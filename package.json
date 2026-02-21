@@ -1,0 +1,78 @@
+{
+  "name": "openai-sip-trunking",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p . && npm --prefix client run build",
+    "start": "npx tsx src/server.ts",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mhughan-twilio/openai-programmable-sip.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/mhughan-twilio/openai-programmable-sip/issues"
+  },
+  "homepage": "https://github.com/mhughan-twilio/openai-programmable-sipg#readme",
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
+    "@openai/agents": "0.3.7",
+    "@openai/agents-realtime": "0.3.7",
+    "@types/bcrypt": "^6.0.0",
+    "@types/cors": "^2.8.19",
+    "@types/express-session": "^1.18.2",
+    "@types/memoizee": "^0.4.12",
+    "@types/multer": "^2.0.0",
+    "@types/nodemailer": "^7.0.4",
+    "@types/passport": "^1.0.17",
+    "@types/pg": "^8.16.0",
+    "bcrypt": "^6.0.0",
+    "body-parser": "^2.2.0",
+    "connect-pg-simple": "^10.0.0",
+    "cors": "^2.8.5",
+    "csv-parse": "^6.1.0",
+    "dotenv": "^17.2.1",
+    "drizzle-kit": "^0.31.8",
+    "drizzle-orm": "^0.44.7",
+    "express": "^5.1.0",
+    "express-session": "^1.18.2",
+    "memoizee": "^0.4.17",
+    "multer": "^2.0.2",
+    "nodemailer": "^7.0.11",
+    "openai": "5.23.2",
+    "openid-client": "^6.8.1",
+    "passport": "^0.7.0",
+    "pg": "^8.16.3",
+    "playwright": "^1.52.0",
+    "postgres": "^3.4.8",
+    "react-is": "^19.2.4",
+    "recharts": "^3.7.0",
+    "twilio": "^5.10.0",
+    "vitest": "^4.0.16",
+    "ws": "^8.18.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.10.4",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  },
+  "overrides": {
+    "esbuild": "^0.25.0",
+    "tar-fs": "^3.0.6",
+    "glob": "^10.4.5",
+    "jws": "^4.0.0",
+    "validator": "^13.12.0"
+  }
+}

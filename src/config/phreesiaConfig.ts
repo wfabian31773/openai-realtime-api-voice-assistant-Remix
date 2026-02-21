@@ -1,0 +1,56 @@
+export const PHREESIA_CONFIG = {
+  schedulingUrl: 'https://phreesia.me/AzulVisionDRS',
+  visitType: 'Diabetic Screening',
+  otpTimeoutMs: 90000,
+  otpWaitBeforePromptMs: 60000,
+  
+  locations: [
+    'Anaheim',
+    'Azul Vision DTLA',
+    'Azul Vision Encinitas',
+    'Azul Vision Riverside Latham',
+    'Downey',
+    'Glendale',
+    'Glendora',
+    'Huntington Beach',
+    'Indio',
+    'Laguna Hills',
+    'Long Beach',
+    'Long Beach Willow',
+    'Magan',
+    'Mission Viejo',
+    'Monrovia',
+    'Montebello',
+    'North Valley Eye',
+    'Northridge',
+    'Palm Desert',
+    'Pasadena',
+    'Rancho Cucamonga',
+    'Redlands',
+    'San Bernardino',
+    'San Gabriel',
+    'Santa Ana',
+    'Tarzana',
+    'Upland',
+  ] as const,
+  
+  insuranceFallback: 'Not Listed',
+  
+  commonInsurances: [
+    'Aetna',
+    'Anthem Blue Cross',
+    'Blue Cross Blue Shield',
+    'Blue Shield',
+    'Cigna',
+    'Health Net',
+    'Humana',
+    'Kaiser Permanente',
+    'Medicare',
+    'Medi-Cal',
+    'UnitedHealthcare',
+    'Not Listed',
+  ] as const,
+};
+
+export type PhreesiaLocation = typeof PHREESIA_CONFIG.locations[number];
+export type PatientType = 'new' | 'returning';

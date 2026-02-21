@@ -1,0 +1,231 @@
+{
+  "departments": [
+    {
+      "id": 1,
+      "name": "Optical Support",
+      "description": "Handles eyewear, contact lenses, and product pickup requests",
+      "requestTypes": [
+        {
+          "id": 1,
+          "name": "Frame Selection",
+          "reasons": [
+            { "id": 1, "name": "New Rx - Frame Selection" },
+            { "id": 2, "name": "Frame Repair Needed" },
+            { "id": 3, "name": "Frame Adjustment" },
+            { "id": 4, "name": "Style Consultation" },
+            { "id": 5, "name": "Kids Frames" }
+          ]
+        },
+        {
+          "id": 2,
+          "name": "Lens Issues",
+          "reasons": [
+            { "id": 6, "name": "Scratched Lenses" },
+            { "id": 7, "name": "Wrong Prescription" },
+            { "id": 8, "name": "Progressive Lens Adaptation" },
+            { "id": 9, "name": "Anti-Reflective Coating Question" },
+            { "id": 10, "name": "Blue Light Filter Request" }
+          ]
+        },
+        {
+          "id": 3,
+          "name": "Contact Lenses",
+          "reasons": [
+            { "id": 11, "name": "Contact Lens Order" },
+            { "id": 12, "name": "Fitting Appointment Needed" },
+            { "id": 13, "name": "Contact Lens Irritation" },
+            { "id": 14, "name": "Trial Lens Request" },
+            { "id": 15, "name": "Contact Lens Education" }
+          ]
+        },
+        {
+          "id": 5,
+          "name": "Product Pickup",
+          "reasons": [
+            { "id": 20, "name": "Glasses Ready - Pickup" },
+            { "id": 21, "name": "Contact Lenses Ready" },
+            { "id": 22, "name": "Remake Ready" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Surgery Coordination",
+      "description": "Handles surgical consultations and scheduling",
+      "requestTypes": [
+        {
+          "id": 10,
+          "name": "Cataract Surgery",
+          "reasons": [
+            { "id": 42, "name": "New Cataract Consult" },
+            { "id": 43, "name": "Surgery Scheduling" },
+            { "id": 44, "name": "IOL Selection Counseling" },
+            { "id": 45, "name": "Pre-Op Measurements" },
+            { "id": 46, "name": "Post-Op Follow-Up" },
+            { "id": 47, "name": "Second Eye Surgery" }
+          ]
+        },
+        {
+          "id": 11,
+          "name": "LASIK / Refractive",
+          "reasons": [
+            { "id": 48, "name": "LASIK Consultation" },
+            { "id": 49, "name": "PRK Consultation" },
+            { "id": 50, "name": "Refractive Surgery Scheduling" },
+            { "id": 51, "name": "Post-Refractive Follow-Up" },
+            { "id": 52, "name": "Enhancement Evaluation" }
+          ]
+        },
+        {
+          "id": 12,
+          "name": "Retinal Surgery",
+          "reasons": [
+            { "id": 53, "name": "Retinal Detachment Urgent" },
+            { "id": 54, "name": "Vitrectomy Scheduling" },
+            { "id": 55, "name": "Macular Hole Repair" },
+            { "id": 56, "name": "Epiretinal Membrane Peel" }
+          ]
+        },
+        {
+          "id": 13,
+          "name": "Oculoplastic Surgery",
+          "reasons": [
+            { "id": 57, "name": "Ptosis Repair Consult" },
+            { "id": 58, "name": "Ectropion/Entropion Repair" },
+            { "id": 59, "name": "Blepharoplasty Consult" },
+            { "id": 60, "name": "Chalazion Removal" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Tech Support",
+      "description": "Clinic technicians who assist providers with medications, prescriptions, and patient requests",
+      "requestTypes": [
+        {
+          "id": 6,
+          "name": "Medication Requests",
+          "reasons": [
+            { "id": 204, "name": "Refill Request" },
+            { "id": 205, "name": "Medication Question" },
+            { "id": 206, "name": "Side Effect Concern" },
+            { "id": 207, "name": "Prior Authorization" }
+          ]
+        },
+        {
+          "id": 7,
+          "name": "Prescription Assistance",
+          "reasons": [
+            { "id": 208, "name": "Rx Clarification" },
+            { "id": 209, "name": "Pharmacy Transfer" },
+            { "id": 210, "name": "Lost/Expired Rx" },
+            { "id": 211, "name": "New Rx Request" }
+          ]
+        },
+        {
+          "id": 8,
+          "name": "Patient Assistance",
+          "reasons": [
+            { "id": 212, "name": "Callback Request" },
+            { "id": 213, "name": "Medical Records Request" },
+            { "id": 214, "name": "Forms Completion" },
+            { "id": 215, "name": "Referral Coordination" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "name": "Research",
+      "description": "Clinical research department handling trials, studies, and research participation for retina, glaucoma, and other specialties",
+      "requestTypes": [
+        {
+          "id": 44,
+          "name": "Clinical Trial Inquiry",
+          "reasons": [
+            { "id": 300, "name": "Retina Research" },
+            { "id": 301, "name": "Glaucoma Research" },
+            { "id": 302, "name": "General Trial Information" },
+            { "id": 303, "name": "Eligibility Check" }
+          ]
+        },
+        {
+          "id": 45,
+          "name": "Study Participation",
+          "reasons": [
+            { "id": 304, "name": "Schedule Study Visit" },
+            { "id": 305, "name": "Study Compensation" },
+            { "id": 306, "name": "Side Effects Report" },
+            { "id": 307, "name": "Study Documents" }
+          ]
+        },
+        {
+          "id": 46,
+          "name": "Research Coordination",
+          "reasons": [
+            { "id": 308, "name": "Protocol Question" },
+            { "id": 309, "name": "Data Request" },
+            { "id": 310, "name": "Sponsor Communication" },
+            { "id": 311, "name": "IRB Inquiry" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "name": "CEC Networking",
+      "description": "CEC network operations handling authorizations, contracts, and provider network management",
+      "requestTypes": [
+        {
+          "id": 47,
+          "name": "Authorization Request",
+          "reasons": [
+            { "id": 400, "name": "New Authorization" },
+            { "id": 401, "name": "Authorization Status" },
+            { "id": 402, "name": "Authorization Renewal" },
+            { "id": 403, "name": "Authorization Denial Appeal" }
+          ]
+        },
+        {
+          "id": 48,
+          "name": "Contract Inquiry",
+          "reasons": [
+            { "id": 404, "name": "Contract Terms" },
+            { "id": 405, "name": "Rate Negotiation" },
+            { "id": 406, "name": "Contract Renewal" },
+            { "id": 407, "name": "New Contract Request" }
+          ]
+        },
+        {
+          "id": 49,
+          "name": "Provider Network",
+          "reasons": [
+            { "id": 408, "name": "Provider Enrollment" },
+            { "id": 409, "name": "Provider Status" },
+            { "id": 410, "name": "Group Affiliation" },
+            { "id": 411, "name": "Credentialing" }
+          ]
+        },
+        {
+          "id": 50,
+          "name": "Network Operations",
+          "reasons": [
+            { "id": 412, "name": "Referral Coordination" },
+            { "id": 413, "name": "Coverage Verification" },
+            { "id": 414, "name": "Fee Schedule" },
+            { "id": 415, "name": "General Inquiry" }
+          ]
+        }
+      ]
+    }
+  ],
+  "routingNotes": {
+    "optical": "Route here for anything related to glasses, frames, lenses, contacts, or eyewear pickups",
+    "surgery": "Route here for any surgical procedure inquiries including cataract, LASIK, retina, or oculoplastics",
+    "tech": "Route here for medication refills, prescription questions, patient callbacks, medical records, or referral requests - these go to clinic technicians who assist the providers",
+    "research": "Route here for clinical trial inquiries, study participation questions, research eligibility, retina research, glaucoma research, or any research-related requests",
+    "cec_networking": "Route here for network authorizations, contract inquiries, provider enrollment, credentialing, or any CEC network-related questions"
+  }
+}

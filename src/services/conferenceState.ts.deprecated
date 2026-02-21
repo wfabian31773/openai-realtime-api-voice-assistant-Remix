@@ -1,0 +1,35 @@
+/**
+ * Shared conference state for warm transfer operations.
+ * This module is shared between voiceAgentRoutes and warmTransferCoordinator
+ * to ensure they use the same state (avoiding module instance issues).
+ */
+
+// Map conference name → customer's participant CallSid in conference
+const conferenceNameToCustomerParticipantSid: Record<string, string | undefined> = {};
+// Map conference name → Twilio conference SID (required for API calls)
+const conferenceNameToConferenceSid: Record<string, string | undefined> = {};
+
+export function setCustomerParticipantSid(conferenceName: string, callSid: string): void {
+  conferenceNameToCustomerParticipantSid[conferenceName] = callSid;
+  console.log(`[CONFERENCE STATE] Stored customer participant CallSid: ${callSid} for conference: ${conferenceName}`);
+}
+
+export function getCustomerParticipantSid(conferenceName: string): string | undefined {
+  const sid = conferenceNameToCustomerParticipantSid[conferenceName];
+  console.log(`[CONFERENCE STATE] Looking up participant SID for conference: ${conferenceName}, found: ${sid || 'NOT FOUND'}`);
+  return sid;
+}
+
+export function setConferenceSid(conferenceName: string, conferenceSid: string): void {
+  conferenceNameToConferenceSid[conferenceName] = conferenceSid;
+  console.log(`[CONFERENCE STATE] Stored conference SID: ${conferenceSid} for conference: ${conferenceName}`);
+}
+
+export function getConferenceSid(conferenceName: string): string | undefined {
+  return conferenceNameToConferenceSid[conferenceName];
+}
+
+export function clearConferenceState(conferenceName: string): void {
+  delete conferenceNameToCustomerParticipantSid[conferenceName];
+  delete conferenceNameToConferenceSid[conferenceName];
+}

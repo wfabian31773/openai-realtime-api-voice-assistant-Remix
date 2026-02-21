@@ -1,0 +1,84 @@
+entrypoint = "src/index.ts"
+modules = ["nodejs-20", "python-3.11", "postgresql-16"]
+
+[gitHubImport]
+requiredFiles = [".replit", "replit.nix", "package.json", "package-lock.json"]
+
+[nix]
+channel = "stable-25_05"
+
+[unitTest]
+language = "nodejs"
+
+[deployment]
+run = ["bash", "scripts/start-production.sh"]
+deploymentTarget = "vm"
+ignorePorts = false
+build = ["npm", "run", "build"]
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
+
+[agent]
+expertMode = true
+integrations = ["javascript_database:1.0.0", "twilio:1.0.0"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start Voice Agent Server"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "API Server"
+
+[[workflows.workflow]]
+name = "Start Voice Agent Server"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npx tsx src/server.ts"
+
+[[workflows.workflow]]
+name = "API Server"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npx tsx server/index.ts"
+waitForPort = 5000
+
+[userenv]
+
+[userenv.shared]
+HUMAN_AGENT_NUMBER = "+18455317471"
+URGENT_NOTIFICATION_NUMBER = "+18455317471"
+DISABLE_PHI_LOGGING = "true"
+
+[userenv.development]
+DOMAIN = "dcf9f10f-5436-45b2-9ddd-3056216aaa94-00-3uh0nmdcvfbs6.spock.replit.dev"
+APP_ENV = "development"
+
+[userenv.production]
+DOMAIN = "openai-realtime-api-voice-assistant-remix--fabianwayne1.replit.app"
+APP_ENV = "production"
+PORT = "5000"

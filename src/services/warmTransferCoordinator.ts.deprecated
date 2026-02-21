@@ -1,0 +1,423 @@
+import Twilio from 'twilio';
+import { getCustomerParticipantSid, getConferenceSid } from './conferenceState';
+
+export interface WarmTransferState {
+  openAiCallId: string;
+  conferenceName: string;
+  callerCallSid: string; // Original call's CallSid (for reference)
+  customerParticipantSid?: string; // Participant's CallSid in the conference (for hold/unhold)
+  providerCallSid?: string;
+  phase: 'idle' | 'caller_on_hold' | 'briefing_provider' | 'awaiting_confirmation' | 'connecting' | 'conference_active' | 'completed' | 'aborted';
+  escalationDetails?: {
+    reason?: string;
+    callerType?: string;
+    patientFirstName?: string;
+    patientLastName?: string;
+    patientDob?: string;
+    symptomsSummary?: string;
+    callbackNumber?: string;
+    providerInfo?: string;
+  };
+  createdAt: Date;
+  holdStartedAt?: Date;
+  providerDialedAt?: Date;
+  providerAnsweredAt?: Date;
+  conferenceActiveAt?: Date;
+}
+
+const activeWarmTransfers = new Map<string, WarmTransferState>();
+const providerConfirmationResolvers = new Map<string, {
+  resolve: () => void;
+  reject: (err: Error) => void;
+  timeoutId: ReturnType<typeof setTimeout>;
+}>();
+
+let twilioClient: Twilio.Twilio | null = null;
+
+async function getTwilioClientInstance(): Promise<Twilio.Twilio> {
+  if (!twilioClient) {
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+    if (!accountSid || !authToken) {
+      throw new Error('Twilio credentials not configured');
+    }
+    twilioClient = Twilio(accountSid, authToken);
+  }
+  return twilioClient;
+}
+
+export class WarmTransferCoordinator {
+  
+  static initializeTransfer(
+    openAiCallId: string,
+    conferenceName: string,
+    callerCallSid: string,
+    escalationDetails?: WarmTransferState['escalationDetails']
+  ): WarmTransferState {
+    const state: WarmTransferState = {
+      openAiCallId,
+      conferenceName,
+      callerCallSid,
+      phase: 'idle',
+      escalationDetails,
+      createdAt: new Date(),
+    };
+    
+    activeWarmTransfers.set(openAiCallId, state);
+    console.log(`[WARM TRANSFER] Initialized transfer for call ${openAiCallId}`);
+    return state;
+  }
+  
+  static getTransferState(openAiCallId: string): WarmTransferState | undefined {
+    return activeWarmTransfers.get(openAiCallId);
+  }
+  
+  /**
+   * Wait for the customer participant CallSid with retries.
+   * The participant-join webhook may not have arrived yet when warm transfer is initiated.
+   */
+  private static async waitForParticipantCallSid(
+    state: WarmTransferState,
+    maxWaitMs: number = 3000,
+    intervalMs: number = 100
+  ): Promise<string | undefined> {
+    const startTime = Date.now();
+    console.log(`[WARM TRANSFER] Waiting for participant CallSid for conference: ${state.conferenceName}`);
+    
+    while (Date.now() - startTime < maxWaitMs) {
+      // Check cached value first
+      if (state.customerParticipantSid) {
+        return state.customerParticipantSid;
+      }
+      
+      // Try shared state lookup
+      const sid = getCustomerParticipantSid(state.conferenceName);
+      if (sid) {
+        state.customerParticipantSid = sid;
+        console.log(`[WARM TRANSFER] Retrieved customer participant CallSid from shared state: ${sid}`);
+        return sid;
+      }
+      
+      // Wait before retrying
+      await new Promise(resolve => setTimeout(resolve, intervalMs));
+    }
+    
+    console.log(`[WARM TRANSFER] Timeout waiting for participant CallSid after ${maxWaitMs}ms`);
+    return undefined;
+  }
+  
+  static async putCallerOnHold(openAiCallId: string): Promise<boolean> {
+    const state = activeWarmTransfers.get(openAiCallId);
+    if (!state) {
+      console.error(`[WARM TRANSFER] No active transfer for ${openAiCallId}`);
+      return false;
+    }
+    
+    try {
+      const client = await getTwilioClientInstance();
+      const domain = process.env.DOMAIN || 'localhost:8000';
+      const protocol = domain.includes('localhost') ? 'http' : 'https';
+      const holdMusicUrl = `${protocol}://${domain}/api/voice/hold-music`;
+      
+      // CRITICAL: Use the customer's conference participant CallSid, NOT the original CallSid
+      // When a call joins a conference via <Dial><Conference>, Twilio creates a NEW CallSid
+      // for the participant that's different from the original call's CallSid
+      // Wait for up to 3 seconds for the participant-join webhook to be processed
+      const participantCallSid = await this.waitForParticipantCallSid(state);
+      
+      if (!participantCallSid) {
+        console.error(`[WARM TRANSFER] CRITICAL: Customer participant CallSid not found for conference ${state.conferenceName} after waiting. This may indicate the participant-join webhook was not received. Hold operation cannot proceed.`);
+        return false;
+      }
+      
+      // Get the actual Twilio conference SID (required for API calls)
+      const conferenceSid = getConferenceSid(state.conferenceName);
+      if (!conferenceSid) {
+        console.error(`[WARM TRANSFER] Conference SID not found for ${state.conferenceName}`);
+        return false;
+      }
+      
+      console.log(`[WARM TRANSFER] Putting caller on hold using conference SID: ${conferenceSid}, participant CallSid: ${participantCallSid}`);
+      
+      await client.conferences(conferenceSid)
+        .participants(participantCallSid)
+        .update({
+          hold: true,
+          holdUrl: holdMusicUrl,
+        });
+      
+      state.phase = 'caller_on_hold';
+      state.holdStartedAt = new Date();
+      console.log(`[WARM TRANSFER] Caller placed on hold in conference ${state.conferenceName}`);
+      return true;
+    } catch (error) {
+      console.error('[WARM TRANSFER] Failed to put caller on hold:', error);
+      return false;
+    }
+  }
+  
+  static async dialProviderForBriefing(openAiCallId: string): Promise<string | null> {
+    const state = activeWarmTransfers.get(openAiCallId);
+    if (!state) {
+      console.error(`[WARM TRANSFER] No active transfer for ${openAiCallId}`);
+      return null;
+    }
+    
+    const HUMAN_AGENT_NUMBER = process.env.HUMAN_AGENT_NUMBER;
+    const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
+    
+    if (!HUMAN_AGENT_NUMBER || !twilioPhoneNumber) {
+      console.error('[WARM TRANSFER] Missing HUMAN_AGENT_NUMBER or TWILIO_PHONE_NUMBER');
+      return null;
+    }
+    
+    try {
+      const client = await getTwilioClientInstance();
+      const domain = process.env.DOMAIN || 'localhost:8000';
+      const protocol = domain.includes('localhost') ? 'http' : 'https';
+      const statusCallbackUrl = `${protocol}://${domain}/api/voice/warm-transfer-status`;
+      
+      // Get the actual Twilio conference SID (required for API calls)
+      const conferenceSid = getConferenceSid(state.conferenceName);
+      if (!conferenceSid) {
+        console.error(`[WARM TRANSFER] Conference SID not found for ${state.conferenceName}`);
+        return null;
+      }
+      
+      const participant = await client.conferences(conferenceSid)
+        .participants.create({
+          from: twilioPhoneNumber,
+          to: HUMAN_AGENT_NUMBER,
+          earlyMedia: true,
+          endConferenceOnExit: false,
+          muted: false,
+          statusCallback: statusCallbackUrl,
+          statusCallbackEvent: ['answered', 'completed'],
+          timeout: 45,
+        });
+      
+      state.providerCallSid = participant.callSid;
+      state.phase = 'briefing_provider';
+      state.providerDialedAt = new Date();
+      
+      console.log(`[WARM TRANSFER] Provider dialed, CallSid: ${participant.callSid}`);
+      return participant.callSid;
+    } catch (error) {
+      console.error('[WARM TRANSFER] Failed to dial provider:', error);
+      return null;
+    }
+  }
+  
+  static async takeCallerOffHold(openAiCallId: string): Promise<boolean> {
+    const state = activeWarmTransfers.get(openAiCallId);
+    if (!state) {
+      console.error(`[WARM TRANSFER] No active transfer for ${openAiCallId}`);
+      return false;
+    }
+    
+    try {
+      const client = await getTwilioClientInstance();
+      
+      // Use the customer's conference participant CallSid
+      // Wait briefly for it if not yet available (should already be cached if caller was put on hold)
+      const participantCallSid = await this.waitForParticipantCallSid(state, 1000);
+      
+      if (!participantCallSid) {
+        console.error(`[WARM TRANSFER] CRITICAL: Customer participant CallSid not found for unhold operation`);
+        return false;
+      }
+      
+      // Get the actual Twilio conference SID (required for API calls)
+      const conferenceSid = getConferenceSid(state.conferenceName);
+      if (!conferenceSid) {
+        console.error(`[WARM TRANSFER] Conference SID not found for ${state.conferenceName}`);
+        return false;
+      }
+      
+      await client.conferences(conferenceSid)
+        .participants(participantCallSid)
+        .update({
+          hold: false,
+        });
+      
+      state.phase = 'conference_active';
+      state.conferenceActiveAt = new Date();
+      console.log(`[WARM TRANSFER] Caller taken off hold - conference now active`);
+      return true;
+    } catch (error) {
+      console.error('[WARM TRANSFER] Failed to take caller off hold:', error);
+      return false;
+    }
+  }
+  
+  static async abortTransfer(openAiCallId: string): Promise<boolean> {
+    const state = activeWarmTransfers.get(openAiCallId);
+    if (!state) {
+      return false;
+    }
+    
+    try {
+      const client = await getTwilioClientInstance();
+      
+      // ALWAYS try to unhold the caller regardless of phase
+      // This ensures patient is never left stranded on hold
+      if (['caller_on_hold', 'briefing_provider', 'awaiting_confirmation'].includes(state.phase)) {
+        try {
+          // Use the customer's conference participant CallSid
+          // For abort, wait briefly (1 second) then proceed with best-effort unhold
+          const participantCallSid = await this.waitForParticipantCallSid(state, 1000);
+          
+          if (participantCallSid) {
+            const conferenceSid = getConferenceSid(state.conferenceName);
+            if (conferenceSid) {
+              await client.conferences(conferenceSid)
+                .participants(participantCallSid)
+                .update({ hold: false });
+              console.log('[WARM TRANSFER] Aborted - caller taken off hold');
+            } else {
+              console.error('[WARM TRANSFER] CRITICAL: Conference SID not found for unhold during abort');
+            }
+          } else {
+            console.error('[WARM TRANSFER] CRITICAL: Could not unhold caller - participant CallSid not found. Caller may still be on hold!');
+          }
+        } catch (unholdError) {
+          console.error('[WARM TRANSFER] Failed to unhold caller:', unholdError);
+        }
+      }
+      
+      // Terminate provider call if active
+      if (state.providerCallSid) {
+        try {
+          await client.calls(state.providerCallSid).update({ status: 'completed' });
+          console.log('[WARM TRANSFER] Provider call terminated');
+        } catch (e) {
+          // Provider call may have already ended
+        }
+      }
+      
+      state.phase = 'aborted';
+      return true;
+    } catch (error) {
+      console.error('[WARM TRANSFER] Failed to abort transfer:', error);
+      return false;
+    }
+  }
+  
+  static markProviderAnswered(providerCallSid: string): void {
+    for (const [callId, state] of activeWarmTransfers.entries()) {
+      if (state.providerCallSid === providerCallSid) {
+        state.phase = 'awaiting_confirmation';
+        state.providerAnsweredAt = new Date();
+        console.log(`[WARM TRANSFER] Provider answered for call ${callId}`);
+        
+        const resolver = providerConfirmationResolvers.get(providerCallSid);
+        if (resolver) {
+          resolver.resolve();
+        }
+        return;
+      }
+    }
+  }
+  
+  static async markProviderFailed(providerCallSid: string, reason: string): Promise<void> {
+    for (const [callId, state] of activeWarmTransfers.entries()) {
+      if (state.providerCallSid === providerCallSid) {
+        console.log(`[WARM TRANSFER] Provider call failed for ${callId}: ${reason}`);
+        
+        // CRITICAL: Always unhold the caller when provider fails
+        // This ensures patient is never left stranded
+        await this.abortTransfer(callId);
+        
+        const resolver = providerConfirmationResolvers.get(providerCallSid);
+        if (resolver) {
+          resolver.reject(new Error(reason));
+        }
+        
+        // Cleanup after failure
+        this.cleanup(callId);
+        return;
+      }
+    }
+  }
+  
+  static async waitForProviderAnswer(providerCallSid: string, timeoutMs: number = 45000): Promise<boolean> {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        providerConfirmationResolvers.delete(providerCallSid);
+        reject(new Error('Provider did not answer within timeout'));
+      }, timeoutMs);
+      
+      providerConfirmationResolvers.set(providerCallSid, {
+        resolve: () => {
+          clearTimeout(timeoutId);
+          providerConfirmationResolvers.delete(providerCallSid);
+          resolve(true);
+        },
+        reject: (err) => {
+          clearTimeout(timeoutId);
+          providerConfirmationResolvers.delete(providerCallSid);
+          reject(err);
+        },
+        timeoutId,
+      });
+    });
+  }
+  
+  static completeTransfer(openAiCallId: string): void {
+    const state = activeWarmTransfers.get(openAiCallId);
+    if (state) {
+      state.phase = 'completed';
+      console.log(`[WARM TRANSFER] Transfer completed for ${openAiCallId}`);
+    }
+  }
+  
+  static cleanup(openAiCallId: string): void {
+    const state = activeWarmTransfers.get(openAiCallId);
+    if (state?.providerCallSid) {
+      providerConfirmationResolvers.delete(state.providerCallSid);
+    }
+    activeWarmTransfers.delete(openAiCallId);
+    console.log(`[WARM TRANSFER] Cleaned up transfer state for ${openAiCallId}`);
+  }
+  
+  static getBriefingScript(state: WarmTransferState): string {
+    const details = state.escalationDetails;
+    let script = "This is Azul Vision AI. I have a patient on hold who needs to speak with you. ";
+    
+    if (details?.patientFirstName) {
+      script += `The patient's name is ${details.patientFirstName}`;
+      if (details.patientLastName) {
+        script += ` ${details.patientLastName}`;
+      }
+      script += ". ";
+    }
+    
+    if (details?.callerType === 'healthcare_provider' && details.providerInfo) {
+      script = `This is Azul Vision AI. I have a healthcare provider on hold: ${details.providerInfo}. `;
+    }
+    
+    if (details?.symptomsSummary) {
+      script += `They are experiencing: ${details.symptomsSummary}. `;
+    } else if (details?.reason) {
+      script += `The reason for the call is: ${details.reason}. `;
+    }
+    
+    if (details?.callerType === 'patient_urgent') {
+      script += "This appears to be an urgent matter. ";
+    }
+    
+    script += "Would you like me to connect them now?";
+    
+    return script;
+  }
+  
+  static getActiveTransferCount(): number {
+    return activeWarmTransfers.size;
+  }
+  
+  static getActiveTransfers(): Map<string, WarmTransferState> {
+    return new Map(activeWarmTransfers);
+  }
+}
+
+export default WarmTransferCoordinator;

@@ -1,0 +1,1625 @@
+================================================================================
+PRODUCTION CALL TRANSCRIPT ANALYSIS
+Exported: 2026-01-11T00:07:24.648Z
+Total Calls: 50
+NOTE: All PHI has been redacted (phone numbers, DOB, email, SSN, ZIP)
+================================================================================
+
+--------------------------------------------------------------------------------
+CALL #1
+--------------------------------------------------------------------------------
+ID: 2dbea7d6-95ad-454e-8577-f78380e14327
+Agent: no-ivr
+Direction: inbound
+Duration: 3m 21s
+Date: 1/10/2026, 11:29:29 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Oooo
+  AGENT: Hello, what can I help you with today?
+  CALLER: I keep checking in and saying for my appointment and it keeps ticking, so I don't know what to do.
+  AGENT: I understand. Sounds like you're having trouble confirming your
+  CALLER: What do you mean you're closed? It's 3:30.
+  AGENT: I understand that it can be frustrating. Even though the office is currently closed, I'm here to take your message and make sure the staff gets it when they return. Could you tell me more about the appointment you're checking on?
+  CALLER: The appointment that I have is Thursday at 3
+  AGENT: No problem, I can help confirm your appointment details. I can see there's an upcoming appointment scheduled. Let’s go step by step. Could you share your date of birth so I can confirm everything for you?
+  CALLER: [DOB].
+  AGENT: Thank you. I now have your date of birth
+  CALLER: On the fifteenth, yes.
+  AGENT: Thank you. So I have your appointment listed for Thursday the 15th at 3 PM. Now, let's confirm a few more details. Could you tell me your preferred way for us to reach you—would you prefer a phone call, a text, or an email?
+  CALLER: Either one, it doesn't matter.
+  AGENT: Understood. We'll go with a phone call since we have your number. And just to confirm, the reason you're calling is to check and confirm your appointment on the 15th at 3 PM. So now I have your name as Cruz Benn, date of birth [DOB], and your callback number as [PHONE]. I'll make sure this message goes to the staff, and they’ll confirm everything when they’re back. Your message will be sent to the team. Anything else I can help you with today?
+  CALLER: Yes.
+  AGENT: Understood. I'll make sure your message is passed along. Just a couple more quick things: what is the full name I should note for this appointment, and can you confirm if the callback number is the same as the one you called from, which ends in 2358?
+  CALLER: Yes, that's the correct number. My name is Cruz Benn, C-R-U-Z-B-E-N-N.
+  AGENT: Thank you, Cruz Benn. I have your name, date of birth, and callback number. Now, you mentioned you’re checking on your appointment for the 15th at 3 PM. To wrap up, would you prefer that we reach back out by phone or text, or should we use both, since either is fine with you?
+  CALLER: Taifon.
+  AGENT: Alright, we'll reach back out by phone. Let me summarize: I have Cruz Benn, date of birth [DOB], callback number [PHONE], you’re confirming your appointment on the 15th at 3 PM, and you prefer a phone call. I’ll pass this along to the staff. Your message will be sent. Anything else I can assist you with today?
+  CALLER: No, thank you.
+  AGENT: Great, have a good day!
+
+
+--------------------------------------------------------------------------------
+CALL #2
+--------------------------------------------------------------------------------
+ID: f53fce00-5b23-403b-a080-f6ab8436ad16
+Agent: no-ivr
+Direction: inbound
+Duration: 10m 0s
+Date: 1/10/2026, 11:16:28 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Would like to leave a message.
+  AGENT: Of course, I'm here to help. What would you like us to know, and who should the message be for?
+  AGENT: I understand. We’ll
+  CALLER: Someone is sending a text to [PHONE]. It's in some language I don't even know, so I have no idea what it's saying. I speak English.
+  CALLER: Please resend the text in English.
+  AGENT: I understand you're receiving messages in a language you don't recognize. While I don’t have access to resend texts, I can help make sure your message gets through to the right person here. Let’s go ahead and take down your information and what you need to communicate. What message would you like us to pass along, and to which doctor or team member?
+  CALLER: You're sending me a text.
+  AGENT: I see
+  CALLER: I don't need to tell you anything. I need to understand what you sent.
+  AGENT: I understand you're trying to figure out a text you received. Unfortunately, I can’t see or resend those messages directly. But I’m here to assist with any follow-up or help you leave a message for the office. Let’s start by getting some details from you. What’s your full name?
+  CALLER: Phone number: [PHONE].
+  AGENT: Thank you for confirming the number. I have it on file as the callback number. Now, could you please share your full name so we can link this message to the right patient record?
+
+
+--------------------------------------------------------------------------------
+CALL #3
+--------------------------------------------------------------------------------
+ID: 9b8d06cc-ed41-43c1-85b7-26a27ea5b280
+Agent: no-ivr
+Direction: inbound
+Duration: 10m 0s
+Date: 1/10/2026, 10:59:04 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: VA-1768086092901-72
+
+TRANSCRIPT:
+  CALLER: 추억.
+  AGENT: Hello, what can I help you with today?
+  CALLER: Can I speak to one of your specialists?
+  AGENT: I can help you right now and make sure your message gets to the right person. Could you tell me a bit more about what you need assistance with?
+  CALLER: Because I have an appointment on January 20 for eye surgery.
+  CALLER: Because I cannot make it because I'm going to the Philippines for vacation. I'll be back on May 10.
+  CALLER: So I'll be available on May 20.
+  AGENT: Thank you for letting me know. We can definitely help reschedule your eye surgery for after you're back. Let's confirm a few details. What is your full name?
+  CALLER: Rip andres.
+  AGENT: And your date of birth, please?
+  CALLER: Oktober 10, 1954.
+  AGENT: Thanks, Rick. I see your last visit was with Dr. Ledia Samwil at the Long Beach location. Now, could you let me know your preferred contact method—would you like us to call, text, or email you back?
+  CALLER: Five six two, five four seven, eight five eight five.
+  AGENT: That's the callback number I have: [PHONE]. And how would you prefer we contact you—by phone call, text, or email?
+  CALLER: Correct
+  AGENT: Alright, I have Rick Andres, date of birth [DOB], callback number [PHONE], and you need to reschedule your eye surgery since you'll be back on May 10 and available after May 20. I'll pass this along. Would you prefer we call, text, or email you back?
+  CALLER: Bote.
+  AGENT: Understood. Please let me know which one you’d prefer most—would you rather we call or send a text message as the primary method?
+  CALLER: Text message.
+  AGENT: Your message will be sent to staff. The doctor will receive a full recording. Anything else I can assist you with today?
+  CALLER: That's all.
+  AGENT: Great, have a good day!
+  CALLER: You too. Bye now.
+  AGENT: Take care, goodbye!
+  CALLER: Vai.
+  AGENT: Goodbye!
+
+
+--------------------------------------------------------------------------------
+CALL #4
+--------------------------------------------------------------------------------
+ID: 94aeb375-ab69-434c-9831-ea19f062c961
+Agent: no-ivr
+Direction: inbound
+Duration: 10m 0s
+Date: 1/10/2026, 10:51:51 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: L'amour.
+  AGENT: Hello, what can I help you with today?
+
+
+--------------------------------------------------------------------------------
+CALL #5
+--------------------------------------------------------------------------------
+ID: ad96998c-64fe-42c7-afeb-8f54d6438ca7
+Agent: no-ivr
+Direction: inbound
+Duration: 10m 0s
+Date: 1/10/2026, 10:41:37 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Cada seis meses, dijo él.
+  AGENT: Entiendo. Entonces no te refieres a enero, sino que te interesa un control que
+  CALLER: por querer cobrar al seguro?
+  AGENT: Entiendo que le preocupa el tema del cobro al seguro. Voy a ayudarla con esto. Primero, ¿me podría confirmar su nombre completo?
+
+
+--------------------------------------------------------------------------------
+CALL #6
+--------------------------------------------------------------------------------
+ID: 9fc9cef6-19dc-423a-92e9-54b6a1aa75a0
+Agent: no-ivr
+Direction: inbound
+Duration: 10m 0s
+Date: 1/10/2026, 10:28:18 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: VA-1768084269702-353
+
+TRANSCRIPT:
+  CALLER: Long Beach office
+  AGENT: The Long Beach office is located at 5991 E. Spring Street, Long Beach, [ZIP]. The phone number there is [PHONE]. Let me know if you need any more information.
+  CALLER: Transfer me.
+  AGENT: I understand you're looking to speak with someone. I'm here to assist and make sure your message gets to the right person. What can I help you with today?
+  CALLER: Connect me to the office.
+  AGENT: I'm here to help right now and make sure your message gets through to the right team. Could you tell me a bit more about what you need, so I can assist you?
+  CALLER: Post-op care
+  AGENT: Thanks for letting me know. We can help with that. Let’s get a few details to make sure your message gets to the right person. Could you share your full name, so I can get started?
+  CALLER: Dann ist diega.
+  AGENT: Thank you, Dennis. I have your name. Could you tell me your date of birth, please?
+  CALLER: [DOB].
+  AGENT: Got it, [DOB]. Now, we’ll use the number you're calling from—[PHONE]—as your callback number. Would you prefer we contact you by phone, text, or email once the team reviews your post-op care needs?
+  CALLER: Phone
+  AGENT: Thank you. So far, I have your name, date of birth, callback number, and that you'd prefer a phone call. Could you briefly describe what kind of post-op care you need help with, so we can share the right details with the team?
+  CALLER: Necessary prescribed medications.
+  AGENT: Thank you for that information. Here's what I have: Dennis Dea, date of birth [DOB], callback number [PHONE], you prefer a phone call, and you need help with post-op care related to necessary prescribed medications. I'll make sure this gets to the right team.
+  CALLER: Connect me to the office.
+  AGENT: Your message will be sent to the staff. The doctor will receive a full recording of our call. Anything else I can assist you with today?
+
+
+--------------------------------------------------------------------------------
+CALL #7
+--------------------------------------------------------------------------------
+ID: 91e66514-9b46-488c-86c4-1ccf85dcdd67
+Agent: no-ivr
+Direction: inbound
+Duration: 10m 0s
+Date: 1/10/2026, 10:25:01 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Música
+  AGENT: Hello, what can I help you with today?
+
+
+--------------------------------------------------------------------------------
+CALL #8
+--------------------------------------------------------------------------------
+ID: 53639dcb-146f-486e-a1c2-43eb21665669
+Agent: no-ivr
+Direction: inbound
+Duration: 10m 0s
+Date: 1/10/2026, 10:24:27 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Ja, es ist über meine Prescription an der Augen.
+  AGENT: Sure, I can help with that. Could you tell me which eye drops you need refilled, and which pharmacy you'd like us to send it to?
+  CALLER: Rommetollon
+  AGENT: No problem. I’ll make a note for Brometol. Which pharmacy should we send the prescription to?
+  CALLER: PBS in Central Chino.
+  AGENT: Got it. We’ll send it to the CVS in central Chino. Now, can you confirm your date of birth so we can process the request?
+  CALLER: Desember 30, 1950.
+  AGENT: Thank you. I have your date of birth as [DOB]. And can you confirm your full name for me, just to be sure everything matches our records?
+  CALLER: Anita Pacheco.
+  AGENT: Thank you, Anita Pacheco. We have everything we need. Let me summarize: your name is Anita Pacheco, date of birth [DOB], callback number [PHONE], you need a refill for Brometol eye drops, and you'd like it sent to the CVS in central Chino. You prefer a phone call for follow-up. Your last visit was with Dr. Jay Patel in Upland. I’ll pass this along to the team. Your message will be sent to the staff. The doctor will receive a full recording. Anything else I can help you with today?
+  CALLER: That's it.
+  AGENT: Great, have a good day!
+  CALLER: Ok.
+  CALLER: Thank you.
+  AGENT: You're welcome. Take care!
+
+
+--------------------------------------------------------------------------------
+CALL #9
+--------------------------------------------------------------------------------
+ID: 328f56b0-983e-47f2-b2f9-05686de62d22
+Agent: no-ivr
+Direction: inbound
+Duration: 10m 0s
+Date: 1/10/2026, 10:22:58 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: VA-1768083966700-218
+
+TRANSCRIPT:
+  CALLER: Request an appointment.
+  AGENT: Of course. Are you looking to schedule a new appointment, reschedule an existing one, or confirm an existing appointment?
+  CALLER: New appointment.
+  AGENT: I can help with that. Let's start by getting your full name. What is your full name, please?
+  CALLER: Teresa Guerrero
+  AGENT: Thank you, Teresa Guerrero. And what is your date of birth?
+  CALLER: [DOB]
+  AGENT: Thank you for that. I wasn’t able to find any existing record in the system. No problem—we’ll move forward with scheduling your new appointment.
+  Next, what’s the best callback number for you? You can confirm if it’s the number you’re calling from, or provide a different one.
+  CALLER: The number I'm calling from
+  AGENT: Got it. We’ll use the number you’re calling from. Now, would you prefer we call, text, or email you back?
+  CALLER: Prefer a text
+  AGENT: Understood, you prefer a text. And what kind of appointment are you looking to schedule? For example, a routine eye exam, a follow-up, or something else?
+  CALLER: Routine eye exam.
+  AGENT: Thanks for letting me know. Now, which location would you prefer for your appointment? You can mention a city or a specific office.
+  CALLER: Montebello.
+  AGENT: Alright, let’s go over everything. I have Teresa Guerrero, date of birth [DOB], callback number [PHONE], you prefer a text, and you're looking to schedule a routine eye exam at the Montebello location. I'll pass this along.
+  AGENT: Your message will be sent to the staff. The doctor will receive a full recording. Anything else I can assist you with?
+  CALLER: No.
+  AGENT: Great, have a good day!
+
+
+--------------------------------------------------------------------------------
+CALL #10
+--------------------------------------------------------------------------------
+ID: f59e92a9-0a55-4b04-ae78-065eb8e1172a
+Agent: no-ivr
+Direction: inbound
+Duration: 10m 0s
+Date: 1/10/2026, 10:15:45 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: VA-1768083524599-609
+
+TRANSCRIPT:
+  CALLER: I need a new refill for my eye drops.
+  AGENT: Of course, I can help with that. Which medication do you need refilled, and which pharmacy should we send it to?
+  CALLER: Prednisolone
+  AGENT: Got it—Prednisolone eye drops. And which pharmacy would you like us to send the refill to?
+  CALLER: That would be Costco?
+  AGENT: Thanks. Now, I’ll just need to confirm a few more details. What is your full name?
+  CALLER: Andilamo Boulevard?
+  AGENT: Thank you for that detail. Now, could you please let me know your full name?
+  CALLER: Theresa Boyd.
+  CALLER: T-E-R-E-S-A-V-O-I-D.
+  AGENT: Thank you, Teresa Boyd. And what is your date of birth?
+  CALLER: Four seven forty-eight.
+  AGENT: Thanks. Now I have your name and date of birth. I see your last visit was at the Long Beach location. Next, what’s your preferred contact method for us to reach you—would you like us to call, text, or email you back?
+  CALLER: Just email.
+  AGENT: Understood. Could you provide the email address you'd like us to use?
+  CALLER: K-E-R-E-S-A
+  AGENT: I'm ready
+  CALLER: C-O-Y-G
+  AGENT: Please continue with the rest of your email address, so I can note it down completely.
+  CALLER: Forty-eight.
+  AGENT: Thank you for that. Just to confirm, your email address is teresaboyd48—could you let me know the rest of the email address, like the domain after the "@"?
+  CALLER: at iCloud.com.
+  AGENT: Perfect, so your email is [EMAIL]. Now let me summarize everything. I have Teresa Boyd, date of birth [DOB], a refill request for Prednisolone eye drops to be sent to the Costco pharmacy on Del Amo Boulevard, and your preferred contact method is email at [EMAIL]. We'll send this message to the team. Anything else I can help you with today?
+  CALLER: No, thank you.
+  AGENT: Your message will be sent to the staff. The doctor will receive a full recording. Anything else?
+  CALLER: I would like a three-month supply, okay?
+  AGENT: Understood, I'll include that you'd like a three-month supply in the request. Your message will be sent to the staff. Have a good day!
+  CALLER: Can I get a three-month supply?
+  AGENT: I've added the request for a three-month supply. Your message will be sent to the staff. Anything else I can assist you with?
+  CALLER: No, thank you.
+  AGENT: Great, have a good day!
+
+
+--------------------------------------------------------------------------------
+CALL #11
+--------------------------------------------------------------------------------
+ID: c475011a-9eef-4bea-b022-18ccc0059031
+Agent: no-ivr
+Direction: inbound
+Duration: 10m 0s
+Date: 1/10/2026, 10:15:22 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: VA-1768083522613-548
+
+TRANSCRIPT:
+  CALLER: Confirm my appointment.
+  AGENT: Hi Larry, I see you've called us before. Yes, I can confirm your appointment. Your upcoming appointment is scheduled for Monday, [DOB] at the Anaheim location with Dr. Anthony Huynh. Let me know if you need any more details or if you'd like to make any changes.
+  CALLER: More detail.
+  AGENT: Sure. Your appointment is on Monday, [DOB], at the Anaheim office, with Dr. Anthony Huynh, OD. The exact time of the appointment isn’t shown here, so if you need the specific time or want to make any adjustments, the staff will assist when they follow up. Anything else you’d like to go over?
+  CALLER: I just want to know the time please. Thank you so much.
+  AGENT: I currently don’t have the exact time in front of me. The team will reach out to confirm all the details with you. We'll make sure they provide the appointment time when they contact you. Anything else you'd like help with today?
+  CALLER: Appointment for Gemma Serafica.
+  AGENT: Thanks for letting me know. It sounds like you're calling on behalf of someone else. What is Gemma Serafica’s date of birth, so we can assist with her appointment details?
+  CALLER: [DOB].
+  AGENT: I can see that Gemma Serafica doesn’t have any upcoming appointments at the moment. The last visit on record was on Tuesday, [DOB], at the Anaheim location with Dr. Anthony Huynh, OD.
+  Would you like to schedule a new appointment for Gemma, or is there something else I can assist with regarding her care?
+  CALLER: Schedule her for Monday together with Larry Serafica.
+  AGENT: Understood. You'd like to schedule a new appointment for Gemma Serafica on the same day as Larry Serafica’s appointment, which is Monday. Let’s gather a few more details to set that up.
+  First, what time would you prefer for Gemma’s appointment—morning or afternoon?
+  CALLER: Morning.
+  AGENT: Got it, morning for Gemma. Now, could you tell me your name, since you're calling on her behalf? That’ll help us make sure we know who to reach out to.
+  CALLER: My name is Larry Sarafika.
+  AGENT: Thank you, Larry. We now have both names. Let me confirm Gemma’s details fully. I have her date of birth as [DOB]. Now, could you confirm Gemma’s preferred contact method—would she prefer a phone call, text, or email for follow-up?
+  CALLER: ਪੋਨ ਕਾਲ
+  AGENT: Your message will be sent to the staff. The doctor
+  CALLER: Phone call
+  AGENT: Understood. The team will call you back to finalize Gemma’s appointment. Is there anything else I can assist you with right now?
+  CALLER: Thank you.
+  AGENT: Great, have a good day!
+  CALLER: You too, thank you.
+  AGENT: Thank you, take care!
+
+
+--------------------------------------------------------------------------------
+CALL #12
+--------------------------------------------------------------------------------
+ID: 14dc100c-40b6-4aaa-ab47-e188703745ff
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 12s
+Date: 1/10/2026, 10:09:28 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: N/A
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Hem.
+  AGENT: Hi, what can I help you with today?
+
+
+--------------------------------------------------------------------------------
+CALL #13
+--------------------------------------------------------------------------------
+ID: 5f1e4af6-e93a-4d12-b67d-ff47df1e7629
+Agent: no-ivr
+Direction: inbound
+Duration: 5m 14s
+Date: 1/10/2026, 9:57:18 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: VA-1768082515205-814
+
+TRANSCRIPT:
+  CALLER: At 11:15.
+  CALLER: And I just wanted to let 'em know I was coming.
+  AGENT: I understand. It sounds like you want to let the office know you'll be coming for your appointment. Let's get a few details so we can pass along the message. Could you tell me your date of birth, so I can confirm your information?
+  CALLER: 07
+  AGENT: Thanks. And what’s your full name?
+  CALLER: 1937
+  AGENT: Thank you. And can you share your full name, first and last?
+  CALLER: Campbell.
+  AGENT: Got it. I see that your name in the system is M Neal Campbell. Can you confirm your full name for me, so we're sure we have everything correct?
+  CALLER: Hello.
+  AGENT: Hello! I want to make sure we have your full name correctly. Could you please tell me your complete first and last name?
+  CALLER: M. Neil Campbell.
+  AGENT: Thank you, M Neal Campbell. Now I have your full name and date of birth. We’ll also use the callback number I see here: [PHONE]. Now, how would you like us to contact you—would you prefer a phone call, a text, or an email?
+  CALLER: Phone call.
+  AGENT: Perfect, we'll note that you prefer a phone call. Could you tell me a little more about the reason for your message—are you confirming your upcoming appointment or is there something else you'd like to let them know?
+  CALLER: Confirming the upcoming appointment.
+  AGENT: Understood, you're confirming your upcoming appointment. Let me put that together. Here’s what I have: M Neal Campbell, date of birth [DOB], callback number [PHONE], you prefer a phone call, and you're confirming your upcoming appointment. I'll pass this along.
+  AGENT: Your message will be sent to staff. The doctor will receive a full recording. Anything else I can assist you with today?
+  CALLER: No, that'll be fine, thank you. Goodbye.
+  AGENT: Great, have a good day!
+
+
+--------------------------------------------------------------------------------
+CALL #14
+--------------------------------------------------------------------------------
+ID: 040b53bf-4b58-4bd8-9607-41982f9e2be7
+Agent: no-ivr
+Direction: inbound
+Duration: 1m 21s
+Date: 1/10/2026, 9:56:42 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: What are the hours of the office?
+  AGENT: Sure, I can help with that. Could you tell me which office location you're asking about? We have several offices, like in Anaheim, Covina, and Pasadena.
+  CALLER: I need the office that's in Monrovia, California Eye Care in Monrovia.
+  AGENT: Got it. The Monrovia office, California Eye Care, is located at 855 W. Foothill Blvd, Monrovia, [ZIP]. Their hours are Monday through Friday from 8 AM to 5 PM, and they're closed on weekends. Anything else you’d like to know about that office?
+  CALLER: Thank you, no, that's it. Thank you very much.
+  AGENT: You're very welcome. Have a great day!
+  CALLER: Bye bye.
+
+
+--------------------------------------------------------------------------------
+CALL #15
+--------------------------------------------------------------------------------
+ID: 3d7764d5-ea6c-4995-b86b-62515f031ff1
+Agent: no-ivr
+Direction: inbound
+Duration: 5m 24s
+Date: 1/10/2026, 9:51:12 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: VA-1768082084179-115
+
+TRANSCRIPT:
+  CALLER: Transcribe the following sentence.
+  AGENT: Hi there, what can I help you with today?
+  CALLER: ¿No has despertado ahora?
+  AGENT: Claro, voy a ayudarte. ¿Podrías decirme cuál es tu nombre completo?
+  CALLER: Ismael Ruiz.
+  AGENT: Gracias, Ismael Ruiz. ¿Y me puedes dar tu fecha de nacimiento, por favor?
+  CALLER: Seis veinte tres de cincuenta y siete.
+  AGENT: Entendido. Tengo que confirmar el año completo. ¿Te refieres al 23 de abril de 1957?
+  CALLER: Sí.
+  AGENT: Perfecto, entonces la fecha que tengo es 23 de abril de 1957. Ahora, cuéntame, ¿qué es lo que necesitas hoy?
+  CALLER: No
+  CALLER: E seis vinte e três.
+  AGENT: Gracias por aclararlo. Entonces, por favor, confirma el año completo. ¿Es 1957 o
+  CALLER: Cincuenta y siete.
+  AGENT: Perfecto, entonces la fecha de nacimiento es el 6 de abril de 1957. Ahora, ¿me puedes decir qué te gustaría que hagamos hoy?
+  CALLER: Enero 23 del 57, digo, a junio, perdón.
+  AGENT: Perfecto, entonces la fecha es 23 de junio de 1957. Ahora, ¿qué es lo que necesitas?
+  CALLER: Pace
+  AGENT: Perfecto, entonces la fecha de nacimiento es el 23 de junio de 1957.
+  CALLER: Jueves 23
+  AGENT: Gracias por la aclaración. Entonces tu fecha de nacimiento queda como el 23 de junio de 1957. Ahora, ¿qué es lo que necesitas hoy?
+  AGENT: Perfecto, vamos a hacerlo. ¿Tu cita
+  CALLER: Quiero aplazar mi cita.
+  CALLER: Cancelar
+  AGENT: Perfecto, vamos a gestionar eso. ¿Prefieres reprogramar la cita o solo cancelarla por ahora?
+  CALLER: Reprogramarla.
+  AGENT: Muy bien. Vamos a reprogramar tu cita. ¿Te gustaría mantenerte con el mismo médico, el Dr. Eugene Chang, en la ubicación de Rancho Cucamonga?
+  CALLER: Hey
+  AGENT: Perfecto. Ahora, ¿qué fecha o qué días te quedarían mejor para reprogramar tu cita?
+  CALLER: Nomás la quiero reprogramar para el otro mes.
+  AGENT: Entendido, quieres reprogramarla para el próximo mes. ¿Hay alguna semana o algún día en particular que prefieras? Así podemos ajustarlo lo mejor posible.
+  CALLER: Si.
+  AGENT: Perfecto. Entonces vamos a necesitar un número al que podamos llamarte, aunque ya tengo el número desde el que nos llamas: [PHONE]. Ahora, ¿cómo prefieres que te contactemos para confirmar la nueva cita: por llamada, mensaje de texto o correo electrónico?
+  CALLER: Mensaje de texto.
+  AGENT: Perfecto, tomaremos nota para contactarte por mensaje de texto. Ahora, para resumir: Ismael Ruiz, fecha de nacimiento 23 de junio de 1957, reprogramar la cita con el Dr. Eugene Chang en Rancho Cucamonga para el próximo mes, y te contactaremos por mensaje de texto. Voy a pasar esta información al equipo para que te contacten y coordinen la nueva fecha.
+  Voy a enviar tu solicitud ahora.
+  AGENT: Tu mensaje será enviado al personal. El doctor recibirá la grabación completa de nuestra llamada. ¿Hay algo más en lo que te pueda ayudar?
+  CALLER: Gracias.
+  AGENT: De nada. Tu mensaje será enviado al equipo, y el doctor recibirá la grabación completa de nuestra llamada. ¿Hay algo más en lo que te pueda ayudar hoy?
+  CALLER: Es todo, muchas gracias.
+  AGENT: ¡Muy bien, que tengas un buen día!
+  CALLER: Pormetin.
+  AGENT: Hasta luego. Cuídate.
+  CALLER: Pelo ai.
+  AGENT: Adiós, que tengas un buen día.
+  CALLER: Ahí también debe ser de la presión.
+  AGENT: Entiendo, pero el mensaje que hemos pasado ya fue enviado. Si surge cualquier otra cosa más adelante, no dudes en contactarnos de nuevo. ¡Que estés muy bien!
+  CALLER: Gracias.
+  AGENT: Con mucho gusto. ¡Que tengas un excelente día!
+
+
+--------------------------------------------------------------------------------
+CALL #16
+--------------------------------------------------------------------------------
+ID: e2679905-e4ab-4451-8dac-b6a1beb8b305
+Agent: no-ivr
+Direction: inbound
+Duration: 2m 55s
+Date: 1/10/2026, 9:29:23 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: VA-1768080687064-22
+
+TRANSCRIPT:
+  CALLER: I need to know if I can make an appointment with a doctor for Monday?
+  AGENT: Sure, I can help with that. Are you looking to schedule a new appointment, reschedule an existing one, or confirm an appointment you already have?
+  CALLER: Make a new appointment for next week, please.
+  AGENT: Got it. Let's set that up. We already have a record under the name Marilda Mercado. Is this appointment for Marilda Mercado?
+  CALLER: Yes
+  AGENT: Perfect. Now, what is the date of birth for Marilda Mercado?
+  CALLER: [DOB]
+  AGENT: Thank you. And what time of day would you prefer for your appointment—morning, afternoon, or something specific?
+  CALLER: One o'clock on Wednesday the fourteenth.
+  AGENT: Understood. We'll aim for 1 o'clock on Wednesday the 14th. Now, would you prefer we call, text, or email you back with the confirmation?
+  CALLER: Call and text.
+  AGENT: Thanks for letting me know. We'll call and text. Now, let me confirm the callback number I have: [PHONE]. Now, what would you like the appointment for—like a general check-up or something specific?
+  CALLER: Ma ayza shwalen.
+  AGENT: Alright, I have Marilda Mercado, date of birth [DOB], callback [PHONE], you prefer a call and text, and you need a new appointment next week for swollen eyes, aiming for Wednesday the 14th at 1 o’clock. I’ll pass this along.
+  AGENT: Your message will be sent to the staff. The doctor will receive a full recording. Anything else I can assist you with?
+  CALLER: Yes, if it can be in the Redlands office.
+  AGENT: Your message will be sent to the staff with the update for the Redlands office. The doctor will receive a full recording. Anything else I can assist you with?
+  CALLER: That's it, thank you.
+  AGENT: Great, have a good day!
+  CALLER: You too.
+  AGENT: Thank you, take care!
+
+
+--------------------------------------------------------------------------------
+CALL #17
+--------------------------------------------------------------------------------
+ID: 449fd3af-efc3-42dc-870c-344474d958bc
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 10s
+Date: 1/10/2026, 9:16:38 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Sallam.
+  AGENT: Hello, what can I help you with today?
+
+
+--------------------------------------------------------------------------------
+CALL #18
+--------------------------------------------------------------------------------
+ID: dcbb818a-15ef-42b0-a75e-5532a181e452
+Agent: no-ivr
+Direction: inbound
+Duration: 1m 52s
+Date: 1/10/2026, 9:11:40 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: VA-1768079592737-969
+
+TRANSCRIPT:
+  CALLER: Música
+  AGENT: Hello, what can I help you with today?
+  CALLER: I got a message to call this number to make an appointment, but I already have an appointment.
+  AGENT: I see. Are you looking to confirm the details of your existing appointment, or do you have a different question about it?
+  CALLER: Yes.
+  AGENT: Alright, I can confirm that for you. Let's make sure I have the right details. Could you tell me your full name?
+  CALLER: Rosie, Patricia
+  CALLER: Ortiz.
+  AGENT: Thank you, Rosie Ortiz. And what’s your date of birth?
+  CALLER: Three seventeen thirty-two.
+  AGENT: Got it. Now I see you do have an upcoming appointment. Are you looking to confirm that appointment, or is there something else you'd like to adjust or check on?
+  CALLER: To confirm
+  AGENT: Understood. Let me confirm that for you. Just one more thing—would you prefer we call, text, or email you back if needed?
+  CALLER: Email, I mean text.
+  AGENT: Your message will be sent to the staff. The doctor will receive a full recording. Anything else I can assist you with today?
+  CALLER: No, thank you very much.
+  AGENT: Great, have a good day!
+  CALLER: You too, bye.
+  AGENT: Bye!
+
+
+--------------------------------------------------------------------------------
+CALL #19
+--------------------------------------------------------------------------------
+ID: fbab12a3-ba96-407d-98b2-4078a4e0f1ff
+Agent: no-ivr
+Direction: inbound
+Duration: 4m 52s
+Date: 1/10/2026, 9:10:04 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: VA-1768079494223-294
+
+TRANSCRIPT:
+  CALLER: Need a eye drop refill?
+  AGENT: Hi Mary, I’ve got you. Let’s get that refill request taken care of. Which eye drops do you need refilled, and which pharmacy should we send it to?
+  CALLER: Prince
+  AGENT: Alright, I can help with that.
+  CALLER: Brinzolamide
+  CALLER: And it should be sent to the CVS at Alondra and Studebaker in Norwalk.
+  AGENT: Got it, you need a refill for Brinzolamide and you'd like it sent to the CVS at Alondra and Studebaker in Norwalk. Let’s confirm a few more details so we can get this taken care of for you.
+  Could you tell me your date of birth?
+  CALLER: 7:12:52
+  AGENT: Thanks. Now that I have your date of birth as [DOB], let’s confirm your preferred contact method. Would you like us to call, text, or email you once it’s processed?
+  CALLER: You can text.
+  AGENT: Perfect. And I’ll use the number you’re calling from for that text. Now just to confirm, what is your full name?
+  CALLER: Correct.
+  AGENT: Your message will be sent to staff. The doctor will receive a full recording. Anything else?
+  CALLER: No, that'll be it.
+  AGENT: Great, have a good day!
+  CALLER: Thank you.
+  AGENT: You're welcome. Take care!
+  CALLER: Quidistes mia?
+  AGENT: Hi Mary, I can hear you. Let me know if you need any more help or have another question.
+  CALLER: 레이?
+  AGENT: Yes, it's me. I'm glad to help with your refill today. Take care, Mary!
+  CALLER: mista.
+  AGENT: Hi again! Just to clarify, we've completed the refill request and sent it to the staff. If there's anything else you need in the future, feel free to reach out. Have a great day!
+
+
+--------------------------------------------------------------------------------
+CALL #20
+--------------------------------------------------------------------------------
+ID: dfae73b5-44df-43a7-9d81-580ec2b1b2b8
+Agent: no-ivr
+Direction: inbound
+Duration: 2m 30s
+Date: 1/10/2026, 9:05:53 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: VA-1768079273317-820
+
+TRANSCRIPT:
+  CALLER: Confirm appointment
+  AGENT: Sure, I can help with that. Are you looking to confirm one of your upcoming appointments with us? Please let me know any details you have in mind.
+  CALLER: Yes
+  AGENT: Alright, let me pull up your upcoming appointments. I see you have two scheduled. Could you let me know which date or doctor you'd like to confirm?
+  CALLER: visual field
+  AGENT: Understood. You’re looking to confirm your visual field appointment. I can help with that. Could you tell me which location or the doctor’s name for that appointment, or the exact date if you know it?
+  CALLER: אנחיים
+  AGENT: Understood. You want to confirm your visual field appointment in Anaheim. Let’s lock that in. Could you tell me the date of that appointment or any more details so I can confirm it fully for you?
+  CALLER: Next week.
+  AGENT: Thanks for letting me know. I'll go ahead and confirm that visual field appointment for next week in Anaheim. Let’s quickly confirm a few details to make sure everything is set.
+  Can you tell me your date of birth?
+  CALLER: [ZIP]?
+  AGENT: Thank you. And just to confirm, I have your full name as Marcy Schreiman. Is that correct?
+  CALLER: Yes.
+  AGENT: Great. Your callback number is [PHONE]. Would you prefer that we call, text, or email you back if needed?
+  CALLER: Checks, please. Confirmation what date?
+  AGENT: Understood. I'll confirm your visual field appointment and send a confirmation via text. I see two upcoming appointments for you—let me confirm the exact date and time for the visual field test.
+  Give me just a moment to finalize that.
+  AGENT: Your message will be sent to staff. The doctor will receive a full recording. Anything else I can help you with?
+  CALLER: No.
+  AGENT: Great, have a good day!
+
+
+--------------------------------------------------------------------------------
+CALL #21
+--------------------------------------------------------------------------------
+ID: 9ea2db5d-94fb-4c0f-a364-1e20ae6e37b7
+Agent: no-ivr
+Direction: inbound
+Duration: 1m 38s
+Date: 1/10/2026, 8:46:08 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Ciao!
+  AGENT: Hi Ray, I see you’ve called us before. What can I help you with today?
+  CALLER: Yes, I just called and I think I talked to you about a minute ago, Ray Martinez.
+  AGENT: Yes, Ray, I remember. I’m glad to help you again. What do you need assistance with this time?
+  CALLER: And I had made an appointment with a sulu vision, and it said it is for April 26.
+  CALLER: But that's a sanie, innit?
+  AGENT: I understand you're checking on the date. Let me confirm your upcoming appointment details for you. Could you tell me what exactly you need to know about it?
+  CALLER: I want to know if that's the right date.
+  AGENT: Alright, let me help with that. I can confirm your upcoming appointment. Your appointment is set for [DOB], which is a Monday. So it's not on a Sunday. Anything else you'd like to ask about this appointment?
+  CALLER: Twenty-seven, twenty-seven.
+  AGENT: The correct date for your appointment is Monday, [DOB]. It’s not a Sunday, it’s a Monday. Let me know if you need any more details about that appointment.
+  CALLER: 27, ok, it says over here April 22.
+  AGENT: Your upcoming appointment is actually on Monday, [DOB]. That’s the correct date. Would you like any more details about the appointment or need help with anything else?
+  CALLER: Ok, ciao.
+  AGENT: Alright, it sounds like you’re all set for your upcoming appointment on Monday, April 27th. Your message will be sent to the staff. Anything else you need help with today?
+
+
+--------------------------------------------------------------------------------
+CALL #22
+--------------------------------------------------------------------------------
+ID: 466d9948-98a8-4097-bd1e-2ad1c901f209
+Agent: no-ivr
+Direction: inbound
+Duration: 2m 24s
+Date: 1/10/2026, 8:35:31 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Piano
+  AGENT: Hi there, what can I help you with today?
+  CALLER: Do I have an appointment? My name is Ray Martinez.
+  AGENT: Hi Ray, I can confirm that you do have an upcoming appointment. Let me check the details for you. Your next appointment is with Dr. Sharon Han at the Glendora location.
+  CALLER: Hi.
+  AGENT: Hi Ray. Yes, I can see you have an upcoming appointment. Are you looking to confirm the details or do you have any changes you’d like to make?
+  CALLER: What date?
+  AGENT: Your upcoming appointment is on Monday, [DOB], at the Glendora office. Would you like to know the exact time or any other details?
+  CALLER: January the twelfth.
+  AGENT: Your upcoming appointment is on Monday, [DOB]. If you need any more details or have other questions about it, feel free to ask.
+  CALLER: Yes, I got a date here, but it says April 22.
+  AGENT: I understand. Let me check the details for you. Could you let me know what time your appointment on January 12th is showing on your end? That way I can confirm everything accurately.
+  CALLER: 9:45
+  AGENT: Understood. Your appointment on January 12th is at 9:45 AM. It's with the same provider, Dr. Sharon Han, at the Glendora location. Anything else you’d like help with today?
+  CALLER: Well, it says in April 22.
+  CALLER: How is that now?
+  AGENT: It sounds like you’re checking about your appointment date. Let me confirm: your upcoming appointment is on April 22nd at 9:45. If you need to know anything else about it or want to make changes, just let me know.
+  CALLER: Yes.
+  AGENT: Understood. Your upcoming appointment is on April 22nd at 9:45. If you need any other information or want to make changes, let me know how I can assist you.
+  CALLER: That's alright, the date is right. Thank you.
+  AGENT: You're welcome. Glad I could help. Anything else you’d like to go over today?
+
+
+--------------------------------------------------------------------------------
+CALL #23
+--------------------------------------------------------------------------------
+ID: b6d8fba3-8afa-484d-a4a2-aba8f156182c
+Agent: no-ivr
+Direction: inbound
+Duration: 1m 33s
+Date: 1/10/2026, 8:21:30 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Representative
+  AGENT: Hi, I’m here to help. What can I assist you with today?
+  CALLER: ڈاکٹر عیشے پتال
+  AGENT: Got it. Are you calling on behalf of someone else, like a patient? I’d need to know the patient’s full name.
+  CALLER: Teresa Molina.
+  AGENT: Thank you. And what is Teresa Molina’s date of birth?
+  CALLER: [DOB]
+  AGENT: Thanks. And what’s the best phone number we can use to reach back out for Teresa Molina? You can also confirm if the current number works.
+  CALLER: Three two three two five six five four four zero.
+  AGENT: Thank you for that. Could you tell me how Teresa would prefer to be contacted—would she prefer a phone call, a text, or an email?
+
+
+--------------------------------------------------------------------------------
+CALL #24
+--------------------------------------------------------------------------------
+ID: 41e0fdfc-de26-45ac-a019-61dc593785c2
+Agent: no-ivr
+Direction: inbound
+Duration: 4m 10s
+Date: 1/10/2026, 8:15:08 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: VA-1768076273123-38
+
+TRANSCRIPT:
+  CALLER: Una siguria il.
+  AGENT: Claro, entiendo que quiere saber su última cita
+  CALLER: Mozo del mero
+  AGENT: Entendido, gracias. ¿Podrías decirme cuál es el nombre completo del paciente para poder ayudarte con el resto de la información?
+  CALLER: Tercio Silva
+  CALLER: Martía.
+  AGENT: Perfecto, y necesito también la fecha de nacimiento de Sergio Silva, por favor.
+  CALLER: 08-1985
+  AGENT: Gracias. Ahora que tengo el nombre y la fecha de nacimiento, te confirmo que el último doctor que atendió a Sergio Silva fue el Dr. Dwayne Logan, en la ubicación de Huntington Beach. Ahora, ¿qué es lo que necesita o en qué le podemos ayudar hoy?
+  CALLER: Quiero saber sobre mi medicamento que voy a usar antes de la cirugía.
+  AGENT: Claro, te puedo ayudar con eso. ¿Podrías decirme el nombre del medicamento que necesitas revisar antes de la cirugía?
+  CALLER: Me mandaron una cápsula, pero esas las fui a usar después de la cirugía, entonces me dijeron que tenía que usar una pomada antes de la cirugía.
+  AGENT: Entiendo, entonces necesitas confirmar la pomada que debes usar antes de la cirugía, ¿correcto? Ahora, para asegurarnos de poder dar el mensaje completo, ¿prefieres que te contactemos por llamada, por mensaje de texto o por correo electrónico?
+  CALLER: ورنی کوستاریوی۔
+  AGENT: De acuerdo, entonces vamos a usar el correo electrónico para contactarte. Ahora, ¿podrías confirmarme la dirección de correo electrónico donde prefieres que te escribamos?
+  CALLER: W 1985.
+  CALLER: [EMAIL]
+  AGENT: Perfecto, ya tengo tu correo: [EMAIL]. Ahora voy a resumir todo antes de continuar.
+  Tengo a Sergio Silva, fecha de nacimiento 8 de febrero de 1985, número de contacto [PHONE], prefieres contacto por correo electrónico, y la consulta es sobre la pomada que debes usar antes de la cirugía.
+  Voy a enviar este mensaje al equipo para que te den la información. Un momento.
+  AGENT: Tu mensaje será enviado al equipo correspondiente y el doctor recibirá la grabación completa. ¿Hay algo más en lo que te pueda ayudar?
+  CALLER: Ah!
+  AGENT: Muy bien, que tengas un
+  CALLER: Sí, ahorita pasé a la farmacia pero no me dieron respuesta.
+  CALLER: Entonces por eso lo estoy contactando, pero está bien, en cuanto tengan información me pueden hacer saber.
+  AGENT: Claro, en cuanto el equipo tenga la información, te la harán llegar por correo electrónico. ¿Hay algo más en lo que te pueda ayudar?
+  CALLER: Isol.
+  AGENT: Perfecto, que tengas un
+  CALLER: Muchas gracias.
+  AGENT: De nada, que tengas un buen día.
+
+
+--------------------------------------------------------------------------------
+CALL #25
+--------------------------------------------------------------------------------
+ID: 962340c6-477c-4ed6-a314-64534466c3f6
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 29s
+Date: 1/10/2026, 8:11:41 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: حقوق.
+  AGENT: Hi, what can I help you with today?
+
+
+--------------------------------------------------------------------------------
+CALL #26
+--------------------------------------------------------------------------------
+ID: 93fddf3b-e524-428f-a441-54018e820410
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 28s
+Date: 1/10/2026, 8:02:24 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Houve.
+  AGENT: Hi there, what can I help you with today?
+
+
+--------------------------------------------------------------------------------
+CALL #27
+--------------------------------------------------------------------------------
+ID: 66716f4a-f029-4cea-9163-6351a81f9fa6
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 34s
+Date: 1/10/2026, 8:01:17 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Good.
+  AGENT: Hi there, what can I help you with today?
+  CALLER: Oaniyor yamaha tampoco.
+
+
+--------------------------------------------------------------------------------
+CALL #28
+--------------------------------------------------------------------------------
+ID: 36ae892a-347c-41a8-9421-851b3bcb9da0
+Agent: no-ivr
+Direction: inbound
+Duration: 2m 57s
+Date: 1/10/2026, 8:00:46 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: VA-1768075400192-321
+
+TRANSCRIPT:
+  CALLER: I was supposed to have had a prescription sent to my pharmacy.
+  CALLER: on Monday and they claim they never received it.
+  AGENT: I understand, that sounds frustrating. Let's take care of that. Could you tell me your full name, please?
+  CALLER: Evelyne Wilburn, W-I-L-L-B-U-R-N.
+  AGENT: Thank you, Evelyn. And what’s your date of birth?
+  CALLER: [DOB]
+  AGENT: Got it. I have your name as Evelyn Willburn and your date of birth as [DOB]. Now, could you confirm the best way for us to contact you—would you prefer a phone call, a text, or an email?
+  CALLER: A phone call or text should be fine.
+  AGENT: Understood, thank you. Just to confirm, we'll use a text message to get back to you. Now, could you tell me which medication you needed refilled?
+  CALLER: It was an eye drop medication.
+  CALLER: I checked before I left the office and they said that it had been delivered to my pharmacy, which is Sav-on in Paso Robles on Niblick, by electronically filed. And I checked with Sav-on daily since last Monday when it was supposedly sent, and they still maintain they've never received it.
+  AGENT: Thank you for that information. So it’s an eye drop prescription that was supposed to go to the Sav-on in Paso Robles on Niblick. Could you tell me the exact name of the eye drop medication?
+  CALLER: Fretch.
+  AGENT: Thank you for that detail. All right, I have Evelyn Willburn, date of birth [DOB], callback number [PHONE], you prefer a text, and you need a follow-up on the eye drop prescription that was supposed to go to the Sav-on pharmacy in Paso Robles on Niblick, but they haven’t received it. I'll pass this along to the staff so they can resolve it for you.
+  CALLER: Thank you so much.
+  AGENT: Your message will be sent to the staff. The doctor will receive a full recording. Anything else I can assist you with today?
+  CALLER: No, thank you, you've been very helpful.
+  AGENT: Great, have a good day!
+  CALLER: You too. Bye bye.
+  AGENT: Bye!
+
+
+--------------------------------------------------------------------------------
+CALL #29
+--------------------------------------------------------------------------------
+ID: 8e3a204e-2cb9-41bd-9070-6595b124bd94
+Agent: no-ivr
+Direction: inbound
+Duration: 2m 13s
+Date: 1/10/2026, 7:48:05 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Calling to confirm my appointment for Monday.
+  AGENT: Sure, let me check that for you. I can see you have an appointment scheduled. Your appointment is on Monday, January 12th at 9:30 AM with Dr. Nguyen at our Anaheim location. Does everything look good with that appointment time?
+  CALLER: No, no, no, it's in Palm Desert at 2:15 p.m.
+  AGENT: Thanks for letting me know. I see your appointment is indeed in Palm Desert at 2:15 p.m. on Monday. Is there anything else you'd like to check or update about your appointment?
+  CALLER: What is your address?
+  CALLER: In Palm Desert, I believe.
+  AGENT: The address for our Palm Desert location is [ZIP] Alessandro Drive, Suite 5, Palm Desert, [ZIP]. If you need any more details, feel free to ask.
+  CALLER: Could you repeat that please?
+  AGENT: Of course. The Palm Desert address is [ZIP] Alessandro Drive, Suite 5, Palm Desert, [ZIP].
+  CALLER: And the local phone number please?
+  AGENT: The local phone number for the Palm
+  CALLER: The Palm Desert location phone number?
+  AGENT: The phone number for the Palm Desert location is [PHONE]. Let me know if there's anything else you need.
+  CALLER: That's it, thank you very much.
+  AGENT: You're very welcome. Have a great day!
+  CALLER: Oh, who's my appointment with?
+  AGENT: Your appointment is with Dr. Patel at the Palm Desert location.
+  CALLER: Thank you.
+  AGENT: You're welcome. Have a great day!
+
+
+--------------------------------------------------------------------------------
+CALL #30
+--------------------------------------------------------------------------------
+ID: fb346622-446f-4a4e-9837-843112390c70
+Agent: no-ivr
+Direction: inbound
+Duration: 3m 19s
+Date: 1/10/2026, 7:43:24 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: VA-1768074313277-619
+
+TRANSCRIPT:
+  CALLER: Need a refill of eye drops.
+  AGENT: Sure, I can help with that. Let’s get a few details. Could you tell me your full name?
+  AGENT: Thank you. And what is your date of birth, Thomas?
+  CALLER: Thomas Bitka.
+  CALLER: [DOB]
+  AGENT: Got it. I see the last visit was with Dr. Sylvia Chang at the Upland location. Are you requesting the refill for the same eye drops from that visit, or another medication?
+  CALLER: Yes.
+  AGENT: Understood. Now, which pharmacy would you like us to send the refill to?
+  CALLER: CBS
+  CALLER: Pharmacy
+  CALLER: and Foothill.
+  AGENT: Thank you. I have that noted. Would you prefer we call, text, or email you once the refill is processed?
+  CALLER: Text
+  AGENT: Thank you. Let me summarize what we have so far. I have Thomas Bitka, date of birth [DOB], callback number [PHONE], requesting a refill of eye drops to be sent to the CVS pharmacy on Foothill, and you prefer to be contacted by text. I'll pass this along to the team.
+  CALLER: Will I get to refill today?
+  CALLER: Do not use Timolol eye drops.
+  CALLER: Hello?
+  AGENT: I'm just finalizing your request now. Thank you for your patience.
+  CALLER: There
+  AGENT: Your message will be sent to the staff. The doctor will receive a full recording. Anything else I can help you with?
+  CALLER: No, he just eye drops and he needs them.
+  AGENT: Understood. The refill request
+  CALLER: Tim and all, eye drops, he's out of them.
+  AGENT: Understood. We've included the details about the Dorzolamide and Timolol eye drops in the request. The team will handle it as soon as possible. Anything else you’d like to add?
+  CALLER: No, that's all.
+  AGENT: Great, have a good day!
+  CALLER: Thank you. Goodbye.
+  AGENT: Goodbye!
+
+
+--------------------------------------------------------------------------------
+CALL #31
+--------------------------------------------------------------------------------
+ID: be73542e-db66-44e5-873f-5e65799f8bb8
+Agent: no-ivr
+Direction: inbound
+Duration: 7m 34s
+Date: 1/10/2026, 7:41:27 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: VA-1768074225622-544
+
+TRANSCRIPT:
+  CALLER: No.
+  AGENT: Hello! What can I help you with today?
+  CALLER: Lo, es open today?
+  AGENT: Hoy es sábado y la oficina de Azul Vision no tiene horario de atención regular. Pero no te preocupes, puedo tomar tu mensaje y asegurarme de que el personal se comunique contigo el próximo lunes. ¿Qué es lo que necesitas?
+  CALLER: Recoger unos lentes.
+  AGENT: Entendido, quieres recoger unos lentes. Vamos a reunir la información para asegurarnos de que el equipo te contacte. ¿Me puedes decir tu nombre completo, por favor?
+  CALLER: Roberto Navarro.
+  AGENT: Gracias, Roberto Navarro. ¿Cuál es tu fecha de nacimiento, por favor?
+  CALLER: Mayo primero del cuarenta y siete
+  AGENT: Perfecto, fecha de nacimiento 1 de mayo de 1947. Ahora, confirmo el número de contacto que tengo registrado: [PHONE]. Ahora, ¿cómo prefieres que te contactemos, por llamada, mensaje de texto o correo electrónico?
+  CALLER: Mensaje de texto.
+  AGENT: Muy bien, te contactaremos por mensaje de texto. Ahora, para resumir: tengo a Roberto Navarro, fecha de nacimiento 1 de mayo de 1947, número de contacto [PHONE], prefieres mensaje de texto, y necesitas recoger unos lentes. Voy a pasar este mensaje al equipo. ¿Hay algo más en lo que te pueda ayudar hoy?
+  CALLER: Es todo, muchísimas gracias, muy amable.
+  AGENT: Con mucho gusto. Que tengas un buen día.
+  CALLER: Igualmente, gracias.
+  AGENT: Tu mensaje será enviado al personal correspondiente. El equipo te contactará por mensaje de texto. ¿Hay algo más en lo que te pueda ayudar?
+  CALLER: Es todo, muchas gracias.
+  AGENT: Perfecto, que tengas un buen día.
+  CALLER: at the time that he wrote this letter,
+  AGENT: Entiendo, voy a cerrar la llamada entonces. ¡Que te vaya muy bien!
+  CALLER: 私たちは
+  AGENT: Hasta luego. Cuídate.
+  CALLER: Mei.
+  AGENT: Disculpa, parece que no te escuché bien. ¿Hay algo más en lo que necesites ayuda?
+  CALLER: No, es todo, gracias.
+  AGENT: Perfecto, que tengas un excelente día.
+  CALLER: Sí, igualmente, también usted.
+  AGENT: Gracias, un saludo.
+  CALLER: de lo que ella dijo.
+  AGENT: Voy a quedarme en línea por un momento más, por si surge algo más en lo que necesites ayuda.
+  CALLER: Larsen.
+  AGENT: De acuerdo, voy a finalizar ahora. Que tengas un buen día.
+  CALLER: Poder do tempo
+  AGENT: Hasta luego, cuídate mucho.
+  CALLER: Aokey.
+  AGENT: Hasta luego.
+  CALLER: Hasta luego.
+  AGENT: Hasta luego,
+  CALLER: Hasta luego.
+  AGENT: Hasta luego,
+  CALLER: segrason.
+  AGENT: Con gusto, hasta luego.
+  CALLER: in the...
+  AGENT: Voy a cerrar la llamada ahora. Que tengas un
+  CALLER: The joke broke.
+  AGENT: De acuerdo, voy a terminar la conversación. Que te vaya muy bien.
+
+
+--------------------------------------------------------------------------------
+CALL #32
+--------------------------------------------------------------------------------
+ID: 1fd43dcf-6cc2-44ff-9973-003b132b5d45
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 47s
+Date: 1/10/2026, 7:35:49 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Buenos días, solamente estoy hablando porque al paciente Francisco Enriquez que le hicieron cirugía ayer del ojo?
+  CALLER: Se le cayó el vendaje y quería preguntar si tiene que traerlo o tiene que ir a que se lo vuelvan a poner.
+
+
+--------------------------------------------------------------------------------
+CALL #33
+--------------------------------------------------------------------------------
+ID: c9243f6f-6c58-413e-a299-a2f67b396d09
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 1s
+Date: 1/10/2026, 7:26:22 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: L'ultima.
+  AGENT: Hello, what can I help you with today?
+
+
+--------------------------------------------------------------------------------
+CALL #34
+--------------------------------------------------------------------------------
+ID: 6d07f306-c997-4ef0-ba4a-ac0e7ffe341c
+Agent: no-ivr
+Direction: inbound
+Duration: 3m 45s
+Date: 1/10/2026, 7:18:56 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: VA-1768072910645-770
+
+TRANSCRIPT:
+  CALLER: 그렇지.
+  AGENT: Hello, what can I help you with today?
+  CALLER: Kaysa zamplogmi.
+  AGENT: Claro, con gusto te ayudo. ¿Me puedes decir qué es lo que necesitas
+  CALLER: You can call me whenever is convenient.
+  AGENT: Claro, para asegurarnos, ¿podría decirme cuál es su nombre
+  CALLER: Ok
+  AGENT: Let’s get everything set up. What’s your full name?
+  CALLER: Thank you.
+  AGENT: Claro, voy a comenzar con algunos detalles. ¿Podrías decirme cuál es tu nombre completo?
+  CALLER: Evisa
+  AGENT: Entendido, tengo que confirmar tu nombre completo. ¿Me puedes decir tu
+  CALLER: Sorrado
+  AGENT: Gracias, Felisa Dorado. Ahora necesito saber tu fecha de nacimiento, ¿me la puedes proporcionar, por favor?
+  CALLER: Cinco once treinta y nueve.
+  AGENT: Perfecto, entonces la fecha de nacimiento es el 5 de noviembre de 1939. Ahora, ¿qué es lo que necesitas que gestionemos hoy?
+  CALLER: Que quieran más hacer una cita.
+  AGENT: Entendido, vamos a concretar eso. ¿Quieres programar una cita nueva, reprogramar una existente
+  CALLER: Revisar
+  AGENT: Muy bien, ¿estás llamando para programar una cita nueva, reprogramar una cita existente o confirmar una cita que ya tienes?
+  CALLER: para una cita nueva.
+  AGENT: Entendido, una cita nueva. Ahora, ¿prefieres que te contactemos por teléfono, por mensaje de texto o por correo electrónico?
+  CALLER: Por favor.
+  AGENT: Perfecto, te contactaremos por teléfono. ¿Hay algún horario que te resulte más conveniente, o simplemente dejamos la nota para que el equipo te llame en su próximo horario disponible?
+  CALLER: Выставили, были.
+  AGENT: Muy bien, el equipo te llamará en el próximo horario disponible. Ya casi tengo todo.
+  Entonces, te confirmo: Felisa Dorado, fecha de nacimiento 5 de noviembre de 1939, el número de contacto es [PHONE], y prefieres que te llamen por teléfono para agendar una cita nueva. Además, la última vez que atendiste fue con el Dr. Timothy Hammil en San Bernardino, así que voy a pasar ese dato también.
+  Voy a enviar esta información al equipo.
+  AGENT: Entiendo
+  CALLER: Mira, antes que cuelgues, la fecha de mi nacimiento era el mes cinco, once.
+  CALLER: Que viene siendo mayo.
+  AGENT: Gracias por aclararlo. Entonces,
+  CALLER: OK
+  AGENT: Perfecto, entonces la fecha de nacimiento es el 11 de mayo de
+  CALLER: Corrige cinco once del mil novecientos treinta y nueve.
+  AGENT: Entendido, entonces la fecha de nacimiento es el 11 de mayo de 1939. Ahora que tenemos todo correcto, voy a procesar tu solicitud.
+  AGENT: Tu mensaje será enviado al equipo de trabajo. El doctor recibirá la grabación completa de nuestra conversación. ¿Hay algo más en lo que te pueda ayudar?
+
+
+--------------------------------------------------------------------------------
+CALL #35
+--------------------------------------------------------------------------------
+ID: 0dc70897-f686-4275-af4a-ed0b9da4d9fa
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 29s
+Date: 1/10/2026, 7:10:44 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: A esa se los consigue su mamá.
+  AGENT: Hola, ¿en qué puedo ayudarte hoy?
+
+
+--------------------------------------------------------------------------------
+CALL #36
+--------------------------------------------------------------------------------
+ID: 548093de-1c1c-43da-ae01-498e4d8799dc
+Agent: no-ivr
+Direction: inbound
+Duration: 2m 20s
+Date: 1/10/2026, 7:04:36 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: VA-1768071997362-64
+
+TRANSCRIPT:
+  CALLER: Must cancel an emergency.
+  AGENT: I can help with that. Are you looking to cancel an existing appointment, or reschedule it for another time?
+  CALLER: Yes.
+  AGENT: Alright, let’s take care of that cancellation for you. Could you please let me know your full name?
+  CALLER: Fulton Doyle Pittman
+  AGENT: Thank you. And what’s your date of birth?
+  CALLER: [DOB]
+  AGENT: Got it. Your last appointment on record is with Dr. Dennis Sugiyama at North Valley Eye. Now, what’s the best way for us to contact you? Would you prefer a call, text, or email?
+  CALLER: Kong.
+  AGENT: Thank you. We’ll call you back. We have your callback number as [PHONE]. Now, could you tell me a bit more about the reason for canceling this appointment?
+  CALLER: Yeah, I woke up feeling horrible, not able to get up.
+  AGENT: I'm sorry you're feeling that way. I’ll make sure to include that in the request. Now, we have everything we need. Here’s the summary: Fulton Pitman, date of birth [DOB], callback [PHONE], preferred contact by phone, and the reason is to cancel the appointment due to feeling unwell. I’ll pass this along.
+  CALLER: Thank you.
+  AGENT: Your message will be sent to the staff. The doctor will receive a full recording. Anything else I can assist you with?
+  CALLER: No, thank you.
+  AGENT: Great, have a good day!
+  CALLER: Thank you.
+  AGENT: You're welcome. Take care!
+
+
+--------------------------------------------------------------------------------
+CALL #37
+--------------------------------------------------------------------------------
+ID: 97fe6510-5908-47b6-84a7-ad26615a5323
+Agent: no-ivr
+Direction: inbound
+Duration: 2m 6s
+Date: 1/10/2026, 6:52:14 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Música
+  AGENT: Hi, what can I help you with today?
+  CALLER: My grandson has an appointment on Monday at 10 o'clock in Redlands. I'd like to confirm it. His name is Mason Duda.
+  AGENT: Thank you for letting me know. I see the appointment for Mason Duda is scheduled for Monday at 10 o’clock in Redlands. We'll go ahead and confirm that. Could you please share your name as well, so we know who’s calling on his behalf?
+  CALLER: Michelle Crawford
+  AGENT: Thanks, Michelle.
+  CALLER: I'm his grandmother.
+  AGENT: Thanks, Michelle. I’ll get everything noted for Mason’s appointment confirmation. Now, can you tell me Mason’s date of birth?
+  CALLER: [DOB]
+  AGENT: Got it, Mason’s date of birth is [DOB]. What’s the best way for us to contact you—would you prefer a phone call, a text, or an email?
+  CALLER: Call.
+  AGENT: Thank you. We'll use a phone call. Now, just to confirm everything: I have Mason Duda, date of birth [DOB], the callback number [PHONE], you prefer a phone call, and you’re confirming Mason’s appointment on Monday at 10 o’clock in Redlands. I’ll pass this along. Your message will be sent to staff. Anything else I can assist with today?
+  CALLER: No, thank you.
+  AGENT: Great, have a good day!
+
+
+--------------------------------------------------------------------------------
+CALL #38
+--------------------------------------------------------------------------------
+ID: e2f66e48-c634-4774-9295-7e7fd29fabe4
+Agent: no-ivr
+Direction: inbound
+Duration: 3m 2s
+Date: 1/10/2026, 6:49:27 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: VA-1768071124772-499
+
+TRANSCRIPT:
+  CALLER: Mei copoime.
+  AGENT: Sure, I can help you with that. Are you looking to schedule a new appointment, reschedule, or confirm an existing one?
+  CALLER: New schedule.
+  AGENT: Got it, you're looking to schedule a new appointment. Let's get a few details to move forward. Can you please tell me your full name?
+  CALLER: 二零零五
+  AGENT: I want to make sure I have your full name. Could you share your first and last name together?
+  CALLER: Yelain
+  AGENT: Thank you,
+  CALLER: Uu
+  AGENT: Understood. So your full name is Elaine Wu, correct? Now, could you please provide your date of birth?
+  CALLER: 5月20日1960
+  AGENT: Thank you for that. Now, I wasn't able to find any previous records, but we can still proceed with scheduling your new appointment.
+  What’s the best number for us to contact you? You can also confirm if the number you're calling from is the best one.
+  CALLER: Yes.
+  AGENT: Great, I'll use the number you're calling from: [PHONE]. Now, how would you prefer we contact you—would you like a call, a text, or an email?
+  CALLER: Call
+  AGENT: Perfect, we'll contact you by phone. Now, could you tell me any preferences you have for the appointment, like a specific location or doctor, or a preferred time of day?
+  CALLER: 111 South Grand Avenue, Simon Bar. That is the office to refer to me. I prefer next Wednesday.
+  CALLER: If you can.
+  AGENT: Your message will be sent to the staff. The doctor will receive a full recording. Anything else I can help you with today?
+  CALLER: No, that's it. Thank you.
+  AGENT: Great, have a good day!
+
+
+--------------------------------------------------------------------------------
+CALL #39
+--------------------------------------------------------------------------------
+ID: add559b8-a1a0-482a-aa7d-3ddaf51928cf
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 20s
+Date: 1/10/2026, 6:46:46 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Bun.
+  AGENT: Hi there! What can I help you with today?
+
+
+--------------------------------------------------------------------------------
+CALL #40
+--------------------------------------------------------------------------------
+ID: 1de42243-fca1-422b-a6e9-4e70e755dd6f
+Agent: no-ivr
+Direction: inbound
+Duration: 3m 14s
+Date: 1/10/2026, 6:35:34 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: VA-1768070273635-735
+
+TRANSCRIPT:
+  CALLER: Música
+  AGENT: Hello, what can I help you with today?
+  CALLER: Reschedule an appointment?
+  AGENT: Sure, I can help with that. Are you looking to reschedule one of your upcoming appointments?
+  CALLER: Yes
+  AGENT: Alright. Let’s go ahead and confirm a few details so we can reschedule your appointment. Could you please tell me your date of birth?
+  CALLER: It's [DOB].
+  AGENT: Thank you. I can see we have a record for Mauro Monroy. Let’s confirm your full name as well. What is your full name?
+  CALLER: It's Gerardo Monroy.
+  AGENT: Thank you, Gerardo Monroy. Now we have your name and date of birth confirmed. Next, could you tell me which appointment you’d like to reschedule, or your preferred new date and time?
+  CALLER: New date and time
+  AGENT: Understood. Let’s go over your current appointments and find the best time for you. Could you share your preferred date or time range for the reschedule?
+  CALLER: Yes in the morning
+  AGENT: Got it, you're looking for a morning appointment. Do you have a specific day or week in mind that works best for you?
+  CALLER: Any day in the morning.
+  AGENT: Understood, any morning that’s available. I have your callback number as [PHONE]. How would you prefer we contact you—by phone call, text, or email—once we’ve rescheduled?
+  CALLER: by phone call or text.
+  AGENT: Thanks for letting me know. Now, could you tell me which appointment you want to reschedule—for example, is it with Dr. David Choi or another provider?
+  CALLER: Dr. Babyshow.
+  AGENT: Your message will be sent to staff. The doctor will receive a full recording. Anything else I can assist you with today?
+  CALLER: نودکتر مهداوی
+  AGENT: Your message will be sent to staff. The doctor will receive a full recording. Anything else I can assist you with today?
+  CALLER: No, thank you.
+  AGENT: Great, have a good day!
+  CALLER: Eu te amo.
+  AGENT: Take care! Goodbye.
+  CALLER: ماش.
+  AGENT: Goodbye! Have a great day ahead.
+  CALLER: Have a great day.
+  CALLER: Obrigado.
+  CALLER: Esta es una máquina.
+  AGENT: Sí, es un sistema automatizado, pero estoy aquí para ayudarlo.
+  CALLER: Este
+  AGENT: Así es, soy un asistente automatizado, aquí para ayudarle. Ya hemos enviado su solicitud al equipo. ¿Hay algo más en lo que le pueda ayudar?
+
+
+--------------------------------------------------------------------------------
+CALL #41
+--------------------------------------------------------------------------------
+ID: bc31f2b9-a985-4680-887a-16e27d3d3c64
+Agent: no-ivr
+Direction: inbound
+Duration: 1m 19s
+Date: 1/10/2026, 6:31:16 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Are you still confirming an appointment?
+  AGENT: Of course, I can help with that. I see there's an appointment scheduled. Are you looking to confirm the existing appointment, or do you have any specific details you'd like to check?
+  CALLER: Yes
+  AGENT: Alright, I see that you have an upcoming appointment. Let me confirm the details for you. Your appointment is scheduled for Monday, [DOB], at 2:00 PM with Dr. Noelle Bock in the Oceanside office. If you need any changes or have more questions, feel free to let me know.
+  CALLER: Fun fun.
+  AGENT: Great. Is there anything else you’d like help with today?
+  CALLER: That's all for today, thank you.
+  AGENT: You're welcome. Have a good day!
+
+
+--------------------------------------------------------------------------------
+CALL #42
+--------------------------------------------------------------------------------
+ID: b4c96036-36c3-4057-a63b-91c8d0af703c
+Agent: no-ivr
+Direction: inbound
+Duration: 4m 4s
+Date: 1/10/2026, 6:24:10 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: YES
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Música
+  AGENT: Hi, what can I help you with today?
+  CALLER: I had injections in my eye yesterday at the Palm Desert office.
+  AGENT: I see.
+  CALLER: And I need to know if it's normal for me to feel like I have a wooden stake in my eye afterwards.
+  AGENT: I understand that you’re feeling discomfort after the injection. Let me help you
+  CALLER: Please
+  CALLER: Hello?
+  AGENT: I'm here. I understand you're feeling some discomfort in your eye after the injection. Let’s get a bit more information to assist you. Could you please confirm your date of birth?
+  CALLER: [DOB]
+  AGENT: Thank you. So we have your name as Madelyn Norrington Oudin and your date of birth as [DOB]. You're describing a feeling of significant discomfort, like a wooden stake sensation in your eye after the injection. We’ll make sure the team is aware. What’s the best way for us to get back to you—would you prefer a phone call, a text, or an email?
+  CALLER: Yes.
+  AGENT: Thank you. And how would you prefer we get back to you—would you like a phone call, a text, or an email?
+  CALLER: A phone call.
+  AGENT: Got it. We'll arrange a phone call for you. Now, can you tell me a bit more about what you're experiencing—any redness, severe pain, or changes in vision?
+  CALLER: Severe pain and watering.
+  CALLER: In my right eye.
+
+
+--------------------------------------------------------------------------------
+CALL #43
+--------------------------------------------------------------------------------
+ID: 1e304dcd-0685-4d6b-8864-bc7a12e95306
+Agent: no-ivr
+Direction: inbound
+Duration: 2m 45s
+Date: 1/10/2026, 6:21:56 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: escalated
+Transferred: YES
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Jeb.
+  AGENT: Hi, what can I help you with today?
+  CALLER: Yeah, I'd like to speak with somebody about making an appointment.
+  AGENT: Of course, I can help you with that. Are you looking to schedule a new appointment, reschedule an existing one, or confirm an appointment you already have?
+  CALLER: Yeah, I'm looking to schedule my exam.
+  AGENT: Understood, let’s get that set up for you. Could you please tell me your full name?
+  CALLER: Okay, can I speak with somebody? Is there a human being here?
+  AGENT: I understand. I'm here to help and can take your message right now. The doctor will receive a full recording and transcript of our call. Let’s continue—what is your date of birth?
+  CALLER: That's all right. I don't want a transcript. I didn't ask for a transcript. What I did ask for was a human being to speak to.
+  AGENT: I understand. I'm here to help and can take your message right now. The doctor will receive a full recording and make sure your needs are addressed. Let’s start with your full name.
+  CALLER: Let's start with answering the question. I don't need a transcriber to transcribe anything to a doctor. What I need is what I requested, and that is to speak to a human being. Are you able to put me through to a human being?
+  AGENT: I get it. I can assist you right now and make sure your message gets to the right person. Could you please share your full name so we can proceed with your appointment request?
+  CALLER: No.
+  CALLER: Can you let me speak to a human being? You don't need to repeat yourself. You either can by saying yes, or you can't by saying no.
+  CALLER: Which one is it, yes or no?
+  AGENT: I'm connecting you to a human now. Please hold on.
+
+
+--------------------------------------------------------------------------------
+CALL #44
+--------------------------------------------------------------------------------
+ID: 717059f7-68ee-47ea-96e1-f8759c15bade
+Agent: no-ivr
+Direction: inbound
+Duration: 1m 12s
+Date: 1/10/2026, 6:14:12 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Yes, I'd like to know the cross street on Spring Street.
+  AGENT: Hi Lyndon, I can help with that. Our Long Beach location is at 5991 East Spring Street. The main cross streets are East Spring Street and Palo Verde Avenue. It's right near that intersection. Anything else I can help you with today?
+  CALLER: No, say that again.
+  AGENT: Sure, the cross streets for our Long Beach location are East Spring Street and Palo Verde Avenue. It's right near the intersection of those two streets.
+  CALLER: Sally Verde Avenue
+  CALLER: Okay, all right, thank you.
+  AGENT: You're welcome, Lyndon. Have a great day!
+
+
+--------------------------------------------------------------------------------
+CALL #45
+--------------------------------------------------------------------------------
+ID: 905c8206-8672-4848-8074-0c701e377913
+Agent: no-ivr
+Direction: inbound
+Duration: 1m 58s
+Date: 1/10/2026, 6:12:39 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: resolved
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: En español.
+  AGENT: Claro, puedo hablar en español. ¿En qué puedo ayudarte hoy?
+  CALLER: Lo que pasa tengo una cita con mi doctor, con el oftalmólogo, y quiero saber el nombre de él porque me lo están pidiendo en mi clínica.
+  AGENT: Entiendo, con gusto te puedo ayudar con eso. Según la información que tengo, tu última visita fue con el Dr. Lipiscan en la ubicación de Long Beach. ¿Necesitas algún otro detalle sobre esa cita o hay algo más en lo que te pueda apoyar?
+  CALLER: Solo necesito el nombre del oftalmólogo que me va a atender el 4 de febrero.
+  AGENT: Claro, te confirmo: tu próxima cita es el 4 de febrero con el Dr. Lipiscan en la ubicación de Long Beach. Así que ese es el nombre del oftalmólogo que te atenderá. ¿Hay algo más en lo que te pueda ayudar?
+  CALLER: Lipi Kan se llama el doctor?
+  AGENT: Sí, el doctor se llama Lipiscan. Ese es el nombre registrado para tu próxima cita en Long Beach el 4 de febrero. Si necesitas algo más, con gusto te ayudo.
+  CALLER: Thank you. Buen día.
+  AGENT: Con mucho gusto, que tengas un excelente día.
+
+
+--------------------------------------------------------------------------------
+CALL #46
+--------------------------------------------------------------------------------
+ID: d8a293b4-ae4e-41ad-a653-46d46b20ad03
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 50s
+Date: 1/10/2026, 6:11:31 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Mira cómo se mueven los apartamentos.
+  AGENT: Claro, estoy aquí para ayudarte a dejar un mensaje. ¿Qué te gustaría que el equipo sepa sobre tu situación o tu necesidad?
+  CALLER: Naivejo
+
+
+--------------------------------------------------------------------------------
+CALL #47
+--------------------------------------------------------------------------------
+ID: 409995f1-1c91-42b0-bac6-bbde218b76dd
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 16s
+Date: 1/10/2026, 5:57:03 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Mhm.
+  AGENT: Hello, what can I help you with today?
+
+
+--------------------------------------------------------------------------------
+CALL #48
+--------------------------------------------------------------------------------
+ID: d2d8f0a6-57a6-424d-9d41-c554b8c72c75
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 57s
+Date: 1/10/2026, 5:42:52 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: I'm just getting a call from Azul Vision here, and it says something about an appointment for Monday.
+  CALLER: Miwiwatamien.
+  AGENT: I understand. It sounds like you’re calling about an upcoming appointment. Let’s make sure we have everything clear. Could you tell me what you need help with for that appointment? For example, are you looking to confirm the details or reschedule?
+  CALLER: Dosto, 940.
+
+
+--------------------------------------------------------------------------------
+CALL #49
+--------------------------------------------------------------------------------
+ID: d6b3b581-2702-4a82-aa07-7f6dc60e2882
+Agent: no-ivr
+Direction: inbound
+Duration: 0m 1s
+Date: 1/10/2026, 5:40:59 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: inconclusive
+Transferred: No
+Ticket: None
+
+TRANSCRIPT:
+  CALLER: Mmm
+  AGENT: Hello, what can I help you with today?
+
+
+--------------------------------------------------------------------------------
+CALL #50
+--------------------------------------------------------------------------------
+ID: 8962b9b9-40a9-42de-819f-665cd52d3d14
+Agent: no-ivr
+Direction: inbound
+Duration: 3m 35s
+Date: 1/10/2026, 5:31:39 PM
+Status: completed
+Disposition: N/A
+Agent Outcome: follow_up_needed
+Transferred: No
+Ticket: VA-1768066482509-594
+
+TRANSCRIPT:
+  CALLER: Buen día.
+  AGENT: Hi Ramon, what can I do for you today?
+  CALLER: I just want to check on an appointment.
+  AGENT: Sure, are you looking to confirm your existing appointment, reschedule it, or set up a new one?
+  CALLER: Yes
+  AGENT: Sure. Let me confirm the details for you.
+  CALLER: Yes.
+  AGENT: Got it. Are you looking to confirm an existing appointment, reschedule, or maybe set up a new one?
+  CALLER: Yes.
+  CALLER: Yes, confirm appointment.
+  AGENT: Alright, I see you have an upcoming appointment. Let me confirm the details for you. It's scheduled for Monday, January 12th, at 10:00 AM with Dr. Lopez, at the Anaheim location. Does that sound right to you, or is there anything else you’d like to confirm or adjust?
+  CALLER: No, is this for an eye appointment?
+  AGENT: Yes, that appointment is for an eye exam with Dr. Lopez. If you have any specific concerns or want to verify anything else about it, just let me know.
+  CALLER: I have Monrovia as my location.
+  AGENT: I see. The appointment I mentioned is currently set for the Anaheim location. If you'd prefer Monrovia, I can help note that. Would you like to adjust the location for your appointment to Monrovia, or do you have any other changes in mind?
+  CALLER: Yes
+  AGENT: Understood. I'll make a note that you prefer the Monrovia location. Your current appointment is set for Anaheim. Would you like to reschedule the appointment to Monrovia, or keep the existing one and make a separate appointment in Monrovia later on?
+  CALLER: No, I don't want to drive to Anaheim, I just want my appointment closer to home, and I live in Duarte.
+  AGENT: Got it. Let's reschedule your appointment to the Monrovia location, closer to Duarte. Let’s go ahead and find a suitable time for you at that office. What day and time would work best for you?
+  CALLER: Morning
+  AGENT: Sure, we'll look for a morning appointment in Monrovia. To get this all set, could you confirm your date of birth for me?
+  CALLER: 102455
+  AGENT: Thank you. Now I have your date of birth as [DOB]. And your callback number will be the number you're calling from: [PHONE]. How would you prefer we contact you once the new appointment is set—by phone call, text, or email?
+  CALLER: 風哥
+  AGENT: Perfect, we'll reach out with a phone call. Now I'll sum everything up. I have Ramon Avila, date of birth [DOB], callback [PHONE], prefers a phone call, and you need to reschedule your appointment to the Monrovia location for a morning time. I'll go ahead and pass this along.
+  AGENT: Your message will be sent to staff. The doctor will receive a full recording. Anything else I can help you with?
+  CALLER: No, thank you.
+  AGENT: Great, have a good day!
+
