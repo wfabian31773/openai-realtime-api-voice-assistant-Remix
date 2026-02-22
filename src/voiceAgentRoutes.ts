@@ -1511,9 +1511,70 @@ async function observeCall(
       callerReadyResolvers.delete(confNameForWait);
     }
     
-    // SOLE ACCEPT: session.connect() handles both REST accept AND WebSocket connection.
-    // Do NOT manually call /v1/realtime/calls/{callId}/accept — that causes double-accept conflicts.
-    console.info(`[SESSION] Accepting and connecting call ${callId} via session.connect() (agent: ${effectiveSlug})`);
+    // STEP 3A: REST Accept with FULL config payload
+    // This ensures turn_detection, transcription, and voice are active from the
+    // very first millisecond of audio — before the WebSocket even connects.
+    // Without this, session.connect() implicitly accepts with minimal config,
+    // and only sends the full config via session.update AFTER WebSocket opens,
+    // creating a timing gap where audio flows but nothing processes it (dead air).
+    const agentInstructions = typeof sessionAgent.getSystemPrompt === 'function'
+      ? await sessionAgent.getSystemPrompt({})
+      : (sessionAgent.instructions || sessionAgent.systemPrompt || '');
+    
+    console.info(`[SESSION] REST-accepting call ${callId} with full config (agent: ${effectiveSlug}, voice: ${voiceForCall}, lang: ${languageCode})`);
+    CallDiagnostics.recordStage(callId, 'rest_accept_started', true);
+    const restAcceptStart = Date.now();
+    
+    const acceptPayload = {
+      type: 'realtime',
+      model: 'gpt-realtime',
+      voice: voiceForCall,
+      instructions: agentInstructions,
+      audio: {
+        input: {
+          transcription: { model: 'gpt-4o-transcribe', language: languageCode },
+          turn_detection: {
+            type: 'semantic_vad',
+            eagerness: 'medium',
+            create_response: true,
+            interrupt_response: true,
+          },
+        },
+        output: {
+          voice: voiceForCall,
+        },
+      },
+      tracing: {
+        workflow_name: `AzulVision_${effectiveSlug}`,
+        group_id: twilioCallSid || callId,
+      },
+    };
+    
+    const acceptResponse = await fetch(
+      `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/accept`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(acceptPayload),
+      }
+    );
+    
+    if (!acceptResponse.ok) {
+      const errText = await acceptResponse.text().catch(() => 'unknown');
+      throw new Error(`REST accept failed (${acceptResponse.status}): ${errText}`);
+    }
+    
+    const restAcceptMs = Date.now() - restAcceptStart;
+    CallDiagnostics.recordStage(callId, 'rest_accept_complete', true, { restAcceptMs });
+    console.info(`[SESSION] ✓ REST accept complete in ${restAcceptMs}ms — turn_detection + transcription active from call start`);
+    
+    // STEP 3B: Connect WebSocket to the already-accepted call
+    // session.connect() attaches WebSocket to the existing session.
+    // The SDK's subsequent session.update is harmless (config already set).
+    console.info(`[SESSION] Connecting WebSocket to accepted call ${callId} (agent: ${effectiveSlug})`);
     CallDiagnostics.recordStage(callId, 'session_connect_started', true);
     const sessionConnectStart = Date.now();
     await session.connect({ apiKey: OPENAI_API_KEY!, callId });

@@ -47,6 +47,8 @@ export type CallStageName =
   | 'agent_factory_completed'
   | 'accept_payload_built'
   | 'fast_accept_completed'
+  | 'rest_accept_started'
+  | 'rest_accept_complete'
   | 'accept_started'
   | 'accept_attempt'
   | 'accept_completed'
