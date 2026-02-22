@@ -2315,7 +2315,17 @@ export function setupVoiceAgentRoutes(app: Express): void {
         const realDialedNumber = conferenceNameFromSIP ? getCalledNumber(conferenceNameFromSIP) : null;
         if (realDialedNumber && agentSlug === 'after-hours') {
           try {
-            const agentByPhone = await storage.getAgentByPhoneNumber(realDialedNumber);
+            // TIMING FIX: Race the DB lookup against a 500ms timeout.
+            // A Neon serverless cold-start can take 2-10 seconds; without the timeout that
+            // blocking await consumed the entire OpenAI SIP accept window BEFORE observeCall()
+            // was ever called, causing dead air on every call after a cold start.
+            // Warm DB connections (~5-50 ms) still resolve in time for correct routing;
+            // cold starts fall back to 'after-hours' immediately.
+            const PHONE_LOOKUP_TIMEOUT_MS = 500;
+            const agentByPhone = await Promise.race([
+              storage.getAgentByPhoneNumber(realDialedNumber),
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), PHONE_LOOKUP_TIMEOUT_MS)),
+            ]);
             // Only use phone-based routing for valid non-legacy agents
             if (agentByPhone && !legacyDeletedAgents.includes(agentByPhone.slug)) {
               agentSlug = agentByPhone.slug;
@@ -2376,8 +2386,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         
         console.info(`[WEBHOOK] ✓ Final agent selection: ${agentSlug}`);
         
-        // Let the SDK handle accept via session.connect() - do NOT manually accept via REST API
-        // This avoids the conflict that causes WebSocket 404 errors
+        // observeCall performs: buildInitialConfig → REST accept (8 retries) → session.connect()
         const task = observeCall(callId, agentSlug, extendedMetadata);
         activeCallTasks.set(callId, task);
 
