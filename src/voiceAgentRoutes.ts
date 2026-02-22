@@ -1715,7 +1715,7 @@ async function observeCall(
     // eventually joins, both sides sit silent — this is the root cause of dead air.
     if (callerReadyPromise) {
       console.info(`[SESSION] Awaiting caller-ready signal — caller is still hearing TwiML greeting... (T+${Date.now() - observeCallStart}ms)`);
-      const CALLER_READY_WAIT_MS = 35000;
+      const CALLER_READY_WAIT_MS = 3000;
       await Promise.race([
         callerReadyPromise,
         new Promise<void>((resolve) =>
