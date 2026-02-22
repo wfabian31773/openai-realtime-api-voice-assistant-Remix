@@ -1716,7 +1716,7 @@ async function observeCall(
     // eventually joins, both sides sit silent — this is the root cause of dead air.
     if (callerReadyPromise) {
       console.info(`[SESSION] Awaiting caller-ready signal — caller is still hearing TwiML greeting... (T+${Date.now() - observeCallStart}ms)`);
-      const CALLER_READY_WAIT_MS = 20000;
+      const CALLER_READY_WAIT_MS = 35000;
       await Promise.race([
         callerReadyPromise,
         new Promise<void>((resolve) =>
@@ -2672,14 +2672,14 @@ export function setupVoiceAgentRoutes(app: Express): void {
         // This prevents the race condition where participant-join fires before the promise exists
         const callerReadyPromise = new Promise<void>((resolve) => {
           callerReadyResolvers.set(conferenceName, resolve);
-          // Timeout after 15s in case the participant-join event never fires
+          // Safety timeout: TwiML greeting takes ~18-20s. Allow up to 25s before giving up.
           setTimeout(() => {
             if (callerReadyResolvers.has(conferenceName)) {
-              console.warn(`[IVR] Caller-ready timeout for ${conferenceName}, proceeding anyway`);
+              console.warn(`[IVR] Caller-ready timeout (25s) for ${conferenceName}, proceeding anyway`);
               callerReadyResolvers.delete(conferenceName);
               resolve();
             }
-          }, 15000);
+          }, 25000);
         });
         callerReadyPromises.set(conferenceName, callerReadyPromise);
         console.info(`[IVR] Caller-ready promise created EARLY for conference: ${conferenceName}`);
@@ -2812,6 +2812,24 @@ export function setupVoiceAgentRoutes(app: Express): void {
     }
 
     console.info(`[NO-IVR] Routing directly to no-ivr agent (no IVR menu, voice=sage, lang=en)`);
+
+    // CRITICAL: Create caller-ready promise BEFORE sending TwiML response.
+    // The TwiML plays an ~18-20s greeting before the caller enters the conference.
+    // observeCall awaits this promise in STEP 3D so response.create fires only
+    // after the caller is actually in the conference — preventing dead air.
+    const callerReadyPromise = new Promise<void>((resolve) => {
+      callerReadyResolvers.set(conferenceName, resolve);
+      // Safety timeout: TwiML greeting takes ~18-20s. Allow up to 25s before giving up.
+      setTimeout(() => {
+        if (callerReadyResolvers.has(conferenceName)) {
+          console.warn(`[NO-IVR] Caller-ready timeout (25s) for ${conferenceName} — proceeding anyway`);
+          callerReadyResolvers.delete(conferenceName);
+          resolve();
+        }
+      }, 25000);
+    });
+    callerReadyPromises.set(conferenceName, callerReadyPromise);
+    console.info(`[NO-IVR] Caller-ready promise created for: ${conferenceName}`);
 
     // Extended greeting buys time for agent to connect
     // The greeting ends with a prompt, so caller speaks first and agent is ready to respond
