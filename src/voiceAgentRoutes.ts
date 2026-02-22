@@ -892,11 +892,15 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
 }
 
 // Observe and manage call session with dynamic agent selection
+const OBSERVE_CALL_VERSION = 'v2.1.0-bgdb-restaccept';
+
 async function observeCall(
   callId: string, 
   agentSlug?: string,
   metadata?: { campaignId?: string; contactId?: string; language?: string; agentGreeting?: string; ivrSelection?: '1' | '2' | '3' | '4' }
 ): Promise<void> {
+  const observeCallStart = Date.now();
+  console.info(`[SESSION] ▶ observeCall ${OBSERVE_CALL_VERSION} started for ${callId} (agent: ${agentSlug || 'default'})`);
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   const { agentRegistry } = await import('./config/agents');
   const { createDatabaseAgent } = await import('./agents/databaseAgent');
@@ -1264,7 +1268,7 @@ async function observeCall(
     }
   }
 
-  console.info(`[SESSION] CHECKPOINT A: Awaiting factory result for ${effectiveSlug}...`);
+  console.info(`[SESSION] CHECKPOINT A: Awaiting factory result for ${effectiveSlug}... (T+${Date.now() - observeCallStart}ms)`);
   let sessionAgent: any;
   try {
     sessionAgent = await Promise.resolve(factoryResult);
@@ -1272,7 +1276,7 @@ async function observeCall(
     console.error(`[SESSION] FATAL: Agent factory threw for ${effectiveSlug}:`, factoryError);
     throw factoryError;
   }
-  console.info(`[SESSION] CHECKPOINT B: Factory resolved, agent type: ${sessionAgent?.constructor?.name}, name: ${sessionAgent?.name}`);
+  console.info(`[SESSION] CHECKPOINT B: Factory resolved (T+${Date.now() - observeCallStart}ms), agent type: ${sessionAgent?.constructor?.name}, name: ${sessionAgent?.name}`);
   
   if (!sessionAgent) {
     throw new Error(`Failed to create agent: ${effectiveSlug}`);
@@ -1285,7 +1289,7 @@ async function observeCall(
   const languageCode = languageForCall || (isSpanish ? 'es' : agentLanguage);
   console.info(`[SESSION] Call config: voice=${voiceForCall}, language=${languageCode}, isSpanish=${isSpanish}, ivrSelection=${metadata?.ivrSelection || 'none'}`);
   
-  console.info(`[SESSION] CHECKPOINT C: Creating RealtimeSession...`);
+  console.info(`[SESSION] CHECKPOINT C: Creating RealtimeSession... (T+${Date.now() - observeCallStart}ms)`);
   const session = new RealtimeSession(sessionAgent, {
     transport: new OpenAIRealtimeSIP(),
     ...sessionOptions,
@@ -1521,7 +1525,7 @@ async function observeCall(
       ? await sessionAgent.getSystemPrompt({})
       : (sessionAgent.instructions || sessionAgent.systemPrompt || '');
     
-    console.info(`[SESSION] REST-accepting call ${callId} with full config (agent: ${effectiveSlug}, voice: ${voiceForCall}, lang: ${languageCode})`);
+    console.info(`[SESSION] REST-accepting call ${callId} with full config (T+${Date.now() - observeCallStart}ms, agent: ${effectiveSlug}, voice: ${voiceForCall}, lang: ${languageCode})`);
     CallDiagnostics.recordStage(callId, 'rest_accept_started', true);
     const restAcceptStart = Date.now();
     
@@ -1574,7 +1578,7 @@ async function observeCall(
     // STEP 3B: Connect WebSocket to the already-accepted call
     // session.connect() attaches WebSocket to the existing session.
     // The SDK's subsequent session.update is harmless (config already set).
-    console.info(`[SESSION] Connecting WebSocket to accepted call ${callId} (agent: ${effectiveSlug})`);
+    console.info(`[SESSION] Connecting WebSocket to accepted call ${callId} (T+${Date.now() - observeCallStart}ms, agent: ${effectiveSlug})`);
     CallDiagnostics.recordStage(callId, 'session_connect_started', true);
     const sessionConnectStart = Date.now();
     await session.connect({ apiKey: OPENAI_API_KEY!, callId });
