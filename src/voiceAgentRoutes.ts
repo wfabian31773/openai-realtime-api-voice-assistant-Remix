@@ -897,75 +897,7 @@ async function observeCall(
   agentSlug?: string,
   metadata?: { campaignId?: string; contactId?: string; language?: string; agentGreeting?: string; ivrSelection?: '1' | '2' | '3' | '4' }
 ): Promise<void> {
-  // CRITICAL: Accept the SIP call IMMEDIATELY with minimal config.
-  // OpenAI's SIP accept window is ~10-15 seconds. All DB lookups, agent instantiation,
-  // and event handler setup must happen AFTER the accept. The full agent config will be
-  // sent later via session.update when session.connect() runs.
-  const earlyMeta = metadata as any;
-  const isSpanishEarly = metadata?.language === 'spanish' || metadata?.ivrSelection === '4';
-  const voiceEarly = earlyMeta?.voiceForCall || (isSpanishEarly ? 'coral' : 'sage');
-  
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  const minimalAcceptPayload = {
-    model: 'gpt-realtime',
-    voice: voiceEarly,
-    instructions: 'You are a medical office assistant. Please wait while the system loads your full configuration.',
-  };
-  
-  console.info(`[SESSION] FAST ACCEPT: Immediately accepting call ${callId} with minimal config (voice=${voiceEarly})`);
-  const fastAcceptStart = Date.now();
-  
-  const MAX_FAST_ACCEPT_RETRIES = 5;
-  let fastAcceptSucceeded = false;
-  let fastAcceptError = '';
-  
-  for (let attempt = 0; attempt < MAX_FAST_ACCEPT_RETRIES; attempt++) {
-    if (attempt > 0) {
-      const delay = Math.min(200 * Math.pow(2, attempt - 1), 2000) + Math.random() * 100;
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-    
-    try {
-      const resp = await fetch(`https://api.openai.com/v1/realtime/calls/${callId}/accept`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(minimalAcceptPayload),
-      });
-      
-      if (resp.ok) {
-        const fastAcceptMs = Date.now() - fastAcceptStart;
-        console.info(`[SESSION] FAST ACCEPT: ✓ Call ${callId} accepted in ${fastAcceptMs}ms (attempt ${attempt + 1})`);
-        CallDiagnostics.recordStage(callId, 'fast_accept_completed', true, { fastAcceptMs, attempts: attempt + 1 });
-        fastAcceptSucceeded = true;
-        break;
-      }
-      
-      fastAcceptError = await resp.text();
-      
-      if (resp.status === 404) {
-        console.warn(`[SESSION] FAST ACCEPT: 404 on attempt ${attempt + 1} - call not ready yet`);
-        continue;
-      }
-      
-      console.error(`[SESSION] FAST ACCEPT: Non-retryable error ${resp.status}: ${fastAcceptError.substring(0, 200)}`);
-      break;
-    } catch (fetchErr) {
-      fastAcceptError = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
-      console.warn(`[SESSION] FAST ACCEPT: Fetch error on attempt ${attempt + 1}: ${fastAcceptError}`);
-    }
-  }
-  
-  if (!fastAcceptSucceeded) {
-    console.error(`[SESSION] FAST ACCEPT: FAILED for call ${callId}: ${fastAcceptError.substring(0, 300)}`);
-    CallDiagnostics.recordStage(callId, 'fast_accept_completed', false, undefined, fastAcceptError.substring(0, 200));
-    throw new Error(`Failed to fast-accept call ${callId}: ${fastAcceptError.substring(0, 200)}`);
-  }
-  
-  // Now proceed with the heavy setup work (DB lookups, agent instantiation, etc.)
-  // The call is already accepted and audio is connected.
   const { agentRegistry } = await import('./config/agents');
   const { createDatabaseAgent } = await import('./agents/databaseAgent');
   
@@ -1571,17 +1503,17 @@ async function observeCall(
   });
 
   try {
-    // Call was already accepted via FAST ACCEPT at the top of observeCall.
-    // Clean up caller ready tracking since we're not waiting.
+    // Clean up caller ready tracking - accept immediately, don't wait for caller
     const confNameForWait = getConferenceName(callId);
     if (confNameForWait) {
+      console.info(`[SESSION] Accepting call immediately (caller listening to TwiML greeting)`);
       callerReadyPromises.delete(confNameForWait);
       callerReadyResolvers.delete(confNameForWait);
     }
     
-    console.info(`[SESSION] ✓ Call ${callId} was already accepted via FAST ACCEPT - proceeding to WebSocket connect`);
-    
-    // STEP 3: Connect WebSocket for event streaming (call already accepted via FAST ACCEPT)
+    // SOLE ACCEPT: session.connect() handles both REST accept AND WebSocket connection.
+    // Do NOT manually call /v1/realtime/calls/{callId}/accept — that causes double-accept conflicts.
+    console.info(`[SESSION] Accepting and connecting call ${callId} via session.connect() (agent: ${effectiveSlug})`);
     CallDiagnostics.recordStage(callId, 'session_connect_started', true);
     const sessionConnectStart = Date.now();
     await session.connect({ apiKey: OPENAI_API_KEY!, callId });
