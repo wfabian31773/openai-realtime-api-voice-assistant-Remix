@@ -12,7 +12,7 @@ import { buildPracticeKnowledgePrompt } from '../config/azulVisionKnowledge';
 import { getNextBusinessDayContext } from '../utils/timeAware';
 
 export function getUrgentTriageGreeting(): string {
-  return "Hello, thank you for calling Azul Vision, how may I help you today?";
+  return "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?";
 }
 
 export const WELCOME_GREETING = getUrgentTriageGreeting();

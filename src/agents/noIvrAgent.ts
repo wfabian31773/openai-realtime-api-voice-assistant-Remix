@@ -1126,7 +1126,7 @@ export const noIvrAgentConfig = {
   name: "No-IVR After-Hours Agent",
   description: "Single agent that answers all calls directly without IVR menu. Uses conversation to determine caller type and urgency. Transfers to human for urgent cases.",
   version: "1.11.0",
-  greeting: "Thank you for calling Azul Vision's after-hours line. How may I help you?",
+  greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching
 };
