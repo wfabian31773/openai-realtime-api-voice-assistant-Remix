@@ -14,7 +14,7 @@ language = "nodejs"
 run = ["bash", "scripts/start-production.sh"]
 deploymentTarget = "vm"
 ignorePorts = false
-build = ["npm", "run", "build"]
+build = ["bash", "-c", "cd client && npm install && npm run build"]
 
 [[ports]]
 localPort = 5000
