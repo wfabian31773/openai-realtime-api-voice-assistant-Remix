@@ -1115,7 +1115,10 @@ async function observeCall(
       CallDiagnostics.updateTrace(callId, { failureReason: `DB Error: ${errorMsg}` });
       return { callLogId: undefined, agentId: undefined };
     }
-  })();
+  })().catch((fatalErr) => {
+    console.error('[DB-BG FATAL] Unhandled error in background DB ops:', fatalErr);
+    return { callLogId: undefined, agentId: undefined };
+  });
   
   // Agent factory runs immediately — does NOT wait for DB ops.
   // callLogId is undefined here; it gets backfilled after session.connect().
@@ -1152,7 +1155,7 @@ async function observeCall(
           markContactCompletedCallback, // Use real DB adapter
           undefined, // computer - no Computer Use instance
           handoffCallback,
-          enhancedMetadata // ← CRITICAL: Pass callLogId + agentId for Phreesia tools
+          { ...metadata, callLogId: undefined, agentId: undefined } // callLogId backfilled after session.connect()
         );
         break;
       
@@ -1582,6 +1585,33 @@ async function observeCall(
       agent: effectiveSlug 
     });
     console.info(`[SESSION] ✓ Connected to realtime call ${callId} with agent: ${effectiveSlug}${agentVersion ? ` v${agentVersion}` : ''}`);
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 3C: Await background DB operations NOW (after accept + connect)
+    // The call is already live and processing audio. DB results are needed
+    // only for metadata tracking, transcript persistence, and lifecycle mgmt.
+    // If DB fails, the call continues — graceful degradation.
+    // ═══════════════════════════════════════════════════════════════════════
+    try {
+      const dbResults = await backgroundDbOps;
+      const dbOpsTotalMs = Date.now() - dbOpsStartTime;
+      callLogId = dbResults.callLogId;
+      agentId = dbResults.agentId;
+      
+      const existingMeta = callMetadataForDB.get(callId);
+      if (existingMeta && callLogId) {
+        existingMeta.dbCallLogId = callLogId;
+        CallDiagnostics.recordStage(callId, 'db_backfill_complete', true, { dbOpsTotalMs, callLogId });
+        console.info(`[DB-BG] ✓ Backfilled callLogId=${callLogId} into call metadata (DB ops took ${dbOpsTotalMs}ms, ran in background)`);
+      } else if (!callLogId) {
+        CallDiagnostics.recordStage(callId, 'db_backfill_complete', false, { dbOpsTotalMs }, 'no callLogId resolved');
+        console.warn(`[DB-BG] No callLogId resolved — call continues without DB tracking (${dbOpsTotalMs}ms elapsed)`);
+      }
+    } catch (backfillErr) {
+      const dbOpsTotalMs = Date.now() - dbOpsStartTime;
+      console.error(`[DB-BG] Background DB ops failed after ${dbOpsTotalMs}ms — call continues without DB tracking:`, backfillErr);
+      CallDiagnostics.recordStage(callId, 'db_backfill_complete', false, { dbOpsTotalMs }, 'backfill await threw');
+    }
     
     // STEP 4: Force the agent to speak first by sending response.create
     // ALWAYS send response.create — even when TwiML delivered the greeting audio.

@@ -49,6 +49,7 @@ export type CallStageName =
   | 'fast_accept_completed'
   | 'rest_accept_started'
   | 'rest_accept_complete'
+  | 'db_backfill_complete'
   | 'accept_started'
   | 'accept_attempt'
   | 'accept_completed'
