@@ -810,6 +810,7 @@ async function startVoiceServer() {
   const secretChecks = [
     { name: 'TWILIO_ACCOUNT_SID', present: !!process.env.TWILIO_ACCOUNT_SID },
     { name: 'TWILIO_AUTH_TOKEN', present: !!process.env.TWILIO_AUTH_TOKEN },
+    { name: 'TWILIO_PHONE_NUMBER', present: !!process.env.TWILIO_PHONE_NUMBER },
     { name: 'OPENAI_API_KEY', present: !!process.env.OPENAI_API_KEY },
     { name: 'DATABASE_URL', present: !!process.env.DATABASE_URL },
   ];

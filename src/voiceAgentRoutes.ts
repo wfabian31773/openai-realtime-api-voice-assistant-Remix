@@ -335,6 +335,11 @@ async function addSIPParticipantWithWatchdog(
     return;
   }
 
+  if (!envConfig.twilio.phoneNumber) {
+    console.error(`[WATCHDOG] ✗ TWILIO_PHONE_NUMBER not configured — SIP calls require a verified Twilio number as 'from'`);
+    return;
+  }
+
   const client = await getTwilioClient();
   
   async function addParticipant(retryCount: number): Promise<string | null> {
@@ -352,7 +357,7 @@ async function addSIPParticipantWithWatchdog(
     const twilioSipCircuitBreaker = getCircuitBreaker('twilio-sip');
     const sipResult = await withResiliency(
       async () => client.conferences(conferenceName).participants.create({
-        from: callerIDNumber,
+        from: envConfig.twilio.phoneNumber!,
         label: "virtual agent",
         to: sipUri,
         earlyMedia: true,
@@ -2489,7 +2494,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
           await client
             .conferences(conferenceName)
             .participants.create({
-              from: callerIDNumber,
+              from: envConfig.twilio.phoneNumber!,
               label: "virtual agent",
               to: sipUri,
               earlyMedia: false,
@@ -2798,7 +2803,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       const participant = await twilioClient.conferences(conferenceName)
         .participants
         .create({
-          from: callerIDNumber, // Use caller's number for proper caller ID in SIP
+          from: envConfig.twilio.phoneNumber!,
           label: 'virtual agent',
           to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=no-ivr`,
           earlyMedia: true,
@@ -2909,7 +2914,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       const participant = await twilioClient.conferences(conferenceName)
         .participants
         .create({
-          from: callerIDNumber,
+          from: envConfig.twilio.phoneNumber!,
           label: 'virtual agent',
           to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=dev-no-ivr`,
           earlyMedia: true,
@@ -3016,7 +3021,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       const participant = await twilioClient.conferences(conferenceName)
         .participants
         .create({
-          from: callerIDNumber,
+          from: envConfig.twilio.phoneNumber!,
           label: 'virtual agent',
           to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=answering-service`,
           earlyMedia: true,
@@ -3171,7 +3176,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       const participant = await twilioClient.conferences(conferenceName)
         .participants
         .create({
-          from: callerIDNumber,
+          from: envConfig.twilio.phoneNumber!,
           label: 'virtual agent',
           to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=appointment-confirmation`,
           earlyMedia: true,
@@ -3302,7 +3307,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         const twilioSipCircuitBreaker = getCircuitBreaker('twilio-sip');
         const sipResult = await withResiliency(
           async () => client.conferences(conferenceName).participants.create({
-            from: callerIDNumber,
+            from: envConfig.twilio.phoneNumber!,
             label: "virtual agent",
             to: sipUri,
             earlyMedia: true,
@@ -3424,7 +3429,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         await client
           .conferences(conferenceName)
           .participants.create({
-            from: callerIDNumber,
+            from: envConfig.twilio.phoneNumber!,
             label: "virtual agent",
             to: sipUri,
             earlyMedia: true,
