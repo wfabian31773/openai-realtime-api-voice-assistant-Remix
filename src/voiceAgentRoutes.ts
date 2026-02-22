@@ -8,7 +8,6 @@ process.on('unhandledRejection', (reason, promise) => {
 import { Express } from "express";
 import OpenAI from "openai";
 import { InvalidWebhookSignatureError, APIError } from "openai/error";
-import { validateTwilioWebhook } from './middleware/twilioWebhookValidation';
 import { webhookRateLimiter } from './middleware/rateLimiter';
 import { noCacheHeaders } from './middleware/cacheControl';
 import {
@@ -2607,7 +2606,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   // IVR Menu - Initial incoming call handler with auto-attendant
   // NOW WITH AGENT-BASED ROUTING: Checks database for assigned agent and routes accordingly
   // Security: Twilio signature validation + rate limiting
-  app.post("/api/voice/incoming-call", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/incoming-call", webhookRateLimiter, async (req, res) => {
     // Parse Twilio's URL-encoded body (req.body is Buffer from raw parser)
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
@@ -2757,7 +2756,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   // NO-IVR DIRECT ENDPOINT - Bypasses IVR menu entirely
   // Configure this as the Voice URL for a test Twilio number
   // The AI agent will answer immediately and determine caller type/urgency through conversation
-  app.post("/api/voice/no-ivr", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/no-ivr", webhookRateLimiter, async (req, res) => {
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
@@ -2904,7 +2903,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   // DEV NO-IVR ENDPOINT - Development version of no-ivr agent
   // Configure a separate Twilio number to hit this endpoint for dev testing
   // This keeps dev and prod traffic completely separate
-  app.post("/api/voice/dev-no-ivr", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/dev-no-ivr", webhookRateLimiter, async (req, res) => {
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
@@ -3015,7 +3014,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   // ANSWERING SERVICE ENDPOINT - Daytime overflow calls
   // For patients who have been on hold 3+ minutes
   // Routes to Optical, Tech, or Surgery departments
-  app.post("/api/voice/answering-service", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/answering-service", webhookRateLimiter, async (req, res) => {
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
@@ -3122,7 +3121,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   // APPOINTMENT CONFIRMATION ENDPOINT - Inbound calls for appointment confirmation
   // Point a Twilio phone number to this webhook for the appointment confirmation agent
   // Also handles patient callbacks from voicemails left during outbound campaign
-  app.post("/api/voice/appointment-confirmation", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/appointment-confirmation", webhookRateLimiter, async (req, res) => {
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
@@ -3275,7 +3274,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   });
 
   // IVR Selection Handler - Routes ALL paths to After-Hours Agent with context
-  app.post("/api/voice/ivr-selection", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/ivr-selection", webhookRateLimiter, async (req, res) => {
     console.info(`[IVR-SELECTION] *** Endpoint hit! Method: ${req.method}, Query: ${JSON.stringify(req.query)}`);
     
     const rawBody = req.body.toString("utf8");
@@ -3444,7 +3443,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   });
 
   // Spanish IVR Selection Handler - Routes ALL Spanish paths to After-Hours Agent
-  app.post("/api/voice/ivr-selection-spanish", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/ivr-selection-spanish", webhookRateLimiter, async (req, res) => {
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
@@ -3558,7 +3557,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   });
 
   // Transfer status and voicemail handlers
-  app.post("/api/voice/transfer-status", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/transfer-status", webhookRateLimiter, async (req, res) => {
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     const callSid = req.query.callSid as string;
@@ -3571,7 +3570,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     res.send(`<?xml version="1.0" encoding="UTF-8"?><Response></Response>`);
   });
 
-  app.post("/api/voice/voicemail", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/voicemail", webhookRateLimiter, async (req, res) => {
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     const callSid = req.query.callSid as string;
@@ -3590,7 +3589,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   });
 
   // Handoff status callback - notifies us when human agent answers or call fails
-  app.post("/api/voice/handoff-status", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/handoff-status", webhookRateLimiter, async (req, res) => {
     // Respond immediately to Twilio
     res.sendStatus(200);
     
@@ -3652,13 +3651,13 @@ export function setupVoiceAgentRoutes(app: Express): void {
   });
 
   // Legacy warm transfer status callback - kept for backwards compatibility but no longer used
-  app.post("/api/voice/warm-transfer-status", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/warm-transfer-status", webhookRateLimiter, async (req, res) => {
     res.sendStatus(200);
     console.info(`[WARM-TRANSFER-STATUS] Received callback (warm transfer disabled)`);
   });
 
   // Conference events webhook
-  app.post("/api/voice/conference-events", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/conference-events", webhookRateLimiter, async (req, res) => {
     // Respond to Twilio immediately (before processing)
     res.sendStatus(200);
 
@@ -3859,7 +3858,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   });
 
   // Recording status callback - saves recording URL to database
-  app.post("/api/voice/recording-status", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/recording-status", webhookRateLimiter, async (req, res) => {
     try {
       // Handle both Buffer (raw parser) and object (urlencoded parser) cases
       let parsedBody: Record<string, string>;
@@ -3936,7 +3935,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
 
   // AirCall DTMF endpoint - serves TwiML to send digit "1"
   // This is called when AirCall's "Press 1 to accept" prompt is detected
-  app.post("/api/voice/aircall-dtmf", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/aircall-dtmf", webhookRateLimiter, async (req, res) => {
     console.log('[AIRCALL] Serving DTMF TwiML to send digit "1"');
     
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
@@ -4143,7 +4142,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
 
   // Fallback complete handler - called when Dial action completes after OpenAI accept failure
   // This logs the outcome of the fallback transfer to human agent
-  app.post("/api/voice/fallback-complete", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/fallback-complete", webhookRateLimiter, async (req, res) => {
     // Handle multiple body formats: Buffer (raw), string (URL-encoded), object (parsed by Express)
     let parsedBody: Record<string, string> = {};
     try {
@@ -4322,7 +4321,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   
   // Webhook for outbound appointment confirmation calls (Twilio hits this when call connects)
   // No AMD - immediately connect to AI agent who handles voicemail detection conversationally
-  app.post("/api/voice/outbound-confirmation", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/outbound-confirmation", webhookRateLimiter, async (req, res) => {
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
@@ -4437,7 +4436,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   });
 
   // Voicemail endpoint - called when no keypress received (timeout)
-  app.post("/api/voice/outbound-confirmation-voicemail", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/outbound-confirmation-voicemail", webhookRateLimiter, async (req, res) => {
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
@@ -4500,14 +4499,14 @@ export function setupVoiceAgentRoutes(app: Express): void {
 
   // DEPRECATED: AMD callback endpoint - no longer used since we removed AMD
   // Kept for backwards compatibility in case any old callbacks come through
-  app.post("/api/voice/outbound-amd-result", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/outbound-amd-result", webhookRateLimiter, async (req, res) => {
     console.info(`[AMD-RESULT] DEPRECATED - AMD no longer used, ignoring callback`);
     res.status(200).send('OK');
   });
 
 
   // Status callback for outbound confirmation calls
-  app.post("/api/voice/outbound-confirmation-status", validateTwilioWebhook, webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/outbound-confirmation-status", webhookRateLimiter, async (req, res) => {
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     

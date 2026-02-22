@@ -4,7 +4,7 @@ export type Environment = 'development' | 'production';
 
 const sharedEnvSchema = z.object({
   APP_ENV: z.enum(['development', 'production']).default('development'),
-  SESSION_SECRET: z.string().min(1),
+  SESSION_SECRET: z.string().optional(),
   TICKETING_API_KEY: z.string().optional(),
   TICKETING_SYSTEM_URL: z.string().optional(),
   HUMAN_AGENT_NUMBER: z.string().optional(),
@@ -69,7 +69,7 @@ export interface EnvironmentConfig {
     enabled: boolean;
   };
   session: {
-    secret: string;
+    secret: string | undefined;
   };
   supabase: {
     serviceKey: string | undefined;
