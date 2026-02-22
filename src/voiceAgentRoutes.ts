@@ -493,13 +493,13 @@ async function addSIPParticipantWithWatchdog(
 // - "deprecated" path: triggered by top-level camelCase fields (turnDetection, inputAudioTranscription)
 // - "new" path: expects nested audio.input.turnDetection structure
 // We use the new nested structure to ensure fields pass through correctly.
-// Audio format MUST be G.711 μ-law for Twilio SIP compatibility (not PCM16 default).
+// SIP MODE: Do NOT set audio format here. Audio codec is negotiated at the SIP/SDP transport
+// layer between Twilio and OpenAI. Setting format in session config conflicts with SIP negotiation.
 const sessionOptions: Partial<RealtimeSessionOptions> = {
   model: 'gpt-realtime',
   config: {
     audio: {
       input: {
-        format: 'g711_ulaw',
         transcription: { model: 'gpt-4o-transcribe' },
         turnDetection: {
           type: 'semantic_vad',
@@ -507,9 +507,6 @@ const sessionOptions: Partial<RealtimeSessionOptions> = {
           createResponse: true,
           interruptResponse: true,
         },
-      },
-      output: {
-        format: 'g711_ulaw',
       },
     },
   } as any,
@@ -1317,7 +1314,6 @@ async function observeCall(
       voice: voiceForCall,
       audio: {
         input: {
-          format: 'g711_ulaw',
           transcription: { model: 'gpt-4o-transcribe', language: languageCode },
           turnDetection: {
             type: 'semantic_vad',
@@ -1327,7 +1323,6 @@ async function observeCall(
           },
         },
         output: {
-          format: 'g711_ulaw',
           voice: voiceForCall,
         },
       },
