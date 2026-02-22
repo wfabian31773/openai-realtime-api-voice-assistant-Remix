@@ -1732,26 +1732,38 @@ async function observeCall(
     CallDiagnostics.recordStage(callId, 'session_connect_started', true);
     const sessionConnectStart = Date.now();
     
-    // Listen for raw WebSocket events BEFORE connecting to capture session.created
-    const transport = session.transport as any;
-    if (transport.eventEmitter) {
-      transport.eventEmitter.on('*', (event: any) => {
-        const eventType = event?.type || 'unknown';
-        if (eventType === 'session.created' || eventType === 'session.updated') {
-          const sess = event?.session || {};
-          const audioIn = sess?.input_audio_transcription || sess?.audio?.input;
-          const audioOut = sess?.output_audio_format || sess?.audio?.output;
-          const td = sess?.turn_detection || sess?.audio?.input?.turn_detection;
-          console.info(`[SESSION] OpenAI ${eventType}: voice=${sess?.voice}, turn_detection=${JSON.stringify(td)?.substring(0, 80)}, audio_in=${JSON.stringify(audioIn)?.substring(0, 60)}, audio_out=${JSON.stringify(audioOut)?.substring(0, 60)}`);
-        } else if (eventType === 'error') {
-          console.error(`[SESSION] OpenAI error event for ${callId}:`, JSON.stringify(event).substring(0, 300));
-        } else if (eventType === 'response.done') {
-          const resp = event?.response;
-          console.info(`[SESSION] response.done for ${callId}: status=${resp?.status}, output_count=${resp?.output?.length || 0}`);
+    // Listen for raw transport events BEFORE connecting to capture session.created/updated
+    // IMPORTANT: Use session.transport.on('*') — the SDK emits events through the transport's
+    // EventEmitterDelegate, NOT through transport.eventEmitter.
+    let sessionUpdatedResolve: (() => void) | null = null;
+    const sessionUpdatedPromise = new Promise<void>((resolve) => {
+      sessionUpdatedResolve = resolve;
+      // Safety timeout — don't block forever if session.updated never arrives
+      setTimeout(() => { resolve(); sessionUpdatedResolve = null; }, 3000);
+    });
+
+    session.transport.on('*', (event: any) => {
+      const eventType = event?.type || 'unknown';
+      if (eventType === 'session.created' || eventType === 'session.updated') {
+        const sess = event?.session || {};
+        const audioIn = sess?.audio?.input;
+        const audioOut = sess?.audio?.output;
+        const td = sess?.audio?.input?.turn_detection;
+        console.info(`[SESSION] OpenAI ${eventType}: voice=${audioOut?.voice}, td=${JSON.stringify(td)?.substring(0, 80)}, audio_in=${JSON.stringify(audioIn?.format)}, audio_out=${JSON.stringify(audioOut?.format)}`);
+        if (eventType === 'session.updated' && sessionUpdatedResolve) {
+          console.info(`[SESSION] ✓ session.updated confirmed — safe to send response.create`);
+          sessionUpdatedResolve();
+          sessionUpdatedResolve = null;
         }
-      });
-    }
-    
+      } else if (eventType === 'error') {
+        console.error(`[SESSION] OpenAI error for ${callId}:`, JSON.stringify(event).substring(0, 500));
+      } else if (eventType === 'response.done') {
+        const resp = event?.response;
+        const statusDetails = resp?.status_details;
+        console.info(`[SESSION] response.done for ${callId}: status=${resp?.status}, output_count=${resp?.output?.length || 0}${statusDetails ? `, details=${JSON.stringify(statusDetails).substring(0, 200)}` : ''}`);
+      }
+    });
+
     await session.connect({ apiKey: OPENAI_API_KEY!, callId });
     
     const connectDurationMs = Date.now() - sessionConnectStart;
@@ -1788,10 +1800,16 @@ async function observeCall(
       CallDiagnostics.recordStage(callId, 'db_backfill_complete', false, { dbOpsTotalMs }, 'backfill await threw');
     }
     
-    // STEP 3D: Wait for caller to join the conference before triggering the greeting.
+    // STEP 3D: Wait for session.updated BEFORE sending response.create.
+    // session.connect() sends a session.update over WebSocket. If we fire response.create
+    // before OpenAI acknowledges it, the response fails with status=failed.
+    console.info(`[SESSION] Awaiting session.updated from OpenAI before greeting... (T+${Date.now() - observeCallStart}ms)`);
+    await sessionUpdatedPromise;
+    console.info(`[SESSION] ✓ Session ready (T+${Date.now() - observeCallStart}ms)`);
+
+    // STEP 3E: Wait for caller to join the conference before triggering the greeting.
     // response.create fires audio INTO the conference room. If the caller has not joined yet
-    // (they are still hearing TwiML), the AI speaks into an empty room. When the caller
-    // eventually joins, both sides sit silent — this is the root cause of dead air.
+    // (they are still hearing TwiML), the AI speaks into an empty room.
     if (callerReadyPromise) {
       console.info(`[SESSION] Awaiting caller-ready signal — caller is still hearing TwiML greeting... (T+${Date.now() - observeCallStart}ms)`);
       const CALLER_READY_WAIT_MS = 8000;
