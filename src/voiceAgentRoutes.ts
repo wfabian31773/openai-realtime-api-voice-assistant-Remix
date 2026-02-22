@@ -1011,123 +1011,120 @@ async function observeCall(
   const { storage } = await import('../server/storage');
   
   // GHOST CALL FIX: Only create call log if we have valid caller data
-  // This prevents creating orphan records when mapping data isn't available yet
-  // We require at minimum: caller phone number (from) - callSid is nice to have but not required
   const hasValidCallerData = !!from && from !== 'Unknown';
   
-  try {
-    // Database operations now have retry logic built into the storage layer
-    // DIAGNOSTICS: Track DB operation timing
-    CallDiagnostics.recordStage(callId, 'db_get_agent_started', true);
-    const dbGetAgentStart = Date.now();
-    const agentRecord = await storage.getAgentBySlug(effectiveSlug);
-    CallDiagnostics.recordDbOperation(callId, 'get_agent', dbGetAgentStart, true);
-    CallDiagnostics.recordStage(callId, 'db_get_agent_completed', true, { durationMs: Date.now() - dbGetAgentStart });
-    agentId = agentRecord?.id;
-    
-    if (hasValidCallerData) {
-      // Determine environment based on DOMAIN - production domains contain 'replit.app'
-      const currentDomain = process.env.DOMAIN || '';
-      const isProduction = currentDomain.includes('replit.app');
-      const environment = isProduction ? 'production' : 'development';
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BACKGROUND DB OPERATIONS — launched immediately but NOT awaited until
+  // AFTER session.connect() succeeds. This prevents 3 sequential DB queries
+  // (getAgentBySlug + getCallLogByCallSid + createCallLog) from consuming
+  // the 10-15 second OpenAI SIP accept window, which caused dead air.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const dbOpsStartTime = Date.now();
+  CallDiagnostics.recordStage(callId, 'db_get_agent_started', true);
+  
+  const backgroundDbOps = (async (): Promise<{ callLogId?: string; agentId?: string }> => {
+    try {
+      const dbGetAgentStart = Date.now();
+      const agentRecord = await storage.getAgentBySlug(effectiveSlug);
+      CallDiagnostics.recordDbOperation(callId, 'get_agent', dbGetAgentStart, true);
+      CallDiagnostics.recordStage(callId, 'db_get_agent_completed', true, { durationMs: Date.now() - dbGetAgentStart });
+      const resolvedAgentId = agentRecord?.id;
       
-      // DUPLICATE FIX: Check if call log already exists for this callSid
-      // This can happen if webhook fires twice or there's a race condition
-      let existingCallLog = null;
-      if (twilioCallSid) {
-        existingCallLog = await storage.getCallLogByCallSid(twilioCallSid);
-      }
+      let resolvedCallLogId: string | undefined;
       
-      if (existingCallLog) {
-        // Use existing call log instead of creating duplicate
-        callLogId = existingCallLog.id;
-        console.info(`[DB] Using existing call log: ${callLogId}, CallSid: ${twilioCallSid}`);
+      if (hasValidCallerData) {
+        const currentDomain = process.env.DOMAIN || '';
+        const isProduction = currentDomain.includes('replit.app');
+        const environment = isProduction ? 'production' : 'development';
+        
+        let existingCallLog = null;
+        if (twilioCallSid) {
+          existingCallLog = await storage.getCallLogByCallSid(twilioCallSid);
+        }
+        
+        if (existingCallLog) {
+          resolvedCallLogId = existingCallLog.id;
+          console.info(`[DB-BG] Using existing call log: ${resolvedCallLogId}, CallSid: ${twilioCallSid}`);
+        } else {
+          const agentConfigForLog = agentRegistry.getAgentConfig(effectiveSlug);
+          const agentVersionForLog = agentConfigForLog?.version || 'unknown';
+          
+          CallDiagnostics.recordStage(callId, 'db_create_call_log_started', true);
+          const dbCreateLogStart = Date.now();
+          const callLog = await storage.createCallLog({
+            callSid: twilioCallSid,
+            direction: 'inbound',
+            from: from,
+            to: to || '',
+            agentId: agentRecord?.id,
+            status: 'in_progress',
+            startTime: new Date(),
+            environment: environment,
+            agentUsed: effectiveSlug,
+            agentVersion: agentVersionForLog,
+            dialedNumber: to || undefined,
+          });
+          CallDiagnostics.recordDbOperation(callId, 'create_call_log', dbCreateLogStart, true);
+          CallDiagnostics.recordStage(callId, 'db_create_call_log_completed', true, { durationMs: Date.now() - dbCreateLogStart });
+          
+          resolvedCallLogId = callLog.id;
+          CallDiagnostics.addCorrelationId(callId, 'callLogId', resolvedCallLogId);
+          CallDiagnostics.updateTrace(callId, { 
+            agentSlug: effectiveSlug, 
+            twilioCallSid,
+            callLogId: resolvedCallLogId,
+          });
+          console.info(`[DB-BG] Call log created: ${resolvedCallLogId}, CallSid: ${twilioCallSid}, Agent: ${effectiveSlug} ${agentVersionForLog}, Env: ${environment}`);
+        }
       } else {
-        // Get agent version from registry for tracking
-        const agentConfig = agentRegistry.getAgentConfig(effectiveSlug);
-        const agentVersion = agentConfig?.version || 'unknown';
-        
-        // DIAGNOSTICS: Track call log creation timing
-        CallDiagnostics.recordStage(callId, 'db_create_call_log_started', true);
-        const dbCreateLogStart = Date.now();
-        const callLog = await storage.createCallLog({
-          callSid: twilioCallSid,
-          direction: 'inbound',
-          from: from,
-          to: to || '',
-          agentId: agentRecord?.id,
-          status: 'in_progress',
-          startTime: new Date(),
-          environment: environment,
-          agentUsed: effectiveSlug,
-          agentVersion: agentVersion,
-          dialedNumber: to || undefined,
+        console.warn(`[DB-BG] Skipping call log creation - no caller data:`, {
+          from: from || 'N/A',
+          callSid: twilioCallSid?.slice(-8) || 'N/A',
+          callId: callId.slice(-8),
         });
-        CallDiagnostics.recordDbOperation(callId, 'create_call_log', dbCreateLogStart, true);
-        CallDiagnostics.recordStage(callId, 'db_create_call_log_completed', true, { durationMs: Date.now() - dbCreateLogStart });
-        
-        callLogId = callLog.id;
-        CallDiagnostics.addCorrelationId(callId, 'callLogId', callLogId);
-        // Update trace with full metadata for visibility
-        CallDiagnostics.updateTrace(callId, { 
-          agentSlug: effectiveSlug, 
-          twilioCallSid,
-          callLogId,
-        });
-        console.info(`[DB] Call log created EARLY: ${callLogId}, CallSid: ${twilioCallSid}, Agent: ${effectiveSlug} ${agentVersion}, Env: ${environment}`);
       }
-    } else {
-      console.warn(`[DB] Skipping early call log creation - no caller data available:`, {
-        confName: conferenceNameFromMeta?.slice(-12) || 'N/A',
-        from: from || 'N/A',
-        callSid: twilioCallSid?.slice(-8) || 'N/A',
-        callId: callId.slice(-8),
-        hasSIPData: !!extMeta?.callerPhoneFromSIP,
-      });
-    }
-    
-    // Register call with lifecycle coordinator for reliable termination detection
-    // Only register if we have valid callLogId
-    if (callLogId) {
-      callLifecycleCoordinator.registerCall({
-        callLogId,
-        twilioCallSid,
-        openAiCallId: callId,
-        agentSlug: effectiveSlug,
-        from,
-        to,
-      });
       
-      // CRITICAL: Set conferenceSidToCallLogId mapping now that we have the callLogId
-      // The conference events may have already fired, so we need to find the conferenceSid
-      // by looking through conferenceNameToCallID for any ConferenceSid (CF...) that maps to this callId
-      for (const [key, mappedCallId] of Object.entries(conferenceNameToCallID)) {
-        if (mappedCallId === callId && key.startsWith('CF')) {
-          conferenceSidToCallLogId[key] = callLogId;
-          console.info(`[DB] ✓ Mapped ConferenceSid ${key} → callLogId ${callLogId}`);
-          break;
+      // Register call with lifecycle coordinator
+      if (resolvedCallLogId) {
+        callLifecycleCoordinator.registerCall({
+          callLogId: resolvedCallLogId,
+          twilioCallSid,
+          openAiCallId: callId,
+          agentSlug: effectiveSlug,
+          from,
+          to,
+        });
+        
+        for (const [key, mappedCallId] of Object.entries(conferenceNameToCallID)) {
+          if (mappedCallId === callId && key.startsWith('CF')) {
+            conferenceSidToCallLogId[key] = resolvedCallLogId;
+            console.info(`[DB-BG] ✓ Mapped ConferenceSid ${key} → callLogId ${resolvedCallLogId}`);
+            break;
+          }
         }
       }
+      
+      const totalDbMs = Date.now() - dbOpsStartTime;
+      console.info(`[DB-BG] ✓ All DB operations completed in ${totalDbMs}ms (ran in background, did NOT block accept)`);
+      
+      return { callLogId: resolvedCallLogId, agentId: resolvedAgentId };
+    } catch (dbError) {
+      console.error('[DB-BG ERROR] Background DB operations failed:', dbError);
+      const errorMsg = dbError instanceof Error ? dbError.message : String(dbError);
+      CallDiagnostics.recordStage(callId, 'db_create_call_log_completed', false, undefined, errorMsg);
+      CallDiagnostics.updateTrace(callId, { failureReason: `DB Error: ${errorMsg}` });
+      return { callLogId: undefined, agentId: undefined };
     }
-  } catch (dbError) {
-    console.error('[DB ERROR] Failed to create call log:', dbError);
-    // DIAGNOSTICS: Record DB failure
-    const errorMsg = dbError instanceof Error ? dbError.message : String(dbError);
-    CallDiagnostics.recordStage(callId, 'db_create_call_log_completed', false, undefined, errorMsg);
-    CallDiagnostics.updateTrace(callId, { failureReason: `DB Error: ${errorMsg}` });
-  }
+  })();
   
-  // Build enhanced metadata with callLogId and agentId for DRS agent
-  const enhancedMetadata = {
-    ...metadata,
-    callLogId,
-    agentId,
-  };
+  // Agent factory runs immediately — does NOT wait for DB ops.
+  // callLogId is undefined here; it gets backfilled after session.connect().
+  // The factory's callerMemory/schedule lookups run in parallel with DB ops.
   
   // Build after-hours specific metadata with caller phone for automatic caller ID recognition
   const afterHoursMetadata = {
     ...metadata,
-    callerPhone: from, // Pass caller's phone number from Twilio
+    callerPhone: from,
     dialedNumber: to,
     callSid: twilioCallSid,
   };
