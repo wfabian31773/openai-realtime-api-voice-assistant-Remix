@@ -897,6 +897,75 @@ async function observeCall(
   agentSlug?: string,
   metadata?: { campaignId?: string; contactId?: string; language?: string; agentGreeting?: string; ivrSelection?: '1' | '2' | '3' | '4' }
 ): Promise<void> {
+  // CRITICAL: Accept the SIP call IMMEDIATELY with minimal config.
+  // OpenAI's SIP accept window is ~10-15 seconds. All DB lookups, agent instantiation,
+  // and event handler setup must happen AFTER the accept. The full agent config will be
+  // sent later via session.update when session.connect() runs.
+  const earlyMeta = metadata as any;
+  const isSpanishEarly = metadata?.language === 'spanish' || metadata?.ivrSelection === '4';
+  const voiceEarly = earlyMeta?.voiceForCall || (isSpanishEarly ? 'coral' : 'sage');
+  
+  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+  const minimalAcceptPayload = {
+    model: 'gpt-realtime',
+    voice: voiceEarly,
+    instructions: 'You are a medical office assistant. Please wait while the system loads your full configuration.',
+  };
+  
+  console.info(`[SESSION] FAST ACCEPT: Immediately accepting call ${callId} with minimal config (voice=${voiceEarly})`);
+  const fastAcceptStart = Date.now();
+  
+  const MAX_FAST_ACCEPT_RETRIES = 5;
+  let fastAcceptSucceeded = false;
+  let fastAcceptError = '';
+  
+  for (let attempt = 0; attempt < MAX_FAST_ACCEPT_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delay = Math.min(200 * Math.pow(2, attempt - 1), 2000) + Math.random() * 100;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    
+    try {
+      const resp = await fetch(`https://api.openai.com/v1/realtime/calls/${callId}/accept`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(minimalAcceptPayload),
+      });
+      
+      if (resp.ok) {
+        const fastAcceptMs = Date.now() - fastAcceptStart;
+        console.info(`[SESSION] FAST ACCEPT: ✓ Call ${callId} accepted in ${fastAcceptMs}ms (attempt ${attempt + 1})`);
+        CallDiagnostics.recordStage(callId, 'fast_accept_completed', true, { fastAcceptMs, attempts: attempt + 1 });
+        fastAcceptSucceeded = true;
+        break;
+      }
+      
+      fastAcceptError = await resp.text();
+      
+      if (resp.status === 404) {
+        console.warn(`[SESSION] FAST ACCEPT: 404 on attempt ${attempt + 1} - call not ready yet`);
+        continue;
+      }
+      
+      console.error(`[SESSION] FAST ACCEPT: Non-retryable error ${resp.status}: ${fastAcceptError.substring(0, 200)}`);
+      break;
+    } catch (fetchErr) {
+      fastAcceptError = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      console.warn(`[SESSION] FAST ACCEPT: Fetch error on attempt ${attempt + 1}: ${fastAcceptError}`);
+    }
+  }
+  
+  if (!fastAcceptSucceeded) {
+    console.error(`[SESSION] FAST ACCEPT: FAILED for call ${callId}: ${fastAcceptError.substring(0, 300)}`);
+    CallDiagnostics.recordStage(callId, 'fast_accept_completed', false, undefined, fastAcceptError.substring(0, 200));
+    throw new Error(`Failed to fast-accept call ${callId}: ${fastAcceptError.substring(0, 200)}`);
+  }
+  
+  // Now proceed with the heavy setup work (DB lookups, agent instantiation, etc.)
+  // The call is already accepted and audio is connected.
   const { agentRegistry } = await import('./config/agents');
   const { createDatabaseAgent } = await import('./agents/databaseAgent');
   
@@ -1502,171 +1571,17 @@ async function observeCall(
   });
 
   try {
-    // CRITICAL: Accept immediately - do NOT wait for caller to join
-    // With extended TwiML greetings, waiting causes OpenAI session to timeout
+    // Call was already accepted via FAST ACCEPT at the top of observeCall.
+    // Clean up caller ready tracking since we're not waiting.
     const confNameForWait = getConferenceName(callId);
     if (confNameForWait) {
-      console.info(`[SESSION] Accepting call immediately (caller listening to TwiML greeting)`);
       callerReadyPromises.delete(confNameForWait);
       callerReadyResolvers.delete(confNameForWait);
     }
     
-    console.info(`[SESSION] CHECKPOINT D: Building accept payload...`);
-    const BUILD_CONFIG_TIMEOUT_MS = 5000;
-    let acceptPayload: any;
-    try {
-      const buildConfigPromise = OpenAIRealtimeSIP.buildInitialConfig(sessionAgent, sessionOptions, {
-        voice: voiceForCall,
-        inputAudioTranscription: languageCode 
-          ? { model: 'gpt-4o-transcribe', language: languageCode }
-          : { model: 'gpt-4o-transcribe' },
-        turnDetection: {
-          type: 'semantic_vad',
-          eagerness: 'medium',
-          createResponse: true,
-          interruptResponse: true,
-        },
-      } as any);
-      
-      acceptPayload = await Promise.race([
-        buildConfigPromise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`buildInitialConfig timed out after ${BUILD_CONFIG_TIMEOUT_MS}ms`)), BUILD_CONFIG_TIMEOUT_MS)),
-      ]);
-    } catch (buildError) {
-      console.error(`[SESSION] FATAL: buildInitialConfig failed for ${callId}:`, buildError);
-      throw buildError;
-    }
-    console.info(`[SESSION] CHECKPOINT E: Accept payload built, keys: ${JSON.stringify(Object.keys(acceptPayload || {}))}`);
-    const tdCheck = (acceptPayload as any)?.audio?.input?.turn_detection;
-    if (tdCheck) {
-      console.info(`[SESSION] Accept payload turn_detection: ${JSON.stringify(tdCheck)}`);
-    } else {
-      console.error(`[SESSION] ⚠ turn_detection NOT in accept payload — agent will be silent!`);
-    }
+    console.info(`[SESSION] ✓ Call ${callId} was already accepted via FAST ACCEPT - proceeding to WebSocket connect`);
     
-    // STEP 2: Accept the call via REST API with retry logic for 404 errors
-    // OpenAI's SIP call may not be ready when webhook fires - retry with exponential backoff
-    const MAX_ACCEPT_RETRIES = 8;
-    const INITIAL_RETRY_DELAY_MS = 200;
-    const MAX_RETRY_DELAY_MS = 3000;
-    let lastError: string = '';
-    let acceptSucceeded = false;
-    
-    CallDiagnostics.recordStage(callId, 'accept_started', true);
-    const acceptStartTime = Date.now();
-    
-    for (let attempt = 0; attempt < MAX_ACCEPT_RETRIES; attempt++) {
-      if (attempt > 0) {
-        const baseDelay = Math.min(INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1), MAX_RETRY_DELAY_MS);
-        const jitter = Math.random() * 100;
-        const delayMs = Math.floor(baseDelay + jitter);
-        console.info(`[SESSION] Retry ${attempt}/${MAX_ACCEPT_RETRIES - 1} for call ${callId} - waiting ${delayMs}ms`);
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-      }
-      
-      try {
-        const acceptResponse = await fetch(`https://api.openai.com/v1/realtime/calls/${callId}/accept`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${OPENAI_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(acceptPayload),
-        });
-        
-        if (acceptResponse.ok) {
-          const acceptLatencyMs = Date.now() - acceptStartTime;
-          if (attempt > 0) {
-            console.info(`[SESSION] ✓ Accept succeeded on retry ${attempt} for call ${callId} (total time: ~${acceptLatencyMs}ms)`);
-          }
-          CallDiagnostics.recordAcceptAttempt(callId, attempt + 1, MAX_ACCEPT_RETRIES, true, acceptResponse.status);
-          CallDiagnostics.recordStage(callId, 'accept_completed', true, { 
-            acceptLatencyMs, 
-            attempts: attempt + 1 
-          });
-          acceptSucceeded = true;
-          break;
-        }
-        
-        lastError = await acceptResponse.text();
-        
-        if (acceptResponse.status !== 404) {
-          console.error(`[SESSION] Non-retryable error ${acceptResponse.status} for call ${callId}: ${lastError}`);
-          break;
-        }
-        
-        console.warn(`[SESSION] ⚠️ Accept attempt ${attempt + 1}/${MAX_ACCEPT_RETRIES} failed with 404 for call ${callId}`);
-        CallDiagnostics.recordAcceptAttempt(callId, attempt + 1, MAX_ACCEPT_RETRIES, false, acceptResponse.status, lastError);
-        
-      } catch (fetchError) {
-        lastError = fetchError instanceof Error ? fetchError.message : String(fetchError);
-        console.warn(`[SESSION] ⚠️ Accept fetch error on attempt ${attempt + 1}: ${lastError}`);
-        CallDiagnostics.recordAcceptAttempt(callId, attempt + 1, MAX_ACCEPT_RETRIES, false, undefined, lastError);
-      }
-    }
-    
-    if (!acceptSucceeded) {
-      const confName = getConferenceName(callId);
-      let twilioCallSid = confName ? getTwilioCallSid(confName) : undefined;
-      if (!twilioCallSid && confName) {
-        const derived = confName.replace(/^(test_|outbound_)?conf_/, '');
-        if (derived.startsWith('CA') && derived.length === 34) {
-          twilioCallSid = derived;
-        }
-      }
-      
-      const domain = process.env.DOMAIN || 'dcf9f10f-5436-45b2-9ddd-3056216aaa94-00-10mvu4n0j43c2.worf.replit.dev';
-      const hasValidCallSid = twilioCallSid && twilioCallSid.startsWith('CA') && twilioCallSid.length === 34;
-      
-      console.error(`[SESSION] ✗ All ${MAX_ACCEPT_RETRIES} accept attempts failed for call ${callId}`);
-      console.error(`[SESSION] Last error: ${lastError}`);
-      
-      if (hasValidCallSid && confName) {
-        try {
-          const client = await getTwilioClient();
-          const callerNumber = getCallerNumber(confName) || 
-                               (from && from !== 'Unknown' ? from : undefined) || 
-                               '+16263821543';
-          const humanNumber = process.env.HUMAN_AGENT_NUMBER || '+18186021567';
-          
-          await client.calls(twilioCallSid!).update({
-            twiml: `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say voice="Polly.Joanna">We apologize, but we are experiencing technical difficulties connecting you to our assistant. Please hold while we transfer you to our answering service.</Say>
-  <Pause length="2"/>
-  <Dial callerId="${callerNumber}" timeout="30" action="https://${domain}/api/voice/fallback-complete">
-    <Number>${humanNumber}</Number>
-  </Dial>
-  <Say voice="Polly.Joanna">We were unable to complete your call. Please try again later or call back during regular business hours. Goodbye.</Say>
-  <Hangup/>
-</Response>`
-          });
-          console.info(`[SESSION] ✓ Fallback to human agent initiated for ${twilioCallSid}`);
-          CallDiagnostics.recordStage(callId, 'fallback_to_human', true, { twilioCallSid });
-          CallDiagnostics.completeTrace(callId, 'handoff', 'Accept failed - transferred to human');
-          
-          if (callLogId) {
-            try {
-              await storage.updateCallLog(callLogId, {
-                status: 'transferred',
-                transferredToHuman: true,
-                summary: `Accept failed after ${MAX_ACCEPT_RETRIES} attempts - transferred to human. Error: ${lastError.substring(0, 200)}`,
-              });
-            } catch (logError) {
-              console.error(`[SESSION] Failed to update call log for fallback:`, logError);
-            }
-          }
-          return;
-        } catch (fallbackError) {
-          console.error(`[SESSION] ✗ Conference-based fallback also failed:`, fallbackError);
-        }
-      }
-      
-      throw new Error(`Failed to accept call ${callId} after ${MAX_ACCEPT_RETRIES} attempts: ${lastError}`);
-    }
-    console.info(`[SESSION] ✓ Call ${callId} accepted via REST API`);
-    
-    // STEP 3: Connect WebSocket for event streaming (call already accepted via REST)
+    // STEP 3: Connect WebSocket for event streaming (call already accepted via FAST ACCEPT)
     CallDiagnostics.recordStage(callId, 'session_connect_started', true);
     const sessionConnectStart = Date.now();
     await session.connect({ apiKey: OPENAI_API_KEY!, callId });
