@@ -1715,7 +1715,7 @@ async function observeCall(
     // eventually joins, both sides sit silent — this is the root cause of dead air.
     if (callerReadyPromise) {
       console.info(`[SESSION] Awaiting caller-ready signal — caller is still hearing TwiML greeting... (T+${Date.now() - observeCallStart}ms)`);
-      const CALLER_READY_WAIT_MS = 3000;
+      const CALLER_READY_WAIT_MS = 8000;
       await Promise.race([
         callerReadyPromise,
         new Promise<void>((resolve) =>
@@ -2651,10 +2651,9 @@ export function setupVoiceAgentRoutes(app: Express): void {
       if (assignedAgent && assignedAgent.slug === 'no-ivr') {
         console.info(`[IVR] Phone ${dialedNumber} assigned to no-ivr agent - bypassing IVR menu`);
         
-        // Store metadata for no-ivr agent (no IVR selection)
-        // No agent greeting needed - TwiML already played the full greeting ending with "How may I be of assistance?"
-        // Agent just listens and responds to the caller's first statement
-        const noIvrGreeting = "";
+        // Store metadata for no-ivr agent
+        // AI agent delivers the full greeting via response.create — no long TwiML greeting
+        const noIvrGreeting = WELCOME_GREETING;
         callMetadata.set(conferenceName, {
           agentSlug: 'no-ivr',
           agentGreeting: noIvrGreeting,
@@ -2668,32 +2667,24 @@ export function setupVoiceAgentRoutes(app: Express): void {
         }
         
         // CRITICAL: Create caller-ready promise BEFORE customer joins conference
-        // This prevents the race condition where participant-join fires before the promise exists
         const callerReadyPromise = new Promise<void>((resolve) => {
           callerReadyResolvers.set(conferenceName, resolve);
-          // Safety timeout: TwiML greeting takes ~18-20s. Allow up to 25s before giving up.
           setTimeout(() => {
             if (callerReadyResolvers.has(conferenceName)) {
-              console.warn(`[IVR] Caller-ready timeout (25s) for ${conferenceName}, proceeding anyway`);
+              console.warn(`[IVR] Caller-ready timeout (10s) for ${conferenceName}, proceeding anyway`);
               callerReadyResolvers.delete(conferenceName);
               resolve();
             }
-          }, 25000);
+          }, 10000);
         });
         callerReadyPromises.set(conferenceName, callerReadyPromise);
         console.info(`[IVR] Caller-ready promise created EARLY for conference: ${conferenceName}`);
 
-        // Route directly to conference with extended greeting that buys time for agent to connect
-        // The greeting ends with a prompt, so caller speaks first and agent is ready to respond
+        // Minimal TwiML: brief hold message then immediately join conference
+        // AI agent delivers the full greeting via response.create once caller is in the conference
         const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">Thank you for calling Azul Vision. All of our offices are currently closed. You have reached the after hours call service.</Say>
-  <Pause length="1"/>
-  <Say voice="Polly.Joanna">If this is a medical emergency, please dial 9 1 1.</Say>
-  <Pause length="1"/>
-  <Say voice="Polly.Joanna">All calls are recorded for quality assurance purposes.</Say>
-  <Pause length="1"/>
-  <Say voice="Polly.Joanna">How can I help you?</Say>
+  <Say voice="Polly.Joanna">Please hold while we connect you.</Say>
   <Dial>
     <Conference 
       beep="false"
@@ -2793,54 +2784,43 @@ export function setupVoiceAgentRoutes(app: Express): void {
       state: 'initializing',
     }).catch(err => console.error(`[CALL SESSION] Failed to persist no-ivr call session:`, err));
     
-    // Store metadata for no-ivr agent (no IVR selection)
-    // No agent greeting - TwiML plays the full greeting ending with "How may I be of assistance?"
-    const noIvrGreeting = "";
+    // Store metadata for no-ivr agent
+    // AI agent delivers the full greeting via response.create — no long TwiML greeting
+    const noIvrGreeting = WELCOME_GREETING;
     callMetadata.set(conferenceName, {
       agentSlug: 'no-ivr',
       agentGreeting: noIvrGreeting,
       language: 'english',
-      ivrSelection: undefined,   // No IVR selection - agent determines from conversation
+      ivrSelection: undefined,
     } as any);
-    // Also store extended voice/language config for session setup
-    // CRITICAL: Set languageForCall to 'en' to prevent erratic language switching
     const extendedMeta = callMetadata.get(conferenceName) as any;
     if (extendedMeta) {
       extendedMeta.voiceForCall = 'sage';
-      extendedMeta.languageForCall = 'en'; // Use agent config language - prevents auto-detect issues
+      extendedMeta.languageForCall = 'en';
     }
 
     console.info(`[NO-IVR] Routing directly to no-ivr agent (no IVR menu, voice=sage, lang=en)`);
 
     // CRITICAL: Create caller-ready promise BEFORE sending TwiML response.
-    // The TwiML plays an ~18-20s greeting before the caller enters the conference.
-    // observeCall awaits this promise in STEP 3D so response.create fires only
-    // after the caller is actually in the conference — preventing dead air.
+    // Minimal TwiML (~2s) gets caller into conference fast. AI agent delivers greeting.
     const callerReadyPromise = new Promise<void>((resolve) => {
       callerReadyResolvers.set(conferenceName, resolve);
-      // Safety timeout: TwiML greeting takes ~18-20s. Allow up to 25s before giving up.
       setTimeout(() => {
         if (callerReadyResolvers.has(conferenceName)) {
-          console.warn(`[NO-IVR] Caller-ready timeout (25s) for ${conferenceName} — proceeding anyway`);
+          console.warn(`[NO-IVR] Caller-ready timeout (10s) for ${conferenceName} — proceeding anyway`);
           callerReadyResolvers.delete(conferenceName);
           resolve();
         }
-      }, 25000);
+      }, 10000);
     });
     callerReadyPromises.set(conferenceName, callerReadyPromise);
     console.info(`[NO-IVR] Caller-ready promise created for: ${conferenceName}`);
 
-    // Extended greeting buys time for agent to connect
-    // The greeting ends with a prompt, so caller speaks first and agent is ready to respond
+    // Minimal TwiML: brief hold message then immediately join conference
+    // AI agent delivers the full greeting via response.create once caller is in the conference
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">Thank you for calling Azul Vision. All of our offices are currently closed. You have reached the after hours call service.</Say>
-  <Pause length="1"/>
-  <Say voice="Polly.Joanna">If this is a medical emergency, please dial 9 1 1.</Say>
-  <Pause length="1"/>
-  <Say voice="Polly.Joanna">All calls are recorded for quality assurance purposes.</Say>
-  <Pause length="1"/>
-  <Say voice="Polly.Joanna">How can I help you?</Say>
+  <Say voice="Polly.Joanna">Please hold while we connect you.</Say>
   <Dial>
     <Conference 
       beep="false"
