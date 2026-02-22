@@ -489,16 +489,16 @@ async function addSIPParticipantWithWatchdog(
 // Session options for consistent configuration
 // NOTE: Voice and language are NOT set here - they're configured at call accept time
 // This prevents "cannot_update_voice" errors when session connects
-// IMPORTANT: SDK 0.3.7's toNewSessionConfig() expects camelCase fields (turnDetection, inputAudioTranscription)
-// snake_case fields are silently dropped — they don't match isDeprecatedConfig() checks
+// IMPORTANT: OpenAI REST API /v1/realtime/calls/{id}/accept expects snake_case on the wire.
+// camelCase fields are silently dropped — causing missing turn_detection and dead air.
 const sessionOptions: Partial<RealtimeSessionOptions> = {
   model: 'gpt-realtime',
   config: {
-    turnDetection: {
+    turn_detection: {
       type: 'semantic_vad',
       eagerness: 'medium',
-      createResponse: true,
-      interruptResponse: true,
+      create_response: true,
+      interrupt_response: true,
     },
   } as any,
   outputGuardrails: medicalSafetyGuardrails,
@@ -1303,12 +1303,12 @@ async function observeCall(
     config: {
       ...sessionOptions.config,
       voice: voiceForCall,
-      inputAudioTranscription: { model: 'gpt-4o-transcribe', language: languageCode },
-      turnDetection: {
+      input_audio_transcription: { model: 'gpt-4o-transcribe', language: languageCode },
+      turn_detection: {
         type: 'semantic_vad',
         eagerness: 'medium',
-        createResponse: true,
-        interruptResponse: true,
+        create_response: true,
+        interrupt_response: true,
       },
     },
   } as any);
@@ -1522,14 +1522,14 @@ async function observeCall(
     try {
       const buildConfigPromise = OpenAIRealtimeSIP.buildInitialConfig(sessionAgent, sessionOptions, {
         voice: voiceForCall,
-        inputAudioTranscription: languageCode 
+        input_audio_transcription: languageCode 
           ? { model: 'gpt-4o-transcribe', language: languageCode }
           : { model: 'gpt-4o-transcribe' },
-        turnDetection: {
+        turn_detection: {
           type: 'semantic_vad',
           eagerness: 'medium',
-          createResponse: true,
-          interruptResponse: true,
+          create_response: true,
+          interrupt_response: true,
         },
       } as any);
       
@@ -1544,9 +1544,25 @@ async function observeCall(
     console.info(`[SESSION] CHECKPOINT E: Accept payload built, keys: ${JSON.stringify(Object.keys(acceptPayload || {}))}`);
     const tdCheck = (acceptPayload as any)?.audio?.input?.turn_detection;
     if (tdCheck) {
-      console.info(`[SESSION] Accept payload turn_detection: ${JSON.stringify(tdCheck)}`);
+      console.info(`[SESSION] ✓ turn_detection present: ${JSON.stringify(tdCheck)}`);
     } else {
-      console.error(`[SESSION] ⚠ turn_detection NOT in accept payload — agent will be silent!`);
+      console.error(`[SESSION] ⚠ turn_detection NOT in accept payload — injecting fallback!`);
+      if (!acceptPayload) acceptPayload = {};
+      if (!acceptPayload.audio) acceptPayload.audio = {};
+      if (!acceptPayload.audio.input) acceptPayload.audio.input = {};
+      acceptPayload.audio.input.turn_detection = {
+        type: 'semantic_vad',
+        eagerness: 'medium',
+        create_response: true,
+        interrupt_response: true,
+      };
+      if (!acceptPayload.audio.input.transcription) {
+        acceptPayload.audio.input.transcription = {
+          model: 'gpt-4o-transcribe',
+          language: languageCode || 'en',
+        };
+      }
+      console.info(`[SESSION] ✓ Fallback injected: turn_detection + transcription`);
     }
     
     // STEP 2: Accept the call via REST API with retry logic for 404 errors
