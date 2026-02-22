@@ -11,10 +11,10 @@ channel = "stable-25_05"
 language = "nodejs"
 
 [deployment]
-run = ["bash", "scripts/start-production.sh"]
+run = ["bash", "-c", "npx tsx server/index.ts & npx tsx src/server.ts & wait"]
 deploymentTarget = "vm"
 ignorePorts = false
-build = ["bash", "-c", "cd client && npm install && npm run build"]
+build = ["bash", "-c", "npx tsc --noEmit"]
 
 [[ports]]
 localPort = 5000

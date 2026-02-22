@@ -1599,15 +1599,18 @@ async function observeCall(
         language: languageCode || 'en',
       };
     }
-    if (!audioFmt || (typeof audioFmt === 'object' && audioFmt?.type === 'audio/pcm')) {
-      console.error(`[SESSION] ⚠ Input audio format is PCM16 (wrong for SIP) — forcing G.711 μ-law!`);
-      acceptPayload.audio.input.format = { type: 'audio/pcmu' };
+    // SIP MODE: ALWAYS strip audio format from accept payload.
+    // The codec is negotiated at the SIP/SDP transport layer between Twilio and OpenAI.
+    // Setting format here conflicts with the SIP-negotiated codec and causes screeching/silence.
+    if (acceptPayload.audio?.input?.format) {
+      console.info(`[SIP-FIX] Stripping audio.input.format from accept payload: ${JSON.stringify(acceptPayload.audio.input.format)}`);
+      delete acceptPayload.audio.input.format;
     }
-    if (!outputFmt || (typeof outputFmt === 'object' && outputFmt?.type === 'audio/pcm')) {
-      console.error(`[SESSION] ⚠ Output audio format is PCM16 (wrong for SIP) — forcing G.711 μ-law!`);
-      acceptPayload.audio.output.format = { type: 'audio/pcmu' };
+    if (acceptPayload.audio?.output?.format) {
+      console.info(`[SIP-FIX] Stripping audio.output.format from accept payload: ${JSON.stringify(acceptPayload.audio.output.format)}`);
+      delete acceptPayload.audio.output.format;
     }
-    console.info(`[SESSION] ✓ Final accept payload audio: input=${JSON.stringify(acceptPayload.audio.input.format)}, output=${JSON.stringify(acceptPayload.audio.output.format)}, td=${JSON.stringify(acceptPayload.audio.input.turn_detection)?.substring(0, 80)}`);
+    console.info(`[SESSION] ✓ Final accept payload: td=${JSON.stringify(acceptPayload.audio?.input?.turn_detection)?.substring(0, 80)}, voice=${acceptPayload.audio?.output?.voice}, keys=${JSON.stringify(Object.keys(acceptPayload))}`);
     
     // STEP 2: Accept the call via REST API with retry logic for 404 errors
     const MAX_ACCEPT_RETRIES = 8;
@@ -1734,26 +1737,45 @@ async function observeCall(
     CallDiagnostics.recordStage(callId, 'session_connect_started', true);
     const sessionConnectStart = Date.now();
     
+    // ═══════════════════════════════════════════════════════════════════════
+    // SIP AUDIO FORMAT FIX: Monkey-patch transport.sendEvent to strip audio
+    // format fields from session.update events. In SIP mode, the audio codec
+    // is negotiated at the SIP/SDP transport layer between Twilio and OpenAI.
+    // The SDK's session.update sends PCM16 format by default which OVERRIDES
+    // the SIP-negotiated G.711 codec, causing screeching audio and response failures.
+    // ═══════════════════════════════════════════════════════════════════════
+    const transport = session.transport as any;
+    const originalSendEvent = transport.sendEvent.bind(transport);
+    transport.sendEvent = (event: any) => {
+      if (event?.type === 'session.update' && event?.session?.audio) {
+        if (event.session.audio.input?.format) {
+          console.info(`[SIP-FIX] Stripping audio.input.format from session.update: ${JSON.stringify(event.session.audio.input.format)}`);
+          delete event.session.audio.input.format;
+        }
+        if (event.session.audio.output?.format) {
+          console.info(`[SIP-FIX] Stripping audio.output.format from session.update: ${JSON.stringify(event.session.audio.output.format)}`);
+          delete event.session.audio.output.format;
+        }
+      }
+      return originalSendEvent(event);
+    };
+
     // Listen for raw transport events BEFORE connecting to capture session.created/updated
-    // IMPORTANT: Use session.transport.on('*') — the SDK emits events through the transport's
-    // EventEmitterDelegate, NOT through transport.eventEmitter.
     let sessionUpdatedResolve: (() => void) | null = null;
     const sessionUpdatedPromise = new Promise<void>((resolve) => {
       sessionUpdatedResolve = resolve;
-      // Safety timeout — don't block forever if session.updated never arrives
       setTimeout(() => { resolve(); sessionUpdatedResolve = null; }, 3000);
     });
 
-    session.transport.on('*', (event: any) => {
+    transport.on('*', (event: any) => {
       const eventType = event?.type || 'unknown';
       if (eventType === 'session.created' || eventType === 'session.updated') {
         const sess = event?.session || {};
         const audioIn = sess?.audio?.input;
         const audioOut = sess?.audio?.output;
         const td = sess?.audio?.input?.turn_detection;
-        console.info(`[SESSION] OpenAI ${eventType}: voice=${audioOut?.voice}, td=${JSON.stringify(td)?.substring(0, 80)}, audio_in=${JSON.stringify(audioIn?.format)}, audio_out=${JSON.stringify(audioOut?.format)}`);
+        console.info(`[SESSION] OpenAI ${eventType}: voice=${audioOut?.voice}, td_type=${td?.type}, td_create_response=${td?.create_response}, audio_in_fmt=${JSON.stringify(audioIn?.format)}, audio_out_fmt=${JSON.stringify(audioOut?.format)}`);
         if (eventType === 'session.updated' && sessionUpdatedResolve) {
-          console.info(`[SESSION] ✓ session.updated confirmed — safe to send response.create`);
           sessionUpdatedResolve();
           sessionUpdatedResolve = null;
         }
@@ -1762,7 +1784,8 @@ async function observeCall(
       } else if (eventType === 'response.done') {
         const resp = event?.response;
         const statusDetails = resp?.status_details;
-        console.info(`[SESSION] response.done for ${callId}: status=${resp?.status}, output_count=${resp?.output?.length || 0}${statusDetails ? `, details=${JSON.stringify(statusDetails).substring(0, 200)}` : ''}`);
+        const errorInfo = statusDetails?.error || resp?.error;
+        console.info(`[SESSION] response.done for ${callId}: status=${resp?.status}, outputs=${resp?.output?.length || 0}${errorInfo ? `, ERROR: ${JSON.stringify(errorInfo).substring(0, 300)}` : ''}${statusDetails ? `, details=${JSON.stringify(statusDetails).substring(0, 300)}` : ''}`);
       }
     });
 
