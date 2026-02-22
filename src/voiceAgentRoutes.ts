@@ -1508,10 +1508,12 @@ async function observeCall(
 
   try {
     const confNameForWait = getConferenceName(callId);
-    if (confNameForWait) {
-      console.info(`[SESSION] Accepting call immediately (caller listening to TwiML greeting)`);
-      callerReadyPromises.delete(confNameForWait);
-      callerReadyResolvers.delete(confNameForWait);
+    // Grab the caller-ready promise NOW (before any async work) so we can await it later.
+    // It was created in the no-IVR handler BEFORE the TwiML greeting started playing.
+    // We must NOT delete it here — we need it after session.connect().
+    let callerReadyPromise: Promise<void> | null = callerReadyPromises.get(confNameForWait ?? '') ?? null;
+    if (confNameForWait && callerReadyPromise) {
+      console.info(`[SESSION] Caller-ready promise found for ${confNameForWait} — will await before greeting`);
     }
     
     // STEP 1: Build accept payload using SDK's buildInitialConfig (full agent config)
@@ -1708,6 +1710,31 @@ async function observeCall(
       CallDiagnostics.recordStage(callId, 'db_backfill_complete', false, { dbOpsTotalMs }, 'backfill await threw');
     }
     
+    // STEP 3D: Wait for caller to join the conference before triggering the greeting.
+    // response.create fires audio INTO the conference room. If the caller has not joined yet
+    // (they are still hearing TwiML), the AI speaks into an empty room. When the caller
+    // eventually joins, both sides sit silent — this is the root cause of dead air.
+    if (callerReadyPromise) {
+      console.info(`[SESSION] Awaiting caller-ready signal — caller is still hearing TwiML greeting... (T+${Date.now() - observeCallStart}ms)`);
+      const CALLER_READY_WAIT_MS = 20000;
+      await Promise.race([
+        callerReadyPromise,
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            console.warn(`[SESSION] Caller-ready external timeout after ${CALLER_READY_WAIT_MS}ms — proceeding with greeting`);
+            resolve();
+          }, CALLER_READY_WAIT_MS)
+        ),
+      ]);
+      console.info(`[SESSION] ✓ Caller is in the conference — triggering greeting now (T+${Date.now() - observeCallStart}ms)`);
+      // Cleanup the maps — the promise has fired (or timed out)
+      if (confNameForWait) {
+        callerReadyPromises.delete(confNameForWait);
+        callerReadyResolvers.delete(confNameForWait);
+      }
+      callerReadyPromise = null;
+    }
+
     // STEP 4: Force the agent to speak first by sending response.create
     // ALWAYS send response.create — even when TwiML delivered the greeting audio.
     // Without this, the agent sits in listen-only mode and never speaks.
