@@ -489,16 +489,28 @@ async function addSIPParticipantWithWatchdog(
 // Session options for consistent configuration
 // NOTE: Voice and language are NOT set here - they're configured at call accept time
 // This prevents "cannot_update_voice" errors when session connects
-// IMPORTANT: OpenAI REST API /v1/realtime/calls/{id}/accept expects snake_case on the wire.
-// camelCase fields are silently dropped — causing missing turn_detection and dead air.
+// IMPORTANT: SDK 0.3.7 uses toNewSessionConfig() which has two paths:
+// - "deprecated" path: triggered by top-level camelCase fields (turnDetection, inputAudioTranscription)
+// - "new" path: expects nested audio.input.turnDetection structure
+// We use the new nested structure to ensure fields pass through correctly.
+// Audio format MUST be G.711 μ-law for Twilio SIP compatibility (not PCM16 default).
 const sessionOptions: Partial<RealtimeSessionOptions> = {
   model: 'gpt-realtime',
   config: {
-    turn_detection: {
-      type: 'semantic_vad',
-      eagerness: 'medium',
-      create_response: true,
-      interrupt_response: true,
+    audio: {
+      input: {
+        format: 'g711_ulaw',
+        transcription: { model: 'gpt-4o-transcribe' },
+        turnDetection: {
+          type: 'semantic_vad',
+          eagerness: 'medium',
+          createResponse: true,
+          interruptResponse: true,
+        },
+      },
+      output: {
+        format: 'g711_ulaw',
+      },
     },
   } as any,
   outputGuardrails: medicalSafetyGuardrails,
@@ -1303,12 +1315,21 @@ async function observeCall(
     config: {
       ...sessionOptions.config,
       voice: voiceForCall,
-      input_audio_transcription: { model: 'gpt-4o-transcribe', language: languageCode },
-      turn_detection: {
-        type: 'semantic_vad',
-        eagerness: 'medium',
-        create_response: true,
-        interrupt_response: true,
+      audio: {
+        input: {
+          format: 'g711_ulaw',
+          transcription: { model: 'gpt-4o-transcribe', language: languageCode },
+          turnDetection: {
+            type: 'semantic_vad',
+            eagerness: 'medium',
+            createResponse: true,
+            interruptResponse: true,
+          },
+        },
+        output: {
+          format: 'g711_ulaw',
+          voice: voiceForCall,
+        },
       },
     },
   } as any);
@@ -1522,14 +1543,23 @@ async function observeCall(
     try {
       const buildConfigPromise = OpenAIRealtimeSIP.buildInitialConfig(sessionAgent, sessionOptions, {
         voice: voiceForCall,
-        input_audio_transcription: languageCode 
-          ? { model: 'gpt-4o-transcribe', language: languageCode }
-          : { model: 'gpt-4o-transcribe' },
-        turn_detection: {
-          type: 'semantic_vad',
-          eagerness: 'medium',
-          create_response: true,
-          interrupt_response: true,
+        audio: {
+          input: {
+            format: 'g711_ulaw',
+            transcription: languageCode 
+              ? { model: 'gpt-4o-transcribe', language: languageCode }
+              : { model: 'gpt-4o-transcribe' },
+            turnDetection: {
+              type: 'semantic_vad',
+              eagerness: 'medium',
+              createResponse: true,
+              interruptResponse: true,
+            },
+          },
+          output: {
+            format: 'g711_ulaw',
+            voice: voiceForCall,
+          },
         },
       } as any);
       
@@ -1543,27 +1573,39 @@ async function observeCall(
     }
     console.info(`[SESSION] CHECKPOINT E: Accept payload built, keys: ${JSON.stringify(Object.keys(acceptPayload || {}))}`);
     const tdCheck = (acceptPayload as any)?.audio?.input?.turn_detection;
-    if (tdCheck) {
-      console.info(`[SESSION] ✓ turn_detection present: ${JSON.stringify(tdCheck)}`);
-    } else {
-      console.error(`[SESSION] ⚠ turn_detection NOT in accept payload — injecting fallback!`);
-      if (!acceptPayload) acceptPayload = {};
-      if (!acceptPayload.audio) acceptPayload.audio = {};
-      if (!acceptPayload.audio.input) acceptPayload.audio.input = {};
+    const audioFmt = (acceptPayload as any)?.audio?.input?.format;
+    const outputFmt = (acceptPayload as any)?.audio?.output?.format;
+    console.info(`[SESSION] Accept payload audit: turn_detection=${tdCheck ? 'YES' : 'MISSING'}, input_format=${JSON.stringify(audioFmt) || 'MISSING'}, output_format=${JSON.stringify(outputFmt) || 'MISSING'}`);
+    
+    if (!acceptPayload) acceptPayload = {};
+    if (!acceptPayload.audio) acceptPayload.audio = {};
+    if (!acceptPayload.audio.input) acceptPayload.audio.input = {};
+    if (!acceptPayload.audio.output) acceptPayload.audio.output = {};
+    
+    if (!tdCheck) {
+      console.error(`[SESSION] ⚠ turn_detection MISSING — injecting fallback!`);
       acceptPayload.audio.input.turn_detection = {
         type: 'semantic_vad',
         eagerness: 'medium',
         create_response: true,
         interrupt_response: true,
       };
-      if (!acceptPayload.audio.input.transcription) {
-        acceptPayload.audio.input.transcription = {
-          model: 'gpt-4o-transcribe',
-          language: languageCode || 'en',
-        };
-      }
-      console.info(`[SESSION] ✓ Fallback injected: turn_detection + transcription`);
     }
+    if (!acceptPayload.audio.input.transcription) {
+      acceptPayload.audio.input.transcription = {
+        model: 'gpt-4o-transcribe',
+        language: languageCode || 'en',
+      };
+    }
+    if (!audioFmt || (typeof audioFmt === 'object' && audioFmt?.type === 'audio/pcm')) {
+      console.error(`[SESSION] ⚠ Input audio format is PCM16 (wrong for SIP) — forcing G.711 μ-law!`);
+      acceptPayload.audio.input.format = { type: 'audio/pcmu' };
+    }
+    if (!outputFmt || (typeof outputFmt === 'object' && outputFmt?.type === 'audio/pcm')) {
+      console.error(`[SESSION] ⚠ Output audio format is PCM16 (wrong for SIP) — forcing G.711 μ-law!`);
+      acceptPayload.audio.output.format = { type: 'audio/pcmu' };
+    }
+    console.info(`[SESSION] ✓ Final accept payload audio: input=${JSON.stringify(acceptPayload.audio.input.format)}, output=${JSON.stringify(acceptPayload.audio.output.format)}, td=${JSON.stringify(acceptPayload.audio.input.turn_detection)?.substring(0, 80)}`);
     
     // STEP 2: Accept the call via REST API with retry logic for 404 errors
     const MAX_ACCEPT_RETRIES = 8;
@@ -1689,6 +1731,27 @@ async function observeCall(
     // STEP 3: Connect WebSocket for event streaming (call already accepted via REST)
     CallDiagnostics.recordStage(callId, 'session_connect_started', true);
     const sessionConnectStart = Date.now();
+    
+    // Listen for raw WebSocket events BEFORE connecting to capture session.created
+    const transport = session.transport as any;
+    if (transport.eventEmitter) {
+      transport.eventEmitter.on('*', (event: any) => {
+        const eventType = event?.type || 'unknown';
+        if (eventType === 'session.created' || eventType === 'session.updated') {
+          const sess = event?.session || {};
+          const audioIn = sess?.input_audio_transcription || sess?.audio?.input;
+          const audioOut = sess?.output_audio_format || sess?.audio?.output;
+          const td = sess?.turn_detection || sess?.audio?.input?.turn_detection;
+          console.info(`[SESSION] OpenAI ${eventType}: voice=${sess?.voice}, turn_detection=${JSON.stringify(td)?.substring(0, 80)}, audio_in=${JSON.stringify(audioIn)?.substring(0, 60)}, audio_out=${JSON.stringify(audioOut)?.substring(0, 60)}`);
+        } else if (eventType === 'error') {
+          console.error(`[SESSION] OpenAI error event for ${callId}:`, JSON.stringify(event).substring(0, 300));
+        } else if (eventType === 'response.done') {
+          const resp = event?.response;
+          console.info(`[SESSION] response.done for ${callId}: status=${resp?.status}, output_count=${resp?.output?.length || 0}`);
+        }
+      });
+    }
+    
     await session.connect({ apiKey: OPENAI_API_KEY!, callId });
     
     const connectDurationMs = Date.now() - sessionConnectStart;
