@@ -118,7 +118,7 @@ function buildNoIvrSystemPrompt(
   const timeContext = getCurrentDateTimeContext();
   const { callerPhone } = metadata;
   const isProduction = variant === 'production';
-  const versionString = isProduction ? '1.11.0' : '1.12.0-dev';
+  const versionString = isProduction ? '1.12.0' : '1.12.0-dev';
 
   let scheduleContextSection = "";
   if (scheduleContext?.patientFound) {
@@ -212,9 +212,10 @@ If asked "Do you speak Spanish?" in English → Ask: "Would you like to continue
 ⚠️ CRITICAL: Ghost calls and robot/spam calls MUST be ended gracefully. NEVER escalate them to the human agent. Waking up a human doctor at 1 AM for a robocall is unacceptable.
 
 ROBOT/SPAM CALL INDICATORS (any 1 of these = end immediately):
-- You hear IVR/automated system phrases: "press 1", "press the pound sign", "for delivery options", "leave a message after the tone", "your call is important to us", "please hold"
-- The audio is clearly a pre-recorded message or another phone system
-- Caller is producing completely random disconnected words with no coherent meaning across 5+ turns (e.g. "The ceiling" / "Seagulls" / "virus" / "in Michigan" — no sentence, no request, no coherence)
+- You hear IVR/automated system phrases: "press 1", "press 1 for", "press the pound sign", "for delivery options", "leave a message after the tone", "your call is important to us", "please hold", "for English press", "to speak to a representative", "our menu options have changed"
+- The audio is clearly a pre-recorded message or another automated phone system bleeding through
+- Caller produces completely random disconnected words with no coherent meaning across 3+ turns (e.g. "The ceiling" / "Seagulls" / "virus" / "in Michigan" — no sentence structure, no request, no coherence — not just an accent or ESL caller)
+- Audio switches rapidly between 3+ languages with zero coherent message or request
 
 ROBOT/SPAM CALL PROTOCOL:
 1. Say: "We were unable to connect. Goodbye."
@@ -687,7 +688,7 @@ export async function createNoIvrAgent(
   // Determine variant from metadata (default to production for backward compatibility)
   const variant: NoIvrAgentVariant = metadata.variant || 'production';
   const isProduction = variant === 'production';
-  const versionString = isProduction ? '1.11.0' : '1.12.0-dev';
+  const versionString = isProduction ? '1.12.0' : '1.12.0-dev';
   const agentTag = isProduction ? 'NO-IVR-PROD' : 'NO-IVR-DEV';
   
   // Environment identification tag for call tracing
@@ -894,7 +895,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       last_name: z.string().describe("Patient last name (required)"),
       date_of_birth: z
         .string()
-        .describe('Full date of birth as spoken (e.g., "January 15, 1980" or "01/15/1980")'),
+        .describe('Full date of birth as spoken (e.g., "January 15, 1980" or "01/15/1980"). For B2B/business callers who don\'t have the patient DOB, pass "DOB not available" — the ticket will still be created.'),
       callback_number: z.string().describe("Callback phone number (10+ digits)"),
       request_category: z
         .enum([
@@ -954,19 +955,30 @@ The ticket will include schedule context (last appointment info) automatically.`
         }
       }
 
-      const parsedDOB = parseDateOfBirth(params.date_of_birth);
-      if (!parsedDOB.month || !parsedDOB.day || !parsedDOB.year) {
+      // B2B callers may not have patient DOB — accept placeholder values and skip validation
+      const dobLower = params.date_of_birth?.toLowerCase() || '';
+      const isB2bNoDob = dobLower.includes('not available') || dobLower.includes('n/a') || 
+                         dobLower.includes('unknown') || dobLower.includes('b2b') ||
+                         dobLower.includes('unavailable') || dobLower.includes('none') ||
+                         dobLower === '';
+      
+      const parsedDOB = isB2bNoDob ? null : parseDateOfBirth(params.date_of_birth);
+      if (!isB2bNoDob && (!parsedDOB?.month || !parsedDOB?.day || !parsedDOB?.year)) {
         return {
           success: false,
           validation_errors: ["complete date of birth (month, day, and year)"],
           message: "Missing required information: complete date of birth (month, day, and year)",
         };
       }
+      
+      if (isB2bNoDob) {
+        console.log("[No-IVR Agent] B2B caller — skipping DOB validation, proceeding without DOB");
+      }
 
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB
       // This catches cases where caller phone doesn't match patient record (family member calling)
       let enrichedContext = scheduleContext;
-      if (!scheduleContext?.patientFound || scheduleContext.matchedBy === 'phone') {
+      if (parsedDOB && (!scheduleContext?.patientFound || scheduleContext.matchedBy === 'phone')) {
         console.log("[No-IVR Agent] Performing secondary schedule lookup...");
         try {
           const dobForLookup = parsedDOB.iso || `${parsedDOB.year}-${parsedDOB.month}-${parsedDOB.day}`;
@@ -1007,7 +1019,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
       const result = await SyncAgentService.submitSimplifiedTicket({
         patientFullName,
-        patientDOB: params.date_of_birth, // Any format - API handles parsing
+        patientDOB: isB2bNoDob ? 'Unknown' : params.date_of_birth, // B2B callers may not have DOB
         reasonForCalling: finalSummary,
         preferredContactMethod: preferredContactSimplified,
         patientPhone: callbackNormalized,
