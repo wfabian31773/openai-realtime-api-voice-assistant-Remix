@@ -673,7 +673,7 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
       (async () => {
         try {
           const callerNumber = callerID || 'Unknown';
-          const callTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+          const callTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/Los_Angeles' });
           
           let smsBody = `📞 INCOMING TRANSFER - ${callTime}\n`;
           smsBody += `From: ${callerNumber}\n`;

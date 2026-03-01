@@ -82,6 +82,29 @@ The system utilizes a three-server architecture comprising an API Server, a Voic
 -   **Startup Secret Validation:** Server logs PASS/FAIL for required secrets at boot.
 -   **Secret Management:** All secrets stored exclusively in Replit Account Secrets.
 
+## Critical: SIP Audio Format Rules (DO NOT CHANGE)
+**Problem solved (Feb 22, 2026):** Two days of "dead air" / screeching audio on calls caused by codec mismatch between Twilio SIP and OpenAI Realtime API.
+
+**Root cause:** The OpenAI Agents SDK (`@openai/agents-realtime`) always fills in `audio.input.format` and `audio.output.format` with PCM16 defaults in `session.update` events. In SIP mode, the audio codec (G.711 μ-law) is negotiated at the SIP/SDP transport layer between Twilio and OpenAI. When the SDK sends PCM16 format in `session.update`, it overrides the SIP-negotiated codec, causing screeching audio and response failures.
+
+**The fix (in `src/voiceAgentRoutes.ts`):**
+1. **Transport monkey-patch:** After creating the RealtimeSession but before `session.connect()`, we monkey-patch `transport.sendEvent()` to intercept `session.update` events and delete `audio.input.format` and `audio.output.format` fields before they're sent to OpenAI.
+2. **Accept payload stripping:** After `buildInitialConfig()` produces the accept payload, we delete audio format fields before the REST API call. The SIP/SDP negotiation handles codec selection.
+3. Config still has `format: 'g711_ulaw'` to prevent the SDK from defaulting to PCM16, but the monkey-patch strips it before it reaches the wire.
+
+**Rules:**
+- NEVER remove the transport monkey-patch in `observeCall()` — it prevents codec mismatch
+- NEVER remove the accept payload format stripping — it lets SIP negotiate codecs
+- NEVER set audio format directly via the REST API for SIP calls
+- The `session.updated` response from OpenAI will show `audio/pcm` internally — this is normal, the SIP transport layer handles the actual G.711 encoding
+- Look for `[SIP-FIX]` log lines to confirm stripping is active in production
+
+## After-Hours Greeting (Standard)
+The no-ivr agent greeting must always be:
+> "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?"
+
+This greeting is delivered by the OpenAI voice agent via `response.create` — not TwiML. It is defined in `src/agents/afterHoursAgent.ts` in the `getUrgentTriageGreeting()` function.
+
 ## External Dependencies
 -   **OpenAI API:** For AI voice agents and real-time API interactions.
 -   **Twilio Programmable SIP Trunking:** Provides telephony services.

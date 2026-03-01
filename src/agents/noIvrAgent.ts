@@ -118,7 +118,7 @@ function buildNoIvrSystemPrompt(
   const timeContext = getCurrentDateTimeContext();
   const { callerPhone } = metadata;
   const isProduction = variant === 'production';
-  const versionString = isProduction ? '1.11.0' : '1.12.0-dev';
+  const versionString = isProduction ? '1.12.0' : '1.12.0-dev';
 
   let scheduleContextSection = "";
   if (scheduleContext?.patientFound) {
@@ -207,23 +207,37 @@ Detect language from caller's FIRST substantive spoken words (not just "hello" o
 Once detected (Spanish, English, Vietnamese, etc.), STAY in that language for the ENTIRE call.
 If asked "Do you speak Spanish?" in English → Ask: "Would you like to continue in Spanish?"
 
-🚫 GHOST CALL DETECTION & EARLY EXIT:
-If caller is not engaging meaningfully after 2 prompts, follow this protocol:
+🚫 GHOST CALL & ROBOT/SPAM DETECTION — END THESE CALLS, NEVER ESCALATE:
+
+⚠️ CRITICAL: Ghost calls and robot/spam calls MUST be ended gracefully. NEVER escalate them to the human agent. Waking up a human doctor at 1 AM for a robocall is unacceptable.
+
+ROBOT/SPAM CALL INDICATORS (any 1 of these = end immediately):
+- You hear IVR/automated system phrases: "press 1", "press 1 for", "press the pound sign", "for delivery options", "leave a message after the tone", "your call is important to us", "please hold", "for English press", "to speak to a representative", "our menu options have changed"
+- The audio is clearly a pre-recorded message or another automated phone system bleeding through
+- Caller produces completely random disconnected words with no coherent meaning across 3+ turns (e.g. "The ceiling" / "Seagulls" / "virus" / "in Michigan" — no sentence structure, no request, no coherence — not just an accent or ESL caller)
+- Audio switches rapidly between 3+ languages with zero coherent message or request
+
+ROBOT/SPAM CALL PROTOCOL:
+1. Say: "We were unable to connect. Goodbye."
+2. END the call immediately
+3. Do NOT create a ticket
+4. Do NOT escalate to human — EVER
 
 GHOST CALL INDICATORS (any 2+ of these = ghost call):
 - Only heard single syllables: "mm", "uh", "ok", "hi", background noise
 - Caller hasn't stated any actual request or question
-- Response is in a language you can't identify or appears to be random sounds
 - Caller doesn't respond to direct questions
-- Total conversation is just greetings with no substance
+- Total conversation is just greetings with no substance after 3 prompts
 
 GHOST CALL PROTOCOL:
 1. After first unclear response: "What can I help you with today?"
 2. After second unclear response: "I'm having trouble hearing you. If you need assistance, please call back."
-3. Then END THE CALL GRACEFULLY - do NOT keep prompting
+3. After third unclear response: END THE CALL — say "Take care, goodbye." and hang up
 4. Do NOT create a ticket for ghost calls
+5. Do NOT escalate ghost calls to human — the human agent cannot help someone who isn't communicating
 
-⚠️ NEVER run a ghost call for 10 minutes - exit after 2-3 failed attempts to engage.
+⚠️ NEVER run a ghost call or robot call for more than 2-3 turns — exit and end the call.
+⚠️ Switching between 3+ languages with zero coherent message = robot call → end it.
 
 `;
 
@@ -283,6 +297,23 @@ You have an internal checklist to track. Execute these phases IN ORDER. Track yo
 ║     "Dr.", "nurse", "audit", "hospital", "calling from [clinic]"       ║
 ║  IF DETECTED → Escalate to human after collecting info        ║
 ║                                                                ║
+║  🟡 B2B / BUSINESS CALLER (optical lab, referring office,     ║
+║     outside vendor, other clinic or pharmacy):                 ║
+║     "I'm calling from [lab/optical/office]", "this is [name]  ║
+║     at [business]", "we are a lab", "Bartley Optical",        ║
+║     "we need an invoice", "tint density", "lens order"        ║
+║                                                                ║
+║  B2B PROTOCOL — DOB IS OPTIONAL FOR BUSINESS CALLERS:        ║
+║  - Collect: caller name, business name, patient name,         ║
+║    specific request/question, callback number                  ║
+║  - If they don't have patient DOB: that's okay — note it      ║
+║    in the ticket as "DOB not available — B2B inquiry from      ║
+║    [business name]"                                            ║
+║  - DO NOT refuse to help or escalate just because DOB is      ║
+║    missing for B2B callers                                     ║
+║  - DO NOT keep asking for DOB after caller says they don't    ║
+║    have it — accept that and proceed to create the ticket     ║
+║                                                                ║
 ║  ✓ EXIT when you know WHO the call is about                   ║
 ╚══════════════════════════════════════════════════════════════╝
 
@@ -318,11 +349,15 @@ You have an internal checklist to track. Execute these phases IN ORDER. Track yo
 ╠══════════════════════════════════════════════════════════════╣
 ║  REQUIRED FIELDS for any action:                              ║
 ║  □ Patient FULL NAME (first AND last in ONE question)         ║
-║  □ Date of birth                                              ║
+║  □ Date of birth (REQUIRED for patients; OPTIONAL for B2B)   ║
 ║  □ Callback number                                            ║
 ║  □ Reason for call                                            ║
 ║  □ Preferred contact method (phone, text, or email)           ║
 ║  □ Request-specific details (ONLY if caller mentioned them)   ║
+║                                                                ║
+║  ⚠️ B2B CALLERS: If they say they don't have the patient DOB, ║
+║     DO NOT keep asking — proceed with ticket using available  ║
+║     info and note "DOB unavailable — B2B call"               ║
 ║                                                                ║
 ║  🟢 NAME COLLECTION - EFFICIENT APPROACH:                     ║
 ║     Ask: "What is your full name?" (NOT first, then last)     ║
@@ -503,23 +538,29 @@ Keep a mental checklist: □ Name □ DOB □ Callback □ Reason □ Contact pr
 If caller seems confused, cannot answer basic questions, or is incoherent:
 
 MINIMUM FOR TICKET: name + DOB + callback number + reason (all 4 required)
-MINIMUM FOR ESCALATION: nothing required (always available as fallback)
+MINIMUM FOR ESCALATION: caller must be a real human with a genuine need
 
 - After 3 failed attempts to get the same information:
   IF you have all 4 required fields (name, DOB, callback, reason):
     → "Let me note what you've shared." → call create_ticket → close
-  ELSE:
+  ELSE IF caller has shown ANY coherent intent (mentioned a doctor, appointment, surgery, eye issue):
     → "Let me connect you with someone who can help." → call escalate_to_human
+  ELSE (no coherent intent, just noise/gibberish/random words):
+    → "We were unable to connect. Goodbye." → END THE CALL (do NOT escalate)
     
 - If conversation goes in circles for 5+ minutes without progress:
-  Same logic as above - create ticket if possible, otherwise escalate
+  Same logic as above — escalate only if caller has shown genuine human intent
 
-- If caller is speaking multiple languages or unintelligibly:
+- If caller is speaking multiple languages or unintelligibly but has stated a real need:
   "I'm sorry, I'm having difficulty understanding. Can you try speaking slowly?"
   → After 2 more failed attempts: escalate_to_human (human can use other methods)
   
-⚠️ NEVER abandon a caller - either create ticket OR escalate to human
-⚠️ DON'T force create_ticket if you're missing required fields - escalate instead
+- If caller is speaking nonsense/random words with NO coherent need established:
+  → This is a ghost call or robot call — END THE CALL, do NOT escalate
+
+⚠️ NEVER abandon a real human caller who has a coherent medical or scheduling need
+⚠️ DO end calls for robot callers, ghost calls, and spam — do NOT wake up humans for these
+⚠️ DON'T force create_ticket if you're missing required fields — escalate if human, end if not
 
 ===== HARD RULES =====
 1. Follow 6-phase workflow (exit early only for simple questions)
@@ -651,7 +692,7 @@ export async function createNoIvrAgent(
   // Determine variant from metadata (default to production for backward compatibility)
   const variant: NoIvrAgentVariant = metadata.variant || 'production';
   const isProduction = variant === 'production';
-  const versionString = isProduction ? '1.11.0' : '1.12.0-dev';
+  const versionString = isProduction ? '1.12.0' : '1.12.0-dev';
   const agentTag = isProduction ? 'NO-IVR-PROD' : 'NO-IVR-DEV';
   
   // Environment identification tag for call tracing
@@ -858,7 +899,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       last_name: z.string().describe("Patient last name (required)"),
       date_of_birth: z
         .string()
-        .describe('Full date of birth as spoken (e.g., "January 15, 1980" or "01/15/1980")'),
+        .describe('Full date of birth as spoken (e.g., "January 15, 1980" or "01/15/1980"). For B2B/business callers who don\'t have the patient DOB, pass "DOB not available" — the ticket will still be created.'),
       callback_number: z.string().describe("Callback phone number (10+ digits)"),
       request_category: z
         .enum([
@@ -918,19 +959,30 @@ The ticket will include schedule context (last appointment info) automatically.`
         }
       }
 
-      const parsedDOB = parseDateOfBirth(params.date_of_birth);
-      if (!parsedDOB.month || !parsedDOB.day || !parsedDOB.year) {
+      // B2B callers may not have patient DOB — accept placeholder values and skip validation
+      const dobLower = params.date_of_birth?.toLowerCase() || '';
+      const isB2bNoDob = dobLower.includes('not available') || dobLower.includes('n/a') || 
+                         dobLower.includes('unknown') || dobLower.includes('b2b') ||
+                         dobLower.includes('unavailable') || dobLower.includes('none') ||
+                         dobLower === '';
+      
+      const parsedDOB = isB2bNoDob ? null : parseDateOfBirth(params.date_of_birth);
+      if (!isB2bNoDob && (!parsedDOB?.month || !parsedDOB?.day || !parsedDOB?.year)) {
         return {
           success: false,
           validation_errors: ["complete date of birth (month, day, and year)"],
           message: "Missing required information: complete date of birth (month, day, and year)",
         };
       }
+      
+      if (isB2bNoDob) {
+        console.log("[No-IVR Agent] B2B caller — skipping DOB validation, proceeding without DOB");
+      }
 
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB
       // This catches cases where caller phone doesn't match patient record (family member calling)
       let enrichedContext = scheduleContext;
-      if (!scheduleContext?.patientFound || scheduleContext.matchedBy === 'phone') {
+      if (parsedDOB && (!scheduleContext?.patientFound || scheduleContext.matchedBy === 'phone')) {
         console.log("[No-IVR Agent] Performing secondary schedule lookup...");
         try {
           const dobForLookup = parsedDOB.iso || `${parsedDOB.year}-${parsedDOB.month}-${parsedDOB.day}`;
@@ -971,7 +1023,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
       const result = await SyncAgentService.submitSimplifiedTicket({
         patientFullName,
-        patientDOB: params.date_of_birth, // Any format - API handles parsing
+        patientDOB: isB2bNoDob ? 'Unknown' : params.date_of_birth, // B2B callers may not have DOB
         reasonForCalling: finalSummary,
         preferredContactMethod: preferredContactSimplified,
         patientPhone: callbackNormalized,
@@ -1130,7 +1182,7 @@ export const noIvrAgentConfig = {
   name: "No-IVR After-Hours Agent",
   description: "Single agent that answers all calls directly without IVR menu. Uses conversation to determine caller type and urgency. Transfers to human for urgent cases.",
   version: "1.11.0",
-  greeting: "Thank you for calling Azul Vision's after-hours line. How may I help you?",
+  greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching
 };
