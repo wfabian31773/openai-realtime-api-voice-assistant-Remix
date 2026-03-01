@@ -949,6 +949,13 @@ Respond with a JSON object only, no other text:
 
       for (const call of ungradedCalls) {
         if (call.transcript) {
+          // If transcript is definitively too short to grade, mark it processed so it
+          // doesn't get selected on every future cycle (prevents an infinite retry loop).
+          if (call.transcript.trim().length < 50) {
+            await storage.updateCallLog(call.id, { gradedAt: new Date() });
+            console.info(`[GRADING] Skipping ${call.id} — transcript too short (${call.transcript.trim().length} chars), marked as processed`);
+            continue;
+          }
           const result = await this.gradeCall(call.id, call.transcript);
           if (result) {
             gradedCount++;

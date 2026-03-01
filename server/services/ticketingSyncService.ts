@@ -398,8 +398,10 @@ export class TicketingSyncService {
    */
   async fixSuspiciousDurations(): Promise<void> {
     try {
-      // Find completed calls with duration >= 550s but Twilio cost <= 5 cents
-      // These are almost certainly timeout cases where actual call was short
+      // Find completed calls with duration >= 550s but Twilio cost <= 5 cents.
+      // Limit to the last 30 days — Twilio Insights API rejects calls older than 30 days
+      // and those old records are already fully reconciled (no further data to retrieve).
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
       const suspiciousCalls = await db
         .select({
           id: callLogs.id,
@@ -414,6 +416,7 @@ export class TicketingSyncService {
             isNotNull(callLogs.callSid),
             isNotNull(callLogs.duration),
             sql`${callLogs.duration} >= 550`,
+            gte(callLogs.startTime, thirtyDaysAgo),
             or(
               isNull(callLogs.twilioCostCents),
               sql`${callLogs.twilioCostCents} <= 5`
