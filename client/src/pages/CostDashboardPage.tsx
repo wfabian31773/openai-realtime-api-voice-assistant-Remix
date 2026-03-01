@@ -20,6 +20,7 @@ import {
 import type { Agent } from '@/types'
 import { DailyCostCharts } from '@/components/DailyCostCharts'
 import { CostReconciliation } from '@/components/CostReconciliation'
+import { BudgetWidget } from '@/components/BudgetWidget'
 
 interface OpenAIUsage {
   totalCostDollars: number
@@ -75,6 +76,14 @@ interface CostAnalytics {
     twilioCostCoverage: number
     openaiCostCoverage: number
     qualityCoverage: number
+  }
+  tokenUsage?: {
+    totalInputTextTokens: number
+    totalInputCachedTokens: number
+    totalInputAudioTokens: number
+    totalOutputAudioTokens: number
+    totalOutputTextTokens: number
+    cacheHitRatio: number
   }
 }
 
@@ -224,7 +233,7 @@ export function CostDashboardPage() {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Total Cost</CardTitle>
@@ -305,6 +314,32 @@ export function CostDashboardPage() {
             </p>
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Cache Hit Ratio</CardTitle>
+            <Cpu className="h-5 w-5 text-indigo-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-bold text-foreground">
+              {costAnalytics?.tokenUsage?.cacheHitRatio != null
+                ? `${costAnalytics.tokenUsage.cacheHitRatio}%`
+                : '-'}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {costAnalytics?.tokenUsage?.totalInputCachedTokens
+                ? `${(costAnalytics.tokenUsage.totalInputCachedTokens / 1000).toFixed(0)}K cached tokens`
+                : 'Cached tokens get 90% discount'}
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Budget Tracker */}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="lg:col-span-1">
+          <BudgetWidget />
+        </div>
       </div>
 
       {/* Daily Cost Charts - OpenAI Style */}

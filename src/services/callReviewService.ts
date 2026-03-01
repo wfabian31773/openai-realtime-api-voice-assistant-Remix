@@ -32,7 +32,7 @@ export async function reviewCallForPromptImprovement(
     : 'Unknown IVR context';
 
   const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
+    model: 'gpt-4o-mini',
     temperature: 0.3,
     response_format: { type: 'json_object' },
     messages: [
@@ -122,7 +122,7 @@ export async function reviewMultipleCallsForPatterns(
   ).join('\n\n');
 
   const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
+    model: 'gpt-4o-mini',
     temperature: 0.3,
     response_format: { type: 'json_object' },
     messages: [

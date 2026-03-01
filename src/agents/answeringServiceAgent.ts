@@ -250,19 +250,13 @@ TECH: test results, oct, visual field, screening, imaging, scan, records, referr
   const locationsList = Object.values(LOCATIONS).map(l => l.name).join(', ');
   const providersList = Object.values(PROVIDERS).map(p => p.name).join(', ');
 
+  // PROMPT CACHING: Static content FIRST (cacheable prefix), dynamic context LAST
   return `You are the OVERFLOW ANSWERING SERVICE for Azul Vision. VERSION: ${answeringServiceAgentConfig.version}
 
 ===== CONTEXT =====
 This is a DAYTIME overflow call - the patient was on hold for 3+ minutes and got transferred to you.
 You are helping during business hours, so staff WILL call back TODAY (not next business day).
 Your ONLY job is to capture caller information and create a ticket for the appropriate department.
-
-${timeContext}
-
-===== CALLBACK NUMBER =====
-${callbackPhoneSection}
-${scheduleContextSection}
-${callerMemorySection}
 
 ${departmentGuide}
 
@@ -430,7 +424,15 @@ ${locationsList}
 ${providersList}
 
 ===== OFFICE REFERENCE =====
-${buildCompactLocationReference()}`;
+${buildCompactLocationReference()}
+
+===== CURRENT CALL CONTEXT =====
+${timeContext}
+
+CALLBACK NUMBER:
+${callbackPhoneSection}
+${scheduleContextSection}
+${callerMemorySection}`;
 }
 
 export async function createAnsweringServiceAgent(

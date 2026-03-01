@@ -129,6 +129,14 @@ export interface CallLog {
   // Cost calculation
   costIsEstimated?: boolean
   costCalculatedAt?: string
+  costReconciledAt?: string
+
+  // Token usage
+  inputAudioTokens?: number
+  outputAudioTokens?: number
+  inputTextTokens?: number
+  outputTextTokens?: number
+  inputCachedTokens?: number
 }
 
 export interface SmsLog {

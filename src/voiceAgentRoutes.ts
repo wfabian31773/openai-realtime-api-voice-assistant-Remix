@@ -19,7 +19,7 @@ import {
 } from '@openai/agents/realtime';
 import { getTwilioClient, getTwilioFromPhoneNumber } from './lib/twilioClient';
 import { medicalSafetyGuardrails, WELCOME_GREETING, getUrgentTriageGreeting } from './agents/afterHoursAgent';
-import { callLifecycleCoordinator } from './services/callLifecycleCoordinator';
+import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
@@ -462,13 +462,14 @@ async function addSIPParticipantWithWatchdog(
   // Set up watchdog timer (15 seconds - OpenAI SIP can have high latency)
   const timer = setTimeout(() => handleWatchdogTimeout(sipWatchdogs.get(conferenceName)!), 15000);
   
-  // CRITICAL: Set up max-duration safety timer (10 minutes)
+  // CRITICAL: Set up adaptive max-duration safety timer
   // This terminates orphaned SIP calls even if no conference events are received
   // Prevents 60-minute OpenAI sessions from accumulating costs
+  const agentMaxDurationMs = getMaxDurationMs(agentSlug);
   const maxDurationTimer = setTimeout(async () => {
-    console.warn(`[WATCHDOG] ⚠️ Max duration (${SIP_MAX_DURATION_MS / 60000}min) reached for ${conferenceName}`);
+    console.warn(`[WATCHDOG] ⚠️ Max duration (${agentMaxDurationMs / 60000}min) reached for ${conferenceName} (agent: ${agentSlug || 'unknown'})`);
     await terminateOrphanedSIPCall(conferenceName, 'max_duration_exceeded');
-  }, SIP_MAX_DURATION_MS);
+  }, agentMaxDurationMs);
   
   sipWatchdogs.set(conferenceName, {
     conferenceName,
@@ -483,7 +484,7 @@ async function addSIPParticipantWithWatchdog(
     environment: process.env.APP_ENV || 'development', // Tag with originating environment
   });
   
-  console.info(`[WATCHDOG] Started for ${conferenceName} (15s check, ${SIP_MAX_DURATION_MS / 60000}min max)`);
+  console.info(`[WATCHDOG] Started for ${conferenceName} (15s check, ${agentMaxDurationMs / 60000}min max, agent: ${agentSlug || 'default'})`);
 }
 
 // Session options for consistent configuration
@@ -502,7 +503,7 @@ const sessionOptions: Partial<RealtimeSessionOptions> = {
     audio: {
       input: {
         format: 'g711_ulaw',
-        transcription: { model: 'gpt-4o-transcribe' },
+        transcription: { model: 'gpt-4o-mini-transcribe' },
         turnDetection: {
           type: 'semantic_vad',
           eagerness: 'medium',
@@ -880,10 +881,11 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
                 await callCostService.retryTwilioCostFetch(callLogId, callMeta.twilioCallSid);
               }
               
-              if (transcript.length > 50) {
+              // Only grade substantive calls (skip ghost/short calls to save LLM costs)
+              if (transcript.length > 200) {
                 await callGradingService.gradeCall(callLogId, transcript);
               }
-              
+
               console.info(`[POST-CALL] Cost and grading processed for handoff call ${callLogId}`);
             } catch (postCallError) {
               console.error('[POST-CALL ERROR] Handoff cost/grading failed:', postCallError);
@@ -1320,7 +1322,7 @@ async function observeCall(
       audio: {
         input: {
           format: 'g711_ulaw',
-          transcription: { model: 'gpt-4o-transcribe', language: languageCode },
+          transcription: { model: 'gpt-4o-mini-transcribe', language: languageCode },
           turnDetection: {
             type: 'semantic_vad',
             eagerness: 'medium',
@@ -1549,8 +1551,8 @@ async function observeCall(
           input: {
             format: 'g711_ulaw',
             transcription: languageCode 
-              ? { model: 'gpt-4o-transcribe', language: languageCode }
-              : { model: 'gpt-4o-transcribe' },
+              ? { model: 'gpt-4o-mini-transcribe', language: languageCode }
+              : { model: 'gpt-4o-mini-transcribe' },
             turnDetection: {
               type: 'semantic_vad',
               eagerness: 'medium',
@@ -1595,7 +1597,7 @@ async function observeCall(
     }
     if (!acceptPayload.audio.input.transcription) {
       acceptPayload.audio.input.transcription = {
-        model: 'gpt-4o-transcribe',
+        model: 'gpt-4o-mini-transcribe',
         language: languageCode || 'en',
       };
     }
@@ -2026,28 +2028,15 @@ async function observeCall(
               }
             }
             
-            // Reconcile with Twilio to get REAL duration (after a delay to let Twilio finalize)
-            // The session-based duration (durationSeconds) may be wrong (e.g., 600s timeout)
-            // Twilio needs a few seconds to finalize call data after hangup
-            if (twilioCallSid) {
-              // Wait 5 seconds for Twilio to finalize call data
-              await new Promise(resolve => setTimeout(resolve, 5000));
-              
-              const reconcileResult = await callCostService.reconcileTwilioCallData(dbCallLogId!, twilioCallSid);
-              if (reconcileResult.success && !reconcileResult.skipped) {
-                console.info(`[POST-CALL] Twilio reconcile: duration=${reconcileResult.actualDuration}s (TWILIO AUTHORITATIVE)`);
-              } else if (reconcileResult.skipped) {
-                console.info(`[POST-CALL] Twilio reconcile skipped: ${reconcileResult.twilioStatus}, duration=${reconcileResult.actualDuration}s - background service will retry`);
-              }
-            }
-            
+            // Twilio reconciliation is handled by the lifecycle coordinator event listener
+            // (avoids duplicate API calls - the coordinator already waits and retries)
             // Calculate OpenAI costs based on current duration in database
-            // (will be recalculated again when background service gets final Twilio data)
+            // (will be recalculated when lifecycle coordinator gets final Twilio data)
             await callCostService.recalculateOpenAICostFromDuration(dbCallLogId!);
             
-            // Grade the call if we have a transcript
+            // Grade the call if we have a substantive transcript (skip ghost/short calls to save LLM costs)
             let gradeResult: { qualityScore?: number; patientSentiment?: string; agentOutcome?: string } = {};
-            if (finalTranscript && finalTranscript.length > 50) {
+            if (finalTranscript && finalTranscript.length > 200) {
               const analysisResult = await callGradingService.gradeCall(dbCallLogId!, finalTranscript);
               if (analysisResult) {
                 gradeResult = {
@@ -4298,8 +4287,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
       await new Promise(resolve => setTimeout(resolve, delayMs));
       
       try {
-        const result = await callCostService.reconcileTwilioCallData(callLogId, twilioCallSid);
-        
+        const result = await callCostService.reconcileTwilioCallData(callLogId, twilioCallSid, { skipInsights: true });
+
         if (result.success && !result.skipped && result.actualDuration && result.actualDuration > 0) {
           // Success - recalculate OpenAI cost with correct duration
           await callCostService.recalculateOpenAICostFromDuration(callLogId);
@@ -4344,8 +4333,9 @@ export function setupVoiceAgentRoutes(app: Express): void {
         // Wait briefly for Twilio to finalize data
         await new Promise(resolve => setTimeout(resolve, 2000));
         
-        const reconcileResult = await callCostService.reconcileTwilioCallData(callLogId, effectiveTwilioCallSid);
-        
+        // skipInsights: lifecycle coordinator fetches insights separately
+        const reconcileResult = await callCostService.reconcileTwilioCallData(callLogId, effectiveTwilioCallSid, { skipInsights: true });
+
         if (reconcileResult.success && !reconcileResult.skipped && reconcileResult.actualDuration) {
           actualDuration = reconcileResult.actualDuration;
           twilioDataReady = true;
@@ -4357,16 +4347,16 @@ export function setupVoiceAgentRoutes(app: Express): void {
           // Twilio data not ready - DON'T calculate OpenAI cost yet
           // The delayed retry will recalculate costs when Twilio data is available
           console.info(`[COORDINATOR EVENT] Twilio data not ready, deferring cost calculation for ${callLogId}`);
-          scheduleDelayedTwilioReconciliation(callLogId, effectiveTwilioCallSid, [15000, 45000, 120000]);
+          scheduleDelayedTwilioReconciliation(callLogId, effectiveTwilioCallSid, [30000, 90000]);
         }
       } else {
         // No Twilio call SID - calculate OpenAI cost based on local duration
         await callCostService.recalculateOpenAICostFromDuration(callLogId);
       }
       
-      // Grade the call
+      // Grade the call (skip ghost/short calls to save LLM costs)
       let gradeResult: { qualityScore?: number; patientSentiment?: string; agentOutcome?: string } = {};
-      if (transcript && transcript.length > 50) {
+      if (transcript && transcript.length > 200 && (actualDuration ?? 0) > 15) {
         const analysisResult = await callGradingService.gradeCall(callLogId, transcript);
         if (analysisResult) {
           gradeResult = {

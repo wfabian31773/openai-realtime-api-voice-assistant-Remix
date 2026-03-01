@@ -236,11 +236,9 @@ If they're calling about the same issue, acknowledge you see their previous requ
 Avoid creating duplicate tickets for the same issue.
 ` : '';
 
+  // PROMPT CACHING: Static content FIRST (cacheable prefix), dynamic context LAST
   return `You are the AFTER-HOURS AGENT for Azul Vision. VERSION: ${versionString}
-${callerHistorySection}
-${nameDobFallbackSection}
-${productionEnhancementsSection}
-${openTicketsContext}
+
 ===== INTERNAL WORKFLOW PLAYBOOK (FOLLOW THIS EXACTLY) =====
 
 You have an internal checklist to track. Execute these phases IN ORDER. Track your progress silently.
@@ -422,14 +420,6 @@ You have an internal checklist to track. Execute these phases IN ORDER. Track yo
 ║   - Ticket details  - Callback number  - "We'll contact you"  ║
 ╚══════════════════════════════════════════════════════════════╝
 
-===== CALLER PHONE =====
-${phoneContext}
-
-===== TIME CONTEXT =====
-${timeContext}
-Non-urgent callbacks will be made ${nextBizDay.contextPhrase}.
-${scheduleContextSection}
-
 ===== URGENT SYMPTOMS (see Phase 3 for handling) =====
 ${URGENT_SYMPTOMS.symptoms.map((s) => `• ${s}`).join("\n")}
 (Use emit_decision tool in Phase 3 when urgency is classified)
@@ -566,7 +556,21 @@ The caller doesn't need to know HOW you're doing things - just the outcome.
 ===== OFFICE LOCATIONS REFERENCE =====
 When asked about office locations, addresses, or phone numbers, use ONLY the following verified data:
 
-${buildCompactLocationReference()}`;
+${buildCompactLocationReference()}
+
+===== CURRENT CALL CONTEXT =====
+${callerHistorySection}
+${nameDobFallbackSection}
+${productionEnhancementsSection}
+${openTicketsContext}
+
+CALLER PHONE:
+${phoneContext}
+
+TIME CONTEXT:
+${timeContext}
+Non-urgent callbacks will be made ${nextBizDay.contextPhrase}.
+${scheduleContextSection}`;
 }
 
 export async function createNoIvrAgent(

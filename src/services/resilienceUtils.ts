@@ -43,7 +43,7 @@ export interface RetryResult<T> {
 // ============================================================================
 
 export const OPENAI_RETRY_CONFIG: RetryOptions = {
-  maxAttempts: 8,
+  maxAttempts: 4,
   initialDelayMs: 200,
   maxDelayMs: 3000,
   backoffMultiplier: 2,
@@ -51,7 +51,7 @@ export const OPENAI_RETRY_CONFIG: RetryOptions = {
   retryableErrors: (error) => {
     if (error instanceof Error) {
       const msg = error.message.toLowerCase();
-      if (msg.includes('404') || msg.includes('not found')) return true;
+      // 404 is NOT retryable - it's a permanent "not found" error
       if (msg.includes('timeout') || msg.includes('timed out')) return true;
       if (msg.includes('econnreset') || msg.includes('econnrefused')) return true;
       if (msg.includes('503') || msg.includes('502') || msg.includes('500')) return true;

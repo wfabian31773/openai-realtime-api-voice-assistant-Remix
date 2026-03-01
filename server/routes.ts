@@ -1311,8 +1311,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const search = sanitizeQueryParam(req.query.search);
       const callQualityRaw = sanitizeQueryParam(req.query.callQuality);
       const callQuality = callQualityRaw === 'ghost' || callQualityRaw === 'real' ? callQualityRaw : undefined;
+      const sortByRaw = sanitizeQueryParam(req.query.sortBy);
+      const sortBy = sortByRaw === 'cost' || sortByRaw === 'duration' ? sortByRaw : 'date' as const;
+      const sortOrderRaw = sanitizeQueryParam(req.query.sortOrder);
+      const sortOrder = sortOrderRaw === 'asc' ? 'asc' as const : 'desc' as const;
+      const minCostRaw = sanitizeQueryParam(req.query.minCost);
+      const minCost = minCostRaw ? parseInt(minCostRaw) : undefined;
+      const maxCostRaw = sanitizeQueryParam(req.query.maxCost);
+      const maxCost = maxCostRaw ? parseInt(maxCostRaw) : undefined;
 
-      console.log('[API] Fetching call logs:', { page, limit, status, direction, hasTicket, transferred, agentId, search, callQuality });
+      console.log('[API] Fetching call logs:', { page, limit, status, direction, hasTicket, transferred, agentId, search, callQuality, sortBy });
 
       const result = await storage.getCallLogs({
         page,
@@ -1326,6 +1334,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         agentId,
         search,
         callQuality,
+        sortBy,
+        sortOrder,
+        minCost,
+        maxCost,
       });
 
       console.log('[API] Call logs result:', { dataCount: result.data?.length, pagination: result.pagination });
@@ -1801,6 +1813,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
         qualityCoverage: totalCompleted > 0 ? Math.round((Number(coverageResult.withQualityScore) || 0) / totalCompleted * 100) : 0,
       };
       
+      // Get cache hit ratio from token data
+      const cacheQuery = db
+        .select({
+          totalInputTextTokens: sum(callLogs.inputTextTokens),
+          totalInputCachedTokens: sum(callLogs.inputCachedTokens),
+          totalInputAudioTokens: sum(callLogs.inputAudioTokens),
+          totalOutputAudioTokens: sum(callLogs.outputAudioTokens),
+          totalOutputTextTokens: sum(callLogs.outputTextTokens),
+        })
+        .from(callLogs);
+
+      const [cacheResult] = conditions.length > 0
+        ? await cacheQuery.where(and(...conditions))
+        : await cacheQuery;
+
+      const totalInputText = Number(cacheResult.totalInputTextTokens) || 0;
+      const totalCached = Number(cacheResult.totalInputCachedTokens) || 0;
+      const cacheBase = totalInputText + totalCached;
+      const cacheHitRatio = cacheBase > 0 ? Math.round((totalCached / cacheBase) * 100) : 0;
+
       res.json({
         summary: {
           totalCalls: summaryResult.totalCalls || 0,
@@ -1809,9 +1841,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
           totalCents: Number(summaryResult.totalCents) || 0,
           totalDurationMinutes: Math.round((Number(summaryResult.totalDuration) || 0) / 60),
           avgCostPerCallCents: Math.round(Number(summaryResult.avgCostPerCall) || 0),
-          costPerMinuteCents: summaryResult.totalDuration 
+          costPerMinuteCents: summaryResult.totalDuration
             ? Math.round((Number(summaryResult.totalCents) || 0) / (Number(summaryResult.totalDuration) / 60))
             : 0,
+        },
+        tokenUsage: {
+          totalInputTextTokens: totalInputText,
+          totalInputCachedTokens: totalCached,
+          totalInputAudioTokens: Number(cacheResult.totalInputAudioTokens) || 0,
+          totalOutputAudioTokens: Number(cacheResult.totalOutputAudioTokens) || 0,
+          totalOutputTextTokens: Number(cacheResult.totalOutputTextTokens) || 0,
+          cacheHitRatio,
         },
         byAgent: agentBreakdown.map(a => ({
           agentId: a.agentId,
@@ -2209,6 +2249,49 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error fetching reconciliation summary:", error);
       res.status(500).json({ error: 'Failed to fetch reconciliation summary' });
+    }
+  });
+
+  // Budget status endpoint for dashboard widget
+  app.get('/api/analytics/budget-status', isAuthenticated, async (req, res) => {
+    try {
+      const { budgetGuardService } = await import('../src/services/budgetGuardService');
+      const status = await budgetGuardService.getStatus();
+
+      // Calculate spend rate ($/hour) and projected daily total
+      const now = new Date();
+      const pacificHour = parseInt(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false }));
+      const pacificMinute = parseInt(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', minute: 'numeric' }));
+      const hoursElapsed = pacificHour + pacificMinute / 60;
+      const spendRateCentsPerHour = hoursElapsed > 0.5 ? status.todaySpendCents / hoursElapsed : 0;
+      const projectedDailyCents = hoursElapsed > 0.5 ? Math.round(spendRateCentsPerHour * 24) : 0;
+
+      res.json({
+        ...status,
+        spendRateCentsPerHour: Math.round(spendRateCentsPerHour),
+        projectedDailyCents,
+        hoursElapsedToday: Math.round(hoursElapsed * 10) / 10,
+      });
+    } catch (error) {
+      console.error('Error fetching budget status:', error);
+      res.status(500).json({ error: 'Failed to fetch budget status' });
+    }
+  });
+
+  // Update daily budget (admin only)
+  app.put('/api/analytics/budget', isAuthenticated, requireRole('admin'), async (req, res) => {
+    try {
+      const { dailyBudgetCents } = req.body;
+      if (typeof dailyBudgetCents !== 'number' || dailyBudgetCents < 0) {
+        return res.status(400).json({ error: 'dailyBudgetCents must be a non-negative number' });
+      }
+      const { budgetGuardService } = await import('../src/services/budgetGuardService');
+      budgetGuardService.setDailyBudget(dailyBudgetCents);
+      const status = await budgetGuardService.getStatus();
+      res.json({ success: true, ...status });
+    } catch (error) {
+      console.error('Error updating budget:', error);
+      res.status(500).json({ error: 'Failed to update budget' });
     }
   });
 
