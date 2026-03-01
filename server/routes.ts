@@ -5,7 +5,7 @@ import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated as isReplitAuthenticated } from "./replitAuth";
-import { authRouter, requireAuth, requireRole, requireAdmin, requireManager } from "./auth";
+import { authRouter, requireRole, requireManager } from "./auth";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { getTwilioClient, getTwilioFromPhoneNumber } from "../src/lib/twilioClient";
@@ -51,9 +51,6 @@ function normalizeCallLog(log: any) {
 
 // Rate limiting map for test calls (in-memory for MVP)
 const testCallRateLimit = new Map<string, { count: number; resetTime: number }>();
-
-// Legacy middleware removed - use requireRole from auth.ts instead
-// requireRole('admin', 'manager') replaced with requireRole('admin', 'manager')
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // NOTE: Voice proxy moved to server/index.ts (before body parsers) to preserve raw bodies

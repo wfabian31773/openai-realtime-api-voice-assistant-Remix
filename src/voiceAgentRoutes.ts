@@ -7,7 +7,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 import { Express } from "express";
 import OpenAI from "openai";
-import { InvalidWebhookSignatureError, APIError } from "openai/error";
+import { InvalidWebhookSignatureError } from "openai/error";
 import { webhookRateLimiter } from './middleware/rateLimiter';
 import { noCacheHeaders } from './middleware/cacheControl';
 import {
@@ -25,7 +25,7 @@ import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG,
 import { getGreeterOpeningGreeting } from './utils/timeAware';
 import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
-import { getEnvironmentConfig, getDomain, getWebhookBaseUrl } from './config/environment';
+import { getEnvironmentConfig } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 
 // Load centralized environment configuration
@@ -149,7 +149,7 @@ const conferenceNameToCallID: Record<string, string | undefined> = {};
 const conferenceNameToTwilioCallSid: Record<string, string | undefined> = {}; // Map conference name → Twilio CallSid
 const conferenceSidToCallLogId: Record<string, string | undefined> = {}; // Map Twilio conference SID → DB call log ID
 
-// Note: conferenceState import removed - warm transfer disabled
+// Note: warm transfer functionality has been removed
 
 // ============================================================================
 // MIGRATION HELPERS: Bridge legacy maps with CallSessionService
@@ -4415,9 +4415,6 @@ export function setupVoiceAgentRoutes(app: Express): void {
   });
   
   // Stale call events are logged by the coordinator itself - no duplicate logging needed
-
-  // Shared conference state is now used directly via import from conferenceState.ts
-  // No callback registration needed - both modules import from the same shared state
 
   // ==================== OUTBOUND CONFIRMATION WEBHOOKS ====================
   

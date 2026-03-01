@@ -1,25 +1,13 @@
 import express, { Request, Response } from "express";
 import bodyParser from "body-parser";
-import OpenAI from "openai";
-import { InvalidWebhookSignatureError, APIError } from "openai/error";
-import {
-  OpenAIRealtimeSIP,
-  RealtimeItem,
-  RealtimeSession,
-  type RealtimeSessionOptions,
-} from '@openai/agents/realtime';
-import twilio from "twilio";
 import { agentRegistry } from './config/agents';
-import { medicalSafetyGuardrails, WELCOME_GREETING } from './agents/afterHoursAgent';
-import { storage } from "../server/storage";
+import { medicalSafetyGuardrails } from './agents/afterHoursAgent';
 import { validateEnv, VOICE_AGENT_REQUIRED } from './lib/env';
 import { setupVoiceAgentRoutes } from './voiceAgentRoutes';
-import { ticketingApiClient } from '../server/services/ticketingApiClient';
 import { ticketingSyncService } from '../server/services/ticketingSyncService';
 import { dailyOpenaiReconciliation } from './services/dailyOpenaiReconciliation';
 import { startKeepAlive, stopKeepAlive, warmupDatabase } from '../server/services/databaseKeepAlive';
-import { initializeCallSessionService, callSessionService } from './services/callSessionService';
-import { getCircuitBreakerMetrics } from './services/resilienceUtils';
+import { initializeCallSessionService } from './services/callSessionService';
 import { getEnvironmentConfig, validateProductionConfig } from './config/environment';
 
 // CRITICAL: Global error handlers to prevent server crashes
@@ -41,27 +29,7 @@ const envConfig = getEnvironmentConfig();
 validateProductionConfig();
 
 // Environment variables (from centralized config)
-const DOMAIN = envConfig.domain;
 const PORT = Number(process.env.VOICE_AGENT_PORT ?? 8000);
-const OPENAI_API_KEY = envConfig.openai.apiKey;
-const OPENAI_PROJECT_ID = envConfig.openai.projectId;
-const WEBHOOK_SECRET = envConfig.openai.webhookSecret;
-const TWILIO_ACCOUNT_SID = envConfig.twilio.accountSid;
-const TWILIO_AUTH_TOKEN = envConfig.twilio.authToken;
-const HUMAN_AGENT_NUMBER = envConfig.twilio.humanAgentNumber || process.env.HUMAN_AGENT_NUMBER!;
-
-// ANSI color codes
-const BRIGHT_GREEN = '\x1b[92m';
-const BRIGHT_RED = '\x1b[91m';
-const RESET = '\x1b[0m';
-
-// Initialize clients
-const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY,
-  webhookSecret: WEBHOOK_SECRET,
-});
-
-const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 // Initialize Express
 const app = express();
@@ -70,199 +38,11 @@ app.use(bodyParser.raw({ type: "*/*" }));
 // Setup voice agent routes (Twilio webhooks, OpenAI webhooks, etc.)
 setupVoiceAgentRoutes(app);
 
-// Tracking active calls and conference mappings
+// Tracking active calls for graceful shutdown
 const activeCallTasks = new Map<string, Promise<void>>();
-const callIDtoConferenceNameMapping: Record<string, string | undefined> = {};
-const ConferenceNametoCallerIDMapping: Record<string, string | undefined> = {};
-const ConferenceNametoCalledNumberMapping: Record<string, string | undefined> = {};
-const ConferenceNametoCallTokenMapping: Record<string, string | undefined> = {};
-const callIdToDbCallLogId: Map<string, string> = new Map();
-const conferenceSidToDbCallLogId: Map<string, string> = new Map();
 
-// Store structured patient info from agent tool
-const patientInfoMap = new Map<string, {
-  name: string;
-  phone: string;
-  dob?: string;
-  email?: string;
-  reason: string;
-  priority: string;
-}>();
-
-// NOTE: Session options are now defined in voiceAgentRoutes.ts with correct camelCase fields.
-// The old snake_case input_audio_transcription was silently dropped by SDK 0.3.7.
-
-// Log conversation history
-function logHistoryItem(item: unknown): void {
-  const msg = item as any;
-  if (msg.type !== 'message') return;
-
-  if (msg.role === 'user') {
-    for (const content of msg.content) {
-      if (content.type === 'input_text' && content.text) {
-        console.log(`${BRIGHT_GREEN}[CALLER SPOKE] ${content.text}${RESET}`);
-      } else if (content.type === 'input_audio' && content.transcript) {
-        console.log(`${BRIGHT_GREEN}[CALLER SPOKE] ${content.transcript}${RESET}`);
-      }
-    }
-  } else if (msg.role === 'assistant') {
-    for (const content of msg.content) {
-      if (content.type === 'output_text' && content.text) {
-        console.log(`${BRIGHT_GREEN}[AGENT SPOKE] ${content.text}${RESET}`);
-      } else if (content.type === 'output_audio' && content.transcript) {
-        console.log(`${BRIGHT_GREEN}[AGENT SPOKE] ${content.transcript}${RESET}`);
-      }
-    }
-  }
-}
-
-// Handle human agent handoff
-async function addHumanAgent(openAiCallId: string): Promise<void> {
-  const conferenceName = callIDtoConferenceNameMapping[openAiCallId];
-  if (!conferenceName) {
-    console.error('[HANDOFF] ✗ Conference name not found for call ID:', openAiCallId);
-    return;
-  }
-
-  if (!HUMAN_AGENT_NUMBER) {
-    console.error('[HANDOFF] ✗ HUMAN_AGENT_NUMBER not configured');
-    return;
-  }
-
-  console.log('\n========================================');
-  console.log(`[HANDOFF] Transferring to human agent`);
-  console.log(`   Conference: ${conferenceName}`);
-  console.log(`   Human Number: ${HUMAN_AGENT_NUMBER}`);
-  console.log('========================================\n');
-
-  const callToken = ConferenceNametoCallTokenMapping[conferenceName];
-  const callerID = ConferenceNametoCallerIDMapping[conferenceName];
-
-  if (!callToken || !callerID) {
-    console.error('[HANDOFF] ✗ Missing callToken or callerID');
-    return;
-  }
-
-  try {
-    const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
-    await twilioClient.conferences(conferenceName).participants.create({
-      from: twilioPhoneNumber || callerID,
-      label: "human agent",
-      to: HUMAN_AGENT_NUMBER,
-      earlyMedia: false,
-      callToken: callToken,
-    });
-    console.log('[HANDOFF] ✓ Human agent added to conference successfully\n');
-    
-    // Update database to mark human transfer
-    const dbCallLogId = callIdToDbCallLogId.get(openAiCallId);
-    if (dbCallLogId) {
-      await storage.updateCallLog(dbCallLogId, {
-        transferredToHuman: true,
-        humanAgentNumber: HUMAN_AGENT_NUMBER,
-        status: 'transferred',
-      });
-      console.log('[DATABASE] ✓ Updated call log with human transfer');
-    }
-  } catch (error) {
-    console.error('[HANDOFF] ✗ Error adding human agent:', error);
-  }
-}
-
-// NOTE: acceptCall has been moved to voiceAgentRoutes.ts
-// This function was causing double greetings by creating afterHoursAgent before the intended agent
-
-// Create callback for recording patient info with validation
-function createRecordPatientInfoCallback(callId: string) {
-  return async (patientInfo: any) => {
-    // Validate tool payload before storing - reject incomplete submissions
-    const name = patientInfo.patient_name?.trim();
-    const phone = patientInfo.phone_number?.trim();
-    const dob = patientInfo.date_of_birth?.trim();
-    const email = patientInfo.email?.trim();
-    const reason = patientInfo.reason?.trim();
-    
-    if (!name || !phone || !reason) {
-      const missing = [];
-      if (!name) missing.push('patient_name');
-      if (!phone) missing.push('phone_number');
-      if (!reason) missing.push('reason');
-      console.warn(`[PATIENT INFO] ⚠️ Rejected incomplete payload - missing: ${missing.join(', ')}`);
-      return { 
-        success: false, 
-        error: `Missing required fields: ${missing.join(', ')}. Please collect all patient information before calling this tool.` 
-      };
-    }
-    
-    // Use contact validation utility for format enforcement
-    const { validatePhoneNumber, validateEmail, validateDateOfBirth, validateName } = await import('./utils/contactValidation');
-    
-    // Validate name
-    const nameValidation = validateName(name, 'Patient name');
-    if (!nameValidation.valid) {
-      console.warn(`[PATIENT INFO] ⚠️ Rejected invalid name: ${nameValidation.error}`);
-      return { 
-        success: false, 
-        error: nameValidation.error 
-      };
-    }
-    
-    // Validate phone number
-    const phoneValidation = validatePhoneNumber(phone);
-    if (!phoneValidation.valid) {
-      console.warn(`[PATIENT INFO] ⚠️ Rejected invalid phone: ${phoneValidation.error}`);
-      return { 
-        success: false, 
-        error: phoneValidation.error 
-      };
-    }
-    
-    // Validate date of birth if provided
-    if (dob) {
-      const dobValidation = validateDateOfBirth(dob);
-      if (!dobValidation.valid) {
-        console.warn(`[PATIENT INFO] ⚠️ Rejected invalid DOB: ${dobValidation.error}`);
-        return { 
-          success: false, 
-          error: dobValidation.error 
-        };
-      }
-    }
-    
-    // Validate email if provided
-    if (email) {
-      const emailValidation = validateEmail(email);
-      if (!emailValidation.valid) {
-        console.warn(`[PATIENT INFO] ⚠️ Rejected invalid email: ${emailValidation.error}`);
-        return { 
-          success: false, 
-          error: emailValidation.error 
-        };
-      }
-    }
-    
-    // Store validated data
-    patientInfoMap.set(callId, {
-      name: nameValidation.sanitized!,
-      phone: phoneValidation.sanitized!,
-      dob: dob,
-      email: email,
-      reason,
-      priority: patientInfo.priority || 'normal'
-    });
-    console.log('[PATIENT INFO] ✓ Recorded:', { name: nameValidation.sanitized, phone: phoneValidation.sanitized, dob, email, reason });
-    return { success: true, message: "Patient information recorded successfully" };
-  };
-}
-
-// NOTE: Old observeCall, /incoming-call, /recording-status, and /conference-events handlers
-// have been removed. All call handling is now in voiceAgentRoutes.ts at /api/voice/* routes.
-
-// All call handling routes are in voiceAgentRoutes.ts at /api/voice/* paths.
-// Old broken handlers (/incoming-call, /conference-events, /recording-status) and dead observeCall() removed.
-
-// NOTE: OpenAI webhook handling is now in voiceAgentRoutes.ts at /api/voice/realtime
-// The duplicate root "/" handler has been removed to prevent double greetings and session conflicts
+// NOTE: All call handling is in voiceAgentRoutes.ts at /api/voice/* routes.
+// OpenAI webhook handling is in voiceAgentRoutes.ts at /api/voice/realtime.
 
 // Health check endpoints
 app.get("/health", async (req: Request, res: Response) => {
