@@ -51,7 +51,7 @@ import {
   type InsertDailyOpenaiCost,
 } from "../shared/schema";
 import { db } from "./db";
-import { eq, desc, and, or, count, gte, lte, lt, inArray, isNull, isNotNull, ilike, sql } from "drizzle-orm";
+import { eq, asc, desc, and, or, count, gte, lte, lt, inArray, isNull, isNotNull, ilike, sql } from "drizzle-orm";
 
 export interface IStorage {
   // User operations (required for Replit Auth)
@@ -470,6 +470,10 @@ export class DatabaseStorage implements IStorage {
     agentId?: string;
     search?: string;
     callQuality?: 'ghost' | 'real';
+    sortBy?: 'date' | 'cost' | 'duration';
+    sortOrder?: 'asc' | 'desc';
+    minCost?: number;
+    maxCost?: number;
   }) {
     const page = options?.page ?? 1;
     const limit = options?.limit ?? 50;
@@ -543,6 +547,13 @@ export class DatabaseStorage implements IStorage {
       );
     }
 
+    if (options?.minCost != null) {
+      conditions.push(gte(callLogs.totalCostCents, options.minCost));
+    }
+    if (options?.maxCost != null) {
+      conditions.push(lte(callLogs.totalCostCents, options.maxCost));
+    }
+
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
     const [totalResult] = await db
@@ -550,11 +561,25 @@ export class DatabaseStorage implements IStorage {
       .from(callLogs)
       .where(whereClause);
 
+    // Determine sort order
+    let orderByClause;
+    const sortDirection = options?.sortOrder === 'asc' ? asc : desc;
+    switch (options?.sortBy) {
+      case 'cost':
+        orderByClause = sortDirection(callLogs.totalCostCents);
+        break;
+      case 'duration':
+        orderByClause = sortDirection(callLogs.duration);
+        break;
+      default:
+        orderByClause = desc(callLogs.createdAt);
+    }
+
     const data = await db
       .select()
       .from(callLogs)
       .where(whereClause)
-      .orderBy(desc(callLogs.createdAt))
+      .orderBy(orderByClause)
       .limit(limit)
       .offset(offset);
 

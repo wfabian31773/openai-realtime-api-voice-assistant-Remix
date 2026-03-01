@@ -3,6 +3,7 @@ import { getTwilioClient } from '../lib/twilioClient';
 import type { CampaignContact, Campaign } from '../../shared/schema';
 import { distributedLockService } from './distributedLock';
 import { createLogger } from './structuredLogger';
+import { budgetGuardService } from './budgetGuardService';
 
 const logger = createLogger('SCHEDULER');
 
@@ -197,6 +198,13 @@ export class OutboundCampaignScheduler {
             nextAttemptAt: this.getNextCallableTime(timezone),
           });
           continue;
+        }
+
+        // Budget guard: block outbound calls when daily budget is exceeded
+        const budgetCheck = await budgetGuardService.canMakeOutboundCall();
+        if (!budgetCheck.allowed) {
+          console.warn(`[SCHEDULER] Budget guard blocked outbound call: ${budgetCheck.reason}`);
+          break; // Stop processing all remaining contacts
         }
 
         await this.initiateCall(contact);

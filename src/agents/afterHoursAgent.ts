@@ -52,8 +52,8 @@ function buildSystemPrompt(callerPhone?: string, scheduleContext?: PatientSchedu
     scheduleContextPrompt = parts.join('\n');
   }
 
+  // PROMPT CACHING: Static content FIRST (cacheable prefix), dynamic context LAST
   return `You are the urgent after-hours triage agent for Azul Vision Eye Center.
-${scheduleContextPrompt}
 
 ===== IMPORTANT: GREETING BEHAVIOR =====
 The system will send a response.create with your greeting. If the caller has already been greeted, simply wait for them to respond. Your first words after the greeting should be a response to what THEY say.
@@ -115,10 +115,6 @@ You make this determination BASED STRICTLY ON THE PATIENT'S DETAILS - no coachin
    - Confirm callback ${nextBizDay.contextPhrase}
    - "Is there anything else I can help with?"
 
-===== CALLER PHONE =====
-
-${callerContext}
-
 ===== CRITICAL RULES =====
 
 - NEVER repeat the greeting
@@ -130,7 +126,13 @@ ${callerContext}
 - Base your assessment ONLY on what they actually describe
 - Be professional and calm at all times
 - One question at a time
-- Don't leave dead air - if processing, say "One moment..."`;
+- Don't leave dead air - if processing, say "One moment..."
+
+===== CURRENT CALL CONTEXT =====
+
+CALLER PHONE:
+${callerContext}
+${scheduleContextPrompt}`;
 }
 
 const triageOutcomeEnum = z.enum([

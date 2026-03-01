@@ -9,6 +9,21 @@ import { twilioInsightsService } from './twilioInsightsService';
 
 export type CallState = 'initiated' | 'ringing' | 'in_progress' | 'ending' | 'completed' | 'failed';
 
+/** Max call duration by agent type. Outbound confirmations are short; triage gets full 10 min. */
+const AGENT_MAX_DURATION_MS: Record<string, number> = {
+  'appointment-confirmation': 3 * 60 * 1000,  // 3 min — confirmations complete in 60-90s
+  'after-hours':              7 * 60 * 1000,  // 7 min — after-hours answering
+  'answering-service':        7 * 60 * 1000,  // 7 min — answering service
+};
+const DEFAULT_MAX_DURATION_MS = 10 * 60 * 1000; // 10 min — full triage (no-ivr, drs-scheduler, etc.)
+
+export function getMaxDurationMs(agentSlug?: string): number {
+  if (agentSlug && agentSlug in AGENT_MAX_DURATION_MS) {
+    return AGENT_MAX_DURATION_MS[agentSlug];
+  }
+  return DEFAULT_MAX_DURATION_MS;
+}
+
 export interface CallRecord {
   callLogId: string;
   twilioCallSid?: string;
@@ -54,7 +69,7 @@ class CallLifecycleCoordinator extends EventEmitter {
   private readonly FORCE_CLEANUP_DELAY_MS = 30000; // 30 seconds after first termination signal
   private readonly OPENAI_ONLY_CLEANUP_DELAY_MS = 10000; // 10 seconds when only OpenAI session-end signal exists
   private readonly STALE_CALL_THRESHOLD_MS = 120000; // 2 minutes without activity = stale
-  private readonly MAX_CALL_DURATION_MS = 600000; // 10 minutes absolute maximum call duration
+  private readonly DEFAULT_MAX_CALL_DURATION_MS = 600000; // 10 minutes default
   private readonly PENDING_TRANSCRIPT_TIMEOUT_MS = 60000; // Clean up pending transcripts after 60 seconds
   private readonly BUFFERED_TERMINATION_TIMEOUT_MS = 60000; // Buffer termination signals for up to 60 seconds (extended from 30s)
   private maxDurationTimeouts = new Map<string, NodeJS.Timeout>();
@@ -109,8 +124,8 @@ class CallLifecycleCoordinator extends EventEmitter {
       callerPhone: params.from,
     });
 
-    // Schedule hard timeout at 10 minutes - forcefully terminate call
-    this.scheduleMaxDurationTimeout(params.callLogId, params.twilioCallSid);
+    // Schedule adaptive max duration timeout based on agent type
+    this.scheduleMaxDurationTimeout(params.callLogId, params.twilioCallSid, params.agentSlug);
 
     // Process any pending mappings that were queued before registration
     if (params.openAiCallId && this.pendingMappings.has(params.openAiCallId)) {
@@ -815,12 +830,14 @@ class CallLifecycleCoordinator extends EventEmitter {
     }
   }
 
-  private scheduleMaxDurationTimeout(callLogId: string, twilioCallSid?: string): void {
+  private scheduleMaxDurationTimeout(callLogId: string, twilioCallSid?: string, agentSlug?: string): void {
     // Clear any existing timeout for this call
     const existingTimeout = this.maxDurationTimeouts.get(callLogId);
     if (existingTimeout) {
       clearTimeout(existingTimeout);
     }
+
+    const maxDurationMs = getMaxDurationMs(agentSlug);
 
     const timeout = setTimeout(async () => {
       const record = this.activeCalls.get(callLogId);
@@ -837,9 +854,11 @@ class CallLifecycleCoordinator extends EventEmitter {
       }
 
       const callSid = record.twilioCallSid || twilioCallSid;
-      logger.warn(`REQUESTING Twilio to terminate call - exceeded 10 minute maximum duration`, {
+      const maxMinutes = Math.round(maxDurationMs / 60000);
+      logger.warn(`REQUESTING Twilio to terminate call - exceeded ${maxMinutes} minute maximum duration`, {
         callId: callLogId,
         twilioCallSid: callSid,
+        agentSlug,
         durationSeconds: Math.floor((Date.now() - record.startTime.getTime()) / 1000),
         event: 'max_duration_exceeded',
       });
@@ -872,10 +891,10 @@ class CallLifecycleCoordinator extends EventEmitter {
       }
       
       this.maxDurationTimeouts.delete(callLogId);
-    }, this.MAX_CALL_DURATION_MS);
+    }, maxDurationMs);
 
     this.maxDurationTimeouts.set(callLogId, timeout);
-    logger.debug(`Scheduled 10-minute max duration timeout`, { callId: callLogId });
+    logger.debug(`Scheduled ${Math.round(maxDurationMs / 60000)}-minute max duration timeout`, { callId: callLogId, agentSlug });
   }
 
   cancelMaxDurationTimeout(callLogId: string): void {
@@ -895,7 +914,7 @@ class CallLifecycleCoordinator extends EventEmitter {
       if (record.transferredToHuman) continue;
       
       const durationMs = now - record.startTime.getTime();
-      if (durationMs > this.MAX_CALL_DURATION_MS) {
+      if (durationMs > this.DEFAULT_MAX_CALL_DURATION_MS) {
         const callSid = record.twilioCallSid;
         logger.warn(`Force terminating long-running call on startup`, {
           callId: callLogId,
@@ -1074,7 +1093,7 @@ class CallLifecycleCoordinator extends EventEmitter {
               // Still active in Twilio - force terminate it
               const createdAt = call.createdAt ? new Date(call.createdAt) : new Date();
               const callAge = Date.now() - createdAt.getTime();
-              if (callAge > this.MAX_CALL_DURATION_MS) {
+              if (callAge > this.DEFAULT_MAX_CALL_DURATION_MS) {
                 logger.warn(`DB reconciler: Force terminating long-running call`, {
                   callId: call.id,
                   callSid: call.callSid,

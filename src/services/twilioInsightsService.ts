@@ -274,12 +274,13 @@ export class TwilioInsightsService {
 
   /**
    * Start periodic backfill job to catch calls that missed insights fetch
-   * Runs every 15 minutes to backfill calls from the last 6 hours
+   * Runs every 60 minutes to backfill calls from the last 2 hours
+   * (Primary reconciliation handles most calls immediately; this is a safety net)
    */
   startPeriodicBackfill(): void {
-    const BACKFILL_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
-    const HOURS_BACK = 6;
-    const BATCH_LIMIT = 30;
+    const BACKFILL_INTERVAL_MS = 60 * 60 * 1000; // 60 minutes (reduced from 15 to cut background API calls)
+    const HOURS_BACK = 2; // reduced from 6 (primary path handles most calls)
+    const BATCH_LIMIT = 15; // reduced from 30
 
     console.log(`[TWILIO INSIGHTS] Starting periodic backfill job (every ${BACKFILL_INTERVAL_MS / 60000} min)`);
 

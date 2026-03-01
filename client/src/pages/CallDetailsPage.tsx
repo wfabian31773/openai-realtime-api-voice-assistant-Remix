@@ -5,7 +5,7 @@ import apiClient from '@/lib/apiClient'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ArrowLeft, Download, Play, Pause, DollarSign, Star, ThumbsUp, ThumbsDown, Meh, AlertCircle, Sparkles, Loader2, ChevronDown, ChevronUp, Phone, Signal, RefreshCw } from 'lucide-react'
+import { ArrowLeft, Download, Play, Pause, DollarSign, Star, ThumbsUp, ThumbsDown, Meh, AlertCircle, Sparkles, Loader2, ChevronDown, ChevronUp, Phone, Signal, RefreshCw, Cpu } from 'lucide-react'
 import type { CallLog } from '@/types'
 
 interface RecordingData {
@@ -675,6 +675,93 @@ export function CallDetailsPage() {
           </CardContent>
         </Card>
 
+        {/* Token Usage Card */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Cpu className="h-5 w-5 text-indigo-500" />
+              Token Usage
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {(callLog.inputAudioTokens || callLog.outputAudioTokens || callLog.inputTextTokens || callLog.outputTextTokens) ? (
+              <>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="rounded-lg bg-orange-50 dark:bg-orange-950 p-3">
+                    <p className="text-xs font-medium text-orange-700 dark:text-orange-300">Audio Input</p>
+                    <p className="text-lg font-semibold text-orange-900 dark:text-orange-100">
+                      {(callLog.inputAudioTokens || 0).toLocaleString()}
+                    </p>
+                    <p className="text-xs text-muted-foreground">tokens</p>
+                  </div>
+                  <div className="rounded-lg bg-teal-50 dark:bg-teal-950 p-3">
+                    <p className="text-xs font-medium text-teal-700 dark:text-teal-300">Audio Output</p>
+                    <p className="text-lg font-semibold text-teal-900 dark:text-teal-100">
+                      {(callLog.outputAudioTokens || 0).toLocaleString()}
+                    </p>
+                    <p className="text-xs text-muted-foreground">tokens</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="rounded-lg bg-blue-50 dark:bg-blue-950 p-3">
+                    <p className="text-xs font-medium text-blue-700 dark:text-blue-300">Text Input</p>
+                    <p className="text-lg font-semibold text-blue-900 dark:text-blue-100">
+                      {(callLog.inputTextTokens || 0).toLocaleString()}
+                    </p>
+                    <p className="text-xs text-muted-foreground">tokens</p>
+                  </div>
+                  <div className="rounded-lg bg-slate-50 dark:bg-slate-900 p-3">
+                    <p className="text-xs font-medium text-slate-700 dark:text-slate-300">Text Output</p>
+                    <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                      {(callLog.outputTextTokens || 0).toLocaleString()}
+                    </p>
+                    <p className="text-xs text-muted-foreground">tokens</p>
+                  </div>
+                </div>
+                {callLog.inputCachedTokens != null && callLog.inputCachedTokens > 0 && (
+                  <div className="rounded-lg border border-green-200 bg-green-50 dark:bg-green-950 p-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-xs font-medium text-green-700 dark:text-green-300">Cached Tokens</p>
+                        <p className="text-lg font-semibold text-green-900 dark:text-green-100">
+                          {callLog.inputCachedTokens.toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs font-medium text-green-700 dark:text-green-300">Cache Hit Rate</p>
+                        <p className="text-lg font-semibold text-green-600">
+                          {(() => {
+                            const total = (callLog.inputTextTokens || 0) + (callLog.inputCachedTokens || 0);
+                            if (total === 0) return '0%';
+                            return `${((callLog.inputCachedTokens / total) * 100).toFixed(0)}%`;
+                          })()}
+                        </p>
+                      </div>
+                    </div>
+                    <p className="mt-1 text-xs text-green-600 dark:text-green-400">
+                      Cached tokens get 90% discount on input cost
+                    </p>
+                  </div>
+                )}
+                {callLog.costReconciledAt && (
+                  <p className="text-xs text-muted-foreground">
+                    Reconciled: {formatDate(callLog.costReconciledAt)}
+                  </p>
+                )}
+              </>
+            ) : (
+              <div className="py-6 text-center">
+                <Cpu className="mx-auto h-8 w-8 text-muted-foreground" />
+                <p className="mt-2 text-sm text-muted-foreground">Token data not available</p>
+                <p className="text-xs text-muted-foreground">Token usage is tracked after call completion</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Quality Grading Section */}
+      <div className="grid gap-6 lg:grid-cols-2">
         {/* Quality Grading Card */}
         <Card>
           <CardHeader>

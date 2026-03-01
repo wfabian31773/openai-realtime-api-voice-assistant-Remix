@@ -1,37 +1,8 @@
 import { getTwilioClient } from '../lib/twilioClient';
 import { storage } from '../../server/storage';
 import OpenAI from 'openai';
-
-interface ModelPricing {
-  audioInputPerM: number;
-  audioInputCachedPerM: number;
-  audioOutputPerM: number;
-  textInputPerM: number;
-  textInputCachedPerM: number;
-  textOutputPerM: number;
-}
-
-const MODEL_PRICING: Record<string, ModelPricing> = {
-  'gpt-realtime': { audioInputPerM: 32, audioInputCachedPerM: 0.40, audioOutputPerM: 64, textInputPerM: 4, textInputCachedPerM: 0.40, textOutputPerM: 16 },
-  'gpt-4o-realtime-preview': { audioInputPerM: 40, audioInputCachedPerM: 2.50, audioOutputPerM: 80, textInputPerM: 5, textInputCachedPerM: 2.50, textOutputPerM: 20 },
-  'gpt-4o-mini-transcribe': { audioInputPerM: 3, audioInputCachedPerM: 0, audioOutputPerM: 0, textInputPerM: 0, textInputCachedPerM: 0, textOutputPerM: 6 },
-  'gpt-4o-transcribe': { audioInputPerM: 6, audioInputCachedPerM: 0, audioOutputPerM: 0, textInputPerM: 0, textInputCachedPerM: 0, textOutputPerM: 6 },
-  'gpt-4o-mini': { audioInputPerM: 0, audioInputCachedPerM: 0, audioOutputPerM: 0, textInputPerM: 0.15, textInputCachedPerM: 0.075, textOutputPerM: 0.60 },
-  'gpt-4o': { audioInputPerM: 0, audioInputCachedPerM: 0, audioOutputPerM: 0, textInputPerM: 2.50, textInputCachedPerM: 1.25, textOutputPerM: 10 },
-  'gpt-4.1-mini': { audioInputPerM: 0, audioInputCachedPerM: 0, audioOutputPerM: 0, textInputPerM: 0.40, textInputCachedPerM: 0.10, textOutputPerM: 1.60 },
-  'gpt-5': { audioInputPerM: 0, audioInputCachedPerM: 0, audioOutputPerM: 0, textInputPerM: 1.25, textInputCachedPerM: 0.125, textOutputPerM: 10 },
-};
-
-function getModelPricing(model: string): ModelPricing {
-  const prefixes = Object.keys(MODEL_PRICING).sort((a, b) => b.length - a.length);
-  for (const prefix of prefixes) {
-    if (model.startsWith(prefix)) {
-      return MODEL_PRICING[prefix];
-    }
-  }
-  console.warn(`[COST] Unknown model "${model}", falling back to gpt-realtime pricing`);
-  return MODEL_PRICING['gpt-realtime'];
-}
+import { MODEL_PRICING, getModelPricing } from './modelPricing';
+export type { ModelPricing } from './modelPricing';
 
 const OPENAI_REALTIME_PRICING = {
   inputAudioPerK: MODEL_PRICING['gpt-realtime'].audioInputPerM / 1000,
@@ -481,7 +452,7 @@ export class CallCostService {
    * - Duration must be positive (> 0)
    * This prevents overwriting valid data with 0 or incomplete Twilio responses.
    */
-  async reconcileTwilioCallData(callLogId: string, callSid: string): Promise<{
+  async reconcileTwilioCallData(callLogId: string, callSid: string, options?: { skipInsights?: boolean }): Promise<{
     success: boolean;
     actualDuration?: number;
     twilioStatus?: string;
@@ -490,6 +461,18 @@ export class CallCostService {
     error?: string;
   }> {
     try {
+      // Early exit: skip if already reconciled with finalized Twilio data
+      const existing = await storage.getCallLog(callLogId);
+      if (existing?.twilioStatus && existing.duration && existing.duration > 0 && existing.twilioCostCents != null && existing.twilioCostCents > 0) {
+        console.info(`[TWILIO RECONCILE] ${callLogId}: Already reconciled (duration=${existing.duration}s, status=${existing.twilioStatus}) - skipping redundant fetch`);
+        return {
+          success: true,
+          actualDuration: existing.duration,
+          twilioStatus: existing.twilioStatus,
+          costCents: existing.twilioCostCents,
+        };
+      }
+
       // CRITICAL: Strip known prefixes from callSid before Twilio lookup
       // These prefixes (outbound_conf_, test_conf_, conf_) cause Twilio API failures
       const cleanCallSid = callSid.replace(/^(outbound_|test_)?conf_/, '');
@@ -593,14 +576,17 @@ export class CallCostService {
       console.info(`[TWILIO RECONCILE] ${callLogId}: duration=${actualDuration}s, status=${twilioStatus}, cost=${costCents}c${updateData.durationMismatchFlag ? ' ⚠️ DURATION_MISMATCH' : ''}`);
       
       // Fetch detailed Twilio Insights data asynchronously (don't block the main flow)
-      setImmediate(async () => {
-        try {
-          const { twilioInsightsService } = await import('./twilioInsightsService');
-          await twilioInsightsService.fetchAndSaveInsights(callLogId, callSid);
-        } catch (insightsError) {
-          console.warn(`[TWILIO RECONCILE] Insights fetch failed for ${callLogId}:`, insightsError);
-        }
-      });
+      // Skip if caller already handles insights (e.g., lifecycle coordinator)
+      if (!options?.skipInsights) {
+        setImmediate(async () => {
+          try {
+            const { twilioInsightsService } = await import('./twilioInsightsService');
+            await twilioInsightsService.fetchAndSaveInsights(callLogId, callSid);
+          } catch (insightsError) {
+            console.warn(`[TWILIO RECONCILE] Insights fetch failed for ${callLogId}:`, insightsError);
+          }
+        });
+      }
       
       return {
         success: true,

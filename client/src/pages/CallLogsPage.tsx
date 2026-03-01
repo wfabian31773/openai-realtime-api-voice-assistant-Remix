@@ -38,6 +38,8 @@ export function CallLogsPage() {
   const hasTicket = searchParams.get('hasTicket') || 'all'
   const transferred = searchParams.get('transferred') || 'all'
   const callQuality = searchParams.get('callQuality') || 'all'
+  const sortBy = searchParams.get('sortBy') || 'date'
+  const sortOrder = searchParams.get('sortOrder') || 'desc'
   const page = parseInt(searchParams.get('page') || '1')
   const limit = 50
 
@@ -93,11 +95,13 @@ export function CallLogsPage() {
     if (hasTicket !== 'all') params.set('hasTicket', hasTicket)
     if (transferred !== 'all') params.set('transferred', transferred)
     if (callQuality !== 'all') params.set('callQuality', callQuality)
+    if (sortBy !== 'date') params.set('sortBy', sortBy)
+    if (sortOrder !== 'desc') params.set('sortOrder', sortOrder)
     return params.toString()
-  }, [page, limit, search, status, direction, hasTicket, transferred, callQuality])
+  }, [page, limit, search, status, direction, hasTicket, transferred, callQuality, sortBy, sortOrder])
 
   const { data: callLogsResponse, isLoading, isError, error } = useQuery({
-    queryKey: ['call-logs', page, search, status, direction, hasTicket, transferred, callQuality],
+    queryKey: ['call-logs', page, search, status, direction, hasTicket, transferred, callQuality, sortBy, sortOrder],
     staleTime: 0,
     refetchOnMount: 'always',
     queryFn: async () => {
@@ -117,7 +121,7 @@ export function CallLogsPage() {
     setSearchParams({}, { replace: true })
   }
 
-  const hasActiveFilters = search || status !== 'all' || direction !== 'all' || hasTicket !== 'all' || transferred !== 'all' || callQuality !== 'all'
+  const hasActiveFilters = search || status !== 'all' || direction !== 'all' || hasTicket !== 'all' || transferred !== 'all' || callQuality !== 'all' || sortBy !== 'date'
 
   const getStatusVariant = (callStatus: string) => {
     switch (callStatus) {
@@ -248,14 +252,30 @@ export function CallLogsPage() {
                 <option value="false">Not Transferred</option>
               </Select>
 
-              <Select 
-                value={callQuality} 
+              <Select
+                value={callQuality}
                 onChange={(e) => updateParams({ callQuality: e.target.value, page: 1 })}
                 className="w-[150px]"
               >
                 <option value="all">All Quality</option>
                 <option value="real">Real Calls</option>
                 <option value="ghost">Ghost Calls</option>
+              </Select>
+
+              <Select
+                value={`${sortBy}-${sortOrder}`}
+                onChange={(e) => {
+                  const [newSort, newOrder] = e.target.value.split('-')
+                  updateParams({ sortBy: newSort, sortOrder: newOrder, page: 1 })
+                }}
+                className="w-[170px]"
+              >
+                <option value="date-desc">Newest First</option>
+                <option value="date-asc">Oldest First</option>
+                <option value="cost-desc">Cost (High to Low)</option>
+                <option value="cost-asc">Cost (Low to High)</option>
+                <option value="duration-desc">Duration (Longest)</option>
+                <option value="duration-asc">Duration (Shortest)</option>
               </Select>
 
               {hasActiveFilters && (
@@ -285,6 +305,7 @@ export function CallLogsPage() {
                       <TableHead>To</TableHead>
                       <TableHead>Date</TableHead>
                       <TableHead>Duration</TableHead>
+                      <TableHead>Cost</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead>Media</TableHead>
                       <TableHead>Ticket</TableHead>
@@ -322,6 +343,20 @@ export function CallLogsPage() {
                           {formatDate(log.createdAt)}
                         </TableCell>
                         <TableCell className="text-foreground">{formatDuration(log.duration)}</TableCell>
+                        <TableCell>
+                          {(() => {
+                            const totalCents = (log as any).totalCostCents;
+                            const isEstimated = (log as any).costIsEstimated;
+                            if (totalCents == null || totalCents === 0) return <span className="text-muted-foreground">-</span>;
+                            const dollars = totalCents / 100;
+                            const colorClass = dollars < 0.50 ? 'text-emerald-500' : dollars < 2.00 ? 'text-yellow-500' : 'text-red-500';
+                            return (
+                              <span className={`font-medium ${colorClass}`}>
+                                ${dollars.toFixed(2)}{isEstimated ? <span className="text-xs text-muted-foreground ml-0.5">(est.)</span> : ''}
+                              </span>
+                            );
+                          })()}
+                        </TableCell>
                         <TableCell>
                           <Badge variant={getStatusVariant(log.status || '')}>
                             {log.status || 'unknown'}

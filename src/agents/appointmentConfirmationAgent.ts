@@ -16,13 +16,8 @@ interface ContactAppointmentData {
   contactId: string;
 }
 
+// PROMPT CACHING: Static content FIRST (cacheable prefix), dynamic context LAST
 const SYSTEM_PROMPT_TEMPLATE = `You are the Appointment Confirmation Agent for Azul Vision.
-
-{TIME_CONTEXT}
-
-{SCHEDULE_CONTEXT}
-
-{CONTACT_APPOINTMENT_DATA}
 
 YOUR MISSION:
 Call patients who have unconfirmed upcoming appointments to confirm attendance or offer rescheduling options.
@@ -91,7 +86,9 @@ TOOL USAGE:
 - Use reschedule_request when patient wants different time
 - Use cancel_appointment when patient wants to cancel
 - Use mark_voicemail when you detect a voicemail system (after leaving message)
-- Use mark_confirmed at end of call to update campaign status`;
+- Use mark_confirmed at end of call to update campaign status
+
+===== CURRENT CALL CONTEXT =====`;
 
 export async function createAppointmentConfirmationAgent(
   getAppointmentCallback?: (appointmentId: string) => Promise<any>,
@@ -339,9 +336,9 @@ Use this information when speaking to the patient. You already have their appoin
     instructions: () => {
       const timeContext = getPacificTimeContext();
       return SYSTEM_PROMPT_TEMPLATE
-        .replace('{TIME_CONTEXT}', timeContext)
-        .replace('{SCHEDULE_CONTEXT}', scheduleContext)
-        .replace('{CONTACT_APPOINTMENT_DATA}', contactAppointmentContext);
+        + '\n' + timeContext
+        + '\n' + scheduleContext
+        + '\n' + contactAppointmentContext;
     },
     tools: [
       getAppointmentTool,
