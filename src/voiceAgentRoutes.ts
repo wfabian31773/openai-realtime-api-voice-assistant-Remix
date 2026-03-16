@@ -3135,7 +3135,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     // Store metadata for answering-service agent
     callMetadata.set(conferenceName, {
       agentSlug: 'answering-service',
-      agentGreeting: '',
+      agentGreeting: 'Hello and thank you for calling Azul Vision, all of our agents are currently busy, but I am here to assist, how can I help you?',
       language: 'english',
       ivrSelection: undefined,
     } as any);
@@ -3148,14 +3148,11 @@ export function setupVoiceAgentRoutes(app: Express): void {
 
     console.info(`[ANSWERING-SERVICE] Routing to answering-service agent (overflow, voice=sage, lang=en)`);
 
-    // Overflow greeting - acknowledges the wait
+    // Brief hold bridge while OpenAI SIP participant connects (~1-2s).
+    // The AI agent delivers the full greeting once connected via response.create.
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">Thank you for calling Azul Vision, we apologize for the wait.</Say>
   <Pause length="1"/>
-  <Say voice="Polly.Joanna">All of our staff members are currently busy. I can assist by taking a message and creating a ticket for resolution.</Say>
-  <Pause length="1"/>
-  <Say voice="Polly.Joanna">How may I help you today?</Say>
   <Dial>
     <Conference 
       beep="false"
