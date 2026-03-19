@@ -6,3 +6,9 @@ id = "M9B4I2uZq3zNlqsJ0JH1h"
 uri = "file://azul_vision_care_teams.xlsx"
 type = "table"
 title = "Azul Vision Care Teams — Scheduled vs. Kept"
+
+[[outputs]]
+id = "_vAQTEUW8kqkKzoFtPF8t"
+uri = "file://azul_vision_providers.xlsx"
+type = "table"
+title = "Azul Vision Providers — Schedule & Keep Rates"
