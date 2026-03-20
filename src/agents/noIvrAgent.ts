@@ -66,8 +66,9 @@ function parseDateOfBirth(dobString: string): {
     raw: dobString,
   };
 
+  // Standard m/d/y with slash, dash, space, or period separators
   const mmddyyyy = dobString.match(
-    /(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{2,4})/,
+    /(\d{1,2})[\/\-\s\.](\d{1,2})[\/\-\s\.](\d{2,4})/,
   );
   if (mmddyyyy) {
     result.month = mmddyyyy[1].padStart(2, "0");
@@ -75,6 +76,42 @@ function parseDateOfBirth(dobString: string): {
     result.year = mmddyyyy[3].length === 2 ? expandTwoDigitYear(mmddyyyy[3]) : mmddyyyy[3];
     result.iso = `${result.year}-${result.month}-${result.day}`;
     return result;
+  }
+
+  // STT-merged patterns: "112.37" or "112 37" → 1/12/37
+  // Handles cases where STT drops the slash: "1/12/37" becomes "112.37"
+  const mergedDotYear = dobString.trim().match(/^(\d{2,3})[\.\s](\d{2,4})$/);
+  if (mergedDotYear) {
+    const front = mergedDotYear[1];
+    const back  = mergedDotYear[2];
+    const fullYear = back.length === 4 ? back : expandTwoDigitYear(back);
+    if (front.length === 3) {
+      const month = front[0].padStart(2, '0');
+      const day   = front.slice(1).padStart(2, '0');
+      const m = parseInt(month, 10);
+      const d = parseInt(day, 10);
+      if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+        result.month = month; result.day = day; result.year = fullYear;
+        result.iso = `${fullYear}-${month}-${day}`;
+        return result;
+      }
+    }
+  }
+
+  // Six-digit run-together: MMDDYY e.g. "011237"
+  const sixDigit = dobString.trim().match(/^(\d{6})$/);
+  if (sixDigit) {
+    const raw = sixDigit[1];
+    const month = raw.slice(0, 2);
+    const day   = raw.slice(2, 4);
+    const year  = expandTwoDigitYear(raw.slice(4, 6));
+    const m = parseInt(month, 10);
+    const d = parseInt(day, 10);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      result.month = month; result.day = day; result.year = year;
+      result.iso = `${year}-${month}-${day}`;
+      return result;
+    }
   }
 
   const months: Record<string, string> = {
@@ -175,7 +212,26 @@ IMMEDIATELY after collecting name+DOB, if caller mentions past visits:
 Example: Caller says "Wayne Fabian, March 17 1973" and "I want to see the last doctor I saw"
 → Call lookup_schedule(first_name: "Wayne", last_name: "Fabian", date_of_birth: "03/17/1973")
 → If found: "I can see your last visit was with Dr. [provider] at [location]. I'll request that for you."
-→ If not found: "I don't have your visit history in my system, but I'll note your preference and staff will check."
+→ If not found: Follow the PATIENT NOT FOUND RECOVERY steps below.
+
+**PATIENT NOT FOUND RECOVERY (when lookup_schedule returns found: false)**
+When name+DOB lookup fails, DO NOT immediately say "I can't find you." Instead:
+
+1. Ask: "Just to confirm — are you a new patient with us, or have you been seen at one of our offices before?"
+
+2. IF EXISTING PATIENT:
+   - Say: "Let me try looking you up again. Could you please give me your date of birth, starting with the month, then the day, then the year?"
+   - Wait for them to say each part separately (e.g. "January... twelfth... nineteen thirty-seven")
+   - Also retry with phone: lookup_schedule(phone: callerPhone)
+   - If EITHER lookup succeeds → confirm their name and continue normally
+   - If both fail → note "existing patient — not found in system, staff please verify" in the ticket details, and include their phone number
+
+3. IF NEW PATIENT:
+   - Do NOT attempt another lookup — proceed to collect their request details
+   - Create the ticket normally; new patients do not need to be found in the system
+
+⚠️ DOB CLARIFICATION: Always ask for DOB in parts: "starting with the month, then the day, then the year" — this prevents the phone's voice recognition from merging digits together.
+⚠️ PHONE FALLBACK: Always try lookup_schedule(phone: callerPhone) as a fallback when name+DOB fails — the phone number alone can match most existing patients.
 
 DO NOT say "the team can find it" or "based on your history" - USE THE TOOL to find it yourself!
 `;

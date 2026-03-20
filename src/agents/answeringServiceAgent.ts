@@ -104,14 +104,51 @@ function parseDateOfBirth(dobString: string): {
     }
   }
   
-  const mmddyyyy = normalized.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](19\d{2}|20\d{2}|\d{2})/);
+  // Standard m/d/yyyy or m-d-yyyy or m.d.yyyy separators
+  const mmddyyyy = normalized.match(/(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/);
   if (mmddyyyy) {
     const year = expandTwoDigitYear(mmddyyyy[3]);
     const month = mmddyyyy[1].padStart(2, '0');
     const day = mmddyyyy[2].padStart(2, '0');
     return { month, day, year, iso: `${year}-${month}-${day}` };
   }
-  
+
+  // Handle STT-merged patterns like "112.37" → 1/12/37 or "1137" → 1/1/37
+  // Covers cases where the slash is dropped: caller says "1/12/37" but STT hears "112.37"
+  const mergedDotYear = normalized.match(/^(\d{2,3})[\.\s](\d{2,4})$/);
+  if (mergedDotYear) {
+    const front = mergedDotYear[1]; // e.g. "112" or "11"
+    const back  = mergedDotYear[2]; // e.g. "37" or "1937"
+    const year  = expandTwoDigitYear(back.length <= 2 ? back : back.slice(-2));
+    const fullYear = back.length === 4 ? back : expandTwoDigitYear(back);
+    // If front is 3 digits, first digit is month, remaining two are day (e.g. 112 → m=1, d=12)
+    if (front.length === 3) {
+      const month = front[0].padStart(2, '0');
+      const day   = front.slice(1).padStart(2, '0');
+      const m = parseInt(month, 10);
+      const d = parseInt(day, 10);
+      if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+        return { month, day, year: fullYear, iso: `${fullYear}-${month}-${day}` };
+      }
+    }
+    // If front is 2 digits, treat as month only — need day from context (can't resolve)
+  }
+
+  // Six-digit run-together: MMDDYY or MMDDYYYY e.g. "011237" or "01121937"
+  const sixDigit = normalized.match(/^(\d{6})$/);
+  if (sixDigit) {
+    const raw = sixDigit[1];
+    const month = raw.slice(0, 2);
+    const day   = raw.slice(2, 4);
+    const yr    = raw.slice(4, 6);
+    const year  = expandTwoDigitYear(yr);
+    const m = parseInt(month, 10);
+    const d = parseInt(day, 10);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return { month, day, year, iso: `${year}-${month}-${day}` };
+    }
+  }
+
   return { month: '', day: '', year: '', iso: '' };
 }
 
@@ -343,6 +380,29 @@ Example: Caller says name is "Wayne Fabian" and DOB is "March 17, 1973"
 → MUST call lookup_schedule(first_name: "Wayne", last_name: "Fabian", date_of_birth: "03/17/1973")
 → WAIT for result
 → THEN respond based on what the tool returned
+
+**STEP 3C - RECOVERY WHEN PATIENT NOT FOUND (new or existing clarification)**
+When lookup_schedule returns found: false (patient not found by name+DOB or phone):
+
+1. Ask: "Just to confirm — are you a new patient with us, or have you been seen at one of our offices before?"
+
+2. IF EXISTING PATIENT:
+   - Say: "Let me try looking you up again. Could you please give me your date of birth — starting with the month, then the day, then the year?"
+   - Wait for them to say it in parts (e.g. "January... twelfth... nineteen thirty-seven")
+   - Also call lookup_schedule with their phone number as a second attempt: lookup_schedule(phone: callerPhone)
+   - If EITHER lookup succeeds → confirm their name and continue
+   - If both fail → still create the ticket, note "patient not found in system" in the details, and include their phone number so staff can manually locate them
+
+3. IF NEW PATIENT:
+   - Do NOT attempt another lookup
+   - Proceed directly to STEP 4 to collect their issue details
+   - Create the ticket normally — new patients don't need to be found in the system
+
+⚠️ DOB CLARIFICATION SCRIPT: When asking an existing patient to re-state their DOB, always say:
+"Could you please give me your date of birth, starting with the month, then the day, then the year?"
+This forces them to separate each part clearly, which helps avoid the speech recognition merging digits together.
+
+⚠️ PHONE FALLBACK: If you have the caller's phone number and the name+DOB lookup failed, ALWAYS also call lookup_schedule(phone: callerPhone) — the phone number alone can find them even if the DOB was unclear.
 
 **STEP 4 - GET THE DETAILS**
 Ask what they need help with - be thorough. Good prompts:
