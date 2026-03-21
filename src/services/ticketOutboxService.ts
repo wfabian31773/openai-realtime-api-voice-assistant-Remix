@@ -197,6 +197,17 @@ export class TicketOutboxService {
           .where(eq(ticketOutbox.id, outboxId));
 
         console.info(`[TICKET OUTBOX] ✓ Sent: ${outboxId} → ${response.ticketNumber}`);
+
+        // QVO ticket event — fire and forget, never blocks the outbox worker
+        const ticketNumForQvo = response.ticketNumber;
+        const callLogIdForQvo = entry.callLogId;
+        setImmediate(async () => {
+          try {
+            const { qvoEmitterService } = await import('./qvoEmitterService');
+            await qvoEmitterService.emitTicketCreated(outboxId, callLogIdForQvo, params, ticketNumForQvo);
+          } catch { /* never propagate */ }
+        });
+
         return { success: true, ticketNumber: response.ticketNumber, outboxId };
       }
 

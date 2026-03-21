@@ -887,6 +887,15 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
               }
 
               console.info(`[POST-CALL] Cost and grading processed for handoff call ${callLogId}`);
+
+              // QVO event — 20-second delay lets Twilio costs reconcile first
+              const callLogIdForQvo = callLogId;
+              setTimeout(async () => {
+                try {
+                  const { qvoEmitterService } = await import('./services/qvoEmitterService');
+                  await qvoEmitterService.emitCallCompleted(callLogIdForQvo);
+                } catch { /* never propagate */ }
+              }, 20_000);
             } catch (postCallError) {
               console.error('[POST-CALL ERROR] Handoff cost/grading failed:', postCallError);
             }
@@ -2095,6 +2104,17 @@ async function observeCall(
               } else {
                 console.error(`[POST-CALL] ✗ Ticketing API failed after ${ticketResult.attempts} attempts for ${twilioCallSid}`);
               }
+            }
+
+            // QVO event — fire after a 20-second delay so Twilio costs have time to reconcile
+            if (dbCallLogId) {
+              const callLogIdForQvo = dbCallLogId;
+              setTimeout(async () => {
+                try {
+                  const { qvoEmitterService } = await import('./services/qvoEmitterService');
+                  await qvoEmitterService.emitCallCompleted(callLogIdForQvo);
+                } catch { /* never propagate */ }
+              }, 20_000);
             }
           } catch (postCallError) {
             console.error('[POST-CALL ERROR] Cost/grading/ticketing failed:', postCallError);
