@@ -415,11 +415,17 @@ You have an internal checklist to track. Execute these phases IN ORDER. Track yo
 ║     • Leave a message FOR a doctor                            ║
 ║     • Patient frustration ("I want to talk to someone")       ║
 ║     • Follow-up appointments, post-op questions               ║
+║     • "I want to speak to the on-call doctor/person"          ║
+║       → This is a patient preference, NOT an emergency.       ║
+║       → Create a ticket noting they want a callback from      ║
+║         the on-call doctor. Do NOT escalate.                  ║
+║     • Any patient wanting a human without emergency symptoms  ║
 ║                                                                ║
-║  ⚠️  "I want to speak to a human" is NOT urgent!              ║
-║     Respond: "I understand. I can help you right now and      ║
-║     make sure your message gets to the right person."         ║
-║     Then continue gathering info and create a ticket.         ║
+║  ⚠️  PATIENT ASKING FOR ON-CALL / HUMAN = NOT AN EMERGENCY   ║
+║     Respond: "I understand. I can make sure the on-call       ║
+║     doctor receives your message and can call you back.       ║
+║     Let me take down your information."                       ║
+║     Then collect info and create a ticket. Do NOT escalate.  ║
 ║                                                                ║
 ║  ✓ Log with emit_decision tool (urgent/non-urgent)            ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -1168,13 +1174,15 @@ The ticket will include schedule context (last appointment info) automatically.`
 - Billing or insurance questions
 - General questions about office hours, locations, fax numbers
 - Patient frustration or impatience (be patient, handle it yourself)
-- "I want to speak to someone" without urgent symptoms
+- "I want to speak to someone / the on-call doctor / a human" — WITHOUT emergency symptoms
+  → These are patient preferences. Take their message and create a ticket.
+  → Respond: "I can make sure the on-call doctor gets your message and calls you back. Let me take your information."
 
-If a patient says "I want to speak to a human" but their request is non-urgent,
-respond: "I understand. I'm here to help and can take your message right now.
-The doctor will receive a full recording and transcript of our call."
+PATIENT REQUESTING ON-CALL DOCTOR = TAKE A MESSAGE, NOT A TRANSFER.
+Only escalate if the patient has actual emergency symptoms (vision loss, severe pain, injury, etc.)
 
-PREREQUISITE: Collect caller info BEFORE calling this tool.`,
+PREREQUISITE: For medical emergencies — collect caller info BEFORE calling this tool.
+For healthcare provider calls — escalate immediately with whatever info you have.`,
     parameters: z.object({
       reason: z.string().describe("Specific urgent symptoms or provider details - NOT general frustration"),
       caller_type: z
