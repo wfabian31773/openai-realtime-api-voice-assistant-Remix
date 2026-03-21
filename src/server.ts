@@ -6,6 +6,7 @@ import { validateEnv, VOICE_AGENT_REQUIRED } from './lib/env';
 import { setupVoiceAgentRoutes } from './voiceAgentRoutes';
 import { ticketingSyncService } from '../server/services/ticketingSyncService';
 import { dailyOpenaiReconciliation } from './services/dailyOpenaiReconciliation';
+import './services/qvoEmitterService'; // eager load so config check prints at startup
 import { startKeepAlive, stopKeepAlive, warmupDatabase } from '../server/services/databaseKeepAlive';
 import { initializeCallSessionService } from './services/callSessionService';
 import { getEnvironmentConfig, validateProductionConfig } from './config/environment';

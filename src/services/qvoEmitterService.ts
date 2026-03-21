@@ -15,6 +15,14 @@ const QVO_INGEST_URL = process.env.QVO_INGEST_URL?.replace(/\/$/, '');
 const QVO_API_KEY   = process.env.QVO_API_KEY;
 const QVO_TENANT_ID = process.env.QVO_TENANT_ID;
 
+// Log configuration status at module load time so it appears in startup logs
+console.info('[QVO EMITTER] Configuration check:', {
+  QVO_INGEST_URL: QVO_INGEST_URL ? `✓ set (${QVO_INGEST_URL.substring(0, 30)}...)` : '✗ MISSING',
+  QVO_API_KEY:    QVO_API_KEY    ? `✓ set (length: ${QVO_API_KEY.length})`         : '✗ MISSING',
+  QVO_TENANT_ID:  QVO_TENANT_ID  ? `✓ set`                                          : '✗ MISSING',
+  status: (QVO_INGEST_URL && QVO_API_KEY && QVO_TENANT_ID) ? 'ACTIVE' : 'STANDBY (no-op until vars set)',
+});
+
 const MAX_RETRIES      = 3;
 const RETRY_BASE_MS    = 1_000;
 const FETCH_TIMEOUT_MS = 10_000;
