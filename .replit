@@ -86,3 +86,7 @@ APP_ENV = "development"
 DOMAIN = "openai-realtime-api-voice-assistant-remix--fabianwayne1.replit.app"
 APP_ENV = "production"
 PORT = "5000"
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 60000
