@@ -147,6 +147,11 @@ const ConferenceNametoCallerIDMapping: Record<string, string | undefined> = {};
 const ConferenceNametoCalledNumberMapping: Record<string, string | undefined> = {}; // Dialed/To number
 const ConferenceNametoCallTokenMapping: Record<string, string | undefined> = {};
 const conferenceNameToCallID: Record<string, string | undefined> = {};
+
+// Tracks conferences where the REAL OpenAI realtime.call.incoming webhook has arrived.
+// ONLY populated by the /api/voice/realtime handler — NOT by conference join events.
+// The emergency fallback timer checks this to decide whether to dial a human.
+const openAIWebhookConfirmed = new Set<string>();
 const conferenceNameToTwilioCallSid: Record<string, string | undefined> = {}; // Map conference name → Twilio CallSid
 const conferenceSidToCallLogId: Record<string, string | undefined> = {}; // Map Twilio conference SID → DB call log ID
 
@@ -2425,6 +2430,10 @@ export function setupVoiceAgentRoutes(app: Express): void {
           if (conferenceNameFromSIP) {
             callIDtoConferenceNameMapping[callId] = conferenceNameFromSIP;
             conferenceNameToCallID[conferenceNameFromSIP] = callId;
+            // ✅ Mark this conference as confirmed — the REAL OpenAI webhook arrived.
+            // The emergency fallback timer checks this Set (not conferenceNameToCallID,
+            // which is also populated by conference-join events before the webhook fires).
+            openAIWebhookConfirmed.add(conferenceNameFromSIP);
             console.info(`[WEBHOOK] Conference name from SIP: ${conferenceNameFromSIP}`);
             
             // Add correlation IDs to trace
@@ -3125,13 +3134,15 @@ export function setupVoiceAgentRoutes(app: Express): void {
     if (humanAgentNumber) {
       const OPENAI_WEBHOOK_TIMEOUT_MS = 8000;
       setTimeout(async () => {
-        // Check if OpenAI webhook arrived — if so, a callId will exist for this conference
-        const openAICallId = getCallIdByConference(conferenceName);
-        if (openAICallId) {
-          console.info(`[FALLBACK] OpenAI webhook arrived (callId: ${openAICallId}) — no fallback needed`);
+        // Check if the REAL OpenAI realtime.call.incoming webhook arrived.
+        // openAIWebhookConfirmed is ONLY set by the /api/voice/realtime handler,
+        // unlike conferenceNameToCallID which gets set by conference-join events first.
+        if (openAIWebhookConfirmed.has(conferenceName)) {
+          const openAICallId = getCallIdByConference(conferenceName);
+          console.info(`[FALLBACK] OpenAI webhook confirmed (callId: ${openAICallId}) — no fallback needed`);
           return;
         }
-        console.error(`[FALLBACK] ✗✗✗ OpenAI SIP webhook did NOT arrive in ${OPENAI_WEBHOOK_TIMEOUT_MS}ms`);
+        console.error(`[FALLBACK] ✗✗✗ OpenAI SIP webhook did NOT arrive in ${OPENAI_WEBHOOK_TIMEOUT_MS}ms — dialing human`);
         console.error(`[FALLBACK] Dialing human agent ${humanAgentNumber} into conference ${conferenceName}`);
         try {
           await twilioClient.conferences(conferenceName)
