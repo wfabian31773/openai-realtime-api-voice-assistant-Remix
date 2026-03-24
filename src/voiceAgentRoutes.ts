@@ -3037,31 +3037,37 @@ export function setupVoiceAgentRoutes(app: Express): void {
     
     // Add AI agent to conference via OpenAI SIP
     console.info(`[TRACE-2] CREATING SIP PARTICIPANT → OpenAI SIP gateway`);
-    
+
+    const sipTo = `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=no-ivr`;
+    const webhookToken = ConferenceNametoCallTokenMapping[conferenceName];
+    console.info(`[TRACE-2]   from:        ${envConfig.twilio.phoneNumber}`);
+    console.info(`[TRACE-2]   to:          ${sipTo.substring(0, 100)}...`);
+    console.info(`[TRACE-2]   callToken:   ${webhookToken ? `PRESENT (len=${webhookToken.length}, prefix="${webhookToken.substring(0,15)}...")` : 'OMITTED (testing without token)'}`);
+    console.info(`[TRACE-2]   conference:  ${conferenceName}`);
+    console.info(`[TRACE-2]   PROJECT_ID:  ${process.env.OPENAI_PROJECT_ID || 'MISSING ← WILL FAIL'}`);
+
+    let sipParticipantCallSid: string | undefined;
     try {
-      const webhookToken = ConferenceNametoCallTokenMapping[conferenceName];
-      if (!webhookToken) {
-        console.error('[TRACE-2] ✗✗✗ NO CALLTOKEN IN MAPPING — empty token will cause OpenAI to reject SIP INVITE');
+      const participantParams: any = {
+        from: envConfig.twilio.phoneNumber!,
+        label: 'virtual agent',
+        to: sipTo,
+        earlyMedia: true,
+        conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
+        conferenceStatusCallbackEvent: ['join', 'leave'],
+      };
+      // Only pass callToken if it looks like a real token (not just call metadata JSON)
+      if (webhookToken && !webhookToken.startsWith('{')) {
+        participantParams.callToken = webhookToken;
+        console.info(`[TRACE-2]   → Passing callToken (non-JSON format)`);
+      } else {
+        console.info(`[TRACE-2]   → Omitting callToken (was JSON metadata, not a valid SIP token)`);
       }
-      const effectiveToken = webhookToken || '';
-      const sipTo = `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=no-ivr`;
-      console.info(`[TRACE-2]   from:        ${envConfig.twilio.phoneNumber}`);
-      console.info(`[TRACE-2]   to:          ${sipTo.substring(0, 80)}...`);
-      console.info(`[TRACE-2]   callToken:   ${effectiveToken ? `PRESENT (len=${effectiveToken.length}, prefix="${effectiveToken.substring(0,12)}...")` : 'EMPTY STRING ← WILL FAIL'}`);
-      console.info(`[TRACE-2]   conference:  ${conferenceName}`);
-      console.info(`[TRACE-2]   PROJECT_ID:  ${process.env.OPENAI_PROJECT_ID || 'MISSING ← WILL FAIL'}`);
-      
+
       const participant = await twilioClient.conferences(conferenceName)
         .participants
-        .create({
-          from: envConfig.twilio.phoneNumber!,
-          label: 'virtual agent',
-          to: sipTo,
-          earlyMedia: true,
-          callToken: effectiveToken,
-          conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
-          conferenceStatusCallbackEvent: ['join']
-        });
+        .create(participantParams);
+      sipParticipantCallSid = participant.callSid;
       console.info(`[TRACE-2] ✓ SIP PARTICIPANT CREATED`);
       console.info(`[TRACE-2]   participant.callSid: ${participant.callSid}`);
       console.info(`[TRACE-2]   participant.status:  ${(participant as any).status ?? 'not-in-response'}`);
@@ -3072,8 +3078,40 @@ export function setupVoiceAgentRoutes(app: Express): void {
       console.error(`[TRACE-2]   error.message: ${error?.message}`);
       console.error(`[TRACE-2]   error.status:  ${error?.status}`);
       console.error(`[TRACE-2]   error.code:    ${error?.code}`);
-      console.error(`[TRACE-2]   error.moreInfo: ${error?.moreInfo}`);
       console.error(`[TRACE-2]   full error:`, JSON.stringify(error, Object.getOwnPropertyNames(error)));
+    }
+
+    // ── EMERGENCY FALLBACK ────────────────────────────────────────────
+    // If OpenAI's SIP webhook never arrives within 15s, dial the human
+    // agent directly into the conference so the caller isn't left in silence.
+    const humanAgentNumber = process.env.HUMAN_AGENT_NUMBER;
+    if (humanAgentNumber) {
+      const OPENAI_WEBHOOK_TIMEOUT_MS = 15000;
+      setTimeout(async () => {
+        // Check if OpenAI webhook arrived — if so, a callId will exist for this conference
+        const openAICallId = getCallIdByConference(conferenceName);
+        if (openAICallId) {
+          console.info(`[FALLBACK] OpenAI webhook arrived (callId: ${openAICallId}) — no fallback needed`);
+          return;
+        }
+        console.error(`[FALLBACK] ✗✗✗ OpenAI SIP webhook did NOT arrive in ${OPENAI_WEBHOOK_TIMEOUT_MS}ms`);
+        console.error(`[FALLBACK] Dialing human agent ${humanAgentNumber} into conference ${conferenceName}`);
+        try {
+          await twilioClient.conferences(conferenceName)
+            .participants
+            .create({
+              from: envConfig.twilio.phoneNumber!,
+              to: humanAgentNumber,
+              label: 'human-agent-fallback',
+              earlyMedia: false,
+            });
+          console.info(`[FALLBACK] ✓ Human agent dialed into conference ${conferenceName}`);
+        } catch (fallbackErr: any) {
+          console.error(`[FALLBACK] ✗ Failed to dial human agent:`, fallbackErr?.message);
+        }
+      }, OPENAI_WEBHOOK_TIMEOUT_MS);
+    } else {
+      console.warn(`[FALLBACK] HUMAN_AGENT_NUMBER not set — no emergency fallback available`);
     }
   });
 
