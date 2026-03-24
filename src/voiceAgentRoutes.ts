@@ -2899,11 +2899,11 @@ export function setupVoiceAgentRoutes(app: Express): void {
         // AI agent delivers the full greeting via response.create once caller is in the conference
         const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">Please hold while we connect you.</Say>
+  <Say voice="alice">Please hold while we connect you.</Say>
   <Dial>
     <Conference 
       beep="false"
-      waitUrl=""
+      waitUrl="http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical"
       startConferenceOnEnter="true"
       endConferenceOnExit="true"
       participantLabel="customer"
@@ -3045,11 +3045,11 @@ export function setupVoiceAgentRoutes(app: Express): void {
     // AI agent delivers the full greeting via response.create once caller is in the conference
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">Please hold while we connect you.</Say>
+  <Say voice="alice">Please hold while we connect you.</Say>
   <Dial>
     <Conference 
       beep="false"
-      waitUrl=""
+      waitUrl="http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical"
       startConferenceOnEnter="true"
       endConferenceOnExit="true"
       participantLabel="customer"
