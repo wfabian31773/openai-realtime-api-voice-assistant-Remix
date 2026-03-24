@@ -3086,7 +3086,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     // agent directly into the conference so the caller isn't left in silence.
     const humanAgentNumber = process.env.HUMAN_AGENT_NUMBER;
     if (humanAgentNumber) {
-      const OPENAI_WEBHOOK_TIMEOUT_MS = 15000;
+      const OPENAI_WEBHOOK_TIMEOUT_MS = 8000;
       setTimeout(async () => {
         // Check if OpenAI webhook arrived — if so, a callId will exist for this conference
         const openAICallId = getCallIdByConference(conferenceName);
