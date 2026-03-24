@@ -4838,5 +4838,13 @@ export function setupVoiceAgentRoutes(app: Express): void {
     }
   });
 
+  // SIP call health monitor status endpoint (no auth required — read-only)
+  app.get("/api/health/sip", (req, res) => {
+    const { getLatestSipHealthStatus } = require('./services/sipHealthMonitor');
+    const status = getLatestSipHealthStatus();
+    const httpStatus = status.status === 'down' ? 503 : status.status === 'degraded' ? 200 : 200;
+    res.status(httpStatus).json(status);
+  });
+
   console.log('[VOICE AGENT] Routes configured');
 }

@@ -210,6 +210,11 @@ async function startVoiceServer() {
     import('./services/dataQualitySloService').then(({ dataQualitySloService }) => {
       dataQualitySloService.startMonitoring(60);
     }).catch(err => console.error('[STARTUP] Failed to start SLO monitoring:', err));
+
+    // Start SIP call health monitor (checks every 15 min)
+    import('./services/sipHealthMonitor').then(({ start }) => {
+      start();
+    }).catch(err => console.error('[STARTUP] Failed to start SIP health monitor:', err));
   });
 }
 
