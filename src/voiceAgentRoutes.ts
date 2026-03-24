@@ -1654,17 +1654,25 @@ async function observeCall(
     CallDiagnostics.recordStage(callId, 'accept_started', true);
     const acceptStartTime = Date.now();
     
+    const acceptUrl = `https://api.openai.com/v1/realtime/calls/${callId}/accept`;
+    console.info(`\n${'='.repeat(60)}`);
+    console.info(`[TRACE-4] CALLING OPENAI ACCEPT ENDPOINT`);
+    console.info(`[TRACE-4]   URL:     ${acceptUrl}`);
+    console.info(`[TRACE-4]   call_id: ${callId}`);
+    console.info(`[TRACE-4]   payload: ${JSON.stringify(acceptPayload)}`);
+    console.info(`${'='.repeat(60)}`);
+    
     for (let attempt = 0; attempt < MAX_ACCEPT_RETRIES; attempt++) {
       if (attempt > 0) {
         const baseDelay = Math.min(INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1), MAX_RETRY_DELAY_MS);
         const jitter = Math.random() * 100;
         const delayMs = Math.floor(baseDelay + jitter);
-        console.info(`[SESSION] Retry ${attempt}/${MAX_ACCEPT_RETRIES - 1} for call ${callId} - waiting ${delayMs}ms`);
+        console.info(`[TRACE-4] Retry ${attempt}/${MAX_ACCEPT_RETRIES - 1} for call ${callId} - waiting ${delayMs}ms`);
         await new Promise(resolve => setTimeout(resolve, delayMs));
       }
       
       try {
-        const acceptResponse = await fetch(`https://api.openai.com/v1/realtime/calls/${callId}/accept`, {
+        const acceptResponse = await fetch(acceptUrl, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${OPENAI_API_KEY}`,
@@ -1673,11 +1681,13 @@ async function observeCall(
           body: JSON.stringify(acceptPayload),
         });
         
+        const responseText = await acceptResponse.text();
+        console.info(`[TRACE-4] Attempt ${attempt + 1}: HTTP ${acceptResponse.status}`);
+        console.info(`[TRACE-4]   response body: ${responseText.substring(0, 500)}`);
+        
         if (acceptResponse.ok) {
           const acceptLatencyMs = Date.now() - acceptStartTime;
-          if (attempt > 0) {
-            console.info(`[SESSION] ✓ Accept succeeded on retry ${attempt} for call ${callId} (total time: ~${acceptLatencyMs}ms)`);
-          }
+          console.info(`[TRACE-4] ✓ ACCEPT SUCCEEDED (${acceptLatencyMs}ms, attempt ${attempt + 1})`);
           CallDiagnostics.recordAcceptAttempt(callId, attempt + 1, MAX_ACCEPT_RETRIES, true, acceptResponse.status);
           CallDiagnostics.recordStage(callId, 'accept_completed', true, { 
             acceptLatencyMs, 
@@ -1687,19 +1697,20 @@ async function observeCall(
           break;
         }
         
-        lastError = await acceptResponse.text();
+        lastError = responseText;
         
         if (acceptResponse.status !== 404) {
-          console.error(`[SESSION] Non-retryable error ${acceptResponse.status} for call ${callId}: ${lastError}`);
+          console.error(`[TRACE-4] ✗✗✗ NON-RETRYABLE ERROR ${acceptResponse.status} for call ${callId}`);
+          console.error(`[TRACE-4]   OpenAI said: ${lastError}`);
           break;
         }
         
-        console.warn(`[SESSION] ⚠️ Accept attempt ${attempt + 1}/${MAX_ACCEPT_RETRIES} failed with 404 for call ${callId}`);
+        console.warn(`[TRACE-4] ⚠️ 404 on attempt ${attempt + 1}/${MAX_ACCEPT_RETRIES} — OpenAI call not ready yet`);
         CallDiagnostics.recordAcceptAttempt(callId, attempt + 1, MAX_ACCEPT_RETRIES, false, acceptResponse.status, lastError);
         
       } catch (fetchError) {
         lastError = fetchError instanceof Error ? fetchError.message : String(fetchError);
-        console.warn(`[SESSION] ⚠️ Accept fetch error on attempt ${attempt + 1}: ${lastError}`);
+        console.error(`[TRACE-4] ✗✗✗ NETWORK ERROR on attempt ${attempt + 1}: ${lastError}`);
         CallDiagnostics.recordAcceptAttempt(callId, attempt + 1, MAX_ACCEPT_RETRIES, false, undefined, lastError);
       }
     }
@@ -2270,6 +2281,12 @@ export function setupVoiceAgentRoutes(app: Express): void {
         const callId: string = (event as any)?.data?.call_id;
         const sipHeaders = (event as any)?.data?.sip_headers;
 
+        console.info(`\n${'='.repeat(60)}`);
+        console.info(`[TRACE-3] OPENAI WEBHOOK ARRIVED → realtime.call.incoming`);
+        console.info(`[TRACE-3]   call_id:      ${callId}`);
+        console.info(`[TRACE-3]   sip_headers:  ${sipHeaders ? JSON.stringify(sipHeaders).substring(0, 200) : 'NONE'}`);
+        console.info(`[TRACE-3]   full event:   ${JSON.stringify(event).substring(0, 400)}`);
+        console.info(`${'='.repeat(60)}`);
         console.info(`\n[WEBHOOK] Incoming call: ${callId}`);
         
         // Handle test webhooks from OpenAI dashboard (no real call_id)
@@ -2908,7 +2925,14 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const callerIDNumber = parsedBody.From;
     const dialedNumber = parsedBody.To;
 
-    console.info(`\n[NO-IVR] ✓ Direct call received: ${callSid} from ${callerIDNumber} to ${dialedNumber}`);
+    console.info(`\n${'='.repeat(60)}`);
+    console.info(`[TRACE-1] TWILIO WEBHOOK ARRIVED → /api/voice/no-ivr`);
+    console.info(`[TRACE-1]   CallSid:     ${callSid}`);
+    console.info(`[TRACE-1]   From:        ${callerIDNumber}`);
+    console.info(`[TRACE-1]   To:          ${dialedNumber}`);
+    console.info(`[TRACE-1]   CallToken:   ${callToken ? `PRESENT (len=${callToken.length}, prefix="${callToken.substring(0,12)}...")` : 'MISSING ← THIS IS THE PROBLEM'}`);
+    console.info(`[TRACE-1]   Raw fields:  ${Object.keys(parsedBody).join(', ')}`);
+    console.info(`${'='.repeat(60)}`);
 
     if (!callSid || !callerIDNumber) {
       console.error('[NO-IVR] ✗ Missing required parameters (callSid or callerIDNumber)');
@@ -2916,7 +2940,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       return;
     }
     if (!callToken) {
-      console.warn('[NO-IVR] ⚠️ No CallToken in webhook body — fresh token will be generated from OpenAI API');
+      console.error('[TRACE-1] ✗✗✗ NO CALLTOKEN — SIP call will be sent with empty callToken, OpenAI WILL reject it');
     }
 
     const domain = process.env.DOMAIN || req.get('host');
@@ -3012,35 +3036,44 @@ export function setupVoiceAgentRoutes(app: Express): void {
     }
     
     // Add AI agent to conference via OpenAI SIP
-    // This triggers OpenAI to send the webhook - we MUST accept quickly in the webhook handler
-    // CRITICAL: Pass X-conferenceName so webhook can find stored metadata (agentSlug, etc.)
-    // Also pass X-CallerPhone since the SIP From header is the Twilio number, not the actual caller
-    console.info(`[NO-IVR] Adding no-ivr agent to conference: ${conferenceName}`);
+    console.info(`[TRACE-2] CREATING SIP PARTICIPANT → OpenAI SIP gateway`);
     
     try {
-      // CRITICAL: Use the per-call CallToken from Twilio's webhook body — it is generated by
-      // OpenAI's SIP integration and carries the webhook URL configuration that causes OpenAI
-      // to call back to /api/voice/realtime. A generic client_secret.value from the sessions
-      // API does NOT trigger the webhook callback and must only be used as a last resort.
       const webhookToken = ConferenceNametoCallTokenMapping[conferenceName];
       if (!webhookToken) {
-        console.warn('[NO-IVR] ⚠️ No webhook CallToken found — passing empty string');
+        console.error('[TRACE-2] ✗✗✗ NO CALLTOKEN IN MAPPING — empty token will cause OpenAI to reject SIP INVITE');
       }
       const effectiveToken = webhookToken || '';
+      const sipTo = `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=no-ivr`;
+      console.info(`[TRACE-2]   from:        ${envConfig.twilio.phoneNumber}`);
+      console.info(`[TRACE-2]   to:          ${sipTo.substring(0, 80)}...`);
+      console.info(`[TRACE-2]   callToken:   ${effectiveToken ? `PRESENT (len=${effectiveToken.length}, prefix="${effectiveToken.substring(0,12)}...")` : 'EMPTY STRING ← WILL FAIL'}`);
+      console.info(`[TRACE-2]   conference:  ${conferenceName}`);
+      console.info(`[TRACE-2]   PROJECT_ID:  ${process.env.OPENAI_PROJECT_ID || 'MISSING ← WILL FAIL'}`);
+      
       const participant = await twilioClient.conferences(conferenceName)
         .participants
         .create({
           from: envConfig.twilio.phoneNumber!,
           label: 'virtual agent',
-          to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=no-ivr`,
+          to: sipTo,
           earlyMedia: true,
           callToken: effectiveToken,
           conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
           conferenceStatusCallbackEvent: ['join']
         });
-      console.info(`[NO-IVR] ✓ No-IVR agent successfully added to conference: ${conferenceName}`);
-    } catch (error) {
-      console.error(`[NO-IVR] ✗ Failed to add agent to conference:`, error);
+      console.info(`[TRACE-2] ✓ SIP PARTICIPANT CREATED`);
+      console.info(`[TRACE-2]   participant.callSid: ${participant.callSid}`);
+      console.info(`[TRACE-2]   participant.status:  ${(participant as any).status ?? 'not-in-response'}`);
+      console.info(`[TRACE-2]   → Now waiting for OpenAI to fire realtime.call.incoming webhook...`);
+      console.info(`[TRACE-2]   → If [TRACE-3] never appears, OpenAI rejected the SIP INVITE silently`);
+    } catch (error: any) {
+      console.error(`[TRACE-2] ✗✗✗ SIP PARTICIPANT CREATION FAILED`);
+      console.error(`[TRACE-2]   error.message: ${error?.message}`);
+      console.error(`[TRACE-2]   error.status:  ${error?.status}`);
+      console.error(`[TRACE-2]   error.code:    ${error?.code}`);
+      console.error(`[TRACE-2]   error.moreInfo: ${error?.moreInfo}`);
+      console.error(`[TRACE-2]   full error:`, JSON.stringify(error, Object.getOwnPropertyNames(error)));
     }
   });
 
@@ -3820,7 +3853,25 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const conferenceSid = parsedBody.ConferenceSid;
     const participantCallSid = parsedBody.CallSid;
 
-    console.info(`[CONFERENCE] Event: ${event}, Label: ${label}, FriendlyName: ${friendlyName}, ConferenceSid: ${conferenceSid}`);
+    // TRACE-5: Full conference event dump — critical for diagnosing SIP participant failures
+    const isSipParticipant = label === 'virtual agent';
+    if (isSipParticipant) {
+      console.info(`\n${'='.repeat(60)}`);
+      console.info(`[TRACE-5] CONFERENCE EVENT FOR SIP PARTICIPANT (virtual agent)`);
+      console.info(`[TRACE-5]   event:            ${event}`);
+      console.info(`[TRACE-5]   label:            ${label}`);
+      console.info(`[TRACE-5]   FriendlyName:     ${friendlyName}`);
+      console.info(`[TRACE-5]   ConferenceSid:    ${conferenceSid}`);
+      console.info(`[TRACE-5]   CallSid:          ${participantCallSid}`);
+      console.info(`[TRACE-5]   CallStatus:       ${parsedBody.CallStatus ?? 'N/A'}`);
+      console.info(`[TRACE-5]   SipResponseCode:  ${parsedBody.SipResponseCode ?? 'N/A'}`);
+      console.info(`[TRACE-5]   ErrorCode:        ${parsedBody.ErrorCode ?? 'N/A'}`);
+      console.info(`[TRACE-5]   ErrorMessage:     ${parsedBody.ErrorMessage ?? 'N/A'}`);
+      console.info(`[TRACE-5]   ALL FIELDS: ${JSON.stringify(parsedBody)}`);
+      console.info(`${'='.repeat(60)}`);
+    } else {
+      console.info(`[CONFERENCE] Event: ${event}, Label: ${label}, FriendlyName: ${friendlyName}, ConferenceSid: ${conferenceSid}, CallSid: ${participantCallSid}, CallStatus: ${parsedBody.CallStatus ?? 'N/A'}`);
+    }
 
     // CRITICAL: Find callId using multiple strategies to ensure reliable cleanup
     // Uses wrapper functions that check both legacy maps and service cache for restart recovery
