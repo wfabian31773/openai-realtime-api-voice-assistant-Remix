@@ -2702,7 +2702,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
     const callSid = parsedBody.CallSid;
-    const callToken = parsedBody.CallToken ? decodeURIComponent(parsedBody.CallToken) : undefined;
+    const callToken = parsedBody.CallToken;
     const callerIDNumber = parsedBody.From;
     
     // Extract metadata from query parameters
@@ -2827,7 +2827,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
     const callSid = parsedBody.CallSid;
-    const callToken = parsedBody.CallToken ? decodeURIComponent(parsedBody.CallToken) : undefined;
+    const callToken = parsedBody.CallToken;
     const callerIDNumber = parsedBody.From;
     const dialedNumber = parsedBody.To;
 
@@ -2967,7 +2967,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
     const callSid = parsedBody.CallSid;
-    const callToken = parsedBody.CallToken ? decodeURIComponent(parsedBody.CallToken) : undefined;
+    const callToken = parsedBody.CallToken;
     const callerIDNumber = parsedBody.From;
     const dialedNumber = parsedBody.To;
 
@@ -3142,7 +3142,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
     const callSid = parsedBody.CallSid;
-    const callToken = parsedBody.CallToken ? decodeURIComponent(parsedBody.CallToken) : undefined;
+    const callToken = parsedBody.CallToken;
     const callerIDNumber = parsedBody.From;
     const dialedNumber = parsedBody.To;
 
@@ -3253,7 +3253,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
     const callSid = parsedBody.CallSid;
-    const callToken = parsedBody.CallToken ? decodeURIComponent(parsedBody.CallToken) : undefined;
+    const callToken = parsedBody.CallToken;
     const callerIDNumber = parsedBody.From;
     const dialedNumber = parsedBody.To;
 
@@ -3365,7 +3365,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
     const callSid = parsedBody.CallSid;
-    const callToken = parsedBody.CallToken ? decodeURIComponent(parsedBody.CallToken) : undefined;
+    const callToken = parsedBody.CallToken;
     const callerIDNumber = parsedBody.From;
     const dialedNumber = parsedBody.To;
 
@@ -3522,7 +3522,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     
     const digit = parsedBody.Digits as '1' | '2' | '3' | '4';
     const callSid = req.query.callSid as string || parsedBody.CallSid;
-    const callToken = parsedBody.CallToken ? decodeURIComponent(parsedBody.CallToken) : undefined;
+    const callToken = parsedBody.CallToken;
     const callerIDNumber = parsedBody.From;
     
     console.info(`[IVR] Selection received: digit=${digit}, callSid=${callSid}`);
@@ -3688,7 +3688,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     
     const digit = parsedBody.Digits as '1' | '2' | '3';
     const callSid = req.query.callSid as string || parsedBody.CallSid;
-    const callToken = parsedBody.CallToken ? decodeURIComponent(parsedBody.CallToken) : undefined;
+    const callToken = parsedBody.CallToken;
     const callerIDNumber = parsedBody.From;
     
     console.info(`[IVR-ES] Spanish selection received: digit=${digit}, callSid=${callSid}`);
