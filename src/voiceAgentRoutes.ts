@@ -3099,15 +3099,20 @@ export function setupVoiceAgentRoutes(app: Express): void {
         label: 'virtual agent',
         to: sipTo,
         earlyMedia: true,
+        // statusCallback fires when the SIP leg changes status (completed/failed/busy/no-answer)
+        // This tells us the EXACT SIP response code OpenAI returns on rejection
+        statusCallback: `https://${domain}/api/voice/sip-status`,
+        statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+        statusCallbackMethod: 'POST',
         conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
         conferenceStatusCallbackEvent: ['join', 'leave'],
       };
-      // Only pass callToken if it looks like a real token (not just call metadata JSON)
-      if (webhookToken && !webhookToken.startsWith('{')) {
+      // Pass callToken exactly as Twilio sent it — original working code always passed it
+      if (webhookToken) {
         participantParams.callToken = webhookToken;
-        console.info(`[TRACE-2]   → Passing callToken (non-JSON format)`);
+        console.info(`[TRACE-2]   → Passing callToken (len=${webhookToken.length}, prefix="${webhookToken.substring(0, 20)}...")`);
       } else {
-        console.info(`[TRACE-2]   → Omitting callToken (was JSON metadata, not a valid SIP token)`);
+        console.info(`[TRACE-2]   → No callToken available`);
       }
 
       const participant = await twilioClient.conferences(conferenceName)
@@ -3922,6 +3927,32 @@ export function setupVoiceAgentRoutes(app: Express): void {
   app.post("/api/voice/warm-transfer-status", webhookRateLimiter, async (req, res) => {
     res.sendStatus(200);
     console.info(`[WARM-TRANSFER-STATUS] Received callback (warm transfer disabled)`);
+  });
+
+  // SIP participant status callback — fires when the OpenAI SIP leg changes state.
+  // This is the ONLY way to see the exact SIP error code OpenAI returns on rejection.
+  app.post("/api/voice/sip-status", webhookRateLimiter, async (req, res) => {
+    res.sendStatus(200);
+    try {
+      const rawBody = req.body.toString("utf8");
+      const p = Object.fromEntries(new URLSearchParams(rawBody));
+      const status    = p.CallStatus;        // failed | completed | busy | no-answer
+      const sipCode   = p.SipResponseCode;   // e.g. 403, 404, 503 — THE KEY FIELD
+      const callSid   = p.CallSid;
+      const to        = p.To;
+      const errorCode = p.ErrorCode;         // Twilio error code if any
+      const errorMsg  = p.ErrorMessage;
+      console.error(`[SIP-STATUS] ▼▼▼ OpenAI SIP leg status: ${status} ▼▼▼`);
+      console.error(`[SIP-STATUS]   CallSid:        ${callSid}`);
+      console.error(`[SIP-STATUS]   To:             ${to?.substring(0, 80)}`);
+      console.error(`[SIP-STATUS]   CallStatus:     ${status}`);
+      console.error(`[SIP-STATUS]   SipResponseCode:${sipCode} ← THIS IS THE REJECTION REASON`);
+      console.error(`[SIP-STATUS]   ErrorCode:      ${errorCode}`);
+      console.error(`[SIP-STATUS]   ErrorMessage:   ${errorMsg}`);
+      console.error(`[SIP-STATUS]   Full body:      ${rawBody.substring(0, 500)}`);
+    } catch (e: any) {
+      console.error(`[SIP-STATUS] Failed to parse callback:`, e.message);
+    }
   });
 
   // Conference events webhook
