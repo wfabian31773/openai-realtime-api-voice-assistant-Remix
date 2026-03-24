@@ -1832,6 +1832,11 @@ async function observeCall(
       }
     });
 
+    // ─── WS-DIAG: Track every connection state transition before we even connect ───
+    transport.on('connection_change', (status: string) => {
+      console.info(`[WS-DIAG] connection_change → "${status}" for call ${callId} at ${new Date().toISOString()}`);
+    });
+
     await session.connect({ apiKey: OPENAI_API_KEY!, callId });
     
     const connectDurationMs = Date.now() - sessionConnectStart;
@@ -1840,6 +1845,38 @@ async function observeCall(
       agent: effectiveSlug 
     });
     console.info(`[SESSION] ✓ Connected to realtime call ${callId} with agent: ${effectiveSlug}${agentVersion ? ` v${agentVersion}` : ''}`);
+
+    // ─── WS-DIAG: Wire error/close/message directly onto the underlying WebSocket ───
+    // transport.connectionState is a public getter that returns { status, websocket }
+    // After session.connect() the WebSocket is live and we can attach listeners to it.
+    try {
+      const rawWs = (transport as any).connectionState?.websocket;
+      if (rawWs) {
+        rawWs.on('error', (err: any) => {
+          console.error(`[WS-DIAG] WebSocket error for call ${callId}: message="${err.message}", code=${err.code}, type=${err.type}`);
+        });
+        rawWs.on('close', (code: number, reason: Buffer) => {
+          console.info(`[WS-DIAG] WebSocket CLOSED for call ${callId}: code=${code}, reason="${reason?.toString() || ''}", time=${new Date().toISOString()}`);
+        });
+        rawWs.on('message', (data: any) => {
+          try {
+            const parsed = JSON.parse(data.toString());
+            const t = parsed?.type || 'unknown';
+            // Skip noisy audio delta events; log everything else in full
+            if (t !== 'response.audio.delta' && t !== 'input_audio_buffer.append') {
+              console.info(`[WS-DIAG] ← OpenAI msg [${t}] for call ${callId}: ${JSON.stringify(parsed).substring(0, 400)}`);
+            }
+          } catch {
+            console.info(`[WS-DIAG] ← OpenAI raw msg for call ${callId}: ${data.toString().substring(0, 200)}`);
+          }
+        });
+        console.info(`[WS-DIAG] ✓ Raw WebSocket listeners attached for call ${callId}, readyState=${rawWs.readyState}`);
+      } else {
+        console.warn(`[WS-DIAG] ✗ Could not access underlying WebSocket for call ${callId} (connectionState.websocket is null)`);
+      }
+    } catch (wsErr: any) {
+      console.warn(`[WS-DIAG] ✗ Failed to attach raw WebSocket listeners for call ${callId}:`, wsErr.message);
+    }
     
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 3C: Await background DB operations NOW (after accept + connect)
