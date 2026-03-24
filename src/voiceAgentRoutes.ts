@@ -3132,40 +3132,6 @@ export function setupVoiceAgentRoutes(app: Express): void {
       console.error(`[TRACE-2]   full error:`, JSON.stringify(error, Object.getOwnPropertyNames(error)));
     }
 
-    // ── EMERGENCY FALLBACK ────────────────────────────────────────────
-    // If OpenAI's SIP webhook never arrives within 15s, dial the human
-    // agent directly into the conference so the caller isn't left in silence.
-    const humanAgentNumber = process.env.HUMAN_AGENT_NUMBER;
-    if (humanAgentNumber) {
-      const OPENAI_WEBHOOK_TIMEOUT_MS = 8000;
-      setTimeout(async () => {
-        // Check if the REAL OpenAI realtime.call.incoming webhook arrived.
-        // openAIWebhookConfirmed is ONLY set by the /api/voice/realtime handler,
-        // unlike conferenceNameToCallID which gets set by conference-join events first.
-        if (openAIWebhookConfirmed.has(conferenceName)) {
-          const openAICallId = getCallIdByConference(conferenceName);
-          console.info(`[FALLBACK] OpenAI webhook confirmed (callId: ${openAICallId}) — no fallback needed`);
-          return;
-        }
-        console.error(`[FALLBACK] ✗✗✗ OpenAI SIP webhook did NOT arrive in ${OPENAI_WEBHOOK_TIMEOUT_MS}ms — dialing human`);
-        console.error(`[FALLBACK] Dialing human agent ${humanAgentNumber} into conference ${conferenceName}`);
-        try {
-          await twilioClient.conferences(conferenceName)
-            .participants
-            .create({
-              from: envConfig.twilio.phoneNumber!,
-              to: humanAgentNumber,
-              label: 'human-agent-fallback',
-              earlyMedia: false,
-            });
-          console.info(`[FALLBACK] ✓ Human agent dialed into conference ${conferenceName}`);
-        } catch (fallbackErr: any) {
-          console.error(`[FALLBACK] ✗ Failed to dial human agent:`, fallbackErr?.message);
-        }
-      }, OPENAI_WEBHOOK_TIMEOUT_MS);
-    } else {
-      console.warn(`[FALLBACK] HUMAN_AGENT_NUMBER not set — no emergency fallback available`);
-    }
   });
 
   // DEV NO-IVR ENDPOINT - Development version of no-ivr agent
