@@ -97,6 +97,39 @@ if (isProductionEnv && !HUMAN_AGENT_NUMBER) {
   console.error('═══════════════════════════════════════════════════════════════');
 }
 
+// Generates a fresh OpenAI call token (client_secret) for SIP participant creation.
+// The static CallToken from Twilio's webhook body is a pre-configured token that can
+// expire. This function always fetches a fresh one from the OpenAI API to avoid 400
+// Bad Request responses from OpenAI's SIP gateway due to expired tokens.
+async function generateOpenAICallToken(): Promise<string | null> {
+  try {
+    const response = await fetch('https://api.openai.com/v1/realtime/sessions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'gpt-4o-realtime-preview' }),
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error(`[SIP-TOKEN] ✗ Failed to generate fresh call token: ${response.status} ${errText}`);
+      return null;
+    }
+    const data = await response.json() as any;
+    const token = data?.client_secret?.value;
+    if (!token) {
+      console.error('[SIP-TOKEN] ✗ No client_secret.value in OpenAI Realtime sessions response');
+      return null;
+    }
+    console.info(`[SIP-TOKEN] ✓ Generated fresh call token (expires_at: ${data?.client_secret?.expires_at})`);
+    return token;
+  } catch (error) {
+    console.error('[SIP-TOKEN] ✗ Error generating fresh call token:', error);
+    return null;
+  }
+}
+
 // PHI Logging Protection - Set DISABLE_PHI_LOGGING=true in production for HIPAA compliance
 const DISABLE_PHI_LOGGING = process.env.DISABLE_PHI_LOGGING === 'true';
 const logPHI = (message: string) => {
@@ -344,6 +377,14 @@ async function addSIPParticipantWithWatchdog(
   async function addParticipant(retryCount: number): Promise<string | null> {
     console.info(`[WATCHDOG] Adding SIP participant to ${conferenceName} (attempt ${retryCount + 1})`);
     
+    // Generate a fresh call token from OpenAI API — the static token from the Twilio
+    // webhook body (parsedBody.CallToken) can expire, causing OpenAI SIP 400 Bad Request.
+    const freshToken = await generateOpenAICallToken();
+    const effectiveToken = freshToken || callToken;
+    if (!freshToken) {
+      console.warn('[WATCHDOG] ⚠️ Fresh token generation failed — falling back to webhook token');
+    }
+    
     // Build SIP URI with optional headers for reliable routing
     // CRITICAL: X-Environment header enables cross-environment detection when webhook arrives
     const currentEnv = process.env.APP_ENV || 'development';
@@ -360,7 +401,7 @@ async function addSIPParticipantWithWatchdog(
         label: "virtual agent",
         to: sipUri,
         earlyMedia: true,
-        callToken: callToken,
+        callToken: effectiveToken,
         conferenceStatusCallback: `https://${safeDomain}/api/voice/conference-events`,
         conferenceStatusCallbackEvent: ['join']
       }),
@@ -642,11 +683,10 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
   }
   console.log('========================================\n');
 
-  const callToken = ConferenceNametoCallTokenMapping[conferenceName];
   const callerID = getCallerNumber(conferenceName); // Uses wrapper with fallback to service cache
 
-  if (!callToken || !callerID) {
-    console.error('[HANDOFF] ✗ Missing callToken or callerID');
+  if (!callerID) {
+    console.error('[HANDOFF] ✗ Missing callerID');
     return;
   }
 
@@ -2889,10 +2929,13 @@ export function setupVoiceAgentRoutes(app: Express): void {
 
     console.info(`\n[NO-IVR] ✓ Direct call received: ${callSid} from ${callerIDNumber} to ${dialedNumber}`);
 
-    if (!callSid || !callToken || !callerIDNumber) {
-      console.error('[NO-IVR] ✗ Missing required parameters');
+    if (!callSid || !callerIDNumber) {
+      console.error('[NO-IVR] ✗ Missing required parameters (callSid or callerIDNumber)');
       res.status(400).send('<Response><Say>Invalid request</Say></Response>');
       return;
+    }
+    if (!callToken) {
+      console.warn('[NO-IVR] ⚠️ No CallToken in webhook body — fresh token will be generated from OpenAI API');
     }
 
     const domain = process.env.DOMAIN || req.get('host');
@@ -2994,6 +3037,11 @@ export function setupVoiceAgentRoutes(app: Express): void {
     console.info(`[NO-IVR] Adding no-ivr agent to conference: ${conferenceName}`);
     
     try {
+      const freshToken = await generateOpenAICallToken();
+      const effectiveToken = freshToken || ConferenceNametoCallTokenMapping[conferenceName];
+      if (!freshToken) {
+        console.warn('[NO-IVR] ⚠️ Fresh token generation failed — falling back to webhook token');
+      }
       const participant = await twilioClient.conferences(conferenceName)
         .participants
         .create({
@@ -3001,7 +3049,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
           label: 'virtual agent',
           to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=no-ivr`,
           earlyMedia: true,
-          callToken: ConferenceNametoCallTokenMapping[conferenceName],
+          callToken: effectiveToken,
           conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
           conferenceStatusCallbackEvent: ['join']
         });
@@ -3112,7 +3160,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
           label: 'virtual agent',
           to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=dev-no-ivr`,
           earlyMedia: true,
-          callToken: ConferenceNametoCallTokenMapping[conferenceName],
+          callToken: (await generateOpenAICallToken()) || ConferenceNametoCallTokenMapping[conferenceName],
           conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
           conferenceStatusCallbackEvent: ['join']
         });
@@ -3136,10 +3184,13 @@ export function setupVoiceAgentRoutes(app: Express): void {
 
     console.info(`\n[ANSWERING-SERVICE] ✓ Overflow call received: ${callSid} from ${callerIDNumber} to ${dialedNumber}`);
 
-    if (!callSid || !callToken || !callerIDNumber) {
-      console.error('[ANSWERING-SERVICE] ✗ Missing required parameters');
+    if (!callSid || !callerIDNumber) {
+      console.error('[ANSWERING-SERVICE] ✗ Missing required parameters (callSid or callerIDNumber)');
       res.status(400).send('<Response><Say>Invalid request</Say></Response>');
       return;
+    }
+    if (!callToken) {
+      console.warn('[ANSWERING-SERVICE] ⚠️ No CallToken in webhook body — fresh token will be generated from OpenAI API');
     }
 
     const domain = process.env.DOMAIN || req.get('host');
@@ -3209,6 +3260,11 @@ export function setupVoiceAgentRoutes(app: Express): void {
     console.info(`[ANSWERING-SERVICE] Adding answering-service agent to conference: ${conferenceName}`);
     
     try {
+      const freshToken = await generateOpenAICallToken();
+      const effectiveToken = freshToken || ConferenceNametoCallTokenMapping[conferenceName];
+      if (!freshToken) {
+        console.warn('[ANSWERING-SERVICE] ⚠️ Fresh token generation failed — falling back to webhook token');
+      }
       const participant = await twilioClient.conferences(conferenceName)
         .participants
         .create({
@@ -3216,7 +3272,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
           label: 'virtual agent',
           to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=answering-service`,
           earlyMedia: true,
-          callToken: ConferenceNametoCallTokenMapping[conferenceName],
+          callToken: effectiveToken,
           conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
           conferenceStatusCallbackEvent: ['join']
         });
@@ -3371,7 +3427,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
           label: 'virtual agent',
           to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=appointment-confirmation`,
           earlyMedia: true,
-          callToken: ConferenceNametoCallTokenMapping[conferenceName],
+          callToken: (await generateOpenAICallToken()) || ConferenceNametoCallTokenMapping[conferenceName],
           conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
           conferenceStatusCallbackEvent: ['join']
         });
