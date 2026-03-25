@@ -159,8 +159,8 @@ export const TRIAGE_OUTCOME_MAPPINGS: Record<TriageOutcome, TriageMapping> = {
   patient_insists_urgent: {
     requestTypeId: REQUEST_TYPES.PATIENT_ASSISTANCE,
     requestReasonId: REQUEST_REASONS.CALLBACK_REQUEST,
-    priority: 'urgent',
-    requiresTransfer: true,
+    priority: 'high',
+    requiresTransfer: false,
   },
   medical_professional_calling: {
     requestTypeId: REQUEST_TYPES.PATIENT_ASSISTANCE,

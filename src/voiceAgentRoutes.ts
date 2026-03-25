@@ -1171,6 +1171,7 @@ async function observeCall(
     callerPhone: from,
     dialedNumber: to,
     callSid: twilioCallSid,
+    callId: callId,
   };
   
   // Create agent with correct signature per agent type

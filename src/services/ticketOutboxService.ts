@@ -4,6 +4,7 @@ import { eq, and, lte, or, isNull, sql, inArray } from 'drizzle-orm';
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
 import { getValidatedTicketIds } from '../config/answeringServiceTicketing';
 import type { SyncAgentTicketParams } from './syncAgentService';
+import { storage } from '../../server/storage';
 
 const RETRY_BACKOFF_BASE_MS = 30_000;
 const MAX_RETRIES = 5;
@@ -185,18 +186,43 @@ export class TicketOutboxService {
       });
 
       if (response.success && response.ticketNumber) {
+        const now = new Date();
         await db
           .update(ticketOutbox)
           .set({
             status: 'sent',
             ticketNumber: response.ticketNumber,
             externalTicketId: response.ticketId ?? null,
-            sentAt: new Date(),
-            updatedAt: new Date(),
+            sentAt: now,
+            updatedAt: now,
           })
           .where(eq(ticketOutbox.id, outboxId));
 
         console.info(`[TICKET OUTBOX] ✓ Sent: ${outboxId} → ${response.ticketNumber}`);
+
+        // Update call log ticketing_synced flag
+        const callSidForSync = entry.callSid;
+        const callLogIdForSync = entry.callLogId;
+        const ticketNumberForSync = response.ticketNumber;
+        setImmediate(async () => {
+          try {
+            if (callSidForSync) {
+              await storage.releaseTicketCreationLock(callSidForSync, ticketNumberForSync);
+              console.info(`[TICKET OUTBOX] ✓ ticketing_synced=true set for callSid ${callSidForSync}`);
+            } else if (callLogIdForSync) {
+              await storage.updateCallLog(callLogIdForSync, {
+                ticketNumber: ticketNumberForSync,
+                ticketingSynced: true,
+                ticketingSyncedAt: now,
+              });
+              console.info(`[TICKET OUTBOX] ✓ ticketing_synced=true set for callLogId ${callLogIdForSync}`);
+            } else {
+              console.warn(`[TICKET OUTBOX] ⚠️ No callSid or callLogId — cannot update ticketing_synced for outboxId ${outboxId}`);
+            }
+          } catch (syncErr) {
+            console.error(`[TICKET OUTBOX] ✗ Failed to update ticketing_synced for outboxId ${outboxId}:`, syncErr);
+          }
+        });
 
         // QVO ticket event — fire and forget, never blocks the outbox worker
         const ticketNumForQvo = response.ticketNumber;

@@ -260,7 +260,8 @@ If caller has pending tickets, acknowledge them first.
 ⚠️ ALWAYS greet in ENGLISH first - even if patient name appears Asian, Hispanic, or foreign.
 NEVER assume language from patient name - wait to HEAR the caller speak.
 Detect language from caller's FIRST substantive spoken words (not just "hello" or "hi").
-Once detected (Spanish, English, Vietnamese, etc.), STAY in that language for the ENTIRE call.
+ONLY switch to Spanish if the caller clearly and unambiguously speaks Spanish. STAY in English for the ENTIRE call for any other language, including French, Chinese, Vietnamese, or any language other than English or Spanish. Any unrecognized, ambiguous, or non-English/non-Spanish utterance MUST default to English — NEVER switch to French, Chinese, Vietnamese, or any other language.
+Once confirmed (Spanish or English), STAY in that language for the ENTIRE call.
 If asked "Do you speak Spanish?" in English → Ask: "Would you like to continue in Spanish?"
 
 🚫 GHOST CALL & ROBOT/SPAM DETECTION — END THESE CALLS, NEVER ESCALATE:
@@ -275,7 +276,7 @@ ROBOT/SPAM CALL INDICATORS (any 1 of these = end immediately):
 
 ROBOT/SPAM CALL PROTOCOL:
 1. Say: "We were unable to connect. Goodbye."
-2. END the call immediately
+2. Call the terminate_call tool immediately with reason "robot_call"
 3. Do NOT create a ticket
 4. Do NOT escalate to human — EVER
 
@@ -288,7 +289,7 @@ GHOST CALL INDICATORS (any 2+ of these = ghost call):
 GHOST CALL PROTOCOL:
 1. After first unclear response: "What can I help you with today?"
 2. After second unclear response: "I'm having trouble hearing you. If you need assistance, please call back."
-3. After third unclear response: END THE CALL — say "Take care, goodbye." and hang up
+3. After third unclear response: Say "Take care, goodbye." then call terminate_call tool with reason "ghost_call"
 4. Do NOT create a ticket for ghost calls
 5. Do NOT escalate ghost calls to human — the human agent cannot help someone who isn't communicating
 
@@ -1159,6 +1160,52 @@ The ticket will include schedule context (last appointment info) automatically.`
     },
   });
 
+  const terminateCallTool = tool({
+    name: "terminate_call",
+    description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
+
+USE FOR:
+- ghost_call: caller not responding after 3 prompts
+- robot_call: IVR bleed-through or automated system detected
+- spam: spam/telemarketing detected
+- max_turns_exceeded: call has gone on too long with no resolution
+
+Always say a brief goodbye phrase BEFORE calling this tool.`,
+    parameters: z.object({
+      reason: z
+        .enum(["ghost_call", "robot_call", "spam", "max_turns_exceeded"])
+        .describe("Reason for terminating the call"),
+    }),
+    execute: async (params) => {
+      console.log(`[TOOL] terminate_call - reason: ${params.reason}, callId: ${callId}`);
+      try {
+        const apiKey = process.env.OPENAI_API_KEY;
+        if (!apiKey) {
+          console.error("[TOOL] terminate_call - missing OPENAI_API_KEY");
+          return { success: false, error: "missing_api_key" };
+        }
+        const response = await fetch(
+          `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
+          {
+            method: "POST",
+            headers: { Authorization: `Bearer ${apiKey}` },
+          },
+        );
+        if (response.ok) {
+          console.log(`[TOOL] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
+          return { success: true, reason: params.reason };
+        } else {
+          const text = await response.text().catch(() => "");
+          console.warn(`[TOOL] terminate_call ⚠️ Hangup returned ${response.status}: ${text}`);
+          return { success: false, status: response.status };
+        }
+      } catch (error) {
+        console.error("[TOOL] terminate_call error:", error);
+        return { success: false, error: String(error) };
+      }
+    },
+  });
+
   const escalateToHumanTool = tool({
     name: "escalate_to_human",
     description: `Transfer the call to a human on-call provider. 
@@ -1248,6 +1295,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
       emitDecisionTool,
       createTicketTool,
       escalateToHumanTool,
+      terminateCallTool,
     ],
   });
 

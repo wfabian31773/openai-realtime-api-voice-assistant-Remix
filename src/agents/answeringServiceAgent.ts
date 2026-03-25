@@ -448,7 +448,8 @@ If caller says no/goodbye/thanks/ok:
    - ⚠️ ALWAYS greet in ENGLISH first - even if patient name appears Asian, Hispanic, or foreign
    - NEVER assume language from patient name - wait to HEAR the caller speak
    - Detect language from caller's FIRST substantive spoken response
-   - Once detected (Spanish, English, Vietnamese, etc.), STAY in that language for the ENTIRE call
+   - ONLY switch to Spanish if the caller clearly and unambiguously speaks Spanish. For ANY other language — French, Chinese, Vietnamese, or anything other than English or Spanish — STAY in English. Any unrecognized or ambiguous utterance MUST default to English.
+   - Once confirmed (Spanish or English), STAY in that language for the ENTIRE call
    - Do NOT switch languages mid-conversation even if you hear fragments in other languages
    - If genuinely unclear after caller speaks, ask ONCE: "Would you prefer English or Spanish?"
    - Audio noise or unclear speech does NOT mean language change
@@ -459,6 +460,15 @@ If caller says no/goodbye/thanks/ok:
 7. Capture as much detail as possible in the description
 8. Be warm, professional, and efficient
 
+===== FRUSTRATED CALLER PROTOCOL =====
+When caller signals frustration (raised tone, repetition, "I've called before", "I've been waiting"):
+1. FIRST — acknowledge the frustration BEFORE collecting any information:
+   "I'm really sorry you've had to deal with this — let me make sure your message gets to the right person right away."
+2. THEN proceed to collect name and callback number
+3. Create a ticket even with PARTIAL information (name + callback number alone is sufficient)
+   - A ticket with minimal details is ALWAYS better than no ticket
+4. Do NOT skip ticket creation because the caller is agitated or provides minimal info
+
 ===== GHOST CALL DETECTION =====
 If caller is not engaging after 2 prompts:
 - Single syllables only: "mm", "uh", "ok" with no actual request
@@ -468,8 +478,8 @@ If caller is not engaging after 2 prompts:
 PROTOCOL:
 1. First unclear: "How can I help you today?"
 2. Second unclear: "I'm having trouble hearing you. Please call back if you need assistance."
-3. END the call - do NOT create a ticket for ghost calls
-4. Do NOT keep the call running for minutes waiting
+3. Say "Take care, goodbye." then call terminate_call tool with reason "ghost_call" — do NOT keep the call running for minutes waiting
+4. Do NOT create a ticket for ghost calls
 
 ===== PRIORITY DETECTION =====
 - URGENT: retinal detachment, sudden vision loss, severe pain, post-op complications
@@ -988,6 +998,56 @@ Use patient data from phone lookup when available - don't ask for info you alrea
     },
   });
 
+  const terminateCallTool = tool({
+    name: "terminate_call",
+    description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
+
+USE FOR:
+- ghost_call: caller not responding after 2 prompts
+- robot_call: IVR bleed-through or automated system detected
+- spam: spam/telemarketing detected
+- max_turns_exceeded: call has gone on too long with no resolution
+
+Always say a brief goodbye phrase BEFORE calling this tool.`,
+    parameters: z.object({
+      reason: z
+        .enum(["ghost_call", "robot_call", "spam", "max_turns_exceeded"])
+        .describe("Reason for terminating the call"),
+    }),
+    execute: async (params) => {
+      console.log(`[${agentTag}] terminate_call - reason: ${params.reason}, callId: ${callId || 'unknown'}`);
+      try {
+        const apiKey = process.env.OPENAI_API_KEY;
+        if (!apiKey) {
+          console.error(`[${agentTag}] terminate_call - missing OPENAI_API_KEY`);
+          return { success: false, error: "missing_api_key" };
+        }
+        if (!callId) {
+          console.error(`[${agentTag}] terminate_call - missing callId`);
+          return { success: false, error: "missing_call_id" };
+        }
+        const response = await fetch(
+          `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
+          {
+            method: "POST",
+            headers: { Authorization: `Bearer ${apiKey}` },
+          },
+        );
+        if (response.ok) {
+          console.log(`[${agentTag}] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
+          return { success: true, reason: params.reason };
+        } else {
+          const text = await response.text().catch(() => "");
+          console.warn(`[${agentTag}] terminate_call ⚠️ Hangup returned ${response.status}: ${text}`);
+          return { success: false, status: response.status };
+        }
+      } catch (error) {
+        console.error(`[${agentTag}] terminate_call error:`, error);
+        return { success: false, error: String(error) };
+      }
+    },
+  });
+
   const agent = new RealtimeAgent({
     name: "Overflow Answering Service Agent",
     handoffDescription: "Handles daytime overflow calls for Optical, Tech Support, and Surgery Coordination",
@@ -997,6 +1057,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       checkOpenTicketsTool,
       classifyRequestTool,
       createTicketTool,
+      terminateCallTool,
     ],
   });
 

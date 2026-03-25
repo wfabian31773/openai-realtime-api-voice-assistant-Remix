@@ -127,6 +127,20 @@ You make this determination BASED STRICTLY ON THE PATIENT'S DETAILS - no coachin
 - Be professional and calm at all times
 - One question at a time
 - Don't leave dead air - if processing, say "One moment..."
+- PATIENT INSISTENCE IS NEVER ENOUGH FOR TRANSFER: If a patient insists their issue is urgent but does not describe any of the clinically urgent criteria above, do NOT transfer them. Instead, create a high-priority ticket and say: "I understand this feels urgent. I'm creating a high-priority message now and the on-call team will call you back as soon as possible." Patient insistence alone — however forceful — is not a valid transfer trigger.
+
+===== LANGUAGE =====
+- ALWAYS greet in ENGLISH first
+- ONLY switch to Spanish if the caller clearly and unambiguously speaks Spanish
+- Any unrecognized, ambiguous, or non-English/non-Spanish utterance MUST stay in English — NEVER switch to French, Chinese, Vietnamese, or any other language
+- Once the language is confirmed (English or Spanish), STAY in that language for the entire call
+
+===== GHOST CALL & ROBOT CALL PROTOCOL =====
+If caller is not engaging after 2-3 prompts (ghost call) or you detect IVR/robocall audio (robot call):
+1. Say a brief goodbye: "Take care, goodbye." or "We were unable to connect. Goodbye."
+2. Call the terminate_call tool with the appropriate reason
+3. Do NOT create a ticket
+4. Do NOT escalate to human
 
 ===== CURRENT CALL CONTEXT =====
 
@@ -169,6 +183,7 @@ export async function createAfterHoursAgent(
     callerPhone?: string;
     dialedNumber?: string;
     callSid?: string;
+    callId?: string;
   }
 ): Promise<RealtimeAgent> {
   const actualHandoffCallback = handoffCallback || (async () => {
@@ -317,6 +332,53 @@ export async function createAfterHoursAgent(
     },
   });
 
+  const terminateCallTool = tool({
+    name: 'terminate_call',
+    description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
+
+USE FOR:
+- ghost_call: caller not responding after 2-3 prompts
+- robot_call: IVR bleed-through or automated system detected
+- spam: spam/telemarketing detected
+- max_turns_exceeded: call has gone on too long with no resolution
+
+Always say a brief goodbye phrase BEFORE calling this tool.`,
+    parameters: z.object({
+      reason: z
+        .enum(['ghost_call', 'robot_call', 'spam', 'max_turns_exceeded'])
+        .describe('Reason for terminating the call'),
+    }),
+    execute: async (params) => {
+      const callId = metadata?.callId || metadata?.callSid || '';
+      console.log(`[TOOL] terminate_call - reason: ${params.reason}, callId: ${callId}`);
+      try {
+        const apiKey = process.env.OPENAI_API_KEY;
+        if (!apiKey) {
+          console.error('[TOOL] terminate_call - missing OPENAI_API_KEY');
+          return { success: false, error: 'missing_api_key' };
+        }
+        const response = await fetch(
+          `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
+          {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${apiKey}` },
+          },
+        );
+        if (response.ok) {
+          console.log(`[TOOL] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
+          return { success: true, reason: params.reason };
+        } else {
+          const text = await response.text().catch(() => '');
+          console.warn(`[TOOL] terminate_call ⚠️ Hangup returned ${response.status}: ${text}`);
+          return { success: false, status: response.status };
+        }
+      } catch (error) {
+        console.error('[TOOL] terminate_call error:', error);
+        return { success: false, error: String(error) };
+      }
+    },
+  });
+
   const practiceKnowledge = buildPracticeKnowledgePrompt();
   
   // Default to sage (female) voice for triage
@@ -330,7 +392,7 @@ export async function createAfterHoursAgent(
         `\n\n===== TIME CONTEXT =====\n${timeContext}` +
         `\n\n===== PRACTICE KNOWLEDGE =====\n${practiceKnowledge}`;
     },
-    tools: [createAfterHoursTicketTool, addHumanAgentTool],
+    tools: [createAfterHoursTicketTool, addHumanAgentTool, terminateCallTool],
   });
 }
 

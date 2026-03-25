@@ -636,17 +636,13 @@ export class SyncAgentService {
       if (response.success && response.ticketNumber) {
         console.info(`[SYNC AGENT] ✓ Ticket created via simplified endpoint: ${response.ticketNumber}`);
         
-        // Update local database with ticket number
+        // Update local database with ticket number and mark ticketing_synced
         if (callSid) {
           try {
-            const callLog = await storage.getCallLogBySid(callSid);
-            if (callLog) {
-              await storage.updateCallLog(callLog.id, {
-                ticketNumber: response.ticketNumber,
-              });
-            }
+            await storage.releaseTicketCreationLock(callSid, response.ticketNumber);
+            console.info(`[SYNC AGENT] ✓ ticketing_synced=true set for callSid ${callSid}`);
           } catch (e) {
-            console.warn(`[SYNC AGENT] Could not update local call log for ${callSid}:`, e);
+            console.error(`[SYNC AGENT] ✗ Failed to update ticketing_synced for ${callSid}:`, e);
           }
         }
 

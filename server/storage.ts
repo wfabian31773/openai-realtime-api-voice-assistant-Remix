@@ -453,7 +453,11 @@ export class DatabaseStorage implements IStorage {
       .update(callLogs)
       .set({ 
         ticketCreationPending: null,
-        ...(ticketNumber ? { ticketNumber } : {})
+        ...(ticketNumber ? {
+          ticketNumber,
+          ticketingSynced: true,
+          ticketingSyncedAt: new Date(),
+        } : {})
       })
       .where(eq(callLogs.callSid, callSid));
   }
