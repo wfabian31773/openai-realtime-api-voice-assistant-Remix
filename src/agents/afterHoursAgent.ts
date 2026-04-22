@@ -106,8 +106,9 @@ You make this determination BASED STRICTLY ON THE PATIENT'S DETAILS - no coachin
 
    IF URGENT:
    - "Based on what you're describing, I want to get you connected with our on-call team right away."
-   - Create ticket with urgent priority
-   - Transfer to human agent
+   - ⚠️ MANDATORY: Call create_after_hours_ticket FIRST (before transfer_to_human)
+   - ONLY THEN call transfer_to_human
+   - If the on-call team does not answer, the ticket you already created ensures the patient will be called back
    
    IF NOT URGENT:
    - "I understand your concern. Based on what you've described, this is something our team can help you with ${nextBizDay.contextPhrase}. Let me make sure your message gets to the right person."
@@ -194,6 +195,10 @@ export async function createAfterHoursAgent(
     console.warn('[PATIENT INFO] Default callback used');
     return { success: true, message: "Patient information recorded" };
   });
+
+  // Track whether a ticket was created before transfer — used to auto-create one if agent skips it
+  let ticketCreatedBeforeTransfer = false;
+  let lastPatientInfo: any = null;
   
   const callerPhone = metadata?.callerPhone;
   console.log('[Urgent Triage Agent] Creating agent:', {
@@ -223,10 +228,46 @@ export async function createAfterHoursAgent(
 
   const addHumanAgentTool = tool({
     name: 'transfer_to_human',
-    description: 'Transfer call to human on-call agent. Use ONLY for truly urgent conditions.',
+    description: 'Transfer call to human on-call agent. Use ONLY for truly urgent conditions. ALWAYS call create_after_hours_ticket BEFORE calling this tool.',
     parameters: z.object({}),
     execute: async () => {
       console.log('[TOOL] transfer_to_human - initiating Twilio handoff');
+
+      // Safety net: if agent skipped ticket creation, auto-create an urgent transfer ticket
+      if (!ticketCreatedBeforeTransfer) {
+        console.warn('[TOOL] transfer_to_human called WITHOUT prior ticket — auto-creating urgent transfer ticket');
+        try {
+          const { SyncAgentService } = await import('../services/syncAgentService');
+          const mapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // urgent default
+          const autoPhone = lastPatientInfo?.phone_number || callerPhone || '';
+          const formattedAutoPhone = autoPhone.replace(/\D/g, '').length === 10
+            ? `+1${autoPhone.replace(/\D/g, '')}`
+            : autoPhone.startsWith('+') ? autoPhone : `+${autoPhone.replace(/\D/g, '')}`;
+
+          await SyncAgentService.createTicket({
+            departmentId: AFTER_HOURS_DEPARTMENT_ID,
+            requestTypeId: mapping.requestTypeId,
+            requestReasonId: mapping.requestReasonId,
+            patientFirstName: lastPatientInfo?.patient_name?.split(' ')[0] || 'Unknown',
+            patientLastName: lastPatientInfo?.patient_name?.split(' ').slice(1).join(' ') || 'Caller',
+            patientPhone: formattedAutoPhone,
+            description: lastPatientInfo?.reason
+              ? `URGENT TRANSFER (ticket auto-created): ${lastPatientInfo.reason}`
+              : 'URGENT TRANSFER: Patient requested urgent assistance — on-call team was contacted. Ticket auto-created because call was transferred before ticket creation.',
+            priority: 'urgent',
+            callData: {
+              callSid: metadata?.callSid,
+              callerPhone,
+              dialedNumber: metadata?.dialedNumber,
+              agentUsed: 'urgent-triage',
+            },
+          });
+          console.log('[TOOL] Auto-created urgent transfer ticket for unanswered transfer');
+        } catch (autoTicketErr) {
+          console.error('[TOOL] Failed to auto-create transfer ticket:', autoTicketErr);
+        }
+      }
+
       try {
         await actualHandoffCallback();
         console.log('[TOOL] Human agent added to conference');
@@ -307,6 +348,15 @@ export async function createAfterHoursAgent(
         if (result.success && result.ticketNumber) {
           console.log('[TICKET] Created:', result.ticketNumber, '| Urgent:', mapping.requiresTransfer);
           
+          // Mark ticket as created so transfer_to_human knows a ticket exists
+          ticketCreatedBeforeTransfer = true;
+          lastPatientInfo = {
+            patient_name: `${params.patient_first_name} ${params.patient_last_name}`,
+            phone_number: formattedPhone,
+            reason: params.description,
+            triage_outcome: params.triage_outcome,
+          };
+
           await actualRecordPatientInfoCallback({
             patient_name: `${params.patient_first_name} ${params.patient_last_name}`,
             phone_number: formattedPhone,

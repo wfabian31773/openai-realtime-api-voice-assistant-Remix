@@ -409,6 +409,13 @@ Ask what they need help with - be thorough. Good prompts:
 - "Tell me more about [issue] so I can pass along the right information"
 - "Is there anything else you'd like me to include in the message?"
 
+**STEP 4B - SURGERY COORDINATION REQUIREMENT (department_id = 2)**
+⚠️ If the caller's request will be routed to Surgery Coordination, you MUST ask:
+"Are you currently scheduled for surgery with us, and if so, who is your surgeon?"
+- If they give a surgeon name → include it as provider_name in create_ticket
+- If they are not scheduled or don't know → still ask: "Which doctor have you been seeing here?"
+- DO NOT create a Surgery ticket without a provider_name or provider_id — the ticket cannot be routed without a surgeon
+
 **STEP 5 - CLASSIFY & CREATE TICKET (MANDATORY - DO NOT SKIP)**
 ⚠️ CRITICAL: You MUST call these tools before confirming to the caller:
 1. Call classify_request first to get department, requestTypeId, requestReasonId
@@ -444,6 +451,7 @@ If caller says no/goodbye/thanks/ok:
 ===== HARD RULES =====
 1. ⚠️ TICKET BEFORE CONFIRM: You MUST call create_ticket and receive success=true BEFORE saying "I've passed your message" or any confirmation. NEVER assume a ticket was created - verify the tool response.
 2. ⚠️ LOOKUP BEFORE CLAIMING NO RECORDS: When caller asks about appointments and you don't have their data from phone lookup, you MUST call lookup_schedule with their name+DOB BEFORE saying "I wasn't able to find your records". NEVER claim records don't exist without calling the tool first.
+3. ⚠️ SURGERY REQUIRES SURGEON: NEVER create a Surgery Coordination ticket (department_id=2) without a provider_name or provider_id. Always ask "Who is your surgeon?" or "Which doctor have you been seeing here?" before creating a Surgery ticket. If create_ticket returns validationError with missingFields containing 'surgeon name', ask the caller for their surgeon before retrying.
 3. LANGUAGE LOCK: 
    - ⚠️ ALWAYS greet in ENGLISH first - even if patient name appears Asian, Hispanic, or foreign
    - NEVER assume language from patient name - wait to HEAR the caller speak
@@ -825,6 +833,17 @@ Use patient data from phone lookup when available - don't ask for info you alrea
         return {
           success: false,
           message: "Could not parse date of birth - please confirm month, day, and year",
+        };
+      }
+
+      // Surgery department REQUIRES a surgeon/provider — tickets without a surgeon cannot be routed
+      if (params.department_id === 2 && !params.provider_id && !params.provider_name) {
+        console.warn(`[${agentTag}] Surgery ticket attempted without surgeon — blocking creation`);
+        return {
+          success: false,
+          validationError: true,
+          missingFields: ['surgeon name'],
+          message: 'Surgery Coordination tickets require a surgeon name. Please ask the patient: "Are you currently scheduled for surgery with us, and if so, who is your surgeon?"',
         };
       }
 
