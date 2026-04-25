@@ -816,6 +816,59 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
       if (humanCallSid) {
         handoffReadyResolvers.delete(humanCallSid);
       }
+
+      // CREATE FALLBACK TICKET: Human didn't answer — create an urgent callback ticket
+      // so staff knows to call the patient back
+      console.warn('[HANDOFF] Creating fallback ticket because human did not answer the transfer');
+      try {
+        const { SyncAgentService } = await import('./services/syncAgentService');
+        const { AFTER_HOURS_DEPARTMENT_ID, TRIAGE_OUTCOME_MAPPINGS } = await import('./config/afterHoursTicketing');
+
+        // Use escalationDetails if available, otherwise fall back to minimal info
+        const urgentMapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // generic urgent
+        const patientFirst = escalationDetails?.patientFirstName || 'Unknown';
+        const patientLast  = escalationDetails?.patientLastName  || 'Caller';
+        const rawPhone     = callerID || '';
+        const formattedPhone = rawPhone.replace(/\D/g, '').length === 10
+          ? `+1${rawPhone.replace(/\D/g, '')}`
+          : rawPhone.startsWith('+') ? rawPhone : `+${rawPhone.replace(/\D/g, '')}`;
+
+        const descParts: string[] = [
+          'URGENT TRANSFER NOT ANSWERED: The patient was transferred to the on-call team but no one picked up.',
+          'Please call the patient back immediately.',
+        ];
+        if (escalationDetails?.reason) {
+          descParts.push(`Reason: ${escalationDetails.reason}`);
+        }
+        if (escalationDetails?.symptomsSummary) {
+          descParts.push(`Symptoms: ${escalationDetails.symptomsSummary}`);
+        }
+
+        const ticketResult = await SyncAgentService.createTicket({
+          departmentId: AFTER_HOURS_DEPARTMENT_ID,
+          requestTypeId: urgentMapping.requestTypeId,
+          requestReasonId: urgentMapping.requestReasonId,
+          patientFirstName: patientFirst,
+          patientLastName: patientLast,
+          patientPhone: formattedPhone,
+          description: descParts.join('\n'),
+          priority: 'urgent',
+          callData: {
+            callSid: getTwilioCallSid(conferenceName),
+            callerPhone: callerID,
+            agentUsed: 'after-hours',
+          },
+        });
+
+        if (ticketResult.success) {
+          console.log('[HANDOFF] ✓ Fallback ticket created:', ticketResult.ticketNumber);
+        } else {
+          console.error('[HANDOFF] ✗ Fallback ticket creation failed:', ticketResult.error);
+        }
+      } catch (ticketErr) {
+        console.error('[HANDOFF] ✗ Exception creating fallback ticket:', ticketErr);
+      }
+
       return;
     }
     
