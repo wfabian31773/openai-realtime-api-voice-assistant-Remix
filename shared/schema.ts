@@ -1292,3 +1292,14 @@ export const ticketOutbox = pgTable("ticket_outbox", {
 
 export type TicketOutboxEntry = typeof ticketOutbox.$inferSelect;
 export type InsertTicketOutboxEntry = typeof ticketOutbox.$inferInsert;
+
+// Generic app-level settings (key-value store)
+export const appSettings = pgTable("app_settings", {
+  key: varchar("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  updatedBy: varchar("updated_by"),
+});
+
+export type AppSetting = typeof appSettings.$inferSelect;
+export type InsertAppSetting = typeof appSettings.$inferInsert;

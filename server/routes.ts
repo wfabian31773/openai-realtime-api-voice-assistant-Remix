@@ -3816,6 +3816,74 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ── App Settings: nightly reconciliation schedule ──────────────────────────
+
+  app.get('/api/settings/nightly-reconcile-hour', isAuthenticated, requireRole('admin'), async (_req, res) => {
+    try {
+      const { db } = await import('./db');
+      const { appSettings } = await import('../shared/schema');
+      const { eq } = await import('drizzle-orm');
+
+      const rawEnv = process.env.NIGHTLY_RECONCILE_HOUR_UTC;
+      const parsedEnv = rawEnv !== undefined ? parseInt(rawEnv, 10) : NaN;
+      const DEFAULT_HOUR = (!isNaN(parsedEnv) && parsedEnv >= 0 && parsedEnv <= 23) ? parsedEnv : 6;
+
+      const rows = await db
+        .select()
+        .from(appSettings)
+        .where(eq(appSettings.key, 'nightly_reconcile_hour_utc'));
+
+      const dbHour = rows.length > 0 ? parseInt(rows[0].value, 10) : NaN;
+      const hour = (rows.length > 0 && !isNaN(dbHour) && dbHour >= 0 && dbHour <= 23) ? dbHour : DEFAULT_HOUR;
+      const updatedAt = rows.length > 0 ? rows[0].updatedAt : null;
+      const updatedBy = rows.length > 0 ? rows[0].updatedBy : null;
+      const source = (rows.length > 0 && !isNaN(dbHour) && dbHour >= 0 && dbHour <= 23) ? 'database' : 'default';
+
+      return res.json({ hour, updatedAt, updatedBy, source });
+    } catch (error) {
+      console.error('[SETTINGS] Error fetching nightly reconcile hour:', error);
+      res.status(500).json({ error: 'Failed to fetch setting' });
+    }
+  });
+
+  app.put('/api/settings/nightly-reconcile-hour', isAuthenticated, requireRole('admin'), async (req, res) => {
+    try {
+      const { db } = await import('./db');
+      const { appSettings, users } = await import('../shared/schema');
+      const { eq } = await import('drizzle-orm');
+
+      const { hour } = req.body;
+      if (hour === undefined || hour === null) {
+        return res.status(400).json({ error: 'hour is required' });
+      }
+      const parsed = parseInt(String(hour), 10);
+      if (isNaN(parsed) || parsed < 0 || parsed > 23) {
+        return res.status(400).json({ error: 'hour must be an integer between 0 and 23' });
+      }
+
+      const userId: string | undefined = (req.session as any)?.userId;
+      let updatedByEmail: string | null = null;
+      if (userId) {
+        const userRows = await db.select({ email: users.email }).from(users).where(eq(users.id, userId));
+        updatedByEmail = userRows[0]?.email ?? null;
+      }
+
+      await db
+        .insert(appSettings)
+        .values({ key: 'nightly_reconcile_hour_utc', value: String(parsed), updatedBy: updatedByEmail })
+        .onConflictDoUpdate({
+          target: appSettings.key,
+          set: { value: String(parsed), updatedAt: new Date(), updatedBy: updatedByEmail },
+        });
+
+      console.log(`[SETTINGS] Nightly reconcile hour updated to ${parsed}:00 UTC by ${updatedByEmail ?? 'unknown'}`);
+      return res.json({ success: true, hour: parsed });
+    } catch (error) {
+      console.error('[SETTINGS] Error updating nightly reconcile hour:', error);
+      res.status(500).json({ error: 'Failed to update setting' });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }

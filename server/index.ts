@@ -274,7 +274,26 @@ function parseNightlyHour(raw: string | undefined): number {
   return parsed;
 }
 
-const NIGHTLY_RECONCILE_HOUR_UTC = parseNightlyHour(process.env.NIGHTLY_RECONCILE_HOUR_UTC);
+const NIGHTLY_RECONCILE_HOUR_UTC_DEFAULT = parseNightlyHour(process.env.NIGHTLY_RECONCILE_HOUR_UTC);
+
+async function getNightlyHourUtc(): Promise<number> {
+  try {
+    const { db } = await import('./db');
+    const { appSettings } = await import('../shared/schema');
+    const { eq } = await import('drizzle-orm');
+    const rows = await db
+      .select({ value: appSettings.value })
+      .from(appSettings)
+      .where(eq(appSettings.key, 'nightly_reconcile_hour_utc'));
+    if (rows.length > 0) {
+      const parsed = parseInt(rows[0].value, 10);
+      if (!isNaN(parsed) && parsed >= 0 && parsed <= 23) return parsed;
+    }
+  } catch {
+    // fall through to default
+  }
+  return NIGHTLY_RECONCILE_HOUR_UTC_DEFAULT;
+}
 
 async function runNightlyReconciliation(): Promise<void> {
   try {
@@ -311,13 +330,14 @@ async function runNightlyReconciliation(): Promise<void> {
 }
 
 function scheduleNightlyReconciliation(): void {
-  const scheduleNext = () => {
+  const scheduleNext = async () => {
+    const hourUtc = await getNightlyHourUtc();
     const now = new Date();
     const next = new Date(Date.UTC(
       now.getUTCFullYear(),
       now.getUTCMonth(),
       now.getUTCDate(),
-      NIGHTLY_RECONCILE_HOUR_UTC,
+      hourUtc,
       0,
       0,
       0,
@@ -326,7 +346,7 @@ function scheduleNightlyReconciliation(): void {
       next.setUTCDate(next.getUTCDate() + 1);
     }
     const msUntilNext = next.getTime() - now.getTime();
-    console.log(`[NIGHTLY] Reconciliation scheduled for ${next.toISOString()} — runs daily at ${String(NIGHTLY_RECONCILE_HOUR_UTC).padStart(2, '0')}:00 UTC (in ${Math.round(msUntilNext / 60000)} min)`);
+    console.log(`[NIGHTLY] Reconciliation scheduled for ${next.toISOString()} — runs daily at ${String(hourUtc).padStart(2, '0')}:00 UTC (in ${Math.round(msUntilNext / 60000)} min)`);
     setTimeout(async () => {
       await runNightlyReconciliation();
       scheduleNext();

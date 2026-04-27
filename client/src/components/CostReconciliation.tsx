@@ -24,6 +24,8 @@ import {
   Phone,
   Download,
   AlertTriangle,
+  Clock,
+  Save,
 } from 'lucide-react'
 
 interface ReconciliationSummary {
@@ -190,6 +192,9 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
   const [csvError, setCsvError] = useState<string | null>(null)
   const [showCsvDetails, setShowCsvDetails] = useState(false)
   const [twilioImportResult, setTwilioImportResult] = useState<TwilioCsvImportResponse | null>(null)
+  const [scheduleEditHour, setScheduleEditHour] = useState<number | null>(null)
+  const [scheduleSaveError, setScheduleSaveError] = useState<string | null>(null)
+  const [scheduleSaved, setScheduleSaved] = useState(false)
 
   const { data: reconciliation, isLoading, isFetching } = useQuery({
     queryKey: ['reconciliation-summary', startDate, endDate],
@@ -256,6 +261,33 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
     onSuccess: (data) => {
       setTwilioImportResult(data)
       queryClient.invalidateQueries({ queryKey: ['twilio-costs'] })
+    },
+  })
+
+  const { data: nightlySchedule } = useQuery({
+    queryKey: ['nightly-reconcile-hour'],
+    queryFn: async () => {
+      const { data } = await apiClient.get<{ hour: number; updatedAt: string | null; updatedBy: string | null; source: string }>('/settings/nightly-reconcile-hour')
+      return data
+    },
+    retry: 1,
+  })
+
+  const nightlyScheduleMutation = useMutation({
+    mutationFn: async (hour: number) => {
+      const { data } = await apiClient.put('/settings/nightly-reconcile-hour', { hour })
+      return data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['nightly-reconcile-hour'] })
+      setScheduleEditHour(null)
+      setScheduleSaved(true)
+      setScheduleSaveError(null)
+      setTimeout(() => setScheduleSaved(false), 3000)
+    },
+    onError: (err: unknown) => {
+      const apiErr = err as { response?: { data?: { error?: string } }; message?: string }
+      setScheduleSaveError(apiErr?.response?.data?.error || apiErr?.message || 'Failed to save')
     },
   })
 
@@ -781,6 +813,93 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
           </CardContent>
         </Card>
       )}
+
+      {/* Nightly Reconciliation Schedule */}
+      <Card className="border-border bg-card">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Clock className="h-5 w-5 text-amber-500" />
+            Nightly Reconciliation Schedule
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Automatic reconciliation runs once per day at the configured UTC hour
+          </p>
+        </CardHeader>
+        <CardContent>
+          {nightlySchedule ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 flex items-center gap-3">
+                  <Clock className="h-5 w-5 text-amber-500 flex-shrink-0" />
+                  <div>
+                    <p className="text-xs text-muted-foreground">Current Schedule</p>
+                    <p className="text-xl font-bold text-foreground">
+                      {String(nightlySchedule.hour).padStart(2, '0')}:00 UTC
+                    </p>
+                    {nightlySchedule.source === 'database' && nightlySchedule.updatedBy && (
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Set by {nightlySchedule.updatedBy}
+                        {nightlySchedule.updatedAt && (
+                          <> on {new Date(nightlySchedule.updatedAt).toLocaleDateString()}</>
+                        )}
+                      </p>
+                    )}
+                    {nightlySchedule.source === 'default' && (
+                      <p className="text-xs text-muted-foreground mt-0.5">Using default (env var)</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-end gap-2">
+                  <div>
+                    <label className="text-xs text-muted-foreground block mb-1">Change Hour (0–23 UTC)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={23}
+                      value={scheduleEditHour ?? nightlySchedule.hour}
+                      onChange={(e) => {
+                        setScheduleSaved(false)
+                        setScheduleSaveError(null)
+                        setScheduleEditHour(parseInt(e.target.value, 10))
+                      }}
+                      className="w-20 rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    />
+                  </div>
+                  <button
+                    onClick={() => {
+                      const h = scheduleEditHour ?? nightlySchedule.hour
+                      if (h >= 0 && h <= 23) nightlyScheduleMutation.mutate(h)
+                    }}
+                    disabled={nightlyScheduleMutation.isPending || scheduleEditHour === null || scheduleEditHour === nightlySchedule.hour}
+                    className="flex items-center gap-1.5 rounded-md bg-amber-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+                  >
+                    <Save className="h-3.5 w-3.5" />
+                    {nightlyScheduleMutation.isPending ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+              </div>
+
+              {scheduleSaved && (
+                <div className="flex items-center gap-2 text-sm text-green-600 dark:text-green-400">
+                  <CheckCircle className="h-4 w-4" />
+                  Schedule updated. The new hour will take effect at the next scheduled run.
+                </div>
+              )}
+              {scheduleSaveError && (
+                <div className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400">
+                  <AlertCircle className="h-4 w-4" />
+                  {scheduleSaveError}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="flex justify-center py-4">
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* CSV format/validation error */}
       {csvError && (
