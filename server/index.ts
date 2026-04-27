@@ -318,6 +318,35 @@ async function recordReconciliationRun(opts: {
   }
 }
 
+const RECONCILIATION_RUNS_RETENTION_DAYS_DEFAULT = 90;
+
+function getReconciliationRunsRetentionDays(): number {
+  const raw = process.env.RECONCILIATION_RUNS_RETENTION_DAYS;
+  if (raw) {
+    const parsed = parseInt(raw, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return RECONCILIATION_RUNS_RETENTION_DAYS_DEFAULT;
+}
+
+async function pruneOldReconciliationRuns(): Promise<void> {
+  try {
+    const retentionDays = getReconciliationRunsRetentionDays();
+    const { db } = await import('./db');
+    const { reconciliationRuns } = await import('../shared/schema');
+    const { lt } = await import('drizzle-orm');
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() - retentionDays);
+    const result: any = await db
+      .delete(reconciliationRuns)
+      .where(lt(reconciliationRuns.runAt, cutoff));
+    const deletedCount = result?.rowCount ?? 'unknown';
+    console.log(`[NIGHTLY] Pruned ${deletedCount} reconciliation run record(s) older than ${retentionDays} days (cutoff: ${cutoff.toISOString()})`);
+  } catch (err) {
+    console.error('[NIGHTLY] Failed to prune old reconciliation run records:', err);
+  }
+}
+
 async function runNightlyReconciliation(): Promise<void> {
   const startMs = Date.now();
   const yesterday = new Date();
@@ -344,6 +373,7 @@ async function runNightlyReconciliation(): Promise<void> {
         errorMessage: 'Skipped: already reconciled',
         durationMs: Date.now() - startMs,
       });
+      await pruneOldReconciliationRuns();
       return;
     }
 
@@ -353,6 +383,7 @@ async function runNightlyReconciliation(): Promise<void> {
     if (result.success) {
       console.log(`[NIGHTLY] Reconciliation complete for ${dateStr}: actual=$${result.actualUsd?.toFixed(2)}`);
       await recordReconciliationRun({ dateReconciled: dateStr, triggeredBy: 'auto', success: true, durationMs });
+      await pruneOldReconciliationRuns();
     } else {
       console.warn(`[NIGHTLY] Reconciliation failed for ${dateStr}: ${result.error}`);
       await recordReconciliationRun({ dateReconciled: dateStr, triggeredBy: 'auto', success: false, errorMessage: result.error, durationMs });
