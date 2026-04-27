@@ -701,19 +701,19 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
               {tableData.length > 0 && (
                 <div>
                   <h4 className="text-sm font-medium text-foreground mb-3">Daily Reconciliation Summary</h4>
-                  <div className="overflow-x-auto">
+                  <div className="overflow-x-auto max-h-96 overflow-y-auto border border-border rounded-md">
                     <table className="w-full text-sm">
-                      <thead>
+                      <thead className="sticky top-0 z-10 bg-background">
                         <tr className="border-b border-border text-left">
-                          <th className="pb-2 pr-4 text-xs font-medium text-muted-foreground">Date</th>
-                          <th className="pb-2 pr-4 text-xs font-medium text-muted-foreground text-right">OpenAI Actual</th>
-                          <th className="pb-2 pr-4 text-xs font-medium text-muted-foreground text-right">OpenAI Est.</th>
-                          <th className="pb-2 pr-4 text-xs font-medium text-muted-foreground text-right">Unallocated</th>
+                          <th className="pb-2 pt-2 pr-4 pl-0 text-xs font-medium text-muted-foreground">Date</th>
+                          <th className="pb-2 pt-2 pr-4 text-xs font-medium text-muted-foreground text-right">OpenAI Actual</th>
+                          <th className="pb-2 pt-2 pr-4 text-xs font-medium text-muted-foreground text-right">OpenAI Est.</th>
+                          <th className="pb-2 pt-2 pr-4 text-xs font-medium text-muted-foreground text-right">Unallocated</th>
                           {hasTwilioData && (
-                            <th className="pb-2 pr-4 text-xs font-medium text-emerald-600 dark:text-emerald-400 text-right">Twilio Actual</th>
+                            <th className="pb-2 pt-2 pr-4 text-xs font-medium text-emerald-600 dark:text-emerald-400 text-right">Twilio Actual</th>
                           )}
                           {hasTwilioData && (
-                            <th className="pb-2 text-xs font-medium text-foreground text-right">Combined Total</th>
+                            <th className="pb-2 pt-2 text-xs font-medium text-foreground text-right">Combined Total</th>
                           )}
                         </tr>
                       </thead>
@@ -753,19 +753,19 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
                           )
                         })}
                       </tbody>
-                      <tfoot>
+                      <tfoot className="sticky bottom-0 z-10 bg-background">
                         <tr className="border-t-2 border-border">
-                          <td className="pt-2 pr-4 text-xs font-semibold text-foreground">Total</td>
-                          <td className="pt-2 pr-4 text-right text-sm font-bold text-violet-600 dark:text-violet-400">{formatUsd(totalActual)}</td>
-                          <td className="pt-2 pr-4 text-right text-sm font-bold text-blue-600 dark:text-blue-400">{formatUsd(totalEstimated)}</td>
-                          <td className={`pt-2 pr-4 text-right text-xs font-semibold ${totalDelta > 0 ? 'text-amber-500' : totalDelta < 0 ? 'text-green-500' : 'text-muted-foreground'}`}>
+                          <td className="pt-2 pb-2 pr-4 text-xs font-semibold text-foreground">Total</td>
+                          <td className="pt-2 pb-2 pr-4 text-right text-sm font-bold text-violet-600 dark:text-violet-400">{formatUsd(totalActual)}</td>
+                          <td className="pt-2 pb-2 pr-4 text-right text-sm font-bold text-blue-600 dark:text-blue-400">{formatUsd(totalEstimated)}</td>
+                          <td className={`pt-2 pb-2 pr-4 text-right text-xs font-semibold ${totalDelta > 0 ? 'text-amber-500' : totalDelta < 0 ? 'text-green-500' : 'text-muted-foreground'}`}>
                             {totalDelta > 0 ? '+' : ''}{formatUsd(totalDelta)}
                           </td>
                           {hasTwilioData && (
-                            <td className="pt-2 pr-4 text-right text-sm font-bold text-emerald-600 dark:text-emerald-400">{formatUsd(twilioTotalActual)}</td>
+                            <td className="pt-2 pb-2 pr-4 text-right text-sm font-bold text-emerald-600 dark:text-emerald-400">{formatUsd(twilioTotalActual)}</td>
                           )}
                           {hasTwilioData && (
-                            <td className="pt-2 text-right text-sm font-bold text-foreground">{formatUsd(combinedTotalSpend)}</td>
+                            <td className="pt-2 pb-2 text-right text-sm font-bold text-foreground">{formatUsd(combinedTotalSpend)}</td>
                           )}
                         </tr>
                       </tfoot>
