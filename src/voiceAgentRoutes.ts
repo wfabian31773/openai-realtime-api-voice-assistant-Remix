@@ -959,6 +959,23 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
 
               console.info(`[POST-CALL] Cost and grading processed for handoff call ${callLogId}`);
 
+              // Twilio Lookup enrichment — run if the AI didn't collect a caller name
+              try {
+                const { DatabaseStorage } = await import('../server/storage');
+                const storageForLookup = new DatabaseStorage();
+                const handoffCallLog = await storageForLookup.getCallLog(callLogId);
+                if (!handoffCallLog?.callerName && callMeta.from) {
+                  const { lookupCallerName } = await import('./lib/twilioClient');
+                  const enrichedName = await lookupCallerName(callMeta.from);
+                  if (enrichedName) {
+                    await storageForLookup.updateCallLog(callLogId, { callerName: enrichedName });
+                    console.info(`[LOOKUP] Enriched callerName for handoff call ${callLogId}: ${enrichedName}`);
+                  }
+                }
+              } catch (lookupErr) {
+                console.warn('[LOOKUP] Handoff caller-name enrichment step failed (non-fatal):', (lookupErr as Error)?.message ?? lookupErr);
+              }
+
               // QVO event — 20-second delay lets Twilio costs reconcile first
               const callLogIdForQvo = callLogId;
               setTimeout(async () => {
@@ -2249,6 +2266,22 @@ async function observeCall(
               } else {
                 console.error(`[POST-CALL] ✗ Ticketing API failed after ${ticketResult.attempts} attempts for ${twilioCallSid}`);
               }
+            }
+
+            // Twilio Lookup enrichment — if no callerName was collected by the agent,
+            // attempt a carrier lookup and persist the result (prefixed with [Lookup]).
+            try {
+              const latestCallLog = await storage.getCallLog(dbCallLogId!);
+              if (!latestCallLog?.callerName && callerPhone) {
+                const { lookupCallerName } = await import('./lib/twilioClient');
+                const enrichedName = await lookupCallerName(callerPhone);
+                if (enrichedName) {
+                  await storage.updateCallLog(dbCallLogId!, { callerName: enrichedName });
+                  console.info(`[LOOKUP] Enriched callerName for ${dbCallLogId}: ${enrichedName}`);
+                }
+              }
+            } catch (lookupErr) {
+              console.warn('[LOOKUP] Caller-name enrichment step failed (non-fatal):', (lookupErr as Error)?.message ?? lookupErr);
             }
 
             // QVO event — fire after a 20-second delay so Twilio costs have time to reconcile
