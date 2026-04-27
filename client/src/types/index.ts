@@ -68,7 +68,7 @@ export interface CallLog {
   humanAgentNumber?: string
   transcript?: string
   summary?: string
-  detectedConditions?: Record<string, any>
+  detectedConditions?: unknown
   recordingUrl?: string
   createdAt: string
   
@@ -137,6 +137,13 @@ export interface CallLog {
   inputTextTokens?: number
   outputTextTokens?: number
   inputCachedTokens?: number
+
+  // Ticketing
+  ticketNumber?: string
+  ticketingSynced?: boolean
+
+  // Escalation
+  escalationReason?: string
 }
 
 export interface SmsLog {

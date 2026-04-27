@@ -13,17 +13,121 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { AlertTriangle, Phone, Eye, Clock, User } from 'lucide-react'
+import { AlertTriangle, Phone, Eye, Clock, User, Copy, Check, X, ExternalLink } from 'lucide-react'
 import type { CallLog } from '@/types'
+
+function CopyPhoneButton({ phone, formatted }: { phone: string; formatted: string }) {
+  const [copied, setCopied] = React.useState(false)
+  const [failed, setFailed] = React.useState(false)
+
+  const handleCopy = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!navigator.clipboard) {
+      setFailed(true)
+      setTimeout(() => setFailed(false), 2000)
+      return
+    }
+    navigator.clipboard.writeText(phone).then(
+      () => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2000)
+      },
+      () => {
+        setFailed(true)
+        setTimeout(() => setFailed(false), 2000)
+      }
+    )
+  }
+
+  return (
+    <button
+      onClick={handleCopy}
+      title={failed ? 'Copy failed' : 'Copy phone number'}
+      className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors group"
+    >
+      <span>{formatted}</span>
+      {copied && <Check className="h-3 w-3 text-green-600" />}
+      {failed && <X className="h-3 w-3 text-red-500" />}
+      {!copied && !failed && (
+        <Copy className="h-3 w-3 opacity-0 group-hover:opacity-100 transition-opacity" />
+      )}
+    </button>
+  )
+}
+
+function LastUpdatedIndicator({ dataUpdatedAt }: { dataUpdatedAt: number }) {
+  const [secondsAgo, setSecondsAgo] = React.useState(0)
+
+  React.useEffect(() => {
+    const tick = () => setSecondsAgo(Math.floor((Date.now() - dataUpdatedAt) / 1000))
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [dataUpdatedAt])
+
+  const label =
+    secondsAgo < 5
+      ? 'just now'
+      : secondsAgo < 60
+      ? `${secondsAgo}s ago`
+      : `${Math.floor(secondsAgo / 60)}m ago`
+
+  return (
+    <span className="text-xs text-muted-foreground">
+      Last updated {label}
+    </span>
+  )
+}
+
+function getEscalationReason(call: CallLog): string | null {
+  if (call.escalationReason) return call.escalationReason
+
+  const dc: unknown = call.detectedConditions
+  if (!dc) return null
+
+  if (Array.isArray(dc)) {
+    const items = dc.filter((item): item is string => typeof item === 'string')
+    return items.length > 0 ? items.join(', ') : null
+  }
+
+  if (typeof dc === 'object' && dc !== null) {
+    const obj = dc as Record<string, unknown>
+
+    if (typeof obj.escalationReason === 'string' && obj.escalationReason) {
+      return obj.escalationReason
+    }
+
+    if (Array.isArray(obj.conditions)) {
+      const items = obj.conditions.filter((item): item is string => typeof item === 'string')
+      if (items.length > 0) return items.join(', ')
+    }
+
+    const trueKeys = Object.entries(obj)
+      .filter(([, v]) => v === true)
+      .map(([k]) => k.replace(/([A-Z])/g, ' $1').trim())
+    if (trueKeys.length > 0) return trueKeys.join(', ')
+
+    const strVals = Object.values(obj).filter(
+      (v): v is string => typeof v === 'string' && v.length > 0
+    )
+    if (strVals.length > 0) return strVals[0]
+  }
+
+  return null
+}
+
+function isNoAnswerTransfer(call: CallLog): boolean {
+  return !!(call.humanAgentNumber && call.status === 'transferred' && !call.duration)
+}
 
 export function UrgentCallsPage() {
   const navigate = useNavigate()
 
-  const { data: urgentCallsResponse, isLoading, isError } = useQuery({
+  const { data: urgentCallsResponse, isLoading, isError, dataUpdatedAt } = useQuery({
     queryKey: ['urgent-calls'],
     staleTime: 0,
     refetchOnMount: 'always',
-    refetchInterval: 30000,
+    refetchInterval: 15000,
     queryFn: async () => {
       const { data } = await apiClient.get<{
         data: CallLog[]
@@ -37,6 +141,17 @@ export function UrgentCallsPage() {
       return data
     },
   })
+
+  const { data: ticketPortalData } = useQuery({
+    queryKey: ['settings-ticket-portal-url'],
+    staleTime: 60000,
+    queryFn: async () => {
+      const { data } = await apiClient.get<{ url: string | null }>('/settings/ticket-portal-url')
+      return data
+    },
+  })
+
+  const ticketPortalUrl: string | null = ticketPortalData?.url ?? null
 
   const urgentCalls = React.useMemo(() => {
     if (!urgentCallsResponse?.data) return []
@@ -109,9 +224,12 @@ export function UrgentCallsPage() {
             <p className="text-muted-foreground">Calls transferred to on-call provider</p>
           </div>
         </div>
-        <Badge variant="destructive" className="text-lg px-4 py-2">
-          {urgentCalls.length} Total
-        </Badge>
+        <div className="flex items-center gap-3">
+          {dataUpdatedAt > 0 && <LastUpdatedIndicator dataUpdatedAt={dataUpdatedAt} />}
+          <Badge variant="destructive" className="text-lg px-4 py-2">
+            {urgentCalls.length} Total
+          </Badge>
+        </div>
       </div>
 
       <Card>
@@ -125,9 +243,9 @@ export function UrgentCallsPage() {
           {urgentCalls.length === 0 ? (
             <div className="py-12 text-center">
               <AlertTriangle className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
-              <p className="text-muted-foreground">No urgent calls yet</p>
+              <p className="text-muted-foreground font-medium">No urgent calls in the last 90 days</p>
               <p className="text-sm text-muted-foreground mt-1">
-                Calls that are transferred to the on-call provider will appear here
+                Calls transferred to the on-call provider appear here. An SMS notification is sent each time a new urgent transfer occurs.
               </p>
             </div>
           ) : (
@@ -137,59 +255,123 @@ export function UrgentCallsPage() {
                   <TableHead>Date/Time</TableHead>
                   <TableHead>Caller</TableHead>
                   <TableHead>Duration</TableHead>
+                  <TableHead>Escalation Reason</TableHead>
                   <TableHead>Agent</TableHead>
-                  <TableHead>Quality</TableHead>
-                  <TableHead>Summary</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Ticket</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {urgentCalls.map((call) => (
-                  <TableRow 
-                    key={call.id} 
-                    className="cursor-pointer hover:bg-red-50"
-                    onClick={() => navigate(`/call-logs/${call.id}`)}
-                  >
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <Clock className="h-4 w-4 text-muted-foreground" />
-                        <span className="font-medium">{formatDate(call.startTime)}</span>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <User className="h-4 w-4 text-muted-foreground" />
-                        <div>
-                          <div className="font-medium">{call.callerName || formatPhone(call.from)}</div>
-                          <div className="text-sm text-muted-foreground">{formatPhone(call.from)}</div>
+                {urgentCalls.map((call) => {
+                  const escalationReason = getEscalationReason(call)
+                  const noAnswer = isNoAnswerTransfer(call)
+                  const ticketHref = (() => {
+                    if (!call.ticketNumber || !ticketPortalUrl) return null
+                    try {
+                      const base = new URL(ticketPortalUrl.replace(/\/$/, ''))
+                      if (base.protocol !== 'https:' && base.protocol !== 'http:') return null
+                      return `${base.origin}${base.pathname}/tickets/${encodeURIComponent(call.ticketNumber)}`
+                    } catch {
+                      return null
+                    }
+                  })()
+
+                  return (
+                    <TableRow
+                      key={call.id}
+                      className="cursor-pointer hover:bg-red-50"
+                      onClick={() => navigate(`/call-logs/${call.id}`)}
+                    >
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <Clock className="h-4 w-4 text-muted-foreground" />
+                          <span className="font-medium">{formatDate(call.startTime)}</span>
                         </div>
-                      </div>
-                    </TableCell>
-                    <TableCell>{formatDuration(call.duration)}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{call.agentId || 'Greeter'}</Badge>
-                    </TableCell>
-                    <TableCell>{getQualityBadge(call.qualityScore)}</TableCell>
-                    <TableCell className="max-w-xs">
-                      <p className="text-sm text-muted-foreground truncate">
-                        {call.summary || 'No summary available'}
-                      </p>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          navigate(`/call-logs/${call.id}`)
-                        }}
-                      >
-                        <Eye className="h-4 w-4 mr-1" />
-                        View Details
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <User className="h-4 w-4 text-muted-foreground" />
+                          <div>
+                            <div className="font-medium">{call.callerName || formatPhone(call.from)}</div>
+                            {call.from && (
+                              <CopyPhoneButton
+                                phone={call.from}
+                                formatted={formatPhone(call.from)}
+                              />
+                            )}
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell>{formatDuration(call.duration)}</TableCell>
+                      <TableCell className="max-w-[200px]">
+                        {escalationReason ? (
+                          <span className="text-sm font-medium text-orange-700 capitalize">
+                            {escalationReason}
+                          </span>
+                        ) : (
+                          <span className="text-sm text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline">{call.agentId || 'Greeter'}</Badge>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-col gap-1">
+                          {getQualityBadge(call.qualityScore)}
+                          {noAnswer && (
+                            <Badge className="bg-orange-100 text-orange-800 border-orange-200 w-fit">
+                              No Answer
+                            </Badge>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {call.ticketNumber ? (
+                          ticketHref ? (
+                            <a
+                              href={ticketHref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-blue-100 text-blue-800 border border-blue-200 hover:bg-blue-200 transition-colors"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                              {call.ticketNumber}
+                            </a>
+                          ) : (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                navigate(`/call-logs/${call.id}`)
+                              }}
+                              title="View call details and ticket"
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-blue-100 text-blue-800 border border-blue-200 hover:bg-blue-200 transition-colors cursor-pointer"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                              {call.ticketNumber}
+                            </button>
+                          )
+                        ) : (
+                          <span className="text-sm text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            navigate(`/call-logs/${call.id}`)
+                          }}
+                        >
+                          <Eye className="h-4 w-4 mr-1" />
+                          View Details
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
               </TableBody>
             </Table>
           )}
@@ -202,16 +384,19 @@ export function UrgentCallsPage() {
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground space-y-2">
           <p>
-            <strong>What triggers an urgent transfer?</strong> The triage agent transfers calls 
-            when it detects red-flag symptoms like sudden vision loss, flashes with floaters, 
+            <strong>What triggers an urgent transfer?</strong> The triage agent transfers calls
+            when it detects red-flag symptoms like sudden vision loss, flashes with floaters,
             chemical exposure, eye trauma, or post-surgery complications with vision changes.
           </p>
           <p>
-            <strong>SMS Notifications:</strong> When configured, an SMS is sent to the 
+            <strong>SMS Notifications:</strong> When configured, an SMS is sent to the
             notification number each time an urgent call is transferred.
           </p>
           <p>
-            <strong>Review calls:</strong> Click any row to see full details including 
+            <strong>Lookback window:</strong> This screen shows urgent calls from the last 90 days.
+          </p>
+          <p>
+            <strong>Review calls:</strong> Click any row to see full details including
             the transcript, recording, and AI summary.
           </p>
         </CardContent>

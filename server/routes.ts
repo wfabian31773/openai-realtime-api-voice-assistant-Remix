@@ -1360,12 +1360,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const { db } = await import('./db');
       const { callLogs } = await import('../shared/schema');
-      const { eq, desc, count } = await import('drizzle-orm');
+      const { eq, and, desc, count, gte } = await import('drizzle-orm');
+
+      const ninetyDaysAgo = new Date();
+      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+      const urgentCondition = and(
+        eq(callLogs.transferredToHuman, true),
+        gte(callLogs.createdAt, ninetyDaysAgo)
+      );
 
       const urgentCalls = await db
         .select()
         .from(callLogs)
-        .where(eq(callLogs.transferredToHuman, true))
+        .where(urgentCondition)
         .orderBy(desc(callLogs.createdAt))
         .limit(limit)
         .offset((page - 1) * limit);
@@ -1373,7 +1380,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const [{ count: totalCount }] = await db
         .select({ count: count() })
         .from(callLogs)
-        .where(eq(callLogs.transferredToHuman, true));
+        .where(urgentCondition);
 
       res.json({
         data: urgentCalls.map(normalizeCallLog),
@@ -3983,6 +3990,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error('[SETTINGS] Error updating nightly reconcile hour:', error);
       res.status(500).json({ error: 'Failed to update setting' });
+    }
+  });
+
+  // ── App Settings: ticket portal URL ───────────────────────────────────────
+
+  app.get('/api/settings/ticket-portal-url', isAuthenticated, async (_req, res) => {
+    try {
+      const { db } = await import('./db');
+      const { appSettings } = await import('../shared/schema');
+      const { eq } = await import('drizzle-orm');
+
+      const rows = await db
+        .select()
+        .from(appSettings)
+        .where(eq(appSettings.key, 'ticket_portal_url'));
+
+      const url = rows.length > 0 ? rows[0].value : null;
+      return res.json({ url });
+    } catch (error) {
+      console.error('[SETTINGS] Error fetching ticket portal URL:', error);
+      res.status(500).json({ error: 'Failed to fetch setting' });
     }
   });
 

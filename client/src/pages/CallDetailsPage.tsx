@@ -1026,7 +1026,10 @@ export function CallDetailsPage() {
         </Card>
       )}
 
-      {callLog.detectedConditions && Object.keys(callLog.detectedConditions).length > 0 && (
+      {callLog.detectedConditions !== null &&
+        callLog.detectedConditions !== undefined &&
+        typeof callLog.detectedConditions === 'object' &&
+        Object.keys(callLog.detectedConditions).length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>Detected Conditions</CardTitle>
