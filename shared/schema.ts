@@ -1112,6 +1112,7 @@ export const dailyReconciliation = pgTable("daily_reconciliation", {
   processedAt: timestamp("processed_at").defaultNow(),
   hasDiscrepancyAlert: boolean("has_discrepancy_alert").default(false),
   discrepancyThresholdPct: numeric("discrepancy_threshold_pct", { precision: 5, scale: 2 }).default('15'),
+  resolvedAt: timestamp("resolved_at"),
 }, (table) => [
   index("idx_daily_reconciliation_date").on(table.dateUtc),
 ]);

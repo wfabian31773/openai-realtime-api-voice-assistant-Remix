@@ -256,13 +256,25 @@ export class OrgBillingLedgerService {
       const hasDiscrepancyAlert = Math.abs(deltaPercent) > DISCREPANCY_THRESHOLD_PCT;
 
       const [existingRow] = await db
-        .select({ hasDiscrepancyAlert: dailyReconciliation.hasDiscrepancyAlert })
+        .select({
+          hasDiscrepancyAlert: dailyReconciliation.hasDiscrepancyAlert,
+          resolvedAt: dailyReconciliation.resolvedAt,
+        })
         .from(dailyReconciliation)
         .where(eq(dailyReconciliation.dateUtc, dateStr))
         .limit(1);
 
       const alertAlreadySent = existingRow?.hasDiscrepancyAlert === true;
       const shouldSendAlert = hasDiscrepancyAlert && !alertAlreadySent;
+
+      let resolvedAt: Date | null;
+      if (hasDiscrepancyAlert) {
+        resolvedAt = null;
+      } else if (!hasDiscrepancyAlert && alertAlreadySent) {
+        resolvedAt = new Date();
+      } else {
+        resolvedAt = existingRow?.resolvedAt ?? null;
+      }
 
       if (shouldSendAlert) {
         console.warn(
@@ -303,6 +315,7 @@ export class OrgBillingLedgerService {
           reconciledAt: new Date(),
           hasDiscrepancyAlert,
           discrepancyThresholdPct: DISCREPANCY_THRESHOLD_PCT.toFixed(2),
+          resolvedAt,
         })
         .onConflictDoUpdate({
           target: dailyReconciliation.dateUtc,
@@ -318,6 +331,7 @@ export class OrgBillingLedgerService {
             reconciledAt: new Date(),
             hasDiscrepancyAlert,
             discrepancyThresholdPct: DISCREPANCY_THRESHOLD_PCT.toFixed(2),
+            resolvedAt,
           },
         });
 

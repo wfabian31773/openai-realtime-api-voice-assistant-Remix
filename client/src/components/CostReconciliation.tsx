@@ -48,6 +48,7 @@ interface ReconciliationSummary {
     modelBreakdown: any
     hasDiscrepancyAlert: boolean | null
     discrepancyThresholdPct: string | null
+    resolvedAt: string | null
   }>
   modelCostSummary: Record<string, {
     totalTokens: number
@@ -769,6 +770,56 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
                         </tr>
                       </tfoot>
                     </table>
+                  </div>
+                </div>
+              )}
+
+              {reconciliation.dailyReconciliations.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-medium text-foreground mb-3">Daily Reconciliation History</h4>
+                  <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                    {reconciliation.dailyReconciliations.slice(0, 30).map(day => {
+                      const actual = day.actualUsd !== null ? Number(day.actualUsd) : null
+                      const estimated = day.estimatedUsd !== null ? Number(day.estimatedUsd) : null
+                      const delta = day.deltaPercent !== null ? Number(day.deltaPercent) : null
+                      const isAlert = !!day.hasDiscrepancyAlert
+                      const isResolved = !isAlert && !!day.resolvedAt
+                      return (
+                        <div key={day.dateUtc} className="flex items-center justify-between text-sm rounded-md bg-muted/40 px-3 py-2 gap-2">
+                          <span className="text-muted-foreground w-16 flex-shrink-0">{formatDate(day.dateUtc)}</span>
+                          <div className="flex gap-3 text-right flex-1 justify-end items-center flex-wrap">
+                            {actual !== null && (
+                              <span className="text-xs text-violet-500">act {formatUsd(actual)}</span>
+                            )}
+                            {estimated !== null && (
+                              <span className="text-xs text-blue-500">est {formatUsd(estimated)}</span>
+                            )}
+                            {delta !== null && (
+                              <span className={`text-xs ${Math.abs(delta) > (Number(day.discrepancyThresholdPct) || 15) ? 'text-amber-500' : 'text-muted-foreground'}`}>
+                                {delta > 0 ? '+' : ''}{delta.toFixed(1)}%
+                              </span>
+                            )}
+                            {isAlert && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 flex-shrink-0">
+                                <AlertTriangle className="h-3 w-3" />
+                                Alert
+                              </span>
+                            )}
+                            {isResolved && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/40 dark:text-green-300 flex-shrink-0">
+                                <CheckCircle className="h-3 w-3" />
+                                Resolved {new Date(day.resolvedAt!).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                              </span>
+                            )}
+                            {!isAlert && !isResolved && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground flex-shrink-0">
+                                OK
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               )}
