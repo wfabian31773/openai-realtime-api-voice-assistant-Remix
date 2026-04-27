@@ -403,4 +403,123 @@ describe('buildReconciliationCsv', () => {
     expect(twilioOnlyRow).toBeDefined();
     expect(twilioOnlyRow!['model_gpt-4o_cents']).toBe('0');
   });
+
+  it('appends a TOTAL row as the last row', () => {
+    const reconciliations = [
+      { dateUtc: '2025-01-01', actualUsd: '10.00', estimatedUsd: '9.00', deltaUsd: '1.00', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+      { dateUtc: '2025-01-02', actualUsd: '20.00', estimatedUsd: '18.00', deltaUsd: '2.00', deltaPercent: '11.11', hasDiscrepancyAlert: true },
+    ];
+    const csv = buildReconciliationCsv(reconciliations, [], []);
+    const rows = parseCsv(csv);
+    expect(rows[rows.length - 1].date).toBe('TOTAL');
+  });
+
+  it('TOTAL row sums actual_billed_usd across all data rows', () => {
+    const reconciliations = [
+      { dateUtc: '2025-01-01', actualUsd: '10.00', estimatedUsd: '9.00', deltaUsd: '1.00', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+      { dateUtc: '2025-01-02', actualUsd: '20.00', estimatedUsd: '18.00', deltaUsd: '2.00', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+    ];
+    const csv = buildReconciliationCsv(reconciliations, [], []);
+    const rows = parseCsv(csv);
+    const total = rows.find(r => r.date === 'TOTAL')!;
+    expect(parseFloat(total.actual_billed_usd)).toBeCloseTo(30.0, 4);
+  });
+
+  it('TOTAL row sums estimated_usd across all data rows', () => {
+    const reconciliations = [
+      { dateUtc: '2025-01-01', actualUsd: '10.00', estimatedUsd: '9.00', deltaUsd: '1.00', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+      { dateUtc: '2025-01-02', actualUsd: '20.00', estimatedUsd: '18.00', deltaUsd: '2.00', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+    ];
+    const csv = buildReconciliationCsv(reconciliations, [], []);
+    const rows = parseCsv(csv);
+    const total = rows.find(r => r.date === 'TOTAL')!;
+    expect(parseFloat(total.estimated_usd)).toBeCloseTo(27.0, 4);
+  });
+
+  it('TOTAL row sums delta_usd across all data rows', () => {
+    const reconciliations = [
+      { dateUtc: '2025-01-01', actualUsd: '10.00', estimatedUsd: '9.00', deltaUsd: '1.00', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+      { dateUtc: '2025-01-02', actualUsd: '20.00', estimatedUsd: '18.00', deltaUsd: '2.00', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+    ];
+    const csv = buildReconciliationCsv(reconciliations, [], []);
+    const rows = parseCsv(csv);
+    const total = rows.find(r => r.date === 'TOTAL')!;
+    expect(parseFloat(total.delta_usd)).toBeCloseTo(3.0, 4);
+  });
+
+  it('TOTAL row sums twilio_actual_usd across all data rows', () => {
+    const reconciliations = [
+      { dateUtc: '2025-01-01', actualUsd: '5.00', estimatedUsd: '4.50', deltaUsd: '0.50', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+    ];
+    const twilioRows = [
+      { dateUtc: '2025-01-01', totalCostCents: 1000 },
+      { dateUtc: '2025-01-02', totalCostCents: 2000 },
+    ];
+    const csv = buildReconciliationCsv(reconciliations, [], twilioRows);
+    const rows = parseCsv(csv);
+    const total = rows.find(r => r.date === 'TOTAL')!;
+    expect(parseFloat(total.twilio_actual_usd)).toBeCloseTo(30.0, 4);
+  });
+
+  it('TOTAL row sums combined_total_usd across all data rows', () => {
+    const reconciliations = [
+      { dateUtc: '2025-01-01', actualUsd: '5.00', estimatedUsd: '4.50', deltaUsd: '0.50', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+    ];
+    const twilioRows = [
+      { dateUtc: '2025-01-01', totalCostCents: 1000 },
+      { dateUtc: '2025-01-02', totalCostCents: 2000 },
+    ];
+    const csv = buildReconciliationCsv(reconciliations, [], twilioRows);
+    const rows = parseCsv(csv);
+    const total = rows.find(r => r.date === 'TOTAL')!;
+    expect(parseFloat(total.combined_total_usd)).toBeCloseTo(5.0 + 10.0 + 20.0, 4);
+  });
+
+  it('TOTAL row sums per-model cost columns across all data rows', () => {
+    const reconciliations = [
+      { dateUtc: '2025-01-01', actualUsd: '1.00', estimatedUsd: '0.90', deltaUsd: '0.10', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+      { dateUtc: '2025-01-02', actualUsd: '2.00', estimatedUsd: '1.80', deltaUsd: '0.20', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+    ];
+    const orgUsageRows = [
+      { dateUtc: '2025-01-01', model: 'gpt-4o', estimatedCostCents: 500 },
+      { dateUtc: '2025-01-01', model: 'gpt-4o-mini', estimatedCostCents: 100 },
+      { dateUtc: '2025-01-02', model: 'gpt-4o', estimatedCostCents: 800 },
+      { dateUtc: '2025-01-02', model: 'gpt-4o-mini', estimatedCostCents: 200 },
+    ];
+    const csv = buildReconciliationCsv(reconciliations, orgUsageRows, []);
+    const rows = parseCsv(csv);
+    const total = rows.find(r => r.date === 'TOTAL')!;
+    expect(parseFloat(total['model_gpt-4o_cents'])).toBeCloseTo(1300, 0);
+    expect(parseFloat(total['model_gpt-4o-mini_cents'])).toBeCloseTo(300, 0);
+  });
+
+  it('TOTAL row leaves delta_percent blank', () => {
+    const reconciliations = [
+      { dateUtc: '2025-01-01', actualUsd: '10.00', estimatedUsd: '9.00', deltaUsd: '1.00', deltaPercent: '11.11', hasDiscrepancyAlert: false },
+    ];
+    const csv = buildReconciliationCsv(reconciliations, [], []);
+    const rows = parseCsv(csv);
+    const total = rows.find(r => r.date === 'TOTAL')!;
+    expect(total.delta_percent).toBe('');
+  });
+
+  it('TOTAL row leaves has_discrepancy_alert blank', () => {
+    const reconciliations = [
+      { dateUtc: '2025-01-01', actualUsd: '10.00', estimatedUsd: '9.00', deltaUsd: '1.00', deltaPercent: '11.11', hasDiscrepancyAlert: true },
+    ];
+    const csv = buildReconciliationCsv(reconciliations, [], []);
+    const rows = parseCsv(csv);
+    const total = rows.find(r => r.date === 'TOTAL')!;
+    expect(total.has_discrepancy_alert).toBe('');
+  });
+
+  it('TOTAL row shows zeros when there are no data rows', () => {
+    const csv = buildReconciliationCsv([], [], []);
+    const rows = parseCsv(csv);
+    expect(rows.length).toBe(1);
+    const total = rows[0];
+    expect(total.date).toBe('TOTAL');
+    expect(total.actual_billed_usd).toBe('0.0000');
+    expect(total.combined_total_usd).toBe('0.0000');
+  });
 });

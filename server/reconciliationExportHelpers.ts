@@ -62,6 +62,13 @@ export function buildReconciliationCsv(
   ];
   const csvLines: string[] = [headers.join(',')];
 
+  let totalActualUsd = 0;
+  let totalEstimatedUsd = 0;
+  let totalDeltaUsd = 0;
+  let totalTwilioUsd = 0;
+  let totalCombinedUsd = 0;
+  const totalModelCents: Record<string, number> = {};
+
   for (const dateUtc of allDates) {
     const r = reconciliationByDate[dateUtc];
     const modelCosts = modelCostByDate[dateUtc] || {};
@@ -81,7 +88,29 @@ export function buildReconciliationCsv(
       ...modelValues,
     ];
     csvLines.push(row.join(','));
+
+    totalActualUsd += openaiUsd;
+    totalEstimatedUsd += Number(r?.estimatedUsd || 0);
+    totalDeltaUsd += Number(r?.deltaUsd || 0);
+    totalTwilioUsd += twilioUsd;
+    totalCombinedUsd += combinedUsd;
+    for (const m of allModels) {
+      totalModelCents[m] = (totalModelCents[m] || 0) + (modelCosts[m] || 0);
+    }
   }
+
+  const totalRow = [
+    'TOTAL',
+    totalActualUsd.toFixed(4),
+    totalEstimatedUsd.toFixed(4),
+    totalDeltaUsd.toFixed(4),
+    '',
+    '',
+    totalTwilioUsd.toFixed(4),
+    totalCombinedUsd.toFixed(4),
+    ...allModels.map(m => totalModelCents[m] || 0),
+  ];
+  csvLines.push(totalRow.join(','));
 
   return csvLines.join('\n');
 }
