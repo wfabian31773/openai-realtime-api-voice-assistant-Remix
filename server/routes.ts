@@ -2557,22 +2557,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const allModels = [...new Set(orgUsageRows.map(r => r.model))].sort();
 
+      const reconciliationByDate: Record<string, typeof reconciliations[0]> = {};
+      for (const r of reconciliations) {
+        reconciliationByDate[r.dateUtc] = r;
+      }
+
+      const allDates = [...new Set([
+        ...reconciliations.map(r => r.dateUtc),
+        ...twilioRows.map(r => r.dateUtc),
+      ])].sort();
+
       const headers = ['date', 'actual_billed_usd', 'estimated_usd', 'delta_usd', 'delta_percent', 'has_discrepancy_alert', 'twilio_actual_usd', 'combined_total_usd', ...allModels.map(m => `model_${m}_cents`)];
       const csvLines: string[] = [headers.join(',')];
 
-      for (const r of reconciliations) {
-        const modelCosts = modelCostByDate[r.dateUtc] || {};
+      for (const dateUtc of allDates) {
+        const r = reconciliationByDate[dateUtc];
+        const modelCosts = modelCostByDate[dateUtc] || {};
         const modelValues = allModels.map(m => modelCosts[m] || 0);
-        const twilioUsd = twilioCostByDate[r.dateUtc] || 0;
-        const openaiUsd = Number(r.actualUsd || 0);
+        const twilioUsd = twilioCostByDate[dateUtc] || 0;
+        const openaiUsd = Number(r?.actualUsd || 0);
         const combinedUsd = openaiUsd + twilioUsd;
         const row = [
-          r.dateUtc,
+          dateUtc,
           openaiUsd.toFixed(4),
-          Number(r.estimatedUsd || 0).toFixed(4),
-          Number(r.deltaUsd || 0).toFixed(4),
-          Number(r.deltaPercent || 0).toFixed(2),
-          r.hasDiscrepancyAlert ? 'true' : 'false',
+          Number(r?.estimatedUsd || 0).toFixed(4),
+          Number(r?.deltaUsd || 0).toFixed(4),
+          Number(r?.deltaPercent || 0).toFixed(2),
+          r?.hasDiscrepancyAlert ? 'true' : 'false',
           twilioUsd.toFixed(4),
           combinedUsd.toFixed(4),
           ...modelValues,
