@@ -282,6 +282,10 @@ export class OrgBillingLedgerService {
         console.info(
           `[ORG BILLING] Discrepancy alert for ${dateStr} already sent previously — skipping duplicate.`
         );
+      } else if (!hasDiscrepancyAlert && alertAlreadySent) {
+        console.info(
+          `[ORG BILLING] Discrepancy for ${dateStr} is now resolved (delta=${deltaPercent.toFixed(1)}% within threshold). Resetting alert flag so a future re-appearance will trigger a new notification.`
+        );
       }
 
       await db
