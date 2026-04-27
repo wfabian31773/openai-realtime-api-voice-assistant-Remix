@@ -159,6 +159,65 @@ describe('buildReconciliationCsv', () => {
     expect(row!['model_gpt-4o-mini_cents']).toBe('30');
   });
 
+  it('sums multiple org usage rows for the same date and model', () => {
+    const reconciliations = [
+      {
+        dateUtc: '2025-01-01',
+        actualUsd: '3.00',
+        estimatedUsd: '2.80',
+        deltaUsd: '0.20',
+        deltaPercent: '7.14',
+        hasDiscrepancyAlert: false,
+      },
+    ];
+
+    const orgUsageRows = [
+      { dateUtc: '2025-01-01', model: 'gpt-4o', estimatedCostCents: 100 },
+      { dateUtc: '2025-01-01', model: 'gpt-4o', estimatedCostCents: 75 },
+      { dateUtc: '2025-01-01', model: 'gpt-4o-mini', estimatedCostCents: 20 },
+      { dateUtc: '2025-01-01', model: 'gpt-4o-mini', estimatedCostCents: 5 },
+    ];
+
+    const twilioRows = [{ dateUtc: '2025-01-01', totalCostCents: 300 }];
+
+    const csv = buildReconciliationCsv(reconciliations, orgUsageRows, twilioRows);
+    const rows = parseCsv(csv);
+
+    const row = rows.find(r => r.date === '2025-01-01');
+    expect(row).toBeDefined();
+    expect(row!['model_gpt-4o_cents']).toBe('175');
+    expect(row!['model_gpt-4o-mini_cents']).toBe('25');
+  });
+
+  it('sorts model column headers alphabetically', () => {
+    const reconciliations = [
+      {
+        dateUtc: '2025-01-01',
+        actualUsd: '1.00',
+        estimatedUsd: '0.90',
+        deltaUsd: '0.10',
+        deltaPercent: '11.11',
+        hasDiscrepancyAlert: false,
+      },
+    ];
+
+    const orgUsageRows = [
+      { dateUtc: '2025-01-01', model: 'gpt-4o-mini', estimatedCostCents: 10 },
+      { dateUtc: '2025-01-01', model: 'gpt-4o', estimatedCostCents: 50 },
+      { dateUtc: '2025-01-01', model: 'gpt-3.5-turbo', estimatedCostCents: 5 },
+    ];
+
+    const csv = buildReconciliationCsv(reconciliations, orgUsageRows, []);
+    const headers = csv.split('\n')[0].split(',');
+    const modelHeaders = headers.filter(h => h.startsWith('model_'));
+
+    expect(modelHeaders).toEqual([
+      'model_gpt-3.5-turbo_cents',
+      'model_gpt-4o_cents',
+      'model_gpt-4o-mini_cents',
+    ]);
+  });
+
   it('outputs zero model costs for Twilio-only rows when org usage exists for other dates', () => {
     const reconciliations = [
       {
