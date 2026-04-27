@@ -251,6 +251,15 @@ export class OrgBillingLedgerService {
         }
       }
 
+      const DISCREPANCY_THRESHOLD_PCT = Number(process.env.RECONCILIATION_ALERT_THRESHOLD_PCT) || 15;
+      const hasDiscrepancyAlert = Math.abs(deltaPercent) > DISCREPANCY_THRESHOLD_PCT;
+
+      if (hasDiscrepancyAlert) {
+        console.warn(
+          `[ORG BILLING] DISCREPANCY ALERT for ${dateStr}: delta=${deltaPercent.toFixed(1)}% exceeds threshold of ${DISCREPANCY_THRESHOLD_PCT}%. Actual=$${actualUsd.toFixed(2)}, Estimated=$${estimatedUsd.toFixed(2)}`
+        );
+      }
+
       await db
         .insert(dailyReconciliation)
         .values({
@@ -264,6 +273,8 @@ export class OrgBillingLedgerService {
           unallocatedCents,
           modelBreakdown,
           reconciledAt: new Date(),
+          hasDiscrepancyAlert,
+          discrepancyThresholdPct: DISCREPANCY_THRESHOLD_PCT.toFixed(2),
         })
         .onConflictDoUpdate({
           target: dailyReconciliation.dateUtc,
@@ -277,6 +288,8 @@ export class OrgBillingLedgerService {
             unallocatedCents,
             modelBreakdown,
             reconciledAt: new Date(),
+            hasDiscrepancyAlert,
+            discrepancyThresholdPct: DISCREPANCY_THRESHOLD_PCT.toFixed(2),
           },
         });
 

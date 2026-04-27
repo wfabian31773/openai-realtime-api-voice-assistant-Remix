@@ -2165,7 +2165,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Import OpenAI usage CSV and generate audit report
   app.post('/api/analytics/import-openai-csv', isAuthenticated, requireRole('admin'), upload.single('csv'), async (req: any, res) => {
     try {
-      const { importCsvToDatabase, generateAuditReport } = await import('../src/services/csvCostImport');
+      const { importCsvToDatabase, generateAuditReport, validateCsvFormat } = await import('../src/services/csvCostImport');
 
       let csvContent: string;
       if (req.file) {
@@ -2176,17 +2176,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ success: false, error: 'No CSV file or content provided' });
       }
 
+      const validation = validateCsvFormat(csvContent);
+      if (!validation.valid) {
+        return res.status(400).json({
+          success: false,
+          detectedFormat: validation.format,
+          error: validation.error,
+          missingColumns: validation.missingColumns,
+        });
+      }
+
       const importResult = await importCsvToDatabase(csvContent);
       const auditReport = await generateAuditReport(csvContent);
 
       res.json({
         success: true,
+        detectedFormat: importResult.detectedFormat,
         import: importResult,
         audit: auditReport,
       });
     } catch (error) {
       console.error("Error importing OpenAI CSV:", error);
-      res.status(500).json({
+      res.status(400).json({
         success: false,
         error: error instanceof Error ? error.message : 'CSV import failed'
       });
@@ -2249,6 +2260,218 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error fetching reconciliation summary:", error);
       res.status(500).json({ error: 'Failed to fetch reconciliation summary' });
+    }
+  });
+
+  // Import Twilio usage CSV and store daily cost aggregates
+  app.post('/api/analytics/import-twilio-csv', isAuthenticated, requireRole('admin'), upload.single('csv'), async (req: any, res) => {
+    try {
+      const { parseTwilioCsv } = await import('../src/services/csvCostImport');
+      const { dailyTwilioCosts } = await import('../shared/schema');
+      const { db } = await import('./db');
+
+      let csvContent: string;
+      if (req.file) {
+        csvContent = req.file.buffer.toString('utf-8');
+      } else if (req.body.csvContent) {
+        csvContent = req.body.csvContent;
+      } else {
+        return res.status(400).json({ success: false, error: 'No CSV file or content provided' });
+      }
+
+      const rows = parseTwilioCsv(csvContent);
+
+      const byDate: Record<string, { totalCostCents: number; callCount: number; totalDurationSeconds: number; breakdown: Record<string, number> }> = {};
+      for (const row of rows) {
+        if (!byDate[row.dateUtc]) {
+          byDate[row.dateUtc] = { totalCostCents: 0, callCount: 0, totalDurationSeconds: 0, breakdown: {} };
+        }
+        byDate[row.dateUtc].totalCostCents += row.costCents;
+        byDate[row.dateUtc].callCount += 1;
+        byDate[row.dateUtc].totalDurationSeconds += row.durationSeconds;
+        byDate[row.dateUtc].breakdown[row.category] = (byDate[row.dateUtc].breakdown[row.category] || 0) + row.costCents;
+      }
+
+      const dates = Object.keys(byDate).sort();
+      for (const dateStr of dates) {
+        const d = byDate[dateStr];
+        await db.insert(dailyTwilioCosts).values({
+          dateUtc: dateStr,
+          totalCostCents: d.totalCostCents,
+          callCount: d.callCount,
+          totalDurationSeconds: d.totalDurationSeconds,
+          breakdown: d.breakdown,
+          source: 'csv',
+          importedAt: new Date(),
+        }).onConflictDoUpdate({
+          target: dailyTwilioCosts.dateUtc,
+          set: {
+            totalCostCents: d.totalCostCents,
+            callCount: d.callCount,
+            totalDurationSeconds: d.totalDurationSeconds,
+            breakdown: d.breakdown,
+            importedAt: new Date(),
+            updatedAt: new Date(),
+          },
+        });
+      }
+
+      const totalCostDollars = rows.reduce((sum, r) => sum + r.costCents / 100, 0);
+
+      res.json({
+        success: true,
+        rowsProcessed: rows.length,
+        datesImported: dates.length,
+        dateRange: dates.length > 0 ? { startDate: dates[0], endDate: dates[dates.length - 1] } : null,
+        totalCostDollars,
+      });
+    } catch (error) {
+      console.error('[TWILIO CSV] Import error:', error);
+      res.status(400).json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Twilio CSV import failed',
+      });
+    }
+  });
+
+  // Get Twilio cost data for the reconciliation screen
+  app.get('/api/analytics/twilio-costs', isAuthenticated, async (req, res) => {
+    try {
+      const { dailyTwilioCosts, callLogs } = await import('../shared/schema');
+      const { and, gte, lte, sql, isNotNull } = await import('drizzle-orm');
+      const { db } = await import('./db');
+
+      const startDate = req.query.startDate as string || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const endDate = req.query.endDate as string || new Date().toISOString().split('T')[0];
+
+      // Actual Twilio costs from imported CSV
+      const actualCosts = await db.select().from(dailyTwilioCosts)
+        .where(and(gte(dailyTwilioCosts.dateUtc, startDate), lte(dailyTwilioCosts.dateUtc, endDate)))
+        .orderBy(dailyTwilioCosts.dateUtc);
+
+      // Estimated Twilio costs from per-call twilioCostCents in call logs
+      const estimatedRows = await db
+        .select({
+          dateUtc: sql<string>`DATE(${callLogs.createdAt} AT TIME ZONE 'UTC')::text`,
+          estimatedCostCents: sql<number>`COALESCE(SUM(${callLogs.twilioCostCents}), 0)`,
+          callCount: sql<number>`COUNT(*)`,
+        })
+        .from(callLogs)
+        .where(
+          and(
+            gte(sql`DATE(${callLogs.createdAt} AT TIME ZONE 'UTC')::text`, startDate),
+            lte(sql`DATE(${callLogs.createdAt} AT TIME ZONE 'UTC')::text`, endDate),
+            isNotNull(callLogs.twilioCostCents),
+          )
+        )
+        .groupBy(sql`DATE(${callLogs.createdAt} AT TIME ZONE 'UTC')::text`)
+        .orderBy(sql`DATE(${callLogs.createdAt} AT TIME ZONE 'UTC')::text`);
+
+      // Build a map of estimated costs by date
+      const estimatedByDate: Record<string, { estimatedCostCents: number; callCount: number }> = {};
+      for (const row of estimatedRows) {
+        estimatedByDate[row.dateUtc] = {
+          estimatedCostCents: Number(row.estimatedCostCents),
+          callCount: Number(row.callCount),
+        };
+      }
+
+      // Merge actual and estimated into a unified daily view
+      const allDates = new Set([
+        ...actualCosts.map(r => r.dateUtc),
+        ...estimatedRows.map(r => r.dateUtc),
+      ]);
+
+      const daily = [...allDates].sort().map(dateUtc => {
+        const actual = actualCosts.find(r => r.dateUtc === dateUtc);
+        const est = estimatedByDate[dateUtc];
+        const actualCostCents = actual?.totalCostCents ?? null;
+        const estimatedCostCents = est?.estimatedCostCents ?? null;
+        const deltaCents = (actualCostCents !== null && estimatedCostCents !== null)
+          ? actualCostCents - estimatedCostCents
+          : null;
+        return {
+          dateUtc,
+          totalCostCents: actualCostCents,
+          estimatedCostCents,
+          deltaCents,
+          callCount: actual?.callCount ?? est?.callCount ?? 0,
+          totalDurationSeconds: actual?.totalDurationSeconds ?? 0,
+          breakdown: actual?.breakdown ?? null,
+        };
+      });
+
+      const totalActualCents = actualCosts.reduce((sum, r) => sum + (r.totalCostCents || 0), 0);
+      const totalEstimatedCents = estimatedRows.reduce((sum, r) => sum + Number(r.estimatedCostCents), 0);
+      const totalCallCount = actualCosts.reduce((sum, r) => sum + (r.callCount || 0), 0);
+
+      res.json({
+        daily,
+        totalCostDollars: totalActualCents / 100,
+        totalEstimatedDollars: totalEstimatedCents / 100,
+        totalDeltaDollars: (totalActualCents - totalEstimatedCents) / 100,
+        totalCallCount,
+        daysAvailable: actualCosts.length,
+        daysWithEstimates: estimatedRows.length,
+      });
+    } catch (error) {
+      console.error('[TWILIO COSTS] Fetch error:', error);
+      res.status(500).json({ error: 'Failed to fetch Twilio costs' });
+    }
+  });
+
+  // Export reconciliation report as CSV download
+  app.get('/api/analytics/reconciliation-export', isAuthenticated, async (req, res) => {
+    try {
+      const { dailyReconciliation, dailyOrgUsage } = await import('../shared/schema');
+      const { and, gte, lte } = await import('drizzle-orm');
+      const { db } = await import('./db');
+
+      const startDate = req.query.startDate as string || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const endDate = req.query.endDate as string || new Date().toISOString().split('T')[0];
+
+      const reconciliations = await db.select().from(dailyReconciliation)
+        .where(and(gte(dailyReconciliation.dateUtc, startDate), lte(dailyReconciliation.dateUtc, endDate)))
+        .orderBy(dailyReconciliation.dateUtc);
+
+      const orgUsageRows = await db.select().from(dailyOrgUsage)
+        .where(and(gte(dailyOrgUsage.dateUtc, startDate), lte(dailyOrgUsage.dateUtc, endDate)));
+
+      const modelCostByDate: Record<string, Record<string, number>> = {};
+      for (const row of orgUsageRows) {
+        if (!modelCostByDate[row.dateUtc]) modelCostByDate[row.dateUtc] = {};
+        modelCostByDate[row.dateUtc][row.model] = ((modelCostByDate[row.dateUtc][row.model] || 0) + (row.estimatedCostCents || 0));
+      }
+
+      const allModels = [...new Set(orgUsageRows.map(r => r.model))].sort();
+
+      const headers = ['date', 'actual_billed_usd', 'estimated_usd', 'delta_usd', 'delta_percent', 'has_discrepancy_alert', ...allModels.map(m => `model_${m}_cents`)];
+      const csvLines: string[] = [headers.join(',')];
+
+      for (const r of reconciliations) {
+        const modelCosts = modelCostByDate[r.dateUtc] || {};
+        const modelValues = allModels.map(m => modelCosts[m] || 0);
+        const row = [
+          r.dateUtc,
+          Number(r.actualUsd || 0).toFixed(4),
+          Number(r.estimatedUsd || 0).toFixed(4),
+          Number(r.deltaUsd || 0).toFixed(4),
+          Number(r.deltaPercent || 0).toFixed(2),
+          r.hasDiscrepancyAlert ? 'true' : 'false',
+          ...modelValues,
+        ];
+        csvLines.push(row.join(','));
+      }
+
+      const csvOutput = csvLines.join('\n');
+      const filename = `reconciliation_${startDate}_to_${endDate}.csv`;
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.send(csvOutput);
+    } catch (error) {
+      console.error('[RECON EXPORT] Error:', error);
+      res.status(500).json({ error: 'Failed to export reconciliation report' });
     }
   });
 

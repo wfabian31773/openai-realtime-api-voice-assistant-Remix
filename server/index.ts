@@ -258,6 +258,11 @@ async function cleanupStaleCallsOnStartup() {
   }
 }
 
+async function backfillMissingReconciliations(): Promise<void> {
+  const { backfillMissingReconciliations: doBackfill } = await import('../src/services/reconciliationBackfill');
+  return doBackfill();
+}
+
 async function startServer() {
   try {
     // Warm up database connection before starting server
@@ -289,6 +294,11 @@ async function startServer() {
       
       // Cleanup stale calls from previous sessions
       await cleanupStaleCallsOnStartup();
+      
+      // Backfill any missing reconciliation days (non-blocking)
+      backfillMissingReconciliations().catch(err => {
+        console.error('[STARTUP] Backfill reconciliation error:', err);
+      });
     });
   } catch (error) {
     console.error("Failed to start API server:", error);

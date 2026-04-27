@@ -215,6 +215,13 @@ async function startVoiceServer() {
     import('./services/sipHealthMonitor').then(({ start }) => {
       start();
     }).catch(err => console.error('[STARTUP] Failed to start SIP health monitor:', err));
+
+    // Backfill any missing reconciliation days from the last 7 days (non-blocking)
+    import('./services/reconciliationBackfill').then(({ backfillMissingReconciliations }) => {
+      backfillMissingReconciliations().catch((err: unknown) => {
+        console.error('[STARTUP] Backfill reconciliation error:', err);
+      });
+    }).catch((err: unknown) => console.error('[STARTUP] Failed to load reconciliation backfill:', err));
   });
 }
 

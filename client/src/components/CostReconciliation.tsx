@@ -21,6 +21,9 @@ import {
   TrendingUp,
   FileText,
   Cpu,
+  Phone,
+  Download,
+  AlertTriangle,
 } from 'lucide-react'
 
 interface ReconciliationSummary {
@@ -39,6 +42,8 @@ interface ReconciliationSummary {
     orgBilledCents: number | null
     unallocatedCents: number | null
     modelBreakdown: any
+    hasDiscrepancyAlert: boolean | null
+    discrepancyThresholdPct: string | null
   }>
   modelCostSummary: Record<string, {
     totalTokens: number
@@ -55,6 +60,9 @@ interface ReconciliationSummary {
 
 interface CsvImportResponse {
   success: boolean
+  detectedFormat?: string
+  error?: string
+  missingColumns?: string[]
   import: {
     totalRows: number
     skippedRows: number
@@ -62,6 +70,7 @@ interface CsvImportResponse {
     totalEstimatedCostDollars: number
     costByModel: Record<string, number>
     costByDate: Record<string, number>
+    detectedFormat?: string
   }
   audit: {
     period: { startDate: string; endDate: string }
@@ -85,6 +94,33 @@ interface CsvImportResponse {
       unallocatedDollars: number
     }>
   }
+}
+
+interface TwilioCostsResponse {
+  daily: Array<{
+    dateUtc: string
+    totalCostCents: number | null
+    estimatedCostCents: number | null
+    deltaCents: number | null
+    callCount: number
+    totalDurationSeconds: number
+    breakdown: Record<string, number> | null
+  }>
+  totalCostDollars: number
+  totalEstimatedDollars: number
+  totalDeltaDollars: number
+  totalCallCount: number
+  daysAvailable: number
+  daysWithEstimates: number
+}
+
+interface TwilioCsvImportResponse {
+  success: boolean
+  rowsProcessed: number
+  datesImported: number
+  dateRange: { startDate: string; endDate: string } | null
+  totalCostDollars: number
+  error?: string
 }
 
 const formatUsd = (dollars: number) => `$${dollars.toFixed(2)}`
@@ -121,6 +157,12 @@ const DeltaTooltip = ({ active, payload }: any) => {
   return null
 }
 
+const CSV_FORMAT_LABELS: Record<string, string> = {
+  'token-usage': 'Token Usage Export',
+  'audio-speeches': 'Audio Speeches (TTS) Export',
+  'completions': 'Completions Export',
+}
+
 interface CostReconciliationProps {
   startDate: string
   endDate: string
@@ -129,14 +171,27 @@ interface CostReconciliationProps {
 export function CostReconciliation({ startDate, endDate }: CostReconciliationProps) {
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const twilioFileInputRef = useRef<HTMLInputElement>(null)
   const [csvResult, setCsvResult] = useState<CsvImportResponse | null>(null)
+  const [csvError, setCsvError] = useState<string | null>(null)
   const [showCsvDetails, setShowCsvDetails] = useState(false)
+  const [twilioImportResult, setTwilioImportResult] = useState<TwilioCsvImportResponse | null>(null)
 
   const { data: reconciliation, isLoading, isFetching } = useQuery({
     queryKey: ['reconciliation-summary', startDate, endDate],
     queryFn: async () => {
       const params = new URLSearchParams({ startDate, endDate })
       const { data } = await apiClient.get<ReconciliationSummary>(`/analytics/reconciliation-summary?${params}`)
+      return data
+    },
+    retry: 1,
+  })
+
+  const { data: twilioCosts } = useQuery({
+    queryKey: ['twilio-costs', startDate, endDate],
+    queryFn: async () => {
+      const params = new URLSearchParams({ startDate, endDate })
+      const { data } = await apiClient.get<TwilioCostsResponse>(`/analytics/twilio-costs?${params}`)
       return data
     },
     retry: 1,
@@ -160,20 +215,54 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
       return data
     },
     onSuccess: (data) => {
-      setCsvResult(data)
-      setShowCsvDetails(true)
-      queryClient.invalidateQueries({ queryKey: ['reconciliation-summary'] })
+      if (data.success) {
+        setCsvResult(data)
+        setCsvError(null)
+        setShowCsvDetails(true)
+        queryClient.invalidateQueries({ queryKey: ['reconciliation-summary'] })
+      } else {
+        setCsvError(data.error || 'Import failed')
+        setCsvResult(null)
+      }
+    },
+    onError: (err: unknown) => {
+      const apiErr = err as { response?: { data?: { error?: string } }; message?: string }
+      const msg = apiErr?.response?.data?.error || apiErr?.message || 'CSV import failed'
+      setCsvError(msg)
+      setCsvResult(null)
+    },
+  })
+
+  const twilioCsvMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const text = await file.text()
+      const { data } = await apiClient.post<TwilioCsvImportResponse>('/analytics/import-twilio-csv', { csvContent: text })
+      return data
+    },
+    onSuccess: (data) => {
+      setTwilioImportResult(data)
+      queryClient.invalidateQueries({ queryKey: ['twilio-costs'] })
     },
   })
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (file) {
+      setCsvError(null)
       csvMutation.mutate(file)
     }
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''
-    }
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  const handleTwilioFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) twilioCsvMutation.mutate(file)
+    if (twilioFileInputRef.current) twilioFileInputRef.current.value = ''
+  }
+
+  const handleExportReport = () => {
+    const params = new URLSearchParams({ startDate, endDate })
+    window.location.href = `/api/analytics/reconciliation-export?${params}`
   }
 
   const chartData = (reconciliation?.dailyReconciliations || [])
@@ -183,6 +272,7 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
       estimated: Number(r.estimatedUsd) || 0,
       delta: Number(r.deltaUsd) || 0,
       deltaPercent: Number(r.deltaPercent) || 0,
+      hasAlert: r.hasDiscrepancyAlert,
     }))
     .sort((a, b) => a.date.localeCompare(b.date))
     .slice(-30)
@@ -202,8 +292,26 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
   const totalEstimated = reconciliation?.totalEstimatedUsd || 0
   const deltaPercent = totalActual > 0 ? ((totalDelta / totalActual) * 100) : 0
 
+  const alertDays = reconciliation?.dailyReconciliations.filter(r => r.hasDiscrepancyAlert) || []
+
   return (
     <div className="space-y-6">
+      {/* Discrepancy alert banner */}
+      {alertDays.length > 0 && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 flex items-start gap-3">
+          <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="font-medium text-amber-700 dark:text-amber-400">
+              Discrepancy Alert: {alertDays.length} day{alertDays.length > 1 ? 's' : ''} exceed threshold
+            </p>
+            <p className="text-sm text-amber-600 dark:text-amber-500 mt-1">
+              Days with delta &gt;{alertDays[0]?.discrepancyThresholdPct || 15}% between actual and estimated:&nbsp;
+              {alertDays.map(d => formatDate(d.dateUtc)).join(', ')}
+            </p>
+          </div>
+        </div>
+      )}
+
       <Card className="border-border bg-card">
         <CardHeader className="flex flex-row items-center justify-between">
           <div>
@@ -215,7 +323,7 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
               Actual OpenAI billing vs per-call estimates
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap justify-end">
             <input
               type="file"
               ref={fileInputRef}
@@ -223,13 +331,38 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
               onChange={handleFileUpload}
               className="hidden"
             />
+            <input
+              type="file"
+              ref={twilioFileInputRef}
+              accept=".csv"
+              onChange={handleTwilioFileUpload}
+              className="hidden"
+            />
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={csvMutation.isPending}
               className="flex items-center gap-2 rounded-md bg-muted px-3 py-1.5 text-sm font-medium text-foreground hover:bg-muted/80 disabled:opacity-50"
+              title="Import OpenAI usage CSV (token-usage, audio-speeches, or completions format)"
             >
               <Upload className={`h-4 w-4 ${csvMutation.isPending ? 'animate-pulse' : ''}`} />
-              Import CSV
+              Import OpenAI CSV
+            </button>
+            <button
+              onClick={() => twilioFileInputRef.current?.click()}
+              disabled={twilioCsvMutation.isPending}
+              className="flex items-center gap-2 rounded-md bg-muted px-3 py-1.5 text-sm font-medium text-foreground hover:bg-muted/80 disabled:opacity-50"
+              title="Import Twilio usage CSV"
+            >
+              <Phone className={`h-4 w-4 ${twilioCsvMutation.isPending ? 'animate-pulse' : ''}`} />
+              Import Twilio CSV
+            </button>
+            <button
+              onClick={handleExportReport}
+              className="flex items-center gap-2 rounded-md bg-muted px-3 py-1.5 text-sm font-medium text-foreground hover:bg-muted/80"
+              title="Download reconciliation report as CSV"
+            >
+              <Download className="h-4 w-4" />
+              Export Report
             </button>
             <button
               onClick={() => reconcileMutation.mutate()}
@@ -279,6 +412,9 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
                     {deltaPercent.toFixed(1)}% of billed
+                    {alertDays.length > 0 && (
+                      <span className="ml-1 text-amber-500">⚠ {alertDays.length} alert{alertDays.length > 1 ? 's' : ''}</span>
+                    )}
                   </p>
                 </div>
                 <div className="rounded-lg border border-border bg-muted/30 p-4 text-center">
@@ -340,11 +476,135 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
             <div className="py-8 text-center text-muted-foreground">
               <FileText className="mx-auto h-8 w-8" />
               <p className="mt-2">No reconciliation data yet</p>
-              <p className="text-xs mt-1">Click "Reconcile" to fetch actual billing data from OpenAI, or "Import CSV" to upload a usage export</p>
+              <p className="text-xs mt-1">Click "Reconcile" to fetch actual billing data from OpenAI, or "Import OpenAI CSV" to upload a usage export</p>
             </div>
           )}
         </CardContent>
       </Card>
+
+      {/* Twilio Cost Panel */}
+      {twilioCosts && (twilioCosts.daysAvailable > 0 || twilioCosts.daysWithEstimates > 0) && (
+        <Card className="border-border bg-card">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Phone className="h-5 w-5 text-primary" />
+              Twilio Cost Reconciliation
+            </CardTitle>
+            <p className="text-sm text-muted-foreground">
+              Actual (from imported CSV) vs Estimated (from per-call cost data)
+            </p>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 md:grid-cols-4">
+              <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-center">
+                <p className="text-xs text-muted-foreground">Actual (CSV Import)</p>
+                <p className="text-2xl font-bold text-primary">{formatUsd(twilioCosts.totalCostDollars)}</p>
+                <p className="text-xs text-muted-foreground mt-1">{twilioCosts.daysAvailable} days</p>
+              </div>
+              <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-4 text-center">
+                <p className="text-xs text-muted-foreground">Estimated (Per-Call)</p>
+                <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">{formatUsd(twilioCosts.totalEstimatedDollars)}</p>
+                <p className="text-xs text-muted-foreground mt-1">{twilioCosts.daysWithEstimates} days with logs</p>
+              </div>
+              <div className={`rounded-lg border p-4 text-center ${
+                Math.abs(twilioCosts.totalDeltaDollars) < twilioCosts.totalCostDollars * 0.1
+                  ? 'border-green-500/20 bg-green-500/5'
+                  : 'border-amber-500/20 bg-amber-500/5'
+              }`}>
+                <p className="text-xs text-muted-foreground">Delta (Actual − Est.)</p>
+                <p className={`text-2xl font-bold ${
+                  Math.abs(twilioCosts.totalDeltaDollars) < twilioCosts.totalCostDollars * 0.1
+                    ? 'text-green-600 dark:text-green-400'
+                    : 'text-amber-600 dark:text-amber-400'
+                }`}>
+                  {twilioCosts.totalDeltaDollars > 0 ? '+' : ''}{formatUsd(twilioCosts.totalDeltaDollars)}
+                </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {twilioCosts.totalCostDollars > 0
+                    ? `${((twilioCosts.totalDeltaDollars / twilioCosts.totalCostDollars) * 100).toFixed(1)}% of actual`
+                    : '—'}
+                </p>
+              </div>
+              <div className="rounded-lg border border-border bg-muted/30 p-4 text-center">
+                <p className="text-xs text-muted-foreground">Total Calls</p>
+                <p className="text-2xl font-bold text-foreground">{twilioCosts.totalCallCount.toLocaleString()}</p>
+                <p className="text-xs text-muted-foreground mt-1">from imported CSV</p>
+              </div>
+            </div>
+
+            {twilioCosts.daily.length > 0 && (
+              <div className="mt-4">
+                <h4 className="text-sm font-medium text-foreground mb-3">Daily Twilio: Actual vs Estimated</h4>
+                <div className="space-y-2 max-h-56 overflow-y-auto">
+                  {twilioCosts.daily.slice(-14).reverse().map(day => {
+                    const actual = day.totalCostCents !== null ? day.totalCostCents / 100 : null
+                    const est = day.estimatedCostCents !== null ? day.estimatedCostCents / 100 : null
+                    const delta = day.deltaCents !== null ? day.deltaCents / 100 : null
+                    return (
+                      <div key={day.dateUtc} className="flex items-center justify-between text-sm rounded-md bg-muted/40 px-3 py-2">
+                        <span className="text-muted-foreground w-16 flex-shrink-0">{formatDate(day.dateUtc)}</span>
+                        <div className="flex gap-4 text-right flex-1 justify-end">
+                          <span className="text-xs text-muted-foreground">{day.callCount} calls</span>
+                          {est !== null && (
+                            <span className="text-xs text-blue-500">est {formatUsd(est)}</span>
+                          )}
+                          {actual !== null ? (
+                            <span className="font-medium text-foreground">{formatUsd(actual)}</span>
+                          ) : (
+                            <span className="text-muted-foreground text-xs">no CSV</span>
+                          )}
+                          {delta !== null && (
+                            <span className={`text-xs ${Math.abs(delta) > 1 ? 'text-amber-500' : 'text-green-500'}`}>
+                              {delta > 0 ? '+' : ''}{formatUsd(delta)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Twilio import no-data placeholder */}
+      {(!twilioCosts || (twilioCosts.daysAvailable === 0 && twilioCosts.daysWithEstimates === 0)) && (
+        <Card className="border-border bg-card">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Phone className="h-5 w-5 text-primary" />
+              Twilio Cost Reconciliation
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="py-6 text-center text-muted-foreground">
+              <Phone className="mx-auto h-8 w-8 mb-2" />
+              <p>No Twilio usage data imported yet</p>
+              <p className="text-xs mt-1">Click "Import Twilio CSV" to upload a Twilio usage export and compare estimated vs actual Twilio spend</p>
+              {twilioCsvMutation.isPending && (
+                <div className="mt-3 flex justify-center">
+                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                </div>
+              )}
+              {twilioCsvMutation.isError && (
+                <p className="mt-2 text-sm text-red-500">
+                  {(() => {
+                    const e = twilioCsvMutation.error as { response?: { data?: { error?: string } }; message?: string } | null
+                    return `Import failed: ${e?.response?.data?.error || e?.message || 'Unknown error'}`
+                  })()}
+                </p>
+              )}
+              {twilioImportResult && (
+                <p className="mt-2 text-sm text-green-600 dark:text-green-400">
+                  Imported {twilioImportResult.rowsProcessed} rows across {twilioImportResult.datesImported} days (${twilioImportResult.totalCostDollars.toFixed(2)})
+                </p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {modelData.length > 0 && (
         <Card className="border-border bg-card">
@@ -394,10 +654,17 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
       {showCsvDetails && csvResult?.audit && (
         <Card className="border-amber-500/20 bg-card">
           <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle className="flex items-center gap-2">
-              <Upload className="h-5 w-5 text-amber-500" />
-              CSV Audit Report
-            </CardTitle>
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Upload className="h-5 w-5 text-amber-500" />
+                CSV Audit Report
+              </CardTitle>
+              {csvResult.detectedFormat && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Detected format: <span className="font-medium text-foreground">{CSV_FORMAT_LABELS[csvResult.detectedFormat] || csvResult.detectedFormat}</span>
+                </p>
+              )}
+            </div>
             <button
               onClick={() => setShowCsvDetails(false)}
               className="text-sm text-muted-foreground hover:text-foreground"
@@ -473,20 +740,24 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
         </Card>
       )}
 
+      {/* CSV format/validation error */}
+      {csvError && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-600 dark:text-red-400">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="font-medium">CSV Import Error</p>
+              <p className="mt-1">{csvError}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {reconcileMutation.isError && (
         <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-600 dark:text-red-400">
           <div className="flex items-center gap-2">
             <AlertCircle className="h-4 w-4" />
             Reconciliation failed. Make sure the OPENAI_ADMIN_API_KEY is configured.
-          </div>
-        </div>
-      )}
-
-      {csvMutation.isError && (
-        <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-600 dark:text-red-400">
-          <div className="flex items-center gap-2">
-            <AlertCircle className="h-4 w-4" />
-            CSV import failed. Please check the file format matches OpenAI's usage export.
           </div>
         </div>
       )}

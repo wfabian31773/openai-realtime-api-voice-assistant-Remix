@@ -1110,9 +1110,29 @@ export const dailyReconciliation = pgTable("daily_reconciliation", {
   createdAt: timestamp("created_at").defaultNow(),
   processedVersion: integer("processed_version").notNull().default(1),
   processedAt: timestamp("processed_at").defaultNow(),
+  hasDiscrepancyAlert: boolean("has_discrepancy_alert").default(false),
+  discrepancyThresholdPct: numeric("discrepancy_threshold_pct", { precision: 5, scale: 2 }).default('15'),
 }, (table) => [
   index("idx_daily_reconciliation_date").on(table.dateUtc),
 ]);
+
+export const dailyTwilioCosts = pgTable("daily_twilio_costs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  dateUtc: date("date_utc").notNull().unique(),
+  totalCostCents: integer("total_cost_cents").notNull().default(0),
+  callCount: integer("call_count").notNull().default(0),
+  totalDurationSeconds: integer("total_duration_seconds").notNull().default(0),
+  breakdown: jsonb("breakdown"),
+  source: varchar("source").default('csv'),
+  importedAt: timestamp("imported_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => [
+  index("idx_daily_twilio_costs_date").on(table.dateUtc),
+]);
+
+export type DailyTwilioCost = typeof dailyTwilioCosts.$inferSelect;
+export type InsertDailyTwilioCost = typeof dailyTwilioCosts.$inferInsert;
 
 export type DailyReconciliation = typeof dailyReconciliation.$inferSelect;
 export type InsertDailyReconciliation = typeof dailyReconciliation.$inferInsert;
