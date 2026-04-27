@@ -375,6 +375,70 @@ describe('buildReconciliationCsv', () => {
     expect(row3!['model_gpt-4o_cents']).toBe('300');
   });
 
+  it('sums only non-null estimatedCostCents and produces no NaN when some entries are null', () => {
+    const reconciliations = [
+      {
+        dateUtc: '2025-03-01',
+        actualUsd: '1.00',
+        estimatedUsd: '0.90',
+        deltaUsd: '0.10',
+        deltaPercent: '11.11',
+        hasDiscrepancyAlert: false,
+      },
+      {
+        dateUtc: '2025-03-02',
+        actualUsd: '2.00',
+        estimatedUsd: '1.80',
+        deltaUsd: '0.20',
+        deltaPercent: '11.11',
+        hasDiscrepancyAlert: false,
+      },
+      {
+        dateUtc: '2025-03-03',
+        actualUsd: '3.00',
+        estimatedUsd: '2.70',
+        deltaUsd: '0.30',
+        deltaPercent: '11.11',
+        hasDiscrepancyAlert: false,
+      },
+    ];
+
+    const orgUsageRows = [
+      { dateUtc: '2025-03-01', model: 'gpt-4o', estimatedCostCents: 100 },
+      { dateUtc: '2025-03-01', model: 'gpt-4o', estimatedCostCents: null },
+      { dateUtc: '2025-03-02', model: 'gpt-4o', estimatedCostCents: null },
+      { dateUtc: '2025-03-02', model: 'gpt-4o', estimatedCostCents: null },
+      { dateUtc: '2025-03-03', model: 'gpt-4o', estimatedCostCents: 75 },
+      { dateUtc: '2025-03-03', model: 'gpt-4o', estimatedCostCents: 25 },
+    ];
+
+    const twilioRows = [
+      { dateUtc: '2025-03-01', totalCostCents: 100 },
+      { dateUtc: '2025-03-02', totalCostCents: 200 },
+      { dateUtc: '2025-03-03', totalCostCents: 300 },
+    ];
+
+    const csv = buildReconciliationCsv(reconciliations, orgUsageRows, twilioRows);
+    const rows = parseCsv(csv);
+
+    const row1 = rows.find(r => r.date === '2025-03-01');
+    const row2 = rows.find(r => r.date === '2025-03-02');
+    const row3 = rows.find(r => r.date === '2025-03-03');
+
+    expect(row1).toBeDefined();
+    expect(row2).toBeDefined();
+    expect(row3).toBeDefined();
+
+    expect(row1!['model_gpt-4o_cents']).toBe('100');
+    expect(row1!['model_gpt-4o_cents']).not.toBe('NaN');
+
+    expect(row2!['model_gpt-4o_cents']).toBe('0');
+    expect(row2!['model_gpt-4o_cents']).not.toBe('NaN');
+
+    expect(row3!['model_gpt-4o_cents']).toBe('100');
+    expect(row3!['model_gpt-4o_cents']).not.toBe('NaN');
+  });
+
   it('outputs zero model costs for Twilio-only rows when org usage exists for other dates', () => {
     const reconciliations = [
       {
