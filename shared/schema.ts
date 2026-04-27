@@ -493,6 +493,7 @@ export const callLogs = pgTable("call_logs", {
   index("idx_call_logs_contact").on(table.contactId),
   index("idx_call_logs_created").on(table.createdAt),
   index("idx_call_logs_voicemail").on(table.isVoicemail),
+  index("idx_call_logs_voicemail_created").on(table.isVoicemail, table.createdAt),
   index("idx_call_logs_transferred_created").on(table.transferredToHuman, table.createdAt),
 ]);
 
