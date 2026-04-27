@@ -3,6 +3,7 @@ import { dailyOrgUsage, dailyReconciliation } from '../../shared/schema';
 import { storage } from '../../server/storage';
 import { eq } from 'drizzle-orm';
 import { getModelPricing } from './modelPricing';
+import { sendDiscrepancyAlert } from './reconciliationAlertService';
 
 interface OrgCostResult {
   totalCostDollars: number;
@@ -258,6 +259,16 @@ export class OrgBillingLedgerService {
         console.warn(
           `[ORG BILLING] DISCREPANCY ALERT for ${dateStr}: delta=${deltaPercent.toFixed(1)}% exceeds threshold of ${DISCREPANCY_THRESHOLD_PCT}%. Actual=$${actualUsd.toFixed(2)}, Estimated=$${estimatedUsd.toFixed(2)}`
         );
+        sendDiscrepancyAlert({
+          dateStr,
+          actualUsd,
+          estimatedUsd,
+          deltaUsd,
+          deltaPercent,
+          thresholdPct: DISCREPANCY_THRESHOLD_PCT,
+        }).catch((err) => {
+          console.error(`[ORG BILLING] Failed to send discrepancy alert for ${dateStr}:`, err);
+        });
       }
 
       await db
