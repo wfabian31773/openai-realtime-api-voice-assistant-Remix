@@ -1303,3 +1303,20 @@ export const appSettings = pgTable("app_settings", {
 
 export type AppSetting = typeof appSettings.$inferSelect;
 export type InsertAppSetting = typeof appSettings.$inferInsert;
+
+export const reconciliationRuns = pgTable("reconciliation_runs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  runAt: timestamp("run_at").notNull().defaultNow(),
+  triggeredBy: varchar("triggered_by").notNull().default('auto'),
+  dateReconciled: date("date_reconciled").notNull(),
+  success: boolean("success").notNull(),
+  errorMessage: text("error_message"),
+  durationMs: integer("duration_ms"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => [
+  index("idx_reconciliation_runs_run_at").on(table.runAt),
+  index("idx_reconciliation_runs_date").on(table.dateReconciled),
+]);
+
+export type ReconciliationRun = typeof reconciliationRuns.$inferSelect;
+export type InsertReconciliationRun = typeof reconciliationRuns.$inferInsert;

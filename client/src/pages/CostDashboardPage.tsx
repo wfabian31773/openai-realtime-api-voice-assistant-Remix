@@ -21,6 +21,7 @@ import type { Agent } from '@/types'
 import { DailyCostCharts } from '@/components/DailyCostCharts'
 import { CostReconciliation } from '@/components/CostReconciliation'
 import { BudgetWidget } from '@/components/BudgetWidget'
+import { ReconciliationRunHistory } from '@/components/ReconciliationRunHistory'
 
 interface OpenAIUsage {
   totalCostDollars: number
@@ -787,6 +788,9 @@ export function CostDashboardPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Reconciliation Run History */}
+      <ReconciliationRunHistory />
     </div>
   )
 }

@@ -2139,25 +2139,67 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { orgBillingLedger } = await import('../src/services/orgBillingLedger');
       const { date, startDate, endDate } = req.body;
+      const triggeredBy: string = req.session?.userId || req.user?.claims?.sub || 'manual';
+
+      const logRun = async (dateReconciled: string, result: { success: boolean; error?: string }, durationMs: number | null) => {
+        try {
+          const { db } = await import('./db');
+          const { reconciliationRuns } = await import('../shared/schema');
+          await db.insert(reconciliationRuns).values({
+            dateReconciled,
+            triggeredBy,
+            success: result.success,
+            errorMessage: result.error ?? null,
+            durationMs,
+            runAt: new Date(),
+          });
+        } catch (logErr) {
+          console.error('[RECONCILE] Failed to write reconciliation run record:', logErr);
+        }
+      };
 
       if (startDate && endDate) {
         const result = await orgBillingLedger.reconcileDateRange(startDate, endDate);
+        for (const r of result.results) {
+          await logRun(r.dateStr, { success: !r.error, error: r.error }, null);
+        }
         return res.json(result);
       } else if (date) {
+        const startMs = Date.now();
         const result = await orgBillingLedger.reconcileDay(date);
+        await logRun(date, result, Date.now() - startMs);
         return res.json(result);
       } else {
         const yesterday = new Date();
         yesterday.setDate(yesterday.getDate() - 1);
         const dateStr = yesterday.toISOString().split('T')[0];
+        const startMs = Date.now();
         const result = await orgBillingLedger.reconcileDay(dateStr);
+        await logRun(dateStr, result, Date.now() - startMs);
         return res.json(result);
       }
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Org billing reconciliation failed';
       console.error("Error in org billing reconciliation:", error);
+      try {
+        const { db } = await import('./db');
+        const { reconciliationRuns } = await import('../shared/schema');
+        const triggeredBy: string = req.session?.userId || req.user?.claims?.sub || 'manual';
+        const { date } = req.body;
+        if (date || req.body.startDate) {
+          await db.insert(reconciliationRuns).values({
+            dateReconciled: date || req.body.startDate,
+            triggeredBy,
+            success: false,
+            errorMessage: errorMsg,
+            durationMs: null,
+            runAt: new Date(),
+          });
+        }
+      } catch {}
       res.status(500).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Org billing reconciliation failed'
+        error: errorMsg
       });
     }
   });
@@ -2287,6 +2329,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error fetching reconciliation summary:", error);
       res.status(500).json({ error: 'Failed to fetch reconciliation summary' });
+    }
+  });
+
+  // Get recent reconciliation run history (audit log)
+  app.get('/api/analytics/reconciliation-runs', isAuthenticated, requireRole('admin'), async (req, res) => {
+    try {
+      const rawLimit = parseInt(req.query.limit as string || '20', 10);
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 100) : 20;
+      const { db } = await import('./db');
+      const { reconciliationRuns } = await import('../shared/schema');
+      const { desc } = await import('drizzle-orm');
+      const runs = await db
+        .select()
+        .from(reconciliationRuns)
+        .orderBy(desc(reconciliationRuns.runAt))
+        .limit(limit);
+      res.json({ runs });
+    } catch (error) {
+      console.error('Error fetching reconciliation runs:', error);
+      res.status(500).json({ error: 'Failed to fetch reconciliation runs' });
     }
   });
 

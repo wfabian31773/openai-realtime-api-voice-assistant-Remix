@@ -295,16 +295,39 @@ async function getNightlyHourUtc(): Promise<number> {
   return NIGHTLY_RECONCILE_HOUR_UTC_DEFAULT;
 }
 
+async function recordReconciliationRun(opts: {
+  dateReconciled: string;
+  triggeredBy: string;
+  success: boolean;
+  errorMessage?: string;
+  durationMs: number;
+}): Promise<void> {
+  try {
+    const { db } = await import('./db');
+    const { reconciliationRuns } = await import('../shared/schema');
+    await db.insert(reconciliationRuns).values({
+      dateReconciled: opts.dateReconciled,
+      triggeredBy: opts.triggeredBy,
+      success: opts.success,
+      errorMessage: opts.errorMessage ?? null,
+      durationMs: opts.durationMs,
+      runAt: new Date(),
+    });
+  } catch (err) {
+    console.error('[NIGHTLY] Failed to record reconciliation run:', err);
+  }
+}
+
 async function runNightlyReconciliation(): Promise<void> {
+  const startMs = Date.now();
+  const yesterday = new Date();
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const dateStr = yesterday.toISOString().split('T')[0];
   try {
     const { orgBillingLedger } = await import('../src/services/orgBillingLedger');
     const { db } = await import('./db');
     const { dailyReconciliation } = await import('../shared/schema');
     const { eq } = await import('drizzle-orm');
-
-    const yesterday = new Date();
-    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-    const dateStr = yesterday.toISOString().split('T')[0];
 
     // Deduplication: skip if already reconciled today
     const existing = await db
@@ -314,18 +337,31 @@ async function runNightlyReconciliation(): Promise<void> {
 
     if (existing.length > 0) {
       console.log(`[NIGHTLY] Reconciliation for ${dateStr} already exists — skipping`);
+      await recordReconciliationRun({
+        dateReconciled: dateStr,
+        triggeredBy: 'auto',
+        success: true,
+        errorMessage: 'Skipped: already reconciled',
+        durationMs: Date.now() - startMs,
+      });
       return;
     }
 
     console.log(`[NIGHTLY] Running reconciliation for ${dateStr}...`);
     const result = await orgBillingLedger.reconcileDay(dateStr);
+    const durationMs = Date.now() - startMs;
     if (result.success) {
       console.log(`[NIGHTLY] Reconciliation complete for ${dateStr}: actual=$${result.actualUsd?.toFixed(2)}`);
+      await recordReconciliationRun({ dateReconciled: dateStr, triggeredBy: 'auto', success: true, durationMs });
     } else {
       console.warn(`[NIGHTLY] Reconciliation failed for ${dateStr}: ${result.error}`);
+      await recordReconciliationRun({ dateReconciled: dateStr, triggeredBy: 'auto', success: false, errorMessage: result.error, durationMs });
     }
   } catch (error) {
+    const durationMs = Date.now() - startMs;
+    const errorMsg = error instanceof Error ? error.message : String(error);
     console.error('[NIGHTLY] Error during nightly reconciliation:', error);
+    await recordReconciliationRun({ dateReconciled: dateStr, triggeredBy: 'auto', success: false, errorMessage: errorMsg, durationMs });
   }
 }
 
