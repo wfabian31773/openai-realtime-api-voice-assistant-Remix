@@ -316,6 +316,65 @@ describe('buildReconciliationCsv', () => {
     expect(row3!['model_gpt-4o_cents']).toBe('120');
   });
 
+  it('sums multiple rows per model per date without accumulating across three or more dates', () => {
+    const reconciliations = [
+      {
+        dateUtc: '2025-02-01',
+        actualUsd: '2.00',
+        estimatedUsd: '1.80',
+        deltaUsd: '0.20',
+        deltaPercent: '11.11',
+        hasDiscrepancyAlert: false,
+      },
+      {
+        dateUtc: '2025-02-02',
+        actualUsd: '4.00',
+        estimatedUsd: '3.60',
+        deltaUsd: '0.40',
+        deltaPercent: '11.11',
+        hasDiscrepancyAlert: false,
+      },
+      {
+        dateUtc: '2025-02-03',
+        actualUsd: '6.00',
+        estimatedUsd: '5.40',
+        deltaUsd: '0.60',
+        deltaPercent: '11.11',
+        hasDiscrepancyAlert: false,
+      },
+    ];
+
+    const orgUsageRows = [
+      { dateUtc: '2025-02-01', model: 'gpt-4o', estimatedCostCents: 40 },
+      { dateUtc: '2025-02-01', model: 'gpt-4o', estimatedCostCents: 60 },
+      { dateUtc: '2025-02-02', model: 'gpt-4o', estimatedCostCents: 90 },
+      { dateUtc: '2025-02-02', model: 'gpt-4o', estimatedCostCents: 110 },
+      { dateUtc: '2025-02-03', model: 'gpt-4o', estimatedCostCents: 130 },
+      { dateUtc: '2025-02-03', model: 'gpt-4o', estimatedCostCents: 170 },
+    ];
+
+    const twilioRows = [
+      { dateUtc: '2025-02-01', totalCostCents: 100 },
+      { dateUtc: '2025-02-02', totalCostCents: 200 },
+      { dateUtc: '2025-02-03', totalCostCents: 300 },
+    ];
+
+    const csv = buildReconciliationCsv(reconciliations, orgUsageRows, twilioRows);
+    const rows = parseCsv(csv);
+
+    const row1 = rows.find(r => r.date === '2025-02-01');
+    const row2 = rows.find(r => r.date === '2025-02-02');
+    const row3 = rows.find(r => r.date === '2025-02-03');
+
+    expect(row1).toBeDefined();
+    expect(row2).toBeDefined();
+    expect(row3).toBeDefined();
+
+    expect(row1!['model_gpt-4o_cents']).toBe('100');
+    expect(row2!['model_gpt-4o_cents']).toBe('200');
+    expect(row3!['model_gpt-4o_cents']).toBe('300');
+  });
+
   it('outputs zero model costs for Twilio-only rows when org usage exists for other dates', () => {
     const reconciliations = [
       {
