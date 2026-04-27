@@ -320,17 +320,29 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
 
   const hasTwilioData = !!(twilioCosts && twilioCosts.daysAvailable > 0)
 
-  const chartData = (reconciliation?.dailyReconciliations || [])
-    .map(r => ({
-      date: r.dateUtc,
-      actual: Number(r.actualUsd) || 0,
-      estimated: Number(r.estimatedUsd) || 0,
-      delta: Number(r.deltaUsd) || 0,
-      deltaPercent: Number(r.deltaPercent) || 0,
-      hasAlert: r.hasDiscrepancyAlert,
-      twilioActual: twilioDailyMap.get(r.dateUtc) ?? 0,
-      hasTwilioInPeriod: hasTwilioData,
-    }))
+  const reconciliationMap = new Map(
+    (reconciliation?.dailyReconciliations || []).map(r => [r.dateUtc, r])
+  )
+
+  const allDates = new Set([
+    ...reconciliationMap.keys(),
+    ...twilioDailyMap.keys(),
+  ])
+
+  const chartData = Array.from(allDates)
+    .map(date => {
+      const r = reconciliationMap.get(date)
+      return {
+        date,
+        actual: r ? Number(r.actualUsd) || 0 : 0,
+        estimated: r ? Number(r.estimatedUsd) || 0 : 0,
+        delta: r ? Number(r.deltaUsd) || 0 : 0,
+        deltaPercent: r ? Number(r.deltaPercent) || 0 : 0,
+        hasAlert: r ? r.hasDiscrepancyAlert : false,
+        twilioActual: twilioDailyMap.get(date) ?? 0,
+        hasTwilioInPeriod: hasTwilioData,
+      }
+    })
     .sort((a, b) => a.date.localeCompare(b.date))
     .slice(-30)
 
