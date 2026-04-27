@@ -574,7 +574,7 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
             <div className="flex justify-center py-8">
               <div className="h-6 w-6 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
             </div>
-          ) : reconciliation && reconciliation.daysReconciled > 0 ? (
+          ) : reconciliation && (reconciliation.daysReconciled > 0 || tableData.length > 0) ? (
             <div className="space-y-6">
               <div className={`grid gap-4 ${hasTwilioData ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
                 <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-4 text-center">
