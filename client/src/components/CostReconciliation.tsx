@@ -362,7 +362,7 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
     ...twilioDailyMap.keys(),
   ])
 
-  const chartData = Array.from(allDates)
+  const allDatesSorted = Array.from(allDates)
     .map(date => {
       const r = reconciliationMap.get(date)
       const twilioActual = twilioDailyMap.get(date) ?? 0
@@ -380,7 +380,9 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
       }
     })
     .sort((a, b) => a.date.localeCompare(b.date))
-    .slice(-30)
+
+  const chartData = allDatesSorted.slice(-30)
+  const tableData = allDatesSorted
 
   const modelData = Object.entries(reconciliation?.modelCostSummary || {})
     .map(([model, stats]) => ({
@@ -638,6 +640,7 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
                 <div>
                   <h4 className="text-sm font-medium text-foreground mb-3">
                     Daily Costs: OpenAI{hasTwilioData ? ' + Twilio' : ' Actual vs Estimated'}
+                    {allDatesSorted.length > 30 && <span className="text-xs text-muted-foreground font-normal ml-1">(last 30 days)</span>}
                   </h4>
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
@@ -690,6 +693,83 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
                       Some days have Twilio data but no OpenAI reconciliation entry — hover those bars for details.
                     </p>
                   )}
+                </div>
+              )}
+
+              {/* Daily reconciliation summary table */}
+              {tableData.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-medium text-foreground mb-3">Daily Reconciliation Summary</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-border text-left">
+                          <th className="pb-2 pr-4 text-xs font-medium text-muted-foreground">Date</th>
+                          <th className="pb-2 pr-4 text-xs font-medium text-muted-foreground text-right">OpenAI Actual</th>
+                          <th className="pb-2 pr-4 text-xs font-medium text-muted-foreground text-right">OpenAI Est.</th>
+                          <th className="pb-2 pr-4 text-xs font-medium text-muted-foreground text-right">Unallocated</th>
+                          {hasTwilioData && (
+                            <th className="pb-2 pr-4 text-xs font-medium text-emerald-600 dark:text-emerald-400 text-right">Twilio Actual</th>
+                          )}
+                          {hasTwilioData && (
+                            <th className="pb-2 text-xs font-medium text-foreground text-right">Combined Total</th>
+                          )}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {[...tableData].reverse().map(row => {
+                          const twilioUsd = twilioDailyMap.get(row.date) ?? null
+                          const combinedUsd = row.actual + (twilioUsd ?? 0)
+                          return (
+                            <tr key={row.date} className="hover:bg-muted/30">
+                              <td className="py-2 pr-4 text-muted-foreground whitespace-nowrap">{formatDate(row.date)}</td>
+                              <td className="py-2 pr-4 text-right font-medium text-violet-600 dark:text-violet-400">
+                                {row.actual > 0 ? formatUsd(row.actual) : <span className="text-muted-foreground text-xs">—</span>}
+                              </td>
+                              <td className="py-2 pr-4 text-right text-blue-600 dark:text-blue-400">
+                                {row.estimated > 0 ? formatUsd(row.estimated) : <span className="text-muted-foreground text-xs">—</span>}
+                              </td>
+                              <td className={`py-2 pr-4 text-right text-xs ${row.delta > 0 ? 'text-amber-500' : row.delta < 0 ? 'text-green-500' : 'text-muted-foreground'}`}>
+                                {row.actual > 0
+                                  ? <>{row.delta > 0 ? '+' : ''}{formatUsd(row.delta)}</>
+                                  : <span className="text-muted-foreground">—</span>}
+                              </td>
+                              {hasTwilioData && (
+                                <td className="py-2 pr-4 text-right text-emerald-600 dark:text-emerald-400">
+                                  {twilioUsd !== null && twilioUsd > 0
+                                    ? formatUsd(twilioUsd)
+                                    : <span className="text-muted-foreground text-xs">—</span>}
+                                </td>
+                              )}
+                              {hasTwilioData && (
+                                <td className="py-2 text-right font-semibold text-foreground">
+                                  {(row.actual > 0 || (twilioUsd !== null && twilioUsd > 0))
+                                    ? formatUsd(combinedUsd)
+                                    : <span className="text-muted-foreground text-xs font-normal">—</span>}
+                                </td>
+                              )}
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr className="border-t-2 border-border">
+                          <td className="pt-2 pr-4 text-xs font-semibold text-foreground">Total</td>
+                          <td className="pt-2 pr-4 text-right text-sm font-bold text-violet-600 dark:text-violet-400">{formatUsd(totalActual)}</td>
+                          <td className="pt-2 pr-4 text-right text-sm font-bold text-blue-600 dark:text-blue-400">{formatUsd(totalEstimated)}</td>
+                          <td className={`pt-2 pr-4 text-right text-xs font-semibold ${totalDelta > 0 ? 'text-amber-500' : totalDelta < 0 ? 'text-green-500' : 'text-muted-foreground'}`}>
+                            {totalDelta > 0 ? '+' : ''}{formatUsd(totalDelta)}
+                          </td>
+                          {hasTwilioData && (
+                            <td className="pt-2 pr-4 text-right text-sm font-bold text-emerald-600 dark:text-emerald-400">{formatUsd(twilioTotalActual)}</td>
+                          )}
+                          {hasTwilioData && (
+                            <td className="pt-2 text-right text-sm font-bold text-foreground">{formatUsd(combinedTotalSpend)}</td>
+                          )}
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
                 </div>
               )}
             </div>
