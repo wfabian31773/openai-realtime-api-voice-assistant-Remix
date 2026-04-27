@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   BarChart,
   Bar,
+  Cell,
   XAxis,
   YAxis,
   Tooltip,
@@ -137,15 +138,19 @@ const DeltaTooltip = ({ active, payload }: any) => {
     const data = payload[0].payload
     const total = data.actual + (data.twilioActual || 0)
     const hasTwilio = !!data.hasTwilioInPeriod
+    const twilioOnly = !!data.twilioOnly
     return (
       <div className="rounded-lg border border-border bg-background p-3 shadow-lg text-sm">
         <p className="font-medium text-foreground mb-1">{formatDate(data.date)}</p>
+        {twilioOnly && (
+          <p className="text-xs text-amber-500 mb-2 italic">No OpenAI reconciliation entry for this day</p>
+        )}
         <div className="space-y-1">
-          <div className="flex justify-between gap-4">
+          <div className={`flex justify-between gap-4 ${twilioOnly ? 'opacity-40' : ''}`}>
             <span className="text-violet-500">OpenAI Actual</span>
             <span className="font-medium">{formatUsd(data.actual)}</span>
           </div>
-          <div className="flex justify-between gap-4">
+          <div className={`flex justify-between gap-4 ${twilioOnly ? 'opacity-40' : ''}`}>
             <span className="text-blue-500">OpenAI Estimated</span>
             <span className="font-medium">{formatUsd(data.estimated)}</span>
           </div>
@@ -161,12 +166,14 @@ const DeltaTooltip = ({ active, payload }: any) => {
               <span className="font-bold">{formatUsd(total)}</span>
             </div>
           )}
-          <div className="flex justify-between gap-4 border-t border-border pt-1">
-            <span className="text-muted-foreground">OpenAI Unallocated</span>
-            <span className={`font-medium ${data.delta > 0 ? 'text-amber-500' : 'text-green-500'}`}>
-              {data.delta > 0 ? '+' : ''}{formatUsd(data.delta)}
-            </span>
-          </div>
+          {!twilioOnly && (
+            <div className="flex justify-between gap-4 border-t border-border pt-1">
+              <span className="text-muted-foreground">OpenAI Unallocated</span>
+              <span className={`font-medium ${data.delta > 0 ? 'text-amber-500' : 'text-green-500'}`}>
+                {data.delta > 0 ? '+' : ''}{formatUsd(data.delta)}
+              </span>
+            </div>
+          )}
         </div>
       </div>
     )
@@ -349,6 +356,8 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
   const chartData = Array.from(allDates)
     .map(date => {
       const r = reconciliationMap.get(date)
+      const twilioActual = twilioDailyMap.get(date) ?? 0
+      const twilioOnly = !r && twilioActual > 0
       return {
         date,
         actual: r ? Number(r.actualUsd) || 0 : 0,
@@ -356,8 +365,9 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
         delta: r ? Number(r.deltaUsd) || 0 : 0,
         deltaPercent: r ? Number(r.deltaPercent) || 0 : 0,
         hasAlert: r ? r.hasDiscrepancyAlert : false,
-        twilioActual: twilioDailyMap.get(date) ?? 0,
+        twilioActual,
         hasTwilioInPeriod: hasTwilioData,
+        twilioOnly,
       }
     })
     .sort((a, b) => a.date.localeCompare(b.date))
@@ -616,14 +626,28 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
                           }}
                         />
                         <ReferenceLine y={0} stroke="hsl(var(--border))" />
-                        <Bar dataKey="actual" fill="#8b5cf6" radius={[4, 4, 0, 0]} barSize={10} />
-                        <Bar dataKey="estimated" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={10} />
+                        <Bar dataKey="actual" fill="#8b5cf6" radius={[4, 4, 0, 0]} barSize={10}>
+                          {chartData.map((entry, index) => (
+                            <Cell key={`actual-${index}`} fill={entry.twilioOnly ? '#8b5cf630' : '#8b5cf6'} />
+                          ))}
+                        </Bar>
+                        <Bar dataKey="estimated" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={10}>
+                          {chartData.map((entry, index) => (
+                            <Cell key={`estimated-${index}`} fill={entry.twilioOnly ? '#3b82f630' : '#3b82f6'} />
+                          ))}
+                        </Bar>
                         {hasTwilioData && (
                           <Bar dataKey="twilioActual" fill="#10b981" radius={[4, 4, 0, 0]} barSize={10} />
                         )}
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
+                  {hasTwilioData && chartData.some(d => d.twilioOnly) && (
+                    <p className="text-xs text-muted-foreground mt-2">
+                      <span className="inline-block w-2 h-2 rounded-sm bg-amber-500/40 mr-1 align-middle" />
+                      Some days have Twilio data but no OpenAI reconciliation entry — hover those bars for details.
+                    </p>
+                  )}
                 </div>
               )}
             </div>
