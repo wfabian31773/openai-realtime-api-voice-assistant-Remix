@@ -132,20 +132,34 @@ const formatDate = (dateStr: string) => {
 const DeltaTooltip = ({ active, payload }: any) => {
   if (active && payload && payload.length) {
     const data = payload[0].payload
+    const total = data.actual + (data.twilioActual || 0)
+    const hasTwilio = !!data.hasTwilioInPeriod
     return (
       <div className="rounded-lg border border-border bg-background p-3 shadow-lg text-sm">
         <p className="font-medium text-foreground mb-1">{formatDate(data.date)}</p>
         <div className="space-y-1">
           <div className="flex justify-between gap-4">
-            <span className="text-violet-500">Actual (Billed)</span>
+            <span className="text-violet-500">OpenAI Actual</span>
             <span className="font-medium">{formatUsd(data.actual)}</span>
           </div>
           <div className="flex justify-between gap-4">
-            <span className="text-blue-500">Estimated (Per-call)</span>
+            <span className="text-blue-500">OpenAI Estimated</span>
             <span className="font-medium">{formatUsd(data.estimated)}</span>
           </div>
+          {hasTwilio && (
+            <div className="flex justify-between gap-4">
+              <span className="text-emerald-500">Twilio Actual</span>
+              <span className="font-medium">{formatUsd(data.twilioActual || 0)}</span>
+            </div>
+          )}
+          {hasTwilio && (
+            <div className="flex justify-between gap-4 border-t border-border pt-1">
+              <span className="font-medium text-foreground">Total Spend</span>
+              <span className="font-bold">{formatUsd(total)}</span>
+            </div>
+          )}
           <div className="flex justify-between gap-4 border-t border-border pt-1">
-            <span className="text-muted-foreground">Unallocated</span>
+            <span className="text-muted-foreground">OpenAI Unallocated</span>
             <span className={`font-medium ${data.delta > 0 ? 'text-amber-500' : 'text-green-500'}`}>
               {data.delta > 0 ? '+' : ''}{formatUsd(data.delta)}
             </span>
@@ -265,6 +279,15 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
     window.location.href = `/api/analytics/reconciliation-export?${params}`
   }
 
+  const twilioDailyMap = new Map(
+    (twilioCosts?.daily || []).map(d => [
+      d.dateUtc,
+      d.totalCostCents !== null ? d.totalCostCents / 100 : 0,
+    ])
+  )
+
+  const hasTwilioData = !!(twilioCosts && twilioCosts.daysAvailable > 0)
+
   const chartData = (reconciliation?.dailyReconciliations || [])
     .map(r => ({
       date: r.dateUtc,
@@ -273,6 +296,8 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
       delta: Number(r.deltaUsd) || 0,
       deltaPercent: Number(r.deltaPercent) || 0,
       hasAlert: r.hasDiscrepancyAlert,
+      twilioActual: twilioDailyMap.get(r.dateUtc) ?? 0,
+      hasTwilioInPeriod: hasTwilioData,
     }))
     .sort((a, b) => a.date.localeCompare(b.date))
     .slice(-30)
@@ -291,6 +316,8 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
   const totalActual = reconciliation?.totalActualUsd || 0
   const totalEstimated = reconciliation?.totalEstimatedUsd || 0
   const deltaPercent = totalActual > 0 ? ((totalDelta / totalActual) * 100) : 0
+  const twilioTotalActual = twilioCosts?.totalCostDollars || 0
+  const combinedTotalSpend = totalActual + twilioTotalActual
 
   const alertDays = reconciliation?.dailyReconciliations.filter(r => r.hasDiscrepancyAlert) || []
 
@@ -381,9 +408,9 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
             </div>
           ) : reconciliation && reconciliation.daysReconciled > 0 ? (
             <div className="space-y-6">
-              <div className="grid gap-4 md:grid-cols-4">
+              <div className={`grid gap-4 ${hasTwilioData ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
                 <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-4 text-center">
-                  <p className="text-xs text-muted-foreground">Actual Billed</p>
+                  <p className="text-xs text-muted-foreground">OpenAI Actual</p>
                   <p className="text-2xl font-bold text-violet-600 dark:text-violet-400">{formatUsd(totalActual)}</p>
                   <p className="text-xs text-muted-foreground mt-1">from OpenAI org API</p>
                 </div>
@@ -417,6 +444,15 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
                     )}
                   </p>
                 </div>
+                {hasTwilioData && (
+                  <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4 text-center">
+                    <p className="text-xs text-muted-foreground">Total Daily Spend</p>
+                    <p className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">{formatUsd(combinedTotalSpend)}</p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      OpenAI + Twilio
+                    </p>
+                  </div>
+                )}
                 <div className="rounded-lg border border-border bg-muted/30 p-4 text-center">
                   <p className="text-xs text-muted-foreground">Days Reconciled</p>
                   <p className="text-2xl font-bold text-foreground">{reconciliation.daysReconciled}</p>
@@ -435,7 +471,9 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
 
               {chartData.length > 0 && (
                 <div>
-                  <h4 className="text-sm font-medium text-foreground mb-3">Daily: Actual vs Estimated</h4>
+                  <h4 className="text-sm font-medium text-foreground mb-3">
+                    Daily Costs: OpenAI{hasTwilioData ? ' + Twilio' : ' Actual vs Estimated'}
+                  </h4>
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={chartData} margin={{ top: 5, right: 10, left: -10, bottom: 5 }}>
@@ -458,14 +496,18 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
                         <Legend
                           wrapperStyle={{ fontSize: '12px' }}
                           formatter={(value: string) => {
-                            if (value === 'actual') return 'Actual (Billed)'
-                            if (value === 'estimated') return 'Estimated (Per-call)'
+                            if (value === 'actual') return 'OpenAI Actual'
+                            if (value === 'estimated') return 'OpenAI Estimated'
+                            if (value === 'twilioActual') return 'Twilio Actual'
                             return value
                           }}
                         />
                         <ReferenceLine y={0} stroke="hsl(var(--border))" />
-                        <Bar dataKey="actual" fill="#8b5cf6" radius={[4, 4, 0, 0]} barSize={12} />
-                        <Bar dataKey="estimated" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={12} />
+                        <Bar dataKey="actual" fill="#8b5cf6" radius={[4, 4, 0, 0]} barSize={10} />
+                        <Bar dataKey="estimated" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={10} />
+                        {hasTwilioData && (
+                          <Bar dataKey="twilioActual" fill="#10b981" radius={[4, 4, 0, 0]} barSize={10} />
+                        )}
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
