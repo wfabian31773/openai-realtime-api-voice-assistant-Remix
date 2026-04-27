@@ -218,6 +218,48 @@ describe('buildReconciliationCsv', () => {
     ]);
   });
 
+  it('keeps model costs isolated to their own date across multiple dates', () => {
+    const reconciliations = [
+      {
+        dateUtc: '2025-01-01',
+        actualUsd: '1.50',
+        estimatedUsd: '1.40',
+        deltaUsd: '0.10',
+        deltaPercent: '6.67',
+        hasDiscrepancyAlert: false,
+      },
+      {
+        dateUtc: '2025-01-02',
+        actualUsd: '3.00',
+        estimatedUsd: '2.80',
+        deltaUsd: '0.20',
+        deltaPercent: '6.67',
+        hasDiscrepancyAlert: false,
+      },
+    ];
+
+    const orgUsageRows = [
+      { dateUtc: '2025-01-01', model: 'gpt-4o', estimatedCostCents: 100 },
+      { dateUtc: '2025-01-02', model: 'gpt-4o', estimatedCostCents: 200 },
+    ];
+
+    const twilioRows = [
+      { dateUtc: '2025-01-01', totalCostCents: 150 },
+      { dateUtc: '2025-01-02', totalCostCents: 300 },
+    ];
+
+    const csv = buildReconciliationCsv(reconciliations, orgUsageRows, twilioRows);
+    const rows = parseCsv(csv);
+
+    const row1 = rows.find(r => r.date === '2025-01-01');
+    const row2 = rows.find(r => r.date === '2025-01-02');
+
+    expect(row1).toBeDefined();
+    expect(row2).toBeDefined();
+    expect(row1!['model_gpt-4o_cents']).toBe('100');
+    expect(row2!['model_gpt-4o_cents']).toBe('200');
+  });
+
   it('outputs zero model costs for Twilio-only rows when org usage exists for other dates', () => {
     const reconciliations = [
       {
