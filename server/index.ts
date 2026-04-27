@@ -263,6 +263,78 @@ async function backfillMissingReconciliations(): Promise<void> {
   return doBackfill();
 }
 
+function parseNightlyHour(raw: string | undefined): number {
+  const DEFAULT_HOUR = 6;
+  if (raw === undefined || raw === '') return DEFAULT_HOUR;
+  const parsed = parseInt(raw, 10);
+  if (isNaN(parsed) || parsed < 0 || parsed > 23) {
+    console.warn(`[NIGHTLY] Invalid NIGHTLY_RECONCILE_HOUR_UTC value "${raw}" — falling back to ${DEFAULT_HOUR}:00 UTC`);
+    return DEFAULT_HOUR;
+  }
+  return parsed;
+}
+
+const NIGHTLY_RECONCILE_HOUR_UTC = parseNightlyHour(process.env.NIGHTLY_RECONCILE_HOUR_UTC);
+
+async function runNightlyReconciliation(): Promise<void> {
+  try {
+    const { orgBillingLedger } = await import('../src/services/orgBillingLedger');
+    const { db } = await import('./db');
+    const { dailyReconciliation } = await import('../shared/schema');
+    const { eq } = await import('drizzle-orm');
+
+    const yesterday = new Date();
+    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+    const dateStr = yesterday.toISOString().split('T')[0];
+
+    // Deduplication: skip if already reconciled today
+    const existing = await db
+      .select({ dateUtc: dailyReconciliation.dateUtc })
+      .from(dailyReconciliation)
+      .where(eq(dailyReconciliation.dateUtc, dateStr));
+
+    if (existing.length > 0) {
+      console.log(`[NIGHTLY] Reconciliation for ${dateStr} already exists — skipping`);
+      return;
+    }
+
+    console.log(`[NIGHTLY] Running reconciliation for ${dateStr}...`);
+    const result = await orgBillingLedger.reconcileDay(dateStr);
+    if (result.success) {
+      console.log(`[NIGHTLY] Reconciliation complete for ${dateStr}: actual=$${result.actualUsd?.toFixed(2)}`);
+    } else {
+      console.warn(`[NIGHTLY] Reconciliation failed for ${dateStr}: ${result.error}`);
+    }
+  } catch (error) {
+    console.error('[NIGHTLY] Error during nightly reconciliation:', error);
+  }
+}
+
+function scheduleNightlyReconciliation(): void {
+  const scheduleNext = () => {
+    const now = new Date();
+    const next = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      NIGHTLY_RECONCILE_HOUR_UTC,
+      0,
+      0,
+      0,
+    ));
+    if (next <= now) {
+      next.setUTCDate(next.getUTCDate() + 1);
+    }
+    const msUntilNext = next.getTime() - now.getTime();
+    console.log(`[NIGHTLY] Reconciliation scheduled for ${next.toISOString()} — runs daily at ${String(NIGHTLY_RECONCILE_HOUR_UTC).padStart(2, '0')}:00 UTC (in ${Math.round(msUntilNext / 60000)} min)`);
+    setTimeout(async () => {
+      await runNightlyReconciliation();
+      scheduleNext();
+    }, msUntilNext);
+  };
+  scheduleNext();
+}
+
 async function startServer() {
   try {
     // Warm up database connection before starting server
@@ -299,6 +371,9 @@ async function startServer() {
       backfillMissingReconciliations().catch(err => {
         console.error('[STARTUP] Backfill reconciliation error:', err);
       });
+
+      // Schedule nightly reconciliation at configured UTC hour
+      scheduleNightlyReconciliation();
     });
   } catch (error) {
     console.error("Failed to start API server:", error);
