@@ -260,6 +260,62 @@ describe('buildReconciliationCsv', () => {
     expect(row2!['model_gpt-4o_cents']).toBe('200');
   });
 
+  it('keeps model costs isolated to their own date across three or more dates', () => {
+    const reconciliations = [
+      {
+        dateUtc: '2025-01-01',
+        actualUsd: '1.00',
+        estimatedUsd: '0.90',
+        deltaUsd: '0.10',
+        deltaPercent: '11.11',
+        hasDiscrepancyAlert: false,
+      },
+      {
+        dateUtc: '2025-01-02',
+        actualUsd: '2.00',
+        estimatedUsd: '1.80',
+        deltaUsd: '0.20',
+        deltaPercent: '11.11',
+        hasDiscrepancyAlert: false,
+      },
+      {
+        dateUtc: '2025-01-03',
+        actualUsd: '3.00',
+        estimatedUsd: '2.70',
+        deltaUsd: '0.30',
+        deltaPercent: '11.11',
+        hasDiscrepancyAlert: false,
+      },
+    ];
+
+    const orgUsageRows = [
+      { dateUtc: '2025-01-01', model: 'gpt-4o', estimatedCostCents: 50 },
+      { dateUtc: '2025-01-02', model: 'gpt-4o', estimatedCostCents: 80 },
+      { dateUtc: '2025-01-03', model: 'gpt-4o', estimatedCostCents: 120 },
+    ];
+
+    const twilioRows = [
+      { dateUtc: '2025-01-01', totalCostCents: 100 },
+      { dateUtc: '2025-01-02', totalCostCents: 200 },
+      { dateUtc: '2025-01-03', totalCostCents: 300 },
+    ];
+
+    const csv = buildReconciliationCsv(reconciliations, orgUsageRows, twilioRows);
+    const rows = parseCsv(csv);
+
+    const row1 = rows.find(r => r.date === '2025-01-01');
+    const row2 = rows.find(r => r.date === '2025-01-02');
+    const row3 = rows.find(r => r.date === '2025-01-03');
+
+    expect(row1).toBeDefined();
+    expect(row2).toBeDefined();
+    expect(row3).toBeDefined();
+
+    expect(row1!['model_gpt-4o_cents']).toBe('50');
+    expect(row2!['model_gpt-4o_cents']).toBe('80');
+    expect(row3!['model_gpt-4o_cents']).toBe('120');
+  });
+
   it('outputs zero model costs for Twilio-only rows when org usage exists for other dates', () => {
     const reconciliations = [
       {
