@@ -12,6 +12,7 @@ import {
 import { type TriageOutcome } from "../config/afterHoursTicketing";
 import { storage } from "../../server/storage";
 import { escalationDetailsMap } from "../services/escalationStore";
+import { callMetadataForDB } from "../services/callMetadataStore";
 import {
   workflowEngine,
   type WorkflowContext,
@@ -499,6 +500,16 @@ Call this ONLY when you have collected ALL required information.`,
 
       if (result.success) {
         console.log("[No-IVR V2] ✓ Ticket created:", result.ticketNumber);
+
+        // Write caller name back to call metadata so it is persisted at call-end
+        const resolvedName = [params.first_name, params.last_name].filter(Boolean).join(' ').trim();
+        if (resolvedName && callId) {
+          const callMeta = callMetadataForDB.get(callId);
+          if (callMeta && !callMeta.callerName) {
+            callMeta.callerName = resolvedName;
+          }
+        }
+
         const completed = workflowEngine.markComplete(workflowContext);
         Object.assign(workflowContext, completed);
         return { success: true, ticket_number: result.ticketNumber };

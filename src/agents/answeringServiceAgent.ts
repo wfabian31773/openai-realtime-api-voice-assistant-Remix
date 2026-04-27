@@ -6,6 +6,7 @@ import { scheduleLookupService, PatientScheduleContext } from '../services/sched
 // module initialization errors during agent instantiation (ticketingApiClient validation)
 import { CallerMemoryService, CallerMemory } from '../services/callerMemoryService';
 import { storage } from '../../server/storage';
+import { callMetadataForDB } from '../services/callMetadataStore';
 import { buildCompactLocationReference } from '../config/azulVisionKnowledge';
 import {
   ANSWERING_SERVICE_DEPARTMENTS,
@@ -975,6 +976,15 @@ Use patient data from phone lookup when available - don't ask for info you alrea
         if (result.success) {
           console.log(`[${agentTag}] ✓ Ticket created: ${result.ticketNumber} for ${departmentName}`);
           
+          // Write caller name back to call metadata so it is persisted at call-end
+          const resolvedName = [params.first_name, params.last_name].filter(Boolean).join(' ').trim();
+          if (resolvedName && callId) {
+            const callMeta = callMetadataForDB.get(callId);
+            if (callMeta && !callMeta.callerName) {
+              callMeta.callerName = resolvedName;
+            }
+          }
+
           // Log any lookup warnings
           if (result.lookupWarnings && result.lookupWarnings.length > 0) {
             console.warn(`[${agentTag}] Lookup warnings: ${result.lookupWarnings.join(', ')}`);

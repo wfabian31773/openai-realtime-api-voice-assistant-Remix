@@ -20,6 +20,7 @@ import {
 import { getTwilioClient, getTwilioFromPhoneNumber } from './lib/twilioClient';
 import { medicalSafetyGuardrails, WELCOME_GREETING, getUrgentTriageGreeting } from './agents/afterHoursAgent';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
+import { callMetadataForDB } from './services/callMetadataStore';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
@@ -539,20 +540,6 @@ const callTranscripts = new Map<string, string[]>();
 // Track calls where we've sent AirCall DTMF (avoid sending multiple times)
 const aircallDTMFSent = new Set<string>();
 
-// Store call metadata for database logging
-const callMetadataForDB = new Map<string, {
-  dbCallLogId?: string;
-  startTime: Date;
-  agentSlug: string;
-  agentVersion?: string;
-  twilioCallSid?: string;
-  from?: string;
-  to?: string;
-  transferredToHuman: boolean;
-  audioInputMs: number; // Track audio input duration for cost calculation
-  audioOutputMs: number; // Track audio output duration for cost calculation
-}>();
-
 // Import escalation details from shared store (avoids circular dependency with noIvrAgent.ts)
 import { escalationDetailsMap, type EscalationDetails } from './services/escalationStore';
 
@@ -905,6 +892,23 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
       }
     }
     
+    // Capture patient name from escalation details BEFORE deleting the map entry
+    const escalationDetailsBeforeDelete = escalationDetailsMap.get(openAiCallId);
+    const capturedFirstName = escalationDetailsBeforeDelete?.patientFirstName;
+    const capturedLastName = escalationDetailsBeforeDelete?.patientLastName;
+    const capturedCallerType = escalationDetailsBeforeDelete?.callerType;
+    
+    // Assemble caller name: prefer first+last, fall back to callerType, otherwise leave undefined
+    const capturedCallerName = (capturedFirstName || capturedLastName)
+      ? [capturedFirstName, capturedLastName].filter(Boolean).join(' ').trim()
+      : (capturedCallerType || undefined);
+
+    // Store in callMetadataForDB so post-call async blocks can also access it
+    const callMetaForName = callMetadataForDB.get(openAiCallId);
+    if (callMetaForName && capturedCallerName) {
+      callMetaForName.callerName = capturedCallerName;
+    }
+
     // Clean up escalation details only after successful handoff
     escalationDetailsMap.delete(openAiCallId);
     
@@ -929,6 +933,7 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
             transferredToHuman: true,
             humanAgentNumber: HUMAN_AGENT_NUMBER,
             costIsEstimated: true,  // Mark as estimated until Twilio confirms
+            ...(capturedCallerName ? { callerName: capturedCallerName } : {}),
           });
           
           console.info(`[DB] Call log updated after handoff: ${callMeta.dbCallLogId}, Duration=AWAITING_TWILIO, Transferred: true`);
@@ -2105,6 +2110,17 @@ async function observeCall(
         // The Twilio status callback will provide the authoritative duration via CallDuration
         // We only save transcript and metadata here - duration comes from Twilio later
         
+        // Resolve caller name: prefer what tools wrote to callMeta, then fall back to
+        // any escalation details still in the map (populated by triage agents)
+        const resolvedCallerName = callMeta.callerName || (() => {
+          const esc = escalationDetailsMap.get(callId);
+          if (!esc) return undefined;
+          if (esc.patientFirstName || esc.patientLastName) {
+            return [esc.patientFirstName, esc.patientLastName].filter(Boolean).join(' ').trim();
+          }
+          return esc.callerType || undefined;
+        })();
+
         await storage.updateCallLog(callMeta.dbCallLogId, {
           status: 'completed',
           endTime,
@@ -2115,6 +2131,7 @@ async function observeCall(
           humanAgentNumber: callMeta.transferredToHuman ? HUMAN_AGENT_NUMBER : undefined,
           // Mark as estimated until Twilio confirms
           costIsEstimated: true,
+          ...(resolvedCallerName ? { callerName: resolvedCallerName } : {}),
         });
         
         console.info(`[DB] Call log updated: ${callMeta.dbCallLogId}, Duration=AWAITING_TWILIO, Transferred: ${callMeta.transferredToHuman}`);

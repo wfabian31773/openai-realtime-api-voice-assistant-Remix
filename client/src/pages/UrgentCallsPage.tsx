@@ -160,7 +160,7 @@ export function UrgentCallsPage() {
                       <div className="flex items-center gap-2">
                         <User className="h-4 w-4 text-muted-foreground" />
                         <div>
-                          <div className="font-medium">{call.callerName || 'Unknown'}</div>
+                          <div className="font-medium">{call.callerName || formatPhone(call.from)}</div>
                           <div className="text-sm text-muted-foreground">{formatPhone(call.from)}</div>
                         </div>
                       </div>

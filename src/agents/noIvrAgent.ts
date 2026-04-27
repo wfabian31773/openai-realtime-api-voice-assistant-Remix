@@ -15,6 +15,7 @@ import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
 import { storage } from "../../server/storage";
 import { escalationDetailsMap } from "../services/escalationStore";
+import { callMetadataForDB } from "../services/callMetadataStore";
 
 const CONTEXT_LOOKUP_TIMEOUT_MS = 2000;
 
@@ -1139,6 +1140,15 @@ The ticket will include schedule context (last appointment info) automatically.`
         console.log(`[TICKET CREATE] ✓ SUCCESS for call ${metadata.callSid}: ${result.ticketNumber}`);
         console.log(`[TICKET CREATE]   Patient: ${params.first_name} ${params.last_name}, Category: ${params.request_category}`);
         
+        // Write caller name back to call metadata so it is persisted at call-end
+        const resolvedName = [params.first_name, params.last_name].filter(Boolean).join(' ').trim();
+        if (resolvedName && metadata.callId) {
+          const callMeta = callMetadataForDB.get(metadata.callId);
+          if (callMeta && !callMeta.callerName) {
+            callMeta.callerName = resolvedName;
+          }
+        }
+
         // Log any lookup warnings
         if (result.lookupWarnings && result.lookupWarnings.length > 0) {
           console.warn(`[TICKET CREATE] Lookup warnings: ${result.lookupWarnings.join(', ')}`);
