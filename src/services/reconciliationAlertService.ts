@@ -160,6 +160,56 @@ async function sendEmailAlert(toEmail: string, params: DiscrepancyAlertParams): 
   }
 }
 
+export async function sendTestDiscrepancyAlert(): Promise<{ channels: string[]; errors: string[] }> {
+  const today = new Date().toISOString().split('T')[0];
+  const testParams: DiscrepancyAlertParams = {
+    dateStr: today,
+    actualUsd: 12.3456,
+    estimatedUsd: 10.0,
+    deltaUsd: 2.3456,
+    deltaPercent: 23.5,
+    thresholdPct: Number(process.env.RECONCILIATION_ALERT_THRESHOLD_PCT) || 15,
+  };
+
+  const webhookUrl = process.env.RECONCILIATION_ALERT_WEBHOOK_URL?.trim();
+  const alertEmail = process.env.RECONCILIATION_ALERT_EMAIL?.trim();
+
+  if (!webhookUrl && !alertEmail) {
+    return { channels: [], errors: ['No alert destinations configured (RECONCILIATION_ALERT_WEBHOOK_URL or RECONCILIATION_ALERT_EMAIL)'] };
+  }
+
+  const channels: string[] = [];
+  const errors: string[] = [];
+
+  if (webhookUrl) {
+    try {
+      const testSlackParams = {
+        ...testParams,
+        dateStr: `[TEST] ${testParams.dateStr}`,
+      };
+      await sendSlackAlert(webhookUrl, testSlackParams);
+      channels.push('slack');
+    } catch (err) {
+      errors.push(`Slack: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  if (alertEmail) {
+    try {
+      const testEmailParams = {
+        ...testParams,
+        dateStr: `[TEST] ${testParams.dateStr}`,
+      };
+      await sendEmailAlert(alertEmail, testEmailParams);
+      channels.push('email');
+    } catch (err) {
+      errors.push(`Email: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return { channels, errors };
+}
+
 export async function sendDiscrepancyAlert(params: DiscrepancyAlertParams): Promise<void> {
   const webhookUrl = process.env.RECONCILIATION_ALERT_WEBHOOK_URL?.trim();
   const alertEmail = process.env.RECONCILIATION_ALERT_EMAIL?.trim();

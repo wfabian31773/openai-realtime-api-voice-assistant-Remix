@@ -2162,6 +2162,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Send a test discrepancy alert to verify alert delivery configuration
+  app.post('/api/reconciliation/test-alert', isAuthenticated, requireRole('admin'), async (_req, res) => {
+    try {
+      const { sendTestDiscrepancyAlert } = await import('../src/services/reconciliationAlertService');
+      const result = await sendTestDiscrepancyAlert();
+      const hasNoDestinations = result.channels.length === 0 && result.errors.length === 1
+        && result.errors[0].startsWith('No alert destinations configured');
+      if (hasNoDestinations) {
+        return res.status(400).json({
+          success: false,
+          error: result.errors[0],
+        });
+      }
+      res.json({
+        success: result.channels.length > 0,
+        channels: result.channels,
+        errors: result.errors,
+      });
+    } catch (error) {
+      console.error('Error sending test reconciliation alert:', error);
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to send test alert',
+      });
+    }
+  });
+
   // Import OpenAI usage CSV and generate audit report
   app.post('/api/analytics/import-openai-csv', isAuthenticated, requireRole('admin'), upload.single('csv'), async (req: any, res) => {
     try {

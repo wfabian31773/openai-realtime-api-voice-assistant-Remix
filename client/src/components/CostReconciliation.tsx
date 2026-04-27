@@ -26,6 +26,7 @@ import {
   AlertTriangle,
   Clock,
   Save,
+  Bell,
 } from 'lucide-react'
 
 interface ReconciliationSummary {
@@ -195,6 +196,7 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
   const [scheduleEditHour, setScheduleEditHour] = useState<number | null>(null)
   const [scheduleSaveError, setScheduleSaveError] = useState<string | null>(null)
   const [scheduleSaved, setScheduleSaved] = useState(false)
+  const [testAlertResult, setTestAlertResult] = useState<{ success: boolean; channels: string[]; errors: string[] } | null>(null)
 
   const { data: reconciliation, isLoading, isFetching } = useQuery({
     queryKey: ['reconciliation-summary', startDate, endDate],
@@ -291,6 +293,21 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
     },
   })
 
+  const testAlertMutation = useMutation({
+    mutationFn: async () => {
+      const { data } = await apiClient.post<{ success: boolean; channels: string[]; errors: string[] }>('/reconciliation/test-alert')
+      return data
+    },
+    onSuccess: (data) => {
+      setTestAlertResult(data)
+    },
+    onError: (err: unknown) => {
+      const apiErr = err as { response?: { data?: { error?: string } }; message?: string }
+      const msg = apiErr?.response?.data?.error || apiErr?.message || 'Test alert failed'
+      setTestAlertResult({ success: false, channels: [], errors: [msg] })
+    },
+  })
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (file) {
@@ -367,6 +384,49 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
 
   return (
     <div className="space-y-6">
+      {/* Test alert result banner */}
+      {testAlertResult && (
+        <div className={`rounded-lg border p-4 flex items-start gap-3 ${
+          testAlertResult.success
+            ? 'border-green-500/40 bg-green-500/10'
+            : 'border-red-500/40 bg-red-500/10'
+        }`}>
+          {testAlertResult.success ? (
+            <CheckCircle className="h-5 w-5 text-green-500 flex-shrink-0 mt-0.5" />
+          ) : (
+            <AlertCircle className="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" />
+          )}
+          <div className="flex-1">
+            {testAlertResult.success ? (
+              <>
+                <p className="font-medium text-green-700 dark:text-green-400">
+                  Test alert sent successfully
+                </p>
+                <p className="text-sm text-green-600 dark:text-green-500 mt-1">
+                  Delivered via: {testAlertResult.channels.join(', ')}
+                  {testAlertResult.errors.length > 0 && ` (some channels failed: ${testAlertResult.errors.join('; ')})`}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="font-medium text-red-700 dark:text-red-400">
+                  Test alert failed
+                </p>
+                <p className="text-sm text-red-600 dark:text-red-500 mt-1">
+                  {testAlertResult.errors.join('; ')}
+                </p>
+              </>
+            )}
+          </div>
+          <button
+            onClick={() => setTestAlertResult(null)}
+            className="text-muted-foreground hover:text-foreground text-xs ml-2 flex-shrink-0"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Discrepancy alert banner */}
       {alertDays.length > 0 && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 flex items-start gap-3">
@@ -434,6 +494,15 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
             >
               <Download className="h-4 w-4" />
               Export Report
+            </button>
+            <button
+              onClick={() => { setTestAlertResult(null); testAlertMutation.mutate() }}
+              disabled={testAlertMutation.isPending}
+              className="flex items-center gap-2 rounded-md bg-muted px-3 py-1.5 text-sm font-medium text-foreground hover:bg-muted/80 disabled:opacity-50"
+              title="Send a test discrepancy alert to verify your alert configuration"
+            >
+              <Bell className={`h-4 w-4 ${testAlertMutation.isPending ? 'animate-pulse' : ''}`} />
+              Test Alert
             </button>
             <button
               onClick={() => reconcileMutation.mutate()}
