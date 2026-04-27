@@ -522,6 +522,8 @@ export const smsLogs = pgTable("sms_logs", {
 }, (table) => [
   index("idx_sms_logs_campaign").on(table.campaignId),
   index("idx_sms_logs_created").on(table.createdAt),
+  index("idx_sms_logs_status_created").on(table.status, table.createdAt),
+  index("idx_sms_logs_direction_created").on(table.direction, table.createdAt),
 ]);
 
 export type SmsLog = typeof smsLogs.$inferSelect;
