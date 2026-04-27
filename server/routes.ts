@@ -1360,13 +1360,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const { db } = await import('./db');
       const { callLogs } = await import('../shared/schema');
-      const { eq, and, desc, count, gte } = await import('drizzle-orm');
+      const { eq, and, desc, count, gte, lte } = await import('drizzle-orm');
 
-      const ninetyDaysAgo = new Date();
-      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+      const defaultStart = new Date();
+      defaultStart.setDate(defaultStart.getDate() - 90);
+      const startDate = req.query.startDate
+        ? new Date(req.query.startDate as string)
+        : defaultStart;
+      const endDate = req.query.endDate
+        ? new Date(req.query.endDate as string)
+        : new Date();
+
       const urgentCondition = and(
         eq(callLogs.transferredToHuman, true),
-        gte(callLogs.createdAt, ninetyDaysAgo)
+        gte(callLogs.createdAt, startDate),
+        lte(callLogs.createdAt, endDate)
       );
 
       const urgentCalls = await db

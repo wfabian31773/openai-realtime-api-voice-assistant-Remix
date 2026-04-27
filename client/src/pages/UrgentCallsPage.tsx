@@ -6,6 +6,8 @@ import { useAuth } from '@/hooks/useAuth'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Table,
   TableBody,
@@ -14,8 +16,12 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { AlertTriangle, Phone, Eye, Clock, User, Copy, Check, X, ExternalLink, Link2, Save } from 'lucide-react'
+import { AlertTriangle, Phone, Eye, Clock, User, Copy, Check, X, ExternalLink, Link2, Save, CalendarRange } from 'lucide-react'
 import type { CallLog } from '@/types'
+
+function toDateInputValue(date: Date): string {
+  return date.toISOString().slice(0, 10)
+}
 
 function CopyPhoneButton({ phone, formatted }: { phone: string; formatted: string }) {
   const [copied, setCopied] = React.useState(false)
@@ -131,12 +137,23 @@ export function UrgentCallsPage() {
   const [portalUrlSaved, setPortalUrlSaved] = React.useState(false)
   const [portalUrlError, setPortalUrlError] = React.useState<string | null>(null)
 
+  const defaultEnd = React.useMemo(() => new Date(), [])
+  const defaultStart = React.useMemo(() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 90)
+    return d
+  }, [])
+
+  const [startDate, setStartDate] = React.useState<string>(toDateInputValue(defaultStart))
+  const [endDate, setEndDate] = React.useState<string>(toDateInputValue(defaultEnd))
+
   const { data: urgentCallsResponse, isLoading, isError, dataUpdatedAt } = useQuery({
-    queryKey: ['urgent-calls'],
+    queryKey: ['urgent-calls', startDate, endDate],
     staleTime: 0,
     refetchOnMount: 'always',
     refetchInterval: 15000,
     queryFn: async () => {
+      const params = new URLSearchParams({ limit: '100', startDate, endDate })
       const { data } = await apiClient.get<{
         data: CallLog[]
         pagination: {
@@ -145,7 +162,7 @@ export function UrgentCallsPage() {
           total: number
           totalPages: number
         }
-      }>('/call-logs/urgent?limit=100')
+      }>(`/call-logs/urgent?${params.toString()}`)
       return data
     },
   })
@@ -242,7 +259,7 @@ export function UrgentCallsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex items-center gap-3">
           <AlertTriangle className="h-8 w-8 text-red-600" />
           <div>
@@ -250,11 +267,51 @@ export function UrgentCallsPage() {
             <p className="text-muted-foreground">Calls transferred to on-call provider</p>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          {dataUpdatedAt > 0 && <LastUpdatedIndicator dataUpdatedAt={dataUpdatedAt} />}
-          <Badge variant="destructive" className="text-lg px-4 py-2">
-            {urgentCalls.length} Total
-          </Badge>
+        <div className="flex flex-col gap-3 sm:items-end">
+          <div className="flex items-center gap-2">
+            <CalendarRange className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-1.5">
+                <Label htmlFor="urgent-start-date" className="text-sm whitespace-nowrap">From</Label>
+                <Input
+                  id="urgent-start-date"
+                  type="date"
+                  value={startDate}
+                  max={endDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="w-36 h-8 text-sm"
+                />
+              </div>
+              <div className="flex items-center gap-1.5">
+                <Label htmlFor="urgent-end-date" className="text-sm whitespace-nowrap">To</Label>
+                <Input
+                  id="urgent-end-date"
+                  type="date"
+                  value={endDate}
+                  min={startDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  className="w-36 h-8 text-sm"
+                />
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setStartDate(toDateInputValue(defaultStart))
+                  setEndDate(toDateInputValue(defaultEnd))
+                }}
+                className="h-8 text-xs"
+              >
+                Reset
+              </Button>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            {dataUpdatedAt > 0 && <LastUpdatedIndicator dataUpdatedAt={dataUpdatedAt} />}
+            <Badge variant="destructive" className="text-lg px-4 py-2">
+              {urgentCalls.length} Total
+            </Badge>
+          </div>
         </div>
       </div>
 
@@ -269,7 +326,9 @@ export function UrgentCallsPage() {
           {urgentCalls.length === 0 ? (
             <div className="py-12 text-center">
               <AlertTriangle className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
-              <p className="text-muted-foreground font-medium">No urgent calls in the last 90 days</p>
+              <p className="text-muted-foreground font-medium">
+                No urgent calls from {startDate} to {endDate}
+              </p>
               <p className="text-sm text-muted-foreground mt-1">
                 Calls transferred to the on-call provider appear here. An SMS notification is sent each time a new urgent transfer occurs.
               </p>
@@ -483,7 +542,8 @@ export function UrgentCallsPage() {
             notification number each time an urgent call is transferred.
           </p>
           <p>
-            <strong>Lookback window:</strong> This screen shows urgent calls from the last 90 days.
+            <strong>Date range:</strong> Use the date pickers at the top of the page to choose any
+            start and end date. The default range is the last 90 days.
           </p>
           <p>
             <strong>Review calls:</strong> Click any row to see full details including
