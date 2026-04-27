@@ -300,6 +300,15 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
     },
   })
 
+  const { data: alertConfig } = useQuery({
+    queryKey: ['reconciliation-alert-config'],
+    queryFn: async () => {
+      const { data } = await apiClient.get<{ slack: boolean; email: boolean }>('/reconciliation/alert-config')
+      return data
+    },
+    retry: 1,
+  })
+
   const testAlertMutation = useMutation({
     mutationFn: async () => {
       const { data } = await apiClient.post<{ success: boolean; channels: string[]; errors: string[] }>('/reconciliation/test-alert')
@@ -505,15 +514,48 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
               <Download className="h-4 w-4" />
               Export Report
             </button>
-            <button
-              onClick={() => { setTestAlertResult(null); testAlertMutation.mutate() }}
-              disabled={testAlertMutation.isPending}
-              className="flex items-center gap-2 rounded-md bg-muted px-3 py-1.5 text-sm font-medium text-foreground hover:bg-muted/80 disabled:opacity-50"
-              title="Send a test discrepancy alert to verify your alert configuration"
-            >
-              <Bell className={`h-4 w-4 ${testAlertMutation.isPending ? 'animate-pulse' : ''}`} />
-              Test Alert
-            </button>
+            <div className="flex flex-col items-start gap-1">
+              <button
+                onClick={() => { setTestAlertResult(null); testAlertMutation.mutate() }}
+                disabled={testAlertMutation.isPending}
+                className="flex items-center gap-2 rounded-md bg-muted px-3 py-1.5 text-sm font-medium text-foreground hover:bg-muted/80 disabled:opacity-50"
+                title="Send a test discrepancy alert to verify your alert configuration"
+              >
+                <Bell className={`h-4 w-4 ${testAlertMutation.isPending ? 'animate-pulse' : ''}`} />
+                Test Alert
+              </button>
+              {alertConfig && (
+                <div className="flex items-center gap-1.5 pl-0.5">
+                  {(alertConfig.slack || alertConfig.email) ? (
+                    <>
+                      <span className="text-[10px] text-muted-foreground">Channels:</span>
+                      {alertConfig.slack && (
+                        <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">
+                          <CheckCircle className="h-2.5 w-2.5" /> Slack
+                        </span>
+                      )}
+                      {alertConfig.email && (
+                        <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">
+                          <CheckCircle className="h-2.5 w-2.5" /> Email
+                        </span>
+                      )}
+                      {!alertConfig.slack && (
+                        <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium bg-muted text-muted-foreground">
+                          <AlertCircle className="h-2.5 w-2.5" /> Slack
+                        </span>
+                      )}
+                      {!alertConfig.email && (
+                        <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium bg-muted text-muted-foreground">
+                          <AlertCircle className="h-2.5 w-2.5" /> Email
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-[10px] text-muted-foreground">No channels configured</span>
+                  )}
+                </div>
+              )}
+            </div>
             <button
               onClick={() => reconcileMutation.mutate()}
               disabled={reconcileMutation.isPending || isFetching}

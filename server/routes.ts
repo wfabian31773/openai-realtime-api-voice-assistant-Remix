@@ -2211,6 +2211,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Return which alert channels are configured (boolean flags only, no secret values)
+  app.get('/api/reconciliation/alert-config', isAuthenticated, requireRole('admin'), (_req, res) => {
+    res.json({
+      slack: !!process.env.RECONCILIATION_ALERT_WEBHOOK_URL,
+      email: !!process.env.RECONCILIATION_ALERT_EMAIL,
+    });
+  });
+
   // Send a test discrepancy alert to verify alert delivery configuration
   app.post('/api/reconciliation/test-alert', isAuthenticated, requireRole('admin'), async (_req, res) => {
     try {
