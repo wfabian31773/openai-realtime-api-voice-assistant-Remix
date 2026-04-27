@@ -1405,6 +1405,101 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Export urgent calls as CSV
+  app.get('/api/call-logs/urgent/export', isAuthenticated, async (req, res) => {
+    try {
+      const { db } = await import('./db');
+      const { callLogs } = await import('../shared/schema');
+      const { eq, and, desc, gte, lte } = await import('drizzle-orm');
+
+      const defaultStart = new Date();
+      defaultStart.setDate(defaultStart.getDate() - 90);
+
+      const rawStart = req.query.startDate as string | undefined;
+      const rawEnd = req.query.endDate as string | undefined;
+
+      const startDate = rawStart ? new Date(rawStart) : defaultStart;
+      const endDate = rawEnd ? new Date(rawEnd) : new Date();
+
+      if (rawStart && isNaN(startDate.getTime())) {
+        return res.status(400).json({ error: 'Invalid startDate' });
+      }
+      if (rawEnd && isNaN(endDate.getTime())) {
+        return res.status(400).json({ error: 'Invalid endDate' });
+      }
+
+      const urgentCondition = and(
+        eq(callLogs.transferredToHuman, true),
+        gte(callLogs.createdAt, startDate),
+        lte(callLogs.createdAt, endDate)
+      );
+
+      const urgentCalls = await db
+        .select()
+        .from(callLogs)
+        .where(urgentCondition)
+        .orderBy(desc(callLogs.createdAt));
+
+      const normalized = urgentCalls.map(normalizeCallLog);
+
+      function csvEscape(val: unknown): string {
+        if (val === null || val === undefined) return '';
+        const str = String(val);
+        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+          return '"' + str.replace(/"/g, '""') + '"';
+        }
+        return str;
+      }
+
+      function getEscalationReasonCsv(call: ReturnType<typeof normalizeCallLog>): string {
+        if (call.escalationReason) return call.escalationReason as string;
+        const dc: unknown = call.detectedConditions;
+        if (!dc) return '';
+        if (Array.isArray(dc)) return dc.filter((i): i is string => typeof i === 'string').join('; ');
+        if (typeof dc === 'object' && dc !== null) {
+          const obj = dc as Record<string, unknown>;
+          if (typeof obj.escalationReason === 'string' && obj.escalationReason) return obj.escalationReason;
+          if (Array.isArray(obj.conditions)) return obj.conditions.filter((i): i is string => typeof i === 'string').join('; ');
+          const trueKeys = Object.entries(obj).filter(([, v]) => v === true).map(([k]) => k);
+          if (trueKeys.length > 0) return trueKeys.join('; ');
+          const strVals = Object.values(obj).filter((v): v is string => typeof v === 'string' && v.length > 0);
+          if (strVals.length > 0) return strVals[0];
+        }
+        return '';
+      }
+
+      function formatDurationCsv(seconds: unknown): string {
+        if (!seconds) return '';
+        const s = Number(seconds);
+        const mins = Math.floor(s / 60);
+        const secs = s % 60;
+        return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+      }
+
+      const headers = ['Date/Time', 'Caller Name', 'Phone', 'Duration', 'Escalation Reason', 'Agent', 'Ticket Number'];
+      const rows = normalized.map((call) => [
+        csvEscape(call.startTime ? new Date(call.startTime as string).toLocaleString('en-US') : ''),
+        csvEscape(call.callerName),
+        csvEscape(call.from),
+        csvEscape(formatDurationCsv(call.duration)),
+        csvEscape(getEscalationReasonCsv(call)),
+        csvEscape(call.agentId || 'Greeter'),
+        csvEscape(call.ticketNumber),
+      ]);
+
+      const csvLines = [headers.join(','), ...rows.map((r) => r.join(','))];
+      const csv = csvLines.join('\r\n');
+
+      const filename = `urgent-calls-${startDate.toISOString().slice(0, 10)}-to-${endDate.toISOString().slice(0, 10)}.csv`;
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.send(csv);
+    } catch (error) {
+      console.error("Error exporting urgent calls CSV:", error);
+      res.status(500).json({ message: "Failed to export urgent calls" });
+    }
+  });
+
   // Get voicemail callback list - calls that reached voicemail and need follow-up
   app.get('/api/call-logs/voicemails', isAuthenticated, async (req, res) => {
     try {

@@ -16,7 +16,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { AlertTriangle, Phone, Eye, Clock, User, Copy, Check, X, ExternalLink, Link2, Save, CalendarRange } from 'lucide-react'
+import { AlertTriangle, Phone, Eye, Clock, User, Copy, Check, X, ExternalLink, Link2, Save, CalendarRange, Download } from 'lucide-react'
 import type { CallLog } from '@/types'
 
 function toDateInputValue(date: Date): string {
@@ -201,6 +201,17 @@ export function UrgentCallsPage() {
     return urgentCallsResponse.data
   }, [urgentCallsResponse])
 
+  const handleExportCsv = React.useCallback(() => {
+    const params = new URLSearchParams({ startDate, endDate })
+    const url = `/api/call-logs/urgent/export?${params.toString()}`
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `urgent-calls-${startDate}-to-${endDate}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  }, [startDate, endDate])
+
   const formatDate = (date?: string) => {
     if (!date) return '-'
     return new Date(date).toLocaleString('en-US', {
@@ -303,6 +314,15 @@ export function UrgentCallsPage() {
                 className="h-8 text-xs"
               >
                 Reset
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleExportCsv}
+                className="h-8 text-xs"
+              >
+                <Download className="h-3.5 w-3.5 mr-1" />
+                Download CSV
               </Button>
             </div>
           </div>
