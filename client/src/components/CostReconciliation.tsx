@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import apiClient from '@/lib/apiClient'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -205,6 +205,15 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
   const [scheduleSaveError, setScheduleSaveError] = useState<string | null>(null)
   const [scheduleSaved, setScheduleSaved] = useState(false)
   const [testAlertResult, setTestAlertResult] = useState<{ success: boolean; channels: string[]; errors: string[] } | null>(null)
+  const [tableViewSize, setTableViewSize] = useState<'compact' | 'default' | 'expanded'>(() => {
+    const stored = localStorage.getItem('reconciliation-table-view-size')
+    if (stored === 'compact' || stored === 'default' || stored === 'expanded') return stored
+    return 'default'
+  })
+
+  useEffect(() => {
+    localStorage.setItem('reconciliation-table-view-size', tableViewSize)
+  }, [tableViewSize])
 
   const { data: reconciliation, isLoading, isFetching } = useQuery({
     queryKey: ['reconciliation-summary', startDate, endDate],
@@ -700,8 +709,20 @@ export function CostReconciliation({ startDate, endDate }: CostReconciliationPro
               {/* Daily reconciliation summary table */}
               {tableData.length > 0 && (
                 <div>
-                  <h4 className="text-sm font-medium text-foreground mb-3">Daily Reconciliation Summary</h4>
-                  <div className="overflow-x-auto max-h-96 overflow-y-auto border border-border rounded-md">
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-sm font-medium text-foreground">Daily Reconciliation Summary</h4>
+                    <select
+                      value={tableViewSize}
+                      onChange={e => setTableViewSize(e.target.value as 'compact' | 'default' | 'expanded')}
+                      className="text-xs border border-border rounded px-2 py-1 bg-background text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                      aria-label="Table row display size"
+                    >
+                      <option value="compact">Compact</option>
+                      <option value="default">Default</option>
+                      <option value="expanded">Expanded</option>
+                    </select>
+                  </div>
+                  <div className={`overflow-x-auto overflow-y-auto border border-border rounded-md ${tableViewSize === 'compact' ? 'max-h-48' : tableViewSize === 'expanded' ? 'max-h-[600px]' : 'max-h-96'}`}>
                     <table className="w-full text-sm">
                       <thead className="sticky top-0 z-10 bg-background">
                         <tr className="border-b border-border text-left">
