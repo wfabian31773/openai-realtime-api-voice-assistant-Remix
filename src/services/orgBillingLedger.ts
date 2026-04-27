@@ -255,7 +255,16 @@ export class OrgBillingLedgerService {
       const DISCREPANCY_THRESHOLD_PCT = Number(process.env.RECONCILIATION_ALERT_THRESHOLD_PCT) || 15;
       const hasDiscrepancyAlert = Math.abs(deltaPercent) > DISCREPANCY_THRESHOLD_PCT;
 
-      if (hasDiscrepancyAlert) {
+      const [existingRow] = await db
+        .select({ hasDiscrepancyAlert: dailyReconciliation.hasDiscrepancyAlert })
+        .from(dailyReconciliation)
+        .where(eq(dailyReconciliation.dateUtc, dateStr))
+        .limit(1);
+
+      const alertAlreadySent = existingRow?.hasDiscrepancyAlert === true;
+      const shouldSendAlert = hasDiscrepancyAlert && !alertAlreadySent;
+
+      if (shouldSendAlert) {
         console.warn(
           `[ORG BILLING] DISCREPANCY ALERT for ${dateStr}: delta=${deltaPercent.toFixed(1)}% exceeds threshold of ${DISCREPANCY_THRESHOLD_PCT}%. Actual=$${actualUsd.toFixed(2)}, Estimated=$${estimatedUsd.toFixed(2)}`
         );
@@ -269,6 +278,10 @@ export class OrgBillingLedgerService {
         }).catch((err) => {
           console.error(`[ORG BILLING] Failed to send discrepancy alert for ${dateStr}:`, err);
         });
+      } else if (hasDiscrepancyAlert && alertAlreadySent) {
+        console.info(
+          `[ORG BILLING] Discrepancy alert for ${dateStr} already sent previously — skipping duplicate.`
+        );
       }
 
       await db
