@@ -3987,6 +3987,57 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.put('/api/settings/ticket-portal-url', isAuthenticated, requireRole('admin'), async (req, res) => {
+    try {
+      const { db } = await import('./db');
+      const { appSettings, users } = await import('../shared/schema');
+      const { eq } = await import('drizzle-orm');
+
+      const { url } = req.body;
+      if (url === undefined || url === null) {
+        return res.status(400).json({ error: 'url is required' });
+      }
+      const trimmed = String(url).trim();
+      if (trimmed !== '') {
+        try {
+          const parsed = new URL(trimmed);
+          if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+            return res.status(400).json({ error: 'URL must use http or https' });
+          }
+        } catch {
+          return res.status(400).json({ error: 'Invalid URL format' });
+        }
+      }
+
+      const userId: string | undefined = (req.session as any)?.userId;
+      let updatedByEmail: string | null = null;
+      if (userId) {
+        const userRows = await db.select({ email: users.email }).from(users).where(eq(users.id, userId));
+        updatedByEmail = userRows[0]?.email ?? null;
+      }
+
+      if (trimmed === '') {
+        await db.delete(appSettings).where(eq(appSettings.key, 'ticket_portal_url'));
+        console.log(`[SETTINGS] Ticket portal URL cleared by ${updatedByEmail ?? 'unknown'}`);
+        return res.json({ success: true, url: null });
+      }
+
+      await db
+        .insert(appSettings)
+        .values({ key: 'ticket_portal_url', value: trimmed, updatedBy: updatedByEmail })
+        .onConflictDoUpdate({
+          target: appSettings.key,
+          set: { value: trimmed, updatedAt: new Date(), updatedBy: updatedByEmail },
+        });
+
+      console.log(`[SETTINGS] Ticket portal URL updated to ${trimmed} by ${updatedByEmail ?? 'unknown'}`);
+      return res.json({ success: true, url: trimmed });
+    } catch (error) {
+      console.error('[SETTINGS] Error updating ticket portal URL:', error);
+      res.status(500).json({ error: 'Failed to update setting' });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }

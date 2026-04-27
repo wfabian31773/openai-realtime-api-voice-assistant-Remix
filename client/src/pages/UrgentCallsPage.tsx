@@ -1,5 +1,5 @@
 import React from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import apiClient from '@/lib/apiClient'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -13,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { AlertTriangle, Phone, Eye, Clock, User, Copy, Check, X, ExternalLink } from 'lucide-react'
+import { AlertTriangle, Phone, Eye, Clock, User, Copy, Check, X, ExternalLink, Link2, Save } from 'lucide-react'
 import type { CallLog } from '@/types'
 
 function CopyPhoneButton({ phone, formatted }: { phone: string; formatted: string }) {
@@ -122,6 +122,11 @@ function isNoAnswerTransfer(call: CallLog): boolean {
 
 export function UrgentCallsPage() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
+
+  const [portalUrlEdit, setPortalUrlEdit] = React.useState<string | null>(null)
+  const [portalUrlSaved, setPortalUrlSaved] = React.useState(false)
+  const [portalUrlError, setPortalUrlError] = React.useState<string | null>(null)
 
   const { data: urgentCallsResponse, isLoading, isError, dataUpdatedAt } = useQuery({
     queryKey: ['urgent-calls'],
@@ -152,6 +157,24 @@ export function UrgentCallsPage() {
   })
 
   const ticketPortalUrl: string | null = ticketPortalData?.url ?? null
+
+  const ticketPortalUrlMutation = useMutation({
+    mutationFn: async (url: string) => {
+      const { data } = await apiClient.put<{ success: boolean; url: string | null }>('/settings/ticket-portal-url', { url })
+      return data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-ticket-portal-url'] })
+      setPortalUrlEdit(null)
+      setPortalUrlSaved(true)
+      setPortalUrlError(null)
+      setTimeout(() => setPortalUrlSaved(false), 3000)
+    },
+    onError: (err: unknown) => {
+      const apiErr = err as { response?: { data?: { error?: string } }; message?: string }
+      setPortalUrlError(apiErr?.response?.data?.error || apiErr?.message || 'Failed to save')
+    },
+  })
 
   const urgentCalls = React.useMemo(() => {
     if (!urgentCallsResponse?.data) return []
@@ -374,6 +397,68 @@ export function UrgentCallsPage() {
                 })}
               </TableBody>
             </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Link2 className="h-5 w-5 text-blue-500" />
+            Ticketing System URL
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Base URL for your ticketing portal. When configured, ticket badges link directly to the ticket in a new tab.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex-1 min-w-[260px]">
+              <label className="text-xs text-muted-foreground block mb-1">Portal base URL (e.g. https://tickets.example.com)</label>
+              <input
+                type="url"
+                placeholder={ticketPortalUrl ?? 'Not configured'}
+                value={portalUrlEdit ?? (ticketPortalUrl || '')}
+                onChange={(e) => {
+                  setPortalUrlSaved(false)
+                  setPortalUrlError(null)
+                  setPortalUrlEdit(e.target.value)
+                }}
+                className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <button
+              onClick={() => {
+                const val = portalUrlEdit ?? ''
+                ticketPortalUrlMutation.mutate(val)
+              }}
+              disabled={
+                ticketPortalUrlMutation.isPending ||
+                portalUrlEdit === null ||
+                (portalUrlEdit || '') === (ticketPortalUrl || '')
+              }
+              className="flex items-center gap-1.5 rounded-md bg-blue-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-600 disabled:opacity-50"
+            >
+              <Save className="h-3.5 w-3.5" />
+              {ticketPortalUrlMutation.isPending ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+          {ticketPortalUrl && portalUrlEdit === null && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Current: <span className="font-mono">{ticketPortalUrl}</span>
+            </p>
+          )}
+          {portalUrlSaved && (
+            <div className="mt-2 flex items-center gap-2 text-sm text-green-600">
+              <Check className="h-4 w-4" />
+              Ticketing portal URL saved.
+            </div>
+          )}
+          {portalUrlError && (
+            <div className="mt-2 flex items-center gap-2 text-sm text-red-600">
+              <X className="h-4 w-4" />
+              {portalUrlError}
+            </div>
           )}
         </CardContent>
       </Card>
