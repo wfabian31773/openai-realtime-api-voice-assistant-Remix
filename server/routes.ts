@@ -2249,7 +2249,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { orgBillingLedger } = await import('../src/services/orgBillingLedger');
       const { date, startDate, endDate } = req.body;
-      const triggeredBy: string = req.session?.userId || req.user?.claims?.sub || 'manual';
+      const triggeredBy: string = (req.session as any)?.userId || 'manual';
 
       const logRun = async (dateReconciled: string, result: { success: boolean; error?: string }, durationMs: number | null) => {
         try {
@@ -2294,7 +2294,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       try {
         const { db } = await import('./db');
         const { reconciliationRuns } = await import('../shared/schema');
-        const triggeredBy: string = req.session?.userId || req.user?.claims?.sub || 'manual';
+        const triggeredBy: string = (req.session as any)?.userId || 'manual';
         const { date } = req.body;
         if (date || req.body.startDate) {
           await db.insert(reconciliationRuns).values({
