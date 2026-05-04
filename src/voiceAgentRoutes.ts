@@ -4305,6 +4305,38 @@ export function setupVoiceAgentRoutes(app: Express): void {
           });
           
           console.info(`[RECORDING] ✓ Saved recording URL to call log ${callLogId}`);
+
+          // PUSH RECORDING URL TO TICKETING SYSTEM immediately
+          // The ticketing sync runs every 5 min and marks calls as synced before the
+          // recording is ready — so once synced, the recording URL is never re-sent.
+          // Fix: push it directly here as soon as Twilio delivers the recording.
+          (async () => {
+            try {
+              const callLog = await storage.getCallLog(callLogId);
+              if (!callLog) {
+                console.warn(`[RECORDING] ⚠️ Could not fetch call log ${callLogId} for ticketing push`);
+                return;
+              }
+              // Only push if there is something to identify the ticket on the other end
+              if (!callLog.ticketNumber && !callLog.callSid) {
+                console.info(`[RECORDING] No ticketNumber/callSid on call log ${callLogId} — skipping ticketing push`);
+                return;
+              }
+              const { ticketingApiClient } = await import('../server/services/ticketingApiClient');
+              const result = await ticketingApiClient.updateTicketCallData({
+                callSid: callLog.callSid || undefined,
+                ticketNumber: callLog.ticketNumber || undefined,
+                recordingUrl: recordingUrl,
+              });
+              if (result.success) {
+                console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}`);
+              } else {
+                console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
+              }
+            } catch (pushErr) {
+              console.error('[RECORDING] ✗ Exception pushing recording URL to ticketing system:', pushErr);
+            }
+          })();
           
           // Clean up mapping
           delete conferenceSidToCallLogId[conferenceSid];
