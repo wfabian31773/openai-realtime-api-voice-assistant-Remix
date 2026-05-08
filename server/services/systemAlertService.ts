@@ -26,6 +26,7 @@ interface AlertState {
   alertCounts: Map<string, number>;
   systemHealthy: boolean;
   consecutiveFailures: number;
+  lastRecoverySentAt: number;
 }
 
 const ALERT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between same-type alerts
@@ -38,6 +39,7 @@ class SystemAlertService {
     alertCounts: new Map(),
     systemHealthy: true,
     consecutiveFailures: 0,
+    lastRecoverySentAt: 0,
   };
 
   private alertHistory: AlertEvent[] = [];
@@ -215,9 +217,20 @@ class SystemAlertService {
   }
 
   /**
-   * Send recovery notification
+   * Send recovery notification (rate-limited to once per cooldown window)
    */
   private async sendRecoveryAlert(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastRecovery = now - this.state.lastRecoverySentAt;
+
+    if (timeSinceLastRecovery < ALERT_COOLDOWN_MS) {
+      const remainingSecs = Math.round((ALERT_COOLDOWN_MS - timeSinceLastRecovery) / 1000);
+      console.log(`[ALERT SERVICE] Skipping recovery SMS (cooldown — ${remainingSecs}s remaining)`);
+      return;
+    }
+
+    this.state.lastRecoverySentAt = now;
+
     const event: AlertEvent = {
       type: 'recovery',
       severity: 'info',
