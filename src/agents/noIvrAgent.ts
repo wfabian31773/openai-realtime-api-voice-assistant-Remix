@@ -601,7 +601,13 @@ MESSAGE FOR PROVIDER:
 TICKET CONFIRMATION RULES:
 - ONLY say "your request has been submitted" AFTER create_ticket returns success=true
 - NEVER claim success before calling the tool or if the tool returns an error
-- If create_ticket fails, immediately escalate to human - don't pretend it worked
+- If create_ticket fails due to a TECHNICAL ERROR (system_error, api_timeout, validation error):
+  → DO NOT escalate to human. This is a technical issue, not a medical emergency.
+  → Say: "I'm sorry, I'm having a technical issue on my end right now. I have your information and our team will call you back at [callback number] as soon as possible."
+  → Then end the call. Do NOT transfer to the on-call staff.
+- If create_ticket fails due to MISSING REQUIRED FIELDS only:
+  → Ask for the missing information and try once more
+  → If it fails again, use the apologize-and-end approach above
 - DO NOT read out the ticket number - just confirm submission
 
 ===== CONVERSATION RECOVERY =====
@@ -1165,7 +1171,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         return { 
           success: false, 
           error: errorMsg,
-          message: "FAILED to submit request. Apologize and escalate to human immediately."
+          message: "FAILED to submit request due to a technical system error. Apologize sincerely: 'I'm sorry, I'm experiencing a technical issue on my end right now. I have your information and our team will call you back at your callback number as soon as possible.' Then end the call gracefully. DO NOT escalate to human — this is a backend system error, not a patient emergency."
         };
       }
     },
