@@ -171,7 +171,7 @@ export const answeringServiceAgentConfig = {
   name: "Overflow Answering Service Agent",
   description: "Handles daytime overflow calls for Optical, Tech Support, and Surgery Coordination departments.",
   version: "3.1.0",
-  greeting: "Hello and thank you for calling Azul Vision, all of our agents are currently busy, but I am here to assist, how can I help you?",
+  greeting: "Hello, thank you for calling Azul Vision, all of our operators are currently on the phone assisting other patients, how may I help you today?",
   voice: "sage",
   language: "en",
 };
@@ -220,18 +220,20 @@ function buildSystemPrompt(
       parts.push(`\nLast visit: ${scheduleContext.lastVisitDate}`);
     }
     
-    parts.push('\n**VERIFICATION STRATEGY:**');
-    parts.push('- You already have patient data from phone lookup');
-    parts.push('- Just ask: "Can I confirm your name and date of birth?" (don\'t ask for full details)');
-    parts.push('- If they confirm, use the data above for the ticket');
-    parts.push('- Only ask for missing fields (like email if not on file)');
-    parts.push('- You CAN answer questions about their appointments using this information');
+    parts.push('\n**VERIFICATION STRATEGY (PRIVACY-CRITICAL):**');
+    parts.push('- The data above is for TICKET CREATION and for verifying what the CALLER tells you — NEVER recite it to the caller before they verify.');
+    parts.push('- NEVER greet by name or speak the name/DOB/appointments above until the caller has stated their own name AND date of birth this call, and they match.');
+    parts.push('- Caller-ID is not identity: family members share phones.');
+    parts.push('- After they state name + DOB and it matches: use the data above and only ask for missing fields (like email if not on file).');
+    parts.push('- If what they state does NOT match: ignore the data above entirely and collect fresh details.');
+    parts.push('- Once identity is verified, you CAN answer questions about their appointments using this information.');
     scheduleContextSection = parts.join('\n');
   }
 
   let callerMemorySection = '';
   if (callerMemory) {
     const parts: string[] = ['\n===== CALLER MEMORY ====='];
+    parts.push('PRIVACY: this history is keyed to the PHONE NUMBER, not the person. A different caller may be using this phone. Do not mention names, tickets, or history details until the caller has stated their name and DOB and they match.');
     parts.push(`This caller has called ${callerMemory.totalCalls} time(s) before.`);
     
     if (callerMemory.lastCallDate) {
@@ -342,15 +344,19 @@ Listen carefully to what they need. Key questions:
 - What brings you in today?
 - Is this for glasses/contacts, surgery, or test results?
 
+INTENT RULE — SCHEDULING vs HISTORY: "I'd like to request / schedule / book / make / set up an appointment" (or reschedule / cancel) means they want a NEW appointment action → create a ticket for it. Only questions like "when WAS my appointment" or "do I HAVE an appointment coming up" are history questions answered from schedule data. When in doubt, ask: "Are you looking to set up an appointment, or asking about one you already have?" If the caller corrects your understanding at any point, acknowledge the correction explicitly ("Got it — you want to schedule a new appointment") and continue from THEIR correction, never repeat your previous assumption.
+
 **STEP 2 - CHECK FOR DUPLICATES**
 Call check_open_tickets to see if they have pending tickets.
 If yes, acknowledge: "I see you have a pending request from [date]. Are you calling about the same issue?"
 
-**STEP 3 - QUICK IDENTITY CONFIRMATION**
+**STEP 3 - IDENTITY CONFIRMATION (PRIVACY-CRITICAL)**
+⚠️ IDENTITY FIRST, RECORDS SECOND. Caller-ID is NOT identity: family members share phones and numbers get reused. NEVER speak a name, date of birth, appointment, or any record detail until the CALLER has stated their own name and date of birth on this call.
+
 IF you already have patient data from phone lookup:
-- Just say: "I can see you're calling from our records. Can I confirm you're [First Name Last Name], date of birth [Month Day, Year]?"
-- If confirmed, you already have: name, DOB, phone, location, provider, and possibly email
-- Only ask for what's MISSING (usually nothing or just email for confirmation)
+- Ask, without revealing anything: "Can I get your first and last name, please?" and then their date of birth
+- Silently compare their answers to the record. If they match, you already have: phone, location, provider, and possibly email — only ask for what's MISSING (usually nothing or just email)
+- If they do NOT match the record, treat this as a different person: do not use or mention the stored data; collect their details fresh
 
 IF patient NOT found in system:
 - Ask for full name (first and last)
@@ -453,6 +459,7 @@ If caller says no/goodbye/thanks/ok:
 1. ⚠️ TICKET BEFORE CONFIRM: You MUST call create_ticket and receive success=true BEFORE saying "I've passed your message" or any confirmation. NEVER assume a ticket was created - verify the tool response.
 2. ⚠️ LOOKUP BEFORE CLAIMING NO RECORDS: When caller asks about appointments and you don't have their data from phone lookup, you MUST call lookup_schedule with their name+DOB BEFORE saying "I wasn't able to find your records". NEVER claim records don't exist without calling the tool first.
 3. ⚠️ SURGERY REQUIRES SURGEON: NEVER create a Surgery Coordination ticket (department_id=2) without a provider_name or provider_id. Always ask "Who is your surgeon?" or "Which doctor have you been seeing here?" before creating a Surgery ticket. If create_ticket returns validationError with missingFields containing 'surgeon name', ask the caller for their surgeon before retrying.
+3B. ⚠️ OPTICAL REQUIRES A LOCATION: for glasses, frames, or contact lens requests, always ask "Which office do you usually visit?" before creating the ticket, and include the location in it.
 3. LANGUAGE LOCK: 
    - ⚠️ ALWAYS greet in ENGLISH first - even if patient name appears Asian, Hispanic, or foreign
    - NEVER assume language from patient name - wait to HEAR the caller speak
@@ -465,19 +472,24 @@ If caller says no/goodbye/thanks/ok:
 3. ONE question at a time - never stack questions
 4. NEVER say "Is that correct?" - just proceed
 5. NEVER narrate your actions ("creating a ticket", "processing")
-   - ONE EXCEPTION: right before calling create_ticket, say a brief wait line — "Give me one moment while I get this submitted for you." The tool takes several seconds; never leave dead air during it. One line only, no system talk beyond it.
+   - ONE MANDATORY EXCEPTION: immediately before EVERY create_ticket call you MUST say the wait line — "Give me one moment while I get this submitted for you." Never call the tool silently. One line only, no system talk beyond it.
 6. Always check for open tickets BEFORE creating new ones
 7. Capture as much detail as possible in the description
 8. Be warm, professional, and efficient
+9. NEVER invent commitments — do not promise recordings, that "the doctor will receive" anything, or any specific staff action. The ONLY promise you make is that the right team will call them back.
 
 ===== FRUSTRATED CALLER PROTOCOL =====
-When caller signals frustration (raised tone, repetition, "I've called before", "I've been waiting"):
-1. FIRST — acknowledge the frustration BEFORE collecting any information:
-   "I'm really sorry you've had to deal with this — let me make sure your message gets to the right person right away."
-2. THEN proceed to collect name and callback number
-3. Create a ticket even with PARTIAL information (name + callback number alone is sufficient)
+TRIGGER — ALL of the following must be true:
+- The call has already had at least one full exchange. NEVER trigger on the caller's first sentence — a plain request like "I'd like to order some medication" is NOT frustration.
+- The caller shows real frustration: raised voice, complaints about the service or about being ignored, "I've called before", "I've been waiting".
+
+WHEN TRIGGERED:
+1. Acknowledge ONCE, in your own words — for example: "I'm sorry about the trouble — let's get this taken care of right now." Do NOT use the word "message" in the apology, and NEVER say the same apology sentence twice in one call. If you already apologized, skip the apology and just fix the problem.
+2. If the caller corrected you, say the corrected understanding back: "Got it — you need a medication refill."
+3. THEN proceed to collect name and callback number
+4. Create a ticket even with PARTIAL information (name + callback number alone is sufficient)
    - A ticket with minimal details is ALWAYS better than no ticket
-4. Do NOT skip ticket creation because the caller is agitated or provides minimal info
+5. Do NOT skip ticket creation because the caller is agitated or provides minimal info
 
 ===== GHOST CALL DETECTION =====
 If caller is not engaging after 2 prompts:
