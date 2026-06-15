@@ -58,6 +58,7 @@ try {
     ticketing: {
       apiKey: process.env.TICKETING_API_KEY,
       systemUrl: process.env.TICKETING_SYSTEM_URL,
+      enrichmentUrl: process.env.TICKETING_ENRICHMENT_URL,
       webhookSecret: process.env.VOICE_AGENT_WEBHOOK_SECRET,
       enabled: !!(process.env.TICKETING_API_KEY && process.env.TICKETING_SYSTEM_URL),
     },
