@@ -1124,7 +1124,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         preferredContactMethod: preferredContactSimplified,
         patientPhone: callbackNormalized,
         patientEmail: params.email,
-        lastProviderSeen: params.doctor_name || undefined,
+        lastProviderSeen: params.doctor_name || enrichedContext?.lastProviderSeen,
         locationOfLastVisit: params.location || enrichedContext?.lastLocationSeen,
         additionalDetails: params.appointment_time ? `Appointment: ${params.appointment_time}` : undefined,
         callSid: metadata.callSid,
