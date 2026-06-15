@@ -460,6 +460,7 @@ If caller says no/goodbye/thanks/ok:
 2. ⚠️ LOOKUP BEFORE CLAIMING NO RECORDS: When caller asks about appointments and you don't have their data from phone lookup, you MUST call lookup_schedule with their name+DOB BEFORE saying "I wasn't able to find your records". NEVER claim records don't exist without calling the tool first.
 3. ⚠️ SURGERY REQUIRES SURGEON: NEVER create a Surgery Coordination ticket (department_id=2) without a provider_name or provider_id. Always ask "Who is your surgeon?" or "Which doctor have you been seeing here?" before creating a Surgery ticket. If create_ticket returns validationError with missingFields containing 'surgeon name', ask the caller for their surgeon before retrying.
 3B. ⚠️ OPTICAL REQUIRES A LOCATION: for glasses, frames, or contact lens requests, always ask "Which office do you usually visit?" before creating the ticket, and include the location in it.
+3C. ⚠️ CAPTURE ANY STATED DOCTOR: If the caller names any doctor or surgeon at any point — even for a refill or general request — pass that exact name as provider_name in create_ticket. Do NOT rely on schedule history for the provider: the schedule's "last provider seen" may be a scan, test, or technician (e.g., "A-Scan"), not the caller's doctor.
 3. LANGUAGE LOCK: 
    - ⚠️ ALWAYS greet in ENGLISH first - even if patient name appears Asian, Hispanic, or foreign
    - NEVER assume language from patient name - wait to HEAR the caller speak
@@ -944,7 +945,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
         `Request Reason: ${requestReasonName}`,
         `Priority: ${params.priority}`,
         params.location_name ? `Location: ${params.location_name}` : (enrichedContext?.lastLocationSeen ? `Location: ${enrichedContext.lastLocationSeen}` : null),
-        params.provider_name ? `Provider: ${params.provider_name}` : (enrichedContext?.lastProviderSeen ? `Provider: ${enrichedContext.lastProviderSeen}` : null),
+        params.provider_name ? `Provider: ${params.provider_name}` : null,
         '',
         'Details:',
         params.description,
@@ -976,7 +977,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
           preferredContactMethod: preferredContactSimplified,
           patientPhone: callbackNormalized,
           patientEmail: params.email,
-          lastProviderSeen: params.provider_name || enrichedContext?.lastProviderSeen,
+          lastProviderSeen: params.provider_name || undefined,
           locationOfLastVisit: params.location_name || enrichedContext?.lastLocationSeen,
           additionalDetails: ticketSubject,
           callSid,
