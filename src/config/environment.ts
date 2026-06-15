@@ -7,6 +7,10 @@ const sharedEnvSchema = z.object({
   SESSION_SECRET: z.string().optional(),
   TICKETING_API_KEY: z.string().optional(),
   TICKETING_SYSTEM_URL: z.string().optional(),
+  // Optional direct-to-app base URL for post-call enrichment (update-call-data).
+  // When set, enrichment bypasses the n8n gateway to conserve n8n execution quota.
+  // Falls back to TICKETING_SYSTEM_URL when unset, so behavior is unchanged by default.
+  TICKETING_ENRICHMENT_URL: z.string().optional(),
   HUMAN_AGENT_NUMBER: z.string().optional(),
   TWILIO_PHONE_NUMBER: z.string().optional(),
   URGENT_NOTIFICATION_NUMBER: z.string().optional(),
@@ -65,6 +69,7 @@ export interface EnvironmentConfig {
   ticketing: {
     apiKey: string | undefined;
     systemUrl: string | undefined;
+    enrichmentUrl: string | undefined;
     webhookSecret: string | undefined;
     enabled: boolean;
   };
@@ -168,6 +173,7 @@ export function getEnvironmentConfig(): EnvironmentConfig {
     ticketing: {
       apiKey: env.TICKETING_API_KEY,
       systemUrl: env.TICKETING_SYSTEM_URL,
+      enrichmentUrl: env.TICKETING_ENRICHMENT_URL,
       webhookSecret: env.VOICE_AGENT_WEBHOOK_SECRET,
       enabled: !!(env.TICKETING_API_KEY && env.TICKETING_SYSTEM_URL),
     },

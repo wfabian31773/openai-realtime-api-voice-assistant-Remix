@@ -156,6 +156,8 @@ interface LookupResponse {
 
 export class TicketingApiClient {
   private baseUrl: string | null = null;
+  // Direct-to-app base for post-call enrichment; falls back to baseUrl (n8n) when unset.
+  private enrichmentBaseUrl: string | null = null;
   private apiKey: string | null = null;
   private initialized = false;
   private lastInitTime: number = 0;
@@ -174,6 +176,7 @@ export class TicketingApiClient {
     // Production reads from .env file, development from Replit Secrets
     const config = getEnvironmentConfig();
     const ticketingUrl = config.ticketing.systemUrl;
+    const enrichmentUrl = config.ticketing.enrichmentUrl;
     const apiKey = config.ticketing.apiKey;
 
     if (!this.initialized) {
@@ -195,6 +198,8 @@ export class TicketingApiClient {
     }
 
     this.baseUrl = ticketingUrl.replace(/\/$/, "");
+    // Enrichment (update-call-data) goes direct to the app when configured, else through n8n.
+    this.enrichmentBaseUrl = (enrichmentUrl || ticketingUrl).replace(/\/$/, "");
     this.apiKey = apiKey;
     this.initialized = true;
     this.lastInitTime = now;
@@ -234,7 +239,8 @@ export class TicketingApiClient {
     endpoint: string,
     method: string,
     body?: any,
-    timeoutMs: number = 15000
+    timeoutMs: number = 15000,
+    useEnrichmentBase: boolean = false
   ): Promise<T> {
     this.ensureInitialized();
 
@@ -242,7 +248,9 @@ export class TicketingApiClient {
       throw new Error("Ticketing API client not properly initialized");
     }
 
-    const url = `${this.baseUrl}${endpoint}`;
+    // Resolve the base AFTER ensureInitialized() so enrichmentBaseUrl is populated
+    // (reading it at the call site would capture null on the first request).
+    const url = `${(useEnrichmentBase && this.enrichmentBaseUrl) || this.baseUrl}${endpoint}`;
     console.info(`[TICKETING API] Request: ${method} ${url} (timeout: ${timeoutMs}ms)`);
 
     const controller = new AbortController();
@@ -505,7 +513,9 @@ export class TicketingApiClient {
       const response = await this.makeRequest<UpdateTicketCallDataResponse>(
         "/api/voice-agent/update-call-data",
         "POST",
-        params
+        params,
+        15000,
+        true
       );
 
       if (response.success) {
