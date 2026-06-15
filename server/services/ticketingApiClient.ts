@@ -240,7 +240,7 @@ export class TicketingApiClient {
     method: string,
     body?: any,
     timeoutMs: number = 15000,
-    baseUrlOverride?: string | null
+    useEnrichmentBase: boolean = false
   ): Promise<T> {
     this.ensureInitialized();
 
@@ -248,7 +248,9 @@ export class TicketingApiClient {
       throw new Error("Ticketing API client not properly initialized");
     }
 
-    const url = `${baseUrlOverride || this.baseUrl}${endpoint}`;
+    // Resolve the base AFTER ensureInitialized() so enrichmentBaseUrl is populated
+    // (reading it at the call site would capture null on the first request).
+    const url = `${(useEnrichmentBase && this.enrichmentBaseUrl) || this.baseUrl}${endpoint}`;
     console.info(`[TICKETING API] Request: ${method} ${url} (timeout: ${timeoutMs}ms)`);
 
     const controller = new AbortController();
@@ -513,7 +515,7 @@ export class TicketingApiClient {
         "POST",
         params,
         15000,
-        this.enrichmentBaseUrl
+        true
       );
 
       if (response.success) {
