@@ -217,8 +217,17 @@ export class TicketingApiClient {
   async healthCheck(): Promise<{ ok: boolean; error?: string }> {
     try {
       this.ensureInitialized();
-      const url = `${this.baseUrl}/api/health`;
-      const response = await fetch(url, { 
+      // Warm-up fires before EVERY create/submit, so routing it through the n8n
+      // gateway cost one n8n execution per ticket (~half our monthly executions)
+      // against the 10k cap. When a direct-to-app base is configured (the same
+      // enrichment URL update-call-data uses), probe the app's static liveness
+      // endpoint instead — that keeps warm-up off n8n entirely. Falls back to the
+      // n8n health gateway only when no direct app URL is set.
+      const useDirectApp = !!this.enrichmentBaseUrl && this.enrichmentBaseUrl !== this.baseUrl;
+      const url = useDirectApp
+        ? `${this.enrichmentBaseUrl}/api/voice-agent/ping`
+        : `${this.baseUrl}/api/health`;
+      const response = await fetch(url, {
         method: 'GET',
         headers: { 'X-API-Key': this.apiKey! },
       });
