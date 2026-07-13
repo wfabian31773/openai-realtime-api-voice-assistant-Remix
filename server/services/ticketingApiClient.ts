@@ -154,6 +154,22 @@ interface LookupResponse {
   error?: string;
 }
 
+// PHI-safe log helpers — never emit full patient identifiers to stdout. These
+// masked forms are unconditional (they don't depend on DISABLE_PHI_LOGGING) so a
+// misconfigured flag can't leak a patient name or full phone number. (R-6)
+function maskPhone(phone?: string): string {
+  if (!phone) return '(none)';
+  const d = phone.replace(/\D/g, '');
+  return d.length >= 4 ? `***${d.slice(-4)}` : '***';
+}
+function maskName(...parts: Array<string | undefined>): string {
+  const initials = parts
+    .flatMap((p) => (p ?? '').trim().split(/\s+/))
+    .map((p) => p[0]?.toUpperCase() ?? '')
+    .join('');
+  return initials ? `${initials}***` : '(none)';
+}
+
 export class TicketingApiClient {
   private baseUrl: string | null = null;
   // Direct-to-app base for post-call enrichment; falls back to baseUrl (n8n) when unset.
@@ -338,8 +354,8 @@ export class TicketingApiClient {
 
   async createTicket(params: CreateTicketParams): Promise<CreateTicketResponse> {
     console.info("[TICKETING API] Creating ticket:", {
-      patient: `${params.patientFirstName} ${params.patientLastName}`,
-      phone: params.patientPhone,
+      patient: maskName(params.patientFirstName, params.patientLastName),
+      phone: maskPhone(params.patientPhone),
       departmentId: params.departmentId,
       priority: params.priority || "medium",
       preferredContactMethod: params.preferredContactMethod,
@@ -409,7 +425,7 @@ export class TicketingApiClient {
    */
   async submitTicket(params: SubmitTicketParams): Promise<SubmitTicketResponse> {
     console.info("[TICKETING API] Submitting ticket (simplified endpoint):", {
-      patientName: params.patientFullName,
+      patientName: maskName(params.patientFullName),
       hasPhone: !!params.patientPhone,
       hasEmail: !!params.patientEmail,
       preferredContact: params.preferredContactMethod,
