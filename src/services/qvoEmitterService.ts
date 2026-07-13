@@ -15,12 +15,27 @@ const QVO_INGEST_URL = process.env.QVO_INGEST_URL?.replace(/\/$/, '');
 const QVO_API_KEY   = process.env.QVO_API_KEY;
 const QVO_TENANT_ID = process.env.QVO_TENANT_ID;
 
+// QVO is a downstream analytics vendor. Sending it PHI (transcript, recording,
+// patient name/DOB, reason-for-call description, full phone numbers) requires a
+// signed BAA (HIPAA §164.502(e)). Default to STRIPPING PHI from every QVO
+// payload; only send it when a BAA is on file and QVO_INCLUDE_PHI=true is set
+// explicitly. Non-PHI analytics (costs, quality scores, telemetry, timing) are
+// always sent so the integration keeps working. (medical-records R-3 / R-6.)
+const QVO_INCLUDE_PHI = process.env.QVO_INCLUDE_PHI === 'true';
+
+function maskPhone(phone?: string | null): string {
+  if (!phone) return '';
+  const d = String(phone).replace(/\D/g, '');
+  return d.length >= 4 ? `***${d.slice(-4)}` : '***';
+}
+
 // Log configuration status at module load time so it appears in startup logs
 console.info('[QVO EMITTER] Configuration check:', {
   QVO_INGEST_URL: QVO_INGEST_URL ? `✓ set (${QVO_INGEST_URL.substring(0, 30)}...)` : '✗ MISSING',
   QVO_API_KEY:    QVO_API_KEY    ? `✓ set (length: ${QVO_API_KEY.length})`         : '✗ MISSING',
   QVO_TENANT_ID:  QVO_TENANT_ID  ? `✓ set`                                          : '✗ MISSING',
   status: (QVO_INGEST_URL && QVO_API_KEY && QVO_TENANT_ID) ? 'ACTIVE' : 'STANDBY (no-op until vars set)',
+  phi_mode: QVO_INCLUDE_PHI ? 'FULL (QVO_INCLUDE_PHI=true — BAA must be on file)' : 'REDACTED (default; no PHI sent to QVO)',
 });
 
 const MAX_RETRIES      = 3;
@@ -124,8 +139,9 @@ async function emitCallCompleted(callLogId: string): Promise<void> {
     external_id:  callLogId,
     twilio_sid:   callLog.callSid || '',
     direction:    callLog.direction,
-    from_number:  callLog.from,
-    to_number:    callLog.to,
+    from_number:  QVO_INCLUDE_PHI ? callLog.from : maskPhone(callLog.from),
+    to_number:    QVO_INCLUDE_PHI ? callLog.to   : maskPhone(callLog.to),
+    phi_redacted: !QVO_INCLUDE_PHI,
     status:       callLog.twilioStatus || callLog.status || 'completed',
     start_time:   callLog.startTime?.toISOString()  ?? new Date().toISOString(),
     end_time:     callLog.endTime?.toISOString()    ?? new Date().toISOString(),
@@ -135,10 +151,10 @@ async function emitCallCompleted(callLogId: string): Promise<void> {
     transferred_to_human: callLog.transferredToHuman ?? false,
     ...(callLog.transferredToHuman ? { escalation_reason: 'human_handoff' } : {}),
 
-    // Content
-    transcript:    callLog.transcript    ?? '',
-    ...(callLog.summary      ? { summary:       callLog.summary }       : {}),
-    ...(callLog.recordingUrl ? { recording_url: callLog.recordingUrl }  : {}),
+    // Content — PHI; only sent when a QVO BAA is on file (QVO_INCLUDE_PHI=true)
+    ...(QVO_INCLUDE_PHI ? { transcript: callLog.transcript ?? '' } : {}),
+    ...(QVO_INCLUDE_PHI && callLog.summary      ? { summary:       callLog.summary }       : {}),
+    ...(QVO_INCLUDE_PHI && callLog.recordingUrl ? { recording_url: callLog.recordingUrl }  : {}),
 
     // Costs (all in cents)
     costs: {
@@ -221,17 +237,23 @@ async function emitTicketCreated(
     tenant_id:       QVO_TENANT_ID,
     agent_remote_id: 'no-ivr',             // tickets come from inbound agents
 
-    // Ticket fields
+    // Ticket fields — subject/description can carry patient name + medical
+    // reason-for-call, so they are PHI-gated too. ticketNumber always identifies
+    // the ticket for QVO correlation.
     ...(callLogId ? { call_external_id: callLogId } : {}),
-    subject:     params.subject || ticketNumber,
-    description: params.description,
+    ticket_number: ticketNumber,
+    subject:     QVO_INCLUDE_PHI ? (params.subject || ticketNumber) : ticketNumber,
+    ...(QVO_INCLUDE_PHI ? { description: params.description } : {}),
     priority,
     created_at:  new Date().toISOString(),
+    phi_redacted: !QVO_INCLUDE_PHI,
 
-    // Patient identity (QVO will encrypt PII at rest)
-    ...(params.patientPhone     ? { external_number:    params.patientPhone }     : {}),
-    ...(params.patientFirstName ? { patient_first_name: params.patientFirstName } : {}),
-    ...(params.patientLastName  ? { patient_last_name:  params.patientLastName }  : {}),
+    // Patient identity — PHI; only sent when a QVO BAA is on file.
+    ...(params.patientPhone
+      ? { external_number: QVO_INCLUDE_PHI ? params.patientPhone : maskPhone(params.patientPhone) }
+      : {}),
+    ...(QVO_INCLUDE_PHI && params.patientFirstName ? { patient_first_name: params.patientFirstName } : {}),
+    ...(QVO_INCLUDE_PHI && params.patientLastName  ? { patient_last_name:  params.patientLastName }  : {}),
   };
 
   console.info(`[QVO EMITTER] → ticket.created ${outboxId} (${ticketNumber})`);
