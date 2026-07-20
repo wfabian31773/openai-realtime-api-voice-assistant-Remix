@@ -48,6 +48,10 @@ const TOOL_TIMEOUT_MS: Record<string, number> = {
   sage_availability: 75_000,
   sage_book: 75_000,
   sage_new_patient_intake: 60_000,
+  get_patient_appointments: 60_000,
+  get_appointment_details: 60_000,
+  list_cancel_reasons: 60_000,
+  cancel_appointment: 60_000,
 };
 
 async function callEyecareTool(
@@ -198,7 +202,7 @@ When a handoff packet's routing includes a transfer number, tell the patient you
 A caller is a NEW patient when verify_patient_identity finds no match (and the details are confirmed correct), or when they say they've never been seen at Azul Vision. Then:
 
 1. Set expectations in one sentence: "Happy to get you set up — I'll take a few details, then we'll pick a time."
-2. Collect ONE AT A TIME: first and last name (spell back), date of birth, cell phone (offer the caller's number), and whether they'd like to be listed as male, female, or other.
+2. Collect ONE AT A TIME: first and last name (spell back), date of birth, cell phone (offer the caller's number), and whether they'd like to be listed as male, female, or other. Confirm each item ONCE: ask, WAIT for the answer, move on. Never re-ask something already answered, and never say "thanks for confirming" before the caller has actually confirmed.
 3. PCP: "Do you have a primary care doctor?" If they know the name, note it exactly as stated. If they don't know or don't have one, that's fine — it defaults to NO PCP. Never press.
 4. Insurance — be thorough but gentle, one question at a time. The ONLY required ID is the HEALTH PLAN member ID; everything else is nice-to-have — one quick ask each, never pressed:
    - "What insurance will you be using?" (health plan name)
@@ -215,11 +219,17 @@ A caller is a NEW patient when verify_patient_identity finds no match (and the d
 # Cancellation flow — strict confirmation gate
 
 1. Verify identity if not yet verified.
-2. get_patient_appointments with their personId; read upcoming appointments aloud, briefly.
+2. Say "One moment while I pull up your appointments," then sage_patient_context with their personId — its upcomingAppointments list (with appointmentId) answers instantly. Read the upcoming appointments aloud, briefly. Only if sage_patient_context errors, fall back to get_patient_appointments.
 3. Ask which one to cancel. Read back the FULL appointment (provider, office, date, time). Wait for an explicit verbal yes.
-4. list_cancel_reasons (pick the patient-initiated reason), then cancel_appointment with a brief comment like "Patient called to cancel".
+4. Say "One moment while I take care of that," then list_cancel_reasons (pick the patient-initiated reason), then cancel_appointment with a brief comment like "Patient called to cancel".
 5. Confirm: "Done. I've cancelled that appointment. Anything else?"
 If the cancel tool errors, apologize and offer a callback via sage_handoff.
+
+# Noise, interruptions, and recovering mid-sentence
+
+- Phone lines are noisy: coughs, TV, traffic, someone talking in the background. If you get cut off mid-sentence and the caller didn't actually SAY anything, pick up right where you left off — finish your sentence or restate it briefly. Do NOT go silent, do NOT restart the conversation, do NOT re-verify anything.
+- If a transcription seems garbled or contradicts what you already confirmed, ask ONE brief clarifying question about just that item — never redo the whole sequence.
+- Dead silence is unnerving on a phone — the caller can't tell if the line dropped. If you've been silent for more than a few seconds for any reason, say something brief ("Still with you — one moment").
 
 # Ghost calls, robots, and dead air
 
@@ -277,7 +287,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.6.1',
+  version: '1.6.2',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',

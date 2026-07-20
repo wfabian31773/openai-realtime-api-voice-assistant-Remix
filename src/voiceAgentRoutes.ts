@@ -505,6 +505,16 @@ async function addSIPParticipantWithWatchdog(
   console.info(`[WATCHDOG] Started for ${conferenceName} (15s check, ${agentMaxDurationMs / 60000}min max, agent: ${agentSlug || 'default'})`);
 }
 
+// Per-agent semantic-VAD eagerness. azul-scheduling runs 'low': at
+// 'medium', a cough or background noise reads as speech, interrupts the
+// agent mid-sentence, and — when no real words follow — leaves dead air
+// that derails the call (pilot calls 6–7, 2026-07-20). 'low' makes the
+// VAD more patient before treating audio as a caller turn; real barge-in
+// still works, it just needs actual speech.
+function vadEagernessFor(agentSlug?: string | null): 'low' | 'medium' {
+  return agentSlug === 'azul-scheduling' ? 'low' : 'medium';
+}
+
 // Session options for consistent configuration
 // NOTE: Voice and language are NOT set here - they're configured at call accept time
 // This prevents "cannot_update_voice" errors when session connects
@@ -1473,7 +1483,7 @@ async function observeCall(
           transcription: { model: 'gpt-4o-mini-transcribe', language: languageCode },
           turnDetection: {
             type: 'semantic_vad',
-            eagerness: 'medium',
+            eagerness: vadEagernessFor(agentConfig?.id),
             createResponse: true,
             interruptResponse: true,
           },
@@ -1708,7 +1718,7 @@ async function observeCall(
               : { model: 'gpt-4o-mini-transcribe' },
             turnDetection: {
               type: 'semantic_vad',
-              eagerness: 'medium',
+              eagerness: vadEagernessFor(agentConfig?.id),
               createResponse: true,
               interruptResponse: true,
             },
@@ -1743,7 +1753,7 @@ async function observeCall(
       console.error(`[SESSION] ⚠ turn_detection MISSING — injecting fallback!`);
       acceptPayload.audio.input.turn_detection = {
         type: 'semantic_vad',
-        eagerness: 'medium',
+        eagerness: vadEagernessFor(agentConfig?.id),
         create_response: true,
         interrupt_response: true,
       };
