@@ -6,6 +6,7 @@ import { createAnsweringServiceAgent, answeringServiceAgentConfig } from '../age
 import { createFantasyFootballAgent } from '../agents/fantasyFootballAgent';
 import { createNoIvrAgent, noIvrAgentConfig, type NoIvrAgentMetadata } from '../agents/noIvrAgent';
 import { createNoIvrAgentV2, noIvrAgentV2Config } from '../agents/noIvrAgentV2';
+import { createAzulSchedulingAgent, azulSchedulingAgentConfig } from '../agents/azulSchedulingAgent';
 
 export type AgentFactory = (...args: any[]) => RealtimeAgent | Promise<RealtimeAgent>;
 
@@ -84,6 +85,24 @@ export class AgentRegistry {
       voice: answeringServiceAgentConfig.voice,
       language: answeringServiceAgentConfig.language,
       greeting: answeringServiceAgentConfig.greeting,
+    });
+
+    // Azul Vision NextGen scheduling line (San Diego pilot).
+    // All scheduling decisions run through the Eye Care service's rules
+    // engine (sage_* tools) — the master switch + per-location approvals
+    // live in the Patient Console, not in this repo. Assign the pilot
+    // Twilio number here (or via Phone Endpoints) when it's purchased.
+    this.register({
+      id: azulSchedulingAgentConfig.slug,
+      factory: createAzulSchedulingAgent as AgentFactory,
+      enabled: true,
+      description: azulSchedulingAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'inbound',
+      version: azulSchedulingAgentConfig.version,
+      voice: azulSchedulingAgentConfig.voice,
+      language: azulSchedulingAgentConfig.language,
+      greeting: azulSchedulingAgentConfig.greeting,
     });
 
     // Outbound agents

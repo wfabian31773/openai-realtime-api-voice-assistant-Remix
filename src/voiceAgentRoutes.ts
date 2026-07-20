@@ -1304,6 +1304,21 @@ async function observeCall(
           }
         );
         break;
+
+      case 'azul-scheduling':
+        // createAzulSchedulingAgent(handoffCallback?, metadata?) — NextGen
+        // scheduling line; all decisions gated by the Eye Care rules engine
+        factoryResult = agentFactory(
+          handoffCallback,
+          {
+            callId,
+            callSid: twilioCallSid,
+            callerPhone: from,
+            dialedNumber: to,
+            callLogId,
+          }
+        );
+        break;
       
       case 'fantasy-football':
         // createFantasyFootballAgent(metadata?)
