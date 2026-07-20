@@ -19,7 +19,7 @@ import {
 } from '@openai/agents/realtime';
 import { getTwilioClient, getTwilioFromPhoneNumber } from './lib/twilioClient';
 import { medicalSafetyGuardrails, WELCOME_GREETING, getUrgentTriageGreeting } from './agents/afterHoursAgent';
-import { azulSchedulingAgentConfig } from './agents/azulSchedulingAgent';
+import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulHoldingCallback } from './agents/azulSchedulingAgent';
 import { flushAzulTimeline, getAzulTimeline } from './services/azulToolTimeline';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
@@ -2083,6 +2083,28 @@ async function observeCall(
       callerReadyPromise = null;
     }
 
+    // No-dead-air heartbeat (azul-scheduling only): while any Eye Care tool
+    // call is in flight, tracked() fires this every 15s so the agent speaks
+    // a brief holding update instead of leaving the caller in silence.
+    // Between a function_call and its output there is no active response,
+    // so an out-of-band response.create is protocol-safe (same mechanism as
+    // the greeting trigger below).
+    if (agentConfig?.id === 'azul-scheduling' && callId) {
+      registerAzulHoldingCallback(callId, () => {
+        try {
+          (session.transport as any).sendEvent({
+            type: 'response.create',
+            response: {
+              instructions:
+                "The system lookup you started is still running — that's normal. Say ONE short, warm holding update to the caller (vary the wording each time; never repeat the same sentence twice in a row), e.g. \"Still working on that for you — thanks for hanging with me.\" Say nothing else, ask nothing.",
+            },
+          });
+        } catch (e) {
+          console.error(`[SESSION] azul holding update failed for ${callId}:`, e);
+        }
+      });
+    }
+
     // STEP 4: Force the agent to speak first by sending response.create
     // ALWAYS send response.create — even when TwiML delivered the greeting audio.
     // Without this, the agent sits in listen-only mode and never speaks.
@@ -2182,7 +2204,9 @@ async function observeCall(
     console.error(`[SESSION ERROR] Failed to connect call ${callId}:`, error);
     throw error;
   } finally {
-    // Azul scheduling: persist the pilot tool timeline (no-op for other agents)
+    // Azul scheduling: stop the holding heartbeat + persist the pilot tool
+    // timeline (both no-ops for other agents)
+    unregisterAzulHoldingCallback(callId);
     void flushAzulTimeline(callId);
 
     // Flush accumulated Realtime token usage → accurate per-call OpenAI cost
