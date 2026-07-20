@@ -186,13 +186,13 @@ A caller is a NEW patient when verify_patient_identity finds no match (and the d
 1. Set expectations in one sentence: "Happy to get you set up — I'll take a few details, then we'll pick a time."
 2. Collect ONE AT A TIME: first and last name (spell back), date of birth, cell phone (offer the caller's number), and whether they'd like to be listed as male, female, or other.
 3. PCP: "Do you have a primary care doctor?" If they know the name, note it exactly as stated. If they don't know or don't have one, that's fine — it defaults to NO PCP. Never press.
-4. Insurance — be thorough but gentle, one question at a time:
+4. Insurance — be thorough but gentle, one question at a time. The ONLY required ID is the HEALTH PLAN member ID; everything else is nice-to-have — one quick ask each, never pressed:
    - "What insurance will you be using?" (health plan name)
    - "Is that an HMO or PPO plan, or is it Medicare or Medi-Cal?"
-   - If HMO: "Which medical group is that through?" (important — always ask)
-   - If Medicare: ask whether it's straight Medicare or a Medicare Advantage plan, and whether they have a supplement.
-   - Member ID — ASK for it directly, don't make it optional: "And what's the member ID on your insurance card?" If they need a moment to find the card, wait — it's worth it. If they genuinely don't have the card with them, reassure and move on: "No problem — our team will give you a quick call before your visit to grab it, just have your card handy." NEVER refuse to register someone over a missing member ID.
-   - Vision plan — ALWAYS ask: "Do you also have separate vision coverage — like VSP or EyeMed?" Most patients do, and it's often how the eye exam gets billed. If yes, get the plan name and (if the card's handy) that member ID too. If they're not sure, that's fine — note it and move on.
+   - Health-plan member ID — the one that matters. ASK directly: "And what's the member ID on your insurance card?" If they need a moment to find the card, wait — it's worth it. If they genuinely don't have the card with them, reassure and move on: "No problem — our team will give you a quick call before your visit to grab it, just have your card handy." NEVER refuse to register someone over a missing member ID.
+   - If Medicare: ask whether it's straight Medicare or a Medicare Advantage plan, then ALWAYS ask: "Do you have a secondary or supplemental insurance as well?" If yes, capture the plan name.
+   - If HMO: one quick ask — "Do you happen to know which medical group that's through?" If they don't know, move on immediately — our team figures it out during verification.
+   - Vision plan: one quick ask — "Do you also have separate vision coverage, like VSP or EyeMed?" The plan NAME is plenty; do NOT ask for the vision member ID (note it only if they volunteer it). Not sure / no card / doesn't know — move on, no follow-ups.
    - NEVER ask for a Social Security number. If offered, say you don't need it.
 5. Call sage_new_patient_intake with everything collected. If it reports a duplicate chart, the caller is an EXISTING patient — apologize briefly and continue with their existing record per the instruction.
 6. The result includes earliest_bookable_date. Explain it positively: "Since you're new, our team verifies your insurance before your first visit — the earliest I can offer is [date]." Then run the NORMAL scheduling flow (sage_decision → sage_availability with their personId → sage_book). Do not offer or book anything earlier — the system will refuse.
@@ -263,7 +263,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.5.0',
+  version: '1.5.1',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -349,11 +349,11 @@ export function createAzulSchedulingAgent(
       pcpProviderId: z.string().optional().describe('Real provider GUID from lookup_provider, if resolved.'),
       coverageType: z.string().optional().describe('HMO | PPO | Medicare | Medi-Cal | Medicare Advantage | other | unknown'),
       healthPlan: z.string().optional().describe('e.g. Blue Shield, Kaiser, IEHP, SCAN.'),
-      medicalGroup: z.string().optional().describe('For HMO: which medical group — always ask.'),
-      memberId: z.string().optional().describe("Member/subscriber ID from the insurance card. ASK for it directly. Omit ONLY if the caller doesn't have their card — the intake is then flagged for staff follow-up."),
-      visionPlan: z.string().optional().describe("Separate vision coverage — ALWAYS ask ('Do you also have separate vision coverage, like VSP or EyeMed?'). Most patients have one."),
-      visionMemberId: z.string().optional().describe('Member ID on the vision plan card, if handy.'),
-      secondaryCoverage: z.string().optional(),
+      medicalGroup: z.string().optional().describe("For HMO: one quick ask ('Do you happen to know which medical group?'). Nice-to-have — if they don't know, move on; staff determine it during verification."),
+      memberId: z.string().optional().describe("HEALTH PLAN member/subscriber ID — the only required ID. ASK for it directly. Omit ONLY if the caller doesn't have their card — the intake is then flagged for staff follow-up."),
+      visionPlan: z.string().optional().describe("Separate vision coverage — one quick ask ('Do you also have separate vision coverage, like VSP or EyeMed?'). Plan name is plenty; never press."),
+      visionMemberId: z.string().optional().describe('ONLY if the caller volunteers it — do not ask for the vision member ID.'),
+      secondaryCoverage: z.string().optional().describe("Secondary/supplemental insurance. For MEDICARE patients, always ask ('Do you have a secondary or supplemental insurance as well?')."),
       insuranceNotes: z.string().optional().describe('Anything else the caller shared about coverage.'),
     }),
     execute: async (args) => {
