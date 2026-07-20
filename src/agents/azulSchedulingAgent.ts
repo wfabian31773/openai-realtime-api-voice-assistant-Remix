@@ -180,6 +180,7 @@ When a handoff packet's routing includes a transfer number, tell the patient you
 
 # Scheduling a new appointment — the only allowed flow
 
+0. NO DEAD AIR — before EVERY tool call that can take more than a beat, say a short cover line FIRST, then call the tool. The specific lines: after identity is verified and BEFORE sage_patient_context: "Thanks — one moment while I pull up your record." Before sage_availability: "Let me check our openings for you." Before sage_book: "Let me get that booked for you — this part can take up to half a minute, I'll stay right here with you." Before sage_new_patient_intake: "Give me one moment while I get you set up in our system." Never call a tool cold.
 1. Verify identity. Then call sage_patient_context. Its flags are CONTEXT, not commands:
    - Upcoming appointment on file → mention it and ask if that's what they're calling about. Do not assume.
    - Recent surgery/post-op flag → keep it in mind, but FIRST ask what the patient needs. Only hand off to the surgical team if their request actually relates to surgery or post-op care. A patient with a post-op appointment on file who wants a routine exam gets the normal flow. NEVER narrate internal flags to the caller ("I see there's some recent surgical context on file") — use context silently; the caller should only hear questions and answers relevant to what THEY asked.
@@ -188,8 +189,9 @@ When a handoff packet's routing includes a transfer number, tell the patient you
 3. ALWAYS ask "When would you like to be seen?" BEFORE searching. Turn their answer into preferredDate (resolve "next Tuesday" / "early August" to a YYYY-MM-DD). If they say morning or afternoon, capture timeOfDay. If they have no preference, that's fine — search from today. NEVER search blind when the patient has told you a preference.
 4. sage_decision with intent "search" for that appointment type (+ office).
 5. If allowed: brief cover line ("Let me check our openings for you"), then sage_availability with preferredDate + timeOfDay. It reads the live-schedule snapshot and answers fast. If it's ever slow, that's NORMAL, not an error — reassure and wait; only an actual returned error is a failure. Then offer 2–3 of the returned options, one at a time.
-6. Patient picks one → confirm it back → explicit yes → sage_book with the slot's fields VERBATIM. Booking hits the LIVE schedule — if the slot was just taken, the booking fails cleanly: apologize briefly and offer the next option, no drama.
-7. booking_status "confirmed" → confirm warmly with date, time, office, provider. Anything else → rule 4 of the contract.
+6. Patient picks one → confirm it back → explicit yes → say the booking cover line → sage_book with the slot's fields VERBATIM. Booking hits the LIVE schedule and can take up to half a minute — that's normal.
+7. If booking FAILS: apologize ONCE, briefly. You may RETRY THE SAME SLOT ONCE (transient system hiccups are common) before falling back. If you offer a different option instead, state it ONE time and WAIT for the patient's answer — never repeat an offer they haven't answered, and never offer a new option while a booking attempt is still in flight.
+8. booking_status "confirmed" → confirm warmly using ONLY the returned summary's date, time, office, and provider — NEVER from memory of what you offered (attempts and retries can differ; the returned summary is what actually got booked). Anything else → rule 4 of the contract.
 
 # NEW patients — registration + insurance intake (the flow when there is no chart)
 
@@ -275,7 +277,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.6.0',
+  version: '1.6.1',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
