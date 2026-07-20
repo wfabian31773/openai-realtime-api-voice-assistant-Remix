@@ -39,6 +39,17 @@ const EYECARE_BASE_URL =
 // HTTP client — every scheduling tool executes on the Eye Care service.
 // ─────────────────────────────────────────────────────────────────────────
 
+// Per-tool client timeouts. Availability/booking can legitimately take
+// 40-60s when NGE's gateway is slow (pilot call 2026-07-20: availability
+// returned REAL slots at 46s, 16s after the old 30s abort had already
+// bailed the caller to an api_failure callback). The prompt covers the
+// wait verbally; Vercel's tools API allows 120s.
+const TOOL_TIMEOUT_MS: Record<string, number> = {
+  sage_availability: 75_000,
+  sage_book: 75_000,
+  sage_new_patient_intake: 60_000,
+};
+
 async function callEyecareTool(
   name: string,
   args: Record<string, unknown>,
@@ -51,7 +62,7 @@ async function callEyecareTool(
     });
   }
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const timeout = setTimeout(() => controller.abort(), TOOL_TIMEOUT_MS[name] ?? 30_000);
   try {
     const r = await fetch(`${EYECARE_BASE_URL}/api/tools/${encodeURIComponent(name)}`, {
       method: 'POST',
@@ -175,7 +186,7 @@ When a handoff packet's routing includes a transfer number, tell the patient you
    - NEVER create a handoff or callback before the patient has told you what they want.
 2. Ask what the visit is for. Run the urgent screening if not done.
 3. sage_decision with intent "search" for that appointment type (+ office).
-4. If allowed: sage_availability, then offer 2–3 of the returned options, one at a time.
+4. If allowed: say a cover line FIRST ("Let me check our openings — this can take a moment, thanks for hanging with me"), then sage_availability. The search can take up to a minute when systems are slow — that is NORMAL, not an error. If the caller speaks while you wait, reassure briefly ("Still checking — almost there") and keep waiting. Only treat it as a failure if the tool actually returns an error. Then offer 2–3 of the returned options, one at a time.
 5. Patient picks one → confirm it back → explicit yes → sage_book with the slot's fields VERBATIM.
 6. booking_status "confirmed" → confirm warmly with date, time, office, provider. Anything else → rule 4 of the contract.
 
@@ -263,7 +274,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.5.2',
+  version: '1.5.3',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
