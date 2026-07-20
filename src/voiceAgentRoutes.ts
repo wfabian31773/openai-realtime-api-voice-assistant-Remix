@@ -505,14 +505,15 @@ async function addSIPParticipantWithWatchdog(
   console.info(`[WATCHDOG] Started for ${conferenceName} (15s check, ${agentMaxDurationMs / 60000}min max, agent: ${agentSlug || 'default'})`);
 }
 
-// Per-agent semantic-VAD eagerness. azul-scheduling runs 'low': at
-// 'medium', a cough or background noise reads as speech, interrupts the
-// agent mid-sentence, and — when no real words follow — leaves dead air
-// that derails the call (pilot calls 6–7, 2026-07-20). 'low' makes the
-// VAD more patient before treating audio as a caller turn; real barge-in
-// still works, it just needs actual speech.
-function vadEagernessFor(agentSlug?: string | null): 'low' | 'medium' {
-  return agentSlug === 'azul-scheduling' ? 'low' : 'medium';
+// Per-agent semantic-VAD eagerness. Tried 'low' for azul-scheduling to
+// stop coughs/background noise interrupting the agent (pilot calls 6-7,
+// 2026-07-20) — REVERTED same day: 'low' also makes the VAD slow to
+// commit the CALLER's turn, so responses lagged, the caller repeated
+// themselves and "hello?"-ed into the gap (pilot call 8). Turn-taking
+// responsiveness matters more; noise recovery is handled in the prompt
+// (resume-mid-sentence rules). Keep the hook for future per-agent tuning.
+function vadEagernessFor(_agentSlug?: string | null): 'low' | 'medium' {
+  return 'medium';
 }
 
 // Session options for consistent configuration
