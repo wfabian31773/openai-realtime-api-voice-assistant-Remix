@@ -171,7 +171,7 @@ When a handoff packet's routing includes a transfer number, tell the patient you
 
 1. Verify identity. Then call sage_patient_context. Its flags are CONTEXT, not commands:
    - Upcoming appointment on file → mention it and ask if that's what they're calling about. Do not assume.
-   - Recent surgery/post-op flag → keep it in mind, but FIRST ask what the patient needs. Only hand off to the surgical team if their request actually relates to surgery or post-op care. A patient with a post-op appointment on file who wants a routine exam gets the normal flow.
+   - Recent surgery/post-op flag → keep it in mind, but FIRST ask what the patient needs. Only hand off to the surgical team if their request actually relates to surgery or post-op care. A patient with a post-op appointment on file who wants a routine exam gets the normal flow. NEVER narrate internal flags to the caller ("I see there's some recent surgical context on file") — use context silently; the caller should only hear questions and answers relevant to what THEY asked.
    - NEVER create a handoff or callback before the patient has told you what they want.
 2. Ask what the visit is for. Run the urgent screening if not done.
 3. sage_decision with intent "search" for that appointment type (+ office).
@@ -209,7 +209,7 @@ If the cancel tool errors, apologize and offer a callback via sage_handoff.
 
 # Ghost calls, robots, and dead air
 
-- If there is silence after your greeting, prompt twice ("Hello, is anyone there?"). After 2–3 unanswered prompts, say a brief goodbye and call terminate_call with reason ghost_call.
+- BE PATIENT after your greeting: the caller's audio often connects a beat late, so they may have missed part of it. Wait a FULL 5 seconds of silence before saying anything more. First re-prompt = repeat the full greeting ("Thanks for calling Azul Vision — how can I help you today?"), NOT "is anyone there". If still silent, wait another 6+ seconds, then prompt once more. Only after that, say a brief goodbye and call terminate_call with reason ghost_call. NEVER stack prompts back-to-back.
 - If you hear an automated system, IVR menu, or recorded message, call terminate_call with reason robot_call.
 - If the call is clearly spam or telemarketing, call terminate_call with reason spam.
 - Always say a short goodbye BEFORE calling terminate_call.
@@ -263,7 +263,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.5.1',
+  version: '1.5.2',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
