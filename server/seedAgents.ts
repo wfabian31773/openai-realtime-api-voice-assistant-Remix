@@ -122,6 +122,19 @@ Use the transfer_to_department tool if staff is available, or take_message tool 
     welcomeGreeting: "Thank you for calling Azul Vision. I'm here to help direct your call. Which department are you trying to reach - Optical, Surgery Coordination, or Clinical?",
   },
   {
+    slug: "azul-scheduling",
+    name: "Azul Scheduling (SD Pilot)",
+    description: "NextGen scheduling line for the San Diego pilot (Encinitas + Oceanside) — rules-engine-gated booking via the Eye Care service",
+    agentType: "inbound",
+    voice: "sage",
+    temperature: 70,
+    // NOTE: the REAL system prompt lives in code (src/agents/azulSchedulingAgent.ts) —
+    // this row exists for phone-number routing, agentId attribution on call logs,
+    // and visibility on the Agents admin page. This prompt is a summary only.
+    systemPrompt: `Azul Vision NextGen scheduling voice agent (San Diego pilot). All scheduling decisions are made by the Eye Care service's rules engine (Patient Console → Admin → Scheduling Intelligence); the agent verifies identity, searches/offers/books only through the gated sage_* tools, cancels with strict confirmation, and hands off urgent or out-of-scope calls. Configured in code: src/agents/azulSchedulingAgent.ts.`,
+    welcomeGreeting: "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
+  },
+  {
     slug: "fantasy-football",
     name: "Fantasy Football Advisor",
     description: "Expert fantasy football advisor with real-time NFL player stats via Sleeper API",

@@ -27,6 +27,7 @@ import { UrgentCallsPage } from '@/pages/UrgentCallsPage'
 import { TwilioPage } from '@/pages/TwilioPage'
 import TestingPage from '@/pages/TestingPage'
 import { OperationsMonitorPage } from '@/pages/OperationsMonitorPage'
+import { SdPilotPage } from '@/pages/SdPilotPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth()
@@ -138,6 +139,7 @@ function AppRoutes() {
         <Route path="/sms-logs" element={<SmsLogsPage />} />
         <Route path="/callback-queue" element={<CallbackQueuePage />} />
         <Route path="/live-calls" element={<LiveCallsPage />} />
+        <Route path="/sd-pilot" element={<SdPilotPage />} />
         <Route path="/scheduling-monitor" element={<SchedulingMonitorPage />} />
         <Route path="/cost-dashboard" element={<CostDashboardPage />} />
         <Route path="/documentation" element={<DocumentationPage />} />

@@ -1295,6 +1295,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
   };
   
   // Get call logs with pagination and comprehensive filtering
+  // SD Pilot command center — aggregate stats for the azul-scheduling agent
+  app.get('/api/sd-pilot/stats', isAuthenticated, async (req, res) => {
+    try {
+      const days = req.query.days ? Math.max(1, Math.min(365, parseInt(req.query.days as string))) : 30;
+      const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      const stats = await storage.getAgentPilotStats('azul-scheduling', startDate);
+      res.json({ days, ...stats });
+    } catch (error) {
+      console.error('Error fetching SD pilot stats:', error);
+      res.status(500).json({ message: 'Failed to fetch SD pilot stats' });
+    }
+  });
+
   app.get('/api/call-logs', isAuthenticated, async (req, res) => {
     try {
       const page = req.query.page ? parseInt(req.query.page as string) : 1;
@@ -1308,6 +1321,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const transferredRaw = sanitizeQueryParam(req.query.transferred);
       const transferred = transferredRaw === 'true' ? true : transferredRaw === 'false' ? false : undefined;
       const agentId = sanitizeQueryParam(req.query.agentId);
+      const agentUsed = sanitizeQueryParam(req.query.agentUsed);
       const search = sanitizeQueryParam(req.query.search);
       const callQualityRaw = sanitizeQueryParam(req.query.callQuality);
       const callQuality = callQualityRaw === 'ghost' || callQualityRaw === 'real' ? callQualityRaw : undefined;
@@ -1332,6 +1346,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         hasTicket,
         transferred,
         agentId,
+        agentUsed,
         search,
         callQuality,
         sortBy,
@@ -1701,7 +1716,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
             else if (twilioStatus === 'failed' || twilioStatus === 'canceled') finalStatus = 'failed';
             
             const finalDuration = actualDuration ?? call.duration ?? 0;
-            const openaiCostCents = Math.round(finalDuration / 60 * 19);
+            // Same duration-estimate rate as callCostService (0.19 c/sec).
+            // The old formula here (19 c/min) was a 12x units slip vs the
+            // live pipeline's rate — and token-derived costs must be kept.
+            const openaiCostCents = call.inputAudioTokens != null
+              ? (call.openaiCostCents ?? 0)
+              : Math.ceil(finalDuration * 0.19);
             const finalTwilioCostCents = actualTwilioCostCents ?? call.twilioCostCents ?? 0;
             
             await storage.updateCallLog(call.id, {

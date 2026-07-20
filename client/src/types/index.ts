@@ -79,6 +79,21 @@ export interface CallLog {
   audioOutputMinutes?: number
   totalCostCents?: number
   
+  // Agent attribution + SD pilot tool timeline (agentUsed lives under Call metadata below)
+  agentOutcome?: string
+  toolTimeline?: {
+    purpose?: string
+    result?: string
+    toolCallCount?: number
+    events?: Array<{
+      at: string
+      tool: string
+      args: Record<string, unknown>
+      outcome: Record<string, unknown>
+      ms: number
+    }>
+  }
+
   // Quality grading
   sentiment?: 'satisfied' | 'neutral' | 'frustrated' | 'irate'
   qualityScore?: number

@@ -19,6 +19,8 @@ import {
 } from '@openai/agents/realtime';
 import { getTwilioClient, getTwilioFromPhoneNumber } from './lib/twilioClient';
 import { medicalSafetyGuardrails, WELCOME_GREETING, getUrgentTriageGreeting } from './agents/afterHoursAgent';
+import { azulSchedulingAgentConfig } from './agents/azulSchedulingAgent';
+import { flushAzulTimeline, getAzulTimeline } from './services/azulToolTimeline';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
 import { callSessionService } from './services/callSessionService';
@@ -538,6 +540,38 @@ const sessionOptions: Partial<RealtimeSessionOptions> = {
 // Store transcripts by call ID
 const callTranscripts = new Map<string, string[]>();
 
+// Per-call Realtime token accumulation (from response.done usage payloads).
+// Flushed to callCostService.updateCallCostsWithTokens at call end so per-call
+// OpenAI costs come from REAL token counts + the model pricing registry
+// instead of the duration estimate. (The token pipeline existed but was
+// never wired to the session events — cost-dashboard audit 2026-07-19.)
+interface CallTokenAccumulator {
+  inputAudioTokens: number;
+  outputAudioTokens: number;
+  inputTextTokens: number;
+  outputTextTokens: number;
+  inputCachedTokens: number;
+  responses: number;
+}
+const callTokenUsage = new Map<string, CallTokenAccumulator>();
+
+function accumulateUsage(callId: string, usage: any): void {
+  if (!usage) return;
+  let acc = callTokenUsage.get(callId);
+  if (!acc) {
+    acc = { inputAudioTokens: 0, outputAudioTokens: 0, inputTextTokens: 0, outputTextTokens: 0, inputCachedTokens: 0, responses: 0 };
+    callTokenUsage.set(callId, acc);
+  }
+  const inDet = usage.input_token_details ?? {};
+  const outDet = usage.output_token_details ?? {};
+  acc.inputAudioTokens += Number(inDet.audio_tokens ?? 0);
+  acc.inputTextTokens += Number(inDet.text_tokens ?? 0);
+  acc.inputCachedTokens += Number(inDet.cached_tokens ?? 0);
+  acc.outputAudioTokens += Number(outDet.audio_tokens ?? 0);
+  acc.outputTextTokens += Number(outDet.text_tokens ?? 0);
+  acc.responses += 1;
+}
+
 // Track calls where we've sent AirCall DTMF (avoid sending multiple times)
 const aircallDTMFSent = new Set<string>();
 
@@ -1020,7 +1054,7 @@ async function observeCall(
   
   // AGENT ROUTING with strict validation
   // Only these agents are allowed (defense in depth - validated at webhook AND here)
-  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
+  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
   const legacyDeletedSlugs = ['greeter', 'non-urgent-ticketing'];
   
   let effectiveSlug = agentSlug || 'no-ivr';
@@ -1508,7 +1542,12 @@ async function observeCall(
   // The SDK's history_added fires before transcription completes
   session.transport.on('*', (event: any) => {
     const eventType = event?.type;
-    
+
+    // Accumulate real token usage for cost attribution (see callTokenUsage).
+    if (eventType === 'response.done' && event?.response?.usage) {
+      accumulateUsage(callId, event.response.usage);
+    }
+
     // Log specific events for debugging
     if (eventType === 'conversation.item.input_audio_transcription.completed') {
       const transcript = event?.transcript;
@@ -2132,6 +2171,41 @@ async function observeCall(
     console.error(`[SESSION ERROR] Failed to connect call ${callId}:`, error);
     throw error;
   } finally {
+    // Azul scheduling: persist the pilot tool timeline (no-op for other agents)
+    void flushAzulTimeline(callId);
+
+    // Flush accumulated Realtime token usage → accurate per-call OpenAI cost
+    // (pricing registry path). Falls back to the duration estimate downstream
+    // when no usage events were captured. Fire-and-forget — must not delay
+    // call teardown.
+    {
+      const usage = callTokenUsage.get(callId);
+      callTokenUsage.delete(callId);
+      const usageCallLogId = callMetadataForDB.get(callId)?.dbCallLogId;
+      if (usage && usage.responses > 0 && usageCallLogId) {
+        void (async () => {
+          try {
+            const { callCostService } = await import('./services/callCostService');
+            await callCostService.updateCallCostsWithTokens(
+              usageCallLogId,
+              twilioCallSid || null,
+              {
+                inputAudioTokens: usage.inputAudioTokens,
+                outputAudioTokens: usage.outputAudioTokens,
+                inputTextTokens: usage.inputTextTokens,
+                outputTextTokens: usage.outputTextTokens,
+                inputCachedTokens: usage.inputCachedTokens,
+              } as any,
+              'gpt-realtime',
+            );
+            console.info(`[COST] Token-based cost saved for ${usageCallLogId}: ${usage.responses} responses, in=${usage.inputAudioTokens}a/${usage.inputTextTokens}t (${usage.inputCachedTokens} cached), out=${usage.outputAudioTokens}a/${usage.outputTextTokens}t`);
+          } catch (err) {
+            console.error(`[COST] Token-based cost update failed for ${usageCallLogId}:`, err);
+          }
+        })();
+      }
+    }
+
     // Update call log with transcript and final status when call actually ends
     const callMeta = callMetadataForDB.get(callId);
     if (callMeta?.dbCallLogId) {
@@ -2636,7 +2710,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         // 4. Default to after-hours (IVR-based calls) - no-ivr uses dedicated endpoint
         
         // Valid inbound agents (strict allowlist)
-        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service'];
+        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'azul-scheduling'];
         const validOutboundAgents = ['drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
         const legacyDeletedAgents = ['greeter', 'non-urgent-ticketing'];
         
@@ -3474,6 +3548,114 @@ export function setupVoiceAgentRoutes(app: Express): void {
       console.info(`[ANSWERING-SERVICE] ✓ Answering-service agent successfully added to conference: ${conferenceName}`);
     } catch (error) {
       console.error(`[ANSWERING-SERVICE] ✗ Failed to add agent to conference:`, error);
+    }
+  });
+
+  // AZUL SCHEDULING ENDPOINT - NextGen scheduling line (San Diego pilot)
+  // Point the pilot Twilio number's Voice webhook at this endpoint. All
+  // scheduling decisions are gated by the Eye Care rules engine (sage_* tools).
+  app.post("/api/voice/azul-scheduling", webhookRateLimiter, async (req, res) => {
+    const rawBody = req.body.toString("utf8");
+    const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
+
+    const callSid = parsedBody.CallSid;
+    const callToken = parsedBody.CallToken;
+    const callerIDNumber = parsedBody.From;
+    const dialedNumber = parsedBody.To;
+
+    console.info(`\n[AZUL-SCHED] ✓ Scheduling call received: ${callSid} from ${callerIDNumber} to ${dialedNumber}`);
+
+    if (!callSid || !callerIDNumber) {
+      console.error('[AZUL-SCHED] ✗ Missing required parameters (callSid or callerIDNumber)');
+      res.status(400).send('<Response><Say>Invalid request</Say></Response>');
+      return;
+    }
+    if (!callToken) {
+      console.warn('[AZUL-SCHED] ⚠️ No CallToken in webhook body — fresh token will be generated from OpenAI API');
+    }
+
+    const domain = process.env.DOMAIN || req.get('host');
+    const conferenceName = `conf_${callSid}`;
+
+    callIDtoConferenceNameMapping[callSid] = conferenceName;
+    ConferenceNametoCallerIDMapping[conferenceName] = callerIDNumber;
+    ConferenceNametoCalledNumberMapping[conferenceName] = dialedNumber;
+    ConferenceNametoCallTokenMapping[conferenceName] = callToken;
+    conferenceNameToTwilioCallSid[conferenceName] = callSid;
+
+    callMetadata.set(conferenceName, {
+      agentSlug: 'azul-scheduling',
+      agentGreeting: azulSchedulingAgentConfig.greeting,
+      language: 'english',
+      ivrSelection: undefined,
+    } as any);
+
+    const extendedMeta = callMetadata.get(conferenceName) as any;
+    if (extendedMeta) {
+      extendedMeta.voiceForCall = azulSchedulingAgentConfig.voice;
+      extendedMeta.languageForCall = azulSchedulingAgentConfig.language;
+    }
+
+    console.info(`[AZUL-SCHED] Routing to azul-scheduling agent (voice=${azulSchedulingAgentConfig.voice}, lang=${azulSchedulingAgentConfig.language})`);
+
+    const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Pause length="1"/>
+  <Dial>
+    <Conference
+      beep="false"
+      waitUrl=""
+      startConferenceOnEnter="true"
+      endConferenceOnExit="true"
+      participantLabel="customer"
+      record="record-from-start"
+      recordingStatusCallback="https://${domain}/api/voice/recording-status"
+      recordingStatusCallbackMethod="POST"
+      recordingStatusCallbackEvent="completed"
+      statusCallback="https://${domain}/api/voice/conference-events"
+      statusCallbackEvent="start end join leave"
+      statusCallbackMethod="POST"
+    >
+      ${conferenceName}
+    </Conference>
+  </Dial>
+</Response>`;
+
+    res.setHeader("Content-Type", "application/xml");
+    res.send(twimlResponse);
+    console.info(`[AZUL-SCHED] ✓ Caller joined conference: ${conferenceName}`);
+
+    try {
+      if (!twilioClient) {
+        twilioClient = await getTwilioClient();
+      }
+    } catch (twilioInitError) {
+      console.error(`[AZUL-SCHED] ✗ Failed to initialize Twilio client:`, twilioInitError);
+      return;
+    }
+
+    console.info(`[AZUL-SCHED] Adding azul-scheduling agent to conference: ${conferenceName}`);
+
+    try {
+      const webhookToken = ConferenceNametoCallTokenMapping[conferenceName];
+      if (!webhookToken) {
+        console.warn('[AZUL-SCHED] ⚠️ No webhook CallToken found — passing empty string');
+      }
+      const effectiveToken = webhookToken || '';
+      await twilioClient.conferences(conferenceName)
+        .participants
+        .create({
+          from: envConfig.twilio.phoneNumber!,
+          label: 'virtual agent',
+          to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=azul-scheduling`,
+          earlyMedia: true,
+          callToken: effectiveToken,
+          conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
+          conferenceStatusCallbackEvent: ['join']
+        });
+      console.info(`[AZUL-SCHED] ✓ Azul scheduling agent successfully added to conference: ${conferenceName}`);
+    } catch (error) {
+      console.error(`[AZUL-SCHED] ✗ Failed to add agent to conference:`, error);
     }
   });
 
@@ -4653,6 +4835,11 @@ export function setupVoiceAgentRoutes(app: Express): void {
   callLifecycleCoordinator.on('call-ended', async (data) => {
     const { callLogId, status, duration, transcript, twilioCallSid, transferredToHuman } = data;
     console.info(`[COORDINATOR EVENT] Call ended: ${callLogId}, Duration: ${duration}s, Transcript: ${transcript?.length || 0} chars`);
+
+    // Azul scheduling: backstop timeline flush for quorum-finalized calls
+    // (no-op when the observeCall finally already flushed, or for other agents)
+    if (callLogId) void flushAzulTimeline(callLogId);
+    if (twilioCallSid) void flushAzulTimeline(twilioCallSid);
     
     // Trigger post-call processing (cost calculation, grading, ticketing)
     try {
@@ -5027,6 +5214,21 @@ export function setupVoiceAgentRoutes(app: Express): void {
   });
 
   // Call diagnostics API endpoint - provides real-time visibility into call health
+  // SD Pilot: live tool timeline for an in-progress azul-scheduling call.
+  // Accepts the OpenAI callId, the Twilio callSid, or the callLogId.
+  app.get("/api/voice/azul/tool-timeline/:idOrSid", async (req, res) => {
+    try {
+      const events = getAzulTimeline(String(req.params.idOrSid || ''));
+      if (!events) {
+        return res.status(404).json({ events: [], live: false });
+      }
+      res.json({ events, live: true });
+    } catch (error) {
+      console.error('[AZUL-TIMELINE] endpoint error:', error);
+      res.status(500).json({ error: 'Failed to get tool timeline' });
+    }
+  });
+
   app.get("/api/voice/diagnostics", async (req, res) => {
     try {
       const stats = CallDiagnostics.getDailyStats();

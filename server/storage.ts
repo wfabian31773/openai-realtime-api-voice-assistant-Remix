@@ -472,6 +472,7 @@ export class DatabaseStorage implements IStorage {
     hasTicket?: boolean;
     transferred?: boolean;
     agentId?: string;
+    agentUsed?: string;
     search?: string;
     callQuality?: 'ghost' | 'real';
     sortBy?: 'date' | 'cost' | 'duration';
@@ -521,7 +522,14 @@ export class DatabaseStorage implements IStorage {
     if (options?.agentId) {
       conditions.push(eq(callLogs.agentId, options.agentId));
     }
-    
+
+    // Filter by agent slug (agent_used). More reliable than agentId — inbound
+    // calls always record the slug even when the agents-table row lookup
+    // raced or was missing, leaving agentId null.
+    if (options?.agentUsed) {
+      conditions.push(eq(callLogs.agentUsed, options.agentUsed));
+    }
+
     if (options?.search) {
       const searchPattern = `%${options.search}%`;
       conditions.push(
@@ -1031,6 +1039,52 @@ export class DatabaseStorage implements IStorage {
       ));
     
     return Number(result[0]?.totalCents) || 0;
+  }
+
+  /** SD Pilot: aggregate stats for one agent slug (default azul-scheduling). */
+  async getAgentPilotStats(agentUsed: string, startDate?: Date) {
+    const conditions = [eq(callLogs.agentUsed, agentUsed)];
+    if (startDate) conditions.push(gte(callLogs.createdAt, startDate));
+    const where = and(...conditions);
+
+    const [totals] = await db
+      .select({
+        totalCalls: count(),
+        completed: sql<number>`COUNT(*) FILTER (WHERE status = 'completed')`,
+        inProgress: sql<number>`COUNT(*) FILTER (WHERE status = 'in_progress')`,
+        avgDurationSec: sql<number>`COALESCE(AVG(duration) FILTER (WHERE duration > 0), 0)`,
+        totalDurationSec: sql<number>`COALESCE(SUM(duration), 0)`,
+        transfers: sql<number>`COUNT(*) FILTER (WHERE transferred_to_human = true)`,
+        bookings: sql<number>`COUNT(*) FILTER (WHERE tool_timeline->>'result' LIKE 'Booked%')`,
+        cancellations: sql<number>`COUNT(*) FILTER (WHERE tool_timeline->>'purpose' = 'Cancel appointment' AND tool_timeline->>'result' = 'Cancelled')`,
+        handoffs: sql<number>`COUNT(*) FILTER (WHERE tool_timeline->>'purpose' LIKE 'Handoff%')`,
+        totalOpenaiCostCents: sql<number>`COALESCE(SUM(openai_cost_cents), 0)`,
+        totalTwilioCostCents: sql<number>`COALESCE(SUM(twilio_cost_cents), 0)`,
+      })
+      .from(callLogs)
+      .where(where);
+
+    const byPurpose = await db
+      .select({
+        purpose: sql<string>`COALESCE(tool_timeline->>'purpose', 'Not yet classified')`,
+        callCount: count(),
+      })
+      .from(callLogs)
+      .where(where)
+      .groupBy(sql`COALESCE(tool_timeline->>'purpose', 'Not yet classified')`)
+      .orderBy(desc(count()));
+
+    const byOutcome = await db
+      .select({
+        outcome: sql<string>`COALESCE(agent_outcome::text, 'ungraded')`,
+        callCount: count(),
+      })
+      .from(callLogs)
+      .where(where)
+      .groupBy(sql`COALESCE(agent_outcome::text, 'ungraded')`)
+      .orderBy(desc(count()));
+
+    return { totals, byPurpose, byOutcome };
   }
 }
 

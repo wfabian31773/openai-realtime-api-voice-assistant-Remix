@@ -14,6 +14,7 @@ const AGENT_MAX_DURATION_MS: Record<string, number> = {
   'appointment-confirmation': 3 * 60 * 1000,  // 3 min — confirmations complete in 60-90s
   'after-hours':              7 * 60 * 1000,  // 7 min — after-hours answering
   'answering-service':        7 * 60 * 1000,  // 7 min — answering service
+  'azul-scheduling':         10 * 60 * 1000,  // 10 min — identity + search + book takes longer with elderly callers
 };
 const DEFAULT_MAX_DURATION_MS = 10 * 60 * 1000; // 10 min — full triage (no-ivr, drs-scheduler, etc.)
 

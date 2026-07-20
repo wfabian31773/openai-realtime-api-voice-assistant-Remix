@@ -13,7 +13,15 @@ const OPENAI_REALTIME_PRICING = {
   outputTextPerK: MODEL_PRICING['gpt-realtime'].textOutputPerM / 1000,
 };
 
-const OPENAI_COST_CENTS_PER_SECOND = 0.027;
+/**
+ * Duration-based OpenAI estimate, used ONLY when token counts are missing.
+ * 0.19 c/sec = 11.4 c/min — the blended gpt-realtime audio rate assuming a
+ * 70/30 listen/speak split (the same split the historical backfill used).
+ * The previous value (0.027 c/sec = 1.62 c/min) under-reported ~7x, and the
+ * admin recalculate endpoint used 19 c/min — a units slip of this same
+ * number. ALL duration estimates must use this constant.
+ */
+export const OPENAI_COST_CENTS_PER_SECOND = 0.19;
 
 const OPENAI_AUDIO_INPUT_RATE = 6;
 const OPENAI_AUDIO_OUTPUT_RATE = 24;
@@ -427,14 +435,20 @@ export class CallCostService {
         console.info(`[COST] Duration correction: ${callLog.duration}s -> ${twilioResult.duration}s (from Twilio)`);
       }
       
-      // Recalculate OpenAI cost based on best available duration
-      const openaiCostCents = Math.ceil(actualDuration * OPENAI_COST_CENTS_PER_SECOND);
-      updateData.openaiCostCents = openaiCostCents;
-      updateData.totalCostCents = twilioResult.costCents + openaiCostCents;
-      
+      // Recalculate OpenAI cost from duration ONLY when no token-based cost
+      // exists — a token-derived cost (inputAudioTokens set) is authoritative
+      // and must never be clobbered by an estimate.
+      if (callLog.inputAudioTokens == null) {
+        const openaiCostCents = Math.ceil(actualDuration * OPENAI_COST_CENTS_PER_SECOND);
+        updateData.openaiCostCents = openaiCostCents;
+        updateData.totalCostCents = twilioResult.costCents + openaiCostCents;
+      } else {
+        updateData.totalCostCents = twilioResult.costCents + (callLog.openaiCostCents ?? 0);
+      }
+
       await storage.updateCallLog(callLogId, updateData);
       
-      console.info(`[COST] Retry successful for ${callLogId}: Duration=${actualDuration}s, Twilio=$${(twilioResult.costCents/100).toFixed(2)}, OpenAI=$${(openaiCostCents/100).toFixed(2)}`);
+      console.info(`[COST] Retry successful for ${callLogId}: Duration=${actualDuration}s, Twilio=$${(twilioResult.costCents/100).toFixed(2)}, OpenAI=$${(((updateData.openaiCostCents ?? callLog.openaiCostCents ?? 0))/100).toFixed(2)}`);
       return true;
     } catch (error) {
       console.error(`[COST] Retry failed for ${callLogId}:`, error);
@@ -546,11 +560,16 @@ export class CallCostService {
       
       if (costCents > 0) {
         updateData.twilioCostCents = costCents;
-        
-        // Recalculate OpenAI cost based on actual duration
-        const openaiCostCents = Math.ceil(actualDuration * OPENAI_COST_CENTS_PER_SECOND);
-        updateData.openaiCostCents = openaiCostCents;
-        updateData.totalCostCents = costCents + openaiCostCents;
+
+        // Duration estimate ONLY when no token-based cost exists — never
+        // clobber an authoritative token-derived OpenAI cost.
+        if (existing?.inputAudioTokens == null) {
+          const openaiCostCents = Math.ceil(actualDuration * OPENAI_COST_CENTS_PER_SECOND);
+          updateData.openaiCostCents = openaiCostCents;
+          updateData.totalCostCents = costCents + openaiCostCents;
+        } else {
+          updateData.totalCostCents = costCents + (existing.openaiCostCents ?? 0);
+        }
         updateData.costCalculatedAt = new Date();
       }
       

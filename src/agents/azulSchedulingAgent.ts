@@ -15,6 +15,10 @@
  *   - With the master switch OFF the agent can look up, cancel, and take
  *     callbacks — it cannot book.
  *
+ * Every tool call is recorded to the per-call tool timeline
+ * (src/services/azulToolTimeline.ts) — the SD Pilot dashboard's evidence
+ * trail of what the agent actually did on each call.
+ *
  * ── Required Replit Secrets ──────────────────────────────────────────────
  *   EYECARE_SCHEDULING_BASE_URL  (optional; defaults to the Vercel prod URL)
  *   EYECARE_AGENT_API_KEY        (bearer token for POST /api/tools/<name>)
@@ -23,13 +27,16 @@
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { getPacificTimeContext } from '../utils/timeAware';
+import { medicalSafetyGuardrails } from '../guardrails/medicalSafety';
+import { escalationDetailsMap } from '../services/escalationStore';
+import { recordAzulToolEvent } from '../services/azulToolTimeline';
 
 const EYECARE_BASE_URL =
   process.env.EYECARE_SCHEDULING_BASE_URL ||
   'https://eyecare-scheduling-agent-wayne-fabians-projects.vercel.app';
 
 // ─────────────────────────────────────────────────────────────────────────
-// HTTP client — every tool executes on the Eye Care service.
+// HTTP client — every scheduling tool executes on the Eye Care service.
 // ─────────────────────────────────────────────────────────────────────────
 
 async function callEyecareTool(
@@ -46,7 +53,6 @@ async function callEyecareTool(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
-    const started = Date.now();
     const r = await fetch(`${EYECARE_BASE_URL}/api/tools/${encodeURIComponent(name)}`, {
       method: 'POST',
       headers: {
@@ -57,7 +63,6 @@ async function callEyecareTool(
       signal: controller.signal,
     });
     const text = await r.text();
-    console.log(`[AZUL-SCHED] ${name} → ${r.status} in ${Date.now() - started}ms`);
     if (!r.ok) {
       return JSON.stringify({
         error: `Eye Care service returned ${r.status}`,
@@ -84,13 +89,14 @@ function compact(args: Record<string, unknown>): Record<string, unknown> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// System prompt
+// System prompt — STATIC content first (prompt caching), dynamic tail last.
 // ─────────────────────────────────────────────────────────────────────────
 
-function buildSystemPrompt(metadata?: AzulSchedulingMetadata): string {
-  return `You are the Azul Vision automated scheduling line, an AI voice agent answering patient phone calls.
+const STATIC_PROMPT = `You are the Azul Vision automated scheduling line, an AI voice agent answering patient phone calls.
 
-${getPacificTimeContext()}
+# GREETING
+
+The system plays your scripted greeting automatically at the start of the call. Do NOT repeat or rephrase the greeting — after it plays, wait for the caller to speak.
 
 # CRITICAL — turn-taking rules (read this first, every time)
 
@@ -155,12 +161,20 @@ When a handoff packet's routing includes a transfer number, tell the patient you
 5. Confirm: "Done. I've cancelled that appointment. Anything else?"
 If the cancel tool errors, apologize and offer a callback via sage_handoff.
 
+# Ghost calls, robots, and dead air
+
+- If there is silence after your greeting, prompt twice ("Hello, is anyone there?"). After 2–3 unanswered prompts, say a brief goodbye and call terminate_call with reason ghost_call.
+- If you hear an automated system, IVR menu, or recorded message, call terminate_call with reason robot_call.
+- If the call is clearly spam or telemarketing, call terminate_call with reason spam.
+- Always say a short goodbye BEFORE calling terminate_call.
+
 # What you cannot do
 
 - You cannot reschedule — cancel + book through the allowed flow, or hand off.
 - You cannot update demographics.
 - You cannot answer insurance/authorization questions — sage_handoff with reason insurance_or_authorization_issue.
 - You cannot look up a different patient after verifying one — re-verification required.
+- You are not a doctor: no medical advice, no diagnoses, no medication guidance — ever.
 
 If a patient asks for something out of scope, say so directly and hand off.
 
@@ -172,9 +186,17 @@ The company is Azul Vision. If any tool result mentions the legacy brand "Atlant
 
 # Tone
 
-Warm, professional, brief. You represent a busy ophthalmology practice. No lecturing, no excessive apologizing. When in doubt, ask a clear short question.${
-    metadata?.callerPhone ? `\n\n# Call context\n\nThe caller's phone number is ${metadata.callerPhone}. Offer it as the callback number ("Is this number ending in ${metadata.callerPhone.replace(/\D/g, '').slice(-4)} the best one to reach you?") rather than making them read out digits.` : ''
-  }`;
+Warm, professional, brief. You represent a busy ophthalmology practice. No lecturing, no excessive apologizing. When in doubt, ask a clear short question.`;
+
+function buildDynamicTail(metadata?: AzulSchedulingMetadata): string {
+  const parts: string[] = ['', getPacificTimeContext()];
+  if (metadata?.callerPhone) {
+    const last4 = metadata.callerPhone.replace(/\D/g, '').slice(-4);
+    parts.push(
+      `# Call context\n\nThe caller's phone number is ${metadata.callerPhone}. Offer it as the callback number ("Is this number ending in ${last4} the best one to reach you?") rather than making them read out digits.`,
+    );
+  }
+  return parts.join('\n\n');
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -194,7 +216,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.0.0',
+  version: '1.1.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -205,11 +227,24 @@ export function createAzulSchedulingAgent(
   handoffCallback?: () => Promise<void>,
   metadata?: AzulSchedulingMetadata,
 ): RealtimeAgent {
-  console.log('[AZUL-SCHED] Creating agent with metadata:', {
+  console.log('[AZUL-SCHED] Creating agent v' + azulSchedulingAgentConfig.version, {
     callId: metadata?.callId,
     callSid: metadata?.callSid,
     dialedNumber: metadata?.dialedNumber,
   });
+
+  /** Execute on the Eye Care service AND record to the pilot tool timeline. */
+  const tracked = async (name: string, args: Record<string, unknown>): Promise<string> => {
+    const started = Date.now();
+    const result = await callEyecareTool(name, args);
+    const ms = Date.now() - started;
+    console.log(`[AZUL-SCHED] ${name} completed in ${ms}ms`);
+    recordAzulToolEvent(metadata?.callId ?? metadata?.callSid ?? '', name, args, result, ms, {
+      callSid: metadata?.callSid,
+      callLogId: metadata?.callLogId,
+    });
+    return result;
+  };
 
   // ── sage_* — the rules-engine-gated scheduling contract ────────────────
 
@@ -223,7 +258,7 @@ export function createAzulSchedulingAgent(
       locationId: z.string().optional().describe('Optional location GUID.'),
       providerId: z.string().optional().describe('Optional provider GUID.'),
     }),
-    execute: async (args) => callEyecareTool('sage_decision', compact(args)),
+    execute: async (args) => tracked('sage_decision', compact(args)),
   });
 
   const sagePatientContextTool = tool({
@@ -236,7 +271,7 @@ export function createAzulSchedulingAgent(
       dateOfBirth: z.string().optional().describe('YYYY-MM-DD'),
       personId: z.string().optional().describe('If already verified.'),
     }),
-    execute: async (args) => callEyecareTool('sage_patient_context', compact(args)),
+    execute: async (args) => tracked('sage_patient_context', compact(args)),
   });
 
   const sageAvailabilityTool = tool({
@@ -249,7 +284,7 @@ export function createAzulSchedulingAgent(
       resourceId: z.string().optional().describe('Optional provider resourceId for provider-specific search.'),
       daysAhead: z.number().optional().describe('Search window, default 21.'),
     }),
-    execute: async (args) => callEyecareTool('sage_availability', compact(args)),
+    execute: async (args) => tracked('sage_availability', compact(args)),
   });
 
   const sageBookTool = tool({
@@ -267,7 +302,7 @@ export function createAzulSchedulingAgent(
       description: z.string().optional(),
     }),
     execute: async (args) =>
-      callEyecareTool('sage_book', compact({ ...args, callId: metadata?.callId })),
+      tracked('sage_book', compact({ ...args, callId: metadata?.callId })),
   });
 
   const sageHandoffTool = tool({
@@ -299,7 +334,7 @@ export function createAzulSchedulingAgent(
       const { patientName, patientDob, patientPhone, personId,
         reasonForCall, requestedLocation, requestedTimeframe,
         urgencyScreenResult, patientResponse, ...rest } = args;
-      const result = await callEyecareTool('sage_handoff', compact({
+      const result = await tracked('sage_handoff', compact({
         ...rest,
         patient: compact({
           name: patientName,
@@ -312,10 +347,23 @@ export function createAzulSchedulingAgent(
           urgencyScreenResult, patientResponse, callId: metadata?.callId,
         }),
       }));
-      // Notify the platform a handoff was requested (live-monitor surfacing).
-      if (handoffCallback) {
+
+      // Urgent escalations additionally dial the on-call human into the
+      // conference. The platform's handoff gate requires escalation details
+      // with an allowed callerType — set them BEFORE invoking the callback.
+      if (args.method === 'urgent_escalation' && handoffCallback && metadata?.callId) {
+        const [first, ...restName] = (patientName ?? '').split(' ');
+        escalationDetailsMap.set(metadata.callId, {
+          reason: `Urgent symptom during scheduling call: ${urgencyScreenResult ?? reasonForCall ?? args.handoffReason}`,
+          callerType: 'patient_urgent_medical',
+          patientFirstName: first || undefined,
+          patientLastName: restName.join(' ') || undefined,
+          patientDob,
+          callbackNumber: patientPhone ?? metadata?.callerPhone,
+          symptomsSummary: urgencyScreenResult ?? patientResponse,
+        });
         handoffCallback().catch((err) =>
-          console.error('[AZUL-SCHED] handoffCallback failed:', err),
+          console.error('[AZUL-SCHED] urgent handoff dial failed:', err),
         );
       }
       return result;
@@ -330,11 +378,11 @@ export function createAzulSchedulingAgent(
       "Verify a patient's identity using last name + date of birth + last 4 digits of their phone. Required before any patient-record action. Returns the patient's personId on success plus a matchSignal field — follow its guidance ('verified' = proceed; anything else = do not disclose records).",
     parameters: z.object({
       lastName: z.string().describe("Patient's last name."),
-      dateOfBirth: z.string().describe("YYYY-MM-DD. Ask year, then month, then day; speak it back."),
+      dateOfBirth: z.string().describe('YYYY-MM-DD. Ask year, then month, then day; speak it back.'),
       phoneLast4: z.string().optional().describe('Last 4 digits of the phone number on file.'),
     }),
     execute: async (args) =>
-      callEyecareTool('verify_patient_identity', compact({ ...args, inboundPhone: metadata?.callerPhone })),
+      tracked('verify_patient_identity', compact({ ...args, inboundPhone: metadata?.callerPhone })),
   });
 
   const getPatientAppointmentsTool = tool({
@@ -345,7 +393,7 @@ export function createAzulSchedulingAgent(
       personId: z.string().describe("Patient's personId from verify_patient_identity."),
       includePast: z.boolean().optional().describe('Include past appointments. Default false.'),
     }),
-    execute: async (args) => callEyecareTool('get_patient_appointments', compact(args)),
+    execute: async (args) => tracked('get_patient_appointments', compact(args)),
   });
 
   const getAppointmentDetailsTool = tool({
@@ -355,7 +403,7 @@ export function createAzulSchedulingAgent(
     parameters: z.object({
       appointmentId: z.string().describe('GUID of the appointment.'),
     }),
-    execute: async (args) => callEyecareTool('get_appointment_details', compact(args)),
+    execute: async (args) => tracked('get_appointment_details', compact(args)),
   });
 
   const listCancelReasonsTool = tool({
@@ -363,7 +411,7 @@ export function createAzulSchedulingAgent(
     description:
       'List the cancellation reason codes available in NextGen ({id, name} pairs). Call before cancel_appointment; pick the patient-initiated reason.',
     parameters: z.object({}),
-    execute: async () => callEyecareTool('list_cancel_reasons', {}),
+    execute: async () => tracked('list_cancel_reasons', {}),
   });
 
   const cancelAppointmentTool = tool({
@@ -375,7 +423,7 @@ export function createAzulSchedulingAgent(
       cancelReasonId: z.string().describe('GUID from list_cancel_reasons.'),
       comment: z.string().optional().describe('Brief note, e.g. "Patient called to cancel".'),
     }),
-    execute: async (args) => callEyecareTool('cancel_appointment', compact(args)),
+    execute: async (args) => tracked('cancel_appointment', compact(args)),
   });
 
   const lookupLocationTool = tool({
@@ -385,7 +433,7 @@ export function createAzulSchedulingAgent(
     parameters: z.object({
       name: z.string().describe('Location name fragment (case-insensitive).'),
     }),
-    execute: async (args) => callEyecareTool('lookup_location', compact(args)),
+    execute: async (args) => tracked('lookup_location', compact(args)),
   });
 
   const listLocationsTool = tool({
@@ -393,7 +441,7 @@ export function createAzulSchedulingAgent(
     description:
       "List all schedulable Azul Vision clinics (names + cities). Use for 'what locations do you have'.",
     parameters: z.object({}),
-    execute: async () => callEyecareTool('list_locations', {}),
+    execute: async () => tracked('list_locations', {}),
   });
 
   const lookupProviderTool = tool({
@@ -403,7 +451,7 @@ export function createAzulSchedulingAgent(
     parameters: z.object({
       name: z.string().describe('Provider name fragment (case-insensitive).'),
     }),
-    execute: async (args) => callEyecareTool('lookup_provider', compact(args)),
+    execute: async (args) => tracked('lookup_provider', compact(args)),
   });
 
   const getProviderLocationsTool = tool({
@@ -413,12 +461,62 @@ export function createAzulSchedulingAgent(
     parameters: z.object({
       providerId: z.string().describe("The provider's GUID from lookup_provider (NOT the resourceId)."),
     }),
-    execute: async (args) => callEyecareTool('get_provider_locations', compact(args)),
+    execute: async (args) => tracked('get_provider_locations', compact(args)),
   });
 
-  return new RealtimeAgent({
+  // ── call control ───────────────────────────────────────────────────────
+
+  const terminateCallTool = tool({
+    name: 'terminate_call',
+    description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
+
+USE FOR:
+- ghost_call: caller not responding after 2-3 prompts
+- robot_call: IVR bleed-through or automated system detected
+- spam: spam/telemarketing detected
+- max_turns_exceeded: call has gone on too long with no resolution
+
+Always say a brief goodbye phrase BEFORE calling this tool.`,
+    parameters: z.object({
+      reason: z
+        .enum(['ghost_call', 'robot_call', 'spam', 'max_turns_exceeded'])
+        .describe('Reason for terminating the call'),
+    }),
+    execute: async (params) => {
+      const callId = metadata?.callId || metadata?.callSid || '';
+      console.log(`[AZUL-SCHED] terminate_call - reason: ${params.reason}, callId: ${callId}`);
+      recordAzulToolEvent(callId, 'terminate_call', { reason: params.reason }, '{}', 0, {
+        callSid: metadata?.callSid,
+        callLogId: metadata?.callLogId,
+      });
+      try {
+        const apiKey = process.env.OPENAI_API_KEY;
+        if (!apiKey) {
+          return { success: false, error: 'missing_api_key' };
+        }
+        const response = await fetch(
+          `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
+          {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${apiKey}` },
+          },
+        );
+        if (response.ok) {
+          return { success: true, reason: params.reason };
+        }
+        return { success: false, status: response.status };
+      } catch (error) {
+        console.error('[AZUL-SCHED] terminate_call error:', error);
+        return { success: false, error: String(error) };
+      }
+    },
+  });
+
+  const agent = new RealtimeAgent({
     name: 'Azul Vision Scheduling Assistant',
-    instructions: buildSystemPrompt(metadata),
+    // Function form keeps the Pacific-time tail fresh; static prefix first
+    // preserves prompt caching (same convention as afterHoursAgent).
+    instructions: () => STATIC_PROMPT + buildDynamicTail(metadata),
     tools: [
       sageDecisionTool,
       sagePatientContextTool,
@@ -434,6 +532,13 @@ export function createAzulSchedulingAgent(
       listLocationsTool,
       lookupProviderTool,
       getProviderLocationsTool,
+      terminateCallTool,
     ],
   });
+
+  // Agent-level guardrails (same attachment pattern as noIvrAgent) — the
+  // session-wide guardrails apply too; this is defense in depth.
+  agent.outputGuardrails = medicalSafetyGuardrails;
+
+  return agent;
 }
