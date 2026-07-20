@@ -435,6 +435,7 @@ Ask what they need help with - be thorough. Good prompts:
 **HANDLING create_ticket FAILURES:**
 - If create_ticket returns validationError=true with missingFields, politely ask the caller for the missing information and try again
   Example: "I just need to confirm a couple details. Could you please tell me [missing field]?"
+- If you have already asked and the caller genuinely cannot provide a required field (surgeon or office), call create_ticket again with unresolved_info set to what is missing — the ticket is still captured with the gap flagged for a human, so the request is never lost. Only do this AFTER you have actually asked.
 - If create_ticket fails with a different error, apologize and retry once: "I'm sorry, let me try that again."
 - If it fails twice, tell the caller: "I apologize for the difficulty. I've made note of your request and our team will call you back shortly at [callback number]. Is there anything else I can help with?"
 
@@ -814,6 +815,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       provider_name: z.string().optional().describe('Doctor the CALLER explicitly names (e.g., "Dr. Logan"). Do NOT use schedule/patient-history providers — those are context only.'),
       email: z.string().optional().describe('Patient email for confirmation'),
       confirmation_type: z.enum(['text', 'email', 'phone', 'none']).optional().describe('How patient wants confirmation (text, email, phone, or none)'),
+      unresolved_info: z.string().optional().describe('Set this ONLY after you have already asked and the caller genuinely cannot provide a REQUIRED field (a surgeon for Surgery, an office/location for Optical). Briefly state what is missing (e.g., "caller does not know their office"). The ticket is then still submitted with the gap flagged for a human, so the request is never lost. Do NOT set this on a first attempt — always ask the caller first.'),
     }),
     execute: async (params) => {
       // Lazy import to avoid module initialization during agent bootstrap
@@ -850,14 +852,33 @@ Use patient data from phone lookup when available - don't ask for info you alrea
         };
       }
 
-      // Surgery department REQUIRES a surgeon/provider — tickets without a surgeon cannot be routed
-      if (params.department_id === 2 && !params.provider_id && !params.provider_name) {
-        console.warn(`[${agentTag}] Surgery ticket attempted without surgeon — blocking creation`);
+      // Required-field gates. A ticket that can't be assigned languishes, so we
+      // block here and make the agent ask — UNLESS it has already asked and the
+      // caller genuinely can't answer (unresolved_info), in which case we submit
+      // anyway with the gap flagged (below) so the request is never lost.
+      const gaveUpOnRequired = typeof params.unresolved_info === 'string' && params.unresolved_info.trim().length > 0;
+
+      // Surgery REQUIRES a surgeon/provider — surgery tickets without one cannot be routed.
+      if (!gaveUpOnRequired && params.department_id === 2 && !params.provider_id && !params.provider_name) {
+        console.warn(`[${agentTag}] Surgery ticket attempted without surgeon — asking`);
         return {
           success: false,
           validationError: true,
           missingFields: ['surgeon name'],
-          message: 'Surgery Coordination tickets require a surgeon name. Please ask the patient: "Are you currently scheduled for surgery with us, and if so, who is your surgeon?"',
+          message: 'Surgery Coordination tickets require a surgeon name. Please ask the patient: "Are you currently scheduled for surgery with us, and if so, who is your surgeon?" If they truly cannot say after you ask, call create_ticket again with unresolved_info set to what is missing.',
+        };
+      }
+
+      // Optical REQUIRES a location — optical tickets without one are unassignable
+      // and are the single biggest source of languishing tickets. Enforce what the
+      // prompt already asks for (Hard Rule 3B) instead of trusting the model to.
+      if (!gaveUpOnRequired && params.department_id === 1 && !params.location_id && !params.location_name) {
+        console.warn(`[${agentTag}] Optical ticket attempted without location — asking`);
+        return {
+          success: false,
+          validationError: true,
+          missingFields: ['office location'],
+          message: 'Optical tickets require a location. Please ask which Azul Vision office the patient visits or would like to be seen at, then include it. If they truly cannot say after you ask, call create_ticket again with unresolved_info set to what is missing.',
         };
       }
 
@@ -940,6 +961,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       }
       
       const fullDescription = [
+        gaveUpOnRequired ? `⚠️ NEEDS HUMAN REVIEW — could not complete on the call. Missing: ${params.unresolved_info!.trim()}` : null,
         `Subject: ${ticketSubject}`,
         `Request Type: ${requestTypeName}`,
         `Request Reason: ${requestReasonName}`,
