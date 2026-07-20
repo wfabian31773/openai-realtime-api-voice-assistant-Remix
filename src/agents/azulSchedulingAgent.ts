@@ -185,10 +185,11 @@ When a handoff packet's routing includes a transfer number, tell the patient you
    - Recent surgery/post-op flag → keep it in mind, but FIRST ask what the patient needs. Only hand off to the surgical team if their request actually relates to surgery or post-op care. A patient with a post-op appointment on file who wants a routine exam gets the normal flow. NEVER narrate internal flags to the caller ("I see there's some recent surgical context on file") — use context silently; the caller should only hear questions and answers relevant to what THEY asked.
    - NEVER create a handoff or callback before the patient has told you what they want.
 2. Ask what the visit is for. Run the urgent screening if not done.
-3. sage_decision with intent "search" for that appointment type (+ office).
-4. If allowed: say a cover line FIRST ("Let me check our openings — this can take a moment, thanks for hanging with me"), then sage_availability. The search can take up to a minute when systems are slow — that is NORMAL, not an error. If the caller speaks while you wait, reassure briefly ("Still checking — almost there") and keep waiting. Only treat it as a failure if the tool actually returns an error. Then offer 2–3 of the returned options, one at a time.
-5. Patient picks one → confirm it back → explicit yes → sage_book with the slot's fields VERBATIM.
-6. booking_status "confirmed" → confirm warmly with date, time, office, provider. Anything else → rule 4 of the contract.
+3. ALWAYS ask "When would you like to be seen?" BEFORE searching. Turn their answer into preferredDate (resolve "next Tuesday" / "early August" to a YYYY-MM-DD). If they say morning or afternoon, capture timeOfDay. If they have no preference, that's fine — search from today. NEVER search blind when the patient has told you a preference.
+4. sage_decision with intent "search" for that appointment type (+ office).
+5. If allowed: brief cover line ("Let me check our openings for you"), then sage_availability with preferredDate + timeOfDay. It reads the live-schedule snapshot and answers fast. If it's ever slow, that's NORMAL, not an error — reassure and wait; only an actual returned error is a failure. Then offer 2–3 of the returned options, one at a time.
+6. Patient picks one → confirm it back → explicit yes → sage_book with the slot's fields VERBATIM. Booking hits the LIVE schedule — if the slot was just taken, the booking fails cleanly: apologize briefly and offer the next option, no drama.
+7. booking_status "confirmed" → confirm warmly with date, time, office, provider. Anything else → rule 4 of the contract.
 
 # NEW patients — registration + insurance intake (the flow when there is no chart)
 
@@ -274,7 +275,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.5.3',
+  version: '1.6.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -335,12 +336,14 @@ export function createAzulSchedulingAgent(
   const sageAvailabilityTool = tool({
     name: 'sage_availability',
     description:
-      'Rules-gated availability search. Returns ONLY options the AI is permitted to offer (gate runs first; blocked types return no options). Slots come back book-ready — pass their fields to sage_book verbatim. ALWAYS pass personId once the patient is known — new patients with pending insurance verification get their earliest allowed date enforced here.',
+      "Rules-gated availability from the live-schedule snapshot (fast). ALWAYS ask the patient 'When would you like to be seen?' BEFORE calling and pass preferredDate (+ timeOfDay for morning/afternoon) — never search blind. Returns ONLY options the AI is permitted to offer (gate runs first; blocked types return no options). Slots come back book-ready — pass their fields to sage_book verbatim; booking re-validates live, so a just-taken slot fails cleanly and you offer another. ALWAYS pass personId once the patient is known — new patients with pending insurance verification get their earliest allowed date enforced here.",
     parameters: z.object({
       eventName: z.string(),
+      preferredDate: z.string().optional().describe("YYYY-MM-DD the patient wants to be seen — from asking 'When would you like to be seen?'. Resolve relative answers ('next Tuesday') to a date. Covers that date + the following 6 days."),
+      timeOfDay: z.enum(['AM', 'PM', 'ALL']).optional().describe('Morning (AM) / afternoon (PM) preference, when stated.'),
       locationId: z.string().optional().describe('Optional location GUID.'),
       resourceId: z.string().optional().describe('Optional provider resourceId for provider-specific search.'),
-      daysAhead: z.number().optional().describe('Search window, default 21.'),
+      daysAhead: z.number().optional().describe('Provider-specific search window, default 21.'),
       personId: z.string().optional().describe("Patient's personId — REQUIRED for new patients (eligibility floor)."),
     }),
     execute: async (args) => tracked('sage_availability', compact(args)),
