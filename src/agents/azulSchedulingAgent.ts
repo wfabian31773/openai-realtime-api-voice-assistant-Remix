@@ -50,6 +50,9 @@ const EYECARE_BASE_URL =
 // per-call callback that makes the agent speak a brief holding update;
 // tracked() fires it every 15s until the tool returns. Most tools finish
 // well under 15s, so this only speaks on genuinely long waits.
+// First update fires at 6s (catches the "model forgot the cover line"
+// case — pilot call 10's awkward 5-8s silent chain), then every 15s.
+const HOLDING_FIRST_MS = 6_000;
 const HOLDING_UPDATE_MS = 15_000;
 const holdingCallbacks = new Map<string, () => void>();
 export function registerAzulHoldingCallback(callId: string, cb: () => void): void {
@@ -199,7 +202,7 @@ When a handoff packet's routing includes a transfer number, tell the patient you
 
 # Scheduling a new appointment — the only allowed flow
 
-0. NO DEAD AIR — before EVERY tool call that can take more than a beat, say a short cover line FIRST, then call the tool. The specific lines: after identity is verified and BEFORE sage_patient_context: "Thanks — one moment while I pull up your record." Before sage_availability: "Let me check our openings for you." Before sage_book: "Let me get that booked for you — this part can take up to half a minute, I'll stay right here with you." Before sage_new_patient_intake: "Give me one moment while I get you set up in our system." Never call a tool cold.
+0. NO DEAD AIR — NO EXCEPTIONS. Before the FIRST tool call of ANY chain — even a quick lookup — SPEAK a short cover line, THEN call the tool. This is what a real receptionist does: "One second while I look that up for you." It applies EVERY time you're about to go quiet, including right after collecting or RE-collecting identity details ("Thanks — one second while I pull that up") and mid-conversation re-checks. One cover per chain is enough — speak it, then run the chain silently; the system adds holding updates automatically if it runs long. The specific lines: before sage_patient_context: "Thanks — one moment while I pull up your record." Before sage_availability: "Let me check our openings for you." Before sage_book: "Let me get that booked for you — this part can take up to half a minute, I'll stay right here with you." Before sage_new_patient_intake: "Give me one moment while I get you set up in our system." Before the cancel chain: "One moment while I take care of that." Never, ever call a tool cold.
 1. Verify identity. Then call sage_patient_context. Its flags are CONTEXT, not commands:
    - Upcoming appointment on file → mention it and ask if that's what they're calling about. Do not assume.
    - Recent surgery/post-op flag → keep it in mind, but FIRST ask what the patient needs. Only hand off to the surgical team if their request actually relates to surgery or post-op care. A patient with a post-op appointment on file who wants a routine exam gets the normal flow. NEVER narrate internal flags to the caller ("I see there's some recent surgical context on file") — use context silently; the caller should only hear questions and answers relevant to what THEY asked.
@@ -315,7 +318,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.6.4',
+  version: '1.6.5',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -338,14 +341,19 @@ export function createAzulSchedulingAgent(
     const holdingCb =
       holdingCallbacks.get(String(metadata?.callId ?? '')) ??
       holdingCallbacks.get(String(metadata?.callSid ?? ''));
-    const heartbeat = holdingCb
-      ? setInterval(() => {
-          try {
-            holdingCb();
-          } catch (e) {
-            console.error('[AZUL-SCHED] holding update failed:', e);
-          }
-        }, HOLDING_UPDATE_MS)
+    const fire = () => {
+      try {
+        holdingCb!();
+      } catch (e) {
+        console.error('[AZUL-SCHED] holding update failed:', e);
+      }
+    };
+    let heartbeat: NodeJS.Timeout | null = null;
+    const firstBeat = holdingCb
+      ? setTimeout(() => {
+          fire();
+          heartbeat = setInterval(fire, HOLDING_UPDATE_MS);
+        }, HOLDING_FIRST_MS)
       : null;
     try {
       const result = await callEyecareTool(name, args);
@@ -357,6 +365,7 @@ export function createAzulSchedulingAgent(
       });
       return result;
     } finally {
+      if (firstBeat) clearTimeout(firstBeat);
       if (heartbeat) clearInterval(heartbeat);
     }
   };
