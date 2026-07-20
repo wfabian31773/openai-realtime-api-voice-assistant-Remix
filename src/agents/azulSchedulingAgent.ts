@@ -192,6 +192,7 @@ A caller is a NEW patient when verify_patient_identity finds no match (and the d
    - If HMO: "Which medical group is that through?" (important — always ask)
    - If Medicare: ask whether it's straight Medicare or a Medicare Advantage plan, and whether they have a supplement.
    - Member ID — ASK for it directly, don't make it optional: "And what's the member ID on your insurance card?" If they need a moment to find the card, wait — it's worth it. If they genuinely don't have the card with them, reassure and move on: "No problem — our team will give you a quick call before your visit to grab it, just have your card handy." NEVER refuse to register someone over a missing member ID.
+   - Vision plan — ALWAYS ask: "Do you also have separate vision coverage — like VSP or EyeMed?" Most patients do, and it's often how the eye exam gets billed. If yes, get the plan name and (if the card's handy) that member ID too. If they're not sure, that's fine — note it and move on.
    - NEVER ask for a Social Security number. If offered, say you don't need it.
 5. Call sage_new_patient_intake with everything collected. If it reports a duplicate chart, the caller is an EXISTING patient — apologize briefly and continue with their existing record per the instruction.
 6. The result includes earliest_bookable_date. Explain it positively: "Since you're new, our team verifies your insurance before your first visit — the earliest I can offer is [date]." Then run the NORMAL scheduling flow (sage_decision → sage_availability with their personId → sage_book). Do not offer or book anything earlier — the system will refuse.
@@ -262,7 +263,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.4.0',
+  version: '1.5.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -350,15 +351,17 @@ export function createAzulSchedulingAgent(
       healthPlan: z.string().optional().describe('e.g. Blue Shield, Kaiser, IEHP, SCAN.'),
       medicalGroup: z.string().optional().describe('For HMO: which medical group — always ask.'),
       memberId: z.string().optional().describe("Member/subscriber ID from the insurance card. ASK for it directly. Omit ONLY if the caller doesn't have their card — the intake is then flagged for staff follow-up."),
+      visionPlan: z.string().optional().describe("Separate vision coverage — ALWAYS ask ('Do you also have separate vision coverage, like VSP or EyeMed?'). Most patients have one."),
+      visionMemberId: z.string().optional().describe('Member ID on the vision plan card, if handy.'),
       secondaryCoverage: z.string().optional(),
       insuranceNotes: z.string().optional().describe('Anything else the caller shared about coverage.'),
     }),
     execute: async (args) => {
-      const { coverageType, healthPlan, medicalGroup, memberId, secondaryCoverage, insuranceNotes, ...rest } = args;
+      const { coverageType, healthPlan, medicalGroup, memberId, visionPlan, visionMemberId, secondaryCoverage, insuranceNotes, ...rest } = args;
       return tracked('sage_new_patient_intake', compact({
         ...compact(rest),
         insurance: compact({
-          coverageType, healthPlan, medicalGroup, memberId, secondaryCoverage,
+          coverageType, healthPlan, medicalGroup, memberId, visionPlan, visionMemberId, secondaryCoverage,
           notes: insuranceNotes,
         }),
         callId: metadata?.callId,
