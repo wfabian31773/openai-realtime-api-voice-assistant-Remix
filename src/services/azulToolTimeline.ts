@@ -52,8 +52,12 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
   for (const k of [
     'decision', 'reason', 'booking_status', 'appointmentId', 'matchSignal',
     'callback_id', 'error', 'cancelled', 'rules_version',
+    'status', 'verified', 'identityVerified', 'matchCount', 'recentSurgicalContext',
   ]) {
     if (parsed?.[k] !== undefined) out[k] = parsed[k];
+  }
+  if (Array.isArray(parsed?.upcomingAppointments)) {
+    out.upcomingCount = parsed.upcomingAppointments.length;
   }
   if (tool === 'sage_availability') {
     const opts = parsed?.options;

@@ -14,7 +14,7 @@ language = "nodejs"
 run = ["bash", "-c", "npx tsx server/index.ts & npx tsx src/server.ts & wait"]
 deploymentTarget = "vm"
 ignorePorts = false
-build = ["bash", "-c", "npx tsc --noEmit"]
+build = ["bash", "-c", "npx tsc --noEmit && npm --prefix client install && npm --prefix client run build"]
 
 [[ports]]
 localPort = 5000
