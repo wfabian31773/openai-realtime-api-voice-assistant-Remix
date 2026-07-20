@@ -69,7 +69,7 @@ function formatCents(cents?: number): string {
 
 function purposeBadgeVariant(purpose?: string): 'default' | 'secondary' | 'destructive' | 'success' | 'warning' | 'info' {
   if (!purpose) return 'secondary'
-  if (purpose.startsWith('Handoff')) return 'warning'
+  if (purpose.startsWith('Handoff')) return 'secondary'
   if (purpose === 'Cancel appointment') return 'destructive'
   if (purpose === 'Schedule appointment') return 'info'
   return 'secondary'
@@ -79,7 +79,7 @@ function resultBadgeVariant(result?: string): 'default' | 'secondary' | 'destruc
   if (!result) return 'secondary'
   if (result.startsWith('Booked') || result === 'Cancelled' || result === 'Answered') return 'success'
   if (result.includes('failed') || result.includes('unknown')) return 'destructive'
-  if (result.includes('Callback') || result.includes('Transferred')) return 'warning'
+  if (result.includes('Callback') || result.includes('Transferred')) return 'secondary'
   return 'secondary'
 }
 
@@ -236,7 +236,7 @@ function HistoryRow({ call }: { call: CallLog }) {
                 <Button variant="outline" size="sm">Full call details</Button>
               </Link>
               {call.recordingUrl && <Badge variant="secondary">recording available</Badge>}
-              {call.transferredToHuman && <Badge variant="warning">transferred to human</Badge>}
+              {call.transferredToHuman && <Badge variant="secondary">transferred to human</Badge>}
             </div>
           </TableCell>
         </TableRow>
@@ -276,7 +276,7 @@ export function SdPilotPage() {
     { label: 'Calls', value: totals?.totalCalls ?? 0, icon: Phone, color: 'text-foreground' },
     { label: 'Bookings', value: totals?.bookings ?? 0, icon: CalendarCheck, color: 'text-green-600' },
     { label: 'Cancellations', value: totals?.cancellations ?? 0, icon: CalendarX, color: 'text-orange-600' },
-    { label: 'Handoffs', value: totals?.handoffs ?? 0, icon: PhoneForwarded, color: 'text-yellow-600' },
+    { label: 'Handoffs', value: totals?.handoffs ?? 0, icon: PhoneForwarded, color: 'text-muted-foreground' },
     { label: 'Avg duration', value: formatDuration(Number(totals?.avgDurationSec ?? 0)), icon: Clock, color: 'text-foreground' },
     {
       label: 'Cost',

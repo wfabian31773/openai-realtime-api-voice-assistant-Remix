@@ -61,6 +61,9 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
   if (Array.isArray(parsed?.upcomingAppointments)) {
     out.upcomingCount = parsed.upcomingAppointments.length;
   }
+  if (Array.isArray(parsed?.approved_types)) {
+    out.approvedTypesOffered = parsed.approved_types.length;
+  }
   if (tool === 'sage_availability') {
     const opts = parsed?.options;
     const arr = Array.isArray(opts) ? opts : Array.isArray(opts?.slots) ? opts.slots : null;
