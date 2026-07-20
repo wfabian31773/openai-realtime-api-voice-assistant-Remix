@@ -8,6 +8,12 @@ const DEPARTMENTS = {
   CEC_NETWORKING: 12,
 } as const;
 
+// Operator-approved human review queue (ticket-workflow MASTER §C4): After Hours
+// Call Service → General Inquiry → "General Message for Office". Staff watch it,
+// and auto-assignment is suppressed there. A request the agent can't complete on
+// the call lands here for a human rather than being dropped.
+const REVIEW_QUEUE = { departmentId: 8, requestTypeId: 35, requestReasonId: 172 } as const;
+
 interface ValidationResult {
   valid: boolean;
   error?: string;
@@ -22,6 +28,8 @@ const MEDICATION_KEYWORDS = [
   'timolol', 'combigan', 'steroid', 'antibiotic', 'allergy drops',
   'dry eye', 'artificial tears',
 ];
+
+const ESCALATE_HINT = ' If the caller genuinely cannot provide this after you ask, call create_ticket again with unresolvedInfo set to what is missing, so the request is routed to a human review queue instead of being lost.';
 
 function validateTicketParams(params: {
   departmentId: number;
@@ -41,7 +49,7 @@ function validateTicketParams(params: {
       console.warn('[CREATE_TICKET] ❌ Surgery ticket missing surgeon - rejecting');
       return {
         valid: false,
-        error: 'Surgery tickets require a surgeon. Please ask which doctor is performing the surgery or which surgeon the patient is scheduled with.',
+        error: 'Surgery tickets require a surgeon. Please ask which doctor is performing the surgery or which surgeon the patient is scheduled with.' + ESCALATE_HINT,
       };
     }
   }
@@ -59,7 +67,7 @@ function validateTicketParams(params: {
       console.warn('[CREATE_TICKET] ❌ Optical ticket missing location - rejecting');
       return {
         valid: false,
-        error: 'Optical tickets require a location. Please ask which Azul Vision office the patient visits or would like to be seen at, so this reaches the right team.',
+        error: 'Optical tickets require a location. Please ask which Azul Vision office the patient visits or would like to be seen at, so this reaches the right team.' + ESCALATE_HINT,
       };
     }
   }
@@ -97,23 +105,48 @@ const createTicketSchema = z.object({
   providerId: z.number().nullable().optional().describe('Associated provider ID. REQUIRED for surgery tickets if lastProviderSeen not provided.'),
   description: z.string().describe('Detailed description of the patient request or issue'),
   priority: z.enum(['low', 'normal', 'medium', 'high', 'urgent']).nullable().optional().describe('Priority level, defaults to medium'),
+  unresolvedInfo: z.string().nullable().optional().describe('Set this ONLY after you have already asked and the caller genuinely cannot provide a REQUIRED field (a surgeon for surgery, an office/location for optical). Briefly state what is missing (e.g., "caller does not know which surgeon"). The request is then routed to the human review queue so it is never lost. Do NOT set this on a first attempt — always ask the caller first.'),
 });
 
 export const createTicketTool = tool({
   name: 'create_ticket',
-  description: 'Create a support ticket in the external ticketing system. Returns ONLY the ticket number (e.g., "VA-1700000000000-456") on success, or "ERROR: <message>" on failure. NOTE: Surgery tickets (departmentId=2) REQUIRE a surgeon name in lastProviderSeen or providerId. Optical tickets (departmentId=1) REQUIRE a location in locationOfLastVisit or locationId.',
+  description: 'Create a support ticket in the external ticketing system. Returns ONLY the ticket number (e.g., "VA-1700000000000-456") on success, or "ERROR: <message>" on failure. NOTE: Surgery tickets (departmentId=2) REQUIRE a surgeon name in lastProviderSeen or providerId. Optical tickets (departmentId=1) REQUIRE a location in locationOfLastVisit or locationId. If a required field cannot be obtained after asking the caller, pass unresolvedInfo to route the request to human review instead of failing.',
   parameters: createTicketSchema,
   execute: async (params: z.infer<typeof createTicketSchema>) => {
-    const validation = validateTicketParams(params);
+    const { unresolvedInfo, ...rest } = params;
+    const validation = validateTicketParams(rest);
+
+    const { SyncAgentService } = await import('../../services/syncAgentService');
+
     if (!validation.valid) {
-      return `ERROR: ${validation.error}`;
+      const gaveUp = typeof unresolvedInfo === 'string' && unresolvedInfo.trim().length > 0;
+      if (!gaveUp) {
+        // Gate: get the missing info first (the message tells the agent how).
+        return `ERROR: ${validation.error}`;
+      }
+      // Never lose the request: the caller couldn't provide the required field,
+      // so route to the human review queue rather than dropping it.
+      console.warn(`[CREATE_TICKET] ⚠️ Unresolved required info — routing to review queue (dept ${REVIEW_QUEUE.departmentId}). Missing: ${unresolvedInfo}`);
+      const reviewParams = {
+        ...rest,
+        ...REVIEW_QUEUE,
+        priority: 'high' as const,
+        description: `[NEEDS HUMAN REVIEW] Could not complete on the call. Missing: ${unresolvedInfo.trim()}. Original intent (dept ${rest.departmentId}, type ${rest.requestTypeId}): ${rest.description}`,
+      };
+      const reviewResponse = await SyncAgentService.createTicket(reviewParams);
+      if (reviewResponse.success && reviewResponse.ticketNumber) {
+        return reviewResponse.ticketNumber;
+      } else if (reviewResponse.success && !reviewResponse.ticketNumber) {
+        return reviewResponse.message;
+      } else {
+        return `ERROR: ${reviewResponse.error || 'Unknown error creating review ticket'}`;
+      }
     }
 
     const finalParams = validation.correctedParams
-      ? { ...params, ...validation.correctedParams }
-      : params;
+      ? { ...rest, ...validation.correctedParams }
+      : rest;
 
-    const { SyncAgentService } = await import('../../services/syncAgentService');
     const response = await SyncAgentService.createTicket(finalParams);
     
     if (response.success && response.ticketNumber) {
