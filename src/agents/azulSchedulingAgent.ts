@@ -44,6 +44,21 @@ const EYECARE_BASE_URL =
 // returned REAL slots at 46s, 16s after the old 30s abort had already
 // bailed the caller to an api_failure callback). The prompt covers the
 // wait verbally; Vercel's tools API allows 120s.
+// ── No-dead-air heartbeat ────────────────────────────────────────────────
+// While any Eye Care tool call is in flight, the caller must never sit in
+// silence (operator requirement 2026-07-20). The session layer registers a
+// per-call callback that makes the agent speak a brief holding update;
+// tracked() fires it every 15s until the tool returns. Most tools finish
+// well under 15s, so this only speaks on genuinely long waits.
+const HOLDING_UPDATE_MS = 15_000;
+const holdingCallbacks = new Map<string, () => void>();
+export function registerAzulHoldingCallback(callId: string, cb: () => void): void {
+  holdingCallbacks.set(callId, cb);
+}
+export function unregisterAzulHoldingCallback(callId: string): void {
+  holdingCallbacks.delete(callId);
+}
+
 const TOOL_TIMEOUT_MS: Record<string, number> = {
   sage_availability: 75_000,
   sage_book: 75_000,
@@ -300,7 +315,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.6.3',
+  version: '1.6.4',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -320,14 +335,30 @@ export function createAzulSchedulingAgent(
   /** Execute on the Eye Care service AND record to the pilot tool timeline. */
   const tracked = async (name: string, args: Record<string, unknown>): Promise<string> => {
     const started = Date.now();
-    const result = await callEyecareTool(name, args);
-    const ms = Date.now() - started;
-    console.log(`[AZUL-SCHED] ${name} completed in ${ms}ms`);
-    recordAzulToolEvent(metadata?.callId ?? metadata?.callSid ?? '', name, args, result, ms, {
-      callSid: metadata?.callSid,
-      callLogId: metadata?.callLogId,
-    });
-    return result;
+    const holdingCb =
+      holdingCallbacks.get(String(metadata?.callId ?? '')) ??
+      holdingCallbacks.get(String(metadata?.callSid ?? ''));
+    const heartbeat = holdingCb
+      ? setInterval(() => {
+          try {
+            holdingCb();
+          } catch (e) {
+            console.error('[AZUL-SCHED] holding update failed:', e);
+          }
+        }, HOLDING_UPDATE_MS)
+      : null;
+    try {
+      const result = await callEyecareTool(name, args);
+      const ms = Date.now() - started;
+      console.log(`[AZUL-SCHED] ${name} completed in ${ms}ms`);
+      recordAzulToolEvent(metadata?.callId ?? metadata?.callSid ?? '', name, args, result, ms, {
+        callSid: metadata?.callSid,
+        callLogId: metadata?.callLogId,
+      });
+      return result;
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
+    }
   };
 
   // ── sage_* — the rules-engine-gated scheduling contract ────────────────
