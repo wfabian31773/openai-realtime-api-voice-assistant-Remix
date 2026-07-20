@@ -6,6 +6,7 @@ const DEPARTMENTS = {
   SURGERY: 2,
   TECH: 3,
   CEC_NETWORKING: 12,
+  MEDICAL_RECORDS: 16,
 } as const;
 
 // Operator-approved human review queue (ticket-workflow MASTER §C4): After Hours
@@ -38,6 +39,7 @@ function validateTicketParams(params: {
   lastProviderSeen?: string | null;
   locationId?: number | null;
   locationOfLastVisit?: string | null;
+  patientBirthYear?: string | null;
   description?: string;
 }): ValidationResult {
   if (params.departmentId === DEPARTMENTS.SURGERY) {
@@ -72,6 +74,20 @@ function validateTicketParams(params: {
     }
   }
 
+  // Medical Records (Right of Access) requests can't be fulfilled without
+  // verifying the patient's identity. Capture the date of birth on the call so
+  // the records team can verify before releasing anything.
+  if (params.departmentId === DEPARTMENTS.MEDICAL_RECORDS) {
+    const hasDob = params.patientBirthYear != null && params.patientBirthYear.trim().length > 0;
+    if (!hasDob) {
+      console.warn('[CREATE_TICKET] ❌ Medical records ticket missing date of birth - rejecting');
+      return {
+        valid: false,
+        error: 'Medical records requests require the patient date of birth to verify identity before records can be released. Please ask for the patient date of birth.' + ESCALATE_HINT,
+      };
+    }
+  }
+
   if (params.departmentId === DEPARTMENTS.CEC_NETWORKING && params.description) {
     const lowerDesc = params.description.toLowerCase();
     const isMedication = MEDICATION_KEYWORDS.some(kw => lowerDesc.includes(kw));
@@ -88,7 +104,7 @@ function validateTicketParams(params: {
 }
 
 const createTicketSchema = z.object({
-  departmentId: z.number().describe('Department ID: 1=Optical, 2=Surgery Coordinator, 3=Clinical Tech'),
+  departmentId: z.number().describe('Department ID: 1=Optical, 2=Surgery Coordinator, 3=Clinical Tech, 16=Medical Records'),
   requestTypeId: z.number().describe('Type of request being made'),
   requestReasonId: z.number().describe('Specific reason for the request'),
   patientFirstName: z.string().describe('Patient first name'),
@@ -100,17 +116,17 @@ const createTicketSchema = z.object({
   locationOfLastVisit: z.string().nullable().optional().describe('Location/office where patient had their last visit (e.g., "Pasadena Office"). REQUIRED for optical tickets if locationId not provided.'),
   patientBirthMonth: z.string().nullable().optional().describe('Birth month (2 digits, e.g., "03")'),
   patientBirthDay: z.string().nullable().optional().describe('Birth day (2 digits, e.g., "15")'),
-  patientBirthYear: z.string().nullable().optional().describe('Birth year (4 digits, e.g., "1985")'),
+  patientBirthYear: z.string().nullable().optional().describe('Birth year (4 digits, e.g., "1985"). REQUIRED for medical records tickets to verify identity.'),
   locationId: z.number().nullable().optional().describe('Associated location ID. REQUIRED for optical tickets if locationOfLastVisit not provided.'),
   providerId: z.number().nullable().optional().describe('Associated provider ID. REQUIRED for surgery tickets if lastProviderSeen not provided.'),
   description: z.string().describe('Detailed description of the patient request or issue'),
   priority: z.enum(['low', 'normal', 'medium', 'high', 'urgent']).nullable().optional().describe('Priority level, defaults to medium'),
-  unresolvedInfo: z.string().nullable().optional().describe('Set this ONLY after you have already asked and the caller genuinely cannot provide a REQUIRED field (a surgeon for surgery, an office/location for optical). Briefly state what is missing (e.g., "caller does not know which surgeon"). The request is then routed to the human review queue so it is never lost. Do NOT set this on a first attempt — always ask the caller first.'),
+  unresolvedInfo: z.string().nullable().optional().describe('Set this ONLY after you have already asked and the caller genuinely cannot provide a REQUIRED field (a surgeon for surgery, an office/location for optical, a date of birth for medical records). Briefly state what is missing (e.g., "caller does not know which surgeon"). The request is then routed to the human review queue so it is never lost. Do NOT set this on a first attempt — always ask the caller first.'),
 });
 
 export const createTicketTool = tool({
   name: 'create_ticket',
-  description: 'Create a support ticket in the external ticketing system. Returns ONLY the ticket number (e.g., "VA-1700000000000-456") on success, or "ERROR: <message>" on failure. NOTE: Surgery tickets (departmentId=2) REQUIRE a surgeon name in lastProviderSeen or providerId. Optical tickets (departmentId=1) REQUIRE a location in locationOfLastVisit or locationId. If a required field cannot be obtained after asking the caller, pass unresolvedInfo to route the request to human review instead of failing.',
+  description: 'Create a support ticket in the external ticketing system. Returns ONLY the ticket number (e.g., "VA-1700000000000-456") on success, or "ERROR: <message>" on failure. NOTE: Surgery tickets (departmentId=2) REQUIRE a surgeon name in lastProviderSeen or providerId. Optical tickets (departmentId=1) REQUIRE a location in locationOfLastVisit or locationId. Medical Records tickets (departmentId=16) REQUIRE the patient date of birth (patientBirthYear) to verify identity. If a required field cannot be obtained after asking the caller, pass unresolvedInfo to route the request to human review instead of failing.',
   parameters: createTicketSchema,
   execute: async (params: z.infer<typeof createTicketSchema>) => {
     const { unresolvedInfo, ...rest } = params;
