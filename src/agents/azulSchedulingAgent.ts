@@ -155,6 +155,24 @@ When a handoff packet's routing includes a transfer number, tell the patient you
 5. Patient picks one → confirm it back → explicit yes → sage_book with the slot's fields VERBATIM.
 6. booking_status "confirmed" → confirm warmly with date, time, office, provider. Anything else → rule 4 of the contract.
 
+# NEW patients — registration + insurance intake (the flow when there is no chart)
+
+A caller is a NEW patient when verify_patient_identity finds no match (and the details are confirmed correct), or when they say they've never been seen at Azul Vision. Then:
+
+1. Set expectations in one sentence: "Happy to get you set up — I'll take a few details, then we'll pick a time."
+2. Collect ONE AT A TIME: first and last name (spell back), date of birth, cell phone (offer the caller's number), and whether they'd like to be listed as male, female, or other.
+3. PCP: "Do you have a primary care doctor?" If they know the name, note it exactly as stated. If they don't know or don't have one, that's fine — it defaults to NO PCP. Never press.
+4. Insurance — be thorough but gentle, one question at a time:
+   - "What insurance will you be using?" (health plan name)
+   - "Is that an HMO or PPO plan, or is it Medicare or Medi-Cal?"
+   - If HMO: "Which medical group is that through?" (important — always ask)
+   - If Medicare: ask whether it's straight Medicare or a Medicare Advantage plan, and whether they have a supplement.
+   - "If you have your insurance card handy, I can take the member ID — if not, no problem."
+   - NEVER ask for a Social Security number. If offered, say you don't need it.
+5. Call sage_new_patient_intake with everything collected. If it reports a duplicate chart, the caller is an EXISTING patient — apologize briefly and continue with their existing record per the instruction.
+6. The result includes earliest_bookable_date. Explain it positively: "Since you're new, our team verifies your insurance before your first visit — the earliest I can offer is [date]." Then run the NORMAL scheduling flow (sage_decision → sage_availability with their personId → sage_book). Do not offer or book anything earlier — the system will refuse.
+7. Close with: their insurance will be verified before the visit, and if anything needs clarifying, the team will call them.
+
 # Cancellation flow — strict confirmation gate
 
 1. Verify identity if not yet verified.
@@ -220,7 +238,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.1.0',
+  version: '1.2.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -281,14 +299,47 @@ export function createAzulSchedulingAgent(
   const sageAvailabilityTool = tool({
     name: 'sage_availability',
     description:
-      'Rules-gated availability search. Returns ONLY options the AI is permitted to offer (gate runs first; blocked types return no options). Slots come back book-ready — pass their fields to sage_book verbatim.',
+      'Rules-gated availability search. Returns ONLY options the AI is permitted to offer (gate runs first; blocked types return no options). Slots come back book-ready — pass their fields to sage_book verbatim. ALWAYS pass personId once the patient is known — new patients with pending insurance verification get their earliest allowed date enforced here.',
     parameters: z.object({
       eventName: z.string(),
       locationId: z.string().optional().describe('Optional location GUID.'),
       resourceId: z.string().optional().describe('Optional provider resourceId for provider-specific search.'),
       daysAhead: z.number().optional().describe('Search window, default 21.'),
+      personId: z.string().optional().describe("Patient's personId — REQUIRED for new patients (eligibility floor)."),
     }),
     execute: async (args) => tracked('sage_availability', compact(args)),
+  });
+
+  const sageNewPatientIntakeTool = tool({
+    name: 'sage_new_patient_intake',
+    description:
+      "Register a NEW patient (no existing chart): creates the NextGen chart with a real PCP (defaults to NO PCP when unknown) and opens an insurance-eligibility intake. Returns earliest_bookable_date — insurance verification needs a few business days, and availability/booking enforce it. Call ONLY after collecting full name, DOB, cell phone, sex, PCP (or confirmed unknown), and as much insurance detail as the caller can give. If it reports a duplicate chart, the caller is an EXISTING patient — follow the returned instruction.",
+    parameters: z.object({
+      firstName: z.string(),
+      lastName: z.string(),
+      dateOfBirth: z.string().describe('YYYY-MM-DD.'),
+      cellPhone: z.string().describe("10+ digits — confirm the caller's number."),
+      sex: z.string().describe('F | M | O.'),
+      pcpName: z.string().optional().describe("PCP as stated. Omit if unknown — defaults to 'NO PCP'."),
+      pcpProviderId: z.string().optional().describe('Real provider GUID from lookup_provider, if resolved.'),
+      coverageType: z.string().optional().describe('HMO | PPO | Medicare | Medi-Cal | Medicare Advantage | other | unknown'),
+      healthPlan: z.string().optional().describe('e.g. Blue Shield, Kaiser, IEHP, SCAN.'),
+      medicalGroup: z.string().optional().describe('For HMO: which medical group — always ask.'),
+      memberId: z.string().optional().describe('Member/subscriber ID if the caller has the card handy.'),
+      secondaryCoverage: z.string().optional(),
+      insuranceNotes: z.string().optional().describe('Anything else the caller shared about coverage.'),
+    }),
+    execute: async (args) => {
+      const { coverageType, healthPlan, medicalGroup, memberId, secondaryCoverage, insuranceNotes, ...rest } = args;
+      return tracked('sage_new_patient_intake', compact({
+        ...compact(rest),
+        insurance: compact({
+          coverageType, healthPlan, medicalGroup, memberId, secondaryCoverage,
+          notes: insuranceNotes,
+        }),
+        callId: metadata?.callId,
+      }));
+    },
   });
 
   const sageBookTool = tool({
@@ -527,6 +578,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       sageAvailabilityTool,
       sageBookTool,
       sageHandoffTool,
+      sageNewPatientIntakeTool,
       verifyIdentityTool,
       getPatientAppointmentsTool,
       getAppointmentDetailsTool,

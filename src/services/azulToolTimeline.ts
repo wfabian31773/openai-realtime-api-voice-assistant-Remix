@@ -32,6 +32,7 @@ const SAFE_ARG_KEYS = new Set([
   'intent', 'eventName', 'locationId', 'providerId', 'resourceId', 'daysAhead',
   'slotDateTime', 'handoffReason', 'method', 'reasonForCall', 'requestedLocation',
   'requestedTimeframe', 'urgencyScreenResult', 'includePast', 'reason', 'name',
+  'coverageType', 'healthPlan', 'medicalGroup', 'pcpName',
 ]);
 
 function redactArgs(args: Record<string, unknown>): Record<string, unknown> {
@@ -53,6 +54,7 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     'decision', 'reason', 'booking_status', 'appointmentId', 'matchSignal',
     'callback_id', 'error', 'cancelled', 'rules_version',
     'status', 'verified', 'identityVerified', 'matchCount', 'recentSurgicalContext',
+    'earliest_bookable_date', 'eligibility_due_date', 'intakeId', 'new_patient_earliest_date',
   ]) {
     if (parsed?.[k] !== undefined) out[k] = parsed[k];
   }
@@ -112,7 +114,16 @@ export function getAzulTimeline(callIdOrSid: string): AzulToolEvent[] | null {
 
 /** Derive the call's purpose + headline result from its timeline. */
 export function classifyAzulCall(events: AzulToolEvent[]): { purpose: string; result: string } {
+  const intake = events.find((e) => e.tool === 'sage_new_patient_intake');
   const booked = events.find((e) => e.tool === 'sage_book' && e.outcome.booking_status === 'confirmed');
+  if (intake) {
+    const registered = intake.outcome.status === 'created';
+    const suffix = booked ? ' + booked' : registered ? ' (booking pending eligibility window)' : '';
+    return {
+      purpose: 'New patient registration',
+      result: registered ? `Registered${suffix}` : `Registration ${String(intake.outcome.status ?? 'attempted').replace(/_/g, ' ')}`,
+    };
+  }
   if (booked) return { purpose: 'Schedule appointment', result: `Booked (${booked.args.eventName ?? 'appointment'})` };
   const bookTried = events.find((e) => e.tool === 'sage_book');
   if (bookTried) return { purpose: 'Schedule appointment', result: `Booking ${bookTried.outcome.booking_status ?? 'attempted'}` };
