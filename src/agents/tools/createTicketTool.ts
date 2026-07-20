@@ -28,6 +28,8 @@ function validateTicketParams(params: {
   requestTypeId: number;
   providerId?: number | null;
   lastProviderSeen?: string | null;
+  locationId?: number | null;
+  locationOfLastVisit?: string | null;
   description?: string;
 }): ValidationResult {
   if (params.departmentId === DEPARTMENTS.SURGERY) {
@@ -40,6 +42,24 @@ function validateTicketParams(params: {
       return {
         valid: false,
         error: 'Surgery tickets require a surgeon. Please ask which doctor is performing the surgery or which surgeon the patient is scheduled with.',
+      };
+    }
+  }
+
+  // Optical tickets are unassignable without a location — the single biggest
+  // source of languishing tickets. Gate it the same way surgery gates a surgeon:
+  // bounce back to the agent to ask which office, rather than create a ticket
+  // nobody can pick up.
+  if (params.departmentId === DEPARTMENTS.OPTICAL) {
+    const hasLocation =
+      (params.locationId != null && params.locationId > 0) ||
+      (params.locationOfLastVisit != null && params.locationOfLastVisit.trim().length > 0);
+
+    if (!hasLocation) {
+      console.warn('[CREATE_TICKET] ❌ Optical ticket missing location - rejecting');
+      return {
+        valid: false,
+        error: 'Optical tickets require a location. Please ask which Azul Vision office the patient visits or would like to be seen at, so this reaches the right team.',
       };
     }
   }
@@ -69,11 +89,11 @@ const createTicketSchema = z.object({
   patientEmail: z.string().nullable().optional().describe('Patient email address'),
   preferredContactMethod: z.enum(['phone', 'text', 'email']).nullable().optional().describe('How the patient prefers to be contacted'),
   lastProviderSeen: z.string().nullable().optional().describe('Name of the last provider/doctor the patient saw (e.g., "Dr. Smith"). REQUIRED for surgery tickets.'),
-  locationOfLastVisit: z.string().nullable().optional().describe('Location/office where patient had their last visit (e.g., "Pasadena Office")'),
+  locationOfLastVisit: z.string().nullable().optional().describe('Location/office where patient had their last visit (e.g., "Pasadena Office"). REQUIRED for optical tickets if locationId not provided.'),
   patientBirthMonth: z.string().nullable().optional().describe('Birth month (2 digits, e.g., "03")'),
   patientBirthDay: z.string().nullable().optional().describe('Birth day (2 digits, e.g., "15")'),
   patientBirthYear: z.string().nullable().optional().describe('Birth year (4 digits, e.g., "1985")'),
-  locationId: z.number().nullable().optional().describe('Associated location ID'),
+  locationId: z.number().nullable().optional().describe('Associated location ID. REQUIRED for optical tickets if locationOfLastVisit not provided.'),
   providerId: z.number().nullable().optional().describe('Associated provider ID. REQUIRED for surgery tickets if lastProviderSeen not provided.'),
   description: z.string().describe('Detailed description of the patient request or issue'),
   priority: z.enum(['low', 'normal', 'medium', 'high', 'urgent']).nullable().optional().describe('Priority level, defaults to medium'),
@@ -81,7 +101,7 @@ const createTicketSchema = z.object({
 
 export const createTicketTool = tool({
   name: 'create_ticket',
-  description: 'Create a support ticket in the external ticketing system. Returns ONLY the ticket number (e.g., "VA-1700000000000-456") on success, or "ERROR: <message>" on failure. NOTE: Surgery tickets (departmentId=2) REQUIRE a surgeon name in lastProviderSeen or providerId field.',
+  description: 'Create a support ticket in the external ticketing system. Returns ONLY the ticket number (e.g., "VA-1700000000000-456") on success, or "ERROR: <message>" on failure. NOTE: Surgery tickets (departmentId=2) REQUIRE a surgeon name in lastProviderSeen or providerId. Optical tickets (departmentId=1) REQUIRE a location in locationOfLastVisit or locationId.',
   parameters: createTicketSchema,
   execute: async (params: z.infer<typeof createTicketSchema>) => {
     const validation = validateTicketParams(params);
