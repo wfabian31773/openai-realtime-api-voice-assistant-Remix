@@ -793,7 +793,10 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
           from: twilioPhoneNumber,
           to: HUMAN_AGENT_NUMBER,
           label: 'human agent',
-          earlyMedia: true,
+          // Operator-specified UX (2026-07-22, applies to ALL transfers):
+          // no pre-answer ringback into the conference — the caller hears
+          // the agent, then the human, never the raw ring.
+          earlyMedia: false,
           endConferenceOnExit: true,
           statusCallback: statusCallbackUrl,
           statusCallbackEvent: ['answered', 'completed'],
@@ -1092,7 +1095,13 @@ async function transferConferenceToNumber(
         from: twilioPhoneNumber,
         to: toNumber,
         label: label.slice(0, 64),
-        earlyMedia: true,
+        // Operator-specified UX (2026-07-22): the caller never hears raw
+        // ringback — the agent "steps away" ("give me one second while I try
+        // to connect you"), the dial happens silently, and either the office
+        // voice appears on answer (merge) or the agent comes back with the
+        // periodic cut-ins. earlyMedia: false keeps pre-answer audio out of
+        // the conference.
+        earlyMedia: false,
         endConferenceOnExit: true,
         statusCallback: statusCallbackUrl,
         statusCallbackEvent: ['answered', 'completed'],
