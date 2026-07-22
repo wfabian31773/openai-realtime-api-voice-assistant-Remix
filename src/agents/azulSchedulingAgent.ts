@@ -62,6 +62,29 @@ export function unregisterAzulHoldingCallback(callId: string): void {
   holdingCallbacks.delete(callId);
 }
 
+// ── Tier-2 live transfer to the office queue ─────────────────────────────
+// The session layer registers a per-call callback that dials a number into
+// the caller's Twilio conference (same mechanism as the after-hours urgent
+// handoff) and resolves true once a human answers and the AI leg is hung
+// up. The transfer TARGET is never model-supplied: it's captured from the
+// sage_handoff packet (transferNumberE164), so the agent can only connect
+// callers to numbers the rules engine routed.
+type AzulOfficeTransfer = (toNumber: string, label: string) => Promise<boolean>;
+const officeTransferCallbacks = new Map<string, AzulOfficeTransfer>();
+const transferTargets = new Map<string, {
+  number: string;
+  team: string | null;
+  handoff: Parameters<typeof fileLocationQueueTicket>[0];
+  resultRaw: string;
+}>();
+export function registerAzulOfficeTransferCallback(callId: string, cb: AzulOfficeTransfer): void {
+  officeTransferCallbacks.set(callId, cb);
+}
+export function unregisterAzulOfficeTransferCallback(callId: string): void {
+  officeTransferCallbacks.delete(callId);
+  transferTargets.delete(callId);
+}
+
 const TOOL_TIMEOUT_MS: Record<string, number> = {
   sage_availability: 75_000,
   sage_book: 75_000,
@@ -133,6 +156,7 @@ async function fileLocationQueueTicket(
   },
   handoffResultRaw: string,
   meta: { callId?: string; callSid?: string } | undefined,
+  failedTransfer = false,
 ): Promise<void> {
   try {
     if (!TICKETING_URL || !TICKETING_KEY) {
@@ -143,14 +167,19 @@ async function fileLocationQueueTicket(
     try { handoffResult = JSON.parse(handoffResultRaw); } catch { /* raw text is fine */ }
     const [first, ...restName] = String(handoff.patient.name ?? 'Unknown Caller').trim().split(/\s+/);
     const dob = String(handoff.patient.dob ?? '');
-    // Location for routing: the packet's queue team is named after the
-    // clinic ("Encinitas OCS") — strip the team suffix; pilot default
-    // otherwise. TODO: have the service return location_name explicitly.
+    // Location for routing: the packet's explicit locationName when present
+    // (service ≥ this deploy), else the queue-team heuristic, else pilot
+    // default.
     const queueTeam = String(handoffResult?.queueTeam ?? '');
     const locationName =
-      queueTeam.replace(/\s+(OCS|queue|team)$/i, '').trim() || DEFAULT_QUEUE_LOCATION;
+      String(handoffResult?.locationName ?? '').trim() ||
+      queueTeam.replace(/\s+(OCS|queue|team)$/i, '').trim() ||
+      DEFAULT_QUEUE_LOCATION;
     const reason = handoff.handoffReason;
     const description = [
+      failedTransfer
+        ? `TRANSFER NOT ANSWERED — the live transfer to ${queueTeam || 'the office queue'} did not connect. Please call the patient back promptly.`
+        : null,
       `AI scheduling handoff — ${reason.replace(/_/g, ' ')}`,
       handoff.callContext.reasonForCall ? `Reason for call: ${handoff.callContext.reasonForCall}` : null,
       handoff.callContext.requestedLocation ? `Requested office: ${handoff.callContext.requestedLocation}` : null,
@@ -165,7 +194,9 @@ async function fileLocationQueueTicket(
     const body = {
       queue: 'location',
       locationName,
-      ...(meta?.callId ? { idempotencyKey: `azul-handoff-${meta.callId}` } : {}),
+      ...(meta?.callId
+        ? { idempotencyKey: failedTransfer ? `azul-transfer-fail-${meta.callId}` : `azul-handoff-${meta.callId}` }
+        : {}),
       patientFirstName: first || 'Unknown',
       patientLastName: restName.join(' ') || 'Caller',
       patientPhone: String(handoff.patient.phone ?? 'unknown'),
@@ -173,7 +204,7 @@ async function fileLocationQueueTicket(
         ? { patientBirthYear: dob.slice(0, 4), patientBirthMonth: dob.slice(5, 7), patientBirthDay: dob.slice(8, 10) }
         : {}),
       description,
-      priority: reason === 'urgent_symptom' ? 'urgent' : reason === 'api_failure' ? 'high' : 'medium',
+      priority: reason === 'urgent_symptom' ? 'urgent' : failedTransfer || reason === 'api_failure' ? 'high' : 'medium',
       confirmationType: 'phone',
       callData: { callSid: meta?.callSid, agentUsed: 'azul-scheduling' },
     };
@@ -275,7 +306,9 @@ You do NOT own scheduling decisions. The Eye Care system holds the admin-approve
 
 # Transfers and callbacks
 
-When a handoff packet's routing includes a transfer number, tell the patient you're connecting them to the office. When routing is callback-only, set the expectation clearly: "Our team will call you back at this number, usually within the hour."
+Always pass locationName on sage_handoff — the office the caller wants or was being scheduled at. The packet's returned method decides what happens next; follow it exactly:
+- method "cold_transfer": say the returned patient script ("Let me connect you to the office team now — please stay on the line"), then IMMEDIATELY call transfer_to_office. While it rings, stay quiet unless the system prompts a holding update. If it returns transferred=true, the caller is with the office — your part is over, say NOTHING more. If transferred=false, the office didn't answer: apologize warmly ("I'm sorry — I wasn't able to reach them directly"), promise the callback ("our team will call you back at this number, usually within the hour"), and wrap up. Never just announce a transfer without calling transfer_to_office, and never call transfer_to_office without a cold_transfer packet.
+- method "callback": set the expectation clearly: "Our team will call you back at this number, usually within the hour."
 
 # Scheduling a new appointment — the only allowed flow
 
@@ -395,7 +428,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.7.0',
+  version: '1.8.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -546,7 +579,7 @@ export function createAzulSchedulingAgent(
   const sageHandoffTool = tool({
     name: 'sage_handoff',
     description:
-      "Create a handoff packet and get routing (queue/team, transfer number, patient script, staff summary). ALWAYS call this before transferring or promising a callback — no transfer without a packet. Urgent symptoms use handoffReason 'urgent_symptom' with method 'urgent_escalation'.",
+      "Create a handoff packet and get routing (queue/team, transfer number, patient script, staff summary). ALWAYS call this before transferring or promising a callback — no transfer without a packet. ALWAYS pass locationName — the office the caller wants or was being scheduled at. The RESULT's method decides what happens next: 'cold_transfer' → tell the caller you're connecting them, then call transfer_to_office; 'callback' → promise the callback. Urgent symptoms use handoffReason 'urgent_symptom' with method 'urgent_escalation'.",
     parameters: z.object({
       handoffReason: z.enum([
         'patient_requested_human', 'urgent_symptom', 'no_acceptable_availability',
@@ -557,6 +590,7 @@ export function createAzulSchedulingAgent(
         'diagnostic_or_resource_scheduling', 'queue_transfer_failure',
       ]),
       locationId: z.string().optional(),
+      locationName: z.string().optional().describe("Office the caller wants / was discussing (e.g. 'Encinitas', 'Oceanside'). Pass whenever known — routing picks the office's own queue from it."),
       method: z.enum(['callback', 'cold_transfer', 'urgent_escalation']).optional(),
       patientName: z.string().optional(),
       patientDob: z.string().optional(),
@@ -586,16 +620,33 @@ export function createAzulSchedulingAgent(
         }),
       }));
 
-      // Tier-3 safety net — fire-and-forget; never delays the live call.
-      void fileLocationQueueTicket(
-        {
-          handoffReason: args.handoffReason,
-          patient: { name: patientName, dob: patientDob, phone: patientPhone ?? metadata?.callerPhone },
-          callContext: { reasonForCall, patientResponse, requestedLocation },
-        },
-        result,
-        { callId: metadata?.callId, callSid: metadata?.callSid },
-      );
+      const handoffContext = {
+        handoffReason: args.handoffReason,
+        patient: { name: patientName, dob: patientDob, phone: patientPhone ?? metadata?.callerPhone },
+        callContext: { reasonForCall, patientResponse, requestedLocation },
+      };
+      let parsed: any = {};
+      try { parsed = JSON.parse(result); } catch { /* raw text */ }
+
+      if (parsed?.method === 'cold_transfer' && parsed?.transferNumberE164 && metadata?.callId) {
+        // Tier 2: routing says connect the caller live. Capture the target
+        // for transfer_to_office (the model never supplies numbers). The
+        // tier-3 ticket is NOT filed yet — a successful transfer needs no
+        // ticket; transfer_to_office files one if the office doesn't answer.
+        transferTargets.set(metadata.callId, {
+          number: String(parsed.transferNumberE164),
+          team: parsed.queueTeam ? String(parsed.queueTeam) : null,
+          handoff: handoffContext,
+          resultRaw: result,
+        });
+      } else {
+        // Tier 3 directly (callback / urgent routing) — fire-and-forget;
+        // never delays the live call.
+        void fileLocationQueueTicket(handoffContext, result, {
+          callId: metadata?.callId,
+          callSid: metadata?.callSid,
+        });
+      }
 
       // Urgent escalations additionally dial the on-call human into the
       // conference. The platform's handoff gate requires escalation details
@@ -616,6 +667,65 @@ export function createAzulSchedulingAgent(
         );
       }
       return result;
+    },
+  });
+
+  const transferToOfficeTool = tool({
+    name: 'transfer_to_office',
+    description:
+      "Connect the caller LIVE to the office queue. Use ONLY after sage_handoff returned method 'cold_transfer'. Say the patient script FIRST (\"Let me connect you to the office team now — please stay on the line\"), THEN call this. It rings the office queue for up to 45 seconds. transferred=true → the caller is with the office and your part is over — say NOTHING more. transferred=false → the office didn't pick up: apologize warmly, promise the callback instead (a high-priority ticket is filed for you automatically), and wrap up.",
+    parameters: z.object({}),
+    execute: async () => {
+      const callId = metadata?.callId;
+      const target = callId ? transferTargets.get(callId) : undefined;
+      if (!callId || !target) {
+        return {
+          transferred: false,
+          error: 'no_transfer_packet',
+          instruction: 'No cold_transfer packet exists for this call. Call sage_handoff first; if its method is callback, promise the callback instead.',
+        };
+      }
+      const dial = officeTransferCallbacks.get(callId);
+      if (!dial) {
+        void fileLocationQueueTicket(target.handoff, target.resultRaw, { callId, callSid: metadata?.callSid }, true);
+        return {
+          transferred: false,
+          error: 'transfer_unavailable',
+          instruction: 'Live transfer is not available on this call. Apologize and promise the callback — a ticket has been filed with the office queue.',
+        };
+      }
+      // Holding updates while the office rings (up to 45s) — same no-dead-air
+      // heartbeat the Eye Care tools use, first beat later since the caller
+      // was just told "please stay on the line".
+      const hb = holdingCallbacks.get(callId);
+      let hbInterval: ReturnType<typeof setInterval> | undefined;
+      const hbFirst = hb
+        ? setTimeout(() => {
+            hb();
+            hbInterval = setInterval(hb, HOLDING_UPDATE_MS);
+          }, 12_000)
+        : undefined;
+      try {
+        console.log(`[AZUL-SCHED] tier-2 transfer → ${target.team ?? 'office queue'} (${target.number})`);
+        const answered = await dial(target.number, target.team ?? 'office queue');
+        if (answered) {
+          transferTargets.delete(callId);
+          return { transferred: true };
+        }
+        throw new Error('no_answer');
+      } catch (err) {
+        console.warn(`[AZUL-SCHED] tier-2 transfer failed: ${err instanceof Error ? err.message : err}`);
+        void fileLocationQueueTicket(target.handoff, target.resultRaw, { callId, callSid: metadata?.callSid }, true);
+        transferTargets.delete(callId);
+        return {
+          transferred: false,
+          error: 'office_no_answer',
+          instruction: 'The office did not pick up. Apologize, promise the callback ("I was not able to reach them directly, so our team will call you back — usually within the hour"), and wrap up warmly. A high-priority ticket has been filed with the office queue.',
+        };
+      } finally {
+        if (hbFirst) clearTimeout(hbFirst);
+        if (hbInterval) clearInterval(hbInterval);
+      }
     },
   });
 
@@ -772,6 +882,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       sageAvailabilityTool,
       sageBookTool,
       sageHandoffTool,
+      transferToOfficeTool,
       sageNewPatientIntakeTool,
       verifyIdentityTool,
       getPatientAppointmentsTool,

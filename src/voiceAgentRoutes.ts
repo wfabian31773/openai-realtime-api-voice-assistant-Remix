@@ -19,7 +19,7 @@ import {
 } from '@openai/agents/realtime';
 import { getTwilioClient, getTwilioFromPhoneNumber } from './lib/twilioClient';
 import { medicalSafetyGuardrails, WELCOME_GREETING, getUrgentTriageGreeting } from './agents/afterHoursAgent';
-import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulHoldingCallback } from './agents/azulSchedulingAgent';
+import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulHoldingCallback, registerAzulOfficeTransferCallback, unregisterAzulOfficeTransferCallback } from './agents/azulSchedulingAgent';
 import { flushAzulTimeline, getAzulTimeline } from './services/azulToolTimeline';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
@@ -1047,6 +1047,108 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
     console.error('[HANDOFF ERROR]', error);
     throw error;
   }
+}
+
+// Tier-2 office transfer (azul-scheduling): dial a per-location office queue
+// number into the caller's conference and hand the call over once a human
+// answers. Same conference mechanics as addHumanAgent, but the target comes
+// from the sage_handoff packet's routing (never model-invented), there is no
+// after-hours caller-type gate (the rules engine already authorized the
+// transfer), and failure handling is the agent's job — it falls back to the
+// callback script and files the location-queue ticket. Returns true only
+// after a human answered AND the AI leg was released.
+async function transferConferenceToNumber(
+  openAiCallId: string,
+  toNumber: string,
+  label: string,
+): Promise<boolean> {
+  const conferenceName = getConferenceName(openAiCallId);
+  if (!conferenceName) {
+    console.error('[OFFICE-TRANSFER] ✗ No conference found for call:', openAiCallId);
+    return false;
+  }
+  if (!twilioClient) {
+    twilioClient = await getTwilioClient();
+  }
+  const twilioPhoneNumber = envConfig.twilio.phoneNumber;
+  if (!twilioPhoneNumber) {
+    console.error('[OFFICE-TRANSFER] ✗ TWILIO_PHONE_NUMBER not configured');
+    return false;
+  }
+
+  let participantSid: string | undefined;
+  let resolveAnswered!: () => void;
+  let rejectAnswered!: (err: Error) => void;
+  const answeredPromise = new Promise<void>((resolve, reject) => {
+    resolveAnswered = resolve;
+    rejectAnswered = reject;
+  });
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    const statusCallbackUrl = `https://${envConfig.domain}/api/voice/handoff-status`;
+    const dialResult = await withResiliency(
+      async () => twilioClient.conferences(conferenceName).participants.create({
+        from: twilioPhoneNumber,
+        to: toNumber,
+        label: label.slice(0, 64),
+        earlyMedia: true,
+        endConferenceOnExit: true,
+        statusCallback: statusCallbackUrl,
+        statusCallbackEvent: ['answered', 'completed'],
+        timeout: 40, // ring the office queue for up to 40s
+      }),
+      getCircuitBreaker('twilio-office-transfer'),
+      TWILIO_RETRY_CONFIG,
+      `Office transfer for conference ${conferenceName}`,
+    );
+    if (!dialResult.success) {
+      throw dialResult.error;
+    }
+    const dialedSid: string = dialResult.result!.callSid;
+    participantSid = dialedSid;
+    console.log(`[OFFICE-TRANSFER] Dialing ${label} (${toNumber}) into ${conferenceName}, CallSid: ${dialedSid}`);
+
+    timeoutId = setTimeout(() => {
+      handoffReadyResolvers.delete(dialedSid);
+      rejectAnswered(new Error('Office queue did not answer within 45 seconds'));
+    }, 45_000);
+
+    // The /api/voice/handoff-status webhook resolves this by participant
+    // CallSid — the same agent-agnostic path the after-hours handoff uses.
+    handoffReadyResolvers.set(dialedSid, {
+      resolve: () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        resolveAnswered();
+      },
+      reject: rejectAnswered,
+      openAiCallId,
+      conferenceName,
+      callLogId: callMetadataForDB.get(openAiCallId)?.dbCallLogId,
+    });
+
+    await answeredPromise;
+    console.log('[OFFICE-TRANSFER] ✓ Office answered — releasing AI leg');
+  } catch (err) {
+    console.warn('[OFFICE-TRANSFER] ✗ Transfer failed:', err instanceof Error ? err.message : err);
+    if (timeoutId) clearTimeout(timeoutId);
+    if (participantSid) handoffReadyResolvers.delete(participantSid);
+    return false;
+  }
+
+  try {
+    const hangupResponse = await fetch(
+      `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(openAiCallId)}/hangup`,
+      { method: 'POST', headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } },
+    );
+    if (!hangupResponse.ok) {
+      console.warn('[OFFICE-TRANSFER] ⚠️ AI hangup returned:', hangupResponse.status);
+    }
+  } catch (hangupErr) {
+    // Office is already connected — caller is fine either way.
+    console.warn('[OFFICE-TRANSFER] ⚠️ AI hangup failed (office already connected):', hangupErr);
+  }
+  return true;
 }
 
 // Observe and manage call session with dynamic agent selection
@@ -2103,6 +2205,13 @@ async function observeCall(
           console.error(`[SESSION] azul holding update failed for ${callId}:`, e);
         }
       });
+
+      // Tier-2 live transfer: lets the agent's transfer_to_office tool dial
+      // the sage_handoff packet's office queue number into this caller's
+      // conference (the number itself never comes from the model).
+      registerAzulOfficeTransferCallback(callId, (toNumber, label) =>
+        transferConferenceToNumber(callId, toNumber, label),
+      );
     }
 
     // STEP 4: Force the agent to speak first by sending response.create
@@ -2204,9 +2313,10 @@ async function observeCall(
     console.error(`[SESSION ERROR] Failed to connect call ${callId}:`, error);
     throw error;
   } finally {
-    // Azul scheduling: stop the holding heartbeat + persist the pilot tool
-    // timeline (both no-ops for other agents)
+    // Azul scheduling: stop the holding heartbeat, drop the transfer hook +
+    // persist the pilot tool timeline (all no-ops for other agents)
     unregisterAzulHoldingCallback(callId);
+    unregisterAzulOfficeTransferCallback(callId);
     void flushAzulTimeline(callId);
 
     // Flush accumulated Realtime token usage → accurate per-call OpenAI cost
