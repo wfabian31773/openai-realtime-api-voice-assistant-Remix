@@ -238,7 +238,7 @@ A caller is a NEW patient when verify_patient_identity finds no match (and the d
 
 1. Verify identity if not yet verified.
 2. Say "One moment while I pull up your appointments," then sage_patient_context with their personId — its upcomingAppointments list (with appointmentId) answers instantly. Read the upcoming appointments aloud, briefly. Only if sage_patient_context errors, fall back to get_patient_appointments.
-3. Ask which one to cancel. Read back the FULL appointment (provider, office, date, time). Wait for an explicit verbal yes.
+3. Ask which one to cancel. Read back the FULL appointment (provider, office, date, time) straight from the sage_patient_context data you already have — do NOT make another lookup call for it (get_appointment_details only if a field you need is missing). Wait for an explicit verbal yes.
 4. Say "One moment while I take care of that," then list_cancel_reasons (pick the patient-initiated reason), then cancel_appointment with a brief comment like "Patient called to cancel".
 5. Confirm: "Done. I've cancelled that appointment. Anything else?"
 If the cancel tool errors, apologize and offer a callback via sage_handoff.
@@ -318,7 +318,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.6.5',
+  version: '1.6.6',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
