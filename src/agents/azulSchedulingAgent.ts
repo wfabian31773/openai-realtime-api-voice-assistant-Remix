@@ -54,8 +54,8 @@ const EYECARE_BASE_URL =
 // case — pilot call 10's awkward 5-8s silent chain), then every 15s.
 const HOLDING_FIRST_MS = 6_000;
 const HOLDING_UPDATE_MS = 15_000;
-const holdingCallbacks = new Map<string, () => void>();
-export function registerAzulHoldingCallback(callId: string, cb: () => void): void {
+const holdingCallbacks = new Map<string, (instructionOverride?: string) => void>();
+export function registerAzulHoldingCallback(callId: string, cb: (instructionOverride?: string) => void): void {
   holdingCallbacks.set(callId, cb);
 }
 export function unregisterAzulHoldingCallback(callId: string): void {
@@ -69,7 +69,7 @@ export function unregisterAzulHoldingCallback(callId: string): void {
 // up. The transfer TARGET is never model-supplied: it's captured from the
 // sage_handoff packet (transferNumberE164), so the agent can only connect
 // callers to numbers the rules engine routed.
-type AzulOfficeTransfer = (toNumber: string, label: string) => Promise<boolean>;
+type AzulOfficeTransfer = (toNumber: string, label: string) => Promise<{ ok: boolean; detail?: string }>;
 const officeTransferCallbacks = new Map<string, AzulOfficeTransfer>();
 const transferTargets = new Map<string, {
   number: string;
@@ -330,6 +330,8 @@ You do NOT own scheduling decisions. The Eye Care system holds the admin-approve
 
 # Transfers and callbacks
 
+VERIFY IDENTITY BEFORE ANY HANDOFF OR TRANSFER — no exceptions except a true medical emergency (urgent_symptom: safety first, handle immediately). Even when a caller just says "connect me to the office," first get their name and verify (verify_patient_identity / sage_patient_context) so the office answers knowing who's on the line and the callback packet is complete. If the caller refuses to identify, collect at least a name and note the refusal — then hand off. The server rejects anonymous handoff packets.
+
 Always pass locationName on sage_handoff — the office the caller wants or was being scheduled at. The packet's returned method decides what happens next; follow it exactly:
 - method "cold_transfer": say the returned patient script ("Let me connect you to the office team now — please stay on the line"), then IMMEDIATELY call transfer_to_office. While it rings, stay quiet unless the system prompts a holding update. If it returns transferred=true, the caller is with the office — your part is over, say NOTHING more. If transferred=false, the office didn't answer: apologize warmly ("I'm sorry — I wasn't able to reach them directly"), promise the callback ("our team will call you back at this number, usually within the hour"), and wrap up. Never just announce a transfer without calling transfer_to_office, and never call transfer_to_office without a cold_transfer packet.
 - method "callback": set the expectation clearly: "Our team will call you back at this number, usually within the hour."
@@ -452,7 +454,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.8.2',
+  version: '1.9.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -705,7 +707,7 @@ export function createAzulSchedulingAgent(
   const transferToOfficeTool = tool({
     name: 'transfer_to_office',
     description:
-      "Connect the caller LIVE to the office queue. Use ONLY after sage_handoff returned method 'cold_transfer'. Say the patient script FIRST (\"Let me connect you to the office team now — please stay on the line\"), THEN call this. It rings the office queue for up to 45 seconds. transferred=true → the caller is with the office and your part is over — say NOTHING more. transferred=false → the office didn't pick up: apologize warmly, promise the callback instead (a high-priority ticket is filed for you automatically), and wrap up.",
+      "Connect the caller LIVE to the office queue. Use ONLY after sage_handoff returned method 'cold_transfer'. BEFORE calling this, say a FULL warm connection line — not one short sentence — e.g. \"Absolutely — I'm connecting you with our Encinitas team right now. I'll stay with you while their line rings; it can take a few moments, so please don't hang up.\" THEN call this. It rings the office for up to 45 seconds; the system will prompt you with reassurance updates while it rings — speak them. transferred=true → the caller is with the office and your part is over — say NOTHING more. transferred=false → the office didn't pick up: apologize warmly, promise the callback instead (a high-priority ticket is filed for you automatically), and wrap up.",
     parameters: z.object({}),
     execute: async () => {
       const callId = metadata?.callId;
@@ -726,32 +728,41 @@ export function createAzulSchedulingAgent(
           instruction: 'Live transfer is not available on this call. Apologize and promise the callback — a ticket has been filed with the office queue.',
         };
       }
-      // Holding updates while the office rings (up to 45s) — same no-dead-air
-      // heartbeat the Eye Care tools use, first beat later since the caller
-      // was just told "please stay on the line".
+      // Reassurance while the office rings (up to 45s) — after-hours-style:
+      // the agent's long connect line covers the first stretch, then these
+      // injected updates keep a human voice over the ringback every ~10s.
+      const RING_UPDATE =
+        'The office line is still ringing. Reassure the caller in ONE short, warm sentence that you are still connecting them (vary the wording), e.g. "Their line is ringing — thanks for staying with me." Say nothing else.';
       const hb = holdingCallbacks.get(callId);
       let hbInterval: ReturnType<typeof setInterval> | undefined;
       const hbFirst = hb
         ? setTimeout(() => {
-            hb();
-            hbInterval = setInterval(hb, HOLDING_UPDATE_MS);
-          }, 12_000)
+            hb(RING_UPDATE);
+            hbInterval = setInterval(() => hb(RING_UPDATE), 10_000);
+          }, 8_000)
         : undefined;
+      const startedAt = Date.now();
       try {
         console.log(`[AZUL-SCHED] tier-2 transfer → ${target.team ?? 'office queue'} (${target.number})`);
-        const answered = await dial(target.number, target.team ?? 'office queue');
-        if (answered) {
+        const outcome = await dial(target.number, target.team ?? 'office queue');
+        recordAzulToolEvent(callId, 'transfer_to_office', { team: target.team, number: target.number }, JSON.stringify(outcome), Date.now() - startedAt, {
+          callSid: metadata?.callSid,
+          callLogId: metadata?.callLogId,
+        });
+        if (outcome.ok) {
           transferTargets.delete(callId);
           return { transferred: true };
         }
-        throw new Error('no_answer');
+        throw new Error(outcome.detail || 'no_answer');
       } catch (err) {
-        console.warn(`[AZUL-SCHED] tier-2 transfer failed: ${err instanceof Error ? err.message : err}`);
+        const detail = err instanceof Error ? err.message : String(err);
+        console.warn(`[AZUL-SCHED] tier-2 transfer failed: ${detail}`);
         void fileLocationQueueTicket(target.handoff, target.resultRaw, { callId, callSid: metadata?.callSid }, true);
         transferTargets.delete(callId);
         return {
           transferred: false,
           error: 'office_no_answer',
+          detail,
           instruction: 'The office did not pick up. Apologize, promise the callback ("I was not able to reach them directly, so our team will call you back — usually within the hour"), and wrap up warmly. A high-priority ticket has been filed with the office queue.',
         };
       } finally {

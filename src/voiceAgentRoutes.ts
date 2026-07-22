@@ -1061,11 +1061,11 @@ async function transferConferenceToNumber(
   openAiCallId: string,
   toNumber: string,
   label: string,
-): Promise<boolean> {
+): Promise<{ ok: boolean; detail?: string }> {
   const conferenceName = getConferenceName(openAiCallId);
   if (!conferenceName) {
     console.error('[OFFICE-TRANSFER] ✗ No conference found for call:', openAiCallId);
-    return false;
+    return { ok: false, detail: 'no_conference_for_call' };
   }
   if (!twilioClient) {
     twilioClient = await getTwilioClient();
@@ -1073,7 +1073,7 @@ async function transferConferenceToNumber(
   const twilioPhoneNumber = envConfig.twilio.phoneNumber;
   if (!twilioPhoneNumber) {
     console.error('[OFFICE-TRANSFER] ✗ TWILIO_PHONE_NUMBER not configured');
-    return false;
+    return { ok: false, detail: 'twilio_phone_number_missing' };
   }
 
   let participantSid: string | undefined;
@@ -1130,10 +1130,11 @@ async function transferConferenceToNumber(
     await answeredPromise;
     console.log('[OFFICE-TRANSFER] ✓ Office answered — releasing AI leg');
   } catch (err) {
-    console.warn('[OFFICE-TRANSFER] ✗ Transfer failed:', err instanceof Error ? err.message : err);
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn('[OFFICE-TRANSFER] ✗ Transfer failed:', detail);
     if (timeoutId) clearTimeout(timeoutId);
     if (participantSid) handoffReadyResolvers.delete(participantSid);
-    return false;
+    return { ok: false, detail };
   }
 
   try {
@@ -1148,7 +1149,7 @@ async function transferConferenceToNumber(
     // Office is already connected — caller is fine either way.
     console.warn('[OFFICE-TRANSFER] ⚠️ AI hangup failed (office already connected):', hangupErr);
   }
-  return true;
+  return { ok: true };
 }
 
 // Observe and manage call session with dynamic agent selection
@@ -2192,12 +2193,13 @@ async function observeCall(
     // so an out-of-band response.create is protocol-safe (same mechanism as
     // the greeting trigger below).
     if (agentConfig?.id === 'azul-scheduling' && callId) {
-      registerAzulHoldingCallback(callId, () => {
+      registerAzulHoldingCallback(callId, (instructionOverride?: string) => {
         try {
           (session.transport as any).sendEvent({
             type: 'response.create',
             response: {
               instructions:
+                instructionOverride ??
                 "The system lookup you started is still running — that's normal. Say ONE short, warm holding update to the caller (vary the wording each time; never repeat the same sentence twice in a row), e.g. \"Still working on that for you — thanks for hanging with me.\" Say nothing else, ask nothing.",
             },
           });
