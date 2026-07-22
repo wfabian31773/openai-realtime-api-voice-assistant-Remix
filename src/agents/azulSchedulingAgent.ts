@@ -114,6 +114,11 @@ async function callEyecareTool(
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
+        // Hard pilot lockdown (operator directive 2026-07-22): the service
+        // strips every location-bearing record outside the AI-enabled
+        // pilot set from responses to this agent — locations, providers'
+        // offices, appointments, slots. Other consumers are unaffected.
+        'X-Pilot-Fence': '1',
       },
       body: JSON.stringify(args ?? {}),
       signal: controller.signal,
@@ -164,7 +169,10 @@ async function fileLocationQueueTicket(
       return;
     }
     let handoffResult: any = {};
-    try { handoffResult = JSON.parse(handoffResultRaw); } catch { /* raw text is fine */ }
+    try {
+      const env = JSON.parse(handoffResultRaw);
+      handoffResult = env?.result ?? env;
+    } catch { /* raw text is fine */ }
     const [first, ...restName] = String(handoff.patient.name ?? 'Unknown Caller').trim().split(/\s+/);
     const dob = String(handoff.patient.dob ?? '');
     // Location for routing: the packet's explicit locationName when present
@@ -444,7 +452,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.8.1',
+  version: '1.8.2',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -641,8 +649,16 @@ export function createAzulSchedulingAgent(
         patient: { name: patientName, dob: patientDob, phone: patientPhone ?? metadata?.callerPhone },
         callContext: { reasonForCall, patientResponse, requestedLocation },
       };
+      // The service wraps every response as {tool, result: {...}} — unwrap
+      // the envelope (pilot call 2026-07-22 18:50: parsing the envelope
+      // directly made method/transferNumberE164 read as undefined, so the
+      // transfer target was never captured and every cold_transfer
+      // instantly fell back to the callback apology).
       let parsed: any = {};
-      try { parsed = JSON.parse(result); } catch { /* raw text */ }
+      try {
+        const env = JSON.parse(result);
+        parsed = env?.result ?? env;
+      } catch { /* raw text */ }
 
       if (parsed?.method === 'cold_transfer' && parsed?.transferNumberE164 && metadata?.callId) {
         // Tier 2: routing says connect the caller live. Capture the target
