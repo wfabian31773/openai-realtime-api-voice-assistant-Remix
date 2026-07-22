@@ -208,12 +208,28 @@ async function fileLocationQueueTicket(
       confirmationType: 'phone',
       callData: { callSid: meta?.callSid, agentUsed: 'azul-scheduling' },
     };
-    const r = await fetch(`${TICKETING_URL}/api/voice-agent/create-ticket`, {
+    let r = await fetch(`${TICKETING_URL}/api/voice-agent/create-ticket`, {
       method: 'POST',
       headers: { 'X-API-Key': TICKETING_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const txt = await r.text();
+    let txt = await r.text();
+    // A 422 means the office has no ticket queue yet (not a pilot location,
+    // e.g. Redlands). Re-file into the pilot default queue rather than lose
+    // the ticket — the description names the office it was really for.
+    if (r.status === 422 && locationName.toLowerCase() !== DEFAULT_QUEUE_LOCATION.toLowerCase()) {
+      console.warn(`[AZUL-SCHED] no queue for '${locationName}' — re-filing to ${DEFAULT_QUEUE_LOCATION}`);
+      r = await fetch(`${TICKETING_URL}/api/voice-agent/create-ticket`, {
+        method: 'POST',
+        headers: { 'X-API-Key': TICKETING_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...body,
+          locationName: DEFAULT_QUEUE_LOCATION,
+          description: `[For office: ${locationName} — no queue onboarded yet, routed to default]\n${description}`,
+        }),
+      });
+      txt = await r.text();
+    }
     console.log(
       `[AZUL-SCHED] tier-3 location-queue ticket ${r.ok ? 'created' : `FAILED ${r.status}`}: ${txt.slice(0, 200)}`,
     );
@@ -428,7 +444,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.8.0',
+  version: '1.8.1',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
