@@ -163,9 +163,23 @@ async function fileLocationQueueTicket(
   meta: { callId?: string; callSid?: string } | undefined,
   failedTransfer = false,
 ): Promise<void> {
+  // Every filing attempt lands in the azul tool timeline — 'did the ticket
+  // fire, and what came back?' must be answerable from the dashboard, not
+  // Replit console logs (two POSTs went unaccounted-for on 2026-07-22).
+  const t0 = Date.now();
+  const record = (result: Record<string, unknown>) => {
+    if (meta?.callId) {
+      try {
+        recordAzulToolEvent(meta.callId, 'file_location_ticket', { failedTransfer }, JSON.stringify(result), Date.now() - t0, {
+          callSid: meta?.callSid,
+        });
+      } catch { /* telemetry must never break the call */ }
+    }
+  };
   try {
     if (!TICKETING_URL || !TICKETING_KEY) {
       console.warn('[AZUL-SCHED] ticketing env not configured — tier-3 ticket skipped');
+      record({ skipped: 'ticketing env not configured' });
       return;
     }
     let handoffResult: any = {};
@@ -241,8 +255,10 @@ async function fileLocationQueueTicket(
     console.log(
       `[AZUL-SCHED] tier-3 location-queue ticket ${r.ok ? 'created' : `FAILED ${r.status}`}: ${txt.slice(0, 200)}`,
     );
+    record({ status: r.status, ok: r.ok, locationName, response: txt.slice(0, 250) });
   } catch (e) {
     console.error('[AZUL-SCHED] tier-3 ticket error (call unaffected):', e);
+    record({ error: e instanceof Error ? e.message.slice(0, 250) : String(e).slice(0, 250) });
   }
 }
 
@@ -454,7 +470,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.9.1',
+  version: '1.9.2',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
