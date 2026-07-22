@@ -114,6 +114,83 @@ async function callEyecareTool(
   }
 }
 
+// ── Tier-3 safety net: location-queue ticket on EVERY handoff ────────────
+// Zero-voicemail architecture: tier 1 = resolve on the call, tier 2 = live
+// DID transfer (the handoff packet's routing), tier 3 = a context-rich
+// ticket in the location's queue (ticketing-app PR #162) so nothing —
+// dropped transfers included — is ever lost. Fire-and-forget: must never
+// delay the live call; reuses the app's existing ticketing secrets.
+const TICKETING_URL =
+  process.env.TICKETING_ENRICHMENT_URL || process.env.TICKETING_SYSTEM_URL || '';
+const TICKETING_KEY = process.env.TICKETING_API_KEY || '';
+const DEFAULT_QUEUE_LOCATION = process.env.AZUL_DEFAULT_QUEUE_LOCATION || 'Encinitas';
+
+async function fileLocationQueueTicket(
+  handoff: {
+    handoffReason: string;
+    patient: { name?: string; dob?: string; phone?: string };
+    callContext: { reasonForCall?: string; patientResponse?: string; requestedLocation?: string };
+  },
+  handoffResultRaw: string,
+  meta: { callId?: string; callSid?: string } | undefined,
+): Promise<void> {
+  try {
+    if (!TICKETING_URL || !TICKETING_KEY) {
+      console.warn('[AZUL-SCHED] ticketing env not configured — tier-3 ticket skipped');
+      return;
+    }
+    let handoffResult: any = {};
+    try { handoffResult = JSON.parse(handoffResultRaw); } catch { /* raw text is fine */ }
+    const [first, ...restName] = String(handoff.patient.name ?? 'Unknown Caller').trim().split(/\s+/);
+    const dob = String(handoff.patient.dob ?? '');
+    // Location for routing: the packet's queue team is named after the
+    // clinic ("Encinitas OCS") — strip the team suffix; pilot default
+    // otherwise. TODO: have the service return location_name explicitly.
+    const queueTeam = String(handoffResult?.queueTeam ?? '');
+    const locationName =
+      queueTeam.replace(/\s+(OCS|queue|team)$/i, '').trim() || DEFAULT_QUEUE_LOCATION;
+    const reason = handoff.handoffReason;
+    const description = [
+      `AI scheduling handoff — ${reason.replace(/_/g, ' ')}`,
+      handoff.callContext.reasonForCall ? `Reason for call: ${handoff.callContext.reasonForCall}` : null,
+      handoff.callContext.requestedLocation ? `Requested office: ${handoff.callContext.requestedLocation}` : null,
+      handoff.callContext.patientResponse ? `Details: ${handoff.callContext.patientResponse}` : null,
+      handoffResult?.staffSummary ? `Agent summary: ${handoffResult.staffSummary}` : null,
+      handoffResult?.callbackId != null
+        ? `Console callback #${handoffResult.callbackId} (SLA ${handoffResult.slaMinutes ?? '?'} min)`
+        : null,
+      meta?.callId ? `Call ID: ${meta.callId}` : null,
+    ].filter(Boolean).join('\n');
+
+    const body = {
+      queue: 'location',
+      locationName,
+      ...(meta?.callId ? { idempotencyKey: `azul-handoff-${meta.callId}` } : {}),
+      patientFirstName: first || 'Unknown',
+      patientLastName: restName.join(' ') || 'Caller',
+      patientPhone: String(handoff.patient.phone ?? 'unknown'),
+      ...(/^\d{4}-\d{2}-\d{2}$/.test(dob)
+        ? { patientBirthYear: dob.slice(0, 4), patientBirthMonth: dob.slice(5, 7), patientBirthDay: dob.slice(8, 10) }
+        : {}),
+      description,
+      priority: reason === 'urgent_symptom' ? 'urgent' : reason === 'api_failure' ? 'high' : 'medium',
+      confirmationType: 'phone',
+      callData: { callSid: meta?.callSid, agentUsed: 'azul-scheduling' },
+    };
+    const r = await fetch(`${TICKETING_URL}/api/voice-agent/create-ticket`, {
+      method: 'POST',
+      headers: { 'X-API-Key': TICKETING_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const txt = await r.text();
+    console.log(
+      `[AZUL-SCHED] tier-3 location-queue ticket ${r.ok ? 'created' : `FAILED ${r.status}`}: ${txt.slice(0, 200)}`,
+    );
+  } catch (e) {
+    console.error('[AZUL-SCHED] tier-3 ticket error (call unaffected):', e);
+  }
+}
+
 /** Strip null/undefined so optional params the model sends as null don't reach the service. */
 function compact(args: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(
@@ -318,7 +395,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.6.6',
+  version: '1.7.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -508,6 +585,17 @@ export function createAzulSchedulingAgent(
           urgencyScreenResult, patientResponse, callId: metadata?.callId,
         }),
       }));
+
+      // Tier-3 safety net — fire-and-forget; never delays the live call.
+      void fileLocationQueueTicket(
+        {
+          handoffReason: args.handoffReason,
+          patient: { name: patientName, dob: patientDob, phone: patientPhone ?? metadata?.callerPhone },
+          callContext: { reasonForCall, patientResponse, requestedLocation },
+        },
+        result,
+        { callId: metadata?.callId, callSid: metadata?.callSid },
+      );
 
       // Urgent escalations additionally dial the on-call human into the
       // conference. The platform's handoff gate requires escalation details
