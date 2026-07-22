@@ -333,7 +333,7 @@ You do NOT own scheduling decisions. The Eye Care system holds the admin-approve
 VERIFY IDENTITY BEFORE ANY HANDOFF OR TRANSFER — no exceptions except a true medical emergency (urgent_symptom: safety first, handle immediately). Even when a caller just says "connect me to the office," first get their name and verify (verify_patient_identity / sage_patient_context) so the office answers knowing who's on the line and the callback packet is complete. If the caller refuses to identify, collect at least a name and note the refusal — then hand off. The server rejects anonymous handoff packets.
 
 Always pass locationName on sage_handoff — the office the caller wants or was being scheduled at. The packet's returned method decides what happens next; follow it exactly:
-- method "cold_transfer": say the returned patient script ("Let me connect you to the office team now — please stay on the line"), then IMMEDIATELY call transfer_to_office. While it rings, stay quiet unless the system prompts a holding update. If it returns transferred=true, the caller is with the office — your part is over, say NOTHING more. If transferred=false, the office didn't answer: apologize warmly ("I'm sorry — I wasn't able to reach them directly"), promise the callback ("our team will call you back at this number, usually within the hour"), and wrap up. Never just announce a transfer without calling transfer_to_office, and never call transfer_to_office without a cold_transfer packet.
+- method "cold_transfer": say the step-away line ("Give me one moment while I try to connect you to the office team — if it doesn't go through, I'll be right back with you"), then IMMEDIATELY call transfer_to_office. The caller hears silence while the office is dialed; speak the brief cut-in whenever the system prompts one, then go quiet again. If it returns transferred=true, the calls are merged — your part is over, say NOTHING more. If transferred=false, come back warmly ("Thanks for holding — I wasn't able to reach them directly"), promise the callback ("our team will call you back at this number, usually within the hour"), and wrap up. Never just announce a transfer without calling transfer_to_office, and never call transfer_to_office without a cold_transfer packet.
 - method "callback": set the expectation clearly: "Our team will call you back at this number, usually within the hour."
 
 # Scheduling a new appointment — the only allowed flow
@@ -454,7 +454,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.9.0',
+  version: '1.9.1',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -707,7 +707,7 @@ export function createAzulSchedulingAgent(
   const transferToOfficeTool = tool({
     name: 'transfer_to_office',
     description:
-      "Connect the caller LIVE to the office queue. Use ONLY after sage_handoff returned method 'cold_transfer'. BEFORE calling this, say a FULL warm connection line — not one short sentence — e.g. \"Absolutely — I'm connecting you with our Encinitas team right now. I'll stay with you while their line rings; it can take a few moments, so please don't hang up.\" THEN call this. It rings the office for up to 45 seconds; the system will prompt you with reassurance updates while it rings — speak them. transferred=true → the caller is with the office and your part is over — say NOTHING more. transferred=false → the office didn't pick up: apologize warmly, promise the callback instead (a high-priority ticket is filed for you automatically), and wrap up.",
+      "Connect the caller LIVE to the office queue. Use ONLY after sage_handoff returned method 'cold_transfer'. BEFORE calling this, say the step-away line: \"Give me one moment while I try to connect you to the office team — if it doesn't go through, I'll be right back with you.\" THEN call this. The caller hears silence (never ringing) while the office is dialed for up to 45 seconds; the system prompts you with a brief cut-in every ~10 seconds — speak it, then go quiet again. transferred=true → the office answered and the calls are merged — your part is over, say NOTHING more. transferred=false → the office didn't pick up: come back warmly (\"Thanks for holding — I wasn't able to reach them directly\"), promise the callback (a high-priority ticket is filed for you automatically), and wrap up.",
     parameters: z.object({}),
     execute: async () => {
       const callId = metadata?.callId;
@@ -732,7 +732,7 @@ export function createAzulSchedulingAgent(
       // the agent's long connect line covers the first stretch, then these
       // injected updates keep a human voice over the ringback every ~10s.
       const RING_UPDATE =
-        'The office line is still ringing. Reassure the caller in ONE short, warm sentence that you are still connecting them (vary the wording), e.g. "Their line is ringing — thanks for staying with me." Say nothing else.';
+        'You are still trying to connect the caller to the office (they hear silence, not ringing). Cut in with ONE short, warm reassurance (vary the wording), e.g. "Still trying the office for you — hang tight." Then go quiet again. Say nothing else, ask nothing.';
       const hb = holdingCallbacks.get(callId);
       let hbInterval: ReturnType<typeof setInterval> | undefined;
       const hbFirst = hb
