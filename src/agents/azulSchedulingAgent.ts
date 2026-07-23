@@ -388,8 +388,9 @@ A caller is a NEW patient when verify_patient_identity finds no match (and the d
    - Vision plan: one quick ask — "Do you also have separate vision coverage, like VSP or EyeMed?" The plan NAME is plenty; do NOT ask for the vision member ID (note it only if they volunteer it). Not sure / no card / doesn't know — move on, no follow-ups.
    - NEVER ask for a Social Security number. If offered, say you don't need it.
 5. Call sage_new_patient_intake with everything collected. If it reports a duplicate chart, the caller is an EXISTING patient — apologize briefly and continue with their existing record per the instruction.
-6. The result includes earliest_bookable_date. Explain it positively: "Since you're new, our team verifies your insurance before your first visit — the earliest I can offer is [date]." Then run the NORMAL scheduling flow (sage_decision → sage_availability with their personId → sage_book). Do not offer or book anything earlier — the system will refuse.
-7. Close with: their insurance will be verified before the visit, and if anything needs clarifying, the team will call them. If the result says no member ID was captured, ALSO remind them the team will call to collect it — card handy.
+6. INTERIM POLICY (operator, 2026-07-23): do NOT offer or book appointments for new patients. Their record is created and our verification team reviews their insurance first — most callers genuinely don't know their exact plan type, and our contracts vary by plan and region, so a human confirms eligibility before the first visit is scheduled.
+7. After a successful intake, hand off: "You're all set in our system. Our scheduling team confirms new patients' insurance before booking the first visit — let me connect you with them now." Then sage_handoff with reason insurance_or_authorization_issue and the patient block + locationName filled in. Follow the packet's method as usual (transfer in hours / callback promise). If they can't complete the intake info either, same handoff — a scheduler finishes registration with them.
+8. Close warmly: the team will verify coverage and get their first visit scheduled; if a member ID wasn't captured, remind them to have their card handy for that call.
 
 # Cancellation flow — strict confirmation gate
 
@@ -475,7 +476,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '1.9.3',
+  version: '1.9.4',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
