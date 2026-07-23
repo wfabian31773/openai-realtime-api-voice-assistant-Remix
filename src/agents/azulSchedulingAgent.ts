@@ -69,7 +69,7 @@ export function unregisterAzulHoldingCallback(callId: string): void {
 // up. The transfer TARGET is never model-supplied: it's captured from the
 // sage_handoff packet (transferNumberE164), so the agent can only connect
 // callers to numbers the rules engine routed.
-type AzulOfficeTransfer = (toNumber: string, label: string) => Promise<{ ok: boolean; detail?: string }>;
+type AzulOfficeTransfer = (toNumber: string, label: string, briefing: string) => Promise<{ ok: boolean; detail?: string }>;
 const officeTransferCallbacks = new Map<string, AzulOfficeTransfer>();
 const transferTargets = new Map<string, {
   number: string;
@@ -477,7 +477,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.0.0',
+  version: '2.1.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -761,9 +761,22 @@ export function createAzulSchedulingAgent(
           }, 8_000)
         : undefined;
       const startedAt = Date.now();
+      // Warm-transfer briefing (ship gate): the staffer hears WHO is calling
+      // and WHY before accepting — the patient never repeats themselves.
+      let parsedHandoff: any = {};
       try {
-        console.log(`[AZUL-SCHED] tier-2 transfer → ${target.team ?? 'office queue'} (${target.number})`);
-        const outcome = await dial(target.number, target.team ?? 'office queue');
+        const env = JSON.parse(target.resultRaw);
+        parsedHandoff = env?.result ?? env;
+      } catch { /* raw text */ }
+      const briefing = [
+        'This is the Azul Vision scheduling assistant with a live patient transfer.',
+        target.handoff.patient.name ? `Caller: ${target.handoff.patient.name}.` : null,
+        target.handoff.callContext.reasonForCall ? `Reason: ${target.handoff.callContext.reasonForCall}.` : null,
+        parsedHandoff?.staffSummary ? `${String(parsedHandoff.staffSummary).split('\n')[0]}` : null,
+      ].filter(Boolean).join(' ');
+      try {
+        console.log(`[AZUL-SCHED] tier-2 WARM transfer → ${target.team ?? 'office queue'} (${target.number})`);
+        const outcome = await dial(target.number, target.team ?? 'office queue', briefing);
         recordAzulToolEvent(callId, 'transfer_to_office', { team: target.team, number: target.number }, JSON.stringify(outcome), Date.now() - startedAt, {
           callSid: metadata?.callSid,
           callLogId: metadata?.callLogId,
