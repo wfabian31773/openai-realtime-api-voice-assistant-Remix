@@ -1052,22 +1052,40 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
   }
 }
 
-// Tier-2 office transfer (azul-scheduling): dial a per-location office queue
-// number into the caller's conference and hand the call over once a human
-// answers. Same conference mechanics as addHumanAgent, but the target comes
-// from the sage_handoff packet's routing (never model-invented), there is no
-// after-hours caller-type gate (the rules engine already authorized the
-// transfer), and failure handling is the agent's job — it falls back to the
-// callback script and files the location-queue ticket. Returns true only
-// after a human answered AND the AI leg was released.
+// WARM TRANSFER (azul-scheduling, ship gate per docs/scheduling-agent/
+// ARCHITECTURE.md §2.3): the office is dialed as a SEPARATE outbound call
+// whose TwiML plays a briefing built from the handoff packet and requires a
+// keypress to accept. Only the keypress joins the staffer into the caller's
+// conference — voicemail and IVRs never connect, and the staffer arrives
+// already knowing who's calling and why, so the patient repeats nothing.
+// The caller hears silence + the agent's periodic cut-ins during the whole
+// attempt (earlyMedia is irrelevant here — the office leg isn't in the
+// conference until accept). Failure handling remains the agent's job.
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+const warmTransferAccepts = new Map<string, {
+  resolve: () => void;
+  reject: (err: Error) => void;
+  conferenceName: string;
+  openAiCallId: string;
+}>();
+
 async function transferConferenceToNumber(
   openAiCallId: string,
   toNumber: string,
   label: string,
+  briefing: string,
 ): Promise<{ ok: boolean; detail?: string }> {
   const conferenceName = getConferenceName(openAiCallId);
   if (!conferenceName) {
-    console.error('[OFFICE-TRANSFER] ✗ No conference found for call:', openAiCallId);
+    console.error('[WARM-TRANSFER] ✗ No conference found for call:', openAiCallId);
     return { ok: false, detail: 'no_conference_for_call' };
   }
   if (!twilioClient) {
@@ -1075,75 +1093,93 @@ async function transferConferenceToNumber(
   }
   const twilioPhoneNumber = envConfig.twilio.phoneNumber;
   if (!twilioPhoneNumber) {
-    console.error('[OFFICE-TRANSFER] ✗ TWILIO_PHONE_NUMBER not configured');
+    console.error('[WARM-TRANSFER] ✗ TWILIO_PHONE_NUMBER not configured');
     return { ok: false, detail: 'twilio_phone_number_missing' };
   }
 
-  let participantSid: string | undefined;
-  let resolveAnswered!: () => void;
-  let rejectAnswered!: (err: Error) => void;
-  const answeredPromise = new Promise<void>((resolve, reject) => {
-    resolveAnswered = resolve;
-    rejectAnswered = reject;
+  let officeCallSid: string | undefined;
+  let resolveAccepted!: () => void;
+  let rejectAccepted!: (err: Error) => void;
+  const acceptedPromise = new Promise<void>((resolve, reject) => {
+    resolveAccepted = resolve;
+    rejectAccepted = reject;
   });
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
   try {
-    const statusCallbackUrl = `https://${envConfig.domain}/api/voice/handoff-status`;
+    const acceptUrl = `https://${envConfig.domain}/api/voice/warm-transfer-accept`;
+    const statusUrl = `https://${envConfig.domain}/api/voice/warm-transfer-status`;
+    const say = escapeXml(briefing.slice(0, 800));
+    const twiml =
+      `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+      `<Gather input="dtmf" numDigits="1" timeout="8" action="${acceptUrl}" method="POST">` +
+      `<Say voice="Polly.Joanna">${say}</Say>` +
+      `<Say voice="Polly.Joanna">Press any key to accept the call.</Say>` +
+      `</Gather>` +
+      `<Gather input="dtmf" numDigits="1" timeout="8" action="${acceptUrl}" method="POST">` +
+      `<Say voice="Polly.Joanna">Repeating: ${say}</Say>` +
+      `<Say voice="Polly.Joanna">Press any key to accept the call.</Say>` +
+      `</Gather>` +
+      `<Say voice="Polly.Joanna">No confirmation received. Goodbye.</Say>` +
+      `</Response>`;
     const dialResult = await withResiliency(
-      async () => twilioClient.conferences(conferenceName).participants.create({
+      async () => twilioClient.calls.create({
         from: twilioPhoneNumber,
         to: toNumber,
-        label: label.slice(0, 64),
-        // Operator-specified UX (2026-07-22): the caller never hears raw
-        // ringback — the agent "steps away" ("give me one second while I try
-        // to connect you"), the dial happens silently, and either the office
-        // voice appears on answer (merge) or the agent comes back with the
-        // periodic cut-ins. earlyMedia: false keeps pre-answer audio out of
-        // the conference.
-        earlyMedia: false,
-        endConferenceOnExit: true,
-        statusCallback: statusCallbackUrl,
-        statusCallbackEvent: ['answered', 'completed'],
-        timeout: 40, // ring the office queue for up to 40s
+        twiml,
+        timeout: 30, // ring the office queue for up to 30s
+        statusCallback: statusUrl,
+        statusCallbackEvent: ['completed'],
+        statusCallbackMethod: 'POST',
       }),
       getCircuitBreaker('twilio-office-transfer'),
       TWILIO_RETRY_CONFIG,
-      `Office transfer for conference ${conferenceName}`,
+      `Warm transfer for conference ${conferenceName}`,
     );
     if (!dialResult.success) {
       throw dialResult.error;
     }
-    const dialedSid: string = dialResult.result!.callSid;
-    participantSid = dialedSid;
-    console.log(`[OFFICE-TRANSFER] Dialing ${label} (${toNumber}) into ${conferenceName}, CallSid: ${dialedSid}`);
+    const dialedSid: string = dialResult.result!.sid;
+    officeCallSid = dialedSid;
+    console.log(`[WARM-TRANSFER] Dialing ${label} (${toNumber}) with briefing, CallSid: ${dialedSid}`);
 
+    // Overall window: 30s ring + up to ~35s briefing/gather + margin.
     timeoutId = setTimeout(() => {
-      handoffReadyResolvers.delete(dialedSid);
-      rejectAnswered(new Error('Office queue did not answer within 45 seconds'));
-    }, 45_000);
+      warmTransferAccepts.delete(dialedSid);
+      rejectAccepted(new Error('Office did not accept the transfer within the window'));
+    }, 80_000);
 
-    // The /api/voice/handoff-status webhook resolves this by participant
-    // CallSid — the same agent-agnostic path the after-hours handoff uses.
-    handoffReadyResolvers.set(dialedSid, {
+    warmTransferAccepts.set(dialedSid, {
       resolve: () => {
         if (timeoutId) clearTimeout(timeoutId);
-        resolveAnswered();
+        resolveAccepted();
       },
-      reject: rejectAnswered,
-      openAiCallId,
+      reject: (err) => {
+        if (timeoutId) clearTimeout(timeoutId);
+        rejectAccepted(err);
+      },
       conferenceName,
-      callLogId: callMetadataForDB.get(openAiCallId)?.dbCallLogId,
+      openAiCallId,
     });
 
-    await answeredPromise;
-    console.log('[OFFICE-TRANSFER] ✓ Office answered — releasing AI leg');
+    await acceptedPromise;
+    console.log('[WARM-TRANSFER] ✓ Office ACCEPTED (keypress) — releasing AI leg');
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    console.warn('[OFFICE-TRANSFER] ✗ Transfer failed:', detail);
+    console.warn('[WARM-TRANSFER] ✗ Transfer failed:', detail);
     if (timeoutId) clearTimeout(timeoutId);
-    if (participantSid) handoffReadyResolvers.delete(participantSid);
+    if (officeCallSid) warmTransferAccepts.delete(officeCallSid);
     return { ok: false, detail };
+  }
+
+  // Mark transferred (same bookkeeping the after-hours path does).
+  const callMeta = callMetadataForDB.get(openAiCallId);
+  if (callMeta) {
+    callMeta.transferredToHuman = true;
+    if (callMeta.dbCallLogId) {
+      const { callLifecycleCoordinator } = await import('./services/callLifecycleCoordinator');
+      callLifecycleCoordinator.markTransferred(callMeta.dbCallLogId);
+    }
   }
 
   try {
@@ -1152,11 +1188,11 @@ async function transferConferenceToNumber(
       { method: 'POST', headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } },
     );
     if (!hangupResponse.ok) {
-      console.warn('[OFFICE-TRANSFER] ⚠️ AI hangup returned:', hangupResponse.status);
+      console.warn('[WARM-TRANSFER] ⚠️ AI hangup returned:', hangupResponse.status);
     }
   } catch (hangupErr) {
-    // Office is already connected — caller is fine either way.
-    console.warn('[OFFICE-TRANSFER] ⚠️ AI hangup failed (office already connected):', hangupErr);
+    // Staffer is joining the conference either way — caller is fine.
+    console.warn('[WARM-TRANSFER] ⚠️ AI hangup failed (staffer joining anyway):', hangupErr);
   }
   return { ok: true };
 }
@@ -2217,11 +2253,12 @@ async function observeCall(
         }
       });
 
-      // Tier-2 live transfer: lets the agent's transfer_to_office tool dial
-      // the sage_handoff packet's office queue number into this caller's
-      // conference (the number itself never comes from the model).
-      registerAzulOfficeTransferCallback(callId, (toNumber, label) =>
-        transferConferenceToNumber(callId, toNumber, label),
+      // Tier-2 WARM transfer: lets the agent's transfer_to_office tool dial
+      // the sage_handoff packet's office queue number with a briefing +
+      // keypress-accept before joining the caller's conference (the number
+      // itself never comes from the model).
+      registerAzulOfficeTransferCallback(callId, (toNumber, label, briefing) =>
+        transferConferenceToNumber(callId, toNumber, label, briefing),
       );
     }
 
@@ -4335,6 +4372,49 @@ export function setupVoiceAgentRoutes(app: Express): void {
     // 'ringing', 'queued', 'initiated' - wait for final status
   });
 
+  // Warm-transfer accept: the office staffer pressed a key after hearing the
+  // briefing. Respond with TwiML joining them into the caller's conference,
+  // and resolve the waiting transfer so the AI leg is released.
+  app.post("/api/voice/warm-transfer-accept", webhookRateLimiter, async (req: { body: { toString: (enc: string) => string } }, res: { type: (t: string) => void; send: (b: string) => void }) => {
+    const rawBody = req.body.toString("utf8");
+    const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
+    const callSid = parsedBody.CallSid;
+    const pending = callSid ? warmTransferAccepts.get(callSid) : undefined;
+    res.type("text/xml");
+    if (!pending) {
+      console.warn(`[WARM-TRANSFER] Accept from unknown/expired CallSid: ${callSid}`);
+      res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">This transfer has expired. Goodbye.</Say><Hangup/></Response>`);
+      return;
+    }
+    console.log(`[WARM-TRANSFER] ✓ Keypress accept from ${callSid} → joining conference ${pending.conferenceName}`);
+    res.send(
+      `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+      `<Say voice="Polly.Joanna">Connecting you to the patient now.</Say>` +
+      `<Dial><Conference endConferenceOnExit="true">${escapeXml(pending.conferenceName)}</Conference></Dial>` +
+      `</Response>`,
+    );
+    warmTransferAccepts.delete(callSid);
+    pending.resolve();
+  });
+
+  // Warm-transfer status: the office leg ended (no-answer / busy / failed /
+  // hung up or voicemail played through without a keypress) → reject the
+  // waiting transfer so the agent falls back to callback + ticket.
+  app.post("/api/voice/warm-transfer-status", webhookRateLimiter, async (req: { body: { toString: (enc: string) => string } }, res: { sendStatus: (c: number) => void }) => {
+    res.sendStatus(200);
+    const rawBody = req.body.toString("utf8");
+    const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
+    const callSid = parsedBody.CallSid;
+    const callStatus = parsedBody.CallStatus;
+    const pending = callSid ? warmTransferAccepts.get(callSid) : undefined;
+    if (!pending) return;
+    if (["completed", "busy", "failed", "no-answer", "canceled"].includes(callStatus)) {
+      console.warn(`[WARM-TRANSFER] ✗ Office leg ended without accept: ${callStatus} (${callSid})`);
+      warmTransferAccepts.delete(callSid);
+      pending.reject(new Error(`office_${callStatus}_no_accept`));
+    }
+  });
+
   // Hold music TwiML endpoint for warm transfer
   // Twilio calls this via GET for holdUrl parameter
   app.get("/api/voice/hold-music", async (req, res) => {
@@ -4348,7 +4428,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
   });
 
   // Legacy warm transfer status callback - kept for backwards compatibility but no longer used
-  app.post("/api/voice/warm-transfer-status", webhookRateLimiter, async (req, res) => {
+  app.post("/api/voice/warm-transfer-status", webhookRateLimiter, async (req: { body: { toString: (enc: string) => string } }, res: { sendStatus: (c: number) => void }) => {
     res.sendStatus(200);
     console.info(`[WARM-TRANSFER-STATUS] Received callback (warm transfer disabled)`);
   });
