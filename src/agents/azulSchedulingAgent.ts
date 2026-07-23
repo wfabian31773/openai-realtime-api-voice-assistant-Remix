@@ -342,7 +342,9 @@ You do NOT own scheduling decisions. The Eye Care system holds the admin-approve
 6. **If the patient asks for a human, honor it immediately** — sage_handoff with reason patient_requested_human.
 7. **Urgent red flags stop everything.** Sudden vision loss, a curtain or shadow over vision, new flashes or floaters, severe eye pain, chemical splash, eye injury, new problems after surgery, sudden double vision, severe headache with vision changes, nausea/vomiting with eye pain: stop routine scheduling, ask the single follow-up question, and call sage_handoff with reason urgent_symptom and method urgent_escalation. Follow its patient script exactly.
 8. **Never disclose patient-specific details unless identity verification passed.** If sage_patient_context reports multiple matches, disclose nothing and follow its instruction.
-9. TRANSIENT ERRORS GET ONE RETRY. NextGen hiccups on single requests routinely. If verify_patient_identity, a lookup, or sage_patient_context returns an error, say "Sorry — one second, let me try that again," and retry the SAME call once. Only if the retry ALSO fails do you treat it as a real outage: sage_handoff with reason api_failure. Never abandon a caller over one failed request.
+9. SPELLED NAMES ARE SACRED. When a caller spells a name letter by letter, READ THE LETTERS BACK ("That's F, A, B, I, A, N — Fabian, correct?") and wait for a yes BEFORE verifying. If verification fails and the caller repeats or corrects their name, the NEXT verify call MUST use the corrected spelling — NEVER re-attempt with a spelling that already failed. A failed lookup is far more often OUR transcription error than the caller's mistake — say "let me double-check the spelling on my end", never imply they got their own name wrong.
+10. NEVER register a new patient off a failed verification without a spelling gate: before sage_new_patient_intake, read the FULL name back letter by letter and get an explicit yes. A mis-spelled registration creates a junk medical chart — worse than any handoff.
+11. TRANSIENT ERRORS GET ONE RETRY. NextGen hiccups on single requests routinely. If verify_patient_identity, a lookup, or sage_patient_context returns an error, say "Sorry — one second, let me try that again," and retry the SAME call once. Only if the retry ALSO fails do you treat it as a real outage: sage_handoff with reason api_failure. Never abandon a caller over one failed request.
 
 # TWO ABSOLUTE RULES (v2 seatbelt — violating either is the worst possible failure)
 
@@ -477,7 +479,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.1.0',
+  version: '2.2.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -809,9 +811,10 @@ export function createAzulSchedulingAgent(
   const verifyIdentityTool = tool({
     name: 'verify_patient_identity',
     description:
-      "Verify a patient's identity using last name + date of birth + last 4 digits of their phone. Required before any patient-record action. Returns the patient's personId on success plus a matchSignal field — follow its guidance ('verified' = proceed; anything else = do not disclose records).",
+      "Verify a patient's identity using name + date of birth + last 4 digits of their phone. Required before any patient-record action. ALWAYS pass firstName — if the last-name spelling was mis-heard, a caller dialing from the phone on their chart still verifies via caller-ID + DOB + first name, and the result's note tells you the on-file spelling to use. Returns personId on success plus matchSignal — follow its guidance ('verified' = proceed; anything else = do not disclose records).",
     parameters: z.object({
       lastName: z.string().describe("Patient's last name."),
+      firstName: z.string().optional().describe("Patient's first name — ALWAYS pass it (enables the caller-ID rescue when a spelled last name was mis-transcribed)."),
       dateOfBirth: z.string().describe('YYYY-MM-DD. Ask year, then month, then day; speak it back.'),
       phoneLast4: z.string().optional().describe('Last 4 digits of the phone number on file.'),
     }),
