@@ -1326,6 +1326,13 @@ async function observeCall(
   // the creation site lost to a Vercel cold start; the match arrived at +5s
   // and was discarded, so the caller got the full interrogation.
   let azulPrecontextPromise: Promise<import('./agents/azulSchedulingAgent').AzulPrecontext | null> | null = null;
+  // Late-arriving pre-context is PARKED here and applied only at a turn
+  // boundary (response.done) — operator report 2026-07-24 (live): injecting
+  // context while the agent is mid-greeting makes her "lose her speech and
+  // thought" (instructions churn during active audio). Never mutate the
+  // live prompt while she's talking.
+  let pendingAzulPrecontext: import('./agents/azulSchedulingAgent').AzulPrecontext | null = null;
+  let azulMetadataRef: { precontext?: import('./agents/azulSchedulingAgent').AzulPrecontext } | null = null;
   if (agentSlug === 'azul-scheduling' && from) {
     azulPrecontextPromise = import('./agents/azulSchedulingAgent')
       .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
@@ -1552,12 +1559,15 @@ async function observeCall(
         };
         if (!azulPrecontext && azulPrecontextPromise) {
           void azulPrecontextPromise.then((late) => {
-            if (late) {
-              azulMetadata.precontext = late;
-              console.log(`[AZUL-SCHED] Pre-context arrived LATE for ...${(from || '').slice(-4)} — injected into the live prompt (matched '${late.matched ? late.firstName : 'no'}')`);
+            if (late?.matched) {
+              // Parked — applied at the next response.done (turn boundary),
+              // never while the agent is speaking.
+              pendingAzulPrecontext = late;
+              console.log(`[AZUL-SCHED] Pre-context arrived LATE for ...${(from || '').slice(-4)} (matched '${late.firstName}') — parked for the next turn boundary`);
             }
           });
         }
+        azulMetadataRef = azulMetadata;
         factoryResult = agentFactory(handoffCallback, azulMetadata);
         break;
       }
@@ -2188,6 +2198,13 @@ async function observeCall(
         const statusDetails = resp?.status_details;
         const errorInfo = statusDetails?.error || resp?.error;
         console.info(`[SESSION] response.done for ${callId}: status=${resp?.status}, outputs=${resp?.output?.length || 0}${errorInfo ? `, ERROR: ${JSON.stringify(errorInfo).substring(0, 300)}` : ''}${statusDetails ? `, details=${JSON.stringify(statusDetails).substring(0, 300)}` : ''}`);
+        // Turn boundary: safe moment to let a late pre-context match into
+        // the live prompt (see the parked-injection note above).
+        if (pendingAzulPrecontext && azulMetadataRef) {
+          azulMetadataRef.precontext = pendingAzulPrecontext;
+          pendingAzulPrecontext = null;
+          console.log(`[AZUL-SCHED] Late pre-context APPLIED at turn boundary for ${callId}`);
+        }
       }
     });
 
