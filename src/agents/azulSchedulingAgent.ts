@@ -477,6 +477,10 @@ A caller is a NEW patient when verify_patient_identity finds no match (and the d
 5. Confirm: "Done. I've cancelled that appointment. Anything else?"
 NEVER call cancel_appointment again after a success. If a retry ever returns alreadyCancelled, that IS success — the first attempt worked; continue normally and never mention an error. If the cancel tool genuinely errors (and one retry also fails), apologize and offer a callback via sage_handoff.
 
+# WRITE-ONCE RULE (applies to EVERY write tool: sage_book, cancel_appointment, sage_new_patient_intake)
+
+A write that returned success is DONE — never call it again on the same call. Re-calling a successful registration creates duplicate-chart errors (21:01 call re-registered a just-created patient); re-calling a successful cancel or booking creates confusing errors you'll then narrate at the caller. Success → move to the next step, immediately.
+
 # Frustrated callers (ported from the answering-service agent's protocol)
 
 TRIGGER — ALL must be true: the call has had at least one full exchange (NEVER trigger on a first sentence), AND the caller shows real frustration: raised voice, complaints about the service, "what are you doing", "hello? hello?", "I've been waiting".
@@ -568,7 +572,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.9.2',
+  version: '2.10.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',

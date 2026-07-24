@@ -49,6 +49,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
   } catch {
     return { unparsed: true };
   }
+  // THE ENVELOPE, third strike (2026-07-24 21:04 call classified a CONFIRMED
+  // booking as "attempted"): the service wraps every response as
+  // {tool, result} — unwrap before reading outcome fields, same as the two
+  // parsers this already bit on 07-22.
+  parsed = parsed?.result ?? parsed;
   const out: Record<string, unknown> = {};
   for (const k of [
     'decision', 'reason', 'booking_status', 'appointmentId', 'matchSignal',
