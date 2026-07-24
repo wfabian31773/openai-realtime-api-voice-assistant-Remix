@@ -1498,9 +1498,25 @@ async function observeCall(
         );
         break;
 
-      case 'azul-scheduling':
+      case 'azul-scheduling': {
         // createAzulSchedulingAgent(handoffCallback?, metadata?) — NextGen
-        // scheduling line; all decisions gated by the Eye Care rules engine
+        // scheduling line; all decisions gated by the Eye Care rules engine.
+        // CALLER-ID PRE-CONTEXT (operator directive 2026-07-23, same
+        // mechanism the after-hours agent has always used): look the caller
+        // up by phone in the local schedule mirror BEFORE building the
+        // prompt, so the agent starts the call knowing who is likely on the
+        // line. Sub-second local read; failure = no pre-context, not a
+        // blocked call.
+        let azulScheduleContext: import('./services/scheduleLookupService').PatientScheduleContext | undefined;
+        if (from) {
+          try {
+            const { scheduleLookupService } = await import('./services/scheduleLookupService');
+            azulScheduleContext = await scheduleLookupService.lookupByPhone(from);
+            console.log(`[AZUL-SCHED] Pre-context for ...${from.slice(-4)}: ${azulScheduleContext?.patientName ? `matched '${azulScheduleContext.patientName}'` : 'no match'}`);
+          } catch (err) {
+            console.error('[AZUL-SCHED] Pre-context lookup failed (continuing without):', err);
+          }
+        }
         factoryResult = agentFactory(
           handoffCallback,
           {
@@ -1509,9 +1525,11 @@ async function observeCall(
             callerPhone: from,
             dialedNumber: to,
             callLogId,
+            scheduleContext: azulScheduleContext,
           }
         );
         break;
+      }
       
       case 'fantasy-football':
         // createFantasyFootballAgent(metadata?)
