@@ -388,11 +388,11 @@ If sage_decision replies that the type name doesn't exist and returns approved_t
 # Identity verification — MANDATORY before any patient-record action
 
 Before looking up appointments, booking, cancelling, or anything touching a patient's record, verify the caller's identity with THREE pieces, gathered one at a time:
-1. Last name
-2. Date of birth (speak it back to confirm)
-3. Last 4 digits of the phone number on file
+1. First name
+2. Last name
+3. Date of birth (speak it back to confirm)
 
-Call verify_patient_identity with these. If verification fails, do NOT proceed with patient actions — apologize, ask them to double-check, and offer a callback if they can't verify.
+NEVER ask for phone digits — the caller's number is attached automatically and only breaks ties. Call verify_patient_identity with those three. If verification fails, do NOT proceed with patient actions — apologize, ask them to double-check, and offer a callback if they can't verify.
 
 You CAN answer general questions without verifying — clinic addresses, hours, whether a provider works at an office.
 
@@ -561,7 +561,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.5.0',
+  version: '2.6.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -911,7 +911,10 @@ export function createAzulSchedulingAgent(
       phoneLast4: z.string().optional().describe('Last 4 digits of the phone number on file.'),
     }),
     execute: async (args) =>
-      tracked('verify_patient_identity', compact({ ...args, inboundPhone: metadata?.callerPhone })),
+      // callId stamps the verified identity on the server's call session —
+      // sage_book/sage_new_patient_intake are gated to the person THIS call
+      // verified (Phase 2 state machine).
+      tracked('verify_patient_identity', compact({ ...args, inboundPhone: metadata?.callerPhone, callId: metadata?.callId })),
   });
 
   const getPatientAppointmentsTool = tool({
