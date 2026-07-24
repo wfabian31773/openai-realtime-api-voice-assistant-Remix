@@ -142,6 +142,32 @@ async function callEyecareTool(
   }
 }
 
+// ── Caller-ID pre-context (v2.4.0) ───────────────────────────────────────
+// Operator design 2026-07-24: match the caller's number against the FULL
+// person base in the console snapshot (patients_master, 868k persons incl.
+// chartless) via sage_precontext. Unique match → the call starts knowing
+// who's on the line; ambiguous/no match → the agent asks new-vs-existing
+// and verifies by first + last + DOB. Never verification by itself.
+export interface AzulPrecontext {
+  matched: boolean;
+  firstName?: string;
+  lastNameOnFile?: string;
+  language?: string | null;
+  hasChart?: boolean;
+}
+
+export async function fetchAzulPrecontext(phone: string): Promise<AzulPrecontext | null> {
+  try {
+    const raw = await callEyecareTool('sage_precontext', { phone });
+    const env = JSON.parse(raw);
+    const r = env?.result ?? env;
+    if (r && typeof r.matched === 'boolean') return r as AzulPrecontext;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Tier-3 safety net: location-queue ticket on EVERY handoff ────────────
 // Zero-voicemail architecture: tier 1 = resolve on the call, tier 2 = live
 // DID transfer (the handoff packet's routing), tier 3 = a context-rich
@@ -362,7 +388,7 @@ Always pass locationName on sage_handoff — the office the caller wants or was 
 # Scheduling a new appointment — the only allowed flow
 
 0. NO DEAD AIR — NO EXCEPTIONS. Before the FIRST tool call of ANY chain — even a quick lookup — SPEAK a short cover line, THEN call the tool. This is what a real receptionist does: "One second while I look that up for you." It applies EVERY time you're about to go quiet, including right after collecting or RE-collecting identity details ("Thanks — one second while I pull that up") and mid-conversation re-checks. One cover per chain is enough — speak it, then run the chain silently; the system adds holding updates automatically if it runs long. The specific lines: before sage_patient_context: "Thanks — one moment while I pull up your record." Before sage_availability: "Let me check our openings for you." Before sage_book: "Let me get that booked for you — this part can take up to half a minute, I'll stay right here with you." Before sage_new_patient_intake: "Give me one moment while I get you set up in our system." Before the cancel chain: "One moment while I take care of that." Never, ever call a tool cold.
-1. Verify identity. Then call sage_patient_context. Its flags are CONTEXT, not commands:
+1. Identity. If there is NO caller-ID pre-context for this call, ask EARLY: "Have you been seen at Azul Vision before?" — it routes everything. Existing patients: collect FIRST name, LAST name, and date of birth (those three; do NOT ask for phone digits — the caller's number is attached automatically and only breaks ties), then verify_patient_identity with all three. Then call sage_patient_context. Its flags are CONTEXT, not commands:
    - Upcoming appointment on file → mention it and ask if that's what they're calling about. Do not assume.
    - Recent surgery/post-op flag → keep it in mind, but FIRST ask what the patient needs. Only hand off to the surgical team if their request actually relates to surgery or post-op care. A patient with a post-op appointment on file who wants a routine exam gets the normal flow. NEVER narrate internal flags to the caller ("I see there's some recent surgical context on file") — use context silently; the caller should only hear questions and answers relevant to what THEY asked.
    - NEVER create a handoff or callback before the patient has told you what they want.
@@ -459,10 +485,10 @@ function buildDynamicTail(metadata?: AzulSchedulingMetadata): string {
       `# Call context\n\nThe caller's phone number is ${metadata.callerPhone}. Offer it as the callback number ("Is this number ending in ${last4} the best one to reach you?") rather than making them read out digits.`,
     );
   }
-  const pc = metadata?.scheduleContext;
-  if (pc?.patientFound && (pc.patientData?.firstName || pc.patientName)) {
-    const first = pc.patientData?.firstName || String(pc.patientName ?? '').split(' ')[0];
-    const last = pc.patientData?.lastName || '';
+  const pc = metadata?.precontext;
+  if (pc?.matched && pc.firstName) {
+    const first = pc.firstName;
+    const last = pc.lastNameOnFile || '';
     parts.push(
       `# CALLER-ID PRE-CONTEXT (use this — do not make the caller spell their life out)\n\n` +
       `This phone number matches an existing patient on file: first name "${first}"${last ? `, last name on file "${last}"` : ''}. This is a STRONG hint, not verification.\n` +
@@ -485,15 +511,9 @@ export interface AzulSchedulingMetadata {
   callerPhone?: string;
   dialedNumber?: string;
   callLogId?: string;
-  /** Caller-ID pre-context from the local schedule mirror (same mechanism
-   *  as the after-hours agent): who this phone number likely belongs to.
-   *  NEVER treated as verification by itself. */
-  scheduleContext?: {
-    patientFound: boolean;
-    patientName?: string;
-    patientData?: { firstName?: string; lastName?: string; dateOfBirth?: string };
-    upcomingAppointments?: Array<unknown>;
-  };
+  /** Caller-ID pre-context from the person base (sage_precontext): who this
+   *  phone number likely belongs to. NEVER treated as verification. */
+  precontext?: AzulPrecontext;
 }
 
 export const azulSchedulingAgentConfig = {
@@ -501,7 +521,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.3.0',
+  version: '2.4.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
