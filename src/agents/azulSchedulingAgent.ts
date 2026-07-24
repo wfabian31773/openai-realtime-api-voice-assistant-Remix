@@ -120,6 +120,12 @@ async function callEyecareTool(
         // pilot set from responses to this agent — locations, providers'
         // offices, appointments, slots. Other consumers are unaffected.
         'X-Pilot-Fence': '1',
+        // Zero-identifier contract (Phase 5, 2026-07-24): the service
+        // injects the verified person from the call session, resolves
+        // spoken office/provider/appointment references server-side, and
+        // strips every GUID/token from responses — an identifier the
+        // model never sees is one it can never parrot.
+        'X-Zero-Id': '1',
       },
       body: JSON.stringify(args ?? {}),
       signal: controller.signal,
@@ -440,7 +446,7 @@ Always pass locationName on sage_handoff — the office the caller wants or was 
 4. sage_decision with intent "search" for that appointment type (+ office).
 5. If allowed: brief cover line ("Let me check our openings for you"), then sage_availability with preferredDate + timeOfDay. It reads the live-schedule snapshot and answers fast. If it's ever slow, that's NORMAL, not an error — reassure and wait; only an actual returned error is a failure.
 6. THE OFFER IS THE RESULT'S 'say' SENTENCE — speak it word-for-word. The system composed it from real openings; you may not rephrase times, add options, or improvise. If the caller wants something different, re-search with their new preference and speak the new 'say'.
-7. Patient picks one → confirm it back → explicit yes → say the booking cover line → sage_book with optionNumber (1 for the first option offered, 2 for the second) + personId. You NEVER handle tokens or slot details — the number is all the server needs. Booking hits the LIVE schedule and can take up to half a minute — that's normal.
+7. Patient picks one → confirm it back → explicit yes → say the booking cover line → sage_book with optionNumber (1 for the first option offered, 2 for the second). You NEVER handle IDs, tokens, or slot details — the system knows who this call verified and resolves everything from the number. Booking hits the LIVE schedule and can take up to half a minute — that's normal.
 8. If booking FAILS: apologize ONCE, briefly. You may RETRY THE SAME optionNumber ONCE (transient system hiccups are common) before falling back. On an option error (unknown/superseded), re-run sage_availability and offer only its new 'say'. If TWO booking attempts fail in a row, STOP retrying — sage_handoff (api_failure) and promise the callback. Never offer a new option while a booking attempt is still in flight, and never loop the same offer at the caller more than twice.
 9. booking_status "confirmed" → confirm warmly by speaking the returned 'say' confirmation (add the provider name from the offer) — NEVER from memory of what you offered. Anything else → rule 4 of the contract.
 
@@ -467,9 +473,9 @@ A caller is a NEW patient when verify_patient_identity finds no match (and the d
 # Cancellation flow — strict confirmation gate
 
 1. Verify identity if not yet verified.
-2. Say "One moment while I pull up your appointments," then sage_patient_context with their personId — its upcomingAppointments list (with appointmentId) answers instantly. Read the upcoming appointments aloud, briefly. Only if sage_patient_context errors, fall back to get_patient_appointments.
-3. Ask which one to cancel. Read back the FULL appointment (provider, office, date, time) straight from the sage_patient_context data you already have — do NOT make another lookup call for it (get_appointment_details only if a field you need is missing). Wait for an explicit verbal yes.
-4. Say "One moment while I take care of that," then list_cancel_reasons (pick the patient-initiated reason), then cancel_appointment with a brief comment like "Patient called to cancel".
+2. Say "One moment while I pull up your appointments," then get_patient_appointments — every appointment comes back with a NUMBER. Read the upcoming appointments aloud, briefly.
+3. Ask which one to cancel. Read back the FULL appointment (provider, office, date, time) straight from the list you already have — do NOT make another lookup call for it (get_appointment_details with that appointment's number only if a field you need is missing). Wait for an explicit verbal yes.
+4. Say "One moment while I take care of that," then cancel_appointment with that appointment's NUMBER and a brief comment like "Patient called to cancel" (the reason resolves automatically).
 5. Confirm: "Done. I've cancelled that appointment. Anything else?"
 If the cancel tool errors, apologize and offer a callback via sage_handoff.
 
@@ -564,7 +570,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.8.0',
+  version: '2.9.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -625,8 +631,7 @@ export function createAzulSchedulingAgent(
     parameters: z.object({
       intent: z.enum(['search', 'offer', 'book']),
       eventName: z.string().describe("Appointment type name, e.g. 'Follow Up'."),
-      locationId: z.string().optional().describe('Optional location GUID.'),
-      providerId: z.string().optional().describe('Optional provider GUID.'),
+      locationName: z.string().optional().describe("The office AS THE CALLER SAID IT (e.g. 'Encinitas'). ONLY when the caller asked for a specific office — never volunteer one."),
     }),
     execute: async (args) => tracked('sage_decision', compact(args)),
   });
@@ -635,27 +640,21 @@ export function createAzulSchedulingAgent(
     name: 'sage_patient_context',
     description:
       'Consolidated patient context: identity match status, upcoming/last appointments, preferred office, and post-op flags — WITH instructions the agent must follow (multiple matches → disclose nothing; upcoming appointment → ask about it first; recent surgery → route to the surgical team).',
-    parameters: z.object({
-      lastName: z.string().optional(),
-      firstName: z.string().optional(),
-      dateOfBirth: z.string().optional().describe('YYYY-MM-DD'),
-      personId: z.string().optional().describe('If already verified.'),
-    }),
-    execute: async (args) => tracked('sage_patient_context', compact(args)),
+    parameters: z.object({}).describe('No parameters — runs for the identity THIS CALL verified.'),
+    execute: async () => tracked('sage_patient_context', compact({ callId: metadata?.callId })),
   });
 
   const sageAvailabilityTool = tool({
     name: 'sage_availability',
     description:
-      "Rules-gated availability from the live-schedule snapshot (fast). ALWAYS ask 'What days and times work best for you?' BEFORE calling and pass preferredDate (+ timeOfDay) — never search blind. THE RESULT IS A DIRECTIVE: speak the returned 'say' sentence WORD-FOR-WORD to make the offer — never phrase or invent your own — and book ONLY via one of the returned offer_options tokens. If the caller wants different times, re-search with the new preference (old tokens expire). ALWAYS pass personId once known — new patients get their earliest allowed date enforced here.",
+      "Rules-gated availability from the live-schedule snapshot (fast). ALWAYS ask 'What days and times work best for you?' BEFORE calling and pass preferredDate (+ timeOfDay) — never search blind. THE RESULT IS A DIRECTIVE: speak the returned 'say' sentence WORD-FOR-WORD to make the offer — never phrase or invent your own — and book ONLY by that offer's option NUMBER via sage_book. If the caller wants different times, re-search with the new preference (old offers expire). The system knows who this call verified — you never pass IDs.",
     parameters: z.object({
       eventName: z.string(),
       preferredDate: z.string().optional().describe("YYYY-MM-DD from asking 'What days and times work best for you?'. Resolve relative answers ('next Tuesday') to a date. Covers that date + the following 6 days."),
       timeOfDay: z.enum(['AM', 'PM', 'ALL']).optional().describe('Morning (AM) / afternoon (PM) preference, when stated.'),
-      locationId: z.string().optional().describe('Optional location GUID.'),
-      resourceId: z.string().optional().describe('Optional provider resourceId for provider-specific search.'),
+      locationName: z.string().optional().describe("The office AS THE CALLER SAID IT (e.g. 'Oceanside'). ONLY when the caller asked for a specific office."),
+      providerName: z.string().optional().describe("The provider AS THE CALLER SAID IT (e.g. 'Dr. Wernow') when the caller wants a specific provider."),
       daysAhead: z.number().optional().describe('Provider-specific search window, default 21.'),
-      personId: z.string().optional().describe("Patient's personId — REQUIRED for new patients (eligibility floor)."),
     }),
     execute: async (args) =>
       tracked('sage_availability', compact({ ...args, callId: metadata?.callId })),
@@ -672,7 +671,6 @@ export function createAzulSchedulingAgent(
       cellPhone: z.string().describe("10+ digits — confirm the caller's number."),
       sex: z.string().describe('F | M | O.'),
       pcpName: z.string().optional().describe("PCP as stated. Omit if unknown — defaults to 'NO PCP'."),
-      pcpProviderId: z.string().optional().describe('Real provider GUID from lookup_provider, if resolved.'),
       coverageType: z.string().optional().describe('HMO | PPO | Medicare | Medi-Cal | Medicare Advantage | other | unknown'),
       healthPlan: z.string().optional().describe('e.g. Blue Shield, Kaiser, IEHP, SCAN.'),
       medicalGroup: z.string().optional().describe("For HMO: one quick ask ('Do you happen to know which medical group?'). Nice-to-have — if they don't know, move on; staff determine it during verification."),
@@ -700,8 +698,7 @@ export function createAzulSchedulingAgent(
     description:
       "Rules-gated booking BY TOKEN ONLY: pass the offer_options token (from the LATEST sage_availability result) matching the option the caller chose — all slot details resolve server-side, and a slot without a token cannot be booked. Books in NextGen, then CONFIRMS the appointment exists before claiming success. The returned booking_status is the ONLY truth: 'confirmed' = booked (speak the returned 'say' confirmation); anything else means DO NOT tell the patient they are booked (on 'unknown' a scheduler callback has already been created — read the returned patient_script; on a token error, re-run sage_availability and offer only what it returns).",
     parameters: z.object({
-      personId: z.string().describe("Verified patient's personId."),
-      optionNumber: z.number().describe('The NUMBER of the option the caller chose from the LATEST availability offer: 1 for the first option, 2 for the second. The server resolves the slot — you never handle tokens or slot details.'),
+      optionNumber: z.number().describe('The NUMBER of the option the caller chose from the LATEST availability offer: 1 for the first option, 2 for the second. The server resolves the slot AND the verified patient — you never handle IDs.'),
       description: z.string().optional(),
     }),
     execute: async (args) =>
@@ -721,13 +718,11 @@ export function createAzulSchedulingAgent(
         'patient_identity_uncertain', 'provider_specific_request',
         'diagnostic_or_resource_scheduling', 'queue_transfer_failure',
       ]),
-      locationId: z.string().optional(),
       locationName: z.string().optional().describe("Office the caller wants / was discussing (e.g. 'Encinitas', 'Oceanside'). Pass whenever known — routing picks the office's own queue from it."),
       method: z.enum(['callback', 'cold_transfer', 'urgent_escalation']).optional(),
       patientName: z.string().optional(),
       patientDob: z.string().optional(),
       patientPhone: z.string().optional(),
-      personId: z.string().optional(),
       reasonForCall: z.string().optional(),
       requestedLocation: z.string().optional(),
       requestedTimeframe: z.string().optional(),
@@ -735,7 +730,7 @@ export function createAzulSchedulingAgent(
       patientResponse: z.string().optional(),
     }),
     execute: async (args) => {
-      const { patientName, patientDob, patientPhone, personId,
+      const { patientName, patientDob, patientPhone,
         reasonForCall, requestedLocation, requestedTimeframe,
         urgencyScreenResult, patientResponse, ...rest } = args;
       const result = await tracked('sage_handoff', compact({
@@ -744,7 +739,7 @@ export function createAzulSchedulingAgent(
           name: patientName,
           dob: patientDob,
           phone: patientPhone ?? metadata?.callerPhone,
-          personId,
+          // personId injected server-side from the call session (zero-id)
         }),
         callContext: compact({
           reasonForCall, requestedLocation, requestedTimeframe,
@@ -917,7 +912,7 @@ export function createAzulSchedulingAgent(
   const verifyIdentityTool = tool({
     name: 'verify_patient_identity',
     description:
-      "Verify a patient's identity using FIRST NAME + LAST NAME + DATE OF BIRTH — those three, nothing else. NEVER ask the caller for phone digits (their number is attached automatically and only breaks ties server-side). The result's note may give the ON-FILE spelling — use it from then on. Returns personId on success plus matchSignal — follow its guidance ('verified' = proceed; anything else = do not disclose records).",
+      "Verify a patient's identity using FIRST NAME + LAST NAME + DATE OF BIRTH — those three, nothing else. NEVER ask the caller for phone digits (their number is attached automatically and only breaks ties server-side). The result's note may give the ON-FILE spelling — use it from then on. On success the SYSTEM remembers who this call verified — you never pass IDs afterward. Follow matchSignal's guidance ('verified' = proceed; anything else = do not disclose records).",
     parameters: z.object({
       lastName: z.string().describe("Patient's last name."),
       firstName: z.string().optional().describe("Patient's first name — ALWAYS pass it (enables the caller-ID rescue when a spelled last name was mis-transcribed)."),
@@ -934,42 +929,33 @@ export function createAzulSchedulingAgent(
   const getPatientAppointmentsTool = tool({
     name: 'get_patient_appointments',
     description:
-      "Get a verified patient's appointments (upcoming + optionally recent past), newest first, each with a derived outcome field. Use after identity verification for 'what's my next appointment' or before a cancellation.",
+      "The verified caller's appointments (upcoming + optionally recent past), newest first, each with a derived outcome field AND a NUMBER (ordinal). Refer to appointments by that number in later calls (details, cancel). Runs for the identity THIS CALL verified — no IDs.",
     parameters: z.object({
-      personId: z.string().describe("Patient's personId from verify_patient_identity."),
       includePast: z.boolean().optional().describe('Include past appointments. Default false.'),
     }),
-    execute: async (args) => tracked('get_patient_appointments', compact(args)),
+    execute: async (args) => tracked('get_patient_appointments', compact({ ...args, callId: metadata?.callId })),
   });
 
   const getAppointmentDetailsTool = tool({
     name: 'get_appointment_details',
     description:
-      'Full record of a single appointment by appointmentId. Use before confirming a cancellation so you can read back exactly what is being cancelled.',
+      "Full record of one of the caller's appointments, by its NUMBER from the get_patient_appointments list. Use before confirming a cancellation so you can read back exactly what is being cancelled.",
     parameters: z.object({
-      appointmentId: z.string().describe('GUID of the appointment.'),
+      appointmentOrdinal: z.number().describe('The appointment NUMBER from the get_patient_appointments list.'),
     }),
-    execute: async (args) => tracked('get_appointment_details', compact(args)),
-  });
-
-  const listCancelReasonsTool = tool({
-    name: 'list_cancel_reasons',
-    description:
-      'List the cancellation reason codes available in NextGen ({id, name} pairs). Call before cancel_appointment; pick the patient-initiated reason.',
-    parameters: z.object({}),
-    execute: async () => tracked('list_cancel_reasons', {}),
+    execute: async (args) => tracked('get_appointment_details', compact({ ...args, callId: metadata?.callId })),
   });
 
   const cancelAppointmentTool = tool({
     name: 'cancel_appointment',
     description:
-      'CANCEL an existing appointment. WRITE OPERATION — only after the patient has explicitly confirmed, out loud, the exact appointment being cancelled.',
+      'CANCEL one of the caller\'s appointments. WRITE OPERATION — only after the patient has explicitly confirmed, out loud, the exact appointment being cancelled. Pass the appointment NUMBER from the list; the cancellation reason resolves server-side from your words.',
     parameters: z.object({
-      appointmentId: z.string().describe('GUID of the appointment to cancel.'),
-      cancelReasonId: z.string().describe('GUID from list_cancel_reasons.'),
+      appointmentOrdinal: z.number().describe('The appointment NUMBER from the get_patient_appointments list.'),
+      reasonName: z.string().optional().describe("Reason in plain words, e.g. 'patient cancel'. Defaults to the patient-initiated reason."),
       comment: z.string().optional().describe('Brief note, e.g. "Patient called to cancel".'),
     }),
-    execute: async (args) => tracked('cancel_appointment', compact(args)),
+    execute: async (args) => tracked('cancel_appointment', compact({ ...args, callId: metadata?.callId })),
   });
 
   const lookupLocationTool = tool({
@@ -1003,9 +989,9 @@ export function createAzulSchedulingAgent(
   const getProviderLocationsTool = tool({
     name: 'get_provider_locations',
     description:
-      "Where a provider generally sees patients (per-location counts of upcoming appointments). Use for 'where does Dr. X work'.",
+      "Where a provider generally sees patients (per-location counts of upcoming appointments). Use for 'where does Dr. X work'. Pass the provider's NAME as the caller said it — it resolves server-side.",
     parameters: z.object({
-      providerId: z.string().describe("The provider's GUID from lookup_provider (NOT the resourceId)."),
+      providerName: z.string().describe("The provider's name as the caller said it (e.g. 'Dr. Wernow')."),
     }),
     execute: async (args) => tracked('get_provider_locations', compact(args)),
   });
@@ -1075,7 +1061,6 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       verifyIdentityTool,
       getPatientAppointmentsTool,
       getAppointmentDetailsTool,
-      listCancelReasonsTool,
       cancelAppointmentTool,
       lookupLocationTool,
       listLocationsTool,
