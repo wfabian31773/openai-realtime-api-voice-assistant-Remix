@@ -29,7 +29,8 @@ import { z } from 'zod';
 import { getPacificTimeContext } from '../utils/timeAware';
 import { medicalSafetyGuardrails } from '../guardrails/medicalSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
-import { recordAzulToolEvent } from '../services/azulToolTimeline';
+import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall } from '../services/azulToolTimeline';
+import { callMetadataForDB } from '../services/callMetadataStore';
 
 const EYECARE_BASE_URL =
   process.env.EYECARE_SCHEDULING_BASE_URL ||
@@ -252,7 +253,7 @@ async function fileLocationQueueTicket(
         ? { patientBirthYear: dob.slice(0, 4), patientBirthMonth: dob.slice(5, 7), patientBirthDay: dob.slice(8, 10) }
         : {}),
       description,
-      priority: reason === 'urgent_symptom' ? 'urgent' : failedTransfer || reason === 'api_failure' ? 'high' : 'medium',
+      priority: reason === 'urgent_symptom' ? 'urgent' : failedTransfer || reason === 'api_failure' || reason === 'unresolved_call_end' ? 'high' : 'medium',
       confirmationType: 'phone',
       callData: { callSid: meta?.callSid, agentUsed: 'azul-scheduling' },
     };
@@ -285,6 +286,45 @@ async function fileLocationQueueTicket(
   } catch (e) {
     console.error('[AZUL-SCHED] tier-3 ticket error (call unaffected):', e);
     record({ error: e instanceof Error ? e.message.slice(0, 250) : String(e).slice(0, 250) });
+  }
+}
+
+// ── Terminal-disposition sweep (Phase 2 guarantee) ───────────────────────
+// Zero-voicemail promise: NO azul call may end in limbo. When the session
+// closes, the call must have reached one of: booked / transferred live /
+// ticketed / info answered / clean decline-or-junk end. Anything else
+// (mid-call hangup, model dead-end, crash) gets an automatic tier-3 ticket
+// so a human follows up. Self-gating: non-azul calls have no timeline.
+const CLEAN_END_REASONS = new Set(['ghost_call', 'robot_call', 'spam', 'caller_declined']);
+const ANSWERED_PURPOSES = new Set(['Appointment question', 'General information']);
+
+export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
+  try {
+    const events = getAzulTimeline(callId);
+    if (!events || events.length === 0) return; // never engaged the scheduling tools
+    const booked = events.some((e) => e.tool === 'sage_book' && e.outcome.booking_status === 'confirmed');
+    const transferred = events.some((e) => e.tool === 'transfer_to_office' && e.outcome.ok === true);
+    const ticketed = events.some((e) => e.tool === 'file_location_ticket' && (e.outcome.ok === true || e.outcome.skipped != null));
+    const cancelled = events.some((e) => e.tool === 'cancel_appointment' && e.outcome.cancelled !== false && !e.outcome.error);
+    const cleanEnd = events.some((e) => e.tool === 'terminate_call' && CLEAN_END_REASONS.has(String(e.args.reason)));
+    if (booked || transferred || ticketed || cancelled || cleanEnd) return;
+    const { purpose, result } = classifyAzulCall(events);
+    if (ANSWERED_PURPOSES.has(purpose)) return; // tier-1 info call, resolved on the line
+    const meta = callMetadataForDB.get(callId);
+    console.warn(`[AZUL-SCHED] SWEEP: call ${callId} ended unresolved (${purpose} → ${result}) — filing tier-3 ticket`);
+    await fileLocationQueueTicket(
+      {
+        handoffReason: 'unresolved_call_end',
+        patient: { name: meta?.callerName, phone: meta?.from },
+        callContext: {
+          reasonForCall: `Call ended without a booking, live transfer, or ticket. Last known state: ${purpose} — ${result}. Please call the patient back.`,
+        },
+      },
+      '{}',
+      { callId, callSid: meta?.twilioCallSid },
+    );
+  } catch (e) {
+    console.error('[AZUL-SCHED] terminal sweep failed (call already ended):', e);
   }
 }
 
@@ -521,7 +561,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.4.1',
+  version: '2.5.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -827,6 +867,16 @@ export function createAzulSchedulingAgent(
         });
         if (outcome.ok) {
           transferTargets.delete(callId);
+          // Accepted transfer = the promise is KEPT — resolve the console
+          // callback so staff don't also call the patient back (Phase 1.5
+          // double-callback fix). Fire-and-forget; the live call moves on.
+          if (parsedHandoff?.callbackId != null) {
+            void callEyecareTool('sage_resolve_callback', {
+              callbackId: Number(parsedHandoff.callbackId),
+              outcome: 'transferred_live',
+              detail: `Accepted by ${target.team ?? 'office queue'} (${target.number})`,
+            }).catch(() => {});
+          }
           return { transferred: true };
         }
         throw new Error(outcome.detail || 'no_answer');
@@ -954,11 +1004,12 @@ USE FOR:
 - robot_call: IVR bleed-through or automated system detected
 - spam: spam/telemarketing detected
 - max_turns_exceeded: call has gone on too long with no resolution
+- caller_declined: the caller explicitly declined verification AND declined a callback — end politely; no ticket is created (their choice is respected)
 
 Always say a brief goodbye phrase BEFORE calling this tool.`,
     parameters: z.object({
       reason: z
-        .enum(['ghost_call', 'robot_call', 'spam', 'max_turns_exceeded'])
+        .enum(['ghost_call', 'robot_call', 'spam', 'max_turns_exceeded', 'caller_declined'])
         .describe('Reason for terminating the call'),
     }),
     execute: async (params) => {
