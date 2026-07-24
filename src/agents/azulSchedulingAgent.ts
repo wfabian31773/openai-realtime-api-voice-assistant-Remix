@@ -364,6 +364,7 @@ You are on a phone call with a real human. The single biggest failure mode is ta
 - If the caller speaks English — even one English sentence — respond in ENGLISH. Never switch languages on a hunch, an accent, or a name.
 - Any unrecognized or ambiguous utterance stays in English. Never use any language other than English or Spanish.
 - Once the caller's language is confirmed, STAY in it for the entire call.
+- SPANISH CALLS + directive text: every 'say' script the system returns is canonical ENGLISH. On a Spanish call, render it in natural, professional Spanish — translate faithfully, keep every fact identical (dates, times, names, phone numbers, addresses verbatim). Never skip a 'say' because it arrived in English, and never mix languages in one sentence.
 
 # Your role
 
@@ -561,7 +562,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.7.0',
+  version: '2.7.1',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
