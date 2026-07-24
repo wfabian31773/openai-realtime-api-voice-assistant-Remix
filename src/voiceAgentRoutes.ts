@@ -28,6 +28,7 @@ import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG,
 import { getGreeterOpeningGreeting } from './utils/timeAware';
 import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
+import './services/azulRegressionWatch'; // Phase 7: daily grade-regression check (side-effect timers)
 import { getEnvironmentConfig } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 
@@ -1660,9 +1661,24 @@ async function observeCall(
   console.info(`[SESSION] Call config: voice=${voiceForCall}, language=${languageCode}, isSpanish=${isSpanish}, ivrSelection=${metadata?.ivrSelection || 'none'}`);
   
   console.info(`[SESSION] CHECKPOINT C: Creating RealtimeSession... (T+${Date.now() - observeCallStart}ms)`);
+  // Phase 7 A/B carriage (azul only): AZUL_AB_MODEL_B names the challenger
+  // model (e.g. a GPT-live id). Unset = no experiment. Assignment is a
+  // deterministic hash of the callSid (~50/50, reproducible), and the arm
+  // is recorded on the call log via callMeta so grades compare per arm.
+  let modelForCall = sessionOptions.model;
+  if (effectiveSlug === 'azul-scheduling' && process.env.AZUL_AB_MODEL_B) {
+    const sid = twilioCallSid || callId || '';
+    const hash = [...sid].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 0);
+    const arm = hash % 2 === 0 ? 'A' : 'B';
+    if (arm === 'B') modelForCall = process.env.AZUL_AB_MODEL_B as typeof sessionOptions.model;
+    const abMeta = callMetadataForDB.get(callId);
+    if (abMeta) (abMeta as any).abArm = `${arm}:${modelForCall}`;
+    console.info(`[AB-CARRIAGE] azul call ${callId} → arm ${arm} (${modelForCall})`);
+  }
   const session = new RealtimeSession(sessionAgent, {
     transport: new OpenAIRealtimeSIP(),
     ...sessionOptions,
+    model: modelForCall,
     // TRACING: Enable OpenAI dashboard visibility
     // View traces at: platform.openai.com → Logs → Traces
     tracingDisabled: false,
