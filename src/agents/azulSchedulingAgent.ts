@@ -521,7 +521,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.4.0',
+  version: '2.4.1',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -853,7 +853,7 @@ export function createAzulSchedulingAgent(
   const verifyIdentityTool = tool({
     name: 'verify_patient_identity',
     description:
-      "Verify a patient's identity using name + date of birth + last 4 digits of their phone. Required before any patient-record action. ALWAYS pass firstName — if the last-name spelling was mis-heard, a caller dialing from the phone on their chart still verifies via caller-ID + DOB + first name, and the result's note tells you the on-file spelling to use. Returns personId on success plus matchSignal — follow its guidance ('verified' = proceed; anything else = do not disclose records).",
+      "Verify a patient's identity using FIRST NAME + LAST NAME + DATE OF BIRTH — those three, nothing else. NEVER ask the caller for phone digits (their number is attached automatically and only breaks ties server-side). The result's note may give the ON-FILE spelling — use it from then on. Returns personId on success plus matchSignal — follow its guidance ('verified' = proceed; anything else = do not disclose records).",
     parameters: z.object({
       lastName: z.string().describe("Patient's last name."),
       firstName: z.string().optional().describe("Patient's first name — ALWAYS pass it (enables the caller-ID rescue when a spelled last name was mis-transcribed)."),

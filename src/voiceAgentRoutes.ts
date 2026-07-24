@@ -1314,7 +1314,19 @@ async function observeCall(
   const twilioCallSid = extMeta?.twilioCallSidFromSIP ||
                         (confNameForDB ? getTwilioCallSid(confNameForDB) : undefined);
   const conferenceNameFromMeta = extMeta?.conferenceNameFromSIP || confNameForDB;
-  
+
+  // AZUL pre-context: start the person-base lookup NOW (the whole session
+  // setup — accept, conference, DB ops — is its runway) and await it with a
+  // short residual race at agent creation. 2026-07-24 00:25: a 2.5s race at
+  // the creation site lost to a Vercel cold start; the match arrived at +5s
+  // and was discarded, so the caller got the full interrogation.
+  let azulPrecontextPromise: Promise<import('./agents/azulSchedulingAgent').AzulPrecontext | null> | null = null;
+  if (agentSlug === 'azul-scheduling' && from) {
+    azulPrecontextPromise = import('./agents/azulSchedulingAgent')
+      .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
+      .catch(() => null);
+  }
+
   let callLogId: string | undefined;
   let agentId: string | undefined;
   
@@ -1508,14 +1520,15 @@ async function observeCall(
         // line. Sub-second local read; failure = no pre-context, not a
         // blocked call.
         let azulPrecontext: import('./agents/azulSchedulingAgent').AzulPrecontext | null = null;
-        if (from) {
+        if (azulPrecontextPromise) {
           try {
-            const { fetchAzulPrecontext } = await import('./agents/azulSchedulingAgent');
+            // The fetch has been in flight since the top of observeCall —
+            // this race only bounds the RESIDUAL wait.
             azulPrecontext = await Promise.race([
-              fetchAzulPrecontext(from),
-              new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500)),
+              azulPrecontextPromise,
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
             ]);
-            console.log(`[AZUL-SCHED] Pre-context for ...${from.slice(-4)}: ${azulPrecontext?.matched ? `matched '${azulPrecontext.firstName}'` : 'no unique match'}`);
+            console.log(`[AZUL-SCHED] Pre-context for ...${(from || '').slice(-4)}: ${azulPrecontext?.matched ? `matched '${azulPrecontext.firstName}'` : 'no unique match'}`);
           } catch (err) {
             console.error('[AZUL-SCHED] Pre-context lookup failed (continuing without):', err);
           }
