@@ -257,25 +257,27 @@ async function fileLocationQueueTicket(
       confirmationType: 'phone',
       callData: { callSid: meta?.callSid, agentUsed: 'azul-scheduling' },
     };
-    let r = await fetch(`${TICKETING_URL}/api/voice-agent/create-ticket`, {
-      method: 'POST',
-      headers: { 'X-API-Key': TICKETING_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    // 15s hard timeout: a hung ticketing POST must never wedge the caller's
+    // teardown chain (sweep → flush) or vanish without trace (2026-07-22
+    // lost POST; 2026-07-24 unflushed timeline).
+    const postTicket = (payload: unknown) =>
+      fetch(`${TICKETING_URL}/api/voice-agent/create-ticket`, {
+        method: 'POST',
+        headers: { 'X-API-Key': TICKETING_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(15_000),
+      });
+    let r = await postTicket(body);
     let txt = await r.text();
     // A 422 means the office has no ticket queue yet (not a pilot location,
     // e.g. Redlands). Re-file into the pilot default queue rather than lose
     // the ticket — the description names the office it was really for.
     if (r.status === 422 && locationName.toLowerCase() !== DEFAULT_QUEUE_LOCATION.toLowerCase()) {
       console.warn(`[AZUL-SCHED] no queue for '${locationName}' — re-filing to ${DEFAULT_QUEUE_LOCATION}`);
-      r = await fetch(`${TICKETING_URL}/api/voice-agent/create-ticket`, {
-        method: 'POST',
-        headers: { 'X-API-Key': TICKETING_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...body,
-          locationName: DEFAULT_QUEUE_LOCATION,
-          description: `[For office: ${locationName} — no queue onboarded yet, routed to default]\n${description}`,
-        }),
+      r = await postTicket({
+        ...body,
+        locationName: DEFAULT_QUEUE_LOCATION,
+        description: `[For office: ${locationName} — no queue onboarded yet, routed to default]\n${description}`,
       });
       txt = await r.text();
     }
@@ -438,8 +440,8 @@ Always pass locationName on sage_handoff — the office the caller wants or was 
 4. sage_decision with intent "search" for that appointment type (+ office).
 5. If allowed: brief cover line ("Let me check our openings for you"), then sage_availability with preferredDate + timeOfDay. It reads the live-schedule snapshot and answers fast. If it's ever slow, that's NORMAL, not an error — reassure and wait; only an actual returned error is a failure.
 6. THE OFFER IS THE RESULT'S 'say' SENTENCE — speak it word-for-word. The system composed it from real openings; you may not rephrase times, add options, or improvise. If the caller wants something different, re-search with their new preference and speak the new 'say'.
-7. Patient picks one → confirm it back → explicit yes → say the booking cover line → sage_book with that option's TOKEN (from offer_options) + personId. Booking hits the LIVE schedule and can take up to half a minute — that's normal.
-8. If booking FAILS: apologize ONCE, briefly. You may RETRY THE SAME TOKEN ONCE (transient system hiccups are common) before falling back. On a token error (unknown/superseded), re-run sage_availability and offer only its new 'say'. Never offer a new option while a booking attempt is still in flight.
+7. Patient picks one → confirm it back → explicit yes → say the booking cover line → sage_book with optionNumber (1 for the first option offered, 2 for the second) + personId. You NEVER handle tokens or slot details — the number is all the server needs. Booking hits the LIVE schedule and can take up to half a minute — that's normal.
+8. If booking FAILS: apologize ONCE, briefly. You may RETRY THE SAME optionNumber ONCE (transient system hiccups are common) before falling back. On an option error (unknown/superseded), re-run sage_availability and offer only its new 'say'. If TWO booking attempts fail in a row, STOP retrying — sage_handoff (api_failure) and promise the callback. Never offer a new option while a booking attempt is still in flight, and never loop the same offer at the caller more than twice.
 9. booking_status "confirmed" → confirm warmly by speaking the returned 'say' confirmation (add the provider name from the offer) — NEVER from memory of what you offered. Anything else → rule 4 of the contract.
 
 # NEW patients — registration + insurance intake (the flow when there is no chart)
@@ -562,7 +564,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.7.1',
+  version: '2.8.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -699,7 +701,7 @@ export function createAzulSchedulingAgent(
       "Rules-gated booking BY TOKEN ONLY: pass the offer_options token (from the LATEST sage_availability result) matching the option the caller chose — all slot details resolve server-side, and a slot without a token cannot be booked. Books in NextGen, then CONFIRMS the appointment exists before claiming success. The returned booking_status is the ONLY truth: 'confirmed' = booked (speak the returned 'say' confirmation); anything else means DO NOT tell the patient they are booked (on 'unknown' a scheduler callback has already been created — read the returned patient_script; on a token error, re-run sage_availability and offer only what it returns).",
     parameters: z.object({
       personId: z.string().describe("Verified patient's personId."),
-      token: z.string().describe('The offer_options token for the option the caller chose, from the LATEST availability result.'),
+      optionNumber: z.number().describe('The NUMBER of the option the caller chose from the LATEST availability offer: 1 for the first option, 2 for the second. The server resolves the slot — you never handle tokens or slot details.'),
       description: z.string().optional(),
     }),
     execute: async (args) =>
