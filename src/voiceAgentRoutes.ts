@@ -1537,17 +1537,27 @@ async function observeCall(
             console.error('[AZUL-SCHED] Pre-context lookup failed (continuing without):', err);
           }
         }
-        factoryResult = agentFactory(
-          handoffCallback,
-          {
-            callId,
-            callSid: twilioCallSid,
-            callerPhone: from,
-            dialedNumber: to,
-            callLogId,
-            precontext: azulPrecontext ?? undefined,
-          }
-        );
+        // Mutable metadata: instructions() rebuilds the dynamic tail every
+        // turn, so a pre-context match that loses the creation race (6.4s
+        // cold start on the 16:42 call) still lands BEFORE the identity
+        // question (~30s in) via the late-resolve write-through below.
+        const azulMetadata = {
+          callId,
+          callSid: twilioCallSid,
+          callerPhone: from,
+          dialedNumber: to,
+          callLogId,
+          precontext: azulPrecontext ?? undefined,
+        };
+        if (!azulPrecontext && azulPrecontextPromise) {
+          void azulPrecontextPromise.then((late) => {
+            if (late) {
+              azulMetadata.precontext = late;
+              console.log(`[AZUL-SCHED] Pre-context arrived LATE for ...${(from || '').slice(-4)} — injected into the live prompt (matched '${late.matched ? late.firstName : 'no'}')`);
+            }
+          });
+        }
+        factoryResult = agentFactory(handoffCallback, azulMetadata);
         break;
       }
       
