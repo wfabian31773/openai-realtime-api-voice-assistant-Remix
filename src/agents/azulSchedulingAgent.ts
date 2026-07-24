@@ -459,6 +459,19 @@ function buildDynamicTail(metadata?: AzulSchedulingMetadata): string {
       `# Call context\n\nThe caller's phone number is ${metadata.callerPhone}. Offer it as the callback number ("Is this number ending in ${last4} the best one to reach you?") rather than making them read out digits.`,
     );
   }
+  const pc = metadata?.scheduleContext;
+  if (pc?.patientFound && (pc.patientData?.firstName || pc.patientName)) {
+    const first = pc.patientData?.firstName || String(pc.patientName ?? '').split(' ')[0];
+    const last = pc.patientData?.lastName || '';
+    parts.push(
+      `# CALLER-ID PRE-CONTEXT (use this — do not make the caller spell their life out)\n\n` +
+      `This phone number matches an existing patient on file: first name "${first}"${last ? `, last name on file "${last}"` : ''}. This is a STRONG hint, not verification.\n` +
+      `- When identity is needed, ask: "Am I speaking with ${first}?" If YES: confirm their date of birth ONLY, then call verify_patient_identity with firstName "${first}"${last ? `, lastName "${last}" (the ON-FILE spelling — never a transcribed respelling)` : ''} and that DOB. The caller-ID match plus DOB completes verification.\n` +
+      `- Do NOT ask them to spell their name. Do NOT mention we recognized their number — just greet warmly and confirm.\n` +
+      `- If they say NO (calling for someone else / different person), run the standard verification flow for the actual patient.\n` +
+      `- Disclose NOTHING from their record until verify_patient_identity returns verified.`,
+    );
+  }
   return parts.join('\n\n');
 }
 
@@ -472,6 +485,15 @@ export interface AzulSchedulingMetadata {
   callerPhone?: string;
   dialedNumber?: string;
   callLogId?: string;
+  /** Caller-ID pre-context from the local schedule mirror (same mechanism
+   *  as the after-hours agent): who this phone number likely belongs to.
+   *  NEVER treated as verification by itself. */
+  scheduleContext?: {
+    patientFound: boolean;
+    patientName?: string;
+    patientData?: { firstName?: string; lastName?: string; dateOfBirth?: string };
+    upcomingAppointments?: Array<unknown>;
+  };
 }
 
 export const azulSchedulingAgentConfig = {
@@ -479,7 +501,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.2.0',
+  version: '2.3.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
