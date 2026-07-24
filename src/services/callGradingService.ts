@@ -877,7 +877,10 @@ Respond with a JSON object only, no other text:
     }
   }
 
-  static readonly CURRENT_GRADER_VERSION = 2;
+  // v3: Phase 7 governance rubric appended for azul-scheduling calls
+  // (identifier hygiene, say-verbatim, terminal disposition, retry
+  // discipline, verification friction, language compliance, error rate).
+  static readonly CURRENT_GRADER_VERSION = 3;
 
   async runAndPersistDeterministicGraders(callLogId: string, forceRegrade: boolean = false): Promise<GraderResult[]> {
     try {
@@ -912,6 +915,19 @@ Respond with a JSON object only, no other text:
       };
 
       const results = this.runDeterministicGraders(input);
+
+      // Phase 7 rubric — azul calls only; rides the same versioned payload.
+      if (callLog.agentUsed === 'azul-scheduling') {
+        try {
+          const { runAzulRubric, RUBRIC_VERSION } = await import('./azulRubric');
+          const events = ((callLog as any).toolTimeline?.events ?? []) as Array<{ tool: string; args?: Record<string, unknown>; outcome?: Record<string, unknown> }>;
+          const rubric = runAzulRubric({ transcript: callLog.transcript || '', events });
+          results.push(...(rubric as unknown as GraderResult[]));
+          console.info(`[GRADING] Azul rubric v${RUBRIC_VERSION}: ${rubric.filter(r => r.pass).length}/${rubric.length} passed for ${callLogId}`);
+        } catch (e) {
+          console.error(`[GRADING] azul rubric error for ${callLogId}:`, e);
+        }
+      }
 
       const passed = results.filter(r => r.pass).length;
       const failed = results.filter(r => !r.pass).length;

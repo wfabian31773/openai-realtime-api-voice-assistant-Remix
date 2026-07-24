@@ -56,6 +56,7 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     'status', 'verified', 'identityVerified', 'matchCount', 'recentSurgicalContext',
     'earliest_bookable_date', 'eligibility_due_date', 'intakeId', 'new_patient_earliest_date',
     'ok', 'skipped', 'detail', 'transferred',
+    'say', // directive text — kept so the Phase 7 rubric can grade say-verbatim compliance
   ]) {
     if (parsed?.[k] !== undefined) out[k] = parsed[k];
   }
@@ -166,7 +167,14 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
   if (!entry.callLogId && !entry.callSid) return;
   try {
     const { purpose, result } = classifyAzulCall(entry.events);
-    const payload = { events: entry.events, purpose, result, toolCallCount: entry.events.length };
+    // A/B carriage arm (Phase 7): stamped on call metadata at session
+    // creation; persisted here so per-arm grade comparison reads one field.
+    let abArm: string | undefined;
+    try {
+      const { callMetadataForDB } = await import('./callMetadataStore');
+      abArm = (callMetadataForDB.get(key) as { abArm?: string } | undefined)?.abArm;
+    } catch { /* optional */ }
+    const payload = { events: entry.events, purpose, result, toolCallCount: entry.events.length, ...(abArm ? { abArm } : {}) };
     if (entry.callLogId) {
       await db.update(callLogs)
         .set({ toolTimeline: payload, toolCallCount: entry.events.length })
