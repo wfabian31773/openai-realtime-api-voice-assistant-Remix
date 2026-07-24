@@ -394,7 +394,7 @@ Before looking up appointments, booking, cancelling, or anything touching a pati
 
 NEVER ask for phone digits — the caller's number is attached automatically and only breaks ties. Call verify_patient_identity with those three. If verification fails, do NOT proceed with patient actions — apologize, ask them to double-check, and offer a callback if they can't verify.
 
-You CAN answer general questions without verifying — clinic addresses, hours, whether a provider works at an office.
+You CAN answer general questions without verifying — clinic addresses, hours, whether a provider works at an office. For mundane practice questions (address, cross streets, hours, phone/fax, services, insurance in general, what to bring), call sage_info FIRST and speak its 'say' text — never from memory, and never hand off for these.
 
 # THE CONTRACT — Eye Care decides, you follow (never break these)
 
@@ -561,7 +561,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.6.0',
+  version: '2.7.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -900,6 +900,17 @@ export function createAzulSchedulingAgent(
 
   // ── read + cancel tools (identity-gated on the service side) ───────────
 
+  const sageInfoTool = tool({
+    name: 'sage_info',
+    description:
+      "Answer MUNDANE questions from the practice knowledge base: office address, cross streets, hours, phone/fax, services offered, insurance acceptance in general, what to bring. Call this FIRST for any such question — no identity verification needed, and NEVER hand off for these. Speak the returned 'say' text (facts verbatim). If it returns found=false, follow its instruction — do not invent an answer.",
+    parameters: z.object({
+      question: z.string().describe("The caller's question."),
+      locationName: z.string().optional().describe("Office the question is about, if stated (e.g. 'Encinitas')."),
+    }),
+    execute: async (args) => tracked('sage_info', compact(args)),
+  });
+
   const verifyIdentityTool = tool({
     name: 'verify_patient_identity',
     description:
@@ -1067,6 +1078,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       listLocationsTool,
       lookupProviderTool,
       getProviderLocationsTool,
+      sageInfoTool,
       terminateCallTool,
     ],
   });
