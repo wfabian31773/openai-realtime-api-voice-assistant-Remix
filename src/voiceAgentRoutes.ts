@@ -1172,10 +1172,14 @@ async function transferConferenceToNumber(
     return { ok: false, detail };
   }
 
-  // Mark transferred (same bookkeeping the after-hours path does).
+  // Mark transferred (same bookkeeping the after-hours path does). Record
+  // the ACTUAL office number dialed so the call log doesn't claim the
+  // global HUMAN_AGENT_NUMBER was used.
   const callMeta = callMetadataForDB.get(openAiCallId);
   if (callMeta) {
     callMeta.transferredToHuman = true;
+    callMeta.transferTargetNumber = toNumber;
+    callMeta.transferTargetLabel = label;
     if (callMeta.dbCallLogId) {
       const { callLifecycleCoordinator } = await import('./services/callLifecycleCoordinator');
       callLifecycleCoordinator.markTransferred(callMeta.dbCallLogId);
@@ -2399,7 +2403,12 @@ async function observeCall(
     // persist the pilot tool timeline (all no-ops for other agents)
     unregisterAzulHoldingCallback(callId);
     unregisterAzulOfficeTransferCallback(callId);
-    void flushAzulTimeline(callId);
+    // Terminal-disposition sweep BEFORE the flush (the sweep reads — and may
+    // append a ticket event to — the in-memory timeline the flush deletes).
+    void import('./agents/azulSchedulingAgent')
+      .then(({ sweepAzulUnresolvedCall }) => sweepAzulUnresolvedCall(callId))
+      .catch(() => {})
+      .then(() => flushAzulTimeline(callId));
 
     // Flush accumulated Realtime token usage → accurate per-call OpenAI cost
     // (pricing registry path). Falls back to the duration estimate downstream
@@ -2462,7 +2471,9 @@ async function observeCall(
           // Setting it here with session time causes the 600s bug
           transcript,
           transferredToHuman: callMeta.transferredToHuman,
-          humanAgentNumber: callMeta.transferredToHuman ? HUMAN_AGENT_NUMBER : undefined,
+          humanAgentNumber: callMeta.transferredToHuman
+            ? (callMeta.transferTargetNumber ?? HUMAN_AGENT_NUMBER)
+            : undefined,
           // Mark as estimated until Twilio confirms
           costIsEstimated: true,
           ...(resolvedCallerName ? { callerName: resolvedCallerName } : {}),

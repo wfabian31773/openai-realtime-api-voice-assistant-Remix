@@ -13,6 +13,8 @@ export interface CallMetadata {
   audioInputMs: number;
   audioOutputMs: number;
   callerName?: string; // Patient name collected during the call
+  transferTargetNumber?: string; // Actual number dialed on an accepted office transfer
+  transferTargetLabel?: string; // Office/queue label for that number
 }
 
 export const callMetadataForDB = new Map<string, CallMetadata>();

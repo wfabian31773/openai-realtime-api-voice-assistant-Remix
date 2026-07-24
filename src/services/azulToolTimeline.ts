@@ -55,6 +55,7 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     'callback_id', 'error', 'cancelled', 'rules_version',
     'status', 'verified', 'identityVerified', 'matchCount', 'recentSurgicalContext',
     'earliest_bookable_date', 'eligibility_due_date', 'intakeId', 'new_patient_earliest_date',
+    'ok', 'skipped', 'detail', 'transferred',
   ]) {
     if (parsed?.[k] !== undefined) out[k] = parsed[k];
   }
