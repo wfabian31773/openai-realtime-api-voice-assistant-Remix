@@ -2405,10 +2405,18 @@ async function observeCall(
     unregisterAzulOfficeTransferCallback(callId);
     // Terminal-disposition sweep BEFORE the flush (the sweep reads — and may
     // append a ticket event to — the in-memory timeline the flush deletes).
+    // Bounded at 25s: a wedged sweep must never block the flush (2026-07-24
+    // 10:53 call ended with tool_timeline never persisted).
     void import('./agents/azulSchedulingAgent')
-      .then(({ sweepAzulUnresolvedCall }) => sweepAzulUnresolvedCall(callId))
+      .then(({ sweepAzulUnresolvedCall }) =>
+        Promise.race([
+          sweepAzulUnresolvedCall(callId),
+          new Promise((resolve) => setTimeout(resolve, 25_000)),
+        ]),
+      )
       .catch(() => {})
-      .then(() => flushAzulTimeline(callId));
+      .then(() => flushAzulTimeline(callId))
+      .catch((err) => console.error(`[AZUL-TIMELINE] teardown flush failed for ${callId}:`, err));
 
     // Flush accumulated Realtime token usage → accurate per-call OpenAI cost
     // (pricing registry path). Falls back to the duration estimate downstream
