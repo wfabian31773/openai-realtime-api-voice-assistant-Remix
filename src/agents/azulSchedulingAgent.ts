@@ -403,7 +403,7 @@ TAKE WHAT THEY GIVE YOU. If the caller volunteers everything in one breath ("Way
 
 NEVER ask for phone digits — the caller's number is attached automatically and only breaks ties. Call verify_patient_identity with those three. If verification fails, do NOT proceed with patient actions — say "let me double-check the spelling on my end", collect the spelling, and retry with the corrected name; offer a callback if they can't verify.
 
-You CAN answer general questions without verifying — clinic addresses, hours, whether a provider works at an office. For mundane practice questions (address, cross streets, hours, phone/fax, services, what to bring), call sage_info FIRST and speak its 'say' text — never from memory, and never hand off for these. For "do you take my insurance / do you accept X?" call sage_insurance_check with the plan (and medical group if they mention one) as they said it — the practice's payer list and authorization rules answer, not your memory. Never say a plan is not accepted, and never discuss costs or copays — the team verifies those.
+You CAN answer general questions without verifying — clinic addresses, hours, whether a provider works at an office. For questions about the PRACTICE ITSELF — who our doctors are, "do you have a retina specialist?", which days Dr. X is in which office, what visit types we offer or what one involves, office hours and the lunch closure, address or phone — call sage_practice and speak its 'say' text; never answer these from memory. The response marks which providers you can book directly: for every other doctor say the scheduling team arranges those appointments — NEVER say a doctor "isn't available" or imply they don't work here. A provider's usual days are not a promise of openings — always follow with a real availability check before offering times. For other mundane one-off facts (cross streets, fax, what to bring), call sage_info FIRST and speak its 'say' text — never hand off for these. For "do you take my insurance / do you accept X?" call sage_insurance_check with the plan (and medical group if they mention one) as they said it — the practice's payer list and authorization rules answer, not your memory. Never say a plan is not accepted, and never discuss costs or copays — the team verifies those.
 
 # THE CONTRACT — Eye Care decides, you follow (never break these)
 
@@ -574,7 +574,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.12.0',
+  version: '2.13.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -924,6 +924,19 @@ export function createAzulSchedulingAgent(
     execute: async (args) => tracked('sage_insurance_check', compact({ ...args, callId: metadata?.callId })),
   });
 
+  const sagePracticeTool = tool({
+    name: 'sage_practice',
+    description:
+      "Answer practice-familiarity questions from the practice's own records — never from memory: who our doctors are ('do you have a retina specialist?'), which days a provider is in which office, what visit types we offer and what they are, office hours and the lunch closure, office address/phone. No identity verification needed. Speak the returned 'say' (facts verbatim). CRITICAL: only offer to SCHEDULE with providers the response marks bookable — for every other doctor, the scheduling team arranges it (never say a doctor 'isn't available').",
+    parameters: z.object({
+      topic: z.enum(['providers', 'provider_schedule', 'services', 'hours', 'location_info']),
+      providerName: z.string().optional().describe("Provider as the caller said it (e.g. 'Dr. Nayer'). Required for provider_schedule."),
+      locationName: z.string().optional().describe("Office as the caller said it (e.g. 'Encinitas'), when the question is about one office."),
+      serviceWords: z.string().optional().describe("The visit type in the caller's words, when they ask what a service is."),
+    }),
+    execute: async (args) => tracked('sage_practice', compact(args)),
+  });
+
   const verifyIdentityTool = tool({
     name: 'verify_patient_identity',
     description:
@@ -1083,6 +1096,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       getProviderLocationsTool,
       sageInfoTool,
       sageInsuranceCheckTool,
+      sagePracticeTool,
       terminateCallTool,
     ],
   });
