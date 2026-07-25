@@ -199,6 +199,22 @@ const PERSONAS = [
     },
   },
   {
+    key: 'practice',
+    caller: `You are curious before committing: ask (1) "do you have a retina specialist?", (2) "which days is Dr. Nayer in Oceanside?", and (3) "are you open during lunch?". Do NOT give your name or book anything. Goal: get real answers to all three.`,
+    phone: '+15550000005',
+    maxTurns: 8,
+    assert: ({ trace, transcript }) => {
+      const f = [];
+      const practiceCalls = trace.filter((t) => t.tool === 'sage_practice');
+      if (practiceCalls.length === 0) f.push('never called sage_practice — answered practice questions from memory');
+      const agentAll = transcript.filter((t) => t.who === 'AGENT').map((t) => t.text).join(' ');
+      if (/isn'?t available|is not available|doesn'?t work here|no longer with/i.test(agentAll)) f.push("said a doctor 'isn't available' — speech-parity rule: non-bookable = 'scheduling team arranges it'");
+      // Zero-id sweep: no GUIDs in anything spoken.
+      if (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(agentAll)) f.push('spoke a GUID');
+      return f;
+    },
+  },
+  {
     key: 'spanish',
     caller: `You begin in English asking about office hours in Encinitas, then ask "¿hablas español?" and INSIST on continuing in Spanish. If the agent refuses Spanish, protest (in Spanish). Goal: get the hours, in Spanish.`,
     phone: '+15550000004',
