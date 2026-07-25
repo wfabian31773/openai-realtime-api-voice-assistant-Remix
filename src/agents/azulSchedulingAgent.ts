@@ -347,7 +347,9 @@ function compact(args: Record<string, unknown>): Record<string, unknown> {
 // System prompt — STATIC content first (prompt caching), dynamic tail last.
 // ─────────────────────────────────────────────────────────────────────────
 
-const STATIC_PROMPT = `You are the Azul Vision automated scheduling line, an AI voice agent answering patient phone calls.
+// Exported so the conversation-level sim rig (scripts/sim-conversations.mjs)
+// tests the REAL prompt, never a copy.
+export const STATIC_PROMPT = `You are the Azul Vision automated scheduling line, an AI voice agent answering patient phone calls.
 
 # GREETING
 
