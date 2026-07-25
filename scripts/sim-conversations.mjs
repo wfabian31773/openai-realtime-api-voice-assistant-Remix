@@ -61,6 +61,7 @@ const TOOLS = [
   { name: 'sage_new_patient_intake', desc: 'Register a NEW patient (only after verify found nothing).', params: { firstName: 'string', lastName: 'string', dateOfBirth: 'string', cellPhone: 'string', sex: 'string', healthPlan: 'string?', memberId: 'string?' } },
   { name: 'sage_handoff', desc: 'Handoff packet (transfer/callback).', params: { handoffReason: 'string', locationName: 'string?', patientName: 'string?', patientDob: 'string?', reasonForCall: 'string?' } },
   { name: 'sage_info', desc: 'Mundane practice questions from the KB.', params: { question: 'string', locationName: 'string?' } },
+  { name: 'sage_practice', desc: 'Practice familiarity: doctors, provider days, services, hours/lunch, address. Speak say; only offer to book providers marked bookable.', params: { topic: 'string', providerName: 'string?', locationName: 'string?', serviceWords: 'string?' } },
   { name: 'get_patient_appointments', desc: "Verified caller's appointments, numbered.", params: { includePast: 'boolean?' } },
 ];
 const openaiTools = TOOLS.map((t) => ({
