@@ -190,6 +190,23 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
         .where(eq(callLogs.callSid, entry.callSid));
     }
     console.info(`[AZUL-TIMELINE] Flushed ${entry.events.length} tool event(s) (${purpose} → ${result})`);
+    // Phase 7: rubric pass with the just-persisted events. Forced because
+    // grade-then-flush ordering would otherwise leave a rubric graded with an
+    // empty timeline; the gradeCall-side pass is forced too, so whichever
+    // runs LAST folds in complete data (deterministic — re-runs are cheap).
+    try {
+      let rubricCallLogId = entry.callLogId;
+      if (!rubricCallLogId && entry.callSid) {
+        const row = await db.select({ id: callLogs.id }).from(callLogs).where(eq(callLogs.callSid, entry.callSid)).limit(1);
+        rubricCallLogId = row[0]?.id ?? null;
+      }
+      if (rubricCallLogId) {
+        const { callGradingService } = await import('./callGradingService');
+        await callGradingService.runAndPersistDeterministicGraders(rubricCallLogId, true);
+      }
+    } catch (err) {
+      console.error('[AZUL-TIMELINE] post-flush rubric pass failed:', err);
+    }
   } catch (err) {
     console.error('[AZUL-TIMELINE] Flush failed:', err);
   }

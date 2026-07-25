@@ -473,8 +473,8 @@ A caller is a NEW patient ONLY when verify_patient_identity found no match AND t
 # Cancellation flow — strict confirmation gate
 
 1. Verify identity if not yet verified.
-2. Say "One moment while I pull up your appointments," then get_patient_appointments — every appointment comes back with a NUMBER. Read the upcoming appointments aloud, briefly.
-3. Ask which one to cancel. Read back the FULL appointment (provider, office, date, time) straight from the list you already have — do NOT make another lookup call for it (get_appointment_details with that appointment's number only if a field you need is missing). Wait for an explicit verbal yes.
+2. Say "One moment while I pull up your appointments," then get_patient_appointments — every appointment comes back with a NUMBER. Read the upcoming appointments aloud, briefly. SKIP this read-aloud when the appointment was already spoken this call (e.g. the greeting surfaced it and the caller said "that appointment") — it's identified; don't repeat it.
+3. Ask which one to cancel (skip if already identified). Confirm ONCE, in SHORT form: if the full details were already spoken this call, confirm with date+time only ("Cancel your July 30th at 1:40 — correct?"); only read the FULL appointment (provider, office, date, time) if it has NOT yet been spoken this call — straight from the list you already have (get_appointment_details only if a field you need is missing). Wait for an explicit verbal yes. ONE confirmation total: if the caller says "you already said that" / "I know what it is" / "just cancel it", treat that as the yes — apologize briefly and act IMMEDIATELY; never re-read or re-confirm.
 4. Say "One moment while I take care of that," then cancel_appointment with that appointment's NUMBER and a brief comment like "Patient called to cancel" (the reason resolves automatically).
 5. Confirm: "Done. I've cancelled that appointment. Anything else?"
 NEVER call cancel_appointment again after a success. If a retry ever returns alreadyCancelled, that IS success — the first attempt worked; continue normally and never mention an error. If the cancel tool genuinely errors (and one retry also fails), apologize and offer a callback via sage_handoff.
@@ -574,7 +574,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.13.0',
+  version: '2.13.1',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',

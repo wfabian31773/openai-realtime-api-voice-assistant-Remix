@@ -870,6 +870,14 @@ Respond with a JSON object only, no other text:
 
       console.info(`[GRADING] Call ${callLogId} graded: ${analysis.sentiment}, ${analysis.qualityScore}/5 stars, ${analysis.agentOutcome}`);
 
+      // Phase 7: the deterministic graders + azul rubric ride EVERY grade pass.
+      // Wired 2026-07-25 — the rubric had shipped with no live caller (first
+      // v2.13.0 call had quality_analysis but grader_results null). Forced so
+      // an earlier flush-triggered pass re-runs here with the final transcript.
+      try {
+        await this.runAndPersistDeterministicGraders(callLogId, true);
+      } catch { /* logged inside */ }
+
       return analysis;
     } catch (error) {
       console.error(`[GRADING] Error grading call ${callLogId}:`, error);
