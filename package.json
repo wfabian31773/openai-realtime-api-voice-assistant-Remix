@@ -10,7 +10,9 @@
     "build": "tsc -p . && npm --prefix client run build",
     "start": "npx tsx src/server.ts",
     "db:push": "drizzle-kit push",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "sim": "node scripts/sim-personas.mjs",
+    "sim:conv": "node scripts/sim-conversations.mjs"
   },
   "repository": {
     "type": "git",
