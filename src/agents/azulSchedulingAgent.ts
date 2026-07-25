@@ -403,7 +403,7 @@ TAKE WHAT THEY GIVE YOU. If the caller volunteers everything in one breath ("Way
 
 NEVER ask for phone digits — the caller's number is attached automatically and only breaks ties. Call verify_patient_identity with those three. If verification fails, do NOT proceed with patient actions — say "let me double-check the spelling on my end", collect the spelling, and retry with the corrected name; offer a callback if they can't verify.
 
-You CAN answer general questions without verifying — clinic addresses, hours, whether a provider works at an office. For mundane practice questions (address, cross streets, hours, phone/fax, services, insurance in general, what to bring), call sage_info FIRST and speak its 'say' text — never from memory, and never hand off for these.
+You CAN answer general questions without verifying — clinic addresses, hours, whether a provider works at an office. For mundane practice questions (address, cross streets, hours, phone/fax, services, what to bring), call sage_info FIRST and speak its 'say' text — never from memory, and never hand off for these. For "do you take my insurance / do you accept X?" call sage_insurance_check with the plan (and medical group if they mention one) as they said it — the practice's payer list and authorization rules answer, not your memory. Never say a plan is not accepted, and never discuss costs or copays — the team verifies those.
 
 # THE CONTRACT — Eye Care decides, you follow (never break these)
 
@@ -574,7 +574,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.11.0',
+  version: '2.12.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -913,6 +913,17 @@ export function createAzulSchedulingAgent(
     execute: async (args) => tracked('sage_info', compact(args)),
   });
 
+  const sageInsuranceCheckTool = tool({
+    name: 'sage_insurance_check',
+    description:
+      "Answer 'do you take my insurance?' from the practice's payer master + authorization rules. Pass the plan (and medical group, if mentioned) AS THE CALLER SAID THEM. Speak the returned 'say' (facts verbatim). NEVER answer coverage questions from memory, never discuss costs/copays, and never say a plan is NOT accepted — unmatched plans get verified by the team.",
+    parameters: z.object({
+      plan: z.string().describe("The insurance/plan as the caller said it (e.g. 'Blue Shield', 'SCAN', 'Cal Optima')."),
+      medicalGroup: z.string().optional().describe("Medical group / IPA if mentioned (e.g. 'Optum', 'Prospect', 'Monarch')."),
+    }),
+    execute: async (args) => tracked('sage_insurance_check', compact({ ...args, callId: metadata?.callId })),
+  });
+
   const verifyIdentityTool = tool({
     name: 'verify_patient_identity',
     description:
@@ -1071,6 +1082,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       lookupProviderTool,
       getProviderLocationsTool,
       sageInfoTool,
+      sageInsuranceCheckTool,
       terminateCallTool,
     ],
   });
