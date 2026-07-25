@@ -21,9 +21,18 @@ const SCORE_DROP_THRESHOLD = 0.15; // 15-point avg drop (0..1 scale) = regressio
 
 interface GraderSummary { avgScore?: number; criticalFailures?: number; failed?: number; total?: number }
 
-async function summarize(from: Date, to: Date): Promise<{ calls: number; avg: number; criticals: number; criticalGraders: string[] }> {
+/** Operator principle (2026-07-24, first live night): "when the purpose
+ *  doesn't match the result, we need to understand why — that's what leads
+ *  to productivity." Purpose/result pairs come from the call timeline. */
+const INTENT_FULFILLMENT: Array<{ purpose: string; fulfilledPrefix: string[] }> = [
+  { purpose: 'Schedule appointment', fulfilledPrefix: ['Booked'] },
+  { purpose: 'Cancel appointment', fulfilledPrefix: ['Cancelled'] },
+  { purpose: 'New patient registration', fulfilledPrefix: ['Registered'] },
+];
+
+async function summarize(from: Date, to: Date): Promise<{ calls: number; avg: number; criticals: number; criticalGraders: string[]; intentTotal: number; intentFulfilled: number; unfulfilled: string[] }> {
   const rows = await db
-    .select({ graderResults: callLogs.graderResults })
+    .select({ graderResults: callLogs.graderResults, toolTimeline: callLogs.toolTimeline })
     .from(callLogs)
     .where(and(
       eq(callLogs.agentUsed, 'azul-scheduling'),
@@ -34,6 +43,9 @@ async function summarize(from: Date, to: Date): Promise<{ calls: number; avg: nu
   let scoreSum = 0;
   let scored = 0;
   let criticals = 0;
+  let intentTotal = 0;
+  let intentFulfilled = 0;
+  const unfulfilled: string[] = [];
   const criticalGraders: string[] = [];
   for (const r of rows) {
     const payload = r.graderResults as { summary?: GraderSummary; graders?: Array<{ grader: string; pass: boolean; severity: string }> } | null;
@@ -45,8 +57,16 @@ async function summarize(from: Date, to: Date): Promise<{ calls: number; avg: nu
         if (!g.pass && g.severity === 'critical') criticalGraders.push(g.grader);
       }
     }
+    const tl = r.toolTimeline as { purpose?: string; result?: string } | null;
+    const rule = tl?.purpose ? INTENT_FULFILLMENT.find((x) => tl.purpose!.startsWith(x.purpose)) : undefined;
+    if (rule) {
+      intentTotal += 1;
+      const ok = rule.fulfilledPrefix.some((p) => (tl?.result ?? '').startsWith(p));
+      if (ok) intentFulfilled += 1;
+      else unfulfilled.push(`${tl?.purpose} → ${tl?.result ?? 'no result'}`);
+    }
   }
-  return { calls: rows.length, avg: scored ? scoreSum / scored : NaN, criticals, criticalGraders: [...new Set(criticalGraders)] };
+  return { calls: rows.length, avg: scored ? scoreSum / scored : NaN, criticals, criticalGraders: [...new Set(criticalGraders)], intentTotal, intentFulfilled, unfulfilled };
 }
 
 async function fileRegressionTicket(description: string): Promise<void> {
@@ -96,8 +116,16 @@ export async function runRegressionCheck(): Promise<void> {
     if (baseline.calls >= 3 && Number.isFinite(recent.avg) && Number.isFinite(baseline.avg) && baseline.avg - recent.avg > SCORE_DROP_THRESHOLD) {
       problems.push(`Average grade dropped ${((baseline.avg - recent.avg) * 100).toFixed(0)} points (24h avg ${(recent.avg * 100).toFixed(0)} vs 7d avg ${(baseline.avg * 100).toFixed(0)})`);
     }
+    // Purpose ≠ result is the operator's productivity metric: below 50%
+    // fulfillment on a meaningful sample is an owned alert, with the actual
+    // mismatches listed so 'understand why' starts from evidence.
+    if (recent.intentTotal >= 5 && recent.intentFulfilled / recent.intentTotal < 0.5) {
+      problems.push(
+        `Purpose≠result: only ${recent.intentFulfilled}/${recent.intentTotal} intent calls fulfilled. Mismatches: ${recent.unfulfilled.slice(0, 8).join(' | ')}`,
+      );
+    }
     if (problems.length === 0) {
-      console.log(`[REGRESSION-WATCH] healthy — ${recent.calls} call(s), avg ${(recent.avg * 100).toFixed(0)}, 0 criticals`);
+      console.log(`[REGRESSION-WATCH] healthy — ${recent.calls} call(s), avg ${(recent.avg * 100).toFixed(0)}, 0 criticals, intent fulfillment ${recent.intentFulfilled}/${recent.intentTotal}`);
       return;
     }
     const description = [
