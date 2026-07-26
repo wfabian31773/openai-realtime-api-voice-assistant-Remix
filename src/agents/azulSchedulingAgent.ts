@@ -86,6 +86,29 @@ export function unregisterAzulOfficeTransferCallback(callId: string): void {
   transferTargets.delete(callId);
 }
 
+// ── Live transcript access for tickets ───────────────────────────────────
+// The session layer registers a per-call transcript getter so every azul
+// ticket carries the conversation up to the moment of filing — the ticketing
+// app generates its staff-facing call summary from callData.transcript.
+// (2026-07-25: azul tickets used to arrive with NO transcript and never got
+// enriched later, so staff opened them to raw handoff strings only.)
+const transcriptProviders = new Map<string, () => string>();
+export function registerAzulTranscriptProvider(callId: string, get: () => string): void {
+  transcriptProviders.set(callId, get);
+}
+export function unregisterAzulTranscriptProvider(callId: string): void {
+  transcriptProviders.delete(callId);
+}
+function liveTranscriptFor(callId: string | undefined): string | undefined {
+  if (!callId) return undefined;
+  try {
+    const t = transcriptProviders.get(callId)?.();
+    return t && t.trim().length > 0 ? t : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const TOOL_TIMEOUT_MS: Record<string, number> = {
   sage_availability: 75_000,
   sage_book: 75_000,
@@ -261,7 +284,13 @@ async function fileLocationQueueTicket(
       description,
       priority: reason === 'urgent_symptom' ? 'urgent' : failedTransfer || reason === 'api_failure' || reason === 'unresolved_call_end' ? 'high' : 'medium',
       confirmationType: 'phone',
-      callData: { callSid: meta?.callSid, agentUsed: 'azul-scheduling' },
+      callData: {
+        callSid: meta?.callSid,
+        agentUsed: 'azul-scheduling',
+        // Conversation up to this moment — the ticketing app builds the
+        // staff-facing call summary from it.
+        ...(liveTranscriptFor(meta?.callId) ? { transcript: liveTranscriptFor(meta?.callId) } : {}),
+      },
     };
     // 15s hard timeout: a hung ticketing POST must never wedge the caller's
     // teardown chain (sweep → flush) or vanish without trace (2026-07-22
@@ -290,6 +319,23 @@ async function fileLocationQueueTicket(
     console.log(
       `[AZUL-SCHED] tier-3 location-queue ticket ${r.ok ? 'created' : `FAILED ${r.status}`}: ${txt.slice(0, 200)}`,
     );
+    // Persist the ticket number onto the call log so the post-call
+    // enrichment path (final transcript, recording URL, grades) finds this
+    // call's ticket — azul tickets previously never joined enrichment and
+    // stayed frozen at whatever the initial POST carried.
+    if (r.ok && meta?.callSid) {
+      try {
+        const parsedResp = JSON.parse(txt);
+        const ticketNumber = parsedResp?.ticketNumber ?? parsedResp?.ticket?.ticketNumber;
+        if (ticketNumber) {
+          const { storage } = await import('../../server/storage');
+          const log = await storage.getCallLogByCallSid(meta.callSid);
+          if (log && !log.ticketNumber) {
+            await storage.updateCallLog(log.id, { ticketNumber: String(ticketNumber) });
+          }
+        }
+      } catch { /* best-effort: the ticket itself is already filed */ }
+    }
     record({ status: r.status, ok: r.ok, locationName, response: txt.slice(0, 250) });
   } catch (e) {
     console.error('[AZUL-SCHED] tier-3 ticket error (call unaffected):', e);
@@ -574,7 +620,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.13.2',
+  version: '2.14.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
