@@ -1465,6 +1465,9 @@ async function observeCall(
     dialedNumber: to,
     callSid: twilioCallSid,
     callId: callId,
+    // Tickets carry the conversation up to the moment of filing — the
+    // ticketing app generates its staff-facing summary from it.
+    getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
   };
   
   // Create agent with correct signature per agent type

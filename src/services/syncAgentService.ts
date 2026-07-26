@@ -527,6 +527,7 @@ export class SyncAgentService {
     callStartTime?: string;
     callDurationSeconds?: number;
     transcript?: string;
+    priority?: 'low' | 'normal' | 'medium' | 'high' | 'urgent';
   }): Promise<SyncAgentResponse> {
     const { callSid } = params;
     
@@ -621,6 +622,7 @@ export class SyncAgentService {
         lastProviderSeen: params.lastProviderSeen,
         locationOfLastVisit: params.locationOfLastVisit,
         additionalDetails: params.additionalDetails,
+        priority: params.priority,
         callData: callSid ? {
           callSid,
           callerPhone: params.callerPhone,
