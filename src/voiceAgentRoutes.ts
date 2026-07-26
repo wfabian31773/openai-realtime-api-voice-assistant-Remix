@@ -19,7 +19,7 @@ import {
 } from '@openai/agents/realtime';
 import { getTwilioClient, getTwilioFromPhoneNumber } from './lib/twilioClient';
 import { medicalSafetyGuardrails, WELCOME_GREETING, getUrgentTriageGreeting } from './agents/afterHoursAgent';
-import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulHoldingCallback, registerAzulOfficeTransferCallback, unregisterAzulOfficeTransferCallback } from './agents/azulSchedulingAgent';
+import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulHoldingCallback, registerAzulOfficeTransferCallback, unregisterAzulOfficeTransferCallback, registerAzulTranscriptProvider, unregisterAzulTranscriptProvider } from './agents/azulSchedulingAgent';
 import { flushAzulTimeline, getAzulTimeline } from './services/azulToolTimeline';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
@@ -2341,6 +2341,12 @@ async function observeCall(
       registerAzulOfficeTransferCallback(callId, (toNumber, label, briefing) =>
         transferConferenceToNumber(callId, toNumber, label, briefing),
       );
+
+      // Tickets carry the conversation: any azul ticket filed during this
+      // call (handoff, failed transfer, or the teardown sweep) reads the
+      // live transcript through this getter so the ticketing app can build
+      // its staff-facing summary. Unregistered after the timeline flush.
+      registerAzulTranscriptProvider(callId, () => (callTranscripts.get(callId) ?? []).join('\n'));
     }
 
     // STEP 4: Force the agent to speak first by sending response.create
@@ -2459,7 +2465,10 @@ async function observeCall(
       )
       .catch(() => {})
       .then(() => flushAzulTimeline(callId))
-      .catch((err) => console.error(`[AZUL-TIMELINE] teardown flush failed for ${callId}:`, err));
+      .catch((err) => console.error(`[AZUL-TIMELINE] teardown flush failed for ${callId}:`, err))
+      // After the flush: the sweep (which may file a ticket needing the
+      // transcript) has run, so the getter can be released.
+      .finally(() => unregisterAzulTranscriptProvider(callId));
 
     // Flush accumulated Realtime token usage → accurate per-call OpenAI cost
     // (pricing registry path). Falls back to the duration estimate downstream
@@ -2609,7 +2618,7 @@ async function observeCall(
             const hasValidTicket = updatedCallLog?.ticketNumber && updatedCallLog.ticketNumber.trim().length > 0;
             const hasValidTranscript = finalTranscript && finalTranscript.length > 50;
             
-            if (twilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service') && hasValidTicket && hasValidTranscript) {
+            if (twilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service' || agentSlug === 'azul-scheduling') && hasValidTicket && hasValidTranscript) {
               
               // Use shared retry utility for ticketing API updates
               const ticketResult = await withRetry(
@@ -5236,7 +5245,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       const agentSlug = callLog?.agentId ? (await storage.getAgent(callLog.agentId))?.slug : null;
       const hasTicket = callLog?.ticketNumber && callLog.ticketNumber.trim().length > 0;
       
-      if (effectiveTwilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service') && hasTicket) {
+      if (effectiveTwilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service' || agentSlug === 'azul-scheduling') && hasTicket) {
         try {
           const ticketUpdateResult = await ticketingApiClient.updateTicketCallData({
             callSid: effectiveTwilioCallSid,
