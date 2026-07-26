@@ -62,6 +62,8 @@ export interface SubmitTicketParams {
   lastProviderSeen?: string;
   locationOfLastVisit?: string;
   additionalDetails?: string;
+  /** Ticket priority — the app defaults urgent for Urgent/Emergency Transfer tickets and medium otherwise. */
+  priority?: 'low' | 'normal' | 'medium' | 'high' | 'urgent';
   callData?: {
     callSid?: string;
     callerPhone?: string;

@@ -3,13 +3,48 @@ import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { medicalSafetyGuardrails } from '../guardrails/medicalSafety';
 import { scheduleLookupService, PatientScheduleContext } from '../services/scheduleLookupService';
-import { 
-  AFTER_HOURS_DEPARTMENT_ID, 
+import {
   TRIAGE_OUTCOME_MAPPINGS,
-  type TriageOutcome 
+  type TriageOutcome
 } from '../config/afterHoursTicketing';
 import { buildPracticeKnowledgePrompt } from '../config/azulVisionKnowledge';
 import { getNextBusinessDayContext } from '../utils/timeAware';
+import { escalationDetailsMap } from '../services/escalationStore';
+
+// ── Content-based routing (operator mandate 2026-07-25) ─────────────────
+// Tickets go to the APPROPRIATE department for what the call was about;
+// ONLY urgent matters stay in the After Hours queue. Instead of the old
+// hardcoded departmentId (which pinned every after-hours ticket to one
+// department and flattened the taxonomy through a stale local validator),
+// tickets now flow through /api/voice-agent/submit-ticket, where the
+// ticketing app's own router decides: surgery → Surgery Coordination,
+// refills → Technicians, scheduling/insurance → HVA Hub, urgent/unknown →
+// After Hours. A "Request Type:" header pins the unambiguous cases so the
+// app's PRIORITY-1 database lookup wins over keyword guessing.
+const REQUEST_TYPE_HEADER: Partial<Record<TriageOutcome, string>> = {
+  // True urgents — STAY in After Hours (the on-call review queue).
+  sudden_vision_loss: 'Urgent/Emergency Transfer',
+  flashes_floaters_curtain: 'Urgent/Emergency Transfer',
+  chemical_exposure: 'Urgent/Emergency Transfer',
+  eye_trauma: 'Urgent/Emergency Transfer',
+  severe_eye_pain: 'Urgent/Emergency Transfer',
+  post_surgery_complication: 'Urgent/Emergency Transfer',
+  double_vision: 'Urgent/Emergency Transfer',
+  angle_closure_symptoms: 'Urgent/Emergency Transfer',
+  patient_insists_urgent: 'Urgent/Emergency Transfer',
+  medical_professional_calling: 'Urgent/Emergency Transfer',
+  // Appointment family → the app routes Appointment Request per its taxonomy.
+  new_appointment: 'Appointment Request',
+  confirm_appointment: 'Appointment Request',
+  appointment_request: 'Appointment Request',
+  reschedule_appointment: 'Appointment Request',
+  cancel_appointment: 'Appointment Request',
+  // Medication family → Medication Refill (routes to Technicians).
+  medication_refill: 'Medication Refill',
+  prescription_question: 'Medication Refill',
+  // billing/insurance/general/test_results/message_for_provider/follow_up_care:
+  // no header — the app's keyword router (incl. multilingual tables) decides.
+};
 
 export function getUrgentTriageGreeting(): string {
   return "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?";
@@ -181,13 +216,15 @@ const triageOutcomeEnum = z.enum([
 export async function createAfterHoursAgent(
   handoffCallback?: () => Promise<void>,
   recordPatientInfoCallback?: (info: any) => any,
-  metadata?: { 
-    campaignId?: string; 
+  metadata?: {
+    campaignId?: string;
     contactId?: string;
     callerPhone?: string;
     dialedNumber?: string;
     callSid?: string;
     callId?: string;
+    /** Live transcript up to now — tickets carry it so the app can summarize. */
+    getTranscript?: () => string;
   }
 ): Promise<RealtimeAgent> {
   const actualHandoffCallback = handoffCallback || (async () => {
@@ -241,29 +278,29 @@ export async function createAfterHoursAgent(
         console.warn('[TOOL] transfer_to_human called WITHOUT prior ticket — auto-creating urgent transfer ticket');
         try {
           const { SyncAgentService } = await import('../services/syncAgentService');
-          const mapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // urgent default
           const autoPhone = lastPatientInfo?.phone_number || callerPhone || '';
           const formattedAutoPhone = autoPhone.replace(/\D/g, '').length === 10
             ? `+1${autoPhone.replace(/\D/g, '')}`
             : autoPhone.startsWith('+') ? autoPhone : `+${autoPhone.replace(/\D/g, '')}`;
 
-          await SyncAgentService.createTicket({
-            departmentId: AFTER_HOURS_DEPARTMENT_ID,
-            requestTypeId: mapping.requestTypeId,
-            requestReasonId: mapping.requestReasonId,
-            patientFirstName: lastPatientInfo?.patient_name?.split(' ')[0] || 'Unknown',
-            patientLastName: lastPatientInfo?.patient_name?.split(' ').slice(1).join(' ') || 'Caller',
+          await SyncAgentService.submitSimplifiedTicket({
+            patientFullName: lastPatientInfo?.patient_name || 'Unknown Caller',
+            patientDOB: 'Unknown',
+            reasonForCalling: [
+              'Request Type: Urgent/Emergency Transfer',
+              lastPatientInfo?.reason
+                ? `URGENT TRANSFER (ticket auto-created): ${lastPatientInfo.reason}`
+                : 'URGENT TRANSFER: Patient requested urgent assistance — on-call team was contacted. Ticket auto-created because call was transferred before ticket creation.',
+            ].join('\n'),
+            preferredContactMethod: 'phone',
             patientPhone: formattedAutoPhone,
-            description: lastPatientInfo?.reason
-              ? `URGENT TRANSFER (ticket auto-created): ${lastPatientInfo.reason}`
-              : 'URGENT TRANSFER: Patient requested urgent assistance — on-call team was contacted. Ticket auto-created because call was transferred before ticket creation.',
             priority: 'urgent',
-            callData: {
-              callSid: metadata?.callSid,
-              callerPhone,
-              dialedNumber: metadata?.dialedNumber,
-              agentUsed: 'urgent-triage',
-            },
+            callSid: metadata?.callSid,
+            callerPhone,
+            dialedNumber: metadata?.dialedNumber,
+            agentUsed: 'urgent-triage',
+            callStartTime: new Date().toISOString(),
+            transcript: metadata?.getTranscript?.() || undefined,
           });
           console.log('[TOOL] Auto-created urgent transfer ticket for unanswered transfer');
         } catch (autoTicketErr) {
@@ -272,6 +309,24 @@ export async function createAfterHoursAgent(
       }
 
       try {
+        // The platform's handoff gate requires escalation details with an
+        // allowed callerType — the after-hours agent NEVER set them, so
+        // every urgent transfer was silently BLOCKED at addHumanAgent
+        // ("AI should have created a ticket instead"): no on-call dial, no
+        // urgent SMS. Found 2026-07-25 during the routing audit.
+        if (metadata?.callId) {
+          const [first, ...restName] = String(lastPatientInfo?.patient_name ?? '').split(' ');
+          escalationDetailsMap.set(metadata.callId, {
+            reason: lastPatientInfo?.reason
+              ? `After-hours urgent triage: ${lastPatientInfo.reason}`
+              : 'After-hours urgent triage transfer',
+            callerType: 'patient_urgent_medical',
+            patientFirstName: first || undefined,
+            patientLastName: restName.join(' ') || undefined,
+            callbackNumber: lastPatientInfo?.phone_number || callerPhone,
+            symptomsSummary: lastPatientInfo?.reason,
+          });
+        }
         await actualHandoffCallback();
         console.log('[TOOL] Human agent added to conference');
         return { success: true, transferred: true };
@@ -309,7 +364,7 @@ export async function createAfterHoursAgent(
       try {
         // Lazy import to avoid module initialization during agent bootstrap
         const { SyncAgentService } = await import('../services/syncAgentService');
-        
+
         const mapping = TRIAGE_OUTCOME_MAPPINGS[params.triage_outcome as TriageOutcome];
         if (!mapping) {
           console.error('[TICKET] Unknown triage outcome:', params.triage_outcome);
@@ -325,27 +380,41 @@ export async function createAfterHoursAgent(
           formattedPhone = `+${formattedPhone}`;
         }
 
-        const result = await SyncAgentService.createTicket({
-          departmentId: AFTER_HOURS_DEPARTMENT_ID,
-          requestTypeId: mapping.requestTypeId,
-          requestReasonId: mapping.requestReasonId,
-          patientFirstName: params.patient_first_name,
-          patientLastName: params.patient_last_name,
+        // Content-based routing (2026-07-25): the ticketing app's router
+        // picks the department from this text — header pins the sure cases.
+        const typeHeader = REQUEST_TYPE_HEADER[params.triage_outcome as TriageOutcome];
+        const reasonForCalling = [
+          typeHeader ? `Request Type: ${typeHeader}` : null,
+          `Triage outcome: ${params.triage_outcome.replace(/_/g, ' ')}`,
+          '',
+          'Details:',
+          params.description,
+        ].filter((l) => l !== null).join('\n');
+        const extraDetails = [
+          params.pharmacy_name ? `Pharmacy: ${params.pharmacy_name}` : null,
+          params.medication_name ? `Medication: ${params.medication_name}` : null,
+        ].filter(Boolean).join(' | ');
+        const dob = params.patient_birth_month && params.patient_birth_day && params.patient_birth_year
+          ? `${params.patient_birth_month}/${params.patient_birth_day}/${params.patient_birth_year}`
+          : 'Unknown';
+
+        const result = await SyncAgentService.submitSimplifiedTicket({
+          patientFullName: `${params.patient_first_name} ${params.patient_last_name}`.trim(),
+          patientDOB: dob,
+          reasonForCalling,
+          preferredContactMethod: 'phone',
           patientPhone: formattedPhone,
-          patientEmail: params.patient_email,
-          patientBirthMonth: params.patient_birth_month,
-          patientBirthDay: params.patient_birth_day,
-          patientBirthYear: params.patient_birth_year,
-          lastProviderSeen: params.provider_name,
-          locationOfLastVisit: params.location_name,
-          description: params.description,
-          priority: mapping.priority,
-          callData: {
-            callSid: metadata?.callSid,
-            callerPhone: callerPhone,
-            dialedNumber: metadata?.dialedNumber,
-            agentUsed: 'urgent-triage',
-          },
+          patientEmail: params.patient_email ?? undefined,
+          lastProviderSeen: params.provider_name ?? undefined,
+          locationOfLastVisit: params.location_name ?? undefined,
+          additionalDetails: extraDetails || undefined,
+          priority: mapping.priority as 'low' | 'normal' | 'medium' | 'high' | 'urgent',
+          callSid: metadata?.callSid,
+          callerPhone: callerPhone,
+          dialedNumber: metadata?.dialedNumber,
+          agentUsed: 'urgent-triage',
+          callStartTime: new Date().toISOString(),
+          transcript: metadata?.getTranscript?.() || undefined,
         });
 
         if (result.success && result.ticketNumber) {
