@@ -78,12 +78,50 @@ const transferTargets = new Map<string, {
   handoff: Parameters<typeof fileLocationQueueTicket>[0];
   resultRaw: string;
 }>();
+// Calls whose live transfer has already been ACCEPTED by the office.
+//
+// A successful transfer is terminal: the patient is talking to a human. Once
+// a callId is in here, no second dial may run and no
+// "TRANSFER NOT ANSWERED" ticket may ever be filed for it.
+//
+// Why this exists (2026-07-27): staff were being told to call back patients
+// who had already been helped. Ticket 39202 said the transfer "did not
+// connect" 45 seconds after callback 62 recorded outcome 'transferred_live'
+// on the same call — and `transferred_live` is only ever written from the
+// outcome.ok branch below, so the transfer demonstrably succeeded. Running
+// at 3 of 18 successful transfers (~17%), flat across the day.
+//
+// The cause is transfer_to_office executing more than once for one call.
+// The success path deletes the transferTargets entry, so a *sequential*
+// repeat is already harmless — it returns no_transfer_packet and files
+// nothing. An *overlapping* repeat is not: both invocations read the target
+// before either deletes it, the second dials an office that is already
+// merged into the caller's conference, that dial times out at ~45s, and the
+// catch files a failure ticket for a call that connected. The 45-second gap
+// in the production data is exactly the dial timeout.
+//
+// Deliberately keyed on success rather than on "a dial is in flight": the
+// guarantee staff need is about the OUTCOME, and it holds regardless of how
+// the duplicate invocation is interleaved.
+const transferredCalls = new Set<string>();
+
+/** Record that the office ACCEPTED a live transfer for this call. Terminal. */
+export function markAzulTransferAccepted(callId: string): void {
+  transferredCalls.add(callId);
+}
+
+/** True once a live transfer for this call has been accepted by the office. */
+export function hasAzulTransferAccepted(callId: string): boolean {
+  return transferredCalls.has(callId);
+}
+
 export function registerAzulOfficeTransferCallback(callId: string, cb: AzulOfficeTransfer): void {
   officeTransferCallbacks.set(callId, cb);
 }
 export function unregisterAzulOfficeTransferCallback(callId: string): void {
   officeTransferCallbacks.delete(callId);
   transferTargets.delete(callId);
+  transferredCalls.delete(callId);
 }
 
 // ── Live transcript access for tickets ───────────────────────────────────
@@ -233,6 +271,15 @@ async function fileLocationQueueTicket(
     }
   };
   try {
+    // Structural guard: a call that already connected can NEVER produce a
+    // "TRANSFER NOT ANSWERED" ticket, whichever call site asks. The callers
+    // check this too; enforcing it here means a future call site cannot
+    // reintroduce the defect by forgetting to.
+    if (failedTransfer && meta?.callId && transferredCalls.has(meta.callId)) {
+      console.warn(`[AZUL-SCHED] suppressed failed-transfer ticket for ${meta.callId} — transfer already accepted`);
+      record({ skipped: 'transfer already accepted' });
+      return;
+    }
     if (!TICKETING_URL || !TICKETING_KEY) {
       console.warn('[AZUL-SCHED] ticketing env not configured — tier-3 ticket skipped');
       record({ skipped: 'ticketing env not configured' });
@@ -862,6 +909,13 @@ export function createAzulSchedulingAgent(
     parameters: z.object({}),
     execute: async () => {
       const callId = metadata?.callId;
+      // Already connected: a repeat invocation is a no-op, not a second dial.
+      // Re-dialling an office that is already merged into this caller's
+      // conference times out and files a failure ticket for a call that
+      // succeeded — the spurious TRANSFER NOT ANSWERED staff were seeing.
+      if (callId && transferredCalls.has(callId)) {
+        return { transferred: true };
+      }
       const target = callId ? transferTargets.get(callId) : undefined;
       if (!callId || !target) {
         return {
@@ -914,6 +968,10 @@ export function createAzulSchedulingAgent(
           callLogId: metadata?.callLogId,
         });
         if (outcome.ok) {
+          // Mark BEFORE clearing the target: a concurrent invocation that is
+          // already past the target lookup must still be barred from filing a
+          // failure ticket when its own dial times out.
+          markAzulTransferAccepted(callId);
           transferTargets.delete(callId);
           // Accepted transfer = the promise is KEPT — resolve the console
           // callback so staff don't also call the patient back (Phase 1.5
@@ -930,6 +988,14 @@ export function createAzulSchedulingAgent(
         throw new Error(outcome.detail || 'no_answer');
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
+        // A concurrent invocation may have connected the caller while this
+        // dial was timing out. The patient is with a human either way, so
+        // report success and file nothing — telling staff to call back
+        // someone who was already helped is the worse error.
+        if (transferredCalls.has(callId)) {
+          console.warn(`[AZUL-SCHED] tier-2 transfer errored (${detail}) but call already connected — suppressing failure ticket`);
+          return { transferred: true };
+        }
         console.warn(`[AZUL-SCHED] tier-2 transfer failed: ${detail}`);
         void fileLocationQueueTicket(target.handoff, target.resultRaw, { callId, callSid: metadata?.callSid }, true);
         transferTargets.delete(callId);
