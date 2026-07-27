@@ -1079,6 +1079,10 @@ const warmTransferAccepts = new Map<string, {
   reject: (err: Error) => void;
   conferenceName: string;
   openAiCallId: string;
+  // Async answering-machine-detection verdict for this office leg, recorded
+  // by /api/voice/warm-transfer-amd before the briefing finishes. Only
+  // consulted when the office never pressed a key — see the accept handler.
+  answeredBy?: string;
 }>();
 
 async function transferConferenceToNumber(
@@ -1113,18 +1117,27 @@ async function transferConferenceToNumber(
   try {
     const acceptUrl = `https://${envConfig.domain}/api/voice/warm-transfer-accept`;
     const statusUrl = `https://${envConfig.domain}/api/voice/warm-transfer-status`;
+    const amdUrl = `https://${envConfig.domain}/api/voice/warm-transfer-amd`;
     const say = escapeXml(briefing.slice(0, 800));
+    // The second Gather uses actionOnEmptyResult so that staff who simply
+    // listen to the briefing and say nothing are STILL connected. Previously
+    // both Gathers fell through to a "No confirmation received. Goodbye."
+    // hangup, so an office that answered but never pressed a key was recorded
+    // as an unanswered transfer and the caller — who was holding in silence —
+    // was dropped to a callback ticket. A keypress still connects instantly;
+    // staying on the line now connects too. Answering machines are filtered
+    // by the async AMD verdict in the accept handler rather than by relying
+    // on a human to press a digit.
     const twiml =
       `<?xml version="1.0" encoding="UTF-8"?><Response>` +
       `<Gather input="dtmf" numDigits="1" timeout="8" action="${acceptUrl}" method="POST">` +
       `<Say voice="Polly.Joanna">${say}</Say>` +
       `<Say voice="Polly.Joanna">Press any key to accept the call.</Say>` +
       `</Gather>` +
-      `<Gather input="dtmf" numDigits="1" timeout="8" action="${acceptUrl}" method="POST">` +
+      `<Gather input="dtmf" numDigits="1" timeout="8" actionOnEmptyResult="true" action="${acceptUrl}" method="POST">` +
       `<Say voice="Polly.Joanna">Repeating: ${say}</Say>` +
-      `<Say voice="Polly.Joanna">Press any key to accept the call.</Say>` +
+      `<Say voice="Polly.Joanna">Press any key to accept, or just stay on the line and I will connect you.</Say>` +
       `</Gather>` +
-      `<Say voice="Polly.Joanna">No confirmation received. Goodbye.</Say>` +
       `</Response>`;
     const dialResult = await withResiliency(
       async () => twilioClient.calls.create({
@@ -1135,6 +1148,12 @@ async function transferConferenceToNumber(
         statusCallback: statusUrl,
         statusCallbackEvent: ['completed'],
         statusCallbackMethod: 'POST',
+        // Async so detection runs alongside the briefing instead of delaying
+        // it. The verdict lands well before the second Gather times out.
+        machineDetection: 'Enable',
+        asyncAmd: 'true',
+        asyncAmdStatusCallback: amdUrl,
+        asyncAmdStatusCallbackMethod: 'POST',
       }),
       getCircuitBreaker('twilio-office-transfer'),
       TWILIO_RETRY_CONFIG,
@@ -4501,7 +4520,28 @@ export function setupVoiceAgentRoutes(app: Express): void {
       res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">This transfer has expired. Goodbye.</Say><Hangup/></Response>`);
       return;
     }
-    console.log(`[WARM-TRANSFER] ✓ Keypress accept from ${callSid} → joining conference ${pending.conferenceName}`);
+    // Two ways to get here: the office pressed a key (Digits present), or the
+    // briefing played out and the second Gather fired on an empty result.
+    // A keypress is proof of a human and is always honoured. A silent
+    // fall-through is only honoured if answering-machine detection did NOT
+    // say we are talking to a machine — otherwise we would merrily connect a
+    // waiting patient to the office voicemail greeting.
+    const digits = (parsedBody.Digits ?? '').trim();
+    const answeredBy = pending.answeredBy ?? '';
+    const isMachine = answeredBy.startsWith('machine') || answeredBy === 'fax';
+    if (!digits && isMachine) {
+      console.warn(
+        `[WARM-TRANSFER] ✗ Silent fall-through on ${callSid} but AMD says '${answeredBy}' — refusing to connect the patient to voicemail`,
+      );
+      res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
+      warmTransferAccepts.delete(callSid);
+      pending.reject(new Error(`Office leg answered by ${answeredBy}`));
+      return;
+    }
+    console.log(
+      `[WARM-TRANSFER] ✓ ${digits ? 'Keypress' : 'Stay-on-line'} accept from ${callSid}` +
+        `${digits ? '' : ` (AMD: ${answeredBy || 'no verdict'})`} → joining conference ${pending.conferenceName}`,
+    );
     res.send(
       `<?xml version="1.0" encoding="UTF-8"?><Response>` +
       `<Say voice="Polly.Joanna">Connecting you to the patient now.</Say>` +
@@ -4510,6 +4550,25 @@ export function setupVoiceAgentRoutes(app: Express): void {
     );
     warmTransferAccepts.delete(callSid);
     pending.resolve();
+  });
+
+  // Async answering-machine detection verdict for a warm-transfer office leg.
+  // Recorded against the pending transfer so the accept handler can tell a
+  // real person who stayed quiet from a voicemail greeting. Fires a few
+  // seconds into the briefing, well before the second Gather times out.
+  app.post("/api/voice/warm-transfer-amd", webhookRateLimiter, async (req: { body: { toString: (enc: string) => string } }, res: { type: (t: string) => void; send: (b: string) => void }) => {
+    const parsedBody = Object.fromEntries(new URLSearchParams(req.body.toString("utf8")));
+    const callSid = parsedBody.CallSid;
+    const answeredBy = parsedBody.AnsweredBy ?? '';
+    const pending = callSid ? warmTransferAccepts.get(callSid) : undefined;
+    if (pending) {
+      pending.answeredBy = answeredBy;
+      console.log(`[WARM-TRANSFER] AMD verdict for ${callSid}: ${answeredBy || 'unknown'}`);
+    } else {
+      console.warn(`[WARM-TRANSFER] AMD verdict for unknown/expired CallSid ${callSid}: ${answeredBy}`);
+    }
+    res.type("text/xml");
+    res.send(`<?xml version="1.0" encoding="UTF-8"?><Response/>`);
   });
 
   // Warm-transfer status: the office leg ended (no-answer / busy / failed /
