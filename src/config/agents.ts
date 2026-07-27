@@ -35,7 +35,7 @@ export class AgentRegistry {
       description: noIvrAgentConfig.description,
       twilioNumbers: [],
       agentType: 'inbound',
-      version: '1.10.0', // v1.10.0: direct appointment answers, ghost call filtering, improved language detection, open ticket awareness, appointment confirmation handling
+      version: noIvrAgentConfig.version, // v1.13.0: after-hours routing mandate — Request Type pinning, transcript at filing, urgent-transfer record ticket
       voice: noIvrAgentConfig.voice,
       language: noIvrAgentConfig.language,
       greeting: noIvrAgentConfig.greeting,

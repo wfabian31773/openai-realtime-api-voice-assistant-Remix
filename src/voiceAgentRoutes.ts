@@ -893,7 +893,10 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
           callData: {
             callSid: getTwilioCallSid(conferenceName),
             callerPhone: callerID,
-            agentUsed: 'after-hours',
+            // This shared fallback fires for ANY agent whose transfer went
+            // unanswered — label the ticket with the agent actually on the
+            // call (no-ivr in production) instead of a hardcoded slug.
+            agentUsed: callMetadataForDB.get(openAiCallId)?.agentSlug || 'after-hours',
           },
         });
 
@@ -1606,6 +1609,9 @@ async function observeCall(
             dialedNumber: to,
             callLogId: callLogId, // For patient context updates
             variant: 'production' as const, // PRODUCTION variant with full features
+            // Tickets carry the conversation up to the moment of filing —
+            // the ticketing app generates its staff-facing summary from it.
+            getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
           }
         );
         break;
@@ -1622,6 +1628,7 @@ async function observeCall(
             dialedNumber: to,
             callLogId: callLogId,
             variant: 'development' as const, // DEVELOPMENT variant - testing new features before production
+            getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
           }
         );
         break;

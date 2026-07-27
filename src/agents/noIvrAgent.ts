@@ -49,7 +49,30 @@ export interface NoIvrAgentMetadata {
   dialedNumber?: string;
   callLogId?: string; // Database call log ID for patient context updates
   variant?: NoIvrAgentVariant; // Production or development variant
+  /** Live transcript up to the moment of filing — lets the ticketing app generate its staff-facing summary at creation instead of waiting for post-call enrichment. */
+  getTranscript?: () => string;
 }
+
+// Operator mandate 2026-07-25: department-by-call-content, urgents-only in
+// the After Hours queue. This agent (the PRODUCTION after-hours line) has
+// always submitted through /api/voice-agent/submit-ticket, where the
+// ticketing app's own router decides the department — but it never forwarded
+// the triage category it collects, leaving routing to keyword guessing. A
+// "Request Type:" header pins the unambiguous cases so the app's PRIORITY-1
+// database lookup wins. Labels must match the afterHoursAgent map exactly.
+const CATEGORY_TO_REQUEST_TYPE: Partial<Record<string, string>> = {
+  // Appointment family → Appointment Request (routes per the app's taxonomy).
+  new_appointment: 'Appointment Request',
+  confirm_appointment: 'Appointment Request',
+  appointment_request: 'Appointment Request',
+  reschedule_appointment: 'Appointment Request',
+  cancel_appointment: 'Appointment Request',
+  // Medication family → Medication Refill (routes to Technicians).
+  medication_refill: 'Medication Refill',
+  prescription_question: 'Medication Refill',
+  // billing/insurance/general/test_results/message_for_provider/follow_up_care:
+  // no header — the app's keyword router (incl. multilingual tables) decides.
+};
 
 function expandTwoDigitYear(shortYear: string): string {
   const yearNum = parseInt(shortYear, 10);
@@ -156,7 +179,7 @@ function buildNoIvrSystemPrompt(
   const timeContext = getCurrentDateTimeContext();
   const { callerPhone } = metadata;
   const isProduction = variant === 'production';
-  const versionString = isProduction ? '1.12.0' : '1.12.0-dev';
+  const versionString = isProduction ? '1.13.0' : '1.13.0-dev';
 
   let scheduleContextSection = "";
   if (scheduleContext?.patientFound) {
@@ -788,7 +811,7 @@ export async function createNoIvrAgent(
   // Determine variant from metadata (default to production for backward compatibility)
   const variant: NoIvrAgentVariant = metadata.variant || 'production';
   const isProduction = variant === 'production';
-  const versionString = isProduction ? '1.12.0' : '1.12.0-dev';
+  const versionString = isProduction ? '1.13.0' : '1.13.0-dev';
   const agentTag = isProduction ? 'NO-IVR-PROD' : 'NO-IVR-DEV';
   
   // Environment identification tag for call tracing
@@ -1099,9 +1122,16 @@ The ticket will include schedule context (last appointment info) automatically.`
       }
 
       // Prepend [NO CALLBACK NEEDED] tag to summary when callback is not required
-      const finalSummary = requiresCallback 
-        ? params.request_summary 
+      const taggedSummary = requiresCallback
+        ? params.request_summary
         : `[NO CALLBACK NEEDED] ${params.request_summary}`;
+
+      // Pin the department route for unambiguous categories (operator
+      // mandate 2026-07-25) — first line wins the app's database lookup.
+      const requestTypeHeader = CATEGORY_TO_REQUEST_TYPE[params.request_category];
+      const finalSummary = requestTypeHeader
+        ? `Request Type: ${requestTypeHeader}\n${taggedSummary}`
+        : taggedSummary;
       
       // Build full patient name for simplified endpoint
       const patientFullName = `${params.first_name} ${params.last_name}`;
@@ -1132,6 +1162,9 @@ The ticket will include schedule context (last appointment info) automatically.`
         dialedNumber: metadata.dialedNumber,
         agentUsed: 'no-ivr',
         callStartTime: new Date().toISOString(),
+        // Transcript at filing → the app generates the staff-facing summary
+        // immediately instead of waiting for post-call enrichment.
+        transcript: metadata.getTranscript?.() || undefined,
       });
 
       if (result.error?.includes('Missing required information')) {
@@ -1284,6 +1317,48 @@ For healthcare provider calls — escalate immediately with whatever info you ha
       try {
         await handoffToHuman();
         console.info("[HANDOFF] ✓ handoffToHuman() completed successfully");
+
+        // Operator mandate 2026-07-25: every urgent outcome leaves a record
+        // ticket pinned to the After Hours queue. On a successful transfer
+        // the caller is already with the on-call human, so this runs
+        // fire-and-forget — a ticket failure must never fail the handoff.
+        // (Failed transfers are covered by addHumanAgent's fallback ticket;
+        // the per-callSid claim lock dedupes if both paths ever race.)
+        void (async () => {
+          try {
+            const { SyncAgentService } = await import("../services/syncAgentService");
+            const name = [params.patient_first_name, params.patient_last_name]
+              .filter(Boolean).join(' ').trim() || 'Unknown Caller';
+            const phone = normalizePhoneNumber(params.callback_number || metadata.callerPhone || '');
+            const result = await SyncAgentService.submitSimplifiedTicket({
+              patientFullName: name,
+              patientDOB: params.patient_dob || 'Unknown',
+              reasonForCalling: [
+                'Request Type: Urgent/Emergency Transfer',
+                `URGENT TRANSFER (record ticket — caller connected to on-call): ${params.reason}`,
+                params.symptoms_summary ? `Symptoms: ${params.symptoms_summary}` : null,
+                params.provider_info ? `Provider: ${params.provider_info}` : null,
+              ].filter(Boolean).join('\n'),
+              preferredContactMethod: 'phone',
+              patientPhone: phone || undefined,
+              priority: params.caller_type === 'patient_unresponsive' ? 'medium' : 'urgent',
+              callSid: metadata.callSid,
+              callerPhone: metadata.callerPhone,
+              dialedNumber: metadata.dialedNumber,
+              agentUsed: 'no-ivr',
+              callStartTime: new Date().toISOString(),
+              transcript: metadata.getTranscript?.() || undefined,
+            });
+            if (result.success) {
+              console.info(`[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}`);
+            } else {
+              console.error(`[HANDOFF] ✗ Urgent transfer record ticket failed: ${result.error}`);
+            }
+          } catch (recordErr) {
+            console.error('[HANDOFF] ✗ Exception creating urgent transfer record ticket:', recordErr);
+          }
+        })();
+
         return { success: true, message: "Call transferred to on-call provider." };
       } catch (handoffError) {
         console.error("[HANDOFF] ✗ handoffToHuman() threw error:", handoffError);
@@ -1335,7 +1410,7 @@ export const noIvrAgentConfig = {
   slug: "no-ivr",
   name: "No-IVR After-Hours Agent",
   description: "Single agent that answers all calls directly without IVR menu. Uses conversation to determine caller type and urgency. Transfers to human for urgent cases.",
-  version: "1.11.0",
+  version: "1.13.0",
   greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching
