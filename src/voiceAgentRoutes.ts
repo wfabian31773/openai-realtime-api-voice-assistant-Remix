@@ -270,8 +270,11 @@ interface SIPWatchdog {
   environment: string; // CRITICAL: Store originating APP_ENV to prevent cross-environment contamination
 }
 
-// Maximum duration for any SIP call (10 minutes) - safety net for orphaned connections
-const SIP_MAX_DURATION_MS = 10 * 60 * 1000;
+// NOTE: the SIP watchdog's max-duration timer uses getMaxDurationMs(agentSlug)
+// from callLifecycleCoordinator, NOT a constant here. A hardcoded
+// SIP_MAX_DURATION_MS used to live on this line, unreferenced — changing it
+// did nothing, which is a trap for anyone trying to adjust call length.
+// Call durations are configured in AGENT_MAX_DURATION_MS, one place.
 const sipWatchdogs = new Map<string, SIPWatchdog>();
 
 // Cancel watchdog when webhook arrives (also clears max-duration timer)

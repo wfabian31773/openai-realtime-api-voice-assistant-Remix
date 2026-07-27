@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { CallGradingService, DeterministicGraderInput } from './callGradingService';
 import { redactPHI, redactGraderResults } from './phiSanitizer';
 import { HANDOFF_VALID_TRANSITIONS } from '../../shared/schema';
+import { getMaxDurationMs } from './callLifecycleCoordinator';
 
 function makeInput(overrides: Partial<DeterministicGraderInput> = {}): DeterministicGraderInput {
   return {
@@ -117,6 +118,32 @@ describe('Deterministic Graders', () => {
       const grader = results.find(r => r.grader === 'emergency_handling');
       expect(grader).toBeDefined();
       expect(grader!.pass).toBe(true);
+    });
+  });
+
+  describe('call duration limits', () => {
+    it('gives every conversational agent more than 10 minutes', () => {
+      // Staff reported calls dropping mid-call on 2026-07-27. Durations were
+      // stacking against a 10-minute ceiling (601/602/605/609s) with
+      // agent_outcome 'inconclusive' — real callers cut off unfinished.
+      for (const slug of ['azul-scheduling', 'no-ivr', 'after-hours', 'answering-service']) {
+        expect(getMaxDurationMs(slug)).toBeGreaterThan(10 * 60 * 1000);
+      }
+    });
+
+    it('keeps azul-scheduling the longest — it has the longest tail', () => {
+      expect(getMaxDurationMs('azul-scheduling')).toBeGreaterThanOrEqual(getMaxDurationMs('no-ivr'));
+    });
+
+    it('resolves an unknown agent to a sane default, not a surprise cap', () => {
+      // agentSlug does not always reach the scheduler; an answering-service
+      // call ran 609s against a nominal 420s cap because it fell through.
+      expect(getMaxDurationMs(undefined)).toBeGreaterThan(10 * 60 * 1000);
+      expect(getMaxDurationMs('some-agent-that-does-not-exist')).toBeGreaterThan(10 * 60 * 1000);
+    });
+
+    it('keeps outbound confirmations short', () => {
+      expect(getMaxDurationMs('appointment-confirmation')).toBe(3 * 60 * 1000);
     });
   });
 

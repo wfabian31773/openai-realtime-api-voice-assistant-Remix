@@ -9,14 +9,50 @@ import { twilioInsightsService } from './twilioInsightsService';
 
 export type CallState = 'initiated' | 'ringing' | 'in_progress' | 'ending' | 'completed' | 'failed';
 
-/** Max call duration by agent type. Outbound confirmations are short; triage gets full 10 min. */
+/**
+ * Max call duration by agent type.
+ *
+ * These are a COST BACKSTOP against orphaned sessions, not a conversation
+ * budget. When one fires, Twilio hangs up on whoever is mid-sentence — there
+ * is no warning to the caller and no graceful wrap-up.
+ *
+ * Raised 2026-07-27 after staff reported calls dropping mid-call. Durations
+ * were piling up against the old 10-minute ceiling — 601, 601, 601, 602, 602,
+ * 602, 602, 605, 609 seconds — and the no-ivr calls cut at 602s all recorded
+ * `agent_outcome: inconclusive` with no transfer, i.e. a real caller was
+ * dropped with their business unfinished. azul-scheduling averages 272s, so
+ * 10 minutes was only ~2x the mean: far too tight for a distribution with a
+ * long tail (identity checks, elderly callers, interpreter-paced calls).
+ *
+ * Note the old per-agent values were not actually taking effect. An
+ * answering-service call ran 609s against a nominal 420s cap, which means
+ * agentSlug did not reach scheduleMaxDurationTimeout and it fell through to
+ * DEFAULT. Every agent was really running on the 10-minute default. Every
+ * agent now has an explicit entry and DEFAULT is aligned, so a missing slug
+ * degrades to a sane ceiling rather than a surprise one.
+ */
 const AGENT_MAX_DURATION_MS: Record<string, number> = {
-  'appointment-confirmation': 3 * 60 * 1000,  // 3 min — confirmations complete in 60-90s
-  'after-hours':              7 * 60 * 1000,  // 7 min — after-hours answering
-  'answering-service':        7 * 60 * 1000,  // 7 min — answering service
-  'azul-scheduling':         10 * 60 * 1000,  // 10 min — identity + search + book takes longer with elderly callers
+  'appointment-confirmation': 3 * 60 * 1000,  // 3 min — outbound, completes in 60-90s; unchanged
+  'after-hours':             15 * 60 * 1000,  // 15 min — triage, can involve on-call escalation
+  'answering-service':       15 * 60 * 1000,  // 15 min — was nominally 7, never actually applied
+  'no-ivr':                  15 * 60 * 1000,  // 15 min — explicit; previously fell through to DEFAULT
+  'azul-scheduling':         20 * 60 * 1000,  // 20 min — identity + search + book, longest tail of any agent
 };
-const DEFAULT_MAX_DURATION_MS = 10 * 60 * 1000; // 10 min — full triage (no-ivr, drs-scheduler, etc.)
+const DEFAULT_MAX_DURATION_MS = 15 * 60 * 1000; // 15 min — unknown/new agents
+
+/**
+ * Absolute ceiling for the startup sweep and the DB reconciler, both of which
+ * force-terminate calls older than this REGARDLESS of the per-agent cap.
+ *
+ * Derived rather than hardcoded, because it silently overrides everything
+ * above it. It sat at a literal 10 minutes while azul-scheduling was nominally
+ * allowed 10 — so the reconciler could cut a call at the exact moment the
+ * agent was still entitled to run, and raising the per-agent value alone would
+ * have changed nothing. Keeping it a function of the map means the two cannot
+ * drift apart again.
+ */
+const ABSOLUTE_MAX_CALL_DURATION_MS =
+  Math.max(DEFAULT_MAX_DURATION_MS, ...Object.values(AGENT_MAX_DURATION_MS)) + 5 * 60 * 1000;
 
 export function getMaxDurationMs(agentSlug?: string): number {
   if (agentSlug && agentSlug in AGENT_MAX_DURATION_MS) {
@@ -70,7 +106,7 @@ class CallLifecycleCoordinator extends EventEmitter {
   private readonly FORCE_CLEANUP_DELAY_MS = 30000; // 30 seconds after first termination signal
   private readonly OPENAI_ONLY_CLEANUP_DELAY_MS = 10000; // 10 seconds when only OpenAI session-end signal exists
   private readonly STALE_CALL_THRESHOLD_MS = 120000; // 2 minutes without activity = stale
-  private readonly DEFAULT_MAX_CALL_DURATION_MS = 600000; // 10 minutes default
+  private readonly DEFAULT_MAX_CALL_DURATION_MS = ABSOLUTE_MAX_CALL_DURATION_MS; // 25 min — must exceed every per-agent cap
   private readonly PENDING_TRANSCRIPT_TIMEOUT_MS = 60000; // Clean up pending transcripts after 60 seconds
   private readonly BUFFERED_TERMINATION_TIMEOUT_MS = 60000; // Buffer termination signals for up to 60 seconds (extended from 30s)
   private maxDurationTimeouts = new Map<string, NodeJS.Timeout>();
