@@ -27,6 +27,9 @@ interface AlertState {
   systemHealthy: boolean;
   consecutiveFailures: number;
   lastRecoverySentAt: number;
+  /** Last observed 24h grader miss counts, so alerts fire on a RISE rather than on every check. */
+  lastEmergencyMissCount: number;
+  lastProviderMissCount: number;
 }
 
 const ALERT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between same-type alerts
@@ -40,6 +43,8 @@ class SystemAlertService {
     systemHealthy: true,
     consecutiveFailures: 0,
     lastRecoverySentAt: 0,
+    lastEmergencyMissCount: 0,
+    lastProviderMissCount: 0,
   };
 
   private alertHistory: AlertEvent[] = [];
@@ -361,25 +366,40 @@ class SystemAlertService {
       const handoffSuccessRate = handoffTotalCount > 0 ? Math.round((handoffPassCount / handoffTotalCount) * 10000) / 100 : 100;
       const criticalFailRate = totalGraded > 0 ? Math.round((criticalFailCount / totalGraded) * 10000) / 100 : 0;
 
-      if (emergencyMissCount > 0) {
+      // Edge-triggered, not level-triggered.
+      //
+      // These counts are over a rolling 24h window but the check runs every
+      // 15 minutes, and ALERT_COOLDOWN_MS (5 min) is shorter than that — so a
+      // level check (`count > 0`) re-alerts on the SAME calls roughly 96 times
+      // before they age out of the window. That is what paged the on-call
+      // number every 15 minutes on 2026-07-27. Alerting only when the count
+      // RISES means one page per new miss, which is the actual signal.
+      //
+      // The counter resets when the window drains, so a recurrence after a
+      // quiet period pages again rather than staying silent.
+      if (emergencyMissCount > this.state.lastEmergencyMissCount) {
+        const newMisses = emergencyMissCount - this.state.lastEmergencyMissCount;
         await this.sendAlert({
           type: 'emergency_miss',
           severity: 'critical',
-          message: `Emergency handling failure detected: ${emergencyMissCount} emergency miss(es) in last 24h`,
-          details: { emergencyMissCount },
+          message: `Emergency handling failure detected: ${newMisses} new emergency miss(es) (${emergencyMissCount} in last 24h)`,
+          details: { emergencyMissCount, newMisses },
           timestamp: new Date(),
         });
       }
+      this.state.lastEmergencyMissCount = emergencyMissCount;
 
-      if (providerMissCount > 0) {
+      if (providerMissCount > this.state.lastProviderMissCount) {
+        const newMisses = providerMissCount - this.state.lastProviderMissCount;
         await this.sendAlert({
           type: 'provider_miss',
           severity: 'critical',
-          message: `Provider escalation failure: ${providerMissCount} provider miss(es) in last 24h`,
-          details: { providerMissCount },
+          message: `Provider escalation failure: ${newMisses} new provider miss(es) (${providerMissCount} in last 24h)`,
+          details: { providerMissCount, newMisses },
           timestamp: new Date(),
         });
       }
+      this.state.lastProviderMissCount = providerMissCount;
 
       if (handoffSuccessRate < 80 && handoffTotalCount > 3) {
         await this.sendAlert({
