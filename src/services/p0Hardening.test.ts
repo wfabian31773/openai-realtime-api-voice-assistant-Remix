@@ -3,6 +3,11 @@ import { CallGradingService, DeterministicGraderInput } from './callGradingServi
 import { redactPHI, redactGraderResults } from './phiSanitizer';
 import { HANDOFF_VALID_TRANSITIONS } from '../../shared/schema';
 import { getMaxDurationMs } from './callLifecycleCoordinator';
+import {
+  markAzulTransferAccepted,
+  hasAzulTransferAccepted,
+  unregisterAzulOfficeTransferCallback,
+} from '../agents/azulSchedulingAgent';
 
 function makeInput(overrides: Partial<DeterministicGraderInput> = {}): DeterministicGraderInput {
   return {
@@ -118,6 +123,29 @@ describe('Deterministic Graders', () => {
       const grader = results.find(r => r.grader === 'emergency_handling');
       expect(grader).toBeDefined();
       expect(grader!.pass).toBe(true);
+    });
+  });
+
+  describe('accepted-transfer guard (spurious TRANSFER NOT ANSWERED)', () => {
+    it('marks a call as transferred and reports it', () => {
+      // Staff were told to call back patients who had already been helped:
+      // ticket 39202 said the transfer "did not connect" 45s after callback
+      // 62 recorded outcome 'transferred_live' on the same call.
+      expect(hasAzulTransferAccepted('call-guard-a')).toBe(false);
+      markAzulTransferAccepted('call-guard-a');
+      expect(hasAzulTransferAccepted('call-guard-a')).toBe(true);
+    });
+
+    it('does not leak the flag between calls', () => {
+      markAzulTransferAccepted('call-guard-b');
+      expect(hasAzulTransferAccepted('call-guard-c')).toBe(false);
+    });
+
+    it('clears the flag when the call is torn down', () => {
+      markAzulTransferAccepted('call-guard-d');
+      expect(hasAzulTransferAccepted('call-guard-d')).toBe(true);
+      unregisterAzulOfficeTransferCallback('call-guard-d');
+      expect(hasAzulTransferAccepted('call-guard-d')).toBe(false);
     });
   });
 
