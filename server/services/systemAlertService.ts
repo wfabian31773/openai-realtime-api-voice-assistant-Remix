@@ -36,6 +36,23 @@ const ALERT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between same-type alerts
 const MAX_ALERTS_PER_HOUR = 10;
 const FAILURE_THRESHOLD = 3; // Alert after 3 consecutive failures
 
+// System/grader alerts do NOT text. Operator decision, 2026-07-27.
+//
+// URGENT_NOTIFICATION_NUMBER is a human's personal phone, and it has exactly
+// one job: the after-hours no-IVR agent texting a real urgent or emergency
+// caller (`[HANDOFF] INCOMING TRANSFER` in src/voiceAgentRoutes.ts). That
+// channel is untouched and must stay that way.
+//
+// This service is engineering telemetry — grader misses, DB failures,
+// circuit breakers. Sending it to the same phone buries the one message that
+// matters under operational noise; on 2026-07-27 it sent an SMS every 15
+// minutes for hours. Alerts still record to logs and alertHistory, they just
+// don't go to a phone.
+//
+// Set SYSTEM_ALERT_SMS_ENABLED=true to restore, ideally only once these point
+// at an ops channel rather than a personal number.
+const SYSTEM_ALERT_SMS_ENABLED = process.env.SYSTEM_ALERT_SMS_ENABLED === 'true';
+
 class SystemAlertService {
   private state: AlertState = {
     lastAlertTime: new Map(),
@@ -189,15 +206,20 @@ class SystemAlertService {
    * Send SMS alert via Twilio
    */
   private async sendSmsAlert(event: AlertEvent): Promise<void> {
+    if (!SYSTEM_ALERT_SMS_ENABLED) {
+      console.log(`[ALERT SERVICE] SMS suppressed (SYSTEM_ALERT_SMS_ENABLED not set): ${event.type} — ${event.message}`);
+      return;
+    }
+
     try {
       const config = getEnvironmentConfig();
       const alertNumber = config.twilio.urgentNotificationNumber;
-      
+
       if (!alertNumber) {
         console.warn('[ALERT SERVICE] No URGENT_NOTIFICATION_NUMBER configured for SMS alerts');
         return;
       }
-      
+
       const twilioClient = await getTwilioClient();
       const fromNumber = await getTwilioFromPhoneNumber();
       
@@ -244,13 +266,18 @@ class SystemAlertService {
     };
     
     this.alertHistory.push(event);
-    
+
+    if (!SYSTEM_ALERT_SMS_ENABLED) {
+      console.log('[ALERT SERVICE] Recovery SMS suppressed (SYSTEM_ALERT_SMS_ENABLED not set)');
+      return;
+    }
+
     try {
       const config = getEnvironmentConfig();
       const alertNumber = config.twilio.urgentNotificationNumber;
-      
+
       if (!alertNumber) return;
-      
+
       const twilioClient = await getTwilioClient();
       const fromNumber = await getTwilioFromPhoneNumber();
       
@@ -464,7 +491,13 @@ class SystemAlertService {
           details: { synthetic: true },
           timestamp: new Date(),
         });
-        results.push({ alertType: sa.type, delivered: true, detail: 'Alert dispatched (may be suppressed by cooldown/limit)' });
+        results.push({
+          alertType: sa.type,
+          delivered: true,
+          detail: SYSTEM_ALERT_SMS_ENABLED
+            ? 'Alert dispatched (may be suppressed by cooldown/limit)'
+            : 'Alert dispatched to logs only — SMS disabled (SYSTEM_ALERT_SMS_ENABLED not set). No text was sent.',
+        });
       } catch (err: any) {
         results.push({ alertType: sa.type, delivered: false, detail: err.message || 'Send failed' });
       }
