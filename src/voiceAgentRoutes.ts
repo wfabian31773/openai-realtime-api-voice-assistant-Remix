@@ -1078,7 +1078,7 @@ function escapeXml(s: string): string {
 }
 
 const warmTransferAccepts = new Map<string, {
-  resolve: () => void;
+  resolve: (info: { acceptMethod: 'keypress' | 'stay_on_line'; amdVerdict: string }) => void;
   reject: (err: Error) => void;
   conferenceName: string;
   openAiCallId: string;
@@ -1088,12 +1088,27 @@ const warmTransferAccepts = new Map<string, {
   answeredBy?: string;
 }>();
 
+/** Office legs currently bridged (or about to be) into a caller conference,
+ *  keyed by the office leg's CallSid.
+ *
+ *  The conference `<Dial>` that joins the office to the patient was the ONE
+ *  bridge in this codebase with no status callback on it — every other
+ *  conference wires `/api/voice/conference-events`. So the single event that
+ *  proves a transfer physically happened was the one we never recorded, and
+ *  `transferred_live` (written when we DECIDE to connect) had to stand in for
+ *  it. Join/leave events land in /api/voice/office-leg-events. */
+const officeLegBridges = new Map<string, {
+  openAiCallId: string;
+  label: string;
+  joinedAtMs?: number;
+}>();
+
 async function transferConferenceToNumber(
   openAiCallId: string,
   toNumber: string,
   label: string,
   briefing: string,
-): Promise<{ ok: boolean; detail?: string }> {
+): Promise<{ ok: boolean; detail?: string; acceptMethod?: 'keypress' | 'stay_on_line'; amdVerdict?: string }> {
   const conferenceName = getConferenceName(openAiCallId);
   if (!conferenceName) {
     console.error('[WARM-TRANSFER] ✗ No conference found for call:', openAiCallId);
@@ -1109,6 +1124,7 @@ async function transferConferenceToNumber(
   }
 
   let officeCallSid: string | undefined;
+  let acceptInfo: { acceptMethod: 'keypress' | 'stay_on_line'; amdVerdict: string } | undefined;
   let resolveAccepted!: () => void;
   let rejectAccepted!: (err: Error) => void;
   const acceptedPromise = new Promise<void>((resolve, reject) => {
@@ -1175,9 +1191,12 @@ async function transferConferenceToNumber(
       rejectAccepted(new Error('Office did not accept the transfer within the window'));
     }, 80_000);
 
+    officeLegBridges.set(dialedSid, { openAiCallId, label });
+
     warmTransferAccepts.set(dialedSid, {
-      resolve: () => {
+      resolve: (info) => {
         if (timeoutId) clearTimeout(timeoutId);
+        acceptInfo = info;
         resolveAccepted();
       },
       reject: (err) => {
@@ -1189,25 +1208,50 @@ async function transferConferenceToNumber(
     });
 
     await acceptedPromise;
-    console.log('[WARM-TRANSFER] ✓ Office ACCEPTED (keypress) — releasing AI leg');
+    // Was "(keypress)" unconditionally — stale since the stay-on-line accept
+    // was added, and misleading in exactly the situation where knowing which
+    // path ran matters most.
+    console.log(
+      `[WARM-TRANSFER] ✓ Office ACCEPTED via ${acceptInfo?.acceptMethod ?? 'unknown'}` +
+        `${acceptInfo?.acceptMethod === 'stay_on_line' ? ` (AMD: ${acceptInfo.amdVerdict || 'no verdict'})` : ''}` +
+        ' — releasing AI leg',
+    );
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     console.warn('[WARM-TRANSFER] ✗ Transfer failed:', detail);
     if (timeoutId) clearTimeout(timeoutId);
-    if (officeCallSid) warmTransferAccepts.delete(officeCallSid);
+    if (officeCallSid) {
+      warmTransferAccepts.delete(officeCallSid);
+      officeLegBridges.delete(officeCallSid);
+    }
     return { ok: false, detail };
   }
 
   // Mark transferred (same bookkeeping the after-hours path does). Record
   // the ACTUAL office number dialed so the call log doesn't claim the
   // global HUMAN_AGENT_NUMBER was used.
+  //
+  // The coordinator flag is what exempts a call from the per-agent duration
+  // cap — once the office is bridged in, this is a patient talking to a
+  // receptionist and our timer has no business ending it. Marking it used to
+  // depend on `callMeta.dbCallLogId`, which is filled in by a BACKGROUND
+  // database write; if that write had not landed yet, the mark was skipped
+  // silently and the call stayed capped. Mark by openAiCallId as well — the
+  // coordinator maps it to the same record and it exists from registration,
+  // so the exemption no longer races the DB.
+  //
+  // Bock's first call on 2026-07-27 ended at exactly 1200s — the azul cap to
+  // the second — while a receptionist had him on hold. He redialed 45s later,
+  // which is precisely the "same patient calling again and we lost the
+  // original" the front office reported.
+  const { callLifecycleCoordinator } = await import('./services/callLifecycleCoordinator');
+  callLifecycleCoordinator.markTransferred(openAiCallId);
   const callMeta = callMetadataForDB.get(openAiCallId);
   if (callMeta) {
     callMeta.transferredToHuman = true;
     callMeta.transferTargetNumber = toNumber;
     callMeta.transferTargetLabel = label;
     if (callMeta.dbCallLogId) {
-      const { callLifecycleCoordinator } = await import('./services/callLifecycleCoordinator');
       callLifecycleCoordinator.markTransferred(callMeta.dbCallLogId);
     }
   }
@@ -1224,7 +1268,7 @@ async function transferConferenceToNumber(
     // Staffer is joining the conference either way — caller is fine.
     console.warn('[WARM-TRANSFER] ⚠️ AI hangup failed (staffer joining anyway):', hangupErr);
   }
-  return { ok: true };
+  return { ok: true, acceptMethod: acceptInfo?.acceptMethod, amdVerdict: acceptInfo?.amdVerdict };
 }
 
 // Observe and manage call session with dynamic agent selection
@@ -4545,14 +4589,69 @@ export function setupVoiceAgentRoutes(app: Express): void {
       `[WARM-TRANSFER] ✓ ${digits ? 'Keypress' : 'Stay-on-line'} accept from ${callSid}` +
         `${digits ? '' : ` (AMD: ${answeredBy || 'no verdict'})`} → joining conference ${pending.conferenceName}`,
     );
+    // join/leave on THIS conference is the only hard evidence that the two
+    // legs were actually bridged, and how long for. Every other conference in
+    // this file already reports; this one did not, which is why
+    // `transferred_live` — a record of our DECISION to connect — was standing
+    // in for a measurement of what happened.
+    const bridgeEvents = `https://${envConfig.domain}/api/voice/office-leg-events`;
     res.send(
       `<?xml version="1.0" encoding="UTF-8"?><Response>` +
       `<Say voice="Polly.Joanna">Connecting you to the patient now.</Say>` +
-      `<Dial><Conference endConferenceOnExit="true">${escapeXml(pending.conferenceName)}</Conference></Dial>` +
+      `<Dial><Conference endConferenceOnExit="true"` +
+      ` statusCallback="${bridgeEvents}" statusCallbackMethod="POST"` +
+      ` statusCallbackEvent="join leave">${escapeXml(pending.conferenceName)}</Conference></Dial>` +
       `</Response>`,
     );
     warmTransferAccepts.delete(callSid);
-    pending.resolve();
+    pending.resolve({
+      acceptMethod: digits ? 'keypress' : 'stay_on_line',
+      amdVerdict: answeredBy,
+    });
+  });
+
+  // Conference join/leave for a warm-transfer OFFICE leg — the measurement
+  // that `outcome = 'transferred_live'` is not.
+  //
+  // That flag is written when the accept handler decides to connect. It says
+  // nothing about whether the legs were actually bridged, for how long, or
+  // who ended it. On 2026-07-27 two transfers had to be adjudicated by
+  // listening to the audio because no join/leave was ever recorded. With
+  // these events the four cases separate themselves in a query: never joined,
+  // joined and dropped instantly, joined and held, joined and killed by our
+  // own cap (leave absent, call ends on a round number).
+  app.post("/api/voice/office-leg-events", webhookRateLimiter, async (req: { body: { toString: (enc: string) => string } }, res: { sendStatus: (c: number) => void }) => {
+    res.sendStatus(200);
+    const parsedBody = Object.fromEntries(new URLSearchParams(req.body.toString("utf8")));
+    const event = parsedBody.StatusCallbackEvent;
+    const callSid = parsedBody.CallSid;
+    const bridge = callSid ? officeLegBridges.get(callSid) : undefined;
+    if (!bridge) return; // caller leg or an expired transfer — not ours
+
+    const { recordAzulTransferBridge } = await import('./agents/azulSchedulingAgent');
+    if (event === 'participant-join') {
+      bridge.joinedAtMs = Date.now();
+      console.log(`[BRIDGE] ✓ office leg JOINED conference for ${bridge.openAiCallId} (${bridge.label})`);
+      recordAzulTransferBridge(bridge.openAiCallId, {
+        officeJoinedAt: new Date(bridge.joinedAtMs).toISOString(),
+      });
+      return;
+    }
+    if (event === 'participant-leave') {
+      const leftAtMs = Date.now();
+      const seconds = bridge.joinedAtMs
+        ? Math.round((leftAtMs - bridge.joinedAtMs) / 1000)
+        : undefined;
+      console.log(
+        `[BRIDGE] office leg LEFT conference for ${bridge.openAiCallId} (${bridge.label})` +
+          `${seconds != null ? ` after ${seconds}s` : ''}`,
+      );
+      recordAzulTransferBridge(bridge.openAiCallId, {
+        officeLeftAt: new Date(leftAtMs).toISOString(),
+        ...(seconds != null ? { bridgeSeconds: seconds } : {}),
+      });
+      officeLegBridges.delete(callSid);
+    }
   });
 
   // Async answering-machine detection verdict for a warm-transfer office leg.

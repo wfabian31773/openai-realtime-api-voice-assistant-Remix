@@ -864,7 +864,17 @@ class CallLifecycleCoordinator extends EventEmitter {
     if (record) {
       record.transferredToHuman = true;
       logger.handoffCompleted({ callId: callLogId, success: true });
+      return;
     }
+    // A miss used to be silent, which made it invisible that a bridged call
+    // was still holding a live duration cap. The consequence lands ~20
+    // minutes later as a call cut off mid-conversation, with nothing in the
+    // logs connecting the two.
+    logger.warn(`markTransferred found no active call — duration cap NOT released`, {
+      callId: callLogIdOrExternalId,
+      resolvedTo: callLogId,
+      event: 'mark_transferred_miss',
+    });
   }
 
   private scheduleMaxDurationTimeout(callLogId: string, twilioCallSid?: string, agentSlug?: string): void {
