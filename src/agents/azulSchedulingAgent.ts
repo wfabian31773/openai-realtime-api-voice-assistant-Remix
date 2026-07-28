@@ -191,11 +191,18 @@ function liveTranscriptFor(callId: string | undefined): string | undefined {
 const TOOL_TIMEOUT_MS: Record<string, number> = {
   sage_availability: 75_000,
   sage_book: 75_000,
+  sage_reschedule: 75_000, // cancel + book against NGE, same budget as sage_book
+  sage_confirm_appointment: 45_000, // NGE read + patch + read-back
   sage_new_patient_intake: 60_000,
   get_patient_appointments: 60_000,
   get_appointment_details: 60_000,
   list_cancel_reasons: 60_000,
   cancel_appointment: 60_000,
+  // Caller-ID prefetch, raced against a 3s budget at the call site — a 30s
+  // abort (the default below) is meaningless for it and just leaves a socket
+  // open long after the answer could have been used. Post-0107 this resolves
+  // in ~17ms of database time, so 5s is generous.
+  sage_precontext: 5_000,
 };
 
 async function callEyecareTool(
@@ -448,18 +455,36 @@ export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
     const transferred = events.some((e) => e.tool === 'transfer_to_office' && e.outcome.ok === true);
     const ticketed = events.some((e) => e.tool === 'file_location_ticket' && (e.outcome.ok === true || e.outcome.skipped != null));
     const cancelled = events.some((e) => e.tool === 'cancel_appointment' && e.outcome.cancelled !== false && !e.outcome.error);
+    const rescheduled = events.some((e) => e.tool === 'sage_reschedule' && e.outcome.reschedule_status === 'confirmed');
+    // A reschedule that cancelled but failed to rebook leaves the patient with
+    // NO appointment. That is the single worst state this call can end in, so
+    // it overrides every other "resolved" signal — including the successful
+    // cancel event the same operation produces, which would otherwise mark the
+    // call handled and suppress the sweep.
+    const reschedulePartial = events.some(
+      (e) => e.tool === 'sage_reschedule' && e.outcome.reschedule_status === 'cancelled_not_rebooked',
+    );
     const cleanEnd = events.some((e) => e.tool === 'terminate_call' && CLEAN_END_REASONS.has(String(e.args.reason)));
-    if (booked || transferred || ticketed || cancelled || cleanEnd) return;
+    if (!reschedulePartial && (booked || transferred || ticketed || cancelled || rescheduled || cleanEnd)) return;
     const { purpose, result } = classifyAzulCall(events);
-    if (ANSWERED_PURPOSES.has(purpose)) return; // tier-1 info call, resolved on the line
+    // The tier-1 exemption must not swallow a half-completed reschedule: that
+    // call reads as an appointment question, but the patient is left with
+    // nothing on the schedule.
+    if (!reschedulePartial && ANSWERED_PURPOSES.has(purpose)) return; // tier-1 info call, resolved on the line
     const meta = callMetadataForDB.get(callId);
-    console.warn(`[AZUL-SCHED] SWEEP: call ${callId} ended unresolved (${purpose} → ${result}) — filing tier-3 ticket`);
+    console.warn(
+      reschedulePartial
+        ? `[AZUL-SCHED] SWEEP: call ${callId} left a PARTIAL reschedule — patient has no appointment; filing urgent ticket`
+        : `[AZUL-SCHED] SWEEP: call ${callId} ended unresolved (${purpose} → ${result}) — filing tier-3 ticket`,
+    );
     await fileLocationQueueTicket(
       {
-        handoffReason: 'unresolved_call_end',
+        handoffReason: reschedulePartial ? 'booking_status_unknown' : 'unresolved_call_end',
         patient: { name: meta?.callerName, phone: meta?.from },
         callContext: {
-          reasonForCall: `Call ended without a booking, live transfer, or ticket. Last known state: ${purpose} — ${result}. Please call the patient back.`,
+          reasonForCall: reschedulePartial
+            ? 'URGENT — RESCHEDULE LEFT INCOMPLETE. The original appointment was CANCELLED but the replacement did NOT book, so this patient currently has NO appointment. Please call them back and rebook.'
+            : `Call ended without a booking, live transfer, or ticket. Last known state: ${purpose} — ${result}. Please call the patient back.`,
         },
       },
       '{}',
@@ -613,9 +638,41 @@ A caller is a NEW patient ONLY when verify_patient_identity found no match AND t
 5. Confirm: "Done. I've cancelled that appointment. Anything else?"
 NEVER call cancel_appointment again after a success. If a retry ever returns alreadyCancelled, that IS success — the first attempt worked; continue normally and never mention an error. If the cancel tool genuinely errors (and one retry also fails), apologize and offer a callback via sage_handoff.
 
-# WRITE-ONCE RULE (applies to EVERY write tool: sage_book, cancel_appointment, sage_new_patient_intake)
+# Reschedule flow — ONE step, never cancel-then-book
 
-A write that returned success is DONE — never call it again on the same call. Re-calling a successful registration creates duplicate-chart errors (21:01 call re-registered a just-created patient); re-calling a successful cancel or booking creates confusing errors you'll then narrate at the caller. Success → move to the next step, immediately.
+A caller who wants to MOVE an appointment is not cancelling. Never cancel their appointment and then look for a new time — that leaves them holding nothing if the second half fails, and it is not what they asked for. sage_reschedule does both halves as one operation.
+
+1. Verify identity if not yet verified.
+2. "One moment while I pull up your appointments" → get_patient_appointments. Each comes back with a NUMBER. Read the upcoming ones briefly; skip the read-aloud if one was already spoken this call.
+3. Establish WHICH appointment is moving (skip if already obvious from the conversation).
+4. Ask what day and time they'd prefer, then "Let me check our openings for you" → sage_availability with preferredDate (+ timeOfDay). Speak the returned 'say' WORD-FOR-WORD.
+5. Confirm BOTH halves in ONE sentence, then wait for an explicit yes: "So I'll move your July 30th at 1:40 to Tuesday the 5th at 9:00 with Dr. Wernow — correct?" ONE confirmation total; "just do it" IS the yes.
+6. "One moment while I take care of that" → sage_reschedule with the appointment's NUMBER and the option NUMBER.
+7. Read reschedule_status:
+   - 'confirmed' → speak the returned 'say'. Done. Never call sage_reschedule or sage_book again on this call.
+   - 'failed' → nothing changed and their ORIGINAL appointment is intact. Say so plainly ("that time was just taken — your original appointment is still in place"), then offer other times.
+   - 'cancelled_not_rebooked' → SERIOUS. The old appointment is gone and the new one did not take, so they currently have NO appointment. Read patient_script VERBATIM, do NOT offer another time yourself, then sage_handoff (booking_status_unknown). Never tell them they're booked, and never tell them nothing happened.
+   - 'unknown' → say nothing definite either way. Read patient_script, then sage_handoff (api_failure).
+
+If they want to cancel outright with no replacement, that is the cancellation flow, not this one.
+
+# Confirming an existing appointment
+
+Many callers ring only to confirm they're coming. That is a complete answer on its own — handle it and close the call. Do NOT transfer or file a callback for it. You CAN record the confirmation for real: it writes the Confirmed flag the office reads off the appointment book.
+
+1. Verify identity if not yet verified.
+2. "One moment while I pull that up" → get_patient_appointments.
+3. Read it back plainly: "Yes — you're all set for Tuesday, August 5th at 9:00 with Dr. Wernow at our Encinitas office." Then ask directly: "Can I mark you as confirmed for that?"
+4. On a yes: sage_confirm_appointment with that appointment's NUMBER, then speak the returned 'say'. This ticks the same Confirmed box the office sees, so they know you're coming.
+5. Ask if they need anything else, then close warmly.
+
+If they have NO upcoming appointment, say so directly and offer to book one — do not imply one exists.
+
+If the tool returns confirmed=false, tell them plainly what the reason says and never claim it went through. A cancelled or already-kept appointment cannot be confirmed — say so rather than pretending.
+
+# WRITE-ONCE RULE (applies to EVERY write tool: sage_book, sage_reschedule, sage_confirm_appointment, cancel_appointment, sage_new_patient_intake)
+
+A write that returned success is DONE — never call it again on the same call. Re-calling a successful registration creates duplicate-chart errors (21:01 call re-registered a just-created patient); re-calling a successful cancel, booking or reschedule creates confusing errors you'll then narrate at the caller. Success → move to the next step, immediately.
 
 # Frustrated callers (ported from the answering-service agent's protocol)
 
@@ -708,7 +765,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.14.2',
+  version: '2.16.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -841,6 +898,40 @@ export function createAzulSchedulingAgent(
     }),
     execute: async (args) =>
       tracked('sage_book', compact({ ...args, callId: metadata?.callId })),
+  });
+
+  // MOVE an appointment in ONE write. Before this existed the only route was
+  // cancel-then-book: two confirmations, two writes, and a window where the
+  // caller held no appointment at all. An operator hit exactly that live —
+  // the agent asked to cancel first and then rebook, which is not what anyone
+  // means by "move my appointment". The service has done this atomically all
+  // along (reschedule_appointment); azul simply never had the tool.
+  const sageRescheduleTool = tool({
+    name: 'sage_reschedule',
+    description:
+      "MOVE an existing appointment to a new time in ONE step. ALWAYS use this instead of cancelling and re-booking — never do those separately for a move. Prerequisites: get_patient_appointments (gives each appointment a NUMBER) and sage_availability (gives each new time an option NUMBER). Confirm BOTH in one sentence before calling ('move your July 30th 1:40 to Tuesday the 5th at 9am — correct?'). The returned reschedule_status is the ONLY truth: 'confirmed' = moved, speak the returned 'say'; 'cancelled_not_rebooked' = the OLD appointment IS GONE and the new one did NOT take — read patient_script VERBATIM and hand off, never claim either outcome; 'failed' = nothing changed, the original is intact, offer other times; 'unknown' = say nothing definite and hand off.",
+    parameters: z.object({
+      appointmentOrdinal: z.number().describe('The NUMBER of the appointment being moved, from the get_patient_appointments list on THIS call.'),
+      optionNumber: z.number().describe('The NUMBER of the option the caller chose from the LATEST sage_availability offer. The server resolves the slot — you never handle IDs.'),
+    }),
+    execute: async (args) =>
+      tracked('sage_reschedule', compact({ ...args, callId: metadata?.callId })),
+  });
+
+  // Writes the real NextGen "Confirmed" checkbox (appointmentConfirmed) — the
+  // same flag Phreesia sets at pre-registration and the one staff read off the
+  // appointment book. Verified against a live record 2026-07-28; it had been
+  // wrongly reported as non-existent because get_appointment_details discards
+  // every field it does not explicitly map.
+  const sageConfirmAppointmentTool = tool({
+    name: 'sage_confirm_appointment',
+    description:
+      "Mark an appointment CONFIRMED when the caller says they're coming — this ticks the same box the office sees in the appointment book. Prerequisite: get_patient_appointments, so the appointment has a NUMBER. THIS IS A WRITE: only after you have read a specific appointment back to them and they've confirmed attendance. Read the result's `confirmed`: true → speak the returned 'say'; false → read the reason plainly and never claim it was confirmed.",
+    parameters: z.object({
+      appointmentOrdinal: z.number().describe('The NUMBER of the appointment being confirmed, from the get_patient_appointments list on THIS call.'),
+    }),
+    execute: async (args) =>
+      tracked('sage_confirm_appointment', compact({ ...args, callId: metadata?.callId })),
   });
 
   const sageHandoffTool = tool({
@@ -1247,6 +1338,8 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       sagePatientContextTool,
       sageAvailabilityTool,
       sageBookTool,
+      sageRescheduleTool,
+      sageConfirmAppointmentTool,
       sageHandoffTool,
       transferToOfficeTool,
       sageNewPatientIntakeTool,
