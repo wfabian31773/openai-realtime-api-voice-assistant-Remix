@@ -351,7 +351,15 @@ async function fileLocationQueueTicket(
     const reason = handoff.handoffReason;
     const description = [
       failedTransfer
-        ? `TRANSFER NOT ANSWERED — the live transfer to ${queueTeam || 'the office queue'} did not connect. Please call the patient back promptly.`
+        ? reason === 'patient_requested_human'
+          // The caller asked for a person and the office did not pick up, so
+          // the assistant offered them the choice: a callback, or letting it
+          // handle the request itself. It can book, cancel, reschedule and
+          // confirm — so a good share of these are finished on the call. READ
+          // THE TRANSCRIPT before dialling: an unconditional "call them back"
+          // here is how staff end up ringing patients who were already helped.
+          ? `TRANSFER NOT ANSWERED — the live transfer to ${queueTeam || 'the office queue'} did not connect. The assistant offered to handle the request directly; CHECK THE TRANSCRIPT BELOW before calling back, as it may already be resolved.`
+          : `TRANSFER NOT ANSWERED — the live transfer to ${queueTeam || 'the office queue'} did not connect. Please call the patient back promptly.`
         : null,
       `AI scheduling handoff — ${reason.replace(/_/g, ' ')}`,
       handoff.callContext.reasonForCall ? `Reason for call: ${handoff.callContext.reasonForCall}` : null,
@@ -590,7 +598,21 @@ You do NOT own scheduling decisions. The Eye Care system holds the admin-approve
 VERIFY IDENTITY BEFORE ANY HANDOFF OR TRANSFER — no exceptions except a true medical emergency (urgent_symptom: safety first, handle immediately). Even when a caller just says "connect me to the office," first get their name and verify (verify_patient_identity / sage_patient_context) so the office answers knowing who's on the line and the callback packet is complete. If the caller refuses to identify, collect at least a name and note the refusal — then hand off. The server rejects anonymous handoff packets.
 
 Always pass locationName on sage_handoff — the office the caller wants or was being scheduled at. The packet's returned method decides what happens next; follow it exactly:
-- method "cold_transfer": say the step-away line ("Give me one moment while I try to connect you to the office team — if it doesn't go through, I'll be right back with you"), then IMMEDIATELY call transfer_to_office. The caller hears silence while the office is dialed; speak the brief cut-in whenever the system prompts one, then go quiet again. If it returns transferred=true, the calls are merged — your part is over, say NOTHING more. If transferred=false, come back warmly ("Thanks for holding — I wasn't able to reach them directly"), promise the callback ("our team will call you back at this number, usually within the hour"), and wrap up. Never just announce a transfer without calling transfer_to_office, and never call transfer_to_office without a cold_transfer packet.
+- method "cold_transfer": say the step-away line ("Give me one moment while I try to connect you to the office team — if it doesn't go through, I'll be right back with you"), then IMMEDIATELY call transfer_to_office. The caller hears silence while the office is dialed; speak the brief cut-in whenever the system prompts one, then go quiet again. If it returns transferred=true, the calls are merged — your part is over, say NOTHING more. If transferred=false, come back warmly and FOLLOW THE RETURNED instruction — it differs by why they were being transferred. Never just announce a transfer without calling transfer_to_office, and never call transfer_to_office without a cold_transfer packet.
+
+# When a caller asked for "a representative" and the office doesn't pick up
+
+A caller who opens with "representative" or "I want to speak to someone" has told you WHO they want, not WHAT they need. If the office doesn't answer, do not treat that as the end of the road — they may not need a person at all.
+
+Offer both paths in one breath, then follow their answer:
+
+  "Thanks for holding — I wasn't able to reach them directly. I can have someone call you back, usually within the hour — or if you'd like, tell me what you need and I may be able to take care of it right now."
+
+- They pick the callback → confirm warmly, wrap up. The ticket is already filed; don't promise anything more specific than "usually within the hour".
+- They tell you what they need → handle it normally. You can book, cancel, reschedule and confirm appointments, and answer office questions. Many of these are two minutes of work.
+- They decline or repeat that they want a person → take the callback and STOP OFFERING. Ask once. Pushing a second time on someone who has already said they want a human is exactly the experience we are trying to avoid.
+
+Never imply the callback is a lesser option or that you are refusing to connect them — you tried, the office didn't answer, and you're offering the fastest remaining route.
 - method "callback": set the expectation clearly: "Our team will call you back at this number, usually within the hour."
 
 # Scheduling a new appointment — the only allowed flow
@@ -765,7 +787,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.16.0',
+  version: '2.17.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -1146,7 +1168,10 @@ export function createAzulSchedulingAgent(
           transferred: false,
           error: 'office_no_answer',
           detail,
-          instruction: 'The office did not pick up. Apologize, promise the callback ("I was not able to reach them directly, so our team will call you back — usually within the hour"), and wrap up warmly. A high-priority ticket has been filed with the office queue.',
+          instruction:
+            target.handoff.handoffReason === 'patient_requested_human'
+              ? 'The office did not pick up. This caller asked for a person WITHOUT saying what they needed, so do NOT just promise a callback and hang up — OFFER THEM THE CHOICE, warmly and in one breath: "Thanks for holding — I wasn\'t able to reach them directly. I can have someone call you back, usually within the hour — or if you\'d like, tell me what you need and I may be able to take care of it right now." Then FOLLOW THEIR ANSWER. If they want the callback, confirm it warmly and wrap up (the ticket is already filed). If they tell you what they need, handle it normally — you can book, cancel, reschedule and confirm appointments. Ask ONCE; if they decline or repeat that they want a person, take the callback and stop offering.'
+              : 'The office did not pick up. Apologize, promise the callback ("I was not able to reach them directly, so our team will call you back — usually within the hour"), and wrap up warmly. A high-priority ticket has been filed with the office queue.',
         };
       } finally {
         if (hbFirst) clearTimeout(hbFirst);
