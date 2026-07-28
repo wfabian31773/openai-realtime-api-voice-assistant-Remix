@@ -1389,11 +1389,26 @@ async function observeCall(
                         (confNameForDB ? getTwilioCallSid(confNameForDB) : undefined);
   const conferenceNameFromMeta = extMeta?.conferenceNameFromSIP || confNameForDB;
 
-  // AZUL pre-context: start the person-base lookup NOW (the whole session
-  // setup — accept, conference, DB ops — is its runway) and await it with a
-  // short residual race at agent creation. 2026-07-24 00:25: a 2.5s race at
-  // the creation site lost to a Vercel cold start; the match arrived at +5s
-  // and was discarded, so the caller got the full interrogation.
+  // AZUL pre-context: start the person-base lookup NOW and await it with a
+  // short residual race at agent creation.
+  //
+  // The runway is smaller than it looks: this kicks off here, but the race
+  // below sits in the agent-factory switch with only a dynamic import in
+  // between — the REST accept and session.connect() both happen after it. So
+  // the 3s race is effectively in front of the accept, not overlapped with it.
+  //
+  // That mattered enormously while the lookup was slow. Across 108 production
+  // sage_precontext calls the FASTEST was 4,027ms (p50 4,304), so the race
+  // could never be won and every match arrived late. This was repeatedly
+  // written off as a Vercel cold start; it was pm_find_by_phone doing a
+  // sequential scan of 868k rows because patients_master had no statistics
+  // for the 0092 phone indexes. ANALYZE + migration 0107 took it to ~17ms,
+  // which is what makes the race winnable at all.
+  //
+  // Left in front of the accept deliberately: at ~17ms the residual wait is
+  // noise, and winning it outright is what puts the caller's name in the
+  // opening turn. If the lookup ever regresses, the pre-connect write-through
+  // below is the safety net rather than the primary path.
   let azulPrecontextPromise: Promise<import('./agents/azulSchedulingAgent').AzulPrecontext | null> | null = null;
   // Late-arriving pre-context is PARKED here and applied only at a turn
   // boundary (response.done) — operator report 2026-07-24 (live): injecting
@@ -1402,6 +1417,11 @@ async function observeCall(
   // live prompt while she's talking.
   let pendingAzulPrecontext: import('./agents/azulSchedulingAgent').AzulPrecontext | null = null;
   let azulMetadataRef: { precontext?: import('./agents/azulSchedulingAgent').AzulPrecontext } | null = null;
+  // Flipped immediately after session.connect(). Before that point the model
+  // has no audio and the prompt has not been read yet, so a late pre-context
+  // can be written STRAIGHT into metadata; after it, the parked/turn-boundary
+  // path is the only safe one. See the late-resolve handler below.
+  let azulSessionConnected = false;
   if (agentSlug === 'azul-scheduling' && from) {
     azulPrecontextPromise = import('./agents/azulSchedulingAgent')
       .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
@@ -1631,12 +1651,33 @@ async function observeCall(
         };
         if (!azulPrecontext && azulPrecontextPromise) {
           void azulPrecontextPromise.then((late) => {
-            if (late?.matched) {
-              // Parked — applied at the next response.done (turn boundary),
-              // never while the agent is speaking.
-              pendingAzulPrecontext = late;
-              console.log(`[AZUL-SCHED] Pre-context arrived LATE for ...${(from || '').slice(-4)} (matched '${late.firstName}') — parked for the next turn boundary`);
+            if (!late?.matched) return;
+            // BEFORE connect: write straight through.
+            //
+            // The comment above claims instructions() rebuilds the dynamic
+            // tail every turn. It does not. In the installed SDK
+            // getSystemPrompt() — the only thing that evaluates that closure
+            // — runs from #getSessionConfig(), reached only by connect(),
+            // updateAgent() and handoff. This app calls none of the latter
+            // two, so the prompt is frozen at session.connect() and the
+            // parked value was never read by anything. Caller-ID familiarity
+            // reached the model on ~0% of calls: park-only threw away the
+            // single window in which it could still matter.
+            //
+            // connect() re-evaluates instructions, so anything landing before
+            // it does reach the greeting turn. There is no audio yet at that
+            // point, so this cannot cause the mid-utterance prompt churn that
+            // the parking was introduced to prevent.
+            if (!azulSessionConnected && azulMetadataRef) {
+              azulMetadataRef.precontext = late;
+              console.log(`[AZUL-SCHED] Pre-context arrived LATE for ...${(from || '').slice(-4)} (matched '${late.firstName}') — applied pre-connect, will reach the greeting turn`);
+              return;
             }
+            // AFTER connect: park it. Applied at the next response.done —
+            // operator report 2026-07-24: injecting context while the agent
+            // is mid-greeting makes her "lose her speech and thought".
+            pendingAzulPrecontext = late;
+            console.log(`[AZUL-SCHED] Pre-context arrived LATE for ...${(from || '').slice(-4)} (matched '${late.firstName}') — parked for the next turn boundary`);
           });
         }
         azulMetadataRef = azulMetadata;
@@ -2290,7 +2331,10 @@ async function observeCall(
     });
 
     await session.connect({ apiKey: OPENAI_API_KEY!, callId });
-    
+    // Instructions have now been read. From here a late pre-context must go
+    // through the parked/turn-boundary path, never straight into metadata.
+    azulSessionConnected = true;
+
     const connectDurationMs = Date.now() - sessionConnectStart;
     CallDiagnostics.recordStage(callId, 'session_connected', true, { 
       connectDurationMs,
@@ -3972,13 +4016,46 @@ export function setupVoiceAgentRoutes(app: Express): void {
 
     console.info(`[AZUL-SCHED] Routing to azul-scheduling agent (voice=${azulSchedulingAgentConfig.voice}, lang=${azulSchedulingAgentConfig.language})`);
 
+    // Caller-ready gate — created BEFORE the TwiML is sent, exactly as the
+    // no-IVR route does (see the /api/voice/no-ivr handler).
+    //
+    // Without it, `callerReadyPromise` is null at the consumer (the lookup by
+    // conference name below `observeCall`'s accept), the wait is skipped, and
+    // `response.create` fires the greeting as soon as the session is ready —
+    // which can be while the caller is still inside the TwiML, before they
+    // have joined the conference. The greeting is then spoken into an empty
+    // room, and because the prompt forbids repeating it and tells the model
+    // to wait a full 5 seconds of silence before re-prompting, the caller's
+    // first experience of the line is several seconds of nothing.
+    //
+    // The consumer side is already agent-agnostic — it keys purely off the
+    // conference name — and azul already emits `participant-join` (see the
+    // statusCallback below), so the resolver fires today with nothing
+    // listening. This is the missing producer, nothing else.
+    const callerReadyPromise = new Promise<void>((resolve) => {
+      callerReadyResolvers.set(conferenceName, resolve);
+      setTimeout(() => {
+        if (callerReadyResolvers.has(conferenceName)) {
+          console.warn(`[AZUL-SCHED] Caller-ready timeout (10s) for ${conferenceName} — proceeding anyway`);
+          callerReadyResolvers.delete(conferenceName);
+          resolve();
+        }
+      }, 10000);
+    });
+    callerReadyPromises.set(conferenceName, callerReadyPromise);
+    console.info(`[AZUL-SCHED] Caller-ready promise created for: ${conferenceName}`);
+
+    // `<Say>` + real hold audio instead of `<Pause length="1"/>` + waitUrl="".
+    // Two jobs: the caller hears a human voice immediately rather than dead
+    // air, and the ~2-3s of covered audio is genuine runway for the
+    // caller-ID pre-context lookup to land before the greeting turn.
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Pause length="1"/>
+  <Say voice="alice">Please hold while we connect you.</Say>
   <Dial>
     <Conference
       beep="false"
-      waitUrl=""
+      waitUrl="http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical"
       startConferenceOnEnter="true"
       endConferenceOnExit="true"
       participantLabel="customer"

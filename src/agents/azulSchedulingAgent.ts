@@ -196,6 +196,11 @@ const TOOL_TIMEOUT_MS: Record<string, number> = {
   get_appointment_details: 60_000,
   list_cancel_reasons: 60_000,
   cancel_appointment: 60_000,
+  // Caller-ID prefetch, raced against a 3s budget at the call site — a 30s
+  // abort (the default below) is meaningless for it and just leaves a socket
+  // open long after the answer could have been used. Post-0107 this resolves
+  // in ~17ms of database time, so 5s is generous.
+  sage_precontext: 5_000,
 };
 
 async function callEyecareTool(
@@ -708,7 +713,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.14.2',
+  version: '2.14.3',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
