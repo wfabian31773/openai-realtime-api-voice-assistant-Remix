@@ -192,6 +192,7 @@ const TOOL_TIMEOUT_MS: Record<string, number> = {
   sage_availability: 75_000,
   sage_book: 75_000,
   sage_reschedule: 75_000, // cancel + book against NGE, same budget as sage_book
+  sage_confirm_appointment: 45_000, // NGE read + patch + read-back
   sage_new_patient_intake: 60_000,
   get_patient_appointments: 60_000,
   get_appointment_details: 60_000,
@@ -657,18 +658,19 @@ If they want to cancel outright with no replacement, that is the cancellation fl
 
 # Confirming an existing appointment
 
-Many callers just want to hear that their appointment is still there. That is a complete answer on its own — handle it and close the call. Do NOT transfer or file a callback for it.
+Many callers ring only to confirm they're coming. That is a complete answer on its own — handle it and close the call. Do NOT transfer or file a callback for it. You CAN record the confirmation for real: it writes the Confirmed flag the office reads off the appointment book.
 
 1. Verify identity if not yet verified.
 2. "One moment while I pull that up" → get_patient_appointments.
-3. Read it back plainly: "Yes — you're all set for Tuesday, August 5th at 9:00 with Dr. Wernow at our Encinitas office."
-4. Ask if they need anything else, then close warmly.
+3. Read it back plainly: "Yes — you're all set for Tuesday, August 5th at 9:00 with Dr. Wernow at our Encinitas office." Then ask directly: "Can I mark you as confirmed for that?"
+4. On a yes: sage_confirm_appointment with that appointment's NUMBER, then speak the returned 'say'. This ticks the same Confirmed box the office sees, so they know you're coming.
+5. Ask if they need anything else, then close warmly.
 
 If they have NO upcoming appointment, say so directly and offer to book one — do not imply one exists.
 
-You are confirming what our records show; you are not marking anything as confirmed in the chart. Never say "I've marked you as confirmed" or "you're checked in" — say what IS true: the appointment is on the schedule.
+If the tool returns confirmed=false, tell them plainly what the reason says and never claim it went through. A cancelled or already-kept appointment cannot be confirmed — say so rather than pretending.
 
-# WRITE-ONCE RULE (applies to EVERY write tool: sage_book, sage_reschedule, cancel_appointment, sage_new_patient_intake)
+# WRITE-ONCE RULE (applies to EVERY write tool: sage_book, sage_reschedule, sage_confirm_appointment, cancel_appointment, sage_new_patient_intake)
 
 A write that returned success is DONE — never call it again on the same call. Re-calling a successful registration creates duplicate-chart errors (21:01 call re-registered a just-created patient); re-calling a successful cancel, booking or reschedule creates confusing errors you'll then narrate at the caller. Success → move to the next step, immediately.
 
@@ -763,7 +765,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.15.0',
+  version: '2.16.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -914,6 +916,22 @@ export function createAzulSchedulingAgent(
     }),
     execute: async (args) =>
       tracked('sage_reschedule', compact({ ...args, callId: metadata?.callId })),
+  });
+
+  // Writes the real NextGen "Confirmed" checkbox (appointmentConfirmed) — the
+  // same flag Phreesia sets at pre-registration and the one staff read off the
+  // appointment book. Verified against a live record 2026-07-28; it had been
+  // wrongly reported as non-existent because get_appointment_details discards
+  // every field it does not explicitly map.
+  const sageConfirmAppointmentTool = tool({
+    name: 'sage_confirm_appointment',
+    description:
+      "Mark an appointment CONFIRMED when the caller says they're coming — this ticks the same box the office sees in the appointment book. Prerequisite: get_patient_appointments, so the appointment has a NUMBER. THIS IS A WRITE: only after you have read a specific appointment back to them and they've confirmed attendance. Read the result's `confirmed`: true → speak the returned 'say'; false → read the reason plainly and never claim it was confirmed.",
+    parameters: z.object({
+      appointmentOrdinal: z.number().describe('The NUMBER of the appointment being confirmed, from the get_patient_appointments list on THIS call.'),
+    }),
+    execute: async (args) =>
+      tracked('sage_confirm_appointment', compact({ ...args, callId: metadata?.callId })),
   });
 
   const sageHandoffTool = tool({
@@ -1321,6 +1339,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       sageAvailabilityTool,
       sageBookTool,
       sageRescheduleTool,
+      sageConfirmAppointmentTool,
       sageHandoffTool,
       transferToOfficeTool,
       sageNewPatientIntakeTool,
