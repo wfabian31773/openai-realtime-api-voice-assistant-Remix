@@ -70,8 +70,27 @@ export function unregisterAzulHoldingCallback(callId: string): void {
 // up. The transfer TARGET is never model-supplied: it's captured from the
 // sage_handoff packet (transferNumberE164), so the agent can only connect
 // callers to numbers the rules engine routed.
-type AzulOfficeTransfer = (toNumber: string, label: string, briefing: string) => Promise<{ ok: boolean; detail?: string }>;
+// `acceptMethod` and `amdVerdict` describe HOW the office leg accepted, and
+// they matter more than they look. A keypress proves a human pressed a key.
+// A stay-on-line accept only proves the line answered and answering-machine
+// detection did not object — which a phone system auto-answering into a hold
+// queue satisfies identically. On 2026-07-27 that ambiguity cost an evening:
+// callbacks 70 and 72 were read as connected, then as possibly dead air, and
+// only the audio recording settled it. Neither signal was persisted; both
+// existed solely as console log lines. They are recorded on the callback row
+// now (migration 0105).
+type AzulTransferOutcome = {
+  ok: boolean;
+  detail?: string;
+  acceptMethod?: 'keypress' | 'stay_on_line';
+  amdVerdict?: string;
+};
+type AzulOfficeTransfer = (toNumber: string, label: string, briefing: string) => Promise<AzulTransferOutcome>;
 const officeTransferCallbacks = new Map<string, AzulOfficeTransfer>();
+// callId → the console callback row this call's accepted transfer resolved.
+// Held so conference join/leave events arriving AFTER the tool call has
+// returned can still be attributed to the right row.
+const transferBridgeCallbackIds = new Map<string, number>();
 const transferTargets = new Map<string, {
   number: string;
   team: string | null;
@@ -122,6 +141,28 @@ export function unregisterAzulOfficeTransferCallback(callId: string): void {
   officeTransferCallbacks.delete(callId);
   transferTargets.delete(callId);
   transferredCalls.delete(callId);
+  transferBridgeCallbackIds.delete(callId);
+}
+
+/** Record when the office leg actually joined/left the caller's conference.
+ *
+ *  This is the measurement that `outcome = 'transferred_live'` is not. That
+ *  flag says we DECIDED to connect; the bridge says what actually happened —
+ *  never joined, joined and dropped instantly, joined and held, or joined and
+ *  killed by our own duration cap. Fire-and-forget: telemetry must never
+ *  affect a live call. */
+export function recordAzulTransferBridge(
+  callId: string,
+  bridge: { officeJoinedAt?: string; officeLeftAt?: string; bridgeSeconds?: number },
+): void {
+  const callbackId = transferBridgeCallbackIds.get(callId);
+  if (callbackId == null) return;
+  void callEyecareTool('sage_record_transfer_bridge', {
+    callbackId,
+    ...(bridge.officeJoinedAt ? { officeJoinedAt: bridge.officeJoinedAt } : {}),
+    ...(bridge.officeLeftAt ? { officeLeftAt: bridge.officeLeftAt } : {}),
+    ...(bridge.bridgeSeconds != null ? { bridgeSeconds: bridge.bridgeSeconds } : {}),
+  }).catch(() => {});
 }
 
 // ── Live transcript access for tickets ───────────────────────────────────
@@ -667,7 +708,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.14.1',
+  version: '2.14.2',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -977,10 +1018,21 @@ export function createAzulSchedulingAgent(
           // callback so staff don't also call the patient back (Phase 1.5
           // double-callback fix). Fire-and-forget; the live call moves on.
           if (parsedHandoff?.callbackId != null) {
+            const callbackId = Number(parsedHandoff.callbackId);
+            // Remembered so late conference join/leave events can find the row.
+            transferBridgeCallbackIds.set(callId, callbackId);
+            const how =
+              outcome.acceptMethod === 'keypress'
+                ? 'keypress'
+                : outcome.acceptMethod === 'stay_on_line'
+                  ? `stayed on the line (AMD: ${outcome.amdVerdict || 'no verdict'})`
+                  : 'accepted';
             void callEyecareTool('sage_resolve_callback', {
-              callbackId: Number(parsedHandoff.callbackId),
+              callbackId,
               outcome: 'transferred_live',
-              detail: `Accepted by ${target.team ?? 'office queue'} (${target.number})`,
+              detail: `Accepted by ${target.team ?? 'office queue'} (${target.number}) — ${how}`,
+              ...(outcome.acceptMethod ? { acceptMethod: outcome.acceptMethod } : {}),
+              ...(outcome.amdVerdict !== undefined ? { amdVerdict: outcome.amdVerdict } : {}),
             }).catch(() => {});
           }
           return { transferred: true };
