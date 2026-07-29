@@ -22,8 +22,8 @@ function grade(input: RubricInput, name: string) {
 }
 
 describe('azul rubric v2', () => {
-  it('is version 2', () => {
-    expect(RUBRIC_VERSION).toBe(2);
+  it('is version 3', () => {
+    expect(RUBRIC_VERSION).toBe(3);
   });
 
   it('runs every dimension even when one throws', () => {
@@ -298,6 +298,69 @@ describe('azul rubric v2', () => {
           ],
         },
         'rubric_write_once',
+      );
+      expect(r.pass).toBe(false);
+    });
+  });
+
+  // ── calibration against the first real sim run (2026-07-29) ───────────
+  // Every case below is a FALSE POSITIVE the rubric produced on its first
+  // outing against sim traces, blocking a publish it had no business
+  // blocking. They are kept as tests so the fixes can't quietly regress.
+  describe('false positives from the first sim run', () => {
+    it('counts an accepted sage_handoff as a terminal disposition', () => {
+      // The `urgent` persona: flashes and a curtain, correctly routed to a
+      // human — and scored a dead end, because the terminal list only knew
+      // about transfer_to_office and file_location_ticket, neither of which
+      // exists in the sim rig.
+      const r = grade(
+        {
+          transcript: t(
+            ['CALLER', "I've been seeing flashes and a dark curtain since this morning."],
+            ['AGENT', 'I want to get you to our clinical team right away.'],
+          ),
+          events: [{ tool: 'sage_handoff', outcome: { ok: true, handoffReason: 'urgent_symptom' } }],
+        },
+        'rubric_terminal_disposition',
+      );
+      expect(r.pass).toBe(true);
+    });
+
+    it('still calls a REFUSED handoff a dead end', () => {
+      const r = grade(
+        {
+          transcript: t(['CALLER', 'Just connect me to a person.']),
+          events: [{ tool: 'sage_handoff', outcome: { ok: false, error: 'identity_required' } }],
+        },
+        'rubric_terminal_disposition',
+      );
+      expect(r.pass).toBe(false);
+    });
+
+    it('abstains from say-verbatim when the call was translated', () => {
+      // The `spanish` persona scored 17% for obeying the language rule: the
+      // directive arrives in English and MUST be delivered in Spanish.
+      const r = grade(
+        {
+          transcript: t(
+            ['CALLER', '¿Hablas español?'],
+            ['AGENT', 'La oficina de Encinitas está abierta de lunes a viernes, de 8 AM a 5 PM. ¿Hay algo más en lo que pueda ayudarte?'],
+          ),
+          events: [{ tool: 'sage_info', outcome: { say: 'The Encinitas office is open Monday through Friday, 8 AM to 5 PM.' } }],
+        },
+        'rubric_say_verbatim',
+      );
+      expect(r.pass).toBe(true);
+      expect(r.detail).toMatch(/another language/);
+    });
+
+    it('does not let one foreign courtesy excuse an English call', () => {
+      const r = grade(
+        {
+          transcript: t(['AGENT', 'De nada! So, we open at a totally different time than the system said.']),
+          events: [{ tool: 'sage_info', outcome: { say: 'The Encinitas office is open Monday through Friday, 8 AM to 5 PM.' } }],
+        },
+        'rubric_say_verbatim',
       );
       expect(r.pass).toBe(false);
     });

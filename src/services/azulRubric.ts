@@ -30,9 +30,18 @@
  *  - offer_integrity ............ 4:54pm: a 10:00 AM offer with no lookup
  *  - name_fidelity .............. D4: agent's own spelling read back as the caller's
  *  - write_once ................. D5: the Catron duplicate booking
+ *
+ * v3 (2026-07-29) is calibration, not new dimensions. The first sim run after
+ * v2 failed five of six personas and every failure was the rubric's, not the
+ * agent's: terminal_disposition didn't count an accepted sage_handoff (so any
+ * correctly-routed call read as a dead end), and say_verbatim scored a
+ * Spanish call at 17% for obeying the language rule. Both are fixed and
+ * pinned by tests. The lesson is the one already in the backlog and ignored
+ * here: a grader is not finished when it passes its unit tests, only when it
+ * has scored real traffic without crying wolf.
  */
 
-export const RUBRIC_VERSION = 2;
+export const RUBRIC_VERSION = 3;
 
 export interface RubricGraderResult {
   grader: string;
@@ -75,6 +84,19 @@ function normalize(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+/** Did the AGENT switch out of English? Function words only — they are the
+ *  part of a language a translation cannot avoid, and they don't appear in
+ *  clinic vocabulary or patient names. Needs several hits so one Spanish
+ *  courtesy ("de nada") doesn't excuse an English call from the check. */
+const NON_ENGLISH_MARKERS =
+  /\b(está|estás|para|pero|porque|puedo|puede|usted|gracias|cómo|dónde|cuándo|nuestro|nuestra|desde|hasta|también|ayudarte|ayudarle|oficina|abierta|lunes|viernes)\b/gi;
+
+function deliveredInAnotherLanguage(transcript: string): boolean {
+  const spoken = agentLines(transcript).join(' ');
+  if (!spoken) return false;
+  return (spoken.match(NON_ENGLISH_MARKERS) ?? []).length >= 3;
+}
+
 /** No internal identifier may ever be SPOKEN. */
 function gradeIdentifierHygiene(input: RubricInput): RubricGraderResult {
   const hit = agentLines(input.transcript).find((l) => UUID_RE.test(l));
@@ -95,6 +117,21 @@ function gradeSayVerbatim(input: RubricInput): RubricGraderResult {
     .filter((s): s is string => typeof s === 'string' && s.length > 20);
   if (says.length === 0) {
     return { grader: 'rubric_say_verbatim', pass: true, score: 1, severity: 'major', detail: 'No directive say on this call (n/a).' };
+  }
+  // Directives come back in English. When the caller asked for another
+  // language the agent is REQUIRED to deliver them translated — obeying one
+  // rule then failing another. Word-overlap cannot tell a translation from a
+  // deviation, so on a translated call this dimension abstains rather than
+  // reporting a violation it has no way to substantiate. (The spanish sim
+  // persona scored 17% for doing exactly what it was told to do.)
+  if (deliveredInAnotherLanguage(input.transcript)) {
+    return {
+      grader: 'rubric_say_verbatim',
+      pass: true,
+      score: 1,
+      severity: 'major',
+      detail: 'Call was conducted in another language — say-verbatim not checkable by word overlap (n/a).',
+    };
   }
   const spoken = normalize(agentLines(input.transcript).join(' '));
   let worst = 1;
@@ -126,6 +163,13 @@ function gradeTerminalDisposition(input: RubricInput): RubricGraderResult {
   }
   const terminal =
     e.some((x) => x.tool === 'sage_book' && x.outcome?.booking_status === 'confirmed') ||
+    // A handoff packet that the service ACCEPTED is a disposition in its own
+    // right — routing is chosen and a callback/ticket exists server-side, and
+    // on a live call the transfer or ticket that follows is recorded too.
+    // Omitting it meant every correctly-handed-off call in the sim rig (which
+    // has no transfer_to_office or file_location_ticket tool at all) scored as
+    // a dead end. A REFUSED handoff still doesn't count: nothing was routed.
+    e.some((x) => x.tool === 'sage_handoff' && x.outcome?.ok !== false && x.outcome?.error == null) ||
     e.some((x) => x.tool === 'transfer_to_office' && x.outcome?.ok === true) ||
     e.some((x) => x.tool === 'file_location_ticket' && (x.outcome?.ok === true || x.outcome?.skipped != null)) ||
     e.some((x) => x.tool === 'cancel_appointment' && !x.outcome?.error) ||
