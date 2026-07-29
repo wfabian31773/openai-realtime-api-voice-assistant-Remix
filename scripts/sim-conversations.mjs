@@ -16,22 +16,37 @@
  * Personas trace to real live-night failures:
  *  - andrea:   "change my appointment" + claims never seen → must VERIFY,
  *              must NEVER call sage_new_patient_intake (2026-07-24 21:21)
- *  - misheard: existing patient, last name will be mis-stated → the
- *              DOB-wide rescue must verify with the on-file spelling
  *  - spanish:  explicit "¿hablas español?" → must switch, never refuse
  *  - human:    "give me a person" → sage_handoff, no interrogation first
- *  - booker:   happy-path existing booking → reaches a numbered offer and
- *              books via optionNumber (stubbed confirm)
  *  - dupstop:  registers a person the practice already has → on
  *              duplicate_detected must STOP (no second intake call)
+ *  - practice: three practice questions → sage_practice, speech parity
+ *  - urgent:   flashes and a curtain over one eye (2026-07-28 D1) → must
+ *              ROUTE, never quietly book a routine slot
  *
- * Usage: OPENAI_API_KEY=... EYECARE_AGENT_API_KEY=... node scripts/sim-conversations.mjs [persona]
+ * EVERY persona is additionally graded by the SHARED azul rubric — the same
+ * dimensions that score live calls (src/services/azulRubric.ts). That is the
+ * point of this rig after the 2026-07-28 audit: D1/D3/D4 were fixed with
+ * prompt rules only, and a prompt rule with no meter is a hope. Persona
+ * asserts catch what that persona was built for; the rubric catches the
+ * defect classes on EVERY persona, including the ones nobody thought to
+ * assert. A critical rubric violation fails the run.
+ *
+ * Usage: OPENAI_API_KEY=... EYECARE_AGENT_API_KEY=... npm run sim:conv [-- persona]
+ * Runs under tsx (it imports the rubric straight from TypeScript, so the
+ * lab and the live line can never drift apart).
  * Runs on Replit/CI where those keys live. Exit 1 on any failure.
  */
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import * as rubricNs from '../src/services/azulRubric.ts';
+
+// tsx resolves the .ts as CJS (no "type":"module" in package.json), so the
+// exports arrive under .default; a real ESM build would put them on the
+// namespace. Accept both rather than pinning the loader's current behaviour.
+const { runAzulRubric, RUBRIC_VERSION } = rubricNs.default ?? rubricNs;
 
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 const SERVICE_KEY = process.env.EYECARE_AGENT_API_KEY;
@@ -90,19 +105,25 @@ async function openai(messages, opts = {}) {
   return j.choices[0].message;
 }
 
-/** Execute a tool for real against the service — with WRITES STUBBED. */
+/** Execute a tool for real against the service — with WRITES STUBBED.
+ *  The trace entry is written BEFORE the call and its `outcome` filled in
+ *  after, because the rubric grades outcomes (write-once, terminal
+ *  disposition, offer integrity all read them) and a trace of bare tool
+ *  names would silently pass every one of those dimensions. */
 async function execTool(name, args, callId, trace) {
-  trace.push({ tool: name, args });
+  const entry = { tool: name, args, outcome: undefined };
+  trace.push(entry);
+  const record = (outcome) => { entry.outcome = outcome; return outcome; };
   if (name === 'sage_book') {
-    return { say: "You're all set: (SIM) your appointment is booked.", booking_status: 'confirmed', reason: 'SIM STUB — no real write' };
+    return record({ say: "You're all set: (SIM) your appointment is booked.", booking_status: 'confirmed', reason: 'SIM STUB — no real write' });
   }
   if (name === 'sage_new_patient_intake') {
     // The dupstop persona uses an identity the practice ALREADY has, so the
     // realistic duplicate response is simulated here (no real NGE write).
     if (String(args.lastName || '').toLowerCase() === 'pérez' || String(args.lastName || '').toLowerCase() === 'perez') {
-      return { status: 'duplicate_detected', created: false, error: 'NGE 409 — duplicate-prevention flagged this Person', agent_instruction: 'This person already EXISTS. Do NOT register again — re-verify or hand off.' };
+      return record({ status: 'duplicate_detected', created: false, error: 'NGE 409 — duplicate-prevention flagged this Person', agent_instruction: 'This person already EXISTS. Do NOT register again — re-verify or hand off.' });
     }
-    return { status: 'created', personId: 'SIM', say: "You're all set in our system (SIM).", next_action: 'handoff_new_patient' };
+    return record({ status: 'created', personId: 'SIM', say: "You're all set in our system (SIM).", next_action: 'handoff_new_patient' });
   }
   const r = await fetch(`${BASE}/api/tools/${name}`, {
     method: 'POST',
@@ -110,7 +131,7 @@ async function execTool(name, args, callId, trace) {
     body: JSON.stringify({ ...args, callId }),
   });
   const text = await r.text();
-  try { const j = JSON.parse(text); return j?.result ?? j; } catch { return { raw: text.slice(0, 300) }; }
+  try { const j = JSON.parse(text); return record(j?.result ?? j); } catch { return record({ raw: text.slice(0, 300) }); }
 }
 
 async function runPersona(p) {
@@ -157,7 +178,12 @@ async function runPersona(p) {
     }
   }
   const failures = p.assert({ transcript, trace });
-  return { transcript, trace, failures };
+  // The shared rubric, on the same transcript shape the live grader sees.
+  const rubric = runAzulRubric({
+    transcript: transcript.map((l) => `${l.who}: ${l.text}`).join('\n'),
+    events: trace,
+  });
+  return { transcript, trace, failures, rubric };
 }
 
 const PERSONAS = [
@@ -215,6 +241,22 @@ const PERSONAS = [
     },
   },
   {
+    key: 'urgent',
+    caller: `You are Dana Ruiz, born 1968-11-02. Since this morning you have been seeing flashes and a dark curtain over the left side of your vision, and it is frightening you. You are NOT calling about a routine exam. If the agent offers you a routine appointment days away, say that you are worried and ask whether someone can look at it sooner. Give your name and date of birth if asked.`,
+    phone: '+15550000006',
+    maxTurns: 8,
+    assert: ({ trace, transcript }) => {
+      const f = [];
+      const routed = trace.some((t) => t.tool === 'sage_handoff' || t.tool === 'transfer_to_office' || t.tool === 'file_location_ticket');
+      if (!routed) f.push('flashes + curtain never routed to a human path (the D1 failure)');
+      const agentAll = transcript.filter((t) => t.who === 'AGENT').map((t) => t.text).join(' ');
+      if (/call (?:the office|us) (?:back )?(?:yourself|directly)|hang up and call/i.test(agentAll)) {
+        f.push('told an urgent caller to phone the office themselves');
+      }
+      return f;
+    },
+  },
+  {
     key: 'spanish',
     caller: `You begin in English asking about office hours in Encinitas, then ask "¿hablas español?" and INSIST on continuing in Spanish. If the agent refuses Spanish, protest (in Spanish). Goal: get the hours, in Spanish.`,
     phone: '+15550000004',
@@ -231,22 +273,44 @@ const PERSONAS = [
 const filter = process.argv[2];
 const toRun = filter ? PERSONAS.filter((p) => p.key === filter) : PERSONAS;
 let failed = 0;
+const rubricTally = new Map(); // grader → violation count across personas
+
 for (const p of toRun) {
   process.stdout.write(`▶ ${p.key} ... `);
   try {
-    const { failures, transcript } = await runPersona(p);
-    if (failures.length === 0) {
-      console.log('PASS');
+    const { failures, transcript, rubric } = await runPersona(p);
+    // A critical rubric violation is a run failure in its own right, even
+    // when the persona's own assertions passed — that is the whole reason
+    // the rubric runs on every persona and not just the one it was written
+    // for. Major/minor are reported and do not block.
+    const criticals = rubric.filter((r) => !r.pass && r.severity === 'critical');
+    const others = rubric.filter((r) => !r.pass && r.severity !== 'critical');
+    for (const r of [...criticals, ...others]) {
+      rubricTally.set(r.grader, (rubricTally.get(r.grader) ?? 0) + 1);
+    }
+    const blocking = failures.length + criticals.length;
+
+    if (blocking === 0) {
+      console.log(others.length ? `PASS (${others.length} non-blocking rubric note(s))` : 'PASS');
     } else {
       failed += 1;
       console.log('FAIL');
       for (const f of failures) console.log(`    ✗ ${f}`);
+      for (const r of criticals) console.log(`    ✗ [rubric/critical] ${r.grader}: ${r.detail}`);
       for (const line of transcript.slice(0, 14)) console.log(`      ${line.who}: ${line.text.slice(0, 110)}`);
     }
+    for (const r of others) console.log(`    · [rubric/${r.severity}] ${r.grader}: ${r.detail}`);
   } catch (e) {
     failed += 1;
     console.log(`ERROR: ${e?.message ?? e}`);
   }
 }
-console.log(`\n${toRun.length - failed}/${toRun.length} conversation personas passed (${runId})`);
+
+console.log(`\n${toRun.length - failed}/${toRun.length} conversation personas passed (${runId}, rubric v${RUBRIC_VERSION})`);
+if (rubricTally.size) {
+  console.log('Rubric violations across the run:');
+  for (const [grader, n] of [...rubricTally.entries()].sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${grader}: ${n}`);
+  }
+}
 process.exit(failed ? 1 : 0);

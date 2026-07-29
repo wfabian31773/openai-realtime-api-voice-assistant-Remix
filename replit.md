@@ -60,6 +60,7 @@ The system utilizes a three-server architecture comprising an API Server, a Voic
 -   **Session End Resolvers:** Direct cleanup path from conference events to session keepalive promise.
 -   **Durable Ticket Outbox:** `ticket_outbox` table with a write-first pattern ensures zero ticket data loss, with idempotency, lease-based worker claiming, exponential backoff retries, and a dead letter queue.
 -   **Eval Flywheel Phase 1 - Telemetry & Graders:** Per-call telemetry on `call_logs` and 12 deterministic graders.
+-   **Azul Governance Rubric (`azulRubric.ts`):** 12 deterministic dimensions scored on every azul call, riding the versioned `grader_results` payload. `RUBRIC_VERSION` 2 adds the 2026-07-28 audit classes — urgency routing, question repetition, offer integrity (a spoken time must trace to a tool result), name fidelity, and write-once. The same module grades the sim-conversation rig, so lab and live can't drift.
 -   **P0 Hardening - Handoff State Machine:** Extended `handoff_state` enum with validated transitions and idempotent handoff-status webhooks.
 -   **P0 Hardening - Duration Mismatch Detection:** `call_logs` tracks `local_duration_seconds`, `transcript_window_seconds`, and flags discrepancies.
 -   **P0 Hardening - Hybrid Resolver Durability:** Memory-first resolver lookup with DB fallback.
