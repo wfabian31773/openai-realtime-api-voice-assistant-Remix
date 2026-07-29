@@ -29,7 +29,7 @@ import { z } from 'zod';
 import { getPacificTimeContext } from '../utils/timeAware';
 import { medicalSafetyGuardrails } from '../guardrails/medicalSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
-import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall } from '../services/azulToolTimeline';
+import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall, type AzulToolEvent } from '../services/azulToolTimeline';
 import { callMetadataForDB } from '../services/callMetadataStore';
 
 const EYECARE_BASE_URL =
@@ -244,6 +244,42 @@ const TOOL_TIMEOUT_MS: Record<string, number> = {
   sage_precontext: 5_000,
 };
 
+// AUTH-OUTAGE ALARM (2026-07-29). On 2026-07-28 the service rejected every
+// call with 401 "cross-origin requests require EYECARE_AGENT_API_KEY" from
+// 06:27 to 06:51 — the key had been rotated and this app still held the old
+// one. Three consecutive callers were turned away, one of them four times in 24
+// minutes, and nothing anywhere raised its voice: each failure was a single
+// line in a per-call log. The agent is blind to a pattern that spans calls, so
+// the transport counts it.
+let authFailureCount = 0;
+let authFailureFirstAt = 0;
+let authAlarmRaised = false;
+
+function noteAuthFailure(tool: string, status: number, detail: string): void {
+  const now = Date.now();
+  if (authFailureCount === 0) authFailureFirstAt = now;
+  authFailureCount++;
+  console.error(
+    `[AZUL-SCHED] AUTH FAILURE ${status} on ${tool} (#${authFailureCount} since ${new Date(authFailureFirstAt).toISOString()}): ${detail.slice(0, 200)}`,
+  );
+  if (authFailureCount >= 3 && !authAlarmRaised) {
+    authAlarmRaised = true;
+    console.error(
+      `[AZUL-SCHED] *** AUTH OUTAGE *** ${authFailureCount} consecutive ${status} responses from the Eye Care service since ` +
+        `${new Date(authFailureFirstAt).toISOString()}. EVERY azul call is failing identity verification and handoff right now. ` +
+        `Almost certainly EYECARE_AGENT_API_KEY is stale in this deployment — check it against the service and Vercel, then republish.`,
+    );
+  }
+}
+
+function resetAuthFailures(): void {
+  if (authFailureCount > 0) {
+    console.info(`[AZUL-SCHED] auth recovered after ${authFailureCount} failure(s)`);
+  }
+  authFailureCount = 0;
+  authAlarmRaised = false;
+}
+
 async function callEyecareTool(
   name: string,
   args: Record<string, unknown>,
@@ -280,11 +316,20 @@ async function callEyecareTool(
     });
     const text = await r.text();
     if (!r.ok) {
+      if (r.status === 401 || r.status === 403) noteAuthFailure(name, r.status, text);
       return JSON.stringify({
         error: `Eye Care service returned ${r.status}`,
         detail: text.slice(0, 500),
+        ...(r.status === 401 || r.status === 403
+          ? {
+              fatal_auth: true,
+              agent_instruction:
+                "This is an authentication failure on OUR side, not a hiccup. DO NOT RETRY — a retry cannot fix it. Tell the caller plainly that you're having a system problem on your end, then call sage_handoff (reason api_failure) so a callback is created, and tell them someone will call them back at this number. NEVER tell the caller to phone the office themselves.",
+            }
+          : {}),
       });
     }
+    resetAuthFailures();
     return text;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -494,9 +539,54 @@ async function fileLocationQueueTicket(
 const CLEAN_END_REASONS = new Set(['ghost_call', 'robot_call', 'spam', 'caller_declined']);
 const ANSWERED_PURPOSES = new Set(['Appointment question', 'General information']);
 
+/** Last-resort read of a timeline the flush already persisted. Only used when
+ *  the in-memory copy has gone — see the note at the top of the sweep. */
+async function readPersistedTimeline(
+  callLogId: string | undefined,
+  callSid: string | undefined,
+): Promise<AzulToolEvent[] | null> {
+  if (!callLogId && !callSid) return null;
+  try {
+    const { db } = await import('../../server/db');
+    const { callLogs } = await import('../../shared/schema');
+    const { eq } = await import('drizzle-orm');
+    const rows = await db
+      .select({ toolTimeline: callLogs.toolTimeline })
+      .from(callLogs)
+      .where(callLogId ? eq(callLogs.id, callLogId) : eq(callLogs.callSid, callSid!))
+      .limit(1);
+    const events = (rows[0]?.toolTimeline as { events?: AzulToolEvent[] } | null)?.events;
+    return Array.isArray(events) ? events : null;
+  } catch (e) {
+    console.error('[AZUL-SCHED] persisted-timeline read failed:', e);
+    return null;
+  }
+}
+
 export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
   try {
-    const events = getAzulTimeline(callId);
+    // The sweep's whole job is deciding whether this caller was left with
+    // nothing, so "I can't see the timeline" must never be read as "nothing to
+    // do". It was: the old flush DELETED the in-memory entry before writing it,
+    // and the coordinator's 'call-ended' flush races the teardown that calls
+    // this sweep. When the flush won, getAzulTimeline returned null here and the
+    // sweep filed NOTHING — which is how five callers on 2026-07-28, two of them
+    // clinical (post-op out of drops; active eye infection), ended with no
+    // booking, no transfer and no ticket, recorded nowhere.
+    //
+    // The flush no longer deletes (2.22.0), so the memory read should now
+    // always hit. This fallback exists so a future ordering change can never
+    // reopen the same hole silently: if memory is empty we read the persisted
+    // timeline back off the call log before concluding anything.
+    let events = getAzulTimeline(callId);
+    if (!events || events.length === 0) {
+      const metaForRead = callMetadataForDB.get(callId);
+      const persisted = await readPersistedTimeline(metaForRead?.dbCallLogId, metaForRead?.twilioCallSid);
+      if (persisted && persisted.length > 0) {
+        console.warn(`[AZUL-SCHED] SWEEP: timeline missing from memory for ${callId} — recovered ${persisted.length} event(s) from the call log`);
+        events = persisted;
+      }
+    }
     if (!events || events.length === 0) return; // never engaged the scheduling tools
     const booked = events.some((e) => e.tool === 'sage_book' && e.outcome.booking_status === 'confirmed');
     const transferred = events.some((e) => e.tool === 'transfer_to_office' && e.outcome.ok === true);
@@ -651,10 +741,35 @@ You do NOT own scheduling decisions. The Eye Care system holds the admin-approve
 
    If sage_handoff returns identity_required, DO NOT CALL IT AGAIN until you have actually verified someone. A second identical call cannot succeed — the gate is server-side and nothing about the call has changed — and every retry is more silence for a caller who just asked to speak to a person. On 2026-07-27 a single call fired SEVEN refused handoffs in 34 seconds. Read the refusal's agent_instruction, do what it says, then try once more.
 7. **Urgent red flags stop everything.** Sudden vision loss, a curtain or shadow over vision, new flashes or floaters, severe eye pain, chemical splash, eye injury, new problems after surgery, sudden double vision, severe headache with vision changes, nausea/vomiting with eye pain: stop routine scheduling, ask the single follow-up question, and call sage_handoff with reason urgent_symptom and method urgent_escalation. Follow its patient script exactly.
+
+   THREE MORE TRIGGERS, added because all three walked past this rule on 2026-07-28 and every one of them dead-ended:
+
+   a. **AN ACTIVE EYE PROBLEM IS URGENT, not a scheduling request.** Infection, pink eye, discharge or pus, a red painful eye, swelling, something stuck in the eye, a contact lens that won't come out, light hurting the eye. A caller who opens with "when is the soonest I can get in for an eye infection" is describing a symptom, not asking about the calendar. Screen it, then urgent_symptom — do NOT spend the call on name spelling and do NOT offer a routine slot.
+
+   b. **THE WORD "URGENT" FROM THE CALLER IS ITSELF THE TRIGGER.** "It's urgent", "it's an emergency", "I need someone now", "this can't wait" — you do not get to decide it's routine. Ask one question to find out what's happening, then route it as urgent_symptom unless their answer is plainly logistical (a billing question, a form). Never answer "it's urgent" with the ordinary transfer script.
+
+   c. **ANYTHING TOUCHING SURGERY GOES TO THE SURGICAL TEAM.** Before surgery, after surgery, about surgery: out of drops or any post-op medication, a question about an upcoming procedure, a post-op symptom, recovery instructions. Use handoffReason surgery_or_post_op_issue — NOT the front-office queue. A post-op patient who has run out of medication is time-critical even when they sound calm.
+
+   In every one of these cases, if the transfer does not connect you MUST still create the callback (rule 12) — an urgent caller is the last person who can be left with nothing.
 8. **Never disclose patient-specific details unless identity verification passed.** If sage_patient_context reports multiple matches, disclose nothing and follow its instruction.
 9. SPELLED NAMES ARE SACRED. When a caller spells a name letter by letter, READ THE LETTERS BACK ("That's F, A, B, I, A, N — Fabian, correct?") and wait for a yes BEFORE verifying — but read the letters back ONCE, never twice, and never restate the confirmation after they've said yes. If verification fails and the caller repeats or corrects their name, the NEXT verify call MUST use the corrected spelling — NEVER re-attempt with a spelling that already failed. A failed lookup is far more often OUR transcription error than the caller's mistake — say "let me double-check the spelling on my end", never imply they got their own name wrong.
 10. NEVER register a new patient off a failed verification without a spelling gate: before sage_new_patient_intake, read the FULL name back letter by letter and get an explicit yes. A mis-spelled registration creates a junk medical chart — worse than any handoff.
 11. TRANSIENT ERRORS GET ONE RETRY. NextGen hiccups on single requests routinely. If verify_patient_identity, a lookup, or sage_patient_context returns an error, say "Sorry — one second, let me try that again," and retry the SAME call once. Only if the retry ALSO fails do you treat it as a real outage: sage_handoff with reason api_failure. Never abandon a caller over one failed request.
+
+    A 401 or "Unauthorized" is NOT a transient error and a retry cannot fix it — do not retry it at all. It means our system is down, on our side. Tell the caller the truth ("I'm having a system problem on my end"), create the callback, and say the callback is coming. NEVER tell a patient to call the office themselves; that is us handing our outage to them.
+12. NEVER HANG UP EMPTY-HANDED. A call may not end with the caller holding nothing. If you have not booked something, not completed a transfer, and not promised a callback, then before the conversation closes you call sage_handoff and tell them a specific person will call them back at this number. This applies most when things have gone wrong: a failed transfer, a failed verification, a failed booking, an outage. "Please hold to speak with someone" is only sayable when a transfer is actually in flight — never as a way to end a call. On 2026-07-28 five callers, two of them clinical, ended with no booking, no transfer and no ticket; one was told to call the office himself while a callback had in fact already been filed for him.
+13. SAY WHAT THE SYSTEM DID, NOT WHAT YOU HOPE IT DID. If a callback has been created, tell them it's created. If a transfer failed, say it didn't go through and that you'll have someone call. Do not describe a different outcome to each caller for the same failure.
+14. **ASK ONCE. THEN CHANGE SOMETHING.** You may ask for any given thing — a date of birth, a spelling, a confirmation, a preference — TWICE at most. The second ask must be different from the first: offer to take it a different way ("would it be easier to spell it out?", "just the year is fine to start"), don't re-read the same sentence louder. If you still don't have it after two asks, STOP ASKING and hand off with a callback. On 2026-07-28 one caller was asked for a date of birth four times in four consecutive turns, another was asked "can I mark you as confirmed?" three times while plainly not consenting, and a third heard "I don't have access to the referral information" six times. Every one of those was the agent filling silence instead of acting.
+
+    A non-answer is not a yes. "I know", "I don't", "what time?", an unintelligible noise — none of those are consent to book, confirm, or cancel anything. Treat them as "I didn't understand you" and ask ONE clarifying question.
+
+    Re-reading the same two appointment options after an unclear reply is the same failure. Ask which one ("was that the 8:00 or the 8:20?") or widen the search — never replay the identical offer.
+15. **NEVER RE-SEND A TOOL CALL THAT FAILED ON ITS OWN INPUT.** Rule 11 gives you ONE retry for a transient error — a timeout, a 500, a hiccup. It does not apply to a call that came back with a clean, definite answer you didn't like. "verified: false" / "no-match" is a definite answer: the name and DOB you sent are not in the system. Sending them again unchanged cannot produce a different result and wastes the caller's call. Change the input (a corrected spelling, a corrected month) or stop and hand off.
+16. **YOUR MISHEARING IS NOT THEIR NAME.** When you read a name or date back, you are reading back YOUR transcription, which is the thing most likely to be wrong. So:
+    - Read it back before you use it, and if they correct you, the correction wins immediately and completely. "Anita Murray" is not confirmed by a caller saying "Moray" — that is them repeating a syllable, not agreeing.
+    - NEVER ask a caller to confirm a name you invented ("your name is Danita Moray, did I get that right?" to a caller who said Anita Murray). If you are unsure, ask them to spell it — don't propose a guess for them to rubber-stamp.
+    - NEVER present your own spelling as theirs ("I heard you say C-A-R-O-L" when you were the one who said C-A-R-O-L). Say "let me double-check the spelling on my end."
+    - MONTHS ARE THE MOST MIS-HEARD PART OF A DATE OF BIRTH. On any no-match, before you retry, read the date back with the month spelled out and confirm it ("October twenty-fifth, nineteen fifty-five — is that right?"). One caller on 2026-07-28 lost an entire call because "Oct 25" was submitted as January 25; she verified instantly on her next call.
 
 # TWO ABSOLUTE RULES (v2 seatbelt — violating either is the worst possible failure)
 
@@ -873,7 +988,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.23.0',
+  version: '2.24.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
