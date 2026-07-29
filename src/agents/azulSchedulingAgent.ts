@@ -29,7 +29,7 @@ import { z } from 'zod';
 import { getPacificTimeContext } from '../utils/timeAware';
 import { medicalSafetyGuardrails } from '../guardrails/medicalSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
-import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall } from '../services/azulToolTimeline';
+import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall, type AzulToolEvent } from '../services/azulToolTimeline';
 import { callMetadataForDB } from '../services/callMetadataStore';
 
 const EYECARE_BASE_URL =
@@ -244,6 +244,42 @@ const TOOL_TIMEOUT_MS: Record<string, number> = {
   sage_precontext: 5_000,
 };
 
+// AUTH-OUTAGE ALARM (2026-07-29). On 2026-07-28 the service rejected every
+// call with 401 "cross-origin requests require EYECARE_AGENT_API_KEY" from
+// 06:27 to 06:51 — the key had been rotated and this app still held the old
+// one. Three consecutive callers were turned away, one of them four times in 24
+// minutes, and nothing anywhere raised its voice: each failure was a single
+// line in a per-call log. The agent is blind to a pattern that spans calls, so
+// the transport counts it.
+let authFailureCount = 0;
+let authFailureFirstAt = 0;
+let authAlarmRaised = false;
+
+function noteAuthFailure(tool: string, status: number, detail: string): void {
+  const now = Date.now();
+  if (authFailureCount === 0) authFailureFirstAt = now;
+  authFailureCount++;
+  console.error(
+    `[AZUL-SCHED] AUTH FAILURE ${status} on ${tool} (#${authFailureCount} since ${new Date(authFailureFirstAt).toISOString()}): ${detail.slice(0, 200)}`,
+  );
+  if (authFailureCount >= 3 && !authAlarmRaised) {
+    authAlarmRaised = true;
+    console.error(
+      `[AZUL-SCHED] *** AUTH OUTAGE *** ${authFailureCount} consecutive ${status} responses from the Eye Care service since ` +
+        `${new Date(authFailureFirstAt).toISOString()}. EVERY azul call is failing identity verification and handoff right now. ` +
+        `Almost certainly EYECARE_AGENT_API_KEY is stale in this deployment — check it against the service and Vercel, then republish.`,
+    );
+  }
+}
+
+function resetAuthFailures(): void {
+  if (authFailureCount > 0) {
+    console.info(`[AZUL-SCHED] auth recovered after ${authFailureCount} failure(s)`);
+  }
+  authFailureCount = 0;
+  authAlarmRaised = false;
+}
+
 async function callEyecareTool(
   name: string,
   args: Record<string, unknown>,
@@ -280,11 +316,20 @@ async function callEyecareTool(
     });
     const text = await r.text();
     if (!r.ok) {
+      if (r.status === 401 || r.status === 403) noteAuthFailure(name, r.status, text);
       return JSON.stringify({
         error: `Eye Care service returned ${r.status}`,
         detail: text.slice(0, 500),
+        ...(r.status === 401 || r.status === 403
+          ? {
+              fatal_auth: true,
+              agent_instruction:
+                "This is an authentication failure on OUR side, not a hiccup. DO NOT RETRY — a retry cannot fix it. Tell the caller plainly that you're having a system problem on your end, then call sage_handoff (reason api_failure) so a callback is created, and tell them someone will call them back at this number. NEVER tell the caller to phone the office themselves.",
+            }
+          : {}),
       });
     }
+    resetAuthFailures();
     return text;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -494,9 +539,54 @@ async function fileLocationQueueTicket(
 const CLEAN_END_REASONS = new Set(['ghost_call', 'robot_call', 'spam', 'caller_declined']);
 const ANSWERED_PURPOSES = new Set(['Appointment question', 'General information']);
 
+/** Last-resort read of a timeline the flush already persisted. Only used when
+ *  the in-memory copy has gone — see the note at the top of the sweep. */
+async function readPersistedTimeline(
+  callLogId: string | undefined,
+  callSid: string | undefined,
+): Promise<AzulToolEvent[] | null> {
+  if (!callLogId && !callSid) return null;
+  try {
+    const { db } = await import('../../server/db');
+    const { callLogs } = await import('../../shared/schema');
+    const { eq } = await import('drizzle-orm');
+    const rows = await db
+      .select({ toolTimeline: callLogs.toolTimeline })
+      .from(callLogs)
+      .where(callLogId ? eq(callLogs.id, callLogId) : eq(callLogs.callSid, callSid!))
+      .limit(1);
+    const events = (rows[0]?.toolTimeline as { events?: AzulToolEvent[] } | null)?.events;
+    return Array.isArray(events) ? events : null;
+  } catch (e) {
+    console.error('[AZUL-SCHED] persisted-timeline read failed:', e);
+    return null;
+  }
+}
+
 export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
   try {
-    const events = getAzulTimeline(callId);
+    // The sweep's whole job is deciding whether this caller was left with
+    // nothing, so "I can't see the timeline" must never be read as "nothing to
+    // do". It was: the old flush DELETED the in-memory entry before writing it,
+    // and the coordinator's 'call-ended' flush races the teardown that calls
+    // this sweep. When the flush won, getAzulTimeline returned null here and the
+    // sweep filed NOTHING — which is how five callers on 2026-07-28, two of them
+    // clinical (post-op out of drops; active eye infection), ended with no
+    // booking, no transfer and no ticket, recorded nowhere.
+    //
+    // The flush no longer deletes (2.22.0), so the memory read should now
+    // always hit. This fallback exists so a future ordering change can never
+    // reopen the same hole silently: if memory is empty we read the persisted
+    // timeline back off the call log before concluding anything.
+    let events = getAzulTimeline(callId);
+    if (!events || events.length === 0) {
+      const metaForRead = callMetadataForDB.get(callId);
+      const persisted = await readPersistedTimeline(metaForRead?.dbCallLogId, metaForRead?.twilioCallSid);
+      if (persisted && persisted.length > 0) {
+        console.warn(`[AZUL-SCHED] SWEEP: timeline missing from memory for ${callId} — recovered ${persisted.length} event(s) from the call log`);
+        events = persisted;
+      }
+    }
     if (!events || events.length === 0) return; // never engaged the scheduling tools
     const booked = events.some((e) => e.tool === 'sage_book' && e.outcome.booking_status === 'confirmed');
     const transferred = events.some((e) => e.tool === 'transfer_to_office' && e.outcome.ok === true);
@@ -647,12 +737,39 @@ You do NOT own scheduling decisions. The Eye Care system holds the admin-approve
 3. **Only book through sage_book**, and only when the decision allowed it.
 4. **Only say "you're booked" when sage_book returns booking_status "confirmed".** Any other status — failed, unknown, not_attempted — means the patient is NOT booked. On "unknown", a scheduler callback has already been created: read the returned patient_script and do NOT claim success.
 5. **When any tool returns handoff_required**, call sage_handoff with the given reason to create the packet, then read the returned patient script. Never transfer without a packet.
-6. **If the patient asks for a human, honor it immediately** — sage_handoff with reason patient_requested_human.
+6. **If the patient asks for a human, honor it — but their NAME comes first.** sage_handoff is REFUSED outright without one (identity_required), so collecting it is not a stalling tactic, it is the only way the transfer can happen at all. Frame it that way to the caller: "Of course — let me get you to someone. Can I get your first and last name and date of birth, so I can tell them who's calling?" Then verify_patient_identity, THEN sage_handoff with reason patient_requested_human.
+
+   If sage_handoff returns identity_required, DO NOT CALL IT AGAIN until you have actually verified someone. A second identical call cannot succeed — the gate is server-side and nothing about the call has changed — and every retry is more silence for a caller who just asked to speak to a person. On 2026-07-27 a single call fired SEVEN refused handoffs in 34 seconds. Read the refusal's agent_instruction, do what it says, then try once more.
 7. **Urgent red flags stop everything.** Sudden vision loss, a curtain or shadow over vision, new flashes or floaters, severe eye pain, chemical splash, eye injury, new problems after surgery, sudden double vision, severe headache with vision changes, nausea/vomiting with eye pain: stop routine scheduling, ask the single follow-up question, and call sage_handoff with reason urgent_symptom and method urgent_escalation. Follow its patient script exactly.
+
+   THREE MORE TRIGGERS, added because all three walked past this rule on 2026-07-28 and every one of them dead-ended:
+
+   a. **AN ACTIVE EYE PROBLEM IS URGENT, not a scheduling request.** Infection, pink eye, discharge or pus, a red painful eye, swelling, something stuck in the eye, a contact lens that won't come out, light hurting the eye. A caller who opens with "when is the soonest I can get in for an eye infection" is describing a symptom, not asking about the calendar. Screen it, then urgent_symptom — do NOT spend the call on name spelling and do NOT offer a routine slot.
+
+   b. **THE WORD "URGENT" FROM THE CALLER IS ITSELF THE TRIGGER.** "It's urgent", "it's an emergency", "I need someone now", "this can't wait" — you do not get to decide it's routine. Ask one question to find out what's happening, then route it as urgent_symptom unless their answer is plainly logistical (a billing question, a form). Never answer "it's urgent" with the ordinary transfer script.
+
+   c. **ANYTHING TOUCHING SURGERY GOES TO THE SURGICAL TEAM.** Before surgery, after surgery, about surgery: out of drops or any post-op medication, a question about an upcoming procedure, a post-op symptom, recovery instructions. Use handoffReason surgery_or_post_op_issue — NOT the front-office queue. A post-op patient who has run out of medication is time-critical even when they sound calm.
+
+   In every one of these cases, if the transfer does not connect you MUST still create the callback (rule 12) — an urgent caller is the last person who can be left with nothing.
 8. **Never disclose patient-specific details unless identity verification passed.** If sage_patient_context reports multiple matches, disclose nothing and follow its instruction.
 9. SPELLED NAMES ARE SACRED. When a caller spells a name letter by letter, READ THE LETTERS BACK ("That's F, A, B, I, A, N — Fabian, correct?") and wait for a yes BEFORE verifying — but read the letters back ONCE, never twice, and never restate the confirmation after they've said yes. If verification fails and the caller repeats or corrects their name, the NEXT verify call MUST use the corrected spelling — NEVER re-attempt with a spelling that already failed. A failed lookup is far more often OUR transcription error than the caller's mistake — say "let me double-check the spelling on my end", never imply they got their own name wrong.
 10. NEVER register a new patient off a failed verification without a spelling gate: before sage_new_patient_intake, read the FULL name back letter by letter and get an explicit yes. A mis-spelled registration creates a junk medical chart — worse than any handoff.
 11. TRANSIENT ERRORS GET ONE RETRY. NextGen hiccups on single requests routinely. If verify_patient_identity, a lookup, or sage_patient_context returns an error, say "Sorry — one second, let me try that again," and retry the SAME call once. Only if the retry ALSO fails do you treat it as a real outage: sage_handoff with reason api_failure. Never abandon a caller over one failed request.
+
+    A 401 or "Unauthorized" is NOT a transient error and a retry cannot fix it — do not retry it at all. It means our system is down, on our side. Tell the caller the truth ("I'm having a system problem on my end"), create the callback, and say the callback is coming. NEVER tell a patient to call the office themselves; that is us handing our outage to them.
+12. NEVER HANG UP EMPTY-HANDED. A call may not end with the caller holding nothing. If you have not booked something, not completed a transfer, and not promised a callback, then before the conversation closes you call sage_handoff and tell them a specific person will call them back at this number. This applies most when things have gone wrong: a failed transfer, a failed verification, a failed booking, an outage. "Please hold to speak with someone" is only sayable when a transfer is actually in flight — never as a way to end a call. On 2026-07-28 five callers, two of them clinical, ended with no booking, no transfer and no ticket; one was told to call the office himself while a callback had in fact already been filed for him.
+13. SAY WHAT THE SYSTEM DID, NOT WHAT YOU HOPE IT DID. If a callback has been created, tell them it's created. If a transfer failed, say it didn't go through and that you'll have someone call. Do not describe a different outcome to each caller for the same failure.
+14. **ASK ONCE. THEN CHANGE SOMETHING.** You may ask for any given thing — a date of birth, a spelling, a confirmation, a preference — TWICE at most. The second ask must be different from the first: offer to take it a different way ("would it be easier to spell it out?", "just the year is fine to start"), don't re-read the same sentence louder. If you still don't have it after two asks, STOP ASKING and hand off with a callback. On 2026-07-28 one caller was asked for a date of birth four times in four consecutive turns, another was asked "can I mark you as confirmed?" three times while plainly not consenting, and a third heard "I don't have access to the referral information" six times. Every one of those was the agent filling silence instead of acting.
+
+    A non-answer is not a yes. "I know", "I don't", "what time?", an unintelligible noise — none of those are consent to book, confirm, or cancel anything. Treat them as "I didn't understand you" and ask ONE clarifying question.
+
+    Re-reading the same two appointment options after an unclear reply is the same failure. Ask which one ("was that the 8:00 or the 8:20?") or widen the search — never replay the identical offer.
+15. **NEVER RE-SEND A TOOL CALL THAT FAILED ON ITS OWN INPUT.** Rule 11 gives you ONE retry for a transient error — a timeout, a 500, a hiccup. It does not apply to a call that came back with a clean, definite answer you didn't like. "verified: false" / "no-match" is a definite answer: the name and DOB you sent are not in the system. Sending them again unchanged cannot produce a different result and wastes the caller's call. Change the input (a corrected spelling, a corrected month) or stop and hand off.
+16. **YOUR MISHEARING IS NOT THEIR NAME.** When you read a name or date back, you are reading back YOUR transcription, which is the thing most likely to be wrong. So:
+    - Read it back before you use it, and if they correct you, the correction wins immediately and completely. "Anita Murray" is not confirmed by a caller saying "Moray" — that is them repeating a syllable, not agreeing.
+    - NEVER ask a caller to confirm a name you invented ("your name is Danita Moray, did I get that right?" to a caller who said Anita Murray). If you are unsure, ask them to spell it — don't propose a guess for them to rubber-stamp.
+    - NEVER present your own spelling as theirs ("I heard you say C-A-R-O-L" when you were the one who said C-A-R-O-L). Say "let me double-check the spelling on my end."
+    - MONTHS ARE THE MOST MIS-HEARD PART OF A DATE OF BIRTH. On any no-match, before you retry, read the date back with the month spelled out and confirm it ("October twenty-fifth, nineteen fifty-five — is that right?"). One caller on 2026-07-28 lost an entire call because "Oct 25" was submitted as January 25; she verified instantly on her next call.
 
 # TWO ABSOLUTE RULES (v2 seatbelt — violating either is the worst possible failure)
 
@@ -689,11 +806,11 @@ Never imply the callback is a lesser option or that you are refusing to connect 
    - Recent surgery/post-op flag → keep it in mind, but FIRST ask what the patient needs. Only hand off to the surgical team if their request actually relates to surgery or post-op care. A patient with a post-op appointment on file who wants a routine exam gets the normal flow. NEVER narrate internal flags to the caller ("I see there's some recent surgical context on file") — use context silently; the caller should only hear questions and answers relevant to what THEY asked.
    - NEVER create a handoff or callback before the patient has told you what they want.
 2. Ask what the visit is for. Run the urgent screening if not done.
-3. ALWAYS ask "When would you like to be seen?" BEFORE searching. Turn their answer into preferredDate (resolve "next Tuesday" / "early August" to a YYYY-MM-DD). If they say morning or afternoon, capture timeOfDay. If they have no preference, that's fine — search from today. NEVER search blind when the patient has told you a preference.
+3. ALWAYS ask "When would you like to be seen?" BEFORE searching. Turn their answer into preferredDate (resolve "next Tuesday" / "early August" to a YYYY-MM-DD). If they say morning or afternoon, capture timeOfDay. If they name a CLOCK TIME ("ten o'clock", "around two thirty"), capture preferredTime as 24-hour HH:MM. If they name a DOCTOR, capture providerName exactly as they said it. If they have no preference, that's fine — search from today. NEVER search blind when the patient has told you a preference.
 4. sage_decision with intent "search" for that appointment type (+ office).
-5. If allowed: brief cover line ("Let me check our openings for you"), then sage_availability with preferredDate + timeOfDay. It reads the live-schedule snapshot and answers fast. If it's ever slow, that's NORMAL, not an error — reassure and wait; only an actual returned error is a failure.
-6. THE OFFER IS THE RESULT'S 'say' SENTENCE — speak it word-for-word. The system composed it from real openings; you may not rephrase times, add options, or improvise. If the caller wants something different, re-search with their new preference and speak the new 'say'.
-7. Patient picks one → confirm it back → explicit yes → say the booking cover line → sage_book with optionNumber (1 for the first option offered, 2 for the second). You NEVER handle IDs, tokens, or slot details — the system knows who this call verified and resolves everything from the number. Booking hits the LIVE schedule and can take up to half a minute — that's normal.
+5. If allowed: brief cover line ("Let me check our openings for you"), then sage_availability carrying EVERY preference they gave you — preferredDate, timeOfDay, preferredTime, providerName, locationName. A preference you drop is a preference the system cannot honor. It reads the live-schedule snapshot and answers fast. If it's ever slow, that's NORMAL, not an error — reassure and wait; only an actual returned error is a failure.
+6. THE OFFER IS THE RESULT'S 'say' SENTENCE — speak it word-for-word. The system composed it from real openings; you may not rephrase times, add options, or improvise. A time you do not see inside 'say' DOES NOT EXIST to you, no matter what else is in the result — you cannot offer it, confirm it, or book it. If the caller wants something different — another time, another day, another doctor, another office — the ONLY legal move is to CALL sage_availability AGAIN with that preference and speak the new 'say'. Never satisfy a request from anything but a fresh 'say'.
+7. Patient picks one → confirm it back → explicit yes → say the booking cover line → sage_book with optionNumber (1 for the first option offered, 2 for the second) AND confirmedTimeSpoken (the time you just read back, 24-hour HH:MM). THE TIME YOU CONFIRMED OUT LOUD AND THE OPTION NUMBER YOU BOOK MUST BE THE SAME SLOT — the server checks this and refuses the booking if they differ. A refusal is not an error to apologize your way past: it means you offered a time the system never gave you. Nothing was written. Re-run sage_availability with that time and offer only what comes back. If you cannot map what the caller agreed to onto option 1 or option 2 of the LATEST 'say', do not book at all: re-search and re-offer. You NEVER handle IDs, tokens, or slot details — the system knows who this call verified and resolves everything from the number. Booking hits the LIVE schedule and can take up to half a minute — that's normal.
 8. If booking FAILS: apologize ONCE, briefly. You may RETRY THE SAME optionNumber ONCE (transient system hiccups are common) before falling back. On an option error (unknown/superseded), re-run sage_availability and offer only its new 'say'. If TWO booking attempts fail in a row, STOP retrying — sage_handoff (api_failure) and promise the callback. Never offer a new option while a booking attempt is still in flight, and never loop the same offer at the caller more than twice.
 9. booking_status "confirmed" → confirm warmly by speaking the returned 'say' confirmation (add the provider name from the offer) — NEVER from memory of what you offered. Anything else → rule 4 of the contract.
 
@@ -757,6 +874,23 @@ Many callers ring only to confirm they're coming. That is a complete answer on i
 If they have NO upcoming appointment, say so directly and offer to book one — do not imply one exists.
 
 If the tool returns confirmed=false, tell them plainly what the reason says and never claim it went through. A cancelled or already-kept appointment cannot be confirmed — say so rather than pretending.
+
+# NEVER RETRY A REFUSAL
+
+Some tools return a REFUSAL rather than an error: identity_required,
+appointment_reference_unknown, option_number_unknown, person_mismatch,
+already_verified_existing. These are server-side gates, not transient
+failures. Calling the same tool again with the same arguments CANNOT
+succeed — it will be refused identically, and the caller hears silence
+while you try.
+
+Every refusal carries an agent_instruction telling you what to change first
+(verify identity, list the appointments, re-run availability). Do that, then
+call the tool ONCE more. If it refuses again, stop and offer a callback via
+sage_handoff — never loop.
+
+This is different from prompt rule 11's one-retry allowance, which is for
+genuine transient errors (timeouts, 5xx). A refusal is not transient.
 
 # WRITE-ONCE RULE (applies to EVERY write tool: sage_book, sage_reschedule, sage_confirm_appointment, cancel_appointment, sage_new_patient_intake)
 
@@ -824,7 +958,8 @@ function buildDynamicTail(metadata?: AzulSchedulingMetadata): string {
     parts.push(
       `# CALLER-ID PRE-CONTEXT (use this — do not make the caller spell their life out)\n\n` +
       `This phone number matches an existing patient on file: first name "${first}"${last ? `, last name on file "${last}"` : ''}. This is a STRONG hint, not verification.\n` +
-      `- When identity is needed, ask: "Am I speaking with ${first}?" If YES: confirm their date of birth ONLY, then call verify_patient_identity with firstName "${first}"${last ? `, lastName "${last}" (the ON-FILE spelling — never a transcribed respelling)` : ''} and that DOB. The caller-ID match plus DOB completes verification.\n` +
+      `- YOUR OPENING GREETING ALREADY ASKED "Am I speaking with ${first}?" — do NOT ask it a second time. When they confirm, go straight to their date of birth ("Thanks ${first} — and your date of birth?"), then call verify_patient_identity with firstName "${first}"${last ? `, lastName "${last}" (the ON-FILE spelling — never a transcribed respelling)` : ''} and that DOB. The caller-ID match plus DOB completes verification.\n` +
+      `- If the conversation has moved on and identity is still needed later, ask it then — but only once.\n` +
       `- Do NOT ask them to spell their name. Do NOT mention we recognized their number — just greet warmly and confirm.\n` +
       `- If they say NO (calling for someone else / different person), run the standard verification flow for the actual patient.\n` +
       `- Disclose NOTHING from their record until verify_patient_identity returns verified.`,
@@ -853,7 +988,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.18.1',
+  version: '2.24.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -872,6 +1007,26 @@ export function createAzulSchedulingAgent(
 
   /** Execute on the Eye Care service AND record to the pilot tool timeline. */
   const tracked = async (name: string, args: Record<string, unknown>): Promise<string> => {
+    const stampVerifiedIdentity = async (resultJson: string): Promise<void> => {
+      const callLogId = metadata?.callLogId;
+      if (!callLogId) return;
+      try {
+        let parsed: any = JSON.parse(resultJson);
+        parsed = parsed?.result ?? parsed; // {tool, result} envelope
+        if (parsed?.verified !== true) return;
+        const full = [parsed.firstName, parsed.lastName].filter(Boolean).join(' ').trim();
+        if (!full) return;
+        const { storage } = await import('../../server/storage');
+        await storage.updateCallLog(callLogId, {
+          patientFound: true,
+          patientName: full,
+          ...(parsed.dateOfBirth ? { patientDob: String(parsed.dateOfBirth) } : {}),
+        });
+      } catch (e) {
+        console.error('[AZUL-SCHED] verified-identity stamp failed:', e);
+      }
+    };
+
     const started = Date.now();
     const holdingCb =
       holdingCallbacks.get(String(metadata?.callId ?? '')) ??
@@ -898,6 +1053,13 @@ export function createAzulSchedulingAgent(
         callSid: metadata?.callSid,
         callLogId: metadata?.callLogId,
       });
+      // Stamp the VERIFIED identity onto the call log. Without this the console
+      // shows caller_name — the telco CNAM string for the phone line, which is
+      // whoever the carrier has on the account, not who called. The 07-28 16:54
+      // call reads "[Lookup] JO WARD" in the call list while the transcript is a
+      // verified Wayne Burley throughout, which reads like the agent addressed
+      // the wrong person. It didn't; the console was showing the phone bill.
+      if (name === 'verify_patient_identity') void stampVerifiedIdentity(result);
       return result;
     } finally {
       if (firstBeat) clearTimeout(firstBeat);
@@ -930,11 +1092,12 @@ export function createAzulSchedulingAgent(
   const sageAvailabilityTool = tool({
     name: 'sage_availability',
     description:
-      "Rules-gated availability from the live-schedule snapshot (fast). ALWAYS ask 'What days and times work best for you?' BEFORE calling and pass preferredDate (+ timeOfDay) — never search blind. THE RESULT IS A DIRECTIVE: speak the returned 'say' sentence WORD-FOR-WORD to make the offer — never phrase or invent your own — and book ONLY by that offer's option NUMBER via sage_book. If the caller wants different times, re-search with the new preference (old offers expire). The system knows who this call verified — you never pass IDs.",
+      "Rules-gated availability from the live-schedule snapshot (fast). ALWAYS ask 'What days and times work best for you?' BEFORE calling and pass preferredDate (+ timeOfDay, + preferredTime whenever the caller names a clock time, + providerName whenever they name a doctor) — never search blind. THE RESULT IS A DIRECTIVE: speak the returned 'say' sentence WORD-FOR-WORD to make the offer — never phrase or invent your own, and never mention a time that is not inside it — and book ONLY by that offer's option NUMBER via sage_book (option 1 = the first time in 'say', option 2 = the second). The tool hands you ONLY the two speakable options; other openings exist but are withheld on purpose, so the ONLY way to reach a different day, time, provider or office is to call this tool AGAIN with that preference. The system knows who this call verified — you never pass IDs.",
     parameters: z.object({
       eventName: z.string(),
       preferredDate: z.string().optional().describe("YYYY-MM-DD from asking 'What days and times work best for you?'. Resolve relative answers ('next Tuesday') to a date. Covers that date + the following 6 days."),
       timeOfDay: z.enum(['AM', 'PM', 'ALL']).optional().describe('Morning (AM) / afternoon (PM) preference, when stated.'),
+      preferredTime: z.string().optional().describe("The clock time the caller asked for, 24-hour HH:MM ('ten o'clock' -> '10:00', 'two thirty in the afternoon' -> '14:30'). Pass this EVERY time the caller names a time. Without it you are handed the earliest openings of the day and the caller's request is silently ignored."),
       locationName: z.string().optional().describe("The office AS THE CALLER SAID IT (e.g. 'Oceanside'). ONLY when the caller asked for a specific office."),
       providerName: z.string().optional().describe("The provider AS THE CALLER SAID IT (e.g. 'Dr. Wernow') when the caller wants a specific provider."),
       daysAhead: z.number().optional().describe('Provider-specific search window, default 21.'),
@@ -979,9 +1142,10 @@ export function createAzulSchedulingAgent(
   const sageBookTool = tool({
     name: 'sage_book',
     description:
-      "Rules-gated booking BY TOKEN ONLY: pass the offer_options token (from the LATEST sage_availability result) matching the option the caller chose — all slot details resolve server-side, and a slot without a token cannot be booked. Books in NextGen, then CONFIRMS the appointment exists before claiming success. The returned booking_status is the ONLY truth: 'confirmed' = booked (speak the returned 'say' confirmation); anything else means DO NOT tell the patient they are booked (on 'unknown' a scheduler callback has already been created — read the returned patient_script; on a token error, re-run sage_availability and offer only what it returns).",
+      "Rules-gated booking BY OPTION NUMBER: pass the number of the option the caller chose from the LATEST sage_availability offer, plus confirmedTimeSpoken — the time you read back to them. All slot details resolve server-side, and a slot without a live offer cannot be booked. The server REFUSES the booking when confirmedTimeSpoken doesn't match the option you picked ('confirmed_time_mismatch') — that means you offered a time the system never gave you; nothing was written, so re-run sage_availability with that time and offer only what comes back. Books in NextGen, then CONFIRMS the appointment exists before claiming success. The returned booking_status is the ONLY truth: 'confirmed' = booked (speak the returned 'say' confirmation); anything else means DO NOT tell the patient they are booked (on 'unknown' a scheduler callback has already been created — read the returned patient_script; on a token error, re-run sage_availability and offer only what it returns).",
     parameters: z.object({
       optionNumber: z.number().describe('The NUMBER of the option the caller chose from the LATEST availability offer: 1 for the first option, 2 for the second. The server resolves the slot AND the verified patient — you never handle IDs.'),
+      confirmedTimeSpoken: z.string().describe("REQUIRED. The clock time you READ BACK to the caller and they agreed to, in 24-hour HH:MM ('10:00', '14:30'). Send what you actually said out loud — not the option's time copied from the result. If those two differ the booking is refused, which is exactly what protects a caller who agreed to 10:00 from being booked at 8:10."),
       description: z.string().optional(),
     }),
     execute: async (args) =>

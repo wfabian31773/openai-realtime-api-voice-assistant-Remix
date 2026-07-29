@@ -2472,8 +2472,32 @@ async function observeCall(
     // STEP 4: Force the agent to speak first by sending response.create
     // ALWAYS send response.create — even when TwiML delivered the greeting audio.
     // Without this, the agent sits in listen-only mode and never speaks.
-    const agentGreeting = metadata?.agentGreeting;
-    
+    // The greeting must agree with the prompt, or the model is handed two
+    // contradictory orders on its very first turn.
+    //
+    // The configured greeting is forced verbatim ("Say exactly this greeting"),
+    // while azul's CALLER-ID PRE-CONTEXT block tells it to open with "Am I
+    // speaking with <name>?". When a match lands before connect, BOTH apply —
+    // and the model starts the generic line, then abandons it mid-phrase for
+    // the familiar one. Heard on the 07-29 13:51 call as:
+    //     "Thanks for calling" / "Good morning. Am I speaking with Wayne?"
+    //
+    // That reads as the agent being cut off or losing its place, and it is
+    // easy to misdiagnose as a turn-detection or interruption setting. It is
+    // neither: it is two instructions in one turn. This was invisible until
+    // the pre-context lookup got fast enough to win its race.
+    //
+    // Fix: when the caller is recognised, the FORCED greeting becomes the
+    // familiar one, so there is exactly one instruction to follow.
+    let agentGreeting = metadata?.agentGreeting;
+    const recognisedFirstName = azulMetadataRef?.precontext?.matched
+      ? String(azulMetadataRef.precontext.firstName ?? '').trim()
+      : '';
+    if (recognisedFirstName && agentGreeting) {
+      agentGreeting = `Thanks for calling Azul Vision. Am I speaking with ${recognisedFirstName}?`;
+      console.info(`[AZUL-SCHED] Greeting personalised for recognised caller (${recognisedFirstName})`);
+    }
+
     if (agentGreeting && agentGreeting.trim() !== '') {
       console.info(`[SESSION] Triggering greeting via response.create: "${agentGreeting.substring(0, 50)}..."`);
       

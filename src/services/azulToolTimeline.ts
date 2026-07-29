@@ -25,7 +25,14 @@ export interface AzulToolEvent {
   ms: number;               // tool latency
 }
 
-const timelines = new Map<string, { events: AzulToolEvent[]; callSid?: string; callLogId?: string }>();
+const timelines = new Map<string, {
+  events: AzulToolEvent[];
+  callSid?: string;
+  callLogId?: string;
+  /** How many events the last successful DB write persisted. A flush is a
+   *  no-op when this still equals events.length. */
+  flushedCount?: number;
+}>();
 
 /** Argument keys that are safe to persist per tool (everything else dropped). */
 const SAFE_ARG_KEYS = new Set([
@@ -168,8 +175,26 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
     }
   }
   if (!entry) return;
-  timelines.delete(key);
   if (!entry.callLogId && !entry.callSid) return;
+  // NEVER delete the entry here. This used to `timelines.delete(key)` before
+  // writing, which made the flush destructive in a way that silently gutted a
+  // THIRD of the pilot's QA record (17 of 51 timelines on 2026-07-28).
+  //
+  // Two flushes race for every azul call: the lifecycle coordinator's
+  // 'call-ended' backstop, and the observeCall teardown which first runs the
+  // terminal sweep (up to 25s). Whichever lost the race found no entry, so the
+  // late recorders — file_location_ticket from the sweep, transfer_to_office
+  // from the async transfer callback — created a BRAND-NEW one-event entry,
+  // and the second flush overwrote the complete timeline with it.
+  //
+  // The signature was a call with tool_call_count = 1 and events
+  // [file_location_ticket], on a 4-minute call that had really verified
+  // identity and run three availability searches. Read at face value it looks
+  // exactly like an agent speaking PHI with no tool call behind it, and that
+  // is how it was first read. The events were never lost in memory — only the
+  // row was. Keeping the entry means late events append and every subsequent
+  // flush writes a superset. The 2h reaper below owns deletion.
+  if (entry.flushedCount === entry.events.length) return; // nothing new since last write
   try {
     const { purpose, result } = classifyAzulCall(entry.events);
     // A/B carriage arm (Phase 7): stamped on call metadata at session
@@ -189,6 +214,7 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
         .set({ toolTimeline: payload, toolCallCount: entry.events.length })
         .where(eq(callLogs.callSid, entry.callSid));
     }
+    entry.flushedCount = entry.events.length;
     console.info(`[AZUL-TIMELINE] Flushed ${entry.events.length} tool event(s) (${purpose} → ${result})`);
     // Phase 7: rubric pass with the just-persisted events. Forced because
     // grade-then-flush ordering would otherwise leave a rubric graded with an
@@ -212,13 +238,18 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
   }
 }
 
-/** Backstop: drop timelines older than 2h that never flushed. */
+/** Backstop + reaper. Flushes anything older than 2h that never made it to the
+ *  DB, then frees it — the flush itself no longer deletes (see above), so this
+ *  is now the ONLY thing that bounds the map. */
 setInterval(() => {
   const cutoff = Date.now() - 2 * 60 * 60 * 1000;
   for (const [callId, entry] of timelines.entries()) {
     const first = entry.events[0];
-    if (first && new Date(first.at).getTime() < cutoff) {
-      void flushAzulTimeline(callId);
+    if (!first || new Date(first.at).getTime() >= cutoff) continue;
+    if (entry.flushedCount === entry.events.length) {
+      timelines.delete(callId); // already durable — just free it
+    } else {
+      void flushAzulTimeline(callId).finally(() => timelines.delete(callId));
     }
   }
 }, 15 * 60 * 1000).unref?.();

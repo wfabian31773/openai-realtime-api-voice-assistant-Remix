@@ -947,7 +947,9 @@ Respond with a JSON object only, no other text:
   // v3: Phase 7 governance rubric appended for azul-scheduling calls
   // (identifier hygiene, say-verbatim, terminal disposition, retry
   // discipline, verification friction, language compliance, error rate).
-  static readonly CURRENT_GRADER_VERSION = 3;
+  // 4 = azul rubric v2 (2026-07-28 audit classes). Bumping this is what makes
+  // the regrade sweep re-score recent calls against the new dimensions.
+  static readonly CURRENT_GRADER_VERSION = 4;
 
   async runAndPersistDeterministicGraders(callLogId: string, forceRegrade: boolean = false): Promise<GraderResult[]> {
     try {
