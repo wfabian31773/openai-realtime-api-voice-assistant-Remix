@@ -124,6 +124,25 @@ const transferTargets = new Map<string, {
 // the duplicate invocation is interleaved.
 const transferredCalls = new Set<string>();
 
+// Transfers that were ATTEMPTED and did not connect, held until the call ends.
+//
+// The failure ticket used to be filed the instant a dial failed. That is a
+// guess, not a fact: transfer_to_office can run more than once on a call, and
+// on 2026-07-28 NINE of twelve spurious tickets were filed BEFORE the office
+// picked up on a later attempt — the first dial timed out, filed, and then the
+// second dial connected. The transferredCalls guard cannot help there, because
+// at filing time the success has not happened yet. Guarding only the
+// success-then-failure order took the spurious rate from ~21% to ~52%.
+//
+// Deferring to the terminal sweep removes the ordering problem entirely rather
+// than patching one direction of it: at teardown we KNOW whether any attempt
+// on this call was accepted. Keeps the full handoff packet too, so the ticket
+// routes to the right office instead of the Encinitas default.
+const failedTransferAttempts = new Map<string, {
+  handoff: Parameters<typeof fileLocationQueueTicket>[0];
+  resultRaw: string;
+}>();
+
 /** Record that the office ACCEPTED a live transfer for this call. Terminal. */
 export function markAzulTransferAccepted(callId: string): void {
   transferredCalls.add(callId);
@@ -142,6 +161,11 @@ export function unregisterAzulOfficeTransferCallback(callId: string): void {
   transferTargets.delete(callId);
   transferredCalls.delete(callId);
   transferBridgeCallbackIds.delete(callId);
+  // NOT failedTransferAttempts — teardown calls this BEFORE
+  // sweepAzulUnresolvedCall (voiceAgentRoutes.ts:2574 vs :2582), and the sweep
+  // is now the only thing that files a failed-transfer ticket. Clearing here
+  // would delete the record it reads and silently file nothing at all. The
+  // sweep clears it when it is done.
 }
 
 /** Record when the office leg actually joined/left the caller's conference.
@@ -473,6 +497,29 @@ export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
       (e) => e.tool === 'sage_reschedule' && e.outcome.reschedule_status === 'cancelled_not_rebooked',
     );
     const cleanEnd = events.some((e) => e.tool === 'terminate_call' && CLEAN_END_REASONS.has(String(e.args.reason)));
+
+    // FAILED TRANSFER — decided here, once, now that the call is over.
+    //
+    // A dial that failed no longer files its own ticket, because a LATER
+    // attempt on the same call may still have connected. `transferred` above
+    // is the authoritative answer: if any attempt was accepted, the patient
+    // reached a human and no callback is owed, whatever earlier dials did.
+    const failedAttempt = failedTransferAttempts.get(callId);
+    if (failedAttempt && !transferred) {
+      console.warn(`[AZUL-SCHED] SWEEP: call ${callId} attempted a transfer that never connected — filing the failure ticket now`);
+      const meta = callMetadataForDB.get(callId);
+      await fileLocationQueueTicket(
+        failedAttempt.handoff,
+        failedAttempt.resultRaw,
+        { callId, callSid: meta?.twilioCallSid },
+        true,
+      );
+      return;
+    }
+    if (failedAttempt && transferred) {
+      console.info(`[AZUL-SCHED] SWEEP: call ${callId} had a failed dial but a later attempt connected — no ticket (this is the case that produced 9 of 12 spurious tickets on 2026-07-28)`);
+    }
+
     if (!reschedulePartial && (booked || transferred || ticketed || cancelled || rescheduled || cleanEnd)) return;
     const { purpose, result } = classifyAzulCall(events);
     // The tier-1 exemption must not swallow a half-completed reschedule: that
@@ -500,6 +547,10 @@ export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
     );
   } catch (e) {
     console.error('[AZUL-SCHED] terminal sweep failed (call already ended):', e);
+  } finally {
+    // The sweep owns this record's lifecycle — see the note in
+    // unregisterAzulOfficeTransferCallback.
+    failedTransferAttempts.delete(callId);
   }
 }
 
@@ -787,7 +838,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.17.0',
+  version: '2.18.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -1080,11 +1131,11 @@ export function createAzulSchedulingAgent(
       }
       const dial = officeTransferCallbacks.get(callId);
       if (!dial) {
-        void fileLocationQueueTicket(target.handoff, target.resultRaw, { callId, callSid: metadata?.callSid }, true);
+        failedTransferAttempts.set(callId, { handoff: target.handoff, resultRaw: target.resultRaw });
         return {
           transferred: false,
           error: 'transfer_unavailable',
-          instruction: 'Live transfer is not available on this call. Apologize and promise the callback — a ticket has been filed with the office queue.',
+          instruction: 'Live transfer is not available on this call. Apologize and promise the callback — the office queue is notified automatically when the call ends.',
         };
       }
       // Reassurance while the office rings (up to 45s) — after-hours-style:
@@ -1161,8 +1212,10 @@ export function createAzulSchedulingAgent(
           console.warn(`[AZUL-SCHED] tier-2 transfer errored (${detail}) but call already connected — suppressing failure ticket`);
           return { transferred: true };
         }
-        console.warn(`[AZUL-SCHED] tier-2 transfer failed: ${detail}`);
-        void fileLocationQueueTicket(target.handoff, target.resultRaw, { callId, callSid: metadata?.callSid }, true);
+        console.warn(`[AZUL-SCHED] tier-2 transfer failed: ${detail} — deferring the ticket to the terminal sweep`);
+        // Recorded, NOT filed. A later attempt on this same call may still
+        // connect; the sweep decides once, at the end, when it knows.
+        failedTransferAttempts.set(callId, { handoff: target.handoff, resultRaw: target.resultRaw });
         transferTargets.delete(callId);
         return {
           transferred: false,
@@ -1170,8 +1223,8 @@ export function createAzulSchedulingAgent(
           detail,
           instruction:
             target.handoff.handoffReason === 'patient_requested_human'
-              ? 'The office did not pick up. This caller asked for a person WITHOUT saying what they needed, so do NOT just promise a callback and hang up — OFFER THEM THE CHOICE, warmly and in one breath: "Thanks for holding — I wasn\'t able to reach them directly. I can have someone call you back, usually within the hour — or if you\'d like, tell me what you need and I may be able to take care of it right now." Then FOLLOW THEIR ANSWER. If they want the callback, confirm it warmly and wrap up (the ticket is already filed). If they tell you what they need, handle it normally — you can book, cancel, reschedule and confirm appointments. Ask ONCE; if they decline or repeat that they want a person, take the callback and stop offering.'
-              : 'The office did not pick up. Apologize, promise the callback ("I was not able to reach them directly, so our team will call you back — usually within the hour"), and wrap up warmly. A high-priority ticket has been filed with the office queue.',
+              ? 'The office did not pick up. This caller asked for a person WITHOUT saying what they needed, so do NOT just promise a callback and hang up — OFFER THEM THE CHOICE, warmly and in one breath: "Thanks for holding — I wasn\'t able to reach them directly. I can have someone call you back, usually within the hour — or if you\'d like, tell me what you need and I may be able to take care of it right now." Then FOLLOW THEIR ANSWER. If they want the callback, confirm it warmly and wrap up — the office queue is notified automatically. If they tell you what they need, handle it normally — you can book, cancel, reschedule and confirm appointments. Ask ONCE; if they decline or repeat that they want a person, take the callback and stop offering.'
+              : 'The office did not pick up. Apologize, promise the callback ("I was not able to reach them directly, so our team will call you back — usually within the hour"), and wrap up warmly. The office queue is notified automatically when the call ends.',
         };
       } finally {
         if (hbFirst) clearTimeout(hbFirst);
