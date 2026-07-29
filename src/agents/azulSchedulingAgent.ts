@@ -330,7 +330,13 @@ async function callEyecareTool(
     });
     const text = await r.text();
     if (!r.ok) {
+      // Auth failures get the richer treatment (count, outage alarm); every
+      // OTHER non-OK status used to return an error to the model and leave no
+      // server-side trace at all, so a 500 from the service was invisible here
+      // and only visible over there. Same lesson as the fire-and-forget POSTs:
+      // if it can fail, it has to say so on our side too.
       if (r.status === 401 || r.status === 403) noteAuthFailure(name, r.status, text);
+      else console.error(`[AZUL-SCHED] ${name} HTTP ${r.status}: ${text.slice(0, 300)}`);
       return JSON.stringify({
         error: `Eye Care service returned ${r.status}`,
         detail: text.slice(0, 500),
