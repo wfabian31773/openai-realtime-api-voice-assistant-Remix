@@ -84,17 +84,50 @@ function normalize(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-/** Did the AGENT switch out of English? Function words only — they are the
- *  part of a language a translation cannot avoid, and they don't appear in
- *  clinic vocabulary or patient names. Needs several hits so one Spanish
- *  courtesy ("de nada") doesn't excuse an English call from the check. */
-const NON_ENGLISH_MARKERS =
-  /\b(está|estás|para|pero|porque|puedo|puede|usted|gracias|cómo|dónde|cuándo|nuestro|nuestra|desde|hasta|también|ayudarte|ayudarle|oficina|abierta|lunes|viernes)\b/gi;
+/** Which language is the agent actually speaking?
+ *
+ *  First attempt matched a keyword list drawn from the one Spanish call I had
+ *  in front of me, which was office-hours vocabulary — so "Su cita es el
+ *  martes a las diez" scored zero and would have been graded as an English
+ *  deviation. That is the same false positive this whole version exists to
+ *  remove, just moved to a different sentence.
+ *
+ *  So: compare function-word density instead of matching topic words.
+ *  Function words are what a translation cannot avoid and what a clinical
+ *  vocabulary doesn't supply, and comparing the two sides means a stray
+ *  loan-word decides nothing. Tokens ambiguous between the languages ("no",
+ *  "a") are in neither set. */
+const ES_FUNCTION_WORDS = new Set([
+  'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'de', 'del', 'al', 'que', 'y', 'en',
+  'es', 'son', 'está', 'están', 'estás', 'ser', 'su', 'sus', 'con', 'por', 'para', 'se', 'lo',
+  'le', 'les', 'como', 'más', 'pero', 'porque', 'muy', 'tiene', 'tienes', 'puede', 'puedo',
+  'pueda', 'hay', 'cita', 'citas', 'gracias', 'usted', 'nuestro', 'nuestra', 'desde', 'hasta',
+  'también', 'cómo', 'dónde', 'cuándo', 'señor', 'señora', 'buenos', 'buenas', 'días', 'día',
+  'hora', 'horas', 'oficina', 'abierta', 'abierto', 'lunes', 'martes', 'miércoles', 'jueves',
+  'viernes', 'sábado', 'domingo', 'ayudarte', 'ayudarle', 'nada', 'algo', 'todo', 'esta', 'este',
+]);
+const EN_FUNCTION_WORDS = new Set([
+  'the', 'an', 'of', 'and', 'in', 'is', 'are', 'was', 'were', 'to', 'for', 'with', 'you', 'your',
+  'we', 'our', 'on', 'at', 'it', 'that', 'this', 'these', 'those', 'can', 'have', 'has', 'had',
+  'will', 'would', 'could', 'should', 'please', 'thanks', 'thank', 'office', 'open', 'appointment',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'from', 'through',
+  'about', 'there', 'here', 'what', 'when', 'where', 'how', 'all', 'any', 'let', 'get',
+]);
 
 function deliveredInAnotherLanguage(transcript: string): boolean {
-  const spoken = agentLines(transcript).join(' ');
+  const spoken = agentLines(transcript).join(' ').toLowerCase();
   if (!spoken) return false;
-  return (spoken.match(NON_ENGLISH_MARKERS) ?? []).length >= 3;
+  const tokens = spoken.split(/[^a-záéíóúüñ]+/i).filter(Boolean);
+  let es = 0;
+  let en = 0;
+  for (const tok of tokens) {
+    if (ES_FUNCTION_WORDS.has(tok)) es++;
+    else if (EN_FUNCTION_WORDS.has(tok)) en++;
+  }
+  // Needs real weight AND a clear majority: three hits stops a single borrowed
+  // word from abstaining, and out-counting English stops a mostly-English call
+  // with a Spanish courtesy in it from escaping the check.
+  return es >= 3 && es > en;
 }
 
 /** No internal identifier may ever be SPOKEN. */
@@ -164,12 +197,24 @@ function gradeTerminalDisposition(input: RubricInput): RubricGraderResult {
   const terminal =
     e.some((x) => x.tool === 'sage_book' && x.outcome?.booking_status === 'confirmed') ||
     // A handoff packet that the service ACCEPTED is a disposition in its own
-    // right — routing is chosen and a callback/ticket exists server-side, and
-    // on a live call the transfer or ticket that follows is recorded too.
-    // Omitting it meant every correctly-handed-off call in the sim rig (which
-    // has no transfer_to_office or file_location_ticket tool at all) scored as
-    // a dead end. A REFUSED handoff still doesn't count: nothing was routed.
-    e.some((x) => x.tool === 'sage_handoff' && x.outcome?.ok !== false && x.outcome?.error == null) ||
+    // right — routing is chosen and a callback exists server-side, and on a
+    // live call the transfer or ticket that follows is recorded too. Omitting
+    // it meant every correctly-handed-off call in the sim rig (which has no
+    // transfer_to_office or file_location_ticket tool at all) scored as a dead
+    // end.
+    //
+    // AFFIRMATIVE ok only. "Not obviously failed" is not evidence of routing:
+    // an unreadable response summarises to {unparsed:true} on the live
+    // timeline and {raw:...} in the rig, neither of which carries an error —
+    // so a permissive test would score the service falling over as a clean
+    // disposition, which is the exact dead-end class (D2) this dimension
+    // exists to catch. routeAndCreateHandoff always returns an explicit ok,
+    // and the timeline allowlists it, so demanding it costs nothing real.
+    //
+    // NOT accepted as evidence: `method`. It rides the timeline whether the
+    // handoff succeeded or failed (a refused handoff still reports method
+    // "callback"), so treating it as success would re-open the same hole.
+    e.some((x) => x.tool === 'sage_handoff' && x.outcome?.ok === true) ||
     e.some((x) => x.tool === 'transfer_to_office' && x.outcome?.ok === true) ||
     e.some((x) => x.tool === 'file_location_ticket' && (x.outcome?.ok === true || x.outcome?.skipped != null)) ||
     e.some((x) => x.tool === 'cancel_appointment' && !x.outcome?.error) ||

@@ -326,6 +326,32 @@ describe('azul rubric v2', () => {
       expect(r.pass).toBe(true);
     });
 
+    it('does NOT accept an unreadable handoff response as routing', () => {
+      // Codex review, PR #49. summarizeResult stores {unparsed:true} when the
+      // response can't be parsed (the rig stores {raw:...}); neither carries an
+      // error, so "not obviously failed" would have scored the service falling
+      // over as a clean disposition — the exact dead-end class D2 exists for.
+      for (const outcome of [{ unparsed: true }, { raw: '502 Bad Gateway' }, {}]) {
+        const r = grade(
+          { transcript: t(['CALLER', 'Please put me through to someone.']), events: [{ tool: 'sage_handoff', outcome }] },
+          'rubric_terminal_disposition',
+        );
+        expect(r.pass, JSON.stringify(outcome)).toBe(false);
+      }
+    });
+
+    it('does not accept `method` as proof of routing', () => {
+      // method rides the timeline whether the handoff succeeded or not.
+      const r = grade(
+        {
+          transcript: t(['CALLER', 'Connect me to a person.']),
+          events: [{ tool: 'sage_handoff', outcome: { ok: false, method: 'callback' } }],
+        },
+        'rubric_terminal_disposition',
+      );
+      expect(r.pass).toBe(false);
+    });
+
     it('still calls a REFUSED handoff a dead end', () => {
       const r = grade(
         {
@@ -352,6 +378,28 @@ describe('azul rubric v2', () => {
       );
       expect(r.pass).toBe(true);
       expect(r.detail).toMatch(/another language/);
+    });
+
+    it('recognises Spanish that is not about office hours', () => {
+      // Codex review, PR #49: the first marker list was drawn from the one
+      // Spanish call I had, which was office-hours vocabulary. An appointment
+      // script shares none of those words and would have been graded as an
+      // English deviation — the same false positive, one sentence over.
+      for (const line of [
+        'Su cita es el martes a las diez de la mañana.',
+        'El doctor Nayer puede verla en nuestra oficina de Oceanside.',
+        'La dirección es cuatro cinco cero, calle segunda, y hay estacionamiento.',
+      ]) {
+        const r = grade(
+          {
+            transcript: t(['CALLER', '¿Puede hablar en español?'], ['AGENT', line]),
+            events: [{ tool: 'sage_info', outcome: { say: 'Your appointment is Tuesday at ten in the morning at our Oceanside office.' } }],
+          },
+          'rubric_say_verbatim',
+        );
+        expect(r.pass, line).toBe(true);
+        expect(r.detail, line).toMatch(/another language/);
+      }
     });
 
     it('does not let one foreign courtesy excuse an English call', () => {
