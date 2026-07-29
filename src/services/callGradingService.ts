@@ -949,7 +949,7 @@ Respond with a JSON object only, no other text:
   // discipline, verification friction, language compliance, error rate).
   // 4 = azul rubric v2 (2026-07-28 audit classes). Bumping this is what makes
   // the regrade sweep re-score recent calls against the new dimensions.
-  static readonly CURRENT_GRADER_VERSION = 5;
+  static readonly CURRENT_GRADER_VERSION = 6;
 
   async runAndPersistDeterministicGraders(callLogId: string, forceRegrade: boolean = false): Promise<GraderResult[]> {
     try {

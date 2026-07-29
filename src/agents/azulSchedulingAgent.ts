@@ -583,6 +583,12 @@ async function readPersistedTimeline(
   }
 }
 
+/** Below this, a call with no tool events is a hangup or a wrong number and
+ *  files nothing. Above it, someone was on the line long enough to be failed.
+ *  Calibrated against 2026-07-29: the ghost call ran 19s, the two real dead
+ *  ends ran 125s and 482s. */
+const ZERO_TOOL_DEAD_END_SECONDS = 45;
+
 export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
   try {
     // The sweep's whole job is deciding whether this caller was left with
@@ -607,7 +613,50 @@ export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
         events = persisted;
       }
     }
-    if (!events || events.length === 0) return; // never engaged the scheduling tools
+    // ZERO-TOOL CALLS ARE NOT EXEMPT (2026-07-29). This used to be a bare
+    // `return`, on the reasoning that a call which never touched the
+    // scheduling tools had nothing to resolve. Two calls this morning proved
+    // that backwards. 18:30: the caller said "Representative" six times, was
+    // asked for a name and date of birth each time, refused three times, and
+    // the call ended after 125 seconds — no tool call, no handoff, no ticket,
+    // no record that anyone had rung. 18:24: a verified patient asked to be
+    // connected, heard "still trying the office for you — hang tight", and
+    // the call ended at eight minutes with the same silence.
+    //
+    // An agent that talks to someone for a minute and calls NOTHING is the
+    // strongest dead-end signal there is, not an exemption from the check.
+    // The old guard read "no evidence" as "nothing happened", which is the
+    // same mistake the deleted-timeline bug made.
+    //
+    // A genuine hangup still files nothing: the floor is the difference
+    // between a caller who never engaged and one who was failed. Today's
+    // ghost call ran 19 seconds; the two real dead ends ran 125 and 482.
+    if (!events || events.length === 0) {
+      const metaForEmpty = callMetadataForDB.get(callId);
+      const seconds = metaForEmpty?.startTime
+        ? (Date.now() - metaForEmpty.startTime.getTime()) / 1000
+        : 0;
+      if (seconds < ZERO_TOOL_DEAD_END_SECONDS) return; // ghost call / immediate hangup
+      console.warn(
+        `[AZUL-SCHED] SWEEP: call ${callId} ran ${Math.round(seconds)}s and called NOTHING — ` +
+          `the caller was spoken to and nothing was done for them; filing a ticket`,
+      );
+      await fileLocationQueueTicket(
+        {
+          handoffReason: 'unresolved_call_end',
+          patient: { name: metaForEmpty?.callerName, phone: metaForEmpty?.from },
+          callContext: {
+            reasonForCall:
+              `Call lasted ${Math.round(seconds)} seconds and the assistant took NO action at all — no lookup, ` +
+              `no booking, no transfer, no ticket. The caller was talking to someone and got nowhere. ` +
+              `Please call them back and find out what they needed.`,
+          },
+        },
+        '{}',
+        { callId, callSid: metaForEmpty?.twilioCallSid },
+      );
+      return;
+    }
     const booked = events.some((e) => e.tool === 'sage_book' && e.outcome.booking_status === 'confirmed');
     const transferred = events.some((e) => e.tool === 'transfer_to_office' && e.outcome.ok === true);
     const ticketed = events.some((e) => e.tool === 'file_location_ticket' && (e.outcome.ok === true || e.outcome.skipped != null));

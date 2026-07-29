@@ -39,9 +39,20 @@
  * pinned by tests. The lesson is the one already in the backlog and ignored
  * here: a grader is not finished when it passes its unit tests, only when it
  * has scored real traffic without crying wolf.
+ *
+ * v4 (2026-07-29, same day) is the first calibration against LIVE calls —
+ * 13 of them, the morning after 2.25.0 went out. Twelve of thirteen
+ * dimensions produced ZERO false positives, which is the result the sim runs
+ * could not give. Two corrections: 'as soon as possible' was raising a
+ * critical on routine scheduling calls (how soon someone wants to be seen is
+ * not how sick they are), and terminal_disposition EXEMPTED calls with no
+ * tool events — so the single worst failure mode, an agent that talks to a
+ * caller and does nothing at all, scored a clean pass. Two live calls that
+ * morning were exactly that, and neither the grader nor the terminal sweep
+ * (identical hole, fixed with it) noticed either one.
  */
 
-export const RUBRIC_VERSION = 3;
+export const RUBRIC_VERSION = 4;
 
 export interface RubricGraderResult {
   grader: string;
@@ -192,7 +203,23 @@ function gradeSayVerbatim(input: RubricInput): RubricGraderResult {
 function gradeTerminalDisposition(input: RubricInput): RubricGraderResult {
   const e = input.events;
   if (e.length === 0) {
-    return { grader: 'rubric_terminal_disposition', pass: true, score: 1, severity: 'critical', detail: 'No tool engagement (n/a).' };
+    // Not an exemption. A call where the agent held a CONVERSATION and called
+    // nothing is the strongest dead end there is — 2026-07-29 18:30 ran 125
+    // seconds, the caller asked for a representative six times, and the tool
+    // timeline was empty. Under the old n/a this scored a clean pass, which is
+    // how the worst failure mode stayed invisible to its own meter. (The
+    // terminal sweep had the identical hole; both were fixed together.)
+    const turns = callerLines(input.transcript).length;
+    if (turns >= 2) {
+      return {
+        grader: 'rubric_terminal_disposition',
+        pass: false,
+        score: 0,
+        severity: 'critical',
+        detail: `Caller spoke ${turns} time(s) and the agent called NO tools at all — no lookup, no booking, no transfer, no ticket.`,
+      };
+    }
+    return { grader: 'rubric_terminal_disposition', pass: true, score: 1, severity: 'critical', detail: 'No tool engagement and no real conversation — hangup or wrong number (n/a).' };
   }
   const terminal =
     e.some((x) => x.tool === 'sage_book' && x.outcome?.booking_status === 'confirmed') ||
@@ -314,7 +341,18 @@ function gradeToolErrorRate(input: RubricInput): RubricGraderResult {
  *  is cheap; broadening it carelessly turns a critical grader into noise the
  *  regression watch learns to ignore. */
 const URGENCY_RE =
-  /\b(urgent|emergency|asap|right away|as soon as possible|can'?t see|cannot see|losing (?:my )?(?:vision|sight)|vision loss|lost (?:my )?(?:vision|sight)|blurr?y all of a sudden|sudden(?:ly)? blurr?|flashes|floaters|curtain|dark shadow|eye pain|painful eye|my eye hurts|hurts really bad|red eye|swollen|injur|hit (?:my|his|her) eye|scratched (?:my )?eye|something in my eye|chemical|burn(?:ed|ing)? my eye)\b/i;
+  /\b(urgent|emergency|can'?t see|cannot see|losing (?:my )?(?:vision|sight)|vision loss|lost (?:my )?(?:vision|sight)|blurr?y all of a sudden|sudden(?:ly)? blurr?|flashes|floaters|curtain|dark shadow|eye pain|painful eye|my eye hurts|hurts really bad|red eye|swollen|injur|hit (?:my|his|her) eye|scratched (?:my )?eye|something in my eye|chemical|burn(?:ed|ing)? my eye)\b/i;
+
+/** How SOON someone wants to be seen is not how SICK they are. "I need an eye
+ *  exam as soon as possible" is the most ordinary sentence a scheduling line
+ *  hears, and on 2026-07-29 it raised a critical on a routine call — the first
+ *  false positive this rubric produced against live traffic.
+ *
+ *  These now count only ALONGSIDE a clinical signal, where they sharpen a real
+ *  symptom into a same-day one. "urgent" and "emergency" stay in the list
+ *  above and still fire alone, because the operator directive is explicit that
+ *  a caller SAYING it's urgent is itself the trigger. */
+const SCHEDULING_SPEED_RE = /\b(asap|right away|as soon as possible|soonest|first available)\b/i;
 
 /** Anything touching surgery routes to the surgical queue, including the
  *  mundane-sounding tail of it — running out of post-op drops was one of
@@ -332,6 +370,17 @@ function gradeUrgencyRouting(input: RubricInput): RubricGraderResult {
   }
   const urgent = caller.find((l) => URGENCY_RE.test(l));
   const surgical = caller.find((l) => SURGICAL_RE.test(l));
+  // Scheduling-speed words sharpen a clinical signal; they never create one.
+  const speedOnly = !urgent && !surgical && caller.some((l) => SCHEDULING_SPEED_RE.test(l));
+  if (speedOnly) {
+    return {
+      grader: 'rubric_urgency_routing',
+      pass: true,
+      score: 1,
+      severity: 'critical',
+      detail: 'Caller wanted to be seen soon but described no symptom — a scheduling preference, not urgency (n/a).',
+    };
+  }
   const trigger = urgent || surgical;
   if (!trigger) {
     return { grader: 'rubric_urgency_routing', pass: true, score: 1, severity: 'critical', detail: 'No urgency or surgical signal from the caller (n/a).' };
