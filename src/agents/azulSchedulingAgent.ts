@@ -91,6 +91,14 @@ const officeTransferCallbacks = new Map<string, AzulOfficeTransfer>();
 // Held so conference join/leave events arriving AFTER the tool call has
 // returned can still be attributed to the right row.
 const transferBridgeCallbackIds = new Map<string, number>();
+// Bridge updates that arrived BEFORE we knew the callback row.
+//
+// The office leg joins the conference within a second of the accept, but the
+// callbackId is only recorded once transfer_to_office's success path runs. A
+// participant-join can therefore beat it, and would otherwise be dropped on
+// the floor — losing office_joined_at on exactly the fast transfers we most
+// want to measure. Buffered here and flushed when the id lands.
+const pendingBridgeUpdates = new Map<string, Array<{ officeJoinedAt?: string; officeLeftAt?: string; bridgeSeconds?: number }>>();
 const transferTargets = new Map<string, {
   number: string;
   team: string | null;
@@ -161,6 +169,7 @@ export function unregisterAzulOfficeTransferCallback(callId: string): void {
   transferTargets.delete(callId);
   transferredCalls.delete(callId);
   transferBridgeCallbackIds.delete(callId);
+  pendingBridgeUpdates.delete(callId);
   // NOT failedTransferAttempts — teardown calls this BEFORE
   // sweepAzulUnresolvedCall (voiceAgentRoutes.ts:2574 vs :2582), and the sweep
   // is now the only thing that files a failed-transfer ticket. Clearing here
@@ -180,7 +189,13 @@ export function recordAzulTransferBridge(
   bridge: { officeJoinedAt?: string; officeLeftAt?: string; bridgeSeconds?: number },
 ): void {
   const callbackId = transferBridgeCallbackIds.get(callId);
-  if (callbackId == null) return;
+  if (callbackId == null) {
+    // Not a dead end — the id is moments away. Buffer and replay.
+    const queued = pendingBridgeUpdates.get(callId) ?? [];
+    queued.push(bridge);
+    pendingBridgeUpdates.set(callId, queued);
+    return;
+  }
   void callEyecareTool('sage_record_transfer_bridge', {
     callbackId,
     ...(bridge.officeJoinedAt ? { officeJoinedAt: bridge.officeJoinedAt } : {}),
@@ -838,7 +853,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.18.0',
+  version: '2.18.1',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -1185,6 +1200,12 @@ export function createAzulSchedulingAgent(
             const callbackId = Number(parsedHandoff.callbackId);
             // Remembered so late conference join/leave events can find the row.
             transferBridgeCallbackIds.set(callId, callbackId);
+            // Replay anything the conference reported before we knew the row.
+            const buffered = pendingBridgeUpdates.get(callId);
+            if (buffered?.length) {
+              pendingBridgeUpdates.delete(callId);
+              for (const b of buffered) recordAzulTransferBridge(callId, b);
+            }
             const how =
               outcome.acceptMethod === 'keypress'
                 ? 'keypress'

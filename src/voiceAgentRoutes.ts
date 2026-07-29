@@ -4697,13 +4697,25 @@ export function setupVoiceAgentRoutes(app: Express): void {
   // these events the four cases separate themselves in a query: never joined,
   // joined and dropped instantly, joined and held, joined and killed by our
   // own cap (leave absent, call ends on a round number).
-  app.post("/api/voice/office-leg-events", webhookRateLimiter, async (req: { body: { toString: (enc: string) => string } }, res: { sendStatus: (c: number) => void }) => {
-    res.sendStatus(200);
-    const parsedBody = Object.fromEntries(new URLSearchParams(req.body.toString("utf8")));
-    const event = parsedBody.StatusCallbackEvent;
-    const callSid = parsedBody.CallSid;
+  // Office-leg conference join/leave — the measurement that
+  // `outcome = 'transferred_live'` is not.
+  //
+  // WHERE THESE ACTUALLY ARRIVE (fixed 2026-07-29): NOT at a dedicated
+  // endpoint. Conference status callbacks belong to the CONFERENCE, and Twilio
+  // takes them from the participant that CREATES it — here, the caller, whose
+  // TwiML points at /api/voice/conference-events. A `statusCallback` on a
+  // later joiner's <Conference> noun is silently ignored. The office leg's
+  // events have been landing at conference-events all along, which knew
+  // nothing about officeLegBridges, so bridge_seconds recorded on ZERO
+  // transfers for two days and failed quietly rather than erroring.
+  //
+  // Now invoked from the conference-events handler. The dedicated route is
+  // kept as a harmless second entry point in case a future Twilio change ever
+  // honours the per-participant attribute; the map delete on leave makes a
+  // double delivery a no-op.
+  async function handleOfficeLegConferenceEvent(event: string, callSid: string | undefined): Promise<void> {
     const bridge = callSid ? officeLegBridges.get(callSid) : undefined;
-    if (!bridge) return; // caller leg or an expired transfer — not ours
+    if (!bridge) return; // caller leg, SIP agent leg, or an expired transfer
 
     const { recordAzulTransferBridge } = await import('./agents/azulSchedulingAgent');
     if (event === 'participant-join') {
@@ -4727,8 +4739,14 @@ export function setupVoiceAgentRoutes(app: Express): void {
         officeLeftAt: new Date(leftAtMs).toISOString(),
         ...(seconds != null ? { bridgeSeconds: seconds } : {}),
       });
-      officeLegBridges.delete(callSid);
+      officeLegBridges.delete(callSid!);
     }
+  }
+
+  app.post("/api/voice/office-leg-events", webhookRateLimiter, async (req: { body: { toString: (enc: string) => string } }, res: { sendStatus: (c: number) => void }) => {
+    res.sendStatus(200);
+    const parsedBody = Object.fromEntries(new URLSearchParams(req.body.toString("utf8")));
+    await handleOfficeLegConferenceEvent(parsedBody.StatusCallbackEvent, parsedBody.CallSid);
   });
 
   // Async answering-machine detection verdict for a warm-transfer office leg.
@@ -4826,6 +4844,11 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const friendlyName = parsedBody.FriendlyName;
     const conferenceSid = parsedBody.ConferenceSid;
     const participantCallSid = parsedBody.CallSid;
+
+    // Office-leg bridge telemetry. These events arrive HERE, not at
+    // /api/voice/office-leg-events — see the note on
+    // handleOfficeLegConferenceEvent. No-ops for every non-office participant.
+    void handleOfficeLegConferenceEvent(event, participantCallSid);
 
     // TRACE-5: Full conference event dump — critical for diagnosing SIP participant failures
     const isSipParticipant = label === 'virtual agent';
