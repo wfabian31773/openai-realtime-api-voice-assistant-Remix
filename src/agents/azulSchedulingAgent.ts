@@ -36,6 +36,12 @@ const EYECARE_BASE_URL =
   process.env.EYECARE_SCHEDULING_BASE_URL ||
   'https://eyecare-scheduling-agent-wayne-fabians-projects.vercel.app';
 
+/** Declared to the service on every tool call (X-Agent-Version), which is how
+ *  server-side gates can tighten for new builds without breaking old ones.
+ *  `azulSchedulingAgentConfig.version` below is the same value — this constant
+ *  exists only because the config object is defined further down the file. */
+const AZUL_AGENT_VERSION = '2.25.0';
+
 // ─────────────────────────────────────────────────────────────────────────
 // HTTP client — every scheduling tool executes on the Eye Care service.
 // ─────────────────────────────────────────────────────────────────────────
@@ -310,6 +316,14 @@ async function callEyecareTool(
         // strips every GUID/token from responses — an identifier the
         // model never sees is one it can never parrot.
         'X-Zero-Id': '1',
+        // Which build is calling (2026-07-29). The service's read-back gate
+        // needs to distinguish "this agent forgot to read the time back" from
+        // "this agent predates the parameter" — the first must block the
+        // booking, the second must not, and without a version they look
+        // identical. Sending it here is what lets that gate close without a
+        // coordinated deploy: an older build sends no header and keeps failing
+        // open, this build sends one and gets held to the rule.
+        'X-Agent-Version': AZUL_AGENT_VERSION,
       },
       body: JSON.stringify(args ?? {}),
       signal: controller.signal,
@@ -988,7 +1002,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.24.0',
+  version: AZUL_AGENT_VERSION,
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
