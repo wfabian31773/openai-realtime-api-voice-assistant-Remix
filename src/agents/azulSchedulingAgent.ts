@@ -695,7 +695,7 @@ Never imply the callback is a lesser option or that you are refusing to connect 
 4. sage_decision with intent "search" for that appointment type (+ office).
 5. If allowed: brief cover line ("Let me check our openings for you"), then sage_availability carrying EVERY preference they gave you — preferredDate, timeOfDay, preferredTime, providerName, locationName. A preference you drop is a preference the system cannot honor. It reads the live-schedule snapshot and answers fast. If it's ever slow, that's NORMAL, not an error — reassure and wait; only an actual returned error is a failure.
 6. THE OFFER IS THE RESULT'S 'say' SENTENCE — speak it word-for-word. The system composed it from real openings; you may not rephrase times, add options, or improvise. A time you do not see inside 'say' DOES NOT EXIST to you, no matter what else is in the result — you cannot offer it, confirm it, or book it. If the caller wants something different — another time, another day, another doctor, another office — the ONLY legal move is to CALL sage_availability AGAIN with that preference and speak the new 'say'. Never satisfy a request from anything but a fresh 'say'.
-7. Patient picks one → confirm it back → explicit yes → say the booking cover line → sage_book with optionNumber (1 for the first option offered, 2 for the second). THE TIME YOU CONFIRMED OUT LOUD AND THE OPTION NUMBER YOU BOOK MUST BE THE SAME SLOT — if they are not, you have just booked the patient into an appointment they did not agree to. If you cannot map what the caller agreed to onto option 1 or option 2 of the LATEST 'say', do not book: re-search and re-offer. You NEVER handle IDs, tokens, or slot details — the system knows who this call verified and resolves everything from the number. Booking hits the LIVE schedule and can take up to half a minute — that's normal.
+7. Patient picks one → confirm it back → explicit yes → say the booking cover line → sage_book with optionNumber (1 for the first option offered, 2 for the second) AND confirmedTimeSpoken (the time you just read back, 24-hour HH:MM). THE TIME YOU CONFIRMED OUT LOUD AND THE OPTION NUMBER YOU BOOK MUST BE THE SAME SLOT — the server checks this and refuses the booking if they differ. A refusal is not an error to apologize your way past: it means you offered a time the system never gave you. Nothing was written. Re-run sage_availability with that time and offer only what comes back. If you cannot map what the caller agreed to onto option 1 or option 2 of the LATEST 'say', do not book at all: re-search and re-offer. You NEVER handle IDs, tokens, or slot details — the system knows who this call verified and resolves everything from the number. Booking hits the LIVE schedule and can take up to half a minute — that's normal.
 8. If booking FAILS: apologize ONCE, briefly. You may RETRY THE SAME optionNumber ONCE (transient system hiccups are common) before falling back. On an option error (unknown/superseded), re-run sage_availability and offer only its new 'say'. If TWO booking attempts fail in a row, STOP retrying — sage_handoff (api_failure) and promise the callback. Never offer a new option while a booking attempt is still in flight, and never loop the same offer at the caller more than twice.
 9. booking_status "confirmed" → confirm warmly by speaking the returned 'say' confirmation (add the provider name from the offer) — NEVER from memory of what you offered. Anything else → rule 4 of the contract.
 
@@ -873,7 +873,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.22.0',
+  version: '2.23.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
@@ -892,6 +892,26 @@ export function createAzulSchedulingAgent(
 
   /** Execute on the Eye Care service AND record to the pilot tool timeline. */
   const tracked = async (name: string, args: Record<string, unknown>): Promise<string> => {
+    const stampVerifiedIdentity = async (resultJson: string): Promise<void> => {
+      const callLogId = metadata?.callLogId;
+      if (!callLogId) return;
+      try {
+        let parsed: any = JSON.parse(resultJson);
+        parsed = parsed?.result ?? parsed; // {tool, result} envelope
+        if (parsed?.verified !== true) return;
+        const full = [parsed.firstName, parsed.lastName].filter(Boolean).join(' ').trim();
+        if (!full) return;
+        const { storage } = await import('../../server/storage');
+        await storage.updateCallLog(callLogId, {
+          patientFound: true,
+          patientName: full,
+          ...(parsed.dateOfBirth ? { patientDob: String(parsed.dateOfBirth) } : {}),
+        });
+      } catch (e) {
+        console.error('[AZUL-SCHED] verified-identity stamp failed:', e);
+      }
+    };
+
     const started = Date.now();
     const holdingCb =
       holdingCallbacks.get(String(metadata?.callId ?? '')) ??
@@ -918,6 +938,13 @@ export function createAzulSchedulingAgent(
         callSid: metadata?.callSid,
         callLogId: metadata?.callLogId,
       });
+      // Stamp the VERIFIED identity onto the call log. Without this the console
+      // shows caller_name — the telco CNAM string for the phone line, which is
+      // whoever the carrier has on the account, not who called. The 07-28 16:54
+      // call reads "[Lookup] JO WARD" in the call list while the transcript is a
+      // verified Wayne Burley throughout, which reads like the agent addressed
+      // the wrong person. It didn't; the console was showing the phone bill.
+      if (name === 'verify_patient_identity') void stampVerifiedIdentity(result);
       return result;
     } finally {
       if (firstBeat) clearTimeout(firstBeat);
@@ -1000,9 +1027,10 @@ export function createAzulSchedulingAgent(
   const sageBookTool = tool({
     name: 'sage_book',
     description:
-      "Rules-gated booking BY TOKEN ONLY: pass the offer_options token (from the LATEST sage_availability result) matching the option the caller chose — all slot details resolve server-side, and a slot without a token cannot be booked. Books in NextGen, then CONFIRMS the appointment exists before claiming success. The returned booking_status is the ONLY truth: 'confirmed' = booked (speak the returned 'say' confirmation); anything else means DO NOT tell the patient they are booked (on 'unknown' a scheduler callback has already been created — read the returned patient_script; on a token error, re-run sage_availability and offer only what it returns).",
+      "Rules-gated booking BY OPTION NUMBER: pass the number of the option the caller chose from the LATEST sage_availability offer, plus confirmedTimeSpoken — the time you read back to them. All slot details resolve server-side, and a slot without a live offer cannot be booked. The server REFUSES the booking when confirmedTimeSpoken doesn't match the option you picked ('confirmed_time_mismatch') — that means you offered a time the system never gave you; nothing was written, so re-run sage_availability with that time and offer only what comes back. Books in NextGen, then CONFIRMS the appointment exists before claiming success. The returned booking_status is the ONLY truth: 'confirmed' = booked (speak the returned 'say' confirmation); anything else means DO NOT tell the patient they are booked (on 'unknown' a scheduler callback has already been created — read the returned patient_script; on a token error, re-run sage_availability and offer only what it returns).",
     parameters: z.object({
       optionNumber: z.number().describe('The NUMBER of the option the caller chose from the LATEST availability offer: 1 for the first option, 2 for the second. The server resolves the slot AND the verified patient — you never handle IDs.'),
+      confirmedTimeSpoken: z.string().describe("REQUIRED. The clock time you READ BACK to the caller and they agreed to, in 24-hour HH:MM ('10:00', '14:30'). Send what you actually said out loud — not the option's time copied from the result. If those two differ the booking is refused, which is exactly what protects a caller who agreed to 10:00 from being booked at 8:10."),
       description: z.string().optional(),
     }),
     execute: async (args) =>
