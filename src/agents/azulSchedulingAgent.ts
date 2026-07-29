@@ -843,7 +843,8 @@ function buildDynamicTail(metadata?: AzulSchedulingMetadata): string {
     parts.push(
       `# CALLER-ID PRE-CONTEXT (use this — do not make the caller spell their life out)\n\n` +
       `This phone number matches an existing patient on file: first name "${first}"${last ? `, last name on file "${last}"` : ''}. This is a STRONG hint, not verification.\n` +
-      `- When identity is needed, ask: "Am I speaking with ${first}?" If YES: confirm their date of birth ONLY, then call verify_patient_identity with firstName "${first}"${last ? `, lastName "${last}" (the ON-FILE spelling — never a transcribed respelling)` : ''} and that DOB. The caller-ID match plus DOB completes verification.\n` +
+      `- YOUR OPENING GREETING ALREADY ASKED "Am I speaking with ${first}?" — do NOT ask it a second time. When they confirm, go straight to their date of birth ("Thanks ${first} — and your date of birth?"), then call verify_patient_identity with firstName "${first}"${last ? `, lastName "${last}" (the ON-FILE spelling — never a transcribed respelling)` : ''} and that DOB. The caller-ID match plus DOB completes verification.\n` +
+      `- If the conversation has moved on and identity is still needed later, ask it then — but only once.\n` +
       `- Do NOT ask them to spell their name. Do NOT mention we recognized their number — just greet warmly and confirm.\n` +
       `- If they say NO (calling for someone else / different person), run the standard verification flow for the actual patient.\n` +
       `- Disclose NOTHING from their record until verify_patient_identity returns verified.`,
@@ -872,7 +873,7 @@ export const azulSchedulingAgentConfig = {
   name: 'Azul Vision NextGen Scheduling Agent',
   description:
     'NextGen scheduling line (San Diego pilot) — rules-engine-gated booking via the Eye Care service; lookup, cancel, and handoff.',
-  version: '2.19.0',
+  version: '2.20.0',
   greeting:
     "Thanks for calling Azul Vision, this is the automated scheduling assistant. How can I help you today?",
   voice: 'sage',
