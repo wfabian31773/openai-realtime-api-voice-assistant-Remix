@@ -22,8 +22,8 @@ function grade(input: RubricInput, name: string) {
 }
 
 describe('azul rubric v2', () => {
-  it('is version 2', () => {
-    expect(RUBRIC_VERSION).toBe(2);
+  it('is version 3', () => {
+    expect(RUBRIC_VERSION).toBe(3);
   });
 
   it('runs every dimension even when one throws', () => {
@@ -298,6 +298,117 @@ describe('azul rubric v2', () => {
           ],
         },
         'rubric_write_once',
+      );
+      expect(r.pass).toBe(false);
+    });
+  });
+
+  // ── calibration against the first real sim run (2026-07-29) ───────────
+  // Every case below is a FALSE POSITIVE the rubric produced on its first
+  // outing against sim traces, blocking a publish it had no business
+  // blocking. They are kept as tests so the fixes can't quietly regress.
+  describe('false positives from the first sim run', () => {
+    it('counts an accepted sage_handoff as a terminal disposition', () => {
+      // The `urgent` persona: flashes and a curtain, correctly routed to a
+      // human — and scored a dead end, because the terminal list only knew
+      // about transfer_to_office and file_location_ticket, neither of which
+      // exists in the sim rig.
+      const r = grade(
+        {
+          transcript: t(
+            ['CALLER', "I've been seeing flashes and a dark curtain since this morning."],
+            ['AGENT', 'I want to get you to our clinical team right away.'],
+          ),
+          events: [{ tool: 'sage_handoff', outcome: { ok: true, handoffReason: 'urgent_symptom' } }],
+        },
+        'rubric_terminal_disposition',
+      );
+      expect(r.pass).toBe(true);
+    });
+
+    it('does NOT accept an unreadable handoff response as routing', () => {
+      // Codex review, PR #49. summarizeResult stores {unparsed:true} when the
+      // response can't be parsed (the rig stores {raw:...}); neither carries an
+      // error, so "not obviously failed" would have scored the service falling
+      // over as a clean disposition — the exact dead-end class D2 exists for.
+      for (const outcome of [{ unparsed: true }, { raw: '502 Bad Gateway' }, {}]) {
+        const r = grade(
+          { transcript: t(['CALLER', 'Please put me through to someone.']), events: [{ tool: 'sage_handoff', outcome }] },
+          'rubric_terminal_disposition',
+        );
+        expect(r.pass, JSON.stringify(outcome)).toBe(false);
+      }
+    });
+
+    it('does not accept `method` as proof of routing', () => {
+      // method rides the timeline whether the handoff succeeded or not.
+      const r = grade(
+        {
+          transcript: t(['CALLER', 'Connect me to a person.']),
+          events: [{ tool: 'sage_handoff', outcome: { ok: false, method: 'callback' } }],
+        },
+        'rubric_terminal_disposition',
+      );
+      expect(r.pass).toBe(false);
+    });
+
+    it('still calls a REFUSED handoff a dead end', () => {
+      const r = grade(
+        {
+          transcript: t(['CALLER', 'Just connect me to a person.']),
+          events: [{ tool: 'sage_handoff', outcome: { ok: false, error: 'identity_required' } }],
+        },
+        'rubric_terminal_disposition',
+      );
+      expect(r.pass).toBe(false);
+    });
+
+    it('abstains from say-verbatim when the call was translated', () => {
+      // The `spanish` persona scored 17% for obeying the language rule: the
+      // directive arrives in English and MUST be delivered in Spanish.
+      const r = grade(
+        {
+          transcript: t(
+            ['CALLER', '¿Hablas español?'],
+            ['AGENT', 'La oficina de Encinitas está abierta de lunes a viernes, de 8 AM a 5 PM. ¿Hay algo más en lo que pueda ayudarte?'],
+          ),
+          events: [{ tool: 'sage_info', outcome: { say: 'The Encinitas office is open Monday through Friday, 8 AM to 5 PM.' } }],
+        },
+        'rubric_say_verbatim',
+      );
+      expect(r.pass).toBe(true);
+      expect(r.detail).toMatch(/another language/);
+    });
+
+    it('recognises Spanish that is not about office hours', () => {
+      // Codex review, PR #49: the first marker list was drawn from the one
+      // Spanish call I had, which was office-hours vocabulary. An appointment
+      // script shares none of those words and would have been graded as an
+      // English deviation — the same false positive, one sentence over.
+      for (const line of [
+        'Su cita es el martes a las diez de la mañana.',
+        'El doctor Nayer puede verla en nuestra oficina de Oceanside.',
+        'La dirección es cuatro cinco cero, calle segunda, y hay estacionamiento.',
+      ]) {
+        const r = grade(
+          {
+            transcript: t(['CALLER', '¿Puede hablar en español?'], ['AGENT', line]),
+            events: [{ tool: 'sage_info', outcome: { say: 'Your appointment is Tuesday at ten in the morning at our Oceanside office.' } }],
+          },
+          'rubric_say_verbatim',
+        );
+        expect(r.pass, line).toBe(true);
+        expect(r.detail, line).toMatch(/another language/);
+      }
+    });
+
+    it('does not let one foreign courtesy excuse an English call', () => {
+      const r = grade(
+        {
+          transcript: t(['AGENT', 'De nada! So, we open at a totally different time than the system said.']),
+          events: [{ tool: 'sage_info', outcome: { say: 'The Encinitas office is open Monday through Friday, 8 AM to 5 PM.' } }],
+        },
+        'rubric_say_verbatim',
       );
       expect(r.pass).toBe(false);
     });
