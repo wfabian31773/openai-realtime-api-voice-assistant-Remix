@@ -412,7 +412,20 @@ export const callLogs = pgTable("call_logs", {
   
   // Twilio Insights - Conference
   conferenceSid: varchar("conference_sid"), // CF... SID if call used conference
-  
+
+  // OFFICE LEG OUTCOME (2026-07-30). The office we transfer to is a SEPARATE
+  // Twilio call, and nothing recorded it: whether anyone picked up, which
+  // number actually rang, how long the patient waited, how it was accepted.
+  // So "did Encinitas get the call?" could only be answered by reading source
+  // code and guessing — which is how an office manager found a routing bug
+  // before any dashboard did. Written from the warm-transfer accept/status
+  // webhooks, which already receive every one of these fields.
+  // Shape: { officeCallSid, dialedNumber, queueLabel, outcome:
+  //          'accepted'|'no_answer'|'busy'|'failed'|'canceled'|'machine',
+  //          acceptMethod: 'keypress'|'stay_on_line'|null, amdVerdict,
+  //          ringSeconds, at }
+  transferOutcome: jsonb("transfer_outcome"),
+
   // Twilio Insights - Fetched timestamp
   twilioInsightsFetchedAt: timestamp("twilio_insights_fetched_at"),
   
