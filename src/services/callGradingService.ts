@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { storage } from '../../server/storage';
 import { redactGraderResults } from './phiSanitizer';
+import { classifyAsk, isHumanRequest } from './conversationLoopGuard';
 
 export type CallSentiment = 'satisfied' | 'neutral' | 'frustrated' | 'irate';
 export type AgentOutcome = 'resolved' | 'escalated' | 'follow_up_needed' | 'inconclusive';
@@ -103,6 +104,72 @@ function gradeHandoffExpectedVsActual(input: DeterministicGraderInput): GraderRe
     score: 0.8,
     reason: 'Handoff occurred without explicit caller request (agent-initiated, may be appropriate for safety)',
     metadata: { agentInitiated: true },
+  };
+}
+
+/** SEV-1 2026-07-30: the loop meter for EVERY agent. The azul rubric had a
+ *  repetition dimension; the fleet — answering-service and no-ivr, 90% of
+ *  daily traffic and the worst loopers (141 answering-service calls with 3+
+ *  identity asks on 07-29 alone, worst 16) — had none. Built on the runtime
+ *  loop guard's classifier so live enforcement and post-call measurement
+ *  share one definition of "asked again". */
+function gradeQuestionRepetition(input: DeterministicGraderInput): GraderResult {
+  const agentLines = input.transcript
+    .split('\n')
+    .filter(l => /^agent:/i.test(l.trim()))
+    .map(l => l.replace(/^agent:\s*/i, ''));
+  const counts = new Map<string, number>();
+  for (const line of agentLines) {
+    const topic = classifyAsk(line);
+    if (topic) counts.set(topic, (counts.get(topic) ?? 0) + 1);
+  }
+  let worstTopic = '';
+  let worst = 0;
+  for (const [topic, n] of counts) if (n > worst) { worst = n; worstTopic = topic; }
+  const pass = worst <= 2;
+  return {
+    grader: 'question_repetition',
+    pass,
+    score: pass ? 1.0 : Math.max(0, 1 - (worst - 2) * 0.34),
+    // Critical BY DESIGN: 'major'-tier findings are invisible to
+    // criticalFailures, the regression watch, and grader alerting all at
+    // once — which is how the loop epidemic passed unremarked.
+    ...(pass ? {} : { severity: 'critical' as const }),
+    reason: pass
+      ? `No topic asked more than twice (busiest: ${worstTopic || 'none'} ×${worst})`
+      : `Asked for "${worstTopic}" ${worst} times — a caller answering the same question over and over is the single fastest trust destroyer`,
+    metadata: { askCounts: Object.fromEntries(counts) },
+  };
+}
+
+/** SEV-1 2026-07-30: ~40 calls/day demanded a human 2+ times and got an
+ *  identical scripted deflection each time — some 10 deflections deep —
+ *  then ended with no transfer AND no ticket. The caller asked for a
+ *  person; the call must end with a person attached to it somehow. */
+function gradeHumanRequestDeflection(input: DeterministicGraderInput): GraderResult {
+  const requests = input.transcript
+    .split('\n')
+    .filter(l => /^(caller|patient|user):/i.test(l.trim()))
+    .filter(l => isHumanRequest(l)).length;
+  if (requests < 2) {
+    return {
+      grader: 'human_request_deflection',
+      pass: true,
+      score: 1.0,
+      reason: requests === 0 ? 'No human requests detected' : 'Single human request — below the escalation threshold',
+      metadata: { humanRequests: requests },
+    };
+  }
+  const resolved = input.transferredToHuman || Boolean(input.ticketNumber);
+  return {
+    grader: 'human_request_deflection',
+    pass: resolved,
+    score: resolved ? 0.8 : 0.0,
+    ...(resolved ? {} : { severity: 'critical' as const }),
+    reason: resolved
+      ? `Caller asked for a human ${requests} times; call produced ${input.transferredToHuman ? 'a transfer' : 'a ticket'}`
+      : `Caller asked for a human ${requests} times and the call ended with NO transfer and NO ticket — the deflection loop`,
+    metadata: { humanRequests: requests, transferred: input.transferredToHuman, ticket: input.ticketNumber },
   };
 }
 
@@ -779,6 +846,18 @@ export class CallGradingService {
     }
 
     try {
+      results.push(gradeQuestionRepetition(input));
+    } catch (e) {
+      console.error(`[GRADING] question repetition grader error:`, e);
+    }
+
+    try {
+      results.push(gradeHumanRequestDeflection(input));
+    } catch (e) {
+      console.error(`[GRADING] human request deflection grader error:`, e);
+    }
+
+    try {
       results.push(gradeTranscriptCoverage(input));
     } catch (e) {
       console.error(`[GRADING] transcript coverage grader error:`, e);
@@ -947,9 +1026,39 @@ Respond with a JSON object only, no other text:
   // v3: Phase 7 governance rubric appended for azul-scheduling calls
   // (identifier hygiene, say-verbatim, terminal disposition, retry
   // discipline, verification friction, language compliance, error rate).
-  // 4 = azul rubric v2 (2026-07-28 audit classes). Bumping this is what makes
-  // the regrade sweep re-score recent calls against the new dimensions.
-  static readonly CURRENT_GRADER_VERSION = 5;
+  // 4 = azul rubric v2 (2026-07-28 audit classes).
+  // 7 = SEV-1 2026-07-30: question_repetition + human_request_deflection
+  //     for ALL agents, azul rubric v5 (critical repetition, shared
+  //     classifier) — and the regrade sweep this comment always promised
+  //     now actually exists (regradeStaleCalls below), so bumping this
+  //     really does re-score history against the new dimensions.
+  static readonly CURRENT_GRADER_VERSION = 7;
+
+  /** Re-run the deterministic graders on calls graded under an older
+   *  grader version. Deterministic-only — the LLM analysis is not re-run,
+   *  so a sweep cycle costs nothing but DB reads. Called from the 5-minute
+   *  scheduler; at 25/cycle the full 07-27..29 backlog re-scores in a few
+   *  hours. */
+  async regradeStaleCalls(limit: number = 25): Promise<number> {
+    try {
+      const stale = await storage.getCallLogsWithStaleGraderVersion(
+        CallGradingService.CURRENT_GRADER_VERSION,
+        limit,
+      );
+      let regraded = 0;
+      for (const call of stale) {
+        const results = await this.runAndPersistDeterministicGraders(call.id, true);
+        if (results.length > 0) regraded++;
+      }
+      if (stale.length > 0) {
+        console.info(`[GRADING] Regrade sweep: ${regraded}/${stale.length} calls re-scored to grader v${CallGradingService.CURRENT_GRADER_VERSION}`);
+      }
+      return regraded;
+    } catch (error) {
+      console.error('[GRADING] Regrade sweep failed:', error);
+      return 0;
+    }
+  }
 
   async runAndPersistDeterministicGraders(callLogId: string, forceRegrade: boolean = false): Promise<GraderResult[]> {
     try {

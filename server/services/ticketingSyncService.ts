@@ -2,6 +2,11 @@ import { db } from "../db";
 import { callLogs } from "../../shared/schema";
 import { eq, and, isNull, isNotNull, or, sql, lt, gte } from "drizzle-orm";
 import { ticketingApiClient } from "./ticketingApiClient";
+import {
+  isNoTicketError,
+  classifyNoTicketOutcome,
+  NO_TICKET_TERMINAL_PREFIX,
+} from "./ticketingSyncPolicy";
 import { callCostService } from "../../src/services/callCostService";
 import { callGradingService } from "../../src/services/callGradingService";
 
@@ -198,13 +203,52 @@ export class TicketingSyncService {
         };
       } else {
         const errorMsg = response.error || "Unknown error";
+
+        if (isNoTicketError(errorMsg)) {
+          const callEndedAt: Date | null = call.endTime ?? call.startTime ?? null;
+
+          if (classifyNoTicketOutcome(callEndedAt) === "terminal") {
+            // Terminal: this call has no ticket and never will. Mark synced so
+            // it leaves the pending queue — this is an expected outcome for
+            // ticketless calls, not a failure to retry or alert on.
+            await db
+              .update(callLogs)
+              .set({
+                ticketingSynced: true,
+                ticketingSyncedAt: new Date(),
+                ticketingSyncError: `${NO_TICKET_TERMINAL_PREFIX}: ${errorMsg}`,
+                ticketingSyncRetries: currentRetries + 1,
+              })
+              .where(eq(callLogs.id, call.id));
+
+            console.log(`[TICKETING SYNC] ○ No ticket exists for call ${identifier} — marked terminal, will not retry`);
+            return {
+              callId: call.id,
+              callSid: call.callSid,
+              ticketNumber: null,
+              success: true,
+            };
+          }
+
+          // Within the grace window an outbox-created ticket may still be on
+          // its way — leave the call pending without burning a retry.
+          console.log(`[TICKETING SYNC] ○ No ticket yet for call ${identifier} (within grace window) — will re-check next cycle`);
+          return {
+            callId: call.id,
+            callSid: call.callSid,
+            ticketNumber: null,
+            success: false,
+            error: errorMsg,
+          };
+        }
+
         const newRetryCount = currentRetries + 1;
         const retriesExhausted = newRetryCount >= MAX_RETRIES;
-        
+
         await db
           .update(callLogs)
           .set({
-            ticketingSyncError: retriesExhausted 
+            ticketingSyncError: retriesExhausted
               ? `GAVE UP after ${MAX_RETRIES} attempts: ${errorMsg}`
               : errorMsg,
             ticketingSyncRetries: newRetryCount,
@@ -386,6 +430,11 @@ export class TicketingSyncService {
       if (gradedCount > 0) {
         console.log(`[AI GRADING] Graded ${gradedCount} previously ungraded calls`);
       }
+      // SEV-1 2026-07-30: re-score calls graded under an older grader
+      // version (deterministic graders only — no LLM cost). Until this
+      // existed, bumping the grader version re-scored nothing and history
+      // stayed measured by rubrics with no loop dimension.
+      await callGradingService.regradeStaleCalls(25);
     } catch (error) {
       console.error("[AI GRADING] Error during grading:", error);
     }

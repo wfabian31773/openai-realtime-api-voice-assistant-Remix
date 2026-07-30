@@ -39,9 +39,30 @@
  * pinned by tests. The lesson is the one already in the backlog and ignored
  * here: a grader is not finished when it passes its unit tests, only when it
  * has scored real traffic without crying wolf.
+ *
+ * v4 (2026-07-29, same day) is the first calibration against LIVE calls —
+ * 13 of them, the morning after 2.25.0 went out. Twelve of thirteen
+ * dimensions produced ZERO false positives, which is the result the sim runs
+ * could not give. Two corrections: 'as soon as possible' was raising a
+ * critical on routine scheduling calls (how soon someone wants to be seen is
+ * not how sick they are), and terminal_disposition EXEMPTED calls with no
+ * tool events — so the single worst failure mode, an agent that talks to a
+ * caller and does nothing at all, scored a clean pass. Two live calls that
+ * morning were exactly that, and neither the grader nor the terminal sweep
+ * (identical hole, fixed with it) noticed either one.
+ *
+ * v5 (2026-07-30, SEV-1 repeated-question loops) rebuilds rubric_repetition
+ * on the runtime loop guard's shared ask classifier: statement-form asks
+ * count, the topic list matches the live guard exactly, an alternating
+ * identity loop trips a combined cap, and the severity is CRITICAL — at
+ * 'major' the dimension was invisible to criticalFailures, the regression
+ * watch, and grader alerting simultaneously, which is how ~180 loop
+ * calls/day passed unremarked on 07-28 and 07-29 alike.
  */
 
-export const RUBRIC_VERSION = 3;
+import { classifyAsk } from './conversationLoopGuard';
+
+export const RUBRIC_VERSION = 5;
 
 export interface RubricGraderResult {
   grader: string;
@@ -192,7 +213,23 @@ function gradeSayVerbatim(input: RubricInput): RubricGraderResult {
 function gradeTerminalDisposition(input: RubricInput): RubricGraderResult {
   const e = input.events;
   if (e.length === 0) {
-    return { grader: 'rubric_terminal_disposition', pass: true, score: 1, severity: 'critical', detail: 'No tool engagement (n/a).' };
+    // Not an exemption. A call where the agent held a CONVERSATION and called
+    // nothing is the strongest dead end there is — 2026-07-29 18:30 ran 125
+    // seconds, the caller asked for a representative six times, and the tool
+    // timeline was empty. Under the old n/a this scored a clean pass, which is
+    // how the worst failure mode stayed invisible to its own meter. (The
+    // terminal sweep had the identical hole; both were fixed together.)
+    const turns = callerLines(input.transcript).length;
+    if (turns >= 2) {
+      return {
+        grader: 'rubric_terminal_disposition',
+        pass: false,
+        score: 0,
+        severity: 'critical',
+        detail: `Caller spoke ${turns} time(s) and the agent called NO tools at all — no lookup, no booking, no transfer, no ticket.`,
+      };
+    }
+    return { grader: 'rubric_terminal_disposition', pass: true, score: 1, severity: 'critical', detail: 'No tool engagement and no real conversation — hangup or wrong number (n/a).' };
   }
   const terminal =
     e.some((x) => x.tool === 'sage_book' && x.outcome?.booking_status === 'confirmed') ||
@@ -314,7 +351,18 @@ function gradeToolErrorRate(input: RubricInput): RubricGraderResult {
  *  is cheap; broadening it carelessly turns a critical grader into noise the
  *  regression watch learns to ignore. */
 const URGENCY_RE =
-  /\b(urgent|emergency|asap|right away|as soon as possible|can'?t see|cannot see|losing (?:my )?(?:vision|sight)|vision loss|lost (?:my )?(?:vision|sight)|blurr?y all of a sudden|sudden(?:ly)? blurr?|flashes|floaters|curtain|dark shadow|eye pain|painful eye|my eye hurts|hurts really bad|red eye|swollen|injur|hit (?:my|his|her) eye|scratched (?:my )?eye|something in my eye|chemical|burn(?:ed|ing)? my eye)\b/i;
+  /\b(urgent|emergency|can'?t see|cannot see|losing (?:my )?(?:vision|sight)|vision loss|lost (?:my )?(?:vision|sight)|blurr?y all of a sudden|sudden(?:ly)? blurr?|flashes|floaters|curtain|dark shadow|eye pain|painful eye|my eye hurts|hurts really bad|red eye|swollen|injur|hit (?:my|his|her) eye|scratched (?:my )?eye|something in my eye|chemical|burn(?:ed|ing)? my eye)\b/i;
+
+/** How SOON someone wants to be seen is not how SICK they are. "I need an eye
+ *  exam as soon as possible" is the most ordinary sentence a scheduling line
+ *  hears, and on 2026-07-29 it raised a critical on a routine call — the first
+ *  false positive this rubric produced against live traffic.
+ *
+ *  These now count only ALONGSIDE a clinical signal, where they sharpen a real
+ *  symptom into a same-day one. "urgent" and "emergency" stay in the list
+ *  above and still fire alone, because the operator directive is explicit that
+ *  a caller SAYING it's urgent is itself the trigger. */
+const SCHEDULING_SPEED_RE = /\b(asap|right away|as soon as possible|soonest|first available)\b/i;
 
 /** Anything touching surgery routes to the surgical queue, including the
  *  mundane-sounding tail of it — running out of post-op drops was one of
@@ -332,6 +380,17 @@ function gradeUrgencyRouting(input: RubricInput): RubricGraderResult {
   }
   const urgent = caller.find((l) => URGENCY_RE.test(l));
   const surgical = caller.find((l) => SURGICAL_RE.test(l));
+  // Scheduling-speed words sharpen a clinical signal; they never create one.
+  const speedOnly = !urgent && !surgical && caller.some((l) => SCHEDULING_SPEED_RE.test(l));
+  if (speedOnly) {
+    return {
+      grader: 'rubric_urgency_routing',
+      pass: true,
+      score: 1,
+      severity: 'critical',
+      detail: 'Caller wanted to be seen soon but described no symptom — a scheduling preference, not urgency (n/a).',
+    };
+  }
   const trigger = urgent || surgical;
   if (!trigger) {
     return { grader: 'rubric_urgency_routing', pass: true, score: 1, severity: 'critical', detail: 'No urgency or surgical signal from the caller (n/a).' };
@@ -354,45 +413,49 @@ function gradeUrgencyRouting(input: RubricInput): RubricGraderResult {
   };
 }
 
-/** The topics an azul call asks about. A question is bucketed by the first
- *  topic it matches; anything unrecognised is not counted, so this grader
- *  under-reports rather than inventing violations. */
-const QUESTION_TOPICS: Array<[string, RegExp]> = [
-  ['date of birth', /\b(date of birth|birth ?date|d\.?o\.?b\.?|when were you born)\b/i],
-  ['last name', /\b(last name|surname|family name|spell.*last)\b/i],
-  ['first name', /\b(first name|given name)\b/i],
-  ['full name', /\b(your name|may i (?:have|get) your name|who am i speaking)\b/i],
-  ['phone number', /\b(phone number|cell(?: number| phone)?|best number|callback number)\b/i],
-  ['insurance', /\b(insurance|health plan|carrier|coverage|member id|policy)\b/i],
-  ['location', /\b(which (?:office|location)|encinitas or|closer to you|which one works)\b/i],
-  ['provider', /\b(which doctor|see a specific|preferred (?:doctor|provider)|particular doctor)\b/i],
-  ['time preference', /\b(morning or afternoon|what time|time of day|preferred time|day works)\b/i],
-  ['reason for visit', /\b(reason for (?:your )?(?:visit|call)|what brings you|what.*appointment for|type of appointment)\b/i],
-  ['existing patient', /\b(been (?:here|seen) before|existing patient|new patient|seen (?:you|us) before|first time)\b/i],
-];
-
 /** D3 — "ask at most twice; the second ask offers a different route." A
  *  third ask on the same topic is the loop callers hung up on. Counts only
- *  the agent's own questions, so a caller repeating themselves is free. */
+ *  the agent's own asks, so a caller repeating themselves is free.
+ *
+ *  Rubric v5 (SEV-1 2026-07-30) rebuilt this meter on the loop guard's
+ *  shared classifier, closing the four escape hatches the old one had:
+ *  statement-form asks ("I'll need your name and date of birth.") now
+ *  count, not just lines containing '?'; the topic list matches the
+ *  runtime guard's exactly (one definition of "asked again", live and
+ *  post-mortem); an alternating name→DOB→name→DOB loop is caught by the
+ *  combined identity-ask counter, not just per-topic; and the severity is
+ *  CRITICAL — 'major' was invisible to criticalFailures, the regression
+ *  watch, and grader alerting all at once, which is how ~180 loop calls/day
+ *  passed unremarked. */
+const IDENTITY_TOPICS = new Set(['date of birth', 'last name', 'first name', 'full name']);
+const IDENTITY_COMBINED_CAP = 4;
+
 function gradeRepetition(input: RubricInput): RubricGraderResult {
-  const questions = agentLines(input.transcript).filter((l) => l.includes('?'));
   const counts = new Map<string, number>();
-  for (const q of questions) {
-    const topic = QUESTION_TOPICS.find(([, re]) => re.test(q));
-    if (topic) counts.set(topic[0], (counts.get(topic[0]) ?? 0) + 1);
+  for (const line of agentLines(input.transcript)) {
+    const topic = classifyAsk(line);
+    if (topic) counts.set(topic, (counts.get(topic) ?? 0) + 1);
   }
   let worstTopic = '';
   let worst = 0;
-  for (const [topic, n] of counts) if (n > worst) { worst = n; worstTopic = topic; }
-  const pass = worst <= 2;
+  let identityAsks = 0;
+  for (const [topic, n] of counts) {
+    if (n > worst) { worst = n; worstTopic = topic; }
+    if (IDENTITY_TOPICS.has(topic)) identityAsks += n;
+  }
+  const perTopicPass = worst <= 2;
+  const combinedPass = identityAsks <= IDENTITY_COMBINED_CAP;
+  const pass = perTopicPass && combinedPass;
   return {
     grader: 'rubric_repetition',
     pass,
-    score: pass ? 1 : Math.max(0, 1 - (worst - 2) * 0.34),
-    severity: 'major',
+    score: pass ? 1 : Math.max(0, 1 - (Math.max(worst - 2, identityAsks - IDENTITY_COMBINED_CAP)) * 0.34),
+    severity: 'critical',
     detail: pass
-      ? `No topic asked more than twice (busiest: ${worstTopic || 'none'} ×${worst}).`
-      : `Asked "${worstTopic}" ${worst} times — the second ask must offer a different route, the third is the loop.`,
+      ? `No topic asked more than twice (busiest: ${worstTopic || 'none'} ×${worst}; identity asks ${identityAsks}).`
+      : !perTopicPass
+        ? `Asked "${worstTopic}" ${worst} times — the second ask must offer a different route, the third is the loop.`
+        : `${identityAsks} identity asks across name/DOB topics — an alternating identity loop; the cap is ${IDENTITY_COMBINED_CAP} for the whole call.`,
   };
 }
 

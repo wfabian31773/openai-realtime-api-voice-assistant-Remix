@@ -555,6 +555,32 @@ const sessionOptions: Partial<RealtimeSessionOptions> = {
 // Store transcripts by call ID
 const callTranscripts = new Map<string, string[]>();
 
+// SEV-1 2026-07-30: server-side re-ask cap. The transcript stream below is
+// the only place the whole system sees every agent and caller line live —
+// the loop guard rides it, keeps the asked-topic ledger the model doesn't
+// have, and injects a SYSTEM item when a threshold trips. ~180 calls/day
+// were looping 3+ identity asks with every anti-loop rule living in prompt
+// prose only.
+import { conversationLoopGuard, type LoopGuardDirective } from './services/conversationLoopGuard';
+
+// Caller barge-ins truncate the in-flight agent response; counting those
+// events is what finally populates interruption/truncation telemetry
+// (declared in Phase 7, zero writers until now — the graders reading them
+// returned a permanent neutral 0.5 on 100% of calls).
+const callTruncationCounts = new Map<string, number>();
+
+function sendLoopGuardDirective(session: any, callId: string, directive: LoopGuardDirective): void {
+  try {
+    (session.transport as any).sendEvent({
+      type: 'conversation.item.create',
+      item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: directive.text }] },
+    });
+    console.warn(`[LOOP-GUARD] ${directive.kind}${directive.topic ? `:${directive.topic}` : ''} injected for ${callId}`);
+  } catch (e) {
+    console.error(`[LOOP-GUARD] failed to inject directive for ${callId}:`, e);
+  }
+}
+
 // Per-call Realtime token accumulation (from response.done usage payloads).
 // Flushed to callCostService.updateCallCostsWithTokens at call end so per-call
 // OpenAI costs come from REAL token counts + the model pricing registry
@@ -1898,6 +1924,11 @@ async function observeCall(
       accumulateUsage(callId, event.response.usage);
     }
 
+    // Caller barge-in → the SDK truncates the in-flight agent response.
+    if (eventType === 'conversation.item.truncated') {
+      callTruncationCounts.set(callId, (callTruncationCounts.get(callId) ?? 0) + 1);
+    }
+
     // Log specific events for debugging
     if (eventType === 'conversation.item.input_audio_transcription.completed') {
       const transcript = event?.transcript;
@@ -1920,7 +1951,12 @@ async function observeCall(
           callTranscripts.set(callId, []);
         }
         callTranscripts.get(callId)!.push(`CALLER: ${transcript}`);
-        
+
+        // Loop guard: a repeated "representative / customer service" demand
+        // trips the escalation directive.
+        const lgCallerDirective = conversationLoopGuard.onCallerLine(callId, effectiveSlug, transcript);
+        if (lgCallerDirective) sendLoopGuardDirective(session, callId, lgCallerDirective);
+
         // AIRCALL WORKAROUND: Auto-press "1" to accept forwarded calls
         // AirCall plays "Press 1 to answer" when forwarding to external numbers
         // Detect this prompt and automatically send DTMF tone to accept the call
@@ -1993,6 +2029,10 @@ async function observeCall(
           callTranscripts.set(callId, []);
         }
         callTranscripts.get(callId)!.push(`AGENT: ${transcript}`);
+
+        // Loop guard: a third same-topic ask trips the re-ask directive.
+        const lgAgentDirective = conversationLoopGuard.onAgentLine(callId, effectiveSlug, transcript);
+        if (lgAgentDirective) sendLoopGuardDirective(session, callId, lgAgentDirective);
       }
     } else if (eventType === 'response.done') {
       // Also capture from response.done which contains output items
@@ -2007,6 +2047,10 @@ async function observeCall(
                   callTranscripts.set(callId, []);
                 }
                 callTranscripts.get(callId)!.push(`AGENT: ${content.transcript}`);
+                // Loop guard (double-capture safe: verbatim repeats with no
+                // caller line between are ignored inside the guard).
+                const lgDoneDirective = conversationLoopGuard.onAgentLine(callId, effectiveSlug, content.transcript);
+                if (lgDoneDirective) sendLoopGuardDirective(session, callId, lgDoneDirective);
               }
             });
           }
@@ -2668,9 +2712,29 @@ async function observeCall(
           return esc.callerType || undefined;
         })();
 
+        // SEV-1 2026-07-30: turn telemetry finally has a writer. The columns
+        // existed since Phase 7 with no writer anywhere, so the graders that
+        // read them returned a permanent neutral 0.5 on every call and the
+        // regression watch was numerically anaesthetised.
+        const loopStats = conversationLoopGuard.endCall(callId);
+        const truncations = callTruncationCounts.get(callId) ?? 0;
+        callTruncationCounts.delete(callId);
+        if (loopStats && loopStats.interventions.length > 0) {
+          console.warn(`[LOOP-GUARD] ${callId} ended with interventions: ${loopStats.interventions.join(', ')} (asks: ${JSON.stringify(loopStats.asksByTopic)})`);
+        }
+
         await storage.updateCallLog(callMeta.dbCallLogId, {
           status: 'completed',
           endTime,
+          ...(loopStats ? {
+            totalTurns: loopStats.agentLines + loopStats.callerLines,
+            // Both derived from conversation.item.truncated: with semantic
+            // VAD + interruptResponse, a barge-in and a truncation are the
+            // same event. Distinct sources can split them later.
+            interruptionCount: truncations,
+            truncationCount: truncations,
+            telemetrySource: 'transport-events',
+          } : {}),
           // DO NOT SET DURATION HERE - Twilio status callback will set it
           // Setting it here with session time causes the 600s bug
           transcript,
@@ -2839,6 +2903,8 @@ async function observeCall(
     activeSessions.delete(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
+    conversationLoopGuard.endCall(callId); // no-op when already flushed above
+    callTruncationCounts.delete(callId);
     
     // Clean up conference mappings to prevent stale entries
     // Use wrapper for restart recovery - may find session in service cache

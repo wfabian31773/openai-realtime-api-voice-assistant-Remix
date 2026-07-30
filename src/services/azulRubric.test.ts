@@ -22,8 +22,8 @@ function grade(input: RubricInput, name: string) {
 }
 
 describe('azul rubric v2', () => {
-  it('is version 3', () => {
-    expect(RUBRIC_VERSION).toBe(3);
+  it('is version 5', () => {
+    expect(RUBRIC_VERSION).toBe(5);
   });
 
   it('runs every dimension even when one throws', () => {
@@ -411,6 +411,82 @@ describe('azul rubric v2', () => {
         'rubric_say_verbatim',
       );
       expect(r.pass).toBe(false);
+    });
+  });
+
+  // ── calibration against LIVE traffic (2026-07-29 morning, 13 calls) ────
+  // The first real-traffic read. Twelve of thirteen dimensions produced zero
+  // false positives; these are the two things it got wrong, and the live call
+  // that proved each one.
+  describe('live-traffic calibration', () => {
+    it('does not call "as soon as possible" an urgency', () => {
+      // The 18:30 call, verbatim opening. This raised a CRITICAL on what is
+      // the most ordinary sentence a scheduling line hears.
+      const r = grade(
+        {
+          transcript: t(
+            ['CALLER', 'I need to get an eye exam as soon as possible.'],
+            ['AGENT', 'I can help you with that. When would you like to come in?'],
+            ['CALLER', 'Right now.'],
+          ),
+          events: [{ tool: 'sage_availability', outcome: { say: 'I have Thursday at 9:00 AM.' } }],
+        },
+        'rubric_urgency_routing',
+      );
+      expect(r.pass).toBe(true);
+      expect(r.detail).toMatch(/scheduling preference/);
+    });
+
+    it('still fires when speed words sit next to a real symptom', () => {
+      const r = grade(
+        {
+          transcript: t(['CALLER', 'My eye hurts and I need to be seen as soon as possible.']),
+          events: [{ tool: 'sage_availability', outcome: { say: 'I have Thursday.' } }],
+        },
+        'rubric_urgency_routing',
+      );
+      expect(r.pass).toBe(false);
+    });
+
+    it('"urgent" and "emergency" still fire alone — the operator directive', () => {
+      for (const line of ['This is urgent.', 'I think this is an emergency.']) {
+        const r = grade(
+          { transcript: t(['CALLER', line]), events: [{ tool: 'sage_availability', outcome: {} }] },
+          'rubric_urgency_routing',
+        );
+        expect(r.pass, line).toBe(false);
+      }
+    });
+
+    it('fails a call where the agent held a conversation and called nothing', () => {
+      // The 18:30 call: "Representative" six times, "No" three times, 125
+      // seconds, zero tools, no ticket. Under the old zero-event exemption
+      // this scored a clean PASS — the worst dead end, invisible to its meter.
+      const r = grade(
+        {
+          transcript: t(
+            ['CALLER', 'Representative, Representative, Representative.'],
+            ['AGENT', 'Of course — let me get you to someone. Can I get your first and last name?'],
+            ['CALLER', 'No.'],
+            ['AGENT', 'I do need some basic information to connect you to the right person.'],
+            ['CALLER', 'No.'],
+          ),
+          events: [],
+        },
+        'rubric_terminal_disposition',
+      );
+      expect(r.pass).toBe(false);
+      expect(r.detail).toMatch(/called NO tools/);
+    });
+
+    it('still exempts a genuine hangup', () => {
+      // Today's 19-second ghost call must not file anything.
+      const r = grade(
+        { transcript: t(['AGENT', 'Thanks for calling Azul Vision.'], ['CALLER', 'Hello?']), events: [] },
+        'rubric_terminal_disposition',
+      );
+      expect(r.pass).toBe(true);
+      expect(r.detail).toMatch(/hangup or wrong number/);
     });
   });
 

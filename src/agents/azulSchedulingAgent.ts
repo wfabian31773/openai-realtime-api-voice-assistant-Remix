@@ -40,7 +40,7 @@ const EYECARE_BASE_URL =
  *  server-side gates can tighten for new builds without breaking old ones.
  *  `azulSchedulingAgentConfig.version` below is the same value — this constant
  *  exists only because the config object is defined further down the file. */
-const AZUL_AGENT_VERSION = '2.25.0';
+const AZUL_AGENT_VERSION = '2.26.0';
 
 // ─────────────────────────────────────────────────────────────────────────
 // HTTP client — every scheduling tool executes on the Eye Care service.
@@ -583,6 +583,12 @@ async function readPersistedTimeline(
   }
 }
 
+/** Below this, a call with no tool events is a hangup or a wrong number and
+ *  files nothing. Above it, someone was on the line long enough to be failed.
+ *  Calibrated against 2026-07-29: the ghost call ran 19s, the two real dead
+ *  ends ran 125s and 482s. */
+const ZERO_TOOL_DEAD_END_SECONDS = 45;
+
 export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
   try {
     // The sweep's whole job is deciding whether this caller was left with
@@ -607,7 +613,50 @@ export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
         events = persisted;
       }
     }
-    if (!events || events.length === 0) return; // never engaged the scheduling tools
+    // ZERO-TOOL CALLS ARE NOT EXEMPT (2026-07-29). This used to be a bare
+    // `return`, on the reasoning that a call which never touched the
+    // scheduling tools had nothing to resolve. Two calls this morning proved
+    // that backwards. 18:30: the caller said "Representative" six times, was
+    // asked for a name and date of birth each time, refused three times, and
+    // the call ended after 125 seconds — no tool call, no handoff, no ticket,
+    // no record that anyone had rung. 18:24: a verified patient asked to be
+    // connected, heard "still trying the office for you — hang tight", and
+    // the call ended at eight minutes with the same silence.
+    //
+    // An agent that talks to someone for a minute and calls NOTHING is the
+    // strongest dead-end signal there is, not an exemption from the check.
+    // The old guard read "no evidence" as "nothing happened", which is the
+    // same mistake the deleted-timeline bug made.
+    //
+    // A genuine hangup still files nothing: the floor is the difference
+    // between a caller who never engaged and one who was failed. Today's
+    // ghost call ran 19 seconds; the two real dead ends ran 125 and 482.
+    if (!events || events.length === 0) {
+      const metaForEmpty = callMetadataForDB.get(callId);
+      const seconds = metaForEmpty?.startTime
+        ? (Date.now() - metaForEmpty.startTime.getTime()) / 1000
+        : 0;
+      if (seconds < ZERO_TOOL_DEAD_END_SECONDS) return; // ghost call / immediate hangup
+      console.warn(
+        `[AZUL-SCHED] SWEEP: call ${callId} ran ${Math.round(seconds)}s and called NOTHING — ` +
+          `the caller was spoken to and nothing was done for them; filing a ticket`,
+      );
+      await fileLocationQueueTicket(
+        {
+          handoffReason: 'unresolved_call_end',
+          patient: { name: metaForEmpty?.callerName, phone: metaForEmpty?.from },
+          callContext: {
+            reasonForCall:
+              `Call lasted ${Math.round(seconds)} seconds and the assistant took NO action at all — no lookup, ` +
+              `no booking, no transfer, no ticket. The caller was talking to someone and got nowhere. ` +
+              `Please call them back and find out what they needed.`,
+          },
+        },
+        '{}',
+        { callId, callSid: metaForEmpty?.twilioCallSid },
+      );
+      return;
+    }
     const booked = events.some((e) => e.tool === 'sage_book' && e.outcome.booking_status === 'confirmed');
     const transferred = events.some((e) => e.tool === 'transfer_to_office' && e.outcome.ok === true);
     const ticketed = events.some((e) => e.tool === 'file_location_ticket' && (e.outcome.ok === true || e.outcome.skipped != null));
@@ -757,7 +806,7 @@ You do NOT own scheduling decisions. The Eye Care system holds the admin-approve
 3. **Only book through sage_book**, and only when the decision allowed it.
 4. **Only say "you're booked" when sage_book returns booking_status "confirmed".** Any other status — failed, unknown, not_attempted — means the patient is NOT booked. On "unknown", a scheduler callback has already been created: read the returned patient_script and do NOT claim success.
 5. **When any tool returns handoff_required**, call sage_handoff with the given reason to create the packet, then read the returned patient script. Never transfer without a packet.
-6. **If the patient asks for a human, honor it — but their NAME comes first.** sage_handoff is REFUSED outright without one (identity_required), so collecting it is not a stalling tactic, it is the only way the transfer can happen at all. Frame it that way to the caller: "Of course — let me get you to someone. Can I get your first and last name and date of birth, so I can tell them who's calling?" Then verify_patient_identity, THEN sage_handoff with reason patient_requested_human.
+6. **If the patient asks for a human, honor it.** ALREADY VERIFIED THIS CALL? Call sage_handoff IMMEDIATELY with reason patient_requested_human — the server remembers who this call verified; do NOT re-ask their name or date of birth, do NOT run verify_patient_identity again, do NOT "confirm" anything first. Re-asking a verified caller for identity at the transfer is the single most common loop complaint in the call audits. NOT yet verified? Ask ONCE: "Of course — let me get you to someone. Can I get your first and last name and date of birth, so I can tell them who's calling?" Then verify_patient_identity, then sage_handoff. If they REFUSE to identify themselves, that refusal is final — call sage_handoff anyway with the refusal noted in patientResponse; the server routes it without identity. Never ask a second time.
 
    If sage_handoff returns identity_required, DO NOT CALL IT AGAIN until you have actually verified someone. A second identical call cannot succeed — the gate is server-side and nothing about the call has changed — and every retry is more silence for a caller who just asked to speak to a person. On 2026-07-27 a single call fired SEVEN refused handoffs in 34 seconds. Read the refusal's agent_instruction, do what it says, then try once more.
 7. **Urgent red flags stop everything.** Sudden vision loss, a curtain or shadow over vision, new flashes or floaters, severe eye pain, chemical splash, eye injury, new problems after surgery, sudden double vision, severe headache with vision changes, nausea/vomiting with eye pain: stop routine scheduling, ask the single follow-up question, and call sage_handoff with reason urgent_symptom and method urgent_escalation. Follow its patient script exactly.
@@ -1221,9 +1270,9 @@ export function createAzulSchedulingAgent(
       ]),
       locationName: z.string().optional().describe("Office the caller wants / was discussing (e.g. 'Encinitas', 'Oceanside'). Pass whenever known — routing picks the office's own queue from it."),
       method: z.enum(['callback', 'cold_transfer', 'urgent_escalation']).optional(),
-      patientName: z.string().optional(),
-      patientDob: z.string().optional(),
-      patientPhone: z.string().optional(),
+      patientName: z.string().optional().describe('ONLY when identity could NOT be verified this call (e.g. caller gave a name but verification failed). For a VERIFIED caller, OMIT — the server injects the verified identity itself and re-collecting it from the caller is the loop this system is being hardened against.'),
+      patientDob: z.string().optional().describe('ONLY for unverified callers, and only if already given. NEVER re-ask a verified caller for their date of birth at handoff.'),
+      patientPhone: z.string().optional().describe('Only if the caller gave a DIFFERENT callback number — their caller ID is attached automatically.'),
       reasonForCall: z.string().optional(),
       requestedLocation: z.string().optional(),
       requestedTimeframe: z.string().optional(),

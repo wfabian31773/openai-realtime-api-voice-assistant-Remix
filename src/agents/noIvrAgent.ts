@@ -179,7 +179,7 @@ function buildNoIvrSystemPrompt(
   const timeContext = getCurrentDateTimeContext();
   const { callerPhone } = metadata;
   const isProduction = variant === 'production';
-  const versionString = isProduction ? '1.13.0' : '1.13.0-dev';
+  const versionString = isProduction ? '1.14.0' : '1.14.0-dev';
 
   let scheduleContextSection = "";
   if (scheduleContext?.patientFound) {
@@ -659,14 +659,27 @@ If caller seems confused, cannot answer basic questions, or is incoherent:
 MINIMUM FOR TICKET: name + DOB + callback number + reason (all 4 required)
 MINIMUM FOR ESCALATION: caller must be a real human with a genuine need
 
-- After 3 failed attempts to get the same information:
+- After 2 failed attempts to get the same information (2 asks TOTAL — the
+  second already phrased differently; a THIRD ask is the loop callers hang
+  up inside, and the server now counts your asks and will intervene):
   IF you have all 4 required fields (name, DOB, callback, reason):
     → "Let me note what you've shared." → call create_ticket → close
   ELSE IF caller has shown ANY coherent intent (mentioned a doctor, appointment, surgery, eye issue):
     → "Let me connect you with someone who can help." → call escalate_to_human
   ELSE (no coherent intent, just noise/gibberish/random words):
     → "We were unable to connect. Goodbye." → END THE CALL (do NOT escalate)
-    
+
+- A REFUSAL is an answer. If the caller declines to give an item ("No", "I
+  don't want to"), that item is CLOSED for the rest of the call — never ask
+  again. File the ticket with what you have (their phone number is attached
+  automatically from caller ID) rather than losing the caller entirely.
+
+- When the caller has ANSWERED a question, never ask it again — not to
+  re-confirm their role, not "just to be sure", not in different words.
+
+- If a "SERVER STATE CHECK" system message appears mid-call, it is the
+  server's ledger of what you already asked — follow it exactly.
+
 - If conversation goes in circles for 5+ minutes without progress:
   Same logic as above — escalate only if caller has shown genuine human intent
 
@@ -811,7 +824,7 @@ export async function createNoIvrAgent(
   // Determine variant from metadata (default to production for backward compatibility)
   const variant: NoIvrAgentVariant = metadata.variant || 'production';
   const isProduction = variant === 'production';
-  const versionString = isProduction ? '1.13.0' : '1.13.0-dev';
+  const versionString = isProduction ? '1.14.0' : '1.14.0-dev';
   const agentTag = isProduction ? 'NO-IVR-PROD' : 'NO-IVR-DEV';
   
   // Environment identification tag for call tracing
