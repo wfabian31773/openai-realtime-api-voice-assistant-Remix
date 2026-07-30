@@ -430,6 +430,11 @@ export class TicketingSyncService {
       if (gradedCount > 0) {
         console.log(`[AI GRADING] Graded ${gradedCount} previously ungraded calls`);
       }
+      // SEV-1 2026-07-30: re-score calls graded under an older grader
+      // version (deterministic graders only — no LLM cost). Until this
+      // existed, bumping the grader version re-scored nothing and history
+      // stayed measured by rubrics with no loop dimension.
+      await callGradingService.regradeStaleCalls(25);
     } catch (error) {
       console.error("[AI GRADING] Error during grading:", error);
     }

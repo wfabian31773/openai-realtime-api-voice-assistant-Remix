@@ -1,0 +1,210 @@
+/**
+ * Conversation Loop Guard — server-side re-ask cap and escalation trigger.
+ *
+ * SEV-1 2026-07-30. On 07-28 and 07-29 alike, ~180 calls/day asked the
+ * caller for identity 3+ times (34/day hit 5+, worst 16), and ~40 calls/day
+ * met an explicit "representative" demand with the same scripted deflection
+ * up to 10 times. Every anti-loop rule in the system was prompt prose, and
+ * the rubric header already named the lesson: a prompt rule with no
+ * enforcement is a hope.
+ *
+ * This is the enforcement. The server watches the live transcript stream
+ * (the same events that build call_logs.transcript), keeps the per-call
+ * asked-topic ledger the model doesn't have, and when a threshold trips it
+ * injects a SYSTEM message into the Realtime conversation telling the agent
+ * to stop re-asking and take a real exit. The voice layer stays the ears
+ * and the mouth; this is the brain remembering what was already asked.
+ *
+ * Pure classification lives here too so the post-call graders count loops
+ * with exactly the same eyes the runtime guard uses — one definition of
+ * "asked again", live and post-mortem.
+ */
+
+/** Topics an agent asks callers about. A line is bucketed by the FIRST
+ *  topic it matches; unmatched lines are not counted, so the guard
+ *  under-reports rather than inventing loops. Superset of the azul
+ *  rubric's original QUESTION_TOPICS. */
+export const ASK_TOPICS: Array<[string, RegExp]> = [
+  ['date of birth', /\b(date of birth|birth ?date|d\.?o\.?b\.?|when were you born|month.{0,20}day.{0,20}year)\b/i],
+  // 'full name' before the single-name topics: "first and last name" must
+  // bucket consistently as one topic, not whichever fragment matches first.
+  ['full name', /\b(your name|first and last name|may i (?:have|get) your name|full name|who am i speaking)\b/i],
+  ['last name', /\b(last name|surname|family name|spell.*last)\b/i],
+  ['first name', /\b(first name|given name)\b/i],
+  ['phone number', /\b(phone number|cell(?: number| phone)?|best number|callback number|number to reach)\b/i],
+  ['insurance', /\b(insurance|health plan|carrier|coverage|member id|policy)\b/i],
+  ['location', /\b(which (?:office|location)|encinitas or|closer to you|which one works)\b/i],
+  ['provider', /\b(which doctor|see a specific|preferred (?:doctor|provider)|particular doctor|doctor'?s name|name of (?:your|the) (?:doctor|surgeon|provider))\b/i],
+  ['time preference', /\b(morning or afternoon|what time|time of day|preferred time|day works)\b/i],
+  ['reason for visit', /\b(reason for (?:your )?(?:visit|call)|what brings you|what.*appointment for|type of appointment|tell me a bit more about what you need|what you need (?:help|assistance) with)\b/i],
+  ['existing patient', /\b(been (?:here|seen) before|existing patient|new patient|seen (?:you|us) before|first time)\b/i],
+];
+
+/** Ask-intent: the line is REQUESTING the topic, not merely mentioning it
+ *  ("I have your name and date of birth" must not count). Statement-form
+ *  asks count too — "I'll need your name and date of birth." was the exact
+ *  shape the old '?'-only rubric counter could never see. */
+const ASK_INTENT =
+  /\b(could you|can you|may i|would you|what is|what'?s|please (?:share|provide|tell|give|confirm|spell)|i(?:'ll| will) need|i need (?:your|the)|i do need|let'?s start (?:by|with)|go ahead and (?:share|give|tell)|starting with the month|spell (?:out|your|that))\b/i;
+
+export function classifyAsk(agentLine: string): string | null {
+  if (!ASK_INTENT.test(agentLine) && !agentLine.includes('?')) return null;
+  const topic = ASK_TOPICS.find(([, re]) => re.test(agentLine));
+  return topic ? topic[0] : null;
+}
+
+/** Caller demands for a human. Scanned on CALLER lines only, so the
+ *  agent's own "our agents are busy" greeting never counts. */
+const HUMAN_REQUEST =
+  /\b(representative|customer service|real person|live person|a human|an operator|the operator|receptionist|front desk|speak (?:to|with) (?:a|an|someone|somebody)|talk (?:to|with) (?:a|an|someone|somebody)|transfer me|connect me|on.?call doctor|representante|una persona|con alguien|servicio al cliente)\b/i;
+
+export function isHumanRequest(callerLine: string): boolean {
+  return HUMAN_REQUEST.test(callerLine);
+}
+
+export interface LoopGuardDirective {
+  kind: 'reask_cap' | 'reask_hard_stop' | 'human_request';
+  topic?: string;
+  text: string;
+}
+
+export interface LoopGuardStats {
+  asksByTopic: Record<string, number>;
+  agentLines: number;
+  callerLines: number;
+  humanRequests: number;
+  interventions: string[];
+}
+
+interface CallLoopState {
+  asks: Map<string, number>;
+  agentLines: number;
+  callerLines: number;
+  humanRequests: number;
+  /** intervention keys already sent, so each fires at most once per call */
+  sent: Set<string>;
+  interventions: string[];
+  /** double-capture guard: the transport emits agent speech on two event
+   *  types, so the same response can arrive twice verbatim with no caller
+   *  line between. A REAL re-ask always has caller audio in between. */
+  lastAgentLine: string | null;
+  callerSpokeSinceAgent: boolean;
+}
+
+/** Same-topic ask count that triggers the first intervention. Calibrated
+ *  against 07-29 production: the legitimate ceiling is 2 (ask + one
+ *  corrected-spelling retry); 3 is the loop callers hang up inside. */
+export const REASK_SOFT_CAP = 3;
+/** Ask count for the unconditional stop. On 07-29 the worst call hit 16. */
+export const REASK_HARD_CAP = 5;
+/** Human requests before the escalation directive. The first may be an
+ *  aside; the second is a decision. */
+export const HUMAN_REQUEST_CAP = 2;
+
+const AGENT_EXIT: Record<string, string> = {
+  'azul-scheduling':
+    'If identity was already verified this call, act on the request NOW (for a human: sage_handoff immediately — the server remembers who was verified; do NOT re-ask name or date of birth). If the caller refuses to identify, call sage_handoff with the refusal noted in patientResponse — it routes without identity.',
+  default:
+    'Create the ticket NOW with whatever you have — the caller’s phone number is attached automatically from caller ID, and missing fields may stay blank. A partial ticket the team can call back on beats a complete interview the caller never finishes.',
+};
+
+function exitFor(agentSlug: string): string {
+  return AGENT_EXIT[agentSlug] ?? AGENT_EXIT.default;
+}
+
+class ConversationLoopGuard {
+  private calls = new Map<string, CallLoopState>();
+
+  private state(callId: string): CallLoopState {
+    let s = this.calls.get(callId);
+    if (!s) {
+      s = {
+        asks: new Map(), agentLines: 0, callerLines: 0, humanRequests: 0,
+        sent: new Set(), interventions: [], lastAgentLine: null, callerSpokeSinceAgent: true,
+      };
+      this.calls.set(callId, s);
+    }
+    return s;
+  }
+
+  onAgentLine(callId: string, agentSlug: string, line: string): LoopGuardDirective | null {
+    const s = this.state(callId);
+    if (line === s.lastAgentLine && !s.callerSpokeSinceAgent) return null; // duplicate capture of the same response
+    s.lastAgentLine = line;
+    s.callerSpokeSinceAgent = false;
+    s.agentLines += 1;
+    const topic = classifyAsk(line);
+    if (!topic) return null;
+    const n = (s.asks.get(topic) ?? 0) + 1;
+    s.asks.set(topic, n);
+
+    if (n >= REASK_HARD_CAP && !s.sent.has(`hard:${topic}`)) {
+      s.sent.add(`hard:${topic}`);
+      s.interventions.push(`hard:${topic}`);
+      return {
+        kind: 'reask_hard_stop',
+        topic,
+        text:
+          `SERVER STATE CHECK: You have now asked for the caller's ${topic} ${n} times this call. STOP. ` +
+          `Never ask for it again on this call, in any wording. Whatever you have is what you have. ` +
+          exitFor(agentSlug) +
+          ' Acknowledge the caller in fresh words — do not repeat any sentence you have already said.',
+      };
+    }
+    if (n >= REASK_SOFT_CAP && !s.sent.has(`soft:${topic}`)) {
+      s.sent.add(`soft:${topic}`);
+      s.interventions.push(`soft:${topic}`);
+      return {
+        kind: 'reask_cap',
+        topic,
+        text:
+          `SERVER STATE CHECK: You have now asked for the caller's ${topic} ${n} times this call. Do not ask again. ` +
+          `Re-read the conversation: if the caller already gave it — even imperfectly — USE their answer and confirm it once instead of re-asking. ` +
+          `If they refused or cannot give it, the refusal IS their answer: move forward without it. ` +
+          exitFor(agentSlug),
+      };
+    }
+    return null;
+  }
+
+  onCallerLine(callId: string, agentSlug: string, line: string): LoopGuardDirective | null {
+    const s = this.state(callId);
+    s.callerLines += 1;
+    s.callerSpokeSinceAgent = true;
+    if (!isHumanRequest(line)) return null;
+    s.humanRequests += 1;
+    if (s.humanRequests >= HUMAN_REQUEST_CAP && !s.sent.has('human')) {
+      s.sent.add('human');
+      s.interventions.push('human');
+      return {
+        kind: 'human_request',
+        text:
+          `SERVER STATE CHECK: The caller has now asked for a human ${s.humanRequests} times. Honor it — stop collecting anything nonessential and stop repeating the same deflection script. ` +
+          exitFor(agentSlug) +
+          ' Tell the caller plainly, in fresh words, what will happen next.',
+      };
+    }
+    return null;
+  }
+
+  getStats(callId: string): LoopGuardStats | undefined {
+    const s = this.calls.get(callId);
+    if (!s) return undefined;
+    return {
+      asksByTopic: Object.fromEntries(s.asks),
+      agentLines: s.agentLines,
+      callerLines: s.callerLines,
+      humanRequests: s.humanRequests,
+      interventions: [...s.interventions],
+    };
+  }
+
+  /** Returns final stats and frees the per-call state. */
+  endCall(callId: string): LoopGuardStats | undefined {
+    const stats = this.getStats(callId);
+    this.calls.delete(callId);
+    return stats;
+  }
+}
+
+export const conversationLoopGuard = new ConversationLoopGuard();

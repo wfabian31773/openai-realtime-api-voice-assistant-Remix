@@ -636,6 +636,30 @@ export class DatabaseStorage implements IStorage {
       .limit(limit);
   }
 
+  /** SEV-1 2026-07-30: the missing half of grader-version gating. The
+   *  version check only ever SUPPRESSED work — once gradedAt was stamped a
+   *  row was permanently ineligible, so bumping the rubric re-scored
+   *  nothing and every historical loop call stayed measured by a rubric
+   *  that had no loop dimension. This selects graded rows whose
+   *  graderVersion predates the current one so the 5-minute sweep can
+   *  re-run the (cheap, deterministic) graders against them. */
+  async getCallLogsWithStaleGraderVersion(currentVersion: number, limit: number = 25): Promise<CallLog[]> {
+    return await db
+      .select()
+      .from(callLogs)
+      .where(
+        and(
+          isNotNull(callLogs.gradedAt),
+          isNotNull(callLogs.transcript),
+          eq(callLogs.status, 'completed'),
+          or(isNull(callLogs.graderVersion), lt(callLogs.graderVersion, currentVersion)),
+          sql`length(${callLogs.transcript}) >= 50`,
+        )
+      )
+      .orderBy(desc(callLogs.createdAt))
+      .limit(limit);
+  }
+
   async getCallLogsWithoutCosts(limit: number = 10): Promise<CallLog[]> {
     return await db
       .select()

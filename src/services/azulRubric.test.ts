@@ -22,8 +22,8 @@ function grade(input: RubricInput, name: string) {
 }
 
 describe('azul rubric v2', () => {
-  it('is version 4', () => {
-    expect(RUBRIC_VERSION).toBe(4);
+  it('is version 5', () => {
+    expect(RUBRIC_VERSION).toBe(5);
   });
 
   it('runs every dimension even when one throws', () => {

@@ -50,9 +50,19 @@
  * caller and does nothing at all, scored a clean pass. Two live calls that
  * morning were exactly that, and neither the grader nor the terminal sweep
  * (identical hole, fixed with it) noticed either one.
+ *
+ * v5 (2026-07-30, SEV-1 repeated-question loops) rebuilds rubric_repetition
+ * on the runtime loop guard's shared ask classifier: statement-form asks
+ * count, the topic list matches the live guard exactly, an alternating
+ * identity loop trips a combined cap, and the severity is CRITICAL — at
+ * 'major' the dimension was invisible to criticalFailures, the regression
+ * watch, and grader alerting simultaneously, which is how ~180 loop
+ * calls/day passed unremarked on 07-28 and 07-29 alike.
  */
 
-export const RUBRIC_VERSION = 4;
+import { classifyAsk } from './conversationLoopGuard';
+
+export const RUBRIC_VERSION = 5;
 
 export interface RubricGraderResult {
   grader: string;
@@ -403,45 +413,49 @@ function gradeUrgencyRouting(input: RubricInput): RubricGraderResult {
   };
 }
 
-/** The topics an azul call asks about. A question is bucketed by the first
- *  topic it matches; anything unrecognised is not counted, so this grader
- *  under-reports rather than inventing violations. */
-const QUESTION_TOPICS: Array<[string, RegExp]> = [
-  ['date of birth', /\b(date of birth|birth ?date|d\.?o\.?b\.?|when were you born)\b/i],
-  ['last name', /\b(last name|surname|family name|spell.*last)\b/i],
-  ['first name', /\b(first name|given name)\b/i],
-  ['full name', /\b(your name|may i (?:have|get) your name|who am i speaking)\b/i],
-  ['phone number', /\b(phone number|cell(?: number| phone)?|best number|callback number)\b/i],
-  ['insurance', /\b(insurance|health plan|carrier|coverage|member id|policy)\b/i],
-  ['location', /\b(which (?:office|location)|encinitas or|closer to you|which one works)\b/i],
-  ['provider', /\b(which doctor|see a specific|preferred (?:doctor|provider)|particular doctor)\b/i],
-  ['time preference', /\b(morning or afternoon|what time|time of day|preferred time|day works)\b/i],
-  ['reason for visit', /\b(reason for (?:your )?(?:visit|call)|what brings you|what.*appointment for|type of appointment)\b/i],
-  ['existing patient', /\b(been (?:here|seen) before|existing patient|new patient|seen (?:you|us) before|first time)\b/i],
-];
-
 /** D3 — "ask at most twice; the second ask offers a different route." A
  *  third ask on the same topic is the loop callers hung up on. Counts only
- *  the agent's own questions, so a caller repeating themselves is free. */
+ *  the agent's own asks, so a caller repeating themselves is free.
+ *
+ *  Rubric v5 (SEV-1 2026-07-30) rebuilt this meter on the loop guard's
+ *  shared classifier, closing the four escape hatches the old one had:
+ *  statement-form asks ("I'll need your name and date of birth.") now
+ *  count, not just lines containing '?'; the topic list matches the
+ *  runtime guard's exactly (one definition of "asked again", live and
+ *  post-mortem); an alternating name→DOB→name→DOB loop is caught by the
+ *  combined identity-ask counter, not just per-topic; and the severity is
+ *  CRITICAL — 'major' was invisible to criticalFailures, the regression
+ *  watch, and grader alerting all at once, which is how ~180 loop calls/day
+ *  passed unremarked. */
+const IDENTITY_TOPICS = new Set(['date of birth', 'last name', 'first name', 'full name']);
+const IDENTITY_COMBINED_CAP = 4;
+
 function gradeRepetition(input: RubricInput): RubricGraderResult {
-  const questions = agentLines(input.transcript).filter((l) => l.includes('?'));
   const counts = new Map<string, number>();
-  for (const q of questions) {
-    const topic = QUESTION_TOPICS.find(([, re]) => re.test(q));
-    if (topic) counts.set(topic[0], (counts.get(topic[0]) ?? 0) + 1);
+  for (const line of agentLines(input.transcript)) {
+    const topic = classifyAsk(line);
+    if (topic) counts.set(topic, (counts.get(topic) ?? 0) + 1);
   }
   let worstTopic = '';
   let worst = 0;
-  for (const [topic, n] of counts) if (n > worst) { worst = n; worstTopic = topic; }
-  const pass = worst <= 2;
+  let identityAsks = 0;
+  for (const [topic, n] of counts) {
+    if (n > worst) { worst = n; worstTopic = topic; }
+    if (IDENTITY_TOPICS.has(topic)) identityAsks += n;
+  }
+  const perTopicPass = worst <= 2;
+  const combinedPass = identityAsks <= IDENTITY_COMBINED_CAP;
+  const pass = perTopicPass && combinedPass;
   return {
     grader: 'rubric_repetition',
     pass,
-    score: pass ? 1 : Math.max(0, 1 - (worst - 2) * 0.34),
-    severity: 'major',
+    score: pass ? 1 : Math.max(0, 1 - (Math.max(worst - 2, identityAsks - IDENTITY_COMBINED_CAP)) * 0.34),
+    severity: 'critical',
     detail: pass
-      ? `No topic asked more than twice (busiest: ${worstTopic || 'none'} ×${worst}).`
-      : `Asked "${worstTopic}" ${worst} times — the second ask must offer a different route, the third is the loop.`,
+      ? `No topic asked more than twice (busiest: ${worstTopic || 'none'} ×${worst}; identity asks ${identityAsks}).`
+      : !perTopicPass
+        ? `Asked "${worstTopic}" ${worst} times — the second ask must offer a different route, the third is the loop.`
+        : `${identityAsks} identity asks across name/DOB topics — an alternating identity loop; the cap is ${IDENTITY_COMBINED_CAP} for the whole call.`,
   };
 }
 
