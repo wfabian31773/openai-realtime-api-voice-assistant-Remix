@@ -1423,7 +1423,12 @@ export const noIvrAgentConfig = {
   slug: "no-ivr",
   name: "No-IVR After-Hours Agent",
   description: "Single agent that answers all calls directly without IVR menu. Uses conversation to determine caller type and urgency. Transfers to human for urgent cases.",
-  version: "1.13.0",
+  // THIS is the value stamped on call_logs.agent_version (the registry reads
+  // it via src/config/agents.ts); the versionString constants below only feed
+  // the prompt text and logs. The 2026-07-30 test calls stamped 1.13.0 while
+  // running 1.14.0 code because only those were bumped — keep all three in
+  // step or rollout verification lies.
+  version: "1.14.0",
   greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching

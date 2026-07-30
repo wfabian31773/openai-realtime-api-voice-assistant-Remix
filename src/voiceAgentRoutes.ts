@@ -561,13 +561,39 @@ const callTranscripts = new Map<string, string[]>();
 // have, and injects a SYSTEM item when a threshold trips. ~180 calls/day
 // were looping 3+ identity asks with every anti-loop rule living in prompt
 // prose only.
-import { conversationLoopGuard, type LoopGuardDirective } from './services/conversationLoopGuard';
+import { conversationLoopGuard, type LoopGuardDirective, type LoopGuardStats } from './services/conversationLoopGuard';
 
 // Caller barge-ins truncate the in-flight agent response; counting those
 // events is what finally populates interruption/truncation telemetry
 // (declared in Phase 7, zero writers until now — the graders reading them
-// returned a permanent neutral 0.5 on 100% of calls).
-const callTruncationCounts = new Map<string, number>();
+// returned a permanent neutral 0.5 on 100% of calls). The count lives in the
+// loop guard's per-call state so it resolves through the same alias table.
+
+/** Persist the loop guard's turn telemetry for whichever teardown path gets
+ *  there first. `key` may be the OpenAI callId or any registered alias
+ *  (dbCallLogId / twilioCallSid). Returns the stats it wrote, or undefined
+ *  when another path already flushed them. */
+async function flushLoopTelemetry(key: string, callLogId: string): Promise<LoopGuardStats | undefined> {
+  const stats = conversationLoopGuard.endCall(key);
+  if (!stats) return undefined;
+  try {
+    const { storage } = await import('../server/storage');
+    await storage.updateCallLog(callLogId, {
+      totalTurns: stats.agentLines + stats.callerLines,
+      // Both derived from conversation.item.truncated: with semantic VAD +
+      // interruptResponse, a barge-in and a truncation are the same event.
+      interruptionCount: stats.truncations,
+      truncationCount: stats.truncations,
+      telemetrySource: 'transport-events',
+    } as any);
+    if (stats.interventions.length > 0) {
+      console.warn(`[LOOP-GUARD] ${callLogId} ended with interventions: ${stats.interventions.join(', ')} (asks: ${JSON.stringify(stats.asksByTopic)})`);
+    }
+  } catch (err) {
+    console.error(`[LOOP-GUARD] telemetry write failed for ${callLogId}:`, err);
+  }
+  return stats;
+}
 
 function sendLoopGuardDirective(session: any, callId: string, directive: LoopGuardDirective): void {
   try {
@@ -1926,7 +1952,7 @@ async function observeCall(
 
     // Caller barge-in → the SDK truncates the in-flight agent response.
     if (eventType === 'conversation.item.truncated') {
-      callTruncationCounts.set(callId, (callTruncationCounts.get(callId) ?? 0) + 1);
+      conversationLoopGuard.onTruncation(callId);
     }
 
     // Log specific events for debugging
@@ -2076,6 +2102,11 @@ async function observeCall(
     audioInputMs: 0,
     audioOutputMs: 0,
   });
+
+  // Let the loop guard's telemetry be flushed by the lifecycle coordinator
+  // too — that path only knows callLogId / twilioCallSid.
+  conversationLoopGuard.registerAlias(callId, callLogId);
+  conversationLoopGuard.registerAlias(callId, twilioCallSid);
 
   try {
     const confNameForWait = getConferenceName(callId);
@@ -2715,26 +2746,15 @@ async function observeCall(
         // SEV-1 2026-07-30: turn telemetry finally has a writer. The columns
         // existed since Phase 7 with no writer anywhere, so the graders that
         // read them returned a permanent neutral 0.5 on every call and the
-        // regression watch was numerically anaesthetised.
-        const loopStats = conversationLoopGuard.endCall(callId);
-        const truncations = callTruncationCounts.get(callId) ?? 0;
-        callTruncationCounts.delete(callId);
-        if (loopStats && loopStats.interventions.length > 0) {
-          console.warn(`[LOOP-GUARD] ${callId} ended with interventions: ${loopStats.interventions.join(', ')} (asks: ${JSON.stringify(loopStats.asksByTopic)})`);
-        }
+        // regression watch was numerically anaesthetised. The write lives in
+        // flushLoopTelemetry so the lifecycle coordinator's 'call-ended'
+        // handler can do it too — on the 07-30 test calls the coordinator
+        // finalized 4 of 5, and this block never ran for them.
+        void flushLoopTelemetry(callId, callMeta.dbCallLogId);
 
         await storage.updateCallLog(callMeta.dbCallLogId, {
           status: 'completed',
           endTime,
-          ...(loopStats ? {
-            totalTurns: loopStats.agentLines + loopStats.callerLines,
-            // Both derived from conversation.item.truncated: with semantic
-            // VAD + interruptResponse, a barge-in and a truncation are the
-            // same event. Distinct sources can split them later.
-            interruptionCount: truncations,
-            truncationCount: truncations,
-            telemetrySource: 'transport-events',
-          } : {}),
           // DO NOT SET DURATION HERE - Twilio status callback will set it
           // Setting it here with session time causes the 600s bug
           transcript,
@@ -2903,8 +2923,7 @@ async function observeCall(
     activeSessions.delete(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
-    conversationLoopGuard.endCall(callId); // no-op when already flushed above
-    callTruncationCounts.delete(callId);
+    conversationLoopGuard.releaseCall(callId);
     
     // Clean up conference mappings to prevent stale entries
     // Use wrapper for restart recovery - may find session in service cache
@@ -5542,6 +5561,15 @@ export function setupVoiceAgentRoutes(app: Express): void {
     // (no-op when the observeCall finally already flushed, or for other agents)
     if (callLogId) void flushAzulTimeline(callLogId);
     if (twilioCallSid) void flushAzulTimeline(twilioCallSid);
+
+    // Same backstop for the loop guard's turn telemetry: this handler holds
+    // only callLogId/twilioCallSid, so it resolves through the guard's alias
+    // map. Whichever teardown arrives first writes; the other no-ops.
+    if (callLogId) {
+      void flushLoopTelemetry(callLogId, callLogId).then((s) => {
+        if (!s && twilioCallSid) void flushLoopTelemetry(twilioCallSid, callLogId);
+      });
+    }
     
     // Trigger post-call processing (cost calculation, grading, ticketing)
     try {
