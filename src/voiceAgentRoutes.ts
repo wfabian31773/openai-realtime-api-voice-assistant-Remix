@@ -2675,13 +2675,23 @@ async function observeCall(
     // append a ticket event to — the in-memory timeline the flush deletes).
     // Bounded at 25s: a wedged sweep must never block the flush (2026-07-24
     // 10:53 call ended with tool_timeline never persisted).
-    void import('./agents/azulSchedulingAgent')
-      .then(({ sweepAzulUnresolvedCall }) =>
-        Promise.race([
-          sweepAzulUnresolvedCall(callId),
-          new Promise((resolve) => setTimeout(resolve, 25_000)),
-        ]),
-      )
+    // AZUL ONLY (2026-07-30 incident). This sweep reasons from the azul tool
+    // timeline, and azul is the only agent that writes one. It ran for every
+    // call and was harmless purely because a zero-event call used to return
+    // early; when that exemption was removed the same night, every
+    // answering-service call — which records no tool events BY DESIGN —
+    // looked like an agent that did nothing, and the sweep filed a "call
+    // them back" ticket for each one. ~30 false tickets reached the staff
+    // queue between 09:50 and 12:03 PT before this gate. "No tool timeline"
+    // means "not measured here", never "nothing happened".
+    void (agentConfig?.id === 'azul-scheduling'
+      ? import('./agents/azulSchedulingAgent').then(({ sweepAzulUnresolvedCall }) =>
+          Promise.race([
+            sweepAzulUnresolvedCall(callId),
+            new Promise((resolve) => setTimeout(resolve, 25_000)),
+          ]),
+        )
+      : Promise.resolve())
       .catch(() => {})
       .then(() => flushAzulTimeline(callId))
       .catch((err) => console.error(`[AZUL-TIMELINE] teardown flush failed for ${callId}:`, err))

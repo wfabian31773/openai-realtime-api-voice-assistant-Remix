@@ -633,12 +633,32 @@ export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
     // ghost call ran 19 seconds; the two real dead ends ran 125 and 482.
     if (!events || events.length === 0) {
       const metaForEmpty = callMetadataForDB.get(callId);
-      const seconds = metaForEmpty?.startTime
+      // A ticket already exists for this call → the caller was NOT left with
+      // nothing, whatever the timeline says. On 2026-07-30 this sweep told
+      // staff to call Luis Navarro back "because nothing was done", while
+      // ticket VA-46844 from that same call was already in their queue.
+      if (metaForEmpty?.dbCallLogId) {
+        try {
+          const { storage } = await import('../../server/storage');
+          const existing = await storage.getCallLog(metaForEmpty.dbCallLogId);
+          if (existing?.ticketNumber) {
+            console.info(`[AZUL-SCHED] SWEEP: call ${callId} has no tool events but already produced ticket ${existing.ticketNumber} — nothing to file`);
+            return;
+          }
+        } catch { /* fall through: a store hiccup must not suppress a real dead end */ }
+      }
+      // Wall clock from call start to sweep time is NOT the caller's time on
+      // the line — the realtime session lingers after they hang up and caps
+      // out, which is why every one of the 07-30 false tickets read exactly
+      // "601 seconds". Prefer the transcript window; fall back to wall clock
+      // only to apply the floor, and never quote a number we can't stand
+      // behind.
+      const wallSeconds = metaForEmpty?.startTime
         ? (Date.now() - metaForEmpty.startTime.getTime()) / 1000
         : 0;
-      if (seconds < ZERO_TOOL_DEAD_END_SECONDS) return; // ghost call / immediate hangup
+      if (wallSeconds < ZERO_TOOL_DEAD_END_SECONDS) return; // ghost call / immediate hangup
       console.warn(
-        `[AZUL-SCHED] SWEEP: call ${callId} ran ${Math.round(seconds)}s and called NOTHING — ` +
+        `[AZUL-SCHED] SWEEP: call ${callId} called NOTHING — ` +
           `the caller was spoken to and nothing was done for them; filing a ticket`,
       );
       await fileLocationQueueTicket(
@@ -647,8 +667,8 @@ export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
           patient: { name: metaForEmpty?.callerName, phone: metaForEmpty?.from },
           callContext: {
             reasonForCall:
-              `Call lasted ${Math.round(seconds)} seconds and the assistant took NO action at all — no lookup, ` +
-              `no booking, no transfer, no ticket. The caller was talking to someone and got nowhere. ` +
+              `The scheduling assistant took NO action on this call — no lookup, no booking, no transfer, ` +
+              `no ticket. The caller was talking to someone and got nowhere. ` +
               `Please call them back and find out what they needed.`,
           },
         },
