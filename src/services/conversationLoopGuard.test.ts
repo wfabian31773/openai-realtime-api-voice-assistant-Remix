@@ -149,6 +149,58 @@ describe('human-request escalation', () => {
   });
 });
 
+describe('alias resolution + flush-once (the 07-30 test-call defect)', () => {
+  // On the first live test calls the lifecycle coordinator finalized 4 of 5
+  // calls instead of observeCall's teardown. The coordinator holds only
+  // callLogId/twilioCallSid, so the guard — keyed by the OpenAI callId —
+  // returned nothing and the turn telemetry stayed NULL on those calls.
+  it('flushes through a registered alias (callLogId / twilioCallSid)', () => {
+    const callId = freshCallId();
+    const callLogId = `log-${callId}`;
+    conversationLoopGuard.registerAlias(callId, callLogId);
+    conversationLoopGuard.onAgentLine(callId, 'no-ivr', 'How can I help?');
+    conversationLoopGuard.onCallerLine(callId, 'no-ivr', 'Refill please.');
+    const stats = conversationLoopGuard.endCall(callLogId);
+    expect(stats?.agentLines).toBe(1);
+    expect(stats?.callerLines).toBe(1);
+    conversationLoopGuard.releaseCall(callId);
+  });
+
+  it('flushes exactly once — the losing teardown path is a no-op', () => {
+    const callId = freshCallId();
+    const callLogId = `log-${callId}`;
+    conversationLoopGuard.registerAlias(callId, callLogId);
+    conversationLoopGuard.onAgentLine(callId, 'no-ivr', 'How can I help?');
+    expect(conversationLoopGuard.endCall(callId)).toBeTruthy();   // observeCall wins
+    expect(conversationLoopGuard.endCall(callLogId)).toBeUndefined(); // coordinator no-ops
+    // state survives the flush so a late reader still resolves
+    expect(conversationLoopGuard.getStats(callLogId)?.agentLines).toBe(1);
+    conversationLoopGuard.releaseCall(callId);
+    expect(conversationLoopGuard.getStats(callLogId)).toBeUndefined();
+  });
+
+  it('counts barge-ins in the guard, so they survive alias lookup', () => {
+    // Previously a parallel map keyed only by the OpenAI callId: flushing via
+    // an alias read 0 and wrote interruption_count = 0.
+    const callId = freshCallId();
+    const callLogId = `log-${callId}`;
+    conversationLoopGuard.registerAlias(callId, callLogId);
+    conversationLoopGuard.onAgentLine(callId, 'no-ivr', 'Let me explain the—');
+    conversationLoopGuard.onTruncation(callId);
+    conversationLoopGuard.onTruncation(callId);
+    expect(conversationLoopGuard.endCall(callLogId)?.truncations).toBe(2);
+    conversationLoopGuard.releaseCall(callId);
+  });
+
+  it('ignores a self-referential alias', () => {
+    const callId = freshCallId();
+    conversationLoopGuard.registerAlias(callId, callId);
+    conversationLoopGuard.onAgentLine(callId, 'no-ivr', 'Hello?');
+    expect(conversationLoopGuard.endCall(callId)?.agentLines).toBe(1);
+    conversationLoopGuard.releaseCall(callId);
+  });
+});
+
 describe('end-of-call stats (the telemetry writer reads these)', () => {
   it('reports turns, asks, human requests, and interventions — then frees the state', () => {
     const callId = freshCallId();
