@@ -126,19 +126,40 @@ describe('re-ask caps', () => {
 });
 
 describe('human-request escalation', () => {
-  it(`fires on demand #${HUMAN_REQUEST_CAP} with the ticket exit for the answering fleet`, () => {
+  // Operator directive 2026-07-30: the answering service cannot transfer at
+  // all, so making the caller ask twice before hearing that is the bug.
+  // Honesty is owed on the FIRST ask — that is what stops the insisting.
+  it('fires on the FIRST demand for an agent that cannot transfer', () => {
     const callId = freshCallId();
-    expect(conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Customer service.')).toBeNull();
-    conversationLoopGuard.onAgentLine(callId, 'answering-service', 'I can help with that.');
-    const d = conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Customer service!');
+    const d = conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Representative.');
     expect(d?.kind).toBe('human_request');
-    expect(d?.text).toMatch(/Create the ticket NOW/);
-    // once per call
-    expect(conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Representative.')).toBeNull();
-    conversationLoopGuard.endCall(callId);
+    expect(d?.text).toMatch(/CANNOT transfer calls/);
+    expect(d?.text).toMatch(/call them back/);
+    expect(d?.text).toMatch(/nobody is coming to this call/);
+    expect(d?.text).toMatch(/Create the ticket NOW/); // the exit still rides along
+    conversationLoopGuard.releaseCall(callId);
   });
 
-  it('gives azul the sage_handoff exit and forbids identity re-asks', () => {
+  it('never repeats the limitation — one directive per call', () => {
+    const callId = freshCallId();
+    expect(conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Customer service.')).toBeTruthy();
+    conversationLoopGuard.onAgentLine(callId, 'answering-service', "I can't connect calls, but I can have someone call you back.");
+    expect(conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Representative!')).toBeNull();
+    expect(conversationLoopGuard.onCallerLine(callId, 'answering-service', 'REPRESENTATIVE.')).toBeNull();
+    conversationLoopGuard.releaseCall(callId);
+  });
+
+  it(`still waits for demand #${HUMAN_REQUEST_CAP} on agents that CAN transfer`, () => {
+    // azul has a real handoff, so a first mention may be an aside.
+    const callId = freshCallId();
+    expect(conversationLoopGuard.onCallerLine(callId, 'azul-scheduling', 'Representative.')).toBeNull();
+    const d = conversationLoopGuard.onCallerLine(callId, 'azul-scheduling', 'Representative, please.');
+    expect(d?.kind).toBe('human_request');
+    expect(d?.text).not.toMatch(/CANNOT transfer calls/);
+    conversationLoopGuard.releaseCall(callId);
+  });
+
+  it('gives azul the sage_handoff exit and forbids identity re-asks (2nd ask)', () => {
     const callId = freshCallId();
     conversationLoopGuard.onCallerLine(callId, 'azul-scheduling', 'Representative.');
     const d = conversationLoopGuard.onCallerLine(callId, 'azul-scheduling', 'Representative, please.');
@@ -146,6 +167,58 @@ describe('human-request escalation', () => {
     expect(d?.text).toMatch(/sage_handoff/);
     expect(d?.text).toMatch(/do NOT re-ask name or date of birth/);
     conversationLoopGuard.endCall(callId);
+  });
+});
+
+describe('alias resolution + flush-once (the 07-30 test-call defect)', () => {
+  // On the first live test calls the lifecycle coordinator finalized 4 of 5
+  // calls instead of observeCall's teardown. The coordinator holds only
+  // callLogId/twilioCallSid, so the guard — keyed by the OpenAI callId —
+  // returned nothing and the turn telemetry stayed NULL on those calls.
+  it('flushes through a registered alias (callLogId / twilioCallSid)', () => {
+    const callId = freshCallId();
+    const callLogId = `log-${callId}`;
+    conversationLoopGuard.registerAlias(callId, callLogId);
+    conversationLoopGuard.onAgentLine(callId, 'no-ivr', 'How can I help?');
+    conversationLoopGuard.onCallerLine(callId, 'no-ivr', 'Refill please.');
+    const stats = conversationLoopGuard.endCall(callLogId);
+    expect(stats?.agentLines).toBe(1);
+    expect(stats?.callerLines).toBe(1);
+    conversationLoopGuard.releaseCall(callId);
+  });
+
+  it('flushes exactly once — the losing teardown path is a no-op', () => {
+    const callId = freshCallId();
+    const callLogId = `log-${callId}`;
+    conversationLoopGuard.registerAlias(callId, callLogId);
+    conversationLoopGuard.onAgentLine(callId, 'no-ivr', 'How can I help?');
+    expect(conversationLoopGuard.endCall(callId)).toBeTruthy();   // observeCall wins
+    expect(conversationLoopGuard.endCall(callLogId)).toBeUndefined(); // coordinator no-ops
+    // state survives the flush so a late reader still resolves
+    expect(conversationLoopGuard.getStats(callLogId)?.agentLines).toBe(1);
+    conversationLoopGuard.releaseCall(callId);
+    expect(conversationLoopGuard.getStats(callLogId)).toBeUndefined();
+  });
+
+  it('counts barge-ins in the guard, so they survive alias lookup', () => {
+    // Previously a parallel map keyed only by the OpenAI callId: flushing via
+    // an alias read 0 and wrote interruption_count = 0.
+    const callId = freshCallId();
+    const callLogId = `log-${callId}`;
+    conversationLoopGuard.registerAlias(callId, callLogId);
+    conversationLoopGuard.onAgentLine(callId, 'no-ivr', 'Let me explain the—');
+    conversationLoopGuard.onTruncation(callId);
+    conversationLoopGuard.onTruncation(callId);
+    expect(conversationLoopGuard.endCall(callLogId)?.truncations).toBe(2);
+    conversationLoopGuard.releaseCall(callId);
+  });
+
+  it('ignores a self-referential alias', () => {
+    const callId = freshCallId();
+    conversationLoopGuard.registerAlias(callId, callId);
+    conversationLoopGuard.onAgentLine(callId, 'no-ivr', 'Hello?');
+    expect(conversationLoopGuard.endCall(callId)?.agentLines).toBe(1);
+    conversationLoopGuard.releaseCall(callId);
   });
 });
 

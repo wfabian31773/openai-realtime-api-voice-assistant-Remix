@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import { storage } from '../../server/storage';
 import { redactGraderResults } from './phiSanitizer';
-import { classifyAsk, isHumanRequest } from './conversationLoopGuard';
+import { classifyAsk, isHumanRequest, humanRequestCapFor } from './conversationLoopGuard';
 
 export type CallSentiment = 'satisfied' | 'neutral' | 'frustrated' | 'irate';
 export type AgentOutcome = 'resolved' | 'escalated' | 'follow_up_needed' | 'inconclusive';
@@ -147,17 +147,21 @@ function gradeQuestionRepetition(input: DeterministicGraderInput): GraderResult 
  *  then ended with no transfer AND no ticket. The caller asked for a
  *  person; the call must end with a person attached to it somehow. */
 function gradeHumanRequestDeflection(input: DeterministicGraderInput): GraderResult {
-  const requests = input.transcript
-    .split('\n')
-    .filter(l => /^(caller|patient|user):/i.test(l.trim()))
-    .filter(l => isHumanRequest(l)).length;
-  if (requests < 2) {
+  const callerLines = input.transcript.split('\n').filter(l => /^(caller|patient|user):/i.test(l.trim()));
+  const requests = callerLines.filter(l => isHumanRequest(l)).length;
+  // Operator directive 2026-07-30: on a line that cannot transfer, ONE ask is
+  // already the whole obligation — say so honestly and file the callback. So
+  // a single unanswered request is a failure there, not a freebie. The
+  // ≥2-caller-turn floor keeps an instant hangup from counting (the same
+  // no-crying-wolf floor terminal_disposition uses).
+  const threshold = humanRequestCapFor(input.agentSlug ?? '');
+  if (requests < threshold || (requests === 1 && callerLines.length < 2)) {
     return {
       grader: 'human_request_deflection',
       pass: true,
       score: 1.0,
-      reason: requests === 0 ? 'No human requests detected' : 'Single human request — below the escalation threshold',
-      metadata: { humanRequests: requests },
+      reason: requests === 0 ? 'No human requests detected' : 'Single human request — below this agent’s escalation threshold',
+      metadata: { humanRequests: requests, threshold },
     };
   }
   const resolved = input.transferredToHuman || Boolean(input.ticketNumber);
@@ -167,9 +171,9 @@ function gradeHumanRequestDeflection(input: DeterministicGraderInput): GraderRes
     score: resolved ? 0.8 : 0.0,
     ...(resolved ? {} : { severity: 'critical' as const }),
     reason: resolved
-      ? `Caller asked for a human ${requests} times; call produced ${input.transferredToHuman ? 'a transfer' : 'a ticket'}`
-      : `Caller asked for a human ${requests} times and the call ended with NO transfer and NO ticket — the deflection loop`,
-    metadata: { humanRequests: requests, transferred: input.transferredToHuman, ticket: input.ticketNumber },
+      ? `Caller asked for a human ${requests}×; call produced ${input.transferredToHuman ? 'a transfer' : 'a ticket'}`
+      : `Caller asked for a human ${requests}× and the call ended with NO transfer and NO ticket — the deflection loop`,
+    metadata: { humanRequests: requests, threshold, transferred: input.transferredToHuman, ticket: input.ticketNumber },
   };
 }
 

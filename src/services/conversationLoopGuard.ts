@@ -73,6 +73,8 @@ export interface LoopGuardStats {
   agentLines: number;
   callerLines: number;
   humanRequests: number;
+  /** caller barge-ins (conversation.item.truncated) */
+  truncations: number;
   interventions: string[];
 }
 
@@ -81,6 +83,7 @@ interface CallLoopState {
   agentLines: number;
   callerLines: number;
   humanRequests: number;
+  truncations: number;
   /** intervention keys already sent, so each fires at most once per call */
   sent: Set<string>;
   interventions: string[];
@@ -89,6 +92,8 @@ interface CallLoopState {
    *  line between. A REAL re-ask always has caller audio in between. */
   lastAgentLine: string | null;
   callerSpokeSinceAgent: boolean;
+  /** set by the first teardown to flush telemetry; later paths no-op */
+  flushed: boolean;
 }
 
 /** Same-topic ask count that triggers the first intervention. Calibrated
@@ -97,9 +102,22 @@ interface CallLoopState {
 export const REASK_SOFT_CAP = 3;
 /** Ask count for the unconditional stop. On 07-29 the worst call hit 16. */
 export const REASK_HARD_CAP = 5;
-/** Human requests before the escalation directive. The first may be an
- *  aside; the second is a decision. */
+/** Human requests before the escalation directive. On an agent that CAN
+ *  transfer, the first request may be an aside and the second is a decision.
+ *  On an agent that cannot transfer at all, waiting for a second ask is the
+ *  bug: the caller is asking for the one thing the agent can never provide,
+ *  so the honest answer — "I can't connect calls, I can have someone call
+ *  you back" — is owed on the FIRST ask. A vague "I'll get this to the right
+ *  team" is what made callers ask up to ten times on 07-29. */
 export const HUMAN_REQUEST_CAP = 2;
+export const HUMAN_REQUEST_CAP_NO_TRANSFER = 1;
+
+/** Agents with no handoff/transfer capability of any kind. */
+const NO_TRANSFER_AGENTS = new Set(['answering-service']);
+
+export function humanRequestCapFor(agentSlug: string): number {
+  return NO_TRANSFER_AGENTS.has(agentSlug) ? HUMAN_REQUEST_CAP_NO_TRANSFER : HUMAN_REQUEST_CAP;
+}
 
 const AGENT_EXIT: Record<string, string> = {
   'azul-scheduling':
@@ -108,19 +126,44 @@ const AGENT_EXIT: Record<string, string> = {
     'Create the ticket NOW with whatever you have — the caller’s phone number is attached automatically from caller ID, and missing fields may stay blank. A partial ticket the team can call back on beats a complete interview the caller never finishes.',
 };
 
+/** What to say to a caller asking for a human on an agent that cannot
+ *  transfer: name the limitation, offer the real alternative, then act. */
+const NO_TRANSFER_HUMAN_DIRECTIVE =
+  'SERVER STATE CHECK: The caller has asked to reach a person, and you CANNOT transfer calls — there is no handoff on this line. Tell them so NOW, plainly, in your own words: you are not able to connect them to someone, what you CAN do is put in a request and have a team member call them back. Do not say anyone will "be right with them" — nobody is coming to this call. Do not repeat a vague reassurance, and do not make them ask twice. Then take only what you still need and file the ticket with "CALLER REQUESTED A HUMAN" at the start of the description.';
+
 function exitFor(agentSlug: string): string {
   return AGENT_EXIT[agentSlug] ?? AGENT_EXIT.default;
 }
 
 class ConversationLoopGuard {
   private calls = new Map<string, CallLoopState>();
+  /** alias (dbCallLogId, twilioCallSid) → the OpenAI callId that keys `calls`.
+   *  A call can be finalized by either observeCall's teardown (which holds the
+   *  OpenAI callId) or the lifecycle coordinator's 'call-ended' handler (which
+   *  holds only callLogId/twilioCallSid). On 2026-07-30 the coordinator won on
+   *  4 of 5 test calls, so the turn telemetry never landed — same reason
+   *  flushAzulTimeline is called with both keys. */
+  private aliases = new Map<string, string>();
+
+  /** Point an alternate id at this call's state, so whichever teardown path
+   *  wins can still flush the stats. Safe to call repeatedly. */
+  registerAlias(callId: string, alias?: string | null): void {
+    if (alias && alias !== callId) this.aliases.set(alias, callId);
+  }
+
+  private resolve(key: string): string | undefined {
+    if (this.calls.has(key)) return key;
+    const target = this.aliases.get(key);
+    return target && this.calls.has(target) ? target : undefined;
+  }
 
   private state(callId: string): CallLoopState {
     let s = this.calls.get(callId);
     if (!s) {
       s = {
-        asks: new Map(), agentLines: 0, callerLines: 0, humanRequests: 0,
+        asks: new Map(), agentLines: 0, callerLines: 0, humanRequests: 0, truncations: 0,
         sent: new Set(), interventions: [], lastAgentLine: null, callerSpokeSinceAgent: true,
+        flushed: false,
       };
       this.calls.set(callId, s);
     }
@@ -167,15 +210,29 @@ class ConversationLoopGuard {
     return null;
   }
 
+  /** Caller barge-in: the SDK truncated the in-flight agent response. Lives
+   *  here rather than in a parallel map so it resolves through the same
+   *  alias table the teardown paths use. */
+  onTruncation(callId: string): void {
+    this.state(callId).truncations += 1;
+  }
+
   onCallerLine(callId: string, agentSlug: string, line: string): LoopGuardDirective | null {
     const s = this.state(callId);
     s.callerLines += 1;
     s.callerSpokeSinceAgent = true;
     if (!isHumanRequest(line)) return null;
     s.humanRequests += 1;
-    if (s.humanRequests >= HUMAN_REQUEST_CAP && !s.sent.has('human')) {
+    const cap = humanRequestCapFor(agentSlug);
+    if (s.humanRequests >= cap && !s.sent.has('human')) {
       s.sent.add('human');
       s.interventions.push('human');
+      // No-transfer agents get the honest-limitation directive on the FIRST
+      // ask; agents that can actually transfer get the escalation directive
+      // on the second.
+      if (cap === HUMAN_REQUEST_CAP_NO_TRANSFER) {
+        return { kind: 'human_request', text: `${NO_TRANSFER_HUMAN_DIRECTIVE} ${exitFor(agentSlug)}` };
+      }
       return {
         kind: 'human_request',
         text:
@@ -187,23 +244,42 @@ class ConversationLoopGuard {
     return null;
   }
 
-  getStats(callId: string): LoopGuardStats | undefined {
-    const s = this.calls.get(callId);
+  /** Accepts the OpenAI callId or any registered alias. */
+  getStats(key: string): LoopGuardStats | undefined {
+    const callId = this.resolve(key);
+    const s = callId ? this.calls.get(callId) : undefined;
     if (!s) return undefined;
     return {
       asksByTopic: Object.fromEntries(s.asks),
       agentLines: s.agentLines,
       callerLines: s.callerLines,
       humanRequests: s.humanRequests,
+      truncations: s.truncations,
       interventions: [...s.interventions],
     };
   }
 
-  /** Returns final stats and frees the per-call state. */
-  endCall(callId: string): LoopGuardStats | undefined {
-    const stats = this.getStats(callId);
+  /** Returns final stats ONCE and marks the call flushed, so whichever
+   *  teardown path arrives first writes the telemetry and the loser is a
+   *  no-op instead of overwriting or double-counting. State is retained
+   *  until releaseCall() so a late reader still resolves. */
+  endCall(key: string): LoopGuardStats | undefined {
+    const callId = this.resolve(key);
+    if (!callId) return undefined;
+    const s = this.calls.get(callId)!;
+    if (s.flushed) return undefined;
+    s.flushed = true;
+    return this.getStats(callId);
+  }
+
+  /** Frees per-call state and its aliases. Called from final cleanup, after
+   *  every teardown path has had its chance to flush. */
+  releaseCall(key: string): void {
+    const callId = this.resolve(key) ?? key;
     this.calls.delete(callId);
-    return stats;
+    for (const [alias, target] of this.aliases) {
+      if (target === callId || alias === callId) this.aliases.delete(alias);
+    }
   }
 }
 
