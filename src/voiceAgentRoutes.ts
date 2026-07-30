@@ -595,6 +595,44 @@ async function flushLoopTelemetry(key: string, callLogId: string): Promise<LoopG
   return stats;
 }
 
+/** What we dialed for a warm transfer, keyed by the OFFICE leg's CallSid, so
+ *  the accept/status webhooks can attribute an outcome to it. */
+const officeLegDials = new Map<string, { openAiCallId: string; dialedNumber: string; queueLabel: string; dialedAt: number }>();
+
+/** Persist the office leg's result onto the call log. This is the record that
+ *  answers "did the office actually pick up, and which office was it?" — a
+ *  question that had NO answer in the database before 2026-07-30, when an
+ *  office manager found a routing bug that no dashboard could have shown. */
+async function recordTransferOutcome(
+  officeCallSid: string,
+  outcome: 'accepted' | 'no_answer' | 'busy' | 'failed' | 'canceled' | 'machine',
+  extra: { acceptMethod?: 'keypress' | 'stay_on_line' | null; amdVerdict?: string | null } = {},
+): Promise<void> {
+  const dial = officeLegDials.get(officeCallSid);
+  if (!dial) return;
+  officeLegDials.delete(officeCallSid);
+  const callLogId = callMetadataForDB.get(dial.openAiCallId)?.dbCallLogId;
+  if (!callLogId) return;
+  try {
+    const { storage } = await import('../server/storage');
+    await storage.updateCallLog(callLogId, {
+      transferOutcome: {
+        officeCallSid,
+        dialedNumber: dial.dialedNumber,
+        queueLabel: dial.queueLabel,
+        outcome,
+        acceptMethod: extra.acceptMethod ?? null,
+        amdVerdict: extra.amdVerdict ?? null,
+        ringSeconds: Math.round((Date.now() - dial.dialedAt) / 1000),
+        at: new Date().toISOString(),
+      },
+    } as any);
+    console.info(`[WARM-TRANSFER] outcome recorded for ${callLogId}: ${outcome} — ${dial.queueLabel} (${dial.dialedNumber})`);
+  } catch (err) {
+    console.error(`[WARM-TRANSFER] failed to record outcome for ${callLogId}:`, err);
+  }
+}
+
 function sendLoopGuardDirective(session: any, callId: string, directive: LoopGuardDirective): void {
   try {
     (session.transport as any).sendEvent({
@@ -1244,6 +1282,10 @@ async function transferConferenceToNumber(
     }, 80_000);
 
     officeLegBridges.set(dialedSid, { openAiCallId, label });
+    // Office-leg telemetry (2026-07-30): remember what we dialed so the
+    // accept/status webhooks can record the OUTCOME against it. Without
+    // this pair, nothing in the database says whether the office picked up.
+    officeLegDials.set(dialedSid, { openAiCallId, dialedNumber: toNumber, queueLabel: label, dialedAt: Date.now() });
 
     warmTransferAccepts.set(dialedSid, {
       resolve: (info) => {
@@ -4778,6 +4820,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       );
       res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
       warmTransferAccepts.delete(callSid);
+      void recordTransferOutcome(callSid, 'machine', { amdVerdict: answeredBy });
       pending.reject(new Error(`Office leg answered by ${answeredBy}`));
       return;
     }
@@ -4790,6 +4833,10 @@ export function setupVoiceAgentRoutes(app: Express): void {
     // this file already reports; this one did not, which is why
     // `transferred_live` — a record of our DECISION to connect — was standing
     // in for a measurement of what happened.
+    void recordTransferOutcome(callSid, 'accepted', {
+      acceptMethod: digits ? 'keypress' : 'stay_on_line',
+      amdVerdict: answeredBy || null,
+    });
     const bridgeEvents = `https://${envConfig.domain}/api/voice/office-leg-events`;
     res.send(
       `<?xml version="1.0" encoding="UTF-8"?><Response>` +
@@ -4901,6 +4948,18 @@ export function setupVoiceAgentRoutes(app: Express): void {
     if (["completed", "busy", "failed", "no-answer", "canceled"].includes(callStatus)) {
       console.warn(`[WARM-TRANSFER] ✗ Office leg ended without accept: ${callStatus} (${callSid})`);
       warmTransferAccepts.delete(callSid);
+      // Record BEFORE rejecting: this is the "the office never picked up"
+      // evidence, and it is the case nobody could see until now. A leg that
+      // reaches "completed" without ever accepting was answered and hung up
+      // (or rang out to voicemail) — for our purposes, nobody took the call.
+      const OUTCOME_BY_STATUS: Record<string, 'no_answer' | 'busy' | 'failed' | 'canceled'> = {
+        'no-answer': 'no_answer',
+        completed: 'no_answer',
+        busy: 'busy',
+        failed: 'failed',
+        canceled: 'canceled',
+      };
+      void recordTransferOutcome(callSid, OUTCOME_BY_STATUS[callStatus] ?? 'failed');
       pending.reject(new Error(`office_${callStatus}_no_accept`));
     }
   });
