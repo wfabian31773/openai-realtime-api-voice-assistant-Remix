@@ -126,19 +126,40 @@ describe('re-ask caps', () => {
 });
 
 describe('human-request escalation', () => {
-  it(`fires on demand #${HUMAN_REQUEST_CAP} with the ticket exit for the answering fleet`, () => {
+  // Operator directive 2026-07-30: the answering service cannot transfer at
+  // all, so making the caller ask twice before hearing that is the bug.
+  // Honesty is owed on the FIRST ask — that is what stops the insisting.
+  it('fires on the FIRST demand for an agent that cannot transfer', () => {
     const callId = freshCallId();
-    expect(conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Customer service.')).toBeNull();
-    conversationLoopGuard.onAgentLine(callId, 'answering-service', 'I can help with that.');
-    const d = conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Customer service!');
+    const d = conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Representative.');
     expect(d?.kind).toBe('human_request');
-    expect(d?.text).toMatch(/Create the ticket NOW/);
-    // once per call
-    expect(conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Representative.')).toBeNull();
-    conversationLoopGuard.endCall(callId);
+    expect(d?.text).toMatch(/CANNOT transfer calls/);
+    expect(d?.text).toMatch(/call them back/);
+    expect(d?.text).toMatch(/nobody is coming to this call/);
+    expect(d?.text).toMatch(/Create the ticket NOW/); // the exit still rides along
+    conversationLoopGuard.releaseCall(callId);
   });
 
-  it('gives azul the sage_handoff exit and forbids identity re-asks', () => {
+  it('never repeats the limitation — one directive per call', () => {
+    const callId = freshCallId();
+    expect(conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Customer service.')).toBeTruthy();
+    conversationLoopGuard.onAgentLine(callId, 'answering-service', "I can't connect calls, but I can have someone call you back.");
+    expect(conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Representative!')).toBeNull();
+    expect(conversationLoopGuard.onCallerLine(callId, 'answering-service', 'REPRESENTATIVE.')).toBeNull();
+    conversationLoopGuard.releaseCall(callId);
+  });
+
+  it(`still waits for demand #${HUMAN_REQUEST_CAP} on agents that CAN transfer`, () => {
+    // azul has a real handoff, so a first mention may be an aside.
+    const callId = freshCallId();
+    expect(conversationLoopGuard.onCallerLine(callId, 'azul-scheduling', 'Representative.')).toBeNull();
+    const d = conversationLoopGuard.onCallerLine(callId, 'azul-scheduling', 'Representative, please.');
+    expect(d?.kind).toBe('human_request');
+    expect(d?.text).not.toMatch(/CANNOT transfer calls/);
+    conversationLoopGuard.releaseCall(callId);
+  });
+
+  it('gives azul the sage_handoff exit and forbids identity re-asks (2nd ask)', () => {
     const callId = freshCallId();
     conversationLoopGuard.onCallerLine(callId, 'azul-scheduling', 'Representative.');
     const d = conversationLoopGuard.onCallerLine(callId, 'azul-scheduling', 'Representative, please.');

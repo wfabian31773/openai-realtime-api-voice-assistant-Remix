@@ -102,9 +102,22 @@ interface CallLoopState {
 export const REASK_SOFT_CAP = 3;
 /** Ask count for the unconditional stop. On 07-29 the worst call hit 16. */
 export const REASK_HARD_CAP = 5;
-/** Human requests before the escalation directive. The first may be an
- *  aside; the second is a decision. */
+/** Human requests before the escalation directive. On an agent that CAN
+ *  transfer, the first request may be an aside and the second is a decision.
+ *  On an agent that cannot transfer at all, waiting for a second ask is the
+ *  bug: the caller is asking for the one thing the agent can never provide,
+ *  so the honest answer — "I can't connect calls, I can have someone call
+ *  you back" — is owed on the FIRST ask. A vague "I'll get this to the right
+ *  team" is what made callers ask up to ten times on 07-29. */
 export const HUMAN_REQUEST_CAP = 2;
+export const HUMAN_REQUEST_CAP_NO_TRANSFER = 1;
+
+/** Agents with no handoff/transfer capability of any kind. */
+const NO_TRANSFER_AGENTS = new Set(['answering-service']);
+
+export function humanRequestCapFor(agentSlug: string): number {
+  return NO_TRANSFER_AGENTS.has(agentSlug) ? HUMAN_REQUEST_CAP_NO_TRANSFER : HUMAN_REQUEST_CAP;
+}
 
 const AGENT_EXIT: Record<string, string> = {
   'azul-scheduling':
@@ -112,6 +125,11 @@ const AGENT_EXIT: Record<string, string> = {
   default:
     'Create the ticket NOW with whatever you have — the caller’s phone number is attached automatically from caller ID, and missing fields may stay blank. A partial ticket the team can call back on beats a complete interview the caller never finishes.',
 };
+
+/** What to say to a caller asking for a human on an agent that cannot
+ *  transfer: name the limitation, offer the real alternative, then act. */
+const NO_TRANSFER_HUMAN_DIRECTIVE =
+  'SERVER STATE CHECK: The caller has asked to reach a person, and you CANNOT transfer calls — there is no handoff on this line. Tell them so NOW, plainly, in your own words: you are not able to connect them to someone, what you CAN do is put in a request and have a team member call them back. Do not say anyone will "be right with them" — nobody is coming to this call. Do not repeat a vague reassurance, and do not make them ask twice. Then take only what you still need and file the ticket with "CALLER REQUESTED A HUMAN" at the start of the description.';
 
 function exitFor(agentSlug: string): string {
   return AGENT_EXIT[agentSlug] ?? AGENT_EXIT.default;
@@ -205,9 +223,16 @@ class ConversationLoopGuard {
     s.callerSpokeSinceAgent = true;
     if (!isHumanRequest(line)) return null;
     s.humanRequests += 1;
-    if (s.humanRequests >= HUMAN_REQUEST_CAP && !s.sent.has('human')) {
+    const cap = humanRequestCapFor(agentSlug);
+    if (s.humanRequests >= cap && !s.sent.has('human')) {
       s.sent.add('human');
       s.interventions.push('human');
+      // No-transfer agents get the honest-limitation directive on the FIRST
+      // ask; agents that can actually transfer get the escalation directive
+      // on the second.
+      if (cap === HUMAN_REQUEST_CAP_NO_TRANSFER) {
+        return { kind: 'human_request', text: `${NO_TRANSFER_HUMAN_DIRECTIVE} ${exitFor(agentSlug)}` };
+      }
       return {
         kind: 'human_request',
         text:
