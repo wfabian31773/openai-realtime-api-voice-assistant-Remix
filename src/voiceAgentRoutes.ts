@@ -1516,10 +1516,25 @@ async function observeCall(
   // can be written STRAIGHT into metadata; after it, the parked/turn-boundary
   // path is the only safe one. See the late-resolve handler below.
   let azulSessionConnected = false;
+  // Carrier subscriber name, fetched alongside the pre-context and NEVER
+  // waited on. It exists to contradict a bad pre-context match: on 817162bf
+  // (2026-07-31) the person base tied the number to a "Haberkern" and the
+  // agent duly verified against that surname for twelve minutes, while the
+  // carrier had the caller's real name — Kolterman — the whole time. Written
+  // through pre-connect exactly like a late pre-context; if it misses that
+  // window the prompt-side read-back and the identity arg guard still hold.
+  let azulCarrierNamePromise: Promise<string | null> | null = null;
+  let azulCarrierName: string | null = null;
   if (agentSlug === 'azul-scheduling' && from) {
     azulPrecontextPromise = import('./agents/azulSchedulingAgent')
       .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
       .catch(() => null);
+    azulCarrierNamePromise = import('./lib/twilioClient')
+      .then(({ lookupCallerName }) => lookupCallerName(from))
+      .catch(() => null);
+    void azulCarrierNamePromise.then((n) => {
+      azulCarrierName = n;
+    });
   }
 
   let callLogId: string | undefined;
@@ -1735,7 +1750,15 @@ async function observeCall(
         // turn, so a pre-context match that loses the creation race (6.4s
         // cold start on the 16:42 call) still lands BEFORE the identity
         // question (~30s in) via the late-resolve write-through below.
-        const azulMetadata = {
+        const azulMetadata: {
+          callId: string;
+          callSid?: string;
+          callerPhone?: string;
+          dialedNumber?: string;
+          callLogId?: string;
+          precontext?: import('./agents/azulSchedulingAgent').AzulPrecontext;
+          carrierCallerName?: string;
+        } = {
           callId,
           callSid: twilioCallSid,
           callerPhone: from,
@@ -1743,6 +1766,19 @@ async function observeCall(
           callLogId,
           precontext: azulPrecontext ?? undefined,
         };
+        // Never awaited — see the promise's declaration. Landing before
+        // connect() is a bonus, not a requirement.
+        if (azulCarrierNamePromise) {
+          void azulCarrierNamePromise.then((name) => {
+            if (!name) return;
+            azulMetadata.carrierCallerName = name;
+            const meta = callMetadataForDB.get(callId);
+            if (meta) meta.carrierCallerName = name;
+            if (azulSessionConnected) {
+              console.log(`[AZUL-SCHED] Carrier name for ...${(from || '').slice(-4)} arrived after connect — prompt already frozen, arg guard still applies`);
+            }
+          });
+        }
         if (!azulPrecontext && azulPrecontextPromise) {
           void azulPrecontextPromise.then((late) => {
             if (!late?.matched) return;
@@ -2143,6 +2179,9 @@ async function observeCall(
     dbCallLogId: callLogId, // Store the call log ID we created earlier
     audioInputMs: 0,
     audioOutputMs: 0,
+    // Carried so the end-of-call enrichment reuses this lookup instead of
+    // billing a second identical one.
+    ...(azulCarrierName ? { carrierCallerName: azulCarrierName } : {}),
   });
 
   // Let the loop guard's telemetry be flushed by the lifecycle coordinator
@@ -2827,6 +2866,7 @@ async function observeCall(
         const asyncCallId = callId;
         const twilioCallSid = callMeta.twilioCallSid;
         const dbCallLogId = callMeta.dbCallLogId;
+        const prefetchedCarrierName = callMeta.carrierCallerName ?? null;
         const agentSlug = callMeta.agentSlug;
         const startTime = callMeta.startTime;
         const callerPhone = callMeta.from;
@@ -2941,8 +2981,12 @@ async function observeCall(
             try {
               const latestCallLog = await storage.getCallLog(dbCallLogId!);
               if (!latestCallLog?.callerName && callerPhone) {
-                const { lookupCallerName } = await import('./lib/twilioClient');
-                const enrichedName = await lookupCallerName(callerPhone);
+                // azul already looked this number up at call start to
+                // sanity-check the pre-context surname — reuse it rather than
+                // paying Twilio twice for the same answer.
+                const enrichedName =
+                  prefetchedCarrierName ??
+                  (await import('./lib/twilioClient').then(({ lookupCallerName }) => lookupCallerName(callerPhone)));
                 if (enrichedName) {
                   await storage.updateCallLog(dbCallLogId!, { callerName: enrichedName });
                   console.info(`[LOOKUP] Enriched callerName for ${dbCallLogId}: ${enrichedName}`);
@@ -2976,6 +3020,7 @@ async function observeCall(
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
     conversationLoopGuard.releaseCall(callId);
+    void import('./services/identityArgGuard').then(({ releaseIdentityGuard }) => releaseIdentityGuard(callId));
     
     // Clean up conference mappings to prevent stale entries
     // Use wrapper for restart recovery - may find session in service cache
