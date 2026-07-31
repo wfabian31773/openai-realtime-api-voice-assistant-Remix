@@ -31,6 +31,7 @@ import { medicalSafetyGuardrails } from '../guardrails/medicalSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
 import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall, type AzulToolEvent } from '../services/azulToolTimeline';
 import { callMetadataForDB } from '../services/callMetadataStore';
+import { guardIdentityArgs, surnameDisagrees } from '../services/identityArgGuard';
 
 const EYECARE_BASE_URL =
   process.env.EYECARE_SCHEDULING_BASE_URL ||
@@ -40,7 +41,7 @@ const EYECARE_BASE_URL =
  *  server-side gates can tighten for new builds without breaking old ones.
  *  `azulSchedulingAgentConfig.version` below is the same value — this constant
  *  exists only because the config object is defined further down the file. */
-const AZUL_AGENT_VERSION = '2.26.0';
+const AZUL_AGENT_VERSION = '2.27.0';
 
 // ─────────────────────────────────────────────────────────────────────────
 // HTTP client — every scheduling tool executes on the Eye Care service.
@@ -815,6 +816,8 @@ TAKE WHAT THEY GIVE YOU. If the caller volunteers everything in one breath ("Way
 
 NEVER ask for phone digits — the caller's number is attached automatically and only breaks ties. Call verify_patient_identity with those three. If verification fails, do NOT proceed with patient actions — say "let me double-check the spelling on my end", collect the spelling, and retry with the corrected name; offer a callback if they can't verify.
 
+A RETRY MUST CHANGE SOMETHING THE CALLER RE-SUPPLIED. Re-sending a name and date of birth that already came back no-match cannot succeed — nothing about the record changed in the last ten seconds. Before the second attempt, re-check BOTH fields with the caller, not just the one you suspect: read the date of birth back digit by digit ("that's the eighth month, the twenty-ninth day, nineteen fifty-two?") and confirm the last name. A wrong date is invisible to you — it arrives well-formed — so treat it as a suspect on every failed verification, not only when the caller corrects you. If the second attempt also fails, sage_handoff with reason patient_identity_uncertain rather than a third guess.
+
 You CAN answer general questions without verifying — clinic addresses, hours, whether a provider works at an office. For questions about the PRACTICE ITSELF — who our doctors are, "do you have a retina specialist?", which days Dr. X is in which office, what visit types we offer or what one involves, office hours and the lunch closure, address or phone — call sage_practice and speak its 'say' text; never answer these from memory. The response marks which providers you can book directly: for every other doctor, tell the caller our scheduling team will CALL THEM BACK to arrange it, and say so in those words — do NOT say "the scheduling team arranges those appointments", which callers hear as a promise the appointment is already being made and leaves them waiting for a confirmation that never comes. Make the next step explicitly a callback, not a booking. Still NEVER say a doctor "isn't available" or imply they don't work here. A provider's usual days are not a promise of openings — always follow with a real availability check before offering times. For other mundane one-off facts (cross streets, fax, what to bring), call sage_info FIRST and speak its 'say' text — never hand off for these. For "do you take my insurance / do you accept X?" call sage_insurance_check with the plan (and medical group if they mention one) as they said it — the practice's payer list and authorization rules answer, not your memory. If the caller rattles off SEVERAL plans at once ("do you take Blue Shield, Blue Cross, Medi-Cal?"), do NOT pick one and answer for it — ask which plan is on THEIR card, then check that one. Speak the insurance 'say' VERBATIM and never append a plan or medical-group name the 'say' did not confirm; if the caller asked about something the 'say' doesn't mention, that item is unconfirmed — say the team will verify it. Never say a plan is not accepted, and never discuss costs or copays — the team verifies those.
 
 # THE CONTRACT — Eye Care decides, you follow (never break these)
@@ -1043,13 +1046,25 @@ function buildDynamicTail(metadata?: AzulSchedulingMetadata): string {
   const pc = metadata?.precontext;
   if (pc?.matched && pc.firstName) {
     const first = pc.firstName;
-    const last = pc.lastNameOnFile || '';
+    // Suppress the on-file surname when the carrier's subscriber name for this
+    // very number names someone else. On 2026-07-31 (817162bf) the person base
+    // matched the number to a "Haberkern" while the carrier said KOLTERMAN —
+    // and the caller was a Kolterman. The prompt below tells the agent to
+    // prefer the on-file spelling over a transcription, so a wrong match here
+    // becomes a wrong name sent to verification, which cannot ever succeed.
+    // We don't trust the carrier either (CNAM carries spouses and stale
+    // account holders); we just stop treating a contradicted surname as known.
+    const suppressed = surnameDisagrees(pc.lastNameOnFile, metadata?.carrierCallerName);
+    const last = suppressed ? '' : pc.lastNameOnFile || '';
     parts.push(
       `# CALLER-ID PRE-CONTEXT (use this — do not make the caller spell their life out)\n\n` +
       `This phone number matches an existing patient on file: first name "${first}"${last ? `, last name on file "${last}"` : ''}. This is a STRONG hint, not verification.\n` +
-      `- YOUR OPENING GREETING ALREADY ASKED "Am I speaking with ${first}?" — do NOT ask it a second time. When they confirm, go straight to their date of birth ("Thanks ${first} — and your date of birth?"), then call verify_patient_identity with firstName "${first}"${last ? `, lastName "${last}" (the ON-FILE spelling — never a transcribed respelling)` : ''} and that DOB. The caller-ID match plus DOB completes verification.\n` +
+      `- YOUR OPENING GREETING ALREADY ASKED "Am I speaking with ${first}?" — do NOT ask it a second time.\n` +
+      `- CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. After they confirm, ask for the last name AND the date of birth: "Thanks ${first} — can I get your last name and your date of birth?"${last ? ` If the last name they give is that same name, send "${last}" — the ON-FILE spelling beats a transcription. If it is a DIFFERENT name, this number matched the WRONG patient: send what THEY said, and never "${last}".` : ''}\n` +
+      `- READ THE DATE OF BIRTH BACK before you call verify_patient_identity — "just to make sure I have it right, that's <month> <day>, <year>?" — and send the date they confirm. The caller-ID match tells you nothing about their date of birth, so it never excuses skipping the read-back.\n` +
+      `- Then call verify_patient_identity with firstName "${first}", the last name, and that confirmed date of birth.\n` +
       `- If the conversation has moved on and identity is still needed later, ask it then — but only once.\n` +
-      `- Do NOT ask them to spell their name. Do NOT mention we recognized their number — just greet warmly and confirm.\n` +
+      `- Do NOT ask them to spell their name unless verification fails. Do NOT mention we recognized their number — just greet warmly and confirm.\n` +
       `- If they say NO (calling for someone else / different person), run the standard verification flow for the actual patient.\n` +
       `- Disclose NOTHING from their record until verify_patient_identity returns verified.`,
     );
@@ -1070,6 +1085,10 @@ export interface AzulSchedulingMetadata {
   /** Caller-ID pre-context from the person base (sage_precontext): who this
    *  phone number likely belongs to. NEVER treated as verification. */
   precontext?: AzulPrecontext;
+  /** Carrier subscriber name for the inbound number ("[Lookup] SMITH,JANE").
+   *  Used ONLY to detect that the pre-context matched a different person —
+   *  never spoken, never sent to verification. */
+  carrierCallerName?: string;
 }
 
 export const azulSchedulingAgentConfig = {
@@ -1554,11 +1573,46 @@ export function createAzulSchedulingAgent(
       dateOfBirth: z.string().describe('YYYY-MM-DD. Ask year, then month, then day; speak it back.'),
       phoneLast4: z.string().optional().describe('Last 4 digits of the phone number on file.'),
     }),
-    execute: async (args) =>
+    execute: async (args) => {
+      // Guard the ARGUMENTS before they leave, against the caller's own words.
+      // Two things this stops, both from call 817162bf (2026-07-31): a date of
+      // birth the model reassembled out of the caller's digits, and a retry
+      // that resent a value which had already failed. Neither is detectable
+      // downstream — the service only ever sees a name and a date that look
+      // perfectly well-formed.
+      const verdict = guardIdentityArgs(metadata?.callId, args, liveTranscriptFor(metadata?.callId));
+      if (verdict.blocked) {
+        console.warn(
+          `[AZUL-SCHED] identity guard blocked verify (${verdict.telemetry.dobConflict ? 'dob-conflict' : 'repeat-attempt'}) on call ${metadata?.callId}`,
+        );
+        recordAzulToolEvent(
+          metadata?.callId ?? metadata?.callSid ?? '',
+          'verify_patient_identity',
+          compact(args),
+          JSON.stringify({ blocked: true, ...verdict.telemetry }),
+          0,
+          { callSid: metadata?.callSid, callLogId: metadata?.callLogId },
+        );
+        return JSON.stringify({
+          verified: false,
+          matchSignal: 'not-sent',
+          agent_instruction: verdict.instruction,
+        });
+      }
       // callId stamps the verified identity on the server's call session —
       // sage_book/sage_new_patient_intake are gated to the person THIS call
       // verified (Phase 2 state machine).
-      tracked('verify_patient_identity', compact({ ...args, inboundPhone: metadata?.callerPhone, callId: metadata?.callId })),
+      const raw = await tracked(
+        'verify_patient_identity',
+        compact({ ...args, inboundPhone: metadata?.callerPhone, callId: metadata?.callId }),
+      );
+      if (!verdict.note) return raw;
+      try {
+        return JSON.stringify({ ...JSON.parse(raw), agent_instruction: verdict.note });
+      } catch {
+        return raw;
+      }
+    },
   });
 
   const getPatientAppointmentsTool = tool({
