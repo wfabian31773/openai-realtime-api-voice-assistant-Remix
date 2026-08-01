@@ -171,7 +171,7 @@ export const answeringServiceAgentConfig = {
   slug: "answering-service",
   name: "Overflow Answering Service Agent",
   description: "Handles daytime overflow calls for Optical, Tech Support, and Surgery Coordination departments.",
-  version: "3.4.0",
+  version: "3.5.0",
   greeting: "Hello, thank you for calling Azul Vision, all of our operators are currently on the phone assisting other patients, how may I help you today?",
   voice: "sage",
   language: "en",

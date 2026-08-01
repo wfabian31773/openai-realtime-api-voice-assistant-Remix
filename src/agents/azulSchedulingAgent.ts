@@ -41,7 +41,7 @@ const EYECARE_BASE_URL =
  *  server-side gates can tighten for new builds without breaking old ones.
  *  `azulSchedulingAgentConfig.version` below is the same value — this constant
  *  exists only because the config object is defined further down the file. */
-const AZUL_AGENT_VERSION = '2.27.0';
+const AZUL_AGENT_VERSION = '2.28.0';
 
 // ─────────────────────────────────────────────────────────────────────────
 // HTTP client — every scheduling tool executes on the Eye Care service.

@@ -1652,6 +1652,21 @@ async function observeCall(
     return { callLogId: undefined, agentId: undefined };
   });
   
+  // callLogId is resolved by backgroundDbOps AFTER the agent factory runs, so a
+  // captured value is ALWAYS undefined for the whole call. Every agent that
+  // guards a write with `if (callLogId)` therefore skipped it, silently, on
+  // every call: 3,571 calls over the 7 days to 2026-08-01 with patient_found
+  // = 0 across all three agents, including azul calls whose tool timeline
+  // records verified:true. That is why the console shows the carrier's CNAM
+  // string ("[Lookup] FABIAN,WAYNE") where the verified patient should be —
+  // the very bug stampVerifiedIdentity was written to fix, which never once
+  // ran. The tool timeline survived only because its flush falls back to
+  // callSid.
+  //
+  // A getter reads the live value at ACCESS time from the metadata store,
+  // which the backfill does update. Agents need no change.
+  const liveCallLogId = () => callMetadataForDB.get(callId)?.dbCallLogId;
+
   // Agent factory runs immediately — does NOT wait for DB ops.
   // callLogId is undefined here; it gets backfilled after session.connect().
   // The factory's callerMemory/schedule lookups run in parallel with DB ops.
@@ -1718,7 +1733,7 @@ async function observeCall(
             callSid: twilioCallSid,
             callerPhone: from,
             dialedNumber: to,
-            callLogId,
+            get callLogId() { return liveCallLogId(); },
           }
         );
         break;
@@ -1755,7 +1770,7 @@ async function observeCall(
           callSid?: string;
           callerPhone?: string;
           dialedNumber?: string;
-          callLogId?: string;
+          readonly callLogId?: string;
           precontext?: import('./agents/azulSchedulingAgent').AzulPrecontext;
           carrierCallerName?: string;
         } = {
@@ -1763,7 +1778,7 @@ async function observeCall(
           callSid: twilioCallSid,
           callerPhone: from,
           dialedNumber: to,
-          callLogId,
+          get callLogId() { return liveCallLogId(); },
           precontext: azulPrecontext ?? undefined,
         };
         // Never awaited — see the promise's declaration. Landing before
@@ -1844,7 +1859,7 @@ async function observeCall(
             callSid: twilioCallSid,
             callerPhone: from,
             dialedNumber: to,
-            callLogId: callLogId, // For patient context updates
+            get callLogId() { return liveCallLogId(); }, // For patient context updates
             variant: 'production' as const, // PRODUCTION variant with full features
             // Tickets carry the conversation up to the moment of filing —
             // the ticketing app generates its staff-facing summary from it.
@@ -1863,7 +1878,7 @@ async function observeCall(
             callSid: twilioCallSid,
             callerPhone: from,
             dialedNumber: to,
-            callLogId: callLogId,
+            get callLogId() { return liveCallLogId(); },
             variant: 'development' as const, // DEVELOPMENT variant - testing new features before production
             getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
           }
