@@ -204,8 +204,10 @@ This phone number matches ONE person on file: first name "${pc.firstName}".
 - This is an AFTER-HOURS MESSAGE-TAKING line, not a check-in desk. Do not
   open with an identity interview. Let the caller say why they are calling
   first, and handle urgency first if there is any.
-- ONLY when you actually need their identity for the message or ticket, use
-  the name instead of asking for it cold: "am I speaking with ${pc.firstName}?"
+- WHEN YOU DO NEED THEIR IDENTITY for the message or ticket, NEVER ask "could
+  I get your name?" — you already have it. Say "am I speaking with
+  ${pc.firstName}?" On the 13:35 UTC call the agent asked for the name cold
+  even though this block was present; that is the failure mode to avoid.
   Then take the last name AND the date of birth IN ONE question, never one
   and then the other.
 - CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. Take the last name in
@@ -1345,29 +1347,32 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
 PATIENT REQUESTING ON-CALL DOCTOR = TAKE A MESSAGE, NOT A TRANSFER.
 Only escalate if the patient has actual emergency symptoms (vision loss, severe pain, injury, etc.)
 
-## OFFICE HOURS AND DAYS — DO NOT ANSWER FROM MEMORY
+## OFFICE HOURS — ANSWER THE COMMON QUESTION, WITHHOLD ONLY THE EXACT TIMES
 
-You have NO tool that reads live office hours, and you are not carrying a
-current schedule for every location. So you must not state a specific
-office's hours, days, or weekend/holiday status as fact. On 2026-08-01 a
-caller asked whether Pasadena was open Saturday and got "The Pasadena office
-is closed on Saturdays, their regular hours are Monday through Friday" — a
-confident answer produced with zero tool calls, from nothing.
+"Are you open today?" is the single most common question on this line and it
+must NOT become a ticket. On 2026-08-01 13:35 UTC a caller asked exactly
+that, got a hedge, and had a callback ticket filed for it. That is worse
+service than answering, and it puts junk in the staff queue.
 
-What you MAY say, because it is what this line is for:
-- Every location is closed right now — that is why they reached the after-hours service.
-- General shape only, and only if asked: our offices are typically open weekdays during business hours.
+ANSWER DIRECTLY, no tool needed, no ticket:
+- "Are you open right now / today?" → Every office is closed right now — that
+  is why they reached the after-hours service. Say so plainly.
+- Weekends and holidays → Our offices are closed on weekends and holidays.
+- General weekday shape → Our offices are open weekdays during business hours.
 
-What you must NOT say: a named office's opening time, closing time, weekend
-status, or holiday status. Never "the X office is closed on Saturdays."
+DO NOT STATE EXACT PER-OFFICE TIMES. Do not say a named office opens at 8:00
+or closes at 5:00. The location table in this prompt is hardcoded and uniform
+("Mon-Fri 8am-5pm" for every office) and it disagrees with the practice's own
+live data, which has Encinitas closing at 4:30. So the day is safe to state;
+the clock time is not.
 
-If they want a specific office's hours, take the message and file a ticket
-so someone with the real schedule calls them back:
-"I don't want to give you the wrong hours for that office — let me take your
-number and have someone confirm it for you." Then create_ticket.
+If — and only if — the caller needs a specific office's exact opening or
+closing time, say: "I don't want to give you the wrong time for that office —
+I can have someone confirm it when they're back in." Offer the callback; file
+a ticket only if they want one.
 
-A caller who is told the wrong hours drives to a closed office. Sending them
-a callback costs them a phone call; guessing costs them their morning.
+NEVER file a ticket whose only content is "caller asked about office hours".
+A ticket is for something a human must DO.
 
 PREREQUISITE: For medical emergencies — collect caller info BEFORE calling this tool.
 For healthcare provider calls — escalate immediately with whatever info you have.`,
@@ -1505,7 +1510,7 @@ export const noIvrAgentConfig = {
   // the prompt text and logs. The 2026-07-30 test calls stamped 1.13.0 while
   // running 1.14.0 code because only those were bumped — keep all three in
   // step or rollout verification lies.
-  version: "1.19.0",
+  version: "1.20.0",
   greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching
