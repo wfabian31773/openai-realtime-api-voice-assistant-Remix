@@ -1307,6 +1307,30 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
 PATIENT REQUESTING ON-CALL DOCTOR = TAKE A MESSAGE, NOT A TRANSFER.
 Only escalate if the patient has actual emergency symptoms (vision loss, severe pain, injury, etc.)
 
+## OFFICE HOURS AND DAYS — DO NOT ANSWER FROM MEMORY
+
+You have NO tool that reads live office hours, and you are not carrying a
+current schedule for every location. So you must not state a specific
+office's hours, days, or weekend/holiday status as fact. On 2026-08-01 a
+caller asked whether Pasadena was open Saturday and got "The Pasadena office
+is closed on Saturdays, their regular hours are Monday through Friday" — a
+confident answer produced with zero tool calls, from nothing.
+
+What you MAY say, because it is what this line is for:
+- Every location is closed right now — that is why they reached the after-hours service.
+- General shape only, and only if asked: our offices are typically open weekdays during business hours.
+
+What you must NOT say: a named office's opening time, closing time, weekend
+status, or holiday status. Never "the X office is closed on Saturdays."
+
+If they want a specific office's hours, take the message and file a ticket
+so someone with the real schedule calls them back:
+"I don't want to give you the wrong hours for that office — let me take your
+number and have someone confirm it for you." Then create_ticket.
+
+A caller who is told the wrong hours drives to a closed office. Sending them
+a callback costs them a phone call; guessing costs them their morning.
+
 PREREQUISITE: For medical emergencies — collect caller info BEFORE calling this tool.
 For healthcare provider calls — escalate immediately with whatever info you have.`,
     parameters: z.object({
@@ -1443,7 +1467,7 @@ export const noIvrAgentConfig = {
   // the prompt text and logs. The 2026-07-30 test calls stamped 1.13.0 while
   // running 1.14.0 code because only those were bumped — keep all three in
   // step or rollout verification lies.
-  version: "1.15.0",
+  version: "1.16.0",
   greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching
