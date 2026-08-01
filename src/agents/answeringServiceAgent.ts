@@ -7,6 +7,7 @@ import { scheduleLookupService, PatientScheduleContext } from '../services/sched
 import { CallerMemoryService, CallerMemory } from '../services/callerMemoryService';
 import { storage } from '../../server/storage';
 import { callMetadataForDB } from '../services/callMetadataStore';
+import { recordingExecute } from '../services/toolTimeline';
 import { buildCompactLocationReference } from '../config/azulVisionKnowledge';
 import {
   ANSWERING_SERVICE_DEPARTMENTS,
@@ -170,7 +171,7 @@ export const answeringServiceAgentConfig = {
   slug: "answering-service",
   name: "Overflow Answering Service Agent",
   description: "Handles daytime overflow calls for Optical, Tech Support, and Surgery Coordination departments.",
-  version: "3.3.0",
+  version: "3.4.0",
   greeting: "Hello, thank you for calling Azul Vision, all of our operators are currently on the phone assisting other patients, how may I help you today?",
   voice: "sage",
   language: "en",
@@ -564,6 +565,17 @@ export async function createAnsweringServiceAgent(
   const { callId, callerPhone, callLogId, callSid } = metadata;
   const agentTag = 'Answering-Service';
 
+  // D11 (2026-08-01): record every tool call on this line. Until now only azul
+  // did, which is why "60 calls promised a callback and no ticket exists"
+  // could be counted but not explained — nothing recorded whether
+  // create_ticket was even attempted. `recordedTool` is `tool` with the
+  // execute wrapped; recording never alters the return value and never throws
+  // into the tool. Arguments are allow-listed inside the timeline module, so
+  // no name, DOB, phone, or free-text description is persisted.
+  const timelineCtx = { callId, callSid, callLogId, agentSlug: 'answering-service' };
+  const recordedTool: typeof tool = ((def: any) =>
+    tool({ ...def, execute: recordingExecute(timelineCtx, def.name, def.execute) })) as typeof tool;
+
   console.log(`[${agentTag}] Creating agent for call:`, {
     callId,
     hasCallerPhone: !!callerPhone,
@@ -620,7 +632,7 @@ export async function createAnsweringServiceAgent(
     }
   }
 
-  const lookupScheduleTool = tool({
+  const lookupScheduleTool = recordedTool({
     name: 'lookup_schedule',
     description: `Look up patient appointment context using phone, name, or date of birth.
 
@@ -725,7 +737,7 @@ Use this data to answer appointment questions AND for ticket creation.`,
     },
   });
 
-  const checkOpenTicketsTool = tool({
+  const checkOpenTicketsTool = recordedTool({
     name: 'check_open_tickets',
     description: `Check if this caller has any open/pending tickets from recent calls.
     
@@ -783,7 +795,7 @@ Call this BEFORE creating a new ticket to:
     },
   });
 
-  const classifyRequestTool = tool({
+  const classifyRequestTool = recordedTool({
     name: 'classify_request',
     description: `Classify a patient's request to get the correct department, request type, and request reason.
     
@@ -818,7 +830,7 @@ Use this to get the proper IDs for ticket creation. Provide a detailed descripti
     },
   });
 
-  const createTicketTool = tool({
+  const createTicketTool = recordedTool({
     name: 'create_ticket',
     description: `Create a ticket for the appropriate department to follow up with the patient.
     
@@ -1091,7 +1103,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
     },
   });
 
-  const terminateCallTool = tool({
+  const terminateCallTool = recordedTool({
     name: "terminate_call",
     description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
 
