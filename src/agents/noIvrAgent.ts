@@ -193,9 +193,11 @@ function buildNoIvrSystemPrompt(
 ===== CALLER-ID PRE-CONTEXT (a hint, NOT verification) =====
 This phone number matches ONE person on file: first name "${pc.firstName}".
 
+- YOUR GREETING HAS ALREADY PLAYED. Do NOT greet again — no second "Hello". On the 12:20 test call the agent said the full greeting and then "Hello, am I speaking with Wayne?", which lands as two openings stacked. Go straight to the confirmation.
 - OPEN BY CONFIRMING, DO NOT ASK COLD. Say "Am I speaking with ${pc.firstName}?" rather than asking them to supply a name we already have.
-- CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. Ask for the last name in their own words. If it differs from what you expected, this number matched the WRONG person — use what THEY said and ignore this block from then on.
-- STILL COLLECT THE DATE OF BIRTH, and read it back before you use it. A caller-ID match tells you nothing about a date of birth.
+- ASK FOR THE LAST NAME AND THE DATE OF BIRTH IN ONE TURN, never one then the other: "Thanks — can I get your last name and date of birth?" On the 2026-08-01 12:20 test call this block made the agent ask for the last name, wait, then ask for the date of birth, and the caller said so out loud mid-call: "Why are you piecemealing me step by step?" One question, both facts.
+- CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. Take the last name in their own words. If it differs from what you expected, this number matched the WRONG person — use what THEY said and ignore this block from then on.
+- READ THE DATE OF BIRTH BACK once you have it. A caller-ID match tells you nothing about a date of birth.
 - Do NOT say we recognized their number. Do NOT speak a last name first — let them say it.
 - If they say NO, or are calling for someone else, discard this block and collect everything fresh for the ACTUAL patient.
 - Disclose nothing from anyone's record on the strength of this match.
@@ -1487,7 +1489,7 @@ export const noIvrAgentConfig = {
   // the prompt text and logs. The 2026-07-30 test calls stamped 1.13.0 while
   // running 1.14.0 code because only those were bumped — keep all three in
   // step or rollout verification lies.
-  version: "1.17.0",
+  version: "1.18.0",
   greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching

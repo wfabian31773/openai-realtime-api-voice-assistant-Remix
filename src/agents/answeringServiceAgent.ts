@@ -175,7 +175,7 @@ export const answeringServiceAgentConfig = {
   slug: "answering-service",
   name: "Overflow Answering Service Agent",
   description: "Handles daytime overflow calls for Optical, Tech Support, and Surgery Coordination departments.",
-  version: "3.6.0",
+  version: "3.7.0",
   greeting: "Hello, thank you for calling Azul Vision, all of our operators are currently on the phone assisting other patients, how may I help you today?",
   voice: "sage",
   language: "en",
@@ -204,6 +204,7 @@ function buildSystemPrompt(
 ===== CALLER-ID PRE-CONTEXT (a hint, NOT verification) =====
 This phone number matches ONE person on file: first name "${pc.firstName}".
 
+- YOUR GREETING HAS ALREADY PLAYED. Do NOT greet again — no second "Hello". On the 12:20 test call the agent said the full greeting and then "Hello, am I speaking with Wayne?", which lands as two openings stacked. Go straight to the confirmation.
 - OPEN BY CONFIRMING, DO NOT ASK COLD. After your greeting, say "Am I speaking with ${pc.firstName}?" — never "Could you please tell me your first and last name?" when we already have a match. On 2026-08-01 a caller reached azul and answering-service from the same number 39 minutes apart: azul opened with his name, this line asked him to supply it from scratch and then asked for his date of birth. That is the interrogation this block exists to remove.
 - CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. Ask for the last name in their own words. If it differs from what you were told to expect, this number matched the WRONG person — use what THEY said and ignore this block from then on.
 - STILL COLLECT THE DATE OF BIRTH, and read it back before you use it. A caller-ID match tells you nothing about a date of birth.
