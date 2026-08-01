@@ -50,6 +50,10 @@ export interface NoIvrAgentMetadata {
   dialedNumber?: string;
   callLogId?: string; // Database call log ID for patient context updates
   variant?: NoIvrAgentVariant; // Production or development variant
+  /** Caller-ID pre-context from the full person base (sage_precontext): who
+   *  this number likely belongs to. A HINT for the opening turn — never
+   *  verification, and never a substitute for what the caller tells us. */
+  precontext?: import('./azulSchedulingAgent').AzulPrecontext;
   /** Live transcript up to the moment of filing — lets the ticketing app generate its staff-facing summary at creation instead of waiting for post-call enrichment. */
   getTranscript?: () => string;
 }
@@ -181,6 +185,22 @@ function buildNoIvrSystemPrompt(
   const { callerPhone } = metadata;
   const isProduction = variant === 'production';
   const versionString = isProduction ? '1.14.0' : '1.14.0-dev';
+
+  let precontextSection = "";
+  const pc = metadata.precontext;
+  if (pc?.matched && pc.firstName) {
+    precontextSection = `
+===== CALLER-ID PRE-CONTEXT (a hint, NOT verification) =====
+This phone number matches ONE person on file: first name "${pc.firstName}".
+
+- OPEN BY CONFIRMING, DO NOT ASK COLD. Say "Am I speaking with ${pc.firstName}?" rather than asking them to supply a name we already have.
+- CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. Ask for the last name in their own words. If it differs from what you expected, this number matched the WRONG person — use what THEY said and ignore this block from then on.
+- STILL COLLECT THE DATE OF BIRTH, and read it back before you use it. A caller-ID match tells you nothing about a date of birth.
+- Do NOT say we recognized their number. Do NOT speak a last name first — let them say it.
+- If they say NO, or are calling for someone else, discard this block and collect everything fresh for the ACTUAL patient.
+- Disclose nothing from anyone's record on the strength of this match.
+`;
+  }
 
   let scheduleContextSection = "";
   if (scheduleContext?.patientFound) {
@@ -744,7 +764,7 @@ ${phoneContext}
 TIME CONTEXT:
 ${timeContext}
 Non-urgent callbacks will be made ${nextBizDay.contextPhrase}.
-${scheduleContextSection}`;
+${precontextSection}${scheduleContextSection}`;
 }
 
 export async function createNoIvrAgent(
@@ -1467,7 +1487,7 @@ export const noIvrAgentConfig = {
   // the prompt text and logs. The 2026-07-30 test calls stamped 1.13.0 while
   // running 1.14.0 code because only those were bumped — keep all three in
   // step or rollout verification lies.
-  version: "1.16.0",
+  version: "1.17.0",
   greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching

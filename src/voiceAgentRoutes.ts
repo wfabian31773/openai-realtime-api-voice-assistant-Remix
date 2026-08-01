@@ -1525,16 +1525,35 @@ async function observeCall(
   // window the prompt-side read-back and the identity arg guard still hold.
   let azulCarrierNamePromise: Promise<string | null> | null = null;
   let azulCarrierName: string | null = null;
-  if (agentSlug === 'azul-scheduling' && from) {
+  // Caller-ID pre-context is fetched for EVERY agent that talks to patients,
+  // not just azul (2026-08-01). Evidence: the same caller, from the same
+  // number, 39 minutes apart on 08-01 — azul opened "Am I speaking with
+  // Wayne?" while answering-service asked "Could you please tell me your
+  // first and last name?" and then asked for a date of birth. Two different
+  // phone→patient paths, and the working one had been given only to the
+  // agent handling 3% of the volume.
+  //
+  // sage_precontext matches the FULL person base (patients_master, 868k
+  // persons incl. chartless) and is NOT pilot-fenced — verified in the
+  // service's sage-tools.ts — so it is correct for the practice-wide
+  // answering-service and no-ivr lines, not just the SD pilot.
+  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'no-ivr', 'dev-no-ivr']);
+  if (PRECONTEXT_SLUGS.has(effectiveSlug) && from) {
     azulPrecontextPromise = import('./agents/azulSchedulingAgent')
       .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
       .catch(() => null);
-    azulCarrierNamePromise = import('./lib/twilioClient')
-      .then(({ lookupCallerName }) => lookupCallerName(from))
-      .catch(() => null);
-    void azulCarrierNamePromise.then((n) => {
-      azulCarrierName = n;
-    });
+    // Carrier lookup stays AZUL-ONLY: its whole job is to contradict a bad
+    // pre-context match before verify_patient_identity is called, and azul is
+    // the only agent that verifies. Fetching it for the fleet would bill a
+    // Twilio Lookup on ~12k calls/month to inform a decision nobody makes.
+    if (effectiveSlug === 'azul-scheduling') {
+      azulCarrierNamePromise = import('./lib/twilioClient')
+        .then(({ lookupCallerName }) => lookupCallerName(from))
+        .catch(() => null);
+      void azulCarrierNamePromise.then((n) => {
+        azulCarrierName = n;
+      });
+    }
   }
 
   let callLogId: string | undefined;
@@ -1667,6 +1686,21 @@ async function observeCall(
   // which the backfill does update. Agents need no change.
   const liveCallLogId = () => callMetadataForDB.get(callId)?.dbCallLogId;
 
+  // Bounded residual wait for pre-context on the ticket-taking agents. The
+  // lookup is ~17ms since migration 0107, so this resolves instantly in
+  // practice; the cap exists only so a regressed lookup can never hold the
+  // SIP accept open. These factories already spend up to 2s on their own
+  // parallel lookups, so the added latency is nil in the normal case.
+  const racePrecontext = async () => {
+    if (!azulPrecontextPromise) return null;
+    try {
+      return await Promise.race([
+        azulPrecontextPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
+      ]);
+    } catch { return null; }
+  };
+
   // Agent factory runs immediately — does NOT wait for DB ops.
   // callLogId is undefined here; it gets backfilled after session.connect().
   // The factory's callerMemory/schedule lookups run in parallel with DB ops.
@@ -1724,8 +1758,9 @@ async function observeCall(
         );
         break;
       
-      case 'answering-service':
-        // createAnsweringServiceAgent(handoffCallback, metadata) - simplified v2.0
+      case 'answering-service': {
+        const asPrecontext = await racePrecontext();
+        console.log(`[Answering-Service] Pre-context for ...${(from || '').slice(-4)}: ${asPrecontext?.matched ? `matched '${asPrecontext.firstName}'` : 'no unique match'}`);
         factoryResult = agentFactory(
           handoffCallback,
           {
@@ -1734,9 +1769,11 @@ async function observeCall(
             callerPhone: from,
             dialedNumber: to,
             get callLogId() { return liveCallLogId(); },
+            precontext: asPrecontext ?? undefined,
           }
         );
         break;
+      }
 
       case 'azul-scheduling': {
         // createAzulSchedulingAgent(handoffCallback?, metadata?) — NextGen
@@ -1848,7 +1885,9 @@ async function observeCall(
         factoryResult = agentFactory({ ...metadata, contactName });
         break;
       
-      case 'no-ivr':
+      case 'no-ivr': {
+        const noIvrPrecontext = await racePrecontext();
+        console.log(`[No-IVR Agent] Pre-context for ...${(from || '').slice(-4)}: ${noIvrPrecontext?.matched ? `matched '${noIvrPrecontext.firstName}'` : 'no unique match'}`);
         // createNoIvrAgent(handoffCallback, metadata) - async
         // PRODUCTION agent - determines caller type and urgency through conversation
         // Includes Name+DOB fallback lookup feature (v1.7.0)
@@ -1860,6 +1899,7 @@ async function observeCall(
             callerPhone: from,
             dialedNumber: to,
             get callLogId() { return liveCallLogId(); }, // For patient context updates
+            precontext: noIvrPrecontext ?? undefined,
             variant: 'production' as const, // PRODUCTION variant with full features
             // Tickets carry the conversation up to the moment of filing —
             // the ticketing app generates its staff-facing summary from it.
@@ -1867,6 +1907,7 @@ async function observeCall(
           }
         );
         break;
+      }
       
       case 'dev-no-ivr':
         // DEV version of no-ivr agent - for development testing
