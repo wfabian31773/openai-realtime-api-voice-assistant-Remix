@@ -1,16 +1,24 @@
 /**
- * Azul scheduling agent — per-call tool timeline.
+ * Per-call tool timeline — FLEET-WIDE.
  *
- * The SD pilot needs evidence of WHAT the agent did on every call, not just
- * what was said: which appointment types it asked the rules engine about,
- * what the decisions were, which slots were offered, whether a booking
- * confirmed, what handoffs/callbacks were created. This module records one
- * event per tool call (in memory, keyed by the OpenAI callId), exposes the
- * live timeline for the SD Pilot dashboard, and flushes the finished
- * timeline onto call_logs.tool_timeline when the call ends.
+ * Records one event per tool call (in memory, keyed by the OpenAI callId),
+ * exposes the live timeline for the SD Pilot dashboard, and flushes the
+ * finished timeline onto call_logs.tool_timeline + tool_call_count when the
+ * call ends. Evidence of WHAT the agent did, not just what it said.
  *
- * PHI discipline: we store tool names, coarse arguments (appointment type,
- * intent, reason — never DOB/phone), and outcome-relevant result fields.
+ * Built for azul (hence the original name, `azulToolTimeline`), and azul-only
+ * until 2026-08-01. That limit is what made D11 undiagnosable: on 07-31, 60
+ * answering-service calls promised the caller a callback and no ticket was
+ * ever created, and because tool_call_count and tool_timeline were NULL on
+ * every non-azul row — 83% of the day's volume — there was no way to tell
+ * whether create_ticket was never called, called and failed, or pre-empted by
+ * a hangup. You cannot fix what you cannot see. Now every agent records.
+ *
+ * PHI discipline: tool names, an ALLOW-LISTED subset of arguments (appointment
+ * type, intent, reason, department — never a name, DOB, phone, or free-text
+ * description), and outcome-relevant result fields. The allow-list is the
+ * safety mechanism: an argument key that is not listed is dropped, so a new
+ * tool leaks nothing by default.
  */
 
 import { db } from '../../server/db';
@@ -29,6 +37,10 @@ const timelines = new Map<string, {
   events: AzulToolEvent[];
   callSid?: string;
   callLogId?: string;
+  /** Which agent produced these events — picks the classifier at flush time.
+   *  Absent means azul, which is the only agent that recorded before
+   *  2026-08-01. */
+  agentSlug?: string;
   /** How many events the last successful DB write persisted. A flush is a
    *  no-op when this still equals events.length. */
   flushedCount?: number;
@@ -40,12 +52,37 @@ const SAFE_ARG_KEYS = new Set([
   'slotDateTime', 'handoffReason', 'method', 'reasonForCall', 'requestedLocation',
   'requestedTimeframe', 'urgencyScreenResult', 'includePast', 'reason', 'name',
   'coverageType', 'healthPlan', 'medicalGroup', 'pcpName',
+  // Fleet tools (answering-service, no-ivr), 2026-08-01. Routing and shape
+  // ONLY. Deliberately absent, and they must stay absent: first_name,
+  // last_name, middle_initial, date_of_birth, callback_number, email,
+  // subject, description, request_description, unresolved_info, value,
+  // key_phrases — every one is either a direct identifier or free text the
+  // caller's own words land in.
+  'department_id', 'request_type_id', 'request_reason_id', 'priority',
+  'confirmation_type', 'location_id', 'provider_id', 'decision_type',
 ]);
 
-function redactArgs(args: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(args ?? {}).filter(([k, v]) => SAFE_ARG_KEYS.has(k) && v != null),
-  );
+/** Booleans derived from arguments we must NOT store verbatim. "Did the agent
+ *  flag a gap?" is the diagnostic question; the caller's phrasing of the gap
+ *  is PHI-adjacent free text and never leaves the call. */
+function derivedFlags(tool: string, args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (tool === 'create_ticket') {
+    out.hasUnresolvedInfo = Boolean(args?.unresolved_info);
+    // Whether the agent had the identity fields it needs, without storing them.
+    out.hasPatientName = Boolean(args?.first_name && args?.last_name);
+    out.hasCallbackNumber = Boolean(args?.callback_number);
+  }
+  return out;
+}
+
+function redactArgs(tool: string, args: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...Object.fromEntries(
+      Object.entries(args ?? {}).filter(([k, v]) => SAFE_ARG_KEYS.has(k) && v != null),
+    ),
+    ...derivedFlags(tool, args ?? {}),
+  };
 }
 
 /** Pull the outcome-relevant fields out of a tool's JSON result string. */
@@ -68,6 +105,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     'status', 'verified', 'identityVerified', 'matchCount', 'recentSurgicalContext',
     'earliest_bookable_date', 'eligibility_due_date', 'intakeId', 'new_patient_earliest_date',
     'ok', 'skipped', 'detail', 'transferred',
+    // Fleet tools. ticket_number identifies the TICKET, not the patient, and
+    // is the field D11 turns on: it is the difference between "the agent
+    // promised a callback and filed it" and "promised and filed nothing".
+    'success', 'ticket_number', 'ticketNumber', 'validationError',
+    'department', 'requestType', 'escalated', 'patientFound',
     'say', // directive text — kept so the Phase 7 rubric can grade say-verbatim compliance
   ]) {
     if (parsed?.[k] !== undefined) out[k] = parsed[k];
@@ -91,6 +133,10 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
   if (tool === 'get_patient_appointments' && Array.isArray(parsed?.appointments)) {
     out.appointmentCount = parsed.appointments.length;
   }
+  // Field NAMES only — the values are the caller's data.
+  if (Array.isArray(parsed?.missingFields)) {
+    out.missingFields = parsed.missingFields.map(String);
+  }
   return out;
 }
 
@@ -100,7 +146,7 @@ export function recordAzulToolEvent(
   args: Record<string, unknown>,
   resultJson: string,
   ms: number,
-  ids?: { callSid?: string; callLogId?: string },
+  ids?: { callSid?: string; callLogId?: string; agentSlug?: string },
 ): void {
   if (!callId) return;
   let entry = timelines.get(callId);
@@ -110,13 +156,62 @@ export function recordAzulToolEvent(
   }
   if (ids?.callSid) entry.callSid = ids.callSid;
   if (ids?.callLogId) entry.callLogId = ids.callLogId;
+  if (ids?.agentSlug) entry.agentSlug = ids.agentSlug;
   entry.events.push({
     at: new Date().toISOString(),
     tool,
-    args: redactArgs(args),
+    args: redactArgs(tool, args),
     outcome: summarizeResult(tool, resultJson),
     ms,
   });
+}
+
+/** Fleet-neutral alias. New call sites should use this name; the azul-prefixed
+ *  one is kept because it is threaded through the scheduling agent in a dozen
+ *  places and renaming those adds risk without adding meaning. */
+export const recordToolEvent = recordAzulToolEvent;
+
+/** Wrap a tool's execute so the call is timed and recorded without every
+ *  agent re-implementing the try/finally. Recording NEVER changes what the
+ *  tool returns and never throws into the tool: a telemetry bug must not be
+ *  able to break a patient's call. */
+export function recordingExecute<A, R>(
+  ctx: { callId?: string; callSid?: string; callLogId?: string; agentSlug: string },
+  tool: string,
+  fn: (args: A) => Promise<R> | R,
+): (args: A) => Promise<R> {
+  return async (args: A): Promise<R> => {
+    const started = Date.now();
+    let result: R;
+    try {
+      result = await fn(args);
+    } catch (err) {
+      try {
+        recordToolEvent(
+          ctx.callId ?? ctx.callSid ?? '',
+          tool,
+          (args ?? {}) as Record<string, unknown>,
+          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          Date.now() - started,
+          { callSid: ctx.callSid, callLogId: ctx.callLogId, agentSlug: ctx.agentSlug },
+        );
+      } catch { /* telemetry must never mask the real error */ }
+      throw err;
+    }
+    try {
+      recordToolEvent(
+        ctx.callId ?? ctx.callSid ?? '',
+        tool,
+        (args ?? {}) as Record<string, unknown>,
+        typeof result === 'string' ? result : JSON.stringify(result ?? {}),
+        Date.now() - started,
+        { callSid: ctx.callSid, callLogId: ctx.callLogId, agentSlug: ctx.agentSlug },
+      );
+    } catch (e) {
+      console.error(`[TOOL-TIMELINE] record failed for ${tool}:`, e);
+    }
+    return result;
+  };
 }
 
 /** Live view for the SD Pilot dashboard (active calls). */
@@ -160,6 +255,50 @@ export function classifyAzulCall(events: AzulToolEvent[]): { purpose: string; re
   return { purpose: 'Unclassified', result: events.length ? `${events.length} tool call(s)` : 'No tools used' };
 }
 
+/** Purpose + result for the ticket-filing agents (answering-service, no-ivr).
+ *
+ *  The distinction this exists to draw is D11's: an agent that TOLD the caller
+ *  it would file something and then did not. "Promised, not filed" is a
+ *  different failure from "nothing to file", and the old azul classifier
+ *  called both of them "Unclassified". */
+export function classifyFleetCall(events: AzulToolEvent[]): { purpose: string; result: string } {
+  const ticket = events.find((e) => e.tool === 'create_ticket');
+  const filed = events.find(
+    (e) => e.tool === 'create_ticket' && (e.outcome.success === true || e.outcome.ticket_number || e.outcome.ticketNumber),
+  );
+  const escalated = events.find((e) => e.tool === 'escalate_to_human' && !e.outcome.error);
+  if (filed) {
+    const num = filed.outcome.ticket_number ?? filed.outcome.ticketNumber;
+    return { purpose: 'Patient request', result: `Ticket filed${num ? ` (${num})` : ''}` };
+  }
+  if (ticket) {
+    // Attempted and failed — the args/outcome say why (validationError,
+    // missingFields), which is exactly what a callback-with-no-ticket needs.
+    const why = ticket.outcome.validationError
+      ? `validation: ${Array.isArray(ticket.outcome.missingFields) ? (ticket.outcome.missingFields as string[]).join(', ') : 'missing fields'}`
+      : String(ticket.outcome.error ?? 'unknown error');
+    return { purpose: 'Patient request', result: `Ticket FAILED — ${why}` };
+  }
+  if (escalated) return { purpose: 'Escalation', result: 'Escalated to a human' };
+  const classified = events.find((e) => e.tool === 'classify_request');
+  if (classified) {
+    // Got as far as working out WHERE the request belongs, then stopped.
+    return { purpose: 'Patient request', result: 'Classified but NO ticket created' };
+  }
+  const looked = events.find((e) => e.tool === 'lookup_schedule' || e.tool === 'check_open_tickets');
+  if (looked) return { purpose: 'Appointment/ticket question', result: 'Answered from lookup, no ticket' };
+  const terminated = events.find((e) => e.tool === 'terminate_call');
+  if (terminated) return { purpose: 'Ghost/robot/spam', result: `Terminated (${terminated.args.reason ?? 'unspecified'})` };
+  return { purpose: 'Unclassified', result: events.length ? `${events.length} tool call(s)` : 'No tools used' };
+}
+
+/** Agent-appropriate classifier. */
+function classifyForAgent(agentSlug: string | undefined, events: AzulToolEvent[]) {
+  return agentSlug && agentSlug !== 'azul-scheduling'
+    ? classifyFleetCall(events)
+    : classifyAzulCall(events);
+}
+
 /** Persist the finished timeline on the call log and free the memory.
  *  Accepts the OpenAI callId, the Twilio callSid, or the callLogId. */
 export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
@@ -196,7 +335,7 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
   // flush writes a superset. The 2h reaper below owns deletion.
   if (entry.flushedCount === entry.events.length) return; // nothing new since last write
   try {
-    const { purpose, result } = classifyAzulCall(entry.events);
+    const { purpose, result } = classifyForAgent(entry.agentSlug, entry.events);
     // A/B carriage arm (Phase 7): stamped on call metadata at session
     // creation; persisted here so per-arm grade comparison reads one field.
     let abArm: string | undefined;
@@ -204,7 +343,14 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
       const { callMetadataForDB } = await import('./callMetadataStore');
       abArm = (callMetadataForDB.get(key) as { abArm?: string } | undefined)?.abArm;
     } catch { /* optional */ }
-    const payload = { events: entry.events, purpose, result, toolCallCount: entry.events.length, ...(abArm ? { abArm } : {}) };
+    const payload = {
+      events: entry.events,
+      purpose,
+      result,
+      toolCallCount: entry.events.length,
+      ...(entry.agentSlug ? { agentSlug: entry.agentSlug } : {}),
+      ...(abArm ? { abArm } : {}),
+    };
     if (entry.callLogId) {
       await db.update(callLogs)
         .set({ toolTimeline: payload, toolCallCount: entry.events.length })
@@ -215,7 +361,7 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
         .where(eq(callLogs.callSid, entry.callSid));
     }
     entry.flushedCount = entry.events.length;
-    console.info(`[AZUL-TIMELINE] Flushed ${entry.events.length} tool event(s) (${purpose} → ${result})`);
+    console.info(`[TOOL-TIMELINE] ${entry.agentSlug ?? 'azul-scheduling'}: flushed ${entry.events.length} tool event(s) (${purpose} → ${result})`);
     // Phase 7: rubric pass with the just-persisted events. Forced because
     // grade-then-flush ordering would otherwise leave a rubric graded with an
     // empty timeline; the gradeCall-side pass is forced too, so whichever

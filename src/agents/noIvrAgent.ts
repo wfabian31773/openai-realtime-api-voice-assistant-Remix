@@ -10,6 +10,7 @@ import {
 // instantiation (ticketingApiClient validation triggers in production)
 import type { CallerMemory } from "../services/callerMemoryService";
 import { URGENT_SYMPTOMS, getCurrentDateTimeContext } from "../config/knowledgeBase";
+import { recordingExecute } from "../services/toolTimeline";
 import { buildCompactLocationReference } from "../config/azulVisionKnowledge";
 import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
@@ -763,6 +764,20 @@ export async function createNoIvrAgent(
   const { callId, callerPhone } = metadata;
   const phoneRef = phoneLast4(callerPhone);
 
+  // D11 (2026-08-01): fleet-wide tool timeline. See the note in
+  // answeringServiceAgent — this line recorded nothing before today, so a
+  // call that promised a ticket and filed none was indistinguishable from one
+  // that had nothing to file. Arguments are allow-listed in the timeline
+  // module; recording cannot alter a tool's return value or throw into it.
+  const timelineCtx = {
+    callId,
+    callSid: metadata.callSid,
+    callLogId: metadata.callLogId,
+    agentSlug: 'no-ivr',
+  };
+  const recordedTool: typeof tool = ((def: any) =>
+    tool({ ...def, execute: recordingExecute(timelineCtx, def.name, def.execute) })) as typeof tool;
+
   let scheduleContext: PatientScheduleContext | undefined;
   let callerMemory: CallerMemory | null = null;
 
@@ -852,7 +867,7 @@ export async function createNoIvrAgent(
 
   console.log(`[${agentTag}] CHECKPOINT 1: Creating tool definitions...`);
 
-  const lookupScheduleTool = tool({
+  const lookupScheduleTool = recordedTool({
     name: "lookup_schedule",
     description: `Look up patient appointment context using phone, name, or date of birth.
 
@@ -914,7 +929,7 @@ DO NOT USE if schedule context was already loaded and identity was confirmed.`,
     },
   });
 
-  const checkOpenTicketsTool = tool({
+  const checkOpenTicketsTool = recordedTool({
     name: "check_open_tickets",
     description: `Check if this caller has any open/pending tickets from recent calls.
     
@@ -969,7 +984,7 @@ Returns a list of open tickets with their reason and creation date.`,
     },
   });
 
-  const emitDecisionTool = tool({
+  const emitDecisionTool = recordedTool({
     name: "emit_decision",
     description: `Log an internal decision point for tracing and quality review. Call this when you make key decisions:
 - When you identify caller type (patient vs healthcare provider)
@@ -1013,7 +1028,7 @@ This does NOT affect the call - it's purely for internal tracking.`,
     },
   });
 
-  const createTicketTool = tool({
+  const createTicketTool = recordedTool({
     name: "create_ticket",
     description: `Create a ticket in the EXTERNAL TICKETING SYSTEM for non-urgent after-hours requests. 
 This is NOT the callback queue - it creates a ticket that will be processed by staff.
@@ -1224,7 +1239,7 @@ The ticket will include schedule context (last appointment info) automatically.`
     },
   });
 
-  const terminateCallTool = tool({
+  const terminateCallTool = recordedTool({
     name: "terminate_call",
     description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
 
@@ -1270,7 +1285,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     },
   });
 
-  const escalateToHumanTool = tool({
+  const escalateToHumanTool = recordedTool({
     name: "escalate_to_human",
     description: `Transfer the call to a human on-call provider. 
 
@@ -1428,7 +1443,7 @@ export const noIvrAgentConfig = {
   // the prompt text and logs. The 2026-07-30 test calls stamped 1.13.0 while
   // running 1.14.0 code because only those were bumped — keep all three in
   // step or rollout verification lies.
-  version: "1.14.0",
+  version: "1.15.0",
   greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching

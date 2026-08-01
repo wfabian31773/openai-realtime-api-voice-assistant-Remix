@@ -20,7 +20,7 @@ import {
 import { getTwilioClient, getTwilioFromPhoneNumber } from './lib/twilioClient';
 import { medicalSafetyGuardrails, WELCOME_GREETING, getUrgentTriageGreeting } from './agents/afterHoursAgent';
 import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulHoldingCallback, registerAzulOfficeTransferCallback, unregisterAzulOfficeTransferCallback, registerAzulTranscriptProvider, unregisterAzulTranscriptProvider } from './agents/azulSchedulingAgent';
-import { flushAzulTimeline, getAzulTimeline } from './services/azulToolTimeline';
+import { flushAzulTimeline, getAzulTimeline } from './services/toolTimeline';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
 import { callSessionService } from './services/callSessionService';
@@ -2756,15 +2756,22 @@ async function observeCall(
     // append a ticket event to — the in-memory timeline the flush deletes).
     // Bounded at 25s: a wedged sweep must never block the flush (2026-07-24
     // 10:53 call ended with tool_timeline never persisted).
-    // AZUL ONLY (2026-07-30 incident). This sweep reasons from the azul tool
-    // timeline, and azul is the only agent that writes one. It ran for every
-    // call and was harmless purely because a zero-event call used to return
-    // early; when that exemption was removed the same night, every
-    // answering-service call — which records no tool events BY DESIGN —
-    // looked like an agent that did nothing, and the sweep filed a "call
-    // them back" ticket for each one. ~30 false tickets reached the staff
-    // queue between 09:50 and 12:03 PT before this gate. "No tool timeline"
-    // means "not measured here", never "nothing happened".
+    // AZUL ONLY (2026-07-30 incident). It ran for every call and was harmless
+    // purely because a zero-event call used to return early; when that
+    // exemption was removed the same night, every answering-service call
+    // looked like an agent that did nothing, and the sweep filed a "call them
+    // back" ticket for each one. ~30 false tickets reached the staff queue
+    // between 09:50 and 12:03 PT before this gate.
+    //
+    // DO NOT REMOVE THIS GATE. Its original justification was "azul is the
+    // only agent that writes a timeline" — as of 2026-08-01 (D11) that is no
+    // longer true: answering-service and no-ivr record too. The gate survives
+    // on the stronger reason, which was always the real one: this sweep
+    // REASONS IN AZUL'S VOCABULARY. It asks whether a sage_* booking flow
+    // reached a terminal disposition. A fleet timeline full of create_ticket
+    // and classify_request events answers a different question entirely, and
+    // feeding it to this sweep would re-file the same false tickets from a
+    // fresh direction. Fleet timelines are for diagnosis, not for sweeping.
     void (agentConfig?.id === 'azul-scheduling'
       ? import('./agents/azulSchedulingAgent').then(({ sweepAzulUnresolvedCall }) =>
           Promise.race([
