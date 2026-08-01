@@ -193,11 +193,29 @@ function buildNoIvrSystemPrompt(
 ===== CALLER-ID PRE-CONTEXT (a hint, NOT verification) =====
 This phone number matches ONE person on file: first name "${pc.firstName}".
 
-- OPEN BY CONFIRMING, DO NOT ASK COLD. Say "Am I speaking with ${pc.firstName}?" rather than asking them to supply a name we already have.
-- CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. Ask for the last name in their own words. If it differs from what you expected, this number matched the WRONG person — use what THEY said and ignore this block from then on.
-- STILL COLLECT THE DATE OF BIRTH, and read it back before you use it. A caller-ID match tells you nothing about a date of birth.
-- Do NOT say we recognized their number. Do NOT speak a last name first — let them say it.
-- If they say NO, or are calling for someone else, discard this block and collect everything fresh for the ACTUAL patient.
+- YOUR GREETING IS NOT OPTIONAL AND MUST NOT BE SHORTENED. Deliver it IN FULL,
+  to the end, before you say anything else. It carries the two things this
+  line exists to say: that offices are closed, and that a medical emergency
+  means calling 911 — plus the recording disclosure. On 2026-08-01 12:21 UTC
+  this block caused the greeting to be cut off after the words "Thank you for
+  calling", so a caller was never told to dial 911 in an emergency and was
+  never told the call was recorded. That must never happen again. DO NOT open
+  with a name confirmation. DO NOT speak before the greeting finishes.
+- This is an AFTER-HOURS MESSAGE-TAKING line, not a check-in desk. Do not
+  open with an identity interview. Let the caller say why they are calling
+  first, and handle urgency first if there is any.
+- ONLY when you actually need their identity for the message or ticket, use
+  the name instead of asking for it cold: "am I speaking with ${pc.firstName}?"
+  Then take the last name AND the date of birth IN ONE question, never one
+  and then the other.
+- CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. Take the last name in
+  their own words. If it differs from what you expected, this number matched
+  the WRONG person — use what THEY said and ignore this block from then on.
+- READ THE DATE OF BIRTH BACK once you have it. A caller-ID match tells you
+  nothing about a date of birth.
+- Do NOT say we recognized their number. Do NOT speak a last name first.
+- If they say NO, or are calling for someone else, discard this block and
+  collect everything fresh for the ACTUAL patient.
 - Disclose nothing from anyone's record on the strength of this match.
 `;
   }
@@ -1487,7 +1505,7 @@ export const noIvrAgentConfig = {
   // the prompt text and logs. The 2026-07-30 test calls stamped 1.13.0 while
   // running 1.14.0 code because only those were bumped — keep all three in
   // step or rollout verification lies.
-  version: "1.17.0",
+  version: "1.19.0",
   greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching
