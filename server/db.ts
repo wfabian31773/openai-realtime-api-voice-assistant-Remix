@@ -33,6 +33,8 @@ function initializeDatabase() {
   if (isSupabase) {
     // Prefer the explicit pooler URL when provided — it routes through
     // Supabase's PgBouncer (port 6543) and handles connection scaling much better.
+    // NOTE: the pooler URL is validated asynchronously after startup; if its
+    // credentials are wrong we fail over to the direct URL (see validatePoolerOrFallback).
     const poolerUrl = process.env.SUPABASE_POOLER_URL;
     let connectionUrl = poolerUrl || databaseUrl;
     if (connectionUrl.includes('sslmode=')) {
@@ -97,12 +99,55 @@ function initializeDatabase() {
   }
 }
 
-const { pool, db, isSupabase, isPgBouncer } = initializeDatabase();
+let { pool, db, isSupabase, isPgBouncer } = initializeDatabase();
 
 if (isSupabase) {
   console.info(`[DB] Connected to Supabase (${isPgBouncer ? 'PgBouncer' : 'direct'})`);
 } else {
   console.info('[DB] Connected to Replit PostgreSQL (development)');
+}
+
+// SAFETY NET: if SUPABASE_POOLER_URL is set but its credentials are wrong,
+// fail over to the direct database URL instead of letting every query fail
+// (a bad pooler secret previously took production down via Supabase's
+// auth-failure circuit breaker). Failure is loud in the logs, never silent.
+if (isSupabase && process.env.SUPABASE_POOLER_URL) {
+  (async () => {
+    try {
+      await (pool as pg.Pool).query('SELECT 1');
+      console.info('[DB] ✓ Pooler connection validated');
+    } catch (err: any) {
+      console.error('════════════════════════════════════════════════════════');
+      console.error('[DB] ✗ SUPABASE_POOLER_URL FAILED VALIDATION:', err.message);
+      console.error('[DB] ✗ FAILING OVER to direct database URL.');
+      console.error('[DB] ✗ Fix the SUPABASE_POOLER_URL secret: it must be the');
+      console.error('[DB] ✗ transaction pooler URI (port 6543) with your real DB password.');
+      console.error('════════════════════════════════════════════════════════');
+      const oldPool = pool as pg.Pool;
+      const config = getEnvironmentConfig();
+      let directUrl = config.database.url;
+      if (directUrl.includes('sslmode=')) {
+        directUrl = directUrl.replace(/[?&]sslmode=[^&]*/g, '').replace(/\?$/, '');
+      }
+      const directPool = new pg.Pool({
+        connectionString: directUrl,
+        max: 5,
+        min: 1,
+        idleTimeoutMillis: 10000,
+        connectionTimeoutMillis: 15000,
+        allowExitOnIdle: false,
+        ssl: { rejectUnauthorized: false },
+      });
+      directPool.on('error', (e) => {
+        console.error('[DB POOL] Unexpected error on idle client:', e.message);
+      });
+      pool = directPool;
+      db = drizzlePg({ client: directPool, schema, casing: 'snake_case' });
+      isPgBouncer = false;
+      oldPool.end().catch(() => {});
+      console.info('[DB] Failover complete — using direct connection');
+    }
+  })();
 }
 
 export function getPoolMetrics(): PoolMetrics {

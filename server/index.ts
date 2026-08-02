@@ -5,9 +5,11 @@
 import express from "express";
 import cors from "cors";
 import http from "http";
-import { registerRoutes } from "./routes";
+// NOTE: heavy modules (routes, storage, DB, keep-alive) are dynamically imported
+// inside startServer() AFTER the HTTP server is listening — importing them at the
+// top level delayed port binding by ~20s under tsx, causing deployment
+// healthcheck failures at startup.
 import { validateEnv, API_SERVER_REQUIRED } from "../src/lib/env";
-import { startKeepAlive, warmupDatabase } from "./services/databaseKeepAlive";
 import { getEnvironmentConfig } from "../src/config/environment";
 
 const envConfig = getEnvironmentConfig();
@@ -448,6 +450,12 @@ async function startServer() {
   console.log("========================================");
 
   try {
+    // Load heavy modules only after the port is bound (see note at top of file)
+    const [{ startKeepAlive, warmupDatabase }, { registerRoutes }] = await Promise.all([
+      import("./services/databaseKeepAlive"),
+      import("./routes"),
+    ]);
+
     // Warm up database connection
     console.log("[STARTUP] Warming up database connection...");
     await warmupDatabase();
