@@ -111,8 +111,9 @@ if (isSupabase) {
 // fail over to the direct database URL instead of letting every query fail
 // (a bad pooler secret previously took production down via Supabase's
 // auth-failure circuit breaker). Failure is loud in the logs, never silent.
-if (isSupabase && process.env.SUPABASE_POOLER_URL) {
-  (async () => {
+export const dbReady: Promise<void> = (async () => {
+  if (!isSupabase || !process.env.SUPABASE_POOLER_URL) return;
+  {
     try {
       await (pool as pg.Pool).query('SELECT 1');
       console.info('[DB] ✓ Pooler connection validated');
@@ -144,11 +145,12 @@ if (isSupabase && process.env.SUPABASE_POOLER_URL) {
       pool = directPool;
       db = drizzlePg({ client: directPool, schema, casing: 'snake_case' });
       isPgBouncer = false;
-      oldPool.end().catch(() => {});
+      // Drain the bad pool after a grace period so any in-flight work isn't cut off
+      setTimeout(() => oldPool.end().catch(() => {}), 30000);
       console.info('[DB] Failover complete — using direct connection');
     }
-  })();
-}
+  }
+})();
 
 export function getPoolMetrics(): PoolMetrics {
   const pgPool = pool as pg.Pool;

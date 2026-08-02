@@ -1,0 +1,1 @@
+- [Supabase pooler URL + failover](supabase-pooler-failover.md) — pooler password = direct DB password, port 6543; bad secret trips circuit breaker; db.ts validates + fails over, await `dbReady` before DB work.

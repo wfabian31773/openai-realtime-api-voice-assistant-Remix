@@ -451,10 +451,15 @@ async function startServer() {
 
   try {
     // Load heavy modules only after the port is bound (see note at top of file)
-    const [{ startKeepAlive, warmupDatabase }, { registerRoutes }] = await Promise.all([
+    const [{ startKeepAlive, warmupDatabase }, { registerRoutes }, { dbReady }] = await Promise.all([
       import("./services/databaseKeepAlive"),
       import("./routes"),
+      import("./db"),
     ]);
+
+    // Wait for pooler validation/failover before any DB work so no query
+    // ever runs against an invalid pooler pool
+    await dbReady;
 
     // Warm up database connection
     console.log("[STARTUP] Warming up database connection...");
