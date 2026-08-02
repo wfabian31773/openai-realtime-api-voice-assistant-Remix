@@ -2985,6 +2985,119 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ── Shadow agent (observation-only parallel architecture) ─────────────────
+  // Replays a stored call through the shadow engine: what would the shadow
+  // agent have done at each turn, and how does that compare to production.
+  // Read-only over the stored row; no production system is touched.
+  app.post('/api/call-logs/:id/shadow-replay', isAuthenticated, async (req, res) => {
+    try {
+      const callLog = await storage.getCallLog(req.params.id);
+      if (!callLog) {
+        return res.status(404).json({ message: "Call log not found" });
+      }
+      if (!callLog.transcript || callLog.transcript.length < 50) {
+        return res.status(400).json({ message: "Insufficient transcript for shadow replay (minimum 50 characters)" });
+      }
+      const { replayCallLog } = await import('../src/shadow/callLogReplay');
+      const result = await replayCallLog({
+        id: callLog.id,
+        agentUsed: (callLog as any).agentUsed ?? null,
+        agentId: (callLog as any).agentId ?? null,
+        transcript: callLog.transcript,
+        toolTimeline: (callLog as any).toolTimeline ?? null,
+        createdAt: (callLog as any).createdAt ?? null,
+        duration: (callLog as any).duration ?? null,
+        status: (callLog as any).status ?? null,
+      });
+      if (!result) {
+        return res.status(400).json({ message: "Transcript has no caller turns to replay" });
+      }
+      res.json({
+        success: true,
+        result: {
+          agentId: result.agentId,
+          verdict: result.evaluation?.verdict ?? 'indeterminate',
+          reviewPriority: result.evaluation?.reviewPriority ?? 0,
+          reviewReasons: result.evaluation?.reviewReasons ?? [],
+          summary: result.summary ?? null,
+          flags: result.flags,
+          turnComparisons: result.turnComparisons,
+          approximations: result.approximations,
+        },
+      });
+    } catch (error) {
+      console.error("Error running shadow replay:", error);
+      res.status(500).json({ message: "Failed to run shadow replay" });
+    }
+  });
+
+  // Operator decision: keep the shadow in observation mode or record the
+  // "turn live" request. Turning live is a recorded approval — the shadow
+  // engine itself remains observation-only until the live-cutover work ships
+  // (docs/voice-shadow-architecture/09); this endpoint cannot change call
+  // handling and that is intentional.
+  app.get('/api/shadow/status', isAuthenticated, async (_req, res) => {
+    try {
+      const { db } = await import('./db');
+      const { appSettings } = await import('../shared/schema');
+      const { eq } = await import('drizzle-orm');
+      const rows = await db.select().from(appSettings).where(eq(appSettings.key, 'shadow_rollout_mode'));
+      const { getShadowConfig } = await import('../src/shadow/config');
+      const cfg = getShadowConfig();
+      res.json({
+        mode: rows[0]?.value === 'live_requested' ? 'live_requested' : 'shadow',
+        modeUpdatedBy: rows[0]?.updatedBy ?? null,
+        modeUpdatedAt: rows[0]?.updatedAt ?? null,
+        capture: {
+          enabled: cfg.enabled,
+          agentAllowlist: cfg.agentAllowlist,
+          capturePct: cfg.capturePct,
+        },
+        liveCutoverAvailable: false, // shadow is observation-only by design
+      });
+    } catch (error) {
+      console.error('[SHADOW] Error reading shadow status:', error);
+      res.status(500).json({ message: 'Failed to read shadow status' });
+    }
+  });
+
+  app.post('/api/shadow/mode', isAuthenticated, requireRole('admin', 'manager'), async (req, res) => {
+    try {
+      const { mode } = req.body ?? {};
+      if (mode !== 'shadow' && mode !== 'live_requested') {
+        return res.status(400).json({ message: "mode must be 'shadow' or 'live_requested'" });
+      }
+      const { db } = await import('./db');
+      const { appSettings, users } = await import('../shared/schema');
+      const { eq } = await import('drizzle-orm');
+      const userId: string | undefined = (req.session as any)?.userId;
+      let updatedByEmail: string | null = null;
+      if (userId) {
+        const userRows = await db.select({ email: users.email }).from(users).where(eq(users.id, userId));
+        updatedByEmail = userRows[0]?.email ?? null;
+      }
+      await db
+        .insert(appSettings)
+        .values({ key: 'shadow_rollout_mode', value: mode, updatedBy: updatedByEmail })
+        .onConflictDoUpdate({
+          target: appSettings.key,
+          set: { value: mode, updatedAt: new Date(), updatedBy: updatedByEmail },
+        });
+      console.log(`[SHADOW] Rollout mode set to '${mode}' by ${updatedByEmail ?? 'unknown'}`);
+      res.json({
+        success: true,
+        mode,
+        note:
+          mode === 'live_requested'
+            ? 'Live request recorded. The shadow engine remains observation-only until the live-cutover deployment ships (docs/voice-shadow-architecture/09); no call handling changed.'
+            : 'Shadow mode confirmed: the parallel agent observes and compares only.',
+      });
+    } catch (error) {
+      console.error('[SHADOW] Error updating shadow mode:', error);
+      res.status(500).json({ message: 'Failed to update shadow mode' });
+    }
+  });
+
   // Bulk call pattern analysis
   app.post('/api/call-logs/analyze-patterns', isAuthenticated, requireRole('admin', 'manager'), async (req, res) => {
     try {

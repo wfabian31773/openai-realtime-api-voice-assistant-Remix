@@ -77,6 +77,13 @@ waitForPort = 5000
 HUMAN_AGENT_NUMBER = "+16262229400"
 URGENT_NOTIFICATION_NUMBER = "+16262229400"
 DISABLE_PHI_LOGGING = "true"
+# Shadow observer (approved 2026-08-02): observation-only capture on all active
+# agents. Zero caller impact, zero n8n executions, no transcript storage, no
+# model calls — all riskier flags stay at their off defaults (docs/voice-shadow-
+# architecture/09). Emergency shutoff: set SHADOW_MODE_ENABLED = "false".
+SHADOW_MODE_ENABLED = "true"
+SHADOW_AGENT_ALLOWLIST = "no-ivr,dev-no-ivr,after-hours,answering-service,azul-scheduling,appointment-confirmation,drs-scheduler,fantasy-football"
+SHADOW_CAPTURE_PCT = "100"
 
 [userenv.development]
 DOMAIN = "dcf9f10f-5436-45b2-9ddd-3056216aaa94-00-3uh0nmdcvfbs6.spock.replit.dev"
