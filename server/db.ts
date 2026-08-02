@@ -53,9 +53,15 @@ function initializeDatabase() {
     
     const poolConfig: pg.PoolConfig = { 
       connectionString: connectionUrl,
-      max: isPgBouncer ? 8 : 5,
+      // PgBouncer (transaction mode): connections are cheap — the pooler multiplexes
+      // them into fewer real Postgres connections, so a higher client max is fine.
+      // 20 gives concurrent API requests room without risking hitting Supabase's
+      // per-instance limits even if multiple deployment replicas are running.
+      // Direct connection: keep low to avoid exhausting the 15–25 Postgres connection
+      // slots on the Supabase plan.
+      max: isPgBouncer ? 20 : 5,
       min: isPgBouncer ? 2 : 1,
-      idleTimeoutMillis: isPgBouncer ? 30000 : 10000,
+      idleTimeoutMillis: isPgBouncer ? 60000 : 10000,
       connectionTimeoutMillis: 15000,
       allowExitOnIdle: false,
       ssl: {
