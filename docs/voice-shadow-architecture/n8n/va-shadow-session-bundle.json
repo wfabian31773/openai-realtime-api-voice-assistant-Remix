@@ -1,0 +1,110 @@
+{
+  "name": "VA SHADOW — session bundle (INACTIVE)",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "description": "OPTIONAL shadow-only session-bundle receiver (doc 15 §3). Import INACTIVE. Uses a shadow-only header credential, rejects anything not marked shadowMode/simulation-only, drops duplicate idempotency keys via the va_shadow_sessions data table, writes one summary row, responds 200. NO production credentials, NO forwards to the ticketing app, NO sub-workflows, NO retries (bounded retry lives app-side and counts against the shadow budget)." },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "api/voice-shadow/session-bundle",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "shadow-webhook-0001",
+      "name": "Shadow Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shadow-only guard: reject anything that is not an explicit simulation bundle.\nconst body = $input.first().json.body || {};\nconst reject = (reason) => [{ json: { ok: false, reject: true, reason } }];\nif (body.shadowMode !== true) return reject('not_shadow_mode');\nif (body.executionMode !== 'simulation-only') return reject('not_simulation_only');\nif (!body.idempotencyKey || !String(body.idempotencyKey).startsWith('shadow-')) return reject('bad_idempotency_key');\nif (!body.sessionId || !body.agentId) return reject('missing_ids');\n// Production-mutation vocabulary must never appear in a bundle.\nconst raw = JSON.stringify(body).toLowerCase();\nfor (const banned of ['create-ticket', 'submit-ticket', 'update-call-data', 'callback-campaign', 'patientphone', 'patientdob']) {\n  if (raw.includes(banned)) return reject('production_vocabulary_present:' + banned);\n}\nreturn [{ json: { ok: true, reject: false, idempotencyKey: body.idempotencyKey, sessionId: body.sessionId, agentId: body.agentId, verdict: body.bundle?.verdict ?? '', summary: JSON.stringify(body.bundle?.summary ?? {}).slice(0, 4000), ts: new Date().toISOString() } }];"
+      },
+      "id": "shadow-validate-0002",
+      "name": "Validate Shadow Bundle",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict", "version": 2 },
+          "conditions": [
+            { "leftValue": "={{ $json.reject }}", "rightValue": false, "operator": { "type": "boolean", "operation": "equals" } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "shadow-if-0003",
+      "name": "Accepted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": { "__rl": true, "mode": "list", "value": "", "cachedResultName": "va_shadow_sessions (create on import)" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "idempotencyKey": "={{ $json.idempotencyKey }}",
+            "sessionId": "={{ $json.sessionId }}",
+            "agentId": "={{ $json.agentId }}",
+            "verdict": "={{ $json.verdict }}",
+            "summary": "={{ $json.summary }}",
+            "ts": "={{ $json.ts }}"
+          },
+          "matchingColumns": ["idempotencyKey"]
+        },
+        "options": {}
+      },
+      "id": "shadow-write-0004",
+      "name": "Upsert Session Row (idempotent)",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [660, -100],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, stored: true, idempotencyKey: $json.idempotencyKey } }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "shadow-respond-ok-0005",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [880, -100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: false, reason: $json.reason } }}",
+        "options": { "responseCode": 403 }
+      },
+      "id": "shadow-respond-reject-0006",
+      "name": "Respond Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [660, 120]
+    }
+  ],
+  "connections": {
+    "Shadow Webhook": { "main": [[{ "node": "Validate Shadow Bundle", "type": "main", "index": 0 }]] },
+    "Validate Shadow Bundle": { "main": [[{ "node": "Accepted?", "type": "main", "index": 0 }]] },
+    "Accepted?": {
+      "main": [
+        [{ "node": "Upsert Session Row (idempotent)", "type": "main", "index": 0 }],
+        [{ "node": "Respond Reject", "type": "main", "index": 0 }]
+      ]
+    },
+    "Upsert Session Row (idempotent)": { "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]] }
+  }
+}
