@@ -134,3 +134,6 @@ dist
 
 attached_assets/
 twilio-inventory.json
+
+# Shadow observer spool (session records; never committed)
+.shadow-spool/

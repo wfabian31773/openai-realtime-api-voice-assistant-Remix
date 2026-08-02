@@ -1,4 +1,5 @@
 import { getEnvironmentConfig } from '../../src/config/environment';
+import { shadowTap } from '../../src/shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 
 interface CallData {
   callSid?: string;
@@ -280,6 +281,18 @@ export class TicketingApiClient {
     const url = `${(useEnrichmentBase && this.enrichmentBaseUrl) || this.baseUrl}${endpoint}`;
     console.info(`[TICKETING API] Request: ${method} ${url} (timeout: ${timeoutMs}ms)`);
 
+    // Shadow tap (observation only, default off): copies the production
+    // gateway request/response so the shadow can replay n8n results without
+    // ever re-triggering a workflow. emit never throws or blocks.
+    const shadowSession = String(body?.callData?.callSid ?? body?.callSid ?? 'unknown-session');
+    const shadowAgentRaw = String(body?.callData?.agentUsed ?? body?.agentUsed ?? 'unknown');
+    const shadowAgent = shadowAgentRaw === 'urgent-triage' ? 'after-hours' : shadowAgentRaw;
+    const shadowViaGateway = !(useEnrichmentBase && this.enrichmentBaseUrl);
+    shadowTap.emit('n8n_workflow_requested', shadowSession, shadowAgent,
+      { endpoint, method, viaGateway: shadowViaGateway, body: body ?? {} },
+      { sensitive: true, component: 'ticketingApiClient' });
+    let shadowReported = false;
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       controller.abort();
@@ -311,12 +324,24 @@ export class TicketingApiClient {
 
       if (!response.ok) {
         console.error(`[TICKETING API] Error ${response.status}:`, data);
+        shadowTap.emit('n8n_workflow_failed', shadowSession, shadowAgent,
+          { endpoint, method, viaGateway: shadowViaGateway, status: response.status, body: body ?? {}, response: data ?? {} },
+          { sensitive: true, component: 'ticketingApiClient' });
+        shadowReported = true;
         throw new Error(data.error || `HTTP ${response.status} error`);
       }
 
+      shadowTap.emit('n8n_workflow_completed', shadowSession, shadowAgent,
+        { endpoint, method, viaGateway: shadowViaGateway, status: response.status, body: body ?? {}, response: data ?? {} },
+        { sensitive: true, component: 'ticketingApiClient' });
       return data as T;
     } catch (networkError) {
       clearTimeout(timeoutId);
+      if (!shadowReported) {
+        shadowTap.emit('n8n_workflow_failed', shadowSession, shadowAgent,
+          { endpoint, method, viaGateway: shadowViaGateway, status: 0, body: body ?? {}, error: networkError instanceof Error ? networkError.message : 'error' },
+          { sensitive: true, component: 'ticketingApiClient' });
+      }
       
       if (networkError instanceof Error && networkError.name === 'AbortError') {
         console.error(`[TICKETING API] ✗ Request aborted (timeout): ${endpoint}`);

@@ -29,6 +29,7 @@ import { getGreeterOpeningGreeting } from './utils/timeAware';
 import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
 import './services/azulRegressionWatch'; // Phase 7: daily grade-regression check (side-effect timers)
+import { shadowTap } from './shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { getEnvironmentConfig } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 
@@ -1412,7 +1413,16 @@ async function observeCall(
   }
   
   console.info(`[SESSION] Creating agent: ${effectiveSlug}`, metadata || {});
-  
+
+  // Shadow tap (observation only, default off): emit never throws or blocks.
+  shadowTap.emit('session_started', callId, effectiveSlug, {
+    correlation: {
+      twilioCallSid: (metadata as Record<string, unknown> | undefined)?.twilioCallSid
+        ?? (metadata as Record<string, unknown> | undefined)?.callSid,
+      callLogId: (metadata as Record<string, unknown> | undefined)?.dbCallLogId,
+    },
+  }, { sensitive: true, component: 'lifecycle' });
+
   // Import actual adapter functions for database operations
   const { CallbackQueueAdapter, CampaignAdapter } = await import('./db/agentAdapters');
   
@@ -2112,6 +2122,9 @@ async function observeCall(
         }
         callTranscripts.get(callId)!.push(`CALLER: ${transcript}`);
 
+        // Shadow tap (observation only, default off): emit never throws or blocks.
+        shadowTap.emit('user_transcript', callId, effectiveSlug, { text: transcript }, { sensitive: true, component: 'transcript' });
+
         // Loop guard: a repeated "representative / customer service" demand
         // trips the escalation directive.
         const lgCallerDirective = conversationLoopGuard.onCallerLine(callId, effectiveSlug, transcript);
@@ -2189,6 +2202,9 @@ async function observeCall(
           callTranscripts.set(callId, []);
         }
         callTranscripts.get(callId)!.push(`AGENT: ${transcript}`);
+
+        // Shadow tap (observation only, default off): emit never throws or blocks.
+        shadowTap.emit('assistant_transcript', callId, effectiveSlug, { text: transcript }, { sensitive: true, component: 'transcript' });
 
         // Loop guard: a third same-topic ask trips the re-ask directive.
         const lgAgentDirective = conversationLoopGuard.onAgentLine(callId, effectiveSlug, transcript);
