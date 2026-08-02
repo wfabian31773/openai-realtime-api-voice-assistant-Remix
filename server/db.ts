@@ -31,11 +31,17 @@ function initializeDatabase() {
   }
 
   if (isSupabase) {
-    let connectionUrl = databaseUrl;
-    if (databaseUrl.includes('sslmode=')) {
-      connectionUrl = databaseUrl.replace(/[?&]sslmode=[^&]*/g, '').replace(/\?$/, '');
+    // Prefer the explicit pooler URL when provided — it routes through
+    // Supabase's PgBouncer (port 6543) and handles connection scaling much better.
+    const poolerUrl = process.env.SUPABASE_POOLER_URL;
+    let connectionUrl = poolerUrl || databaseUrl;
+    if (connectionUrl.includes('sslmode=')) {
+      connectionUrl = connectionUrl.replace(/[?&]sslmode=[^&]*/g, '').replace(/\?$/, '');
     }
-    
+    if (poolerUrl) {
+      console.info('[DB] Using SUPABASE_POOLER_URL (PgBouncer transaction pooling)');
+    }
+
     const isPgBouncer = connectionUrl.includes(':6543') || connectionUrl.includes('pooler.supabase');
     
     if (isPgBouncer) {

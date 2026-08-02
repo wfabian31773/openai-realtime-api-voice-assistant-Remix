@@ -422,49 +422,65 @@ function scheduleNightlyReconciliation(): void {
   scheduleNext();
 }
 
+// Healthcheck must respond immediately — registered before any async work
+// so Replit's startup probe sees 200 while initialization is still in progress.
+app.get('/healthz', (_req, res) => res.status(200).send('OK'));
+
+let isReady = false;
+
 async function startServer() {
+  // Start listening immediately so Replit's healthcheck succeeds right away.
+  // All async initialization (DB warmup, route registration) runs after the
+  // server is already accepting connections.
+  const earlyServer = http.createServer(app);
+  await new Promise<void>((resolve, reject) => {
+    earlyServer.listen(PORT, '0.0.0.0', () => resolve());
+    earlyServer.once('error', reject);
+  });
+  console.log("========================================");
+  console.log("🚀 Azul Vision Operations Hub - API Server");
+  console.log("========================================");
+  console.log(`Server listening on port ${PORT}`);
+  console.log(`API: http://0.0.0.0:${PORT}/api`);
+  console.log(`Dashboard: http://0.0.0.0:${PORT}`);
+  console.log("========================================");
+  console.log("Note: Voice agent runs separately on port 8000");
+  console.log("========================================");
+
   try {
-    // Warm up database connection before starting server
+    // Warm up database connection
     console.log("[STARTUP] Warming up database connection...");
     await warmupDatabase();
-    
+
     // Start database keep-alive service to prevent cold starts
     startKeepAlive();
-    
-    // Register API routes and auth
-    const httpServer = await registerRoutes(app);
-    
+
+    // Register API routes and auth (mutates `app` in-place; we ignore the
+    // returned server since we're already listening on earlyServer)
+    await registerRoutes(app);
+
     // Catch-all: serve index.html for client-side routing (must be after API routes)
     app.use((req, res) => {
       res.sendFile('index.html', { root: 'client/dist' });
     });
-    
-    // Start server
-    httpServer.listen(PORT, '0.0.0.0', async () => {
-      console.log("========================================");
-      console.log("🚀 Azul Vision Operations Hub - API Server");
-      console.log("========================================");
-      console.log(`Server listening on port ${PORT}`);
-      console.log(`API: http://0.0.0.0:${PORT}/api`);
-      console.log(`Dashboard: http://0.0.0.0:${PORT}`);
-      console.log("========================================");
-      console.log("Note: Voice agent runs separately on port 8000");
-      console.log("========================================");
-      
-      // Cleanup stale calls from previous sessions
-      await cleanupStaleCallsOnStartup();
-      
-      // Backfill any missing reconciliation days (non-blocking)
-      backfillMissingReconciliations().catch(err => {
-        console.error('[STARTUP] Backfill reconciliation error:', err);
-      });
 
-      // Schedule nightly reconciliation at configured UTC hour
-      scheduleNightlyReconciliation();
+    isReady = true;
+    console.log("[STARTUP] Server fully initialized");
+
+    // Cleanup stale calls from previous sessions
+    await cleanupStaleCallsOnStartup();
+
+    // Backfill any missing reconciliation days (non-blocking)
+    backfillMissingReconciliations().catch(err => {
+      console.error('[STARTUP] Backfill reconciliation error:', err);
     });
+
+    // Schedule nightly reconciliation at configured UTC hour
+    scheduleNightlyReconciliation();
   } catch (error) {
-    console.error("Failed to start API server:", error);
-    process.exit(1);
+    console.error("Failed to initialize API server:", error);
+    // Keep the server alive (healthcheck still responds) even if init fails
+    // so Replit doesn't keep restarting us in a crash loop.
   }
 }
 

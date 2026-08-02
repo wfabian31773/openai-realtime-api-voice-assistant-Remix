@@ -18,6 +18,10 @@ const sharedEnvSchema = z.object({
   DISABLE_PHI_LOGGING: z.string().optional(),
   SUPABASE_SERVICE_KEY: z.string().optional(),
   SUPABASE_REST_URL: z.string().optional(),
+  // Optional Supabase transaction pooler URL (port 6543).
+  // When set, production uses this instead of DATABASE_URL for better connection scaling.
+  // Get it from: Supabase Dashboard → Project Settings → Database → Connection pooling → URI
+  SUPABASE_POOLER_URL: z.string().optional(),
 });
 
 const devEnvSchema = sharedEnvSchema.extend({
