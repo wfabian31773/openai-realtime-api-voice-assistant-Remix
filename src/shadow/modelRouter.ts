@@ -38,8 +38,16 @@ export interface ModelCallLog {
   estCostUsd?: number;
 }
 
-/** USD per 1M tokens (in/out) for repo-configured models; others 'unpriced'. */
+/**
+ * USD per 1M tokens (in/out). GPT-5.6 family verified against
+ * developers.openai.com/api/docs/models on 2026-08-02; legacy 4o entries kept
+ * for the pre-existing graders and for env overrides.
+ */
 const PRICES: Record<string, { in: number; out: number }> = {
+  'gpt-5.6-sol': { in: 5, out: 30 },
+  'gpt-5.6': { in: 5, out: 30 }, // alias of sol
+  'gpt-5.6-terra': { in: 2, out: 12 },
+  'gpt-5.6-luna': { in: 0.2, out: 1.2 },
   'gpt-4o-mini': { in: 0.15, out: 0.6 },
   'gpt-4o': { in: 2.5, out: 10 },
 };

@@ -84,6 +84,13 @@ DISABLE_PHI_LOGGING = "true"
 SHADOW_MODE_ENABLED = "true"
 SHADOW_AGENT_ALLOWLIST = "no-ivr,dev-no-ivr,after-hours,answering-service,azul-scheduling,appointment-confirmation,drs-scheduler,fantasy-football"
 SHADOW_CAPTURE_PCT = "100"
+# Tiered reasoning models (GPT-5.6 family, verified 2026-08-02): Luna for
+# routine turns, Terra for ambiguity/corrections, Sol for escalation-grade
+# reasoning. Budget-capped: 6 calls/session, $5/day (SHADOW_MODEL_* to tune).
+SHADOW_MODEL_ROUTING_ENABLED = "true"
+SHADOW_MODEL_LOW = "gpt-5.6-luna"
+SHADOW_MODEL_MID = "gpt-5.6-terra"
+SHADOW_MODEL_HIGH = "gpt-5.6-sol"
 
 [userenv.development]
 DOMAIN = "dcf9f10f-5436-45b2-9ddd-3056216aaa94-00-3uh0nmdcvfbs6.spock.replit.dev"

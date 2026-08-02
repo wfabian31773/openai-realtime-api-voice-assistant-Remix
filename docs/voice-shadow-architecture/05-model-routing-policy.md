@@ -2,21 +2,39 @@
 
 ## 1. Verified model inventory (no invented identifiers)
 
-Configured in this repo (doc 01 §6): `gpt-realtime` (voice, production only),
-`gpt-4o-mini-transcribe` (STT, production only), `gpt-4o-mini` and `gpt-4o`
-(chat completions — grading/summaries). No Anthropic models configured.
+Production (unchanged by this project): `gpt-realtime` (voice),
+`gpt-4o-mini-transcribe` (STT), `gpt-4o`/`gpt-4o-mini` (pre-existing graders).
+
+Shadow reasoning tiers (updated 2026-08-02): the **GPT-5.6 family**, identifiers
+verified against developers.openai.com/api/docs/models — `gpt-5.6-luna`
+($0.20/$1.20 per 1M in/out), `gpt-5.6-terra` ($2/$12), `gpt-5.6-sol` (alias
+`gpt-5.6`, $5/$30). Newer realtime models exist (`gpt-realtime-2.1`) — a
+*production* upgrade candidate via the existing `AZUL_AB_MODEL_B` A/B lever,
+out of shadow scope.
 
 ## 2. Tier mapping (provider-neutral interface, env-overridable)
 
 | Tier | Default model | Env override |
 |---|---|---|
 | `deterministic` | no model call — rules only | — |
-| `low` | `gpt-4o-mini` | `SHADOW_MODEL_LOW` |
-| `mid` | `gpt-4o` | `SHADOW_MODEL_MID` |
-| `high` | `gpt-4o` (no stronger model is configured in this repo; the tier interface exists so a stronger model can be mapped without code change) | `SHADOW_MODEL_HIGH` |
+| `low` | `gpt-5.6-luna` | `SHADOW_MODEL_LOW` |
+| `mid` | `gpt-5.6-terra` | `SHADOW_MODEL_MID` |
+| `high` | `gpt-5.6-sol` | `SHADOW_MODEL_HIGH` |
 
-Shadow never uses `gpt-realtime` (audio model; shadow is text/structured only) and
+Shadow never uses realtime/audio models (shadow is text/structured only) and
 never alters production model selection (`AZUL_AB_MODEL_B` untouched).
+
+## 2.1 Live refinement adapter (implemented 2026-08-02)
+
+`src/shadow/llmAdapter.ts` performs the actual tier-model call when
+`SHADOW_MODEL_ROUTING_ENABLED=true` (now on in `.replit`): minimized structured
+state + identifier-masked current utterance only (never transcript history,
+per the grading-service precedent); JSON-object output validated against a
+strip-unknown schema that **cannot carry tool choices or arguments** —
+tool decisions remain deterministic; urgency is raise-only; caller-facing text
+is sanitized; 10s timeout; budget-gated (6 calls/session, $5/day; unpriced
+models charged an assumed per-call cost so the cap always binds); every
+failure path returns the deterministic result.
 
 ## 3. Tier responsibilities
 

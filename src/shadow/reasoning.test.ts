@@ -138,10 +138,10 @@ describe('selectTier', () => {
     expect(selectTier({ ...base, escalationRequested: true }, false, on).tier).toBe('high');
     expect(selectTier({ ...base, ambiguityScore: 1, conflictCount: 2, retryCount: 3 }, false, on).tier).toBe('high');
   });
-  it('uses only repo-verified model names', () => {
-    expect(selectTier(base, false, on).model).toBe('gpt-4o-mini');
-    expect(selectTier({ ...base, ambiguityScore: 0.6 }, false, on).model).toBe('gpt-4o');
-    expect(selectTier({ ...base, escalationRequested: true }, false, on).model).toBe('gpt-4o');
+  it('uses only verified model identifiers (GPT-5.6 family defaults)', () => {
+    expect(selectTier(base, false, on).model).toBe('gpt-5.6-luna');
+    expect(selectTier({ ...base, ambiguityScore: 0.6 }, false, on).model).toBe('gpt-5.6-terra');
+    expect(selectTier({ ...base, escalationRequested: true }, false, on).model).toBe('gpt-5.6-sol');
   });
 });
 

@@ -160,3 +160,4 @@ Running log of checkpoint certifications and work units. Times UTC.
 | 2026-08-02 21:47 | PR #60 merged (`ec2db8a`, squash) | branch restarted from main |
 | 2026-08-02 21:55 | Shadow enabled via `.replit userenv.shared` (all 8 agents, 100%, safe defaults) | requires Replit republish |
 | 2026-08-02 22:00 | Shadow Agent Review card + stored-call replay + mode endpoints | follow-up PR; 277 tests green, tsc clean, client build clean |
+| 2026-08-02 23:25 | GPT-5.6 tier upgrade + live LLM refinement adapter | identifiers verified vs OpenAI docs; routing enabled in .replit; 114 shadow tests |
