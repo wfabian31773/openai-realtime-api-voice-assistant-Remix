@@ -1989,13 +1989,16 @@ async function observeCall(
   // deterministic hash of the callSid (~50/50, reproducible), and the arm
   // is recorded on the call log via callMeta so grades compare per arm.
   let modelForCall = sessionOptions.model;
+  let abArmLabel: string | undefined;
   if (effectiveSlug === 'azul-scheduling' && process.env.AZUL_AB_MODEL_B) {
     const sid = twilioCallSid || callId || '';
     const hash = [...sid].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 0);
     const arm = hash % 2 === 0 ? 'A' : 'B';
     if (arm === 'B') modelForCall = process.env.AZUL_AB_MODEL_B as typeof sessionOptions.model;
-    const abMeta = callMetadataForDB.get(callId);
-    if (abMeta) (abMeta as any).abArm = `${arm}:${modelForCall}`;
+    // The metadata entry doesn't exist yet at this point — carry the label and
+    // write it when callMetadataForDB is initialized below, so the timeline
+    // flush can persist the arm for per-arm grading.
+    abArmLabel = `${arm}:${modelForCall}`;
     console.info(`[AB-CARRIAGE] azul call ${callId} → arm ${arm} (${modelForCall})`);
   }
   const session = new RealtimeSession(sessionAgent, {
@@ -2254,6 +2257,8 @@ async function observeCall(
     // Carried so the end-of-call enrichment reuses this lookup instead of
     // billing a second identical one.
     ...(azulCarrierName ? { carrierCallerName: azulCarrierName } : {}),
+    // A/B experiment arm (azul only) — persisted by the timeline flush.
+    ...(abArmLabel ? { abArm: abArmLabel } : {}),
   });
 
   // Let the loop guard's telemetry be flushed by the lifecycle coordinator
@@ -2276,7 +2281,10 @@ async function observeCall(
     const BUILD_CONFIG_TIMEOUT_MS = 5000;
     let acceptPayload: any;
     try {
-      const buildConfigPromise = OpenAIRealtimeSIP.buildInitialConfig(sessionAgent, sessionOptions, {
+      // Use the per-call model (A/B challenger when assigned): the accept
+      // payload is what actually starts the session on a model — the later
+      // session.update cannot change it (Codex P1 on PR #63).
+      const buildConfigPromise = OpenAIRealtimeSIP.buildInitialConfig(sessionAgent, { ...sessionOptions, model: modelForCall }, {
         voice: voiceForCall,
         audio: {
           input: {
