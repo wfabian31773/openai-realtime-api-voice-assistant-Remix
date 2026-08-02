@@ -24,6 +24,7 @@
 import { db } from '../../server/db';
 import { callLogs } from '../../shared/schema';
 import { eq } from 'drizzle-orm';
+import { shadowTap } from '../shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 
 export interface AzulToolEvent {
   at: string;               // ISO timestamp
@@ -164,6 +165,17 @@ export function recordAzulToolEvent(
     outcome: summarizeResult(tool, resultJson),
     ms,
   });
+
+  // Shadow tap (observation only, default off): copies the already-redacted
+  // record. emit never throws or blocks; a shadow bug cannot break the call.
+  const recorded = entry.events[entry.events.length - 1];
+  shadowTap.emit(
+    (recorded.outcome as Record<string, unknown>)?.error ? 'tool_failed' : 'tool_completed',
+    callId,
+    ids?.agentSlug ?? entry.agentSlug ?? 'unknown',
+    { tool, args: recorded.args, outcome: recorded.outcome, ms },
+    { sensitive: true, component: 'toolTimeline' },
+  );
 }
 
 /** Fleet-neutral alias. New call sites should use this name; the azul-prefixed

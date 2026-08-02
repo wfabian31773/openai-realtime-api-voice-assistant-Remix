@@ -1,0 +1,108 @@
+[
+  {
+    "sessionId": "fx-ticket-happy",
+    "agentId": "no-ivr",
+    "turns": [
+      { "agent": "Thank you for calling. How can I help you tonight?" },
+      { "caller": "Hi, I need a refill on my eye drops prescription." },
+      { "agent": "I can take care of that. May I have your first and last name?" },
+      { "caller": "My name is Jane Doe." },
+      { "agent": "Thanks Jane. What is the best phone number to reach you?" },
+      { "caller": "It's 555-201-0101." },
+      { "agent": "Let me read that back: prescription refill for Jane Doe at 555-201-0101. Is that right?" },
+      { "caller": "Yes, that's correct." },
+      { "tool": "create_ticket", "args": { "patientFullName": "Jane Doe", "patientPhone": "5552010101", "reasonForCalling": "prescription refill", "idempotencyKey": "call-fx-ticket-happy" }, "result": { "success": true, "ticketId": 1001 }, "ms": 900 },
+      { "n8n": "/api/voice-agent/submit-ticket", "status": 200, "body": { "callData": { "agentUsed": "no-ivr" } } },
+      { "agent": "You're all set — the office will follow up on your refill. Anything else?" },
+      { "caller": "No, that's everything, thanks." }
+    ],
+    "outcome": "completed"
+  },
+  {
+    "sessionId": "fx-loop-name",
+    "agentId": "no-ivr",
+    "turns": [
+      { "caller": "I want to leave a message about my billing statement." },
+      { "agent": "Sure. May I have your first and last name?" },
+      { "caller": "This is John Roe." },
+      { "agent": "Thanks. And may I have your first and last name?" },
+      { "caller": "I just told you, John Roe." },
+      { "agent": "Sorry about that. May I have your first and last name and your phone number and your date of birth?" },
+      { "caller": "John Roe, 555-303-0303." }
+    ],
+    "outcome": "abandoned"
+  },
+  {
+    "sessionId": "fx-urgent",
+    "agentId": "after-hours",
+    "turns": [
+      { "caller": "I suddenly have flashes of light and a curtain over my vision in one eye." },
+      { "agent": "That can be serious. Let me connect you with the on-call doctor right away." },
+      { "tool": "transfer_to_human", "args": { "reason": "possible retinal detachment" }, "result": { "transferred": true }, "ms": 4000 }
+    ],
+    "outcome": "escalated"
+  },
+  {
+    "sessionId": "fx-tool-failure",
+    "agentId": "answering-service",
+    "turns": [
+      { "caller": "I need someone to call me back about my contact lens order." },
+      { "agent": "Happy to help. May I have your first and last name?" },
+      { "caller": "Mary Major, phone 555-404-0404." },
+      { "agent": "Let me confirm: callback about a contact lens order for Mary Major at 555-404-0404, correct?" },
+      { "caller": "Yes, correct." },
+      { "tool": "create_ticket", "args": { "patientFullName": "Mary Major", "patientPhone": "5554040404", "reasonForCalling": "contact lens order callback" }, "failed": true, "ms": 30000 },
+      { "n8n": "/api/voice-agent/submit-ticket", "status": 503, "body": { "callData": { "agentUsed": "answering-service" } } },
+      { "tool": "create_ticket", "args": { "patientFullName": "Mary Major", "patientPhone": "5554040404", "reasonForCalling": "contact lens order callback" }, "failed": true, "ms": 30000 },
+      { "agent": "I'm having trouble filing that right now. The office will see the call record and follow up." }
+    ],
+    "outcome": "failed"
+  },
+  {
+    "sessionId": "fx-multi-intent",
+    "agentId": "no-ivr",
+    "turns": [
+      { "caller": "Two things: what are your Saturday hours, and I also need to cancel my appointment." },
+      { "agent": "We're open 9 to 1 on Saturdays. Now, about the cancellation — which appointment is it?" },
+      { "caller": "The one next Tuesday. Actually wait, I meant reschedule it, not cancel." },
+      { "agent": "No problem, I'll note a reschedule request. Can I get your name and number?" },
+      { "caller": "Sam Small, 555-505-0505." }
+    ],
+    "outcome": "completed"
+  },
+  {
+    "sessionId": "fx-premature-ticket",
+    "agentId": "no-ivr",
+    "turns": [
+      { "caller": "I have a question about my last visit." },
+      { "tool": "create_ticket", "args": { "reasonForCalling": "question about visit" }, "result": { "success": true, "ticketId": 1002 }, "ms": 700 },
+      { "n8n": "/api/voice-agent/submit-ticket", "status": 200, "body": { "callData": { "agentUsed": "no-ivr" } } },
+      { "agent": "I've filed a ticket about your visit. What's your name and phone number so the office can reach you?" },
+      { "caller": "Pat Jones, 555-606-0606." }
+    ],
+    "outcome": "completed"
+  },
+  {
+    "sessionId": "fx-side-question",
+    "agentId": "answering-service",
+    "turns": [
+      { "caller": "I need to leave a message for the doctor about new floaters in my left eye." },
+      { "agent": "I can take that message. May I have your first and last name?" },
+      { "caller": "Quick question first — where is the Oceanside office located?" },
+      { "agent": "The Oceanside office is on Mission Avenue. Now, may I have your first and last name?" },
+      { "caller": "Alex Reed, and my number is 555-707-0707." }
+    ],
+    "outcome": "abandoned"
+  },
+  {
+    "sessionId": "fx-cancellation-flow",
+    "agentId": "no-ivr",
+    "turns": [
+      { "caller": "I'd like to leave a callback request about my glasses order." },
+      { "agent": "Sure — may I have your first and last name?" },
+      { "caller": "Never mind, forget it, I'll just call tomorrow." },
+      { "agent": "No problem at all. Have a good night!" }
+    ],
+    "outcome": "completed"
+  }
+]

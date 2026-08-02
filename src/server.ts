@@ -211,6 +211,12 @@ async function startVoiceServer() {
       dataQualitySloService.startMonitoring(60);
     }).catch(err => console.error('[STARTUP] Failed to start SLO monitoring:', err));
 
+    // Shadow observer (SHADOW_MODE_ENABLED, default off — no-op unless configured).
+    // Fully async/observational; a shadow failure must never affect calls.
+    import('./shadow').then(({ initShadow }) => {
+      try { initShadow(); } catch (err) { console.error('[STARTUP] Shadow init failed (production unaffected):', err); }
+    }).catch(err => console.error('[STARTUP] Shadow module unavailable (production unaffected):', err));
+
     // Start SIP call health monitor (checks every 15 min)
     import('./services/sipHealthMonitor').then(({ start }) => {
       start();
