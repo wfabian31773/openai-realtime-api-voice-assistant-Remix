@@ -9,6 +9,8 @@ import { shadowTap } from './tap';
 import { ShadowPipeline } from './pipeline';
 import { buildOperationalReport, metrics, shadowLog } from './observability';
 import { SpoolWriter } from './spool';
+import { createLlmRefine } from './llmAdapter';
+import { ModelBudget } from './modelRouter';
 
 export { shadowTap } from './tap';
 
@@ -22,7 +24,11 @@ export function initShadow(): { enabled: boolean } {
   }
   if (pipeline) return { enabled: true };
 
-  pipeline = new ShadowPipeline();
+  // With model routing enabled, elevated-signal turns are refined by the
+  // configured GPT-5.6 tier models (budget-gated); otherwise deterministic only.
+  pipeline = cfg.modelRoutingEnabled
+    ? new ShadowPipeline({ llmRefine: createLlmRefine(new ModelBudget(cfg)) })
+    : new ShadowPipeline();
   shadowTap.subscribe((events) => pipeline!.ingest(events));
 
   // Session-completion source that needs no production edit: the lifecycle

@@ -53,6 +53,7 @@ export interface ShadowConfig {
   modelHigh: string;
   modelMaxCallsPerSession: number;
   modelDailyCostCapUsd: number;
+  modelAssumedCostPerCallUsd: number;
   duplicateReadonlyEnabled: boolean;
   n8n: ShadowN8nBudgetConfig;
 }
@@ -85,13 +86,16 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv = process.env): ShadowCo
     sessionTimeoutMin: num(env.SHADOW_SESSION_TIMEOUT_MIN, 30),
     comparisonEnabled: bool(env.SHADOW_COMPARISON_ENABLED, true),
     modelRoutingEnabled: bool(env.SHADOW_MODEL_ROUTING_ENABLED, false),
-    modelLow: env.SHADOW_MODEL_LOW || 'gpt-4o-mini',
-    modelMid: env.SHADOW_MODEL_MID || 'gpt-4o',
-    // No stronger chat model is configured in this repo (doc 05 §2); the high
-    // tier maps to the mid model until one is.
-    modelHigh: env.SHADOW_MODEL_HIGH || 'gpt-4o',
+    // GPT-5.6 tier family (identifiers verified 2026-08-02, doc 05 §2):
+    // Luna = cost-efficient, Terra = balanced, Sol = flagship.
+    modelLow: env.SHADOW_MODEL_LOW || 'gpt-5.6-luna',
+    modelMid: env.SHADOW_MODEL_MID || 'gpt-5.6-terra',
+    modelHigh: env.SHADOW_MODEL_HIGH || 'gpt-5.6-sol',
     modelMaxCallsPerSession: num(env.SHADOW_MODEL_MAX_CALLS_PER_SESSION, 6),
     modelDailyCostCapUsd: num(env.SHADOW_MODEL_DAILY_COST_CAP_USD, 5),
+    // Charged against the daily cap when a model has no price-table entry, so
+    // the cap still binds for unknown/override models.
+    modelAssumedCostPerCallUsd: num(env.SHADOW_MODEL_ASSUMED_COST_USD, 0.02),
     duplicateReadonlyEnabled: bool(env.SHADOW_DUPLICATE_READONLY_ENABLED, false),
     n8n: {
       enabled: bool(env.SHADOW_N8N_ENABLED, false),
