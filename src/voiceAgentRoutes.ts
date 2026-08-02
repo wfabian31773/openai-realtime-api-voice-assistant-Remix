@@ -30,6 +30,7 @@ import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
 import './services/azulRegressionWatch'; // Phase 7: daily grade-regression check (side-effect timers)
 import { shadowTap } from './shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
+import { resolveAbAssignment } from './services/abCarriage';
 import { getEnvironmentConfig } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 
@@ -1984,22 +1985,24 @@ async function observeCall(
   console.info(`[SESSION] Call config: voice=${voiceForCall}, language=${languageCode}, isSpanish=${isSpanish}, ivrSelection=${metadata?.ivrSelection || 'none'}`);
   
   console.info(`[SESSION] CHECKPOINT C: Creating RealtimeSession... (T+${Date.now() - observeCallStart}ms)`);
-  // Phase 7 A/B carriage (azul only): AZUL_AB_MODEL_B names the challenger
-  // model (e.g. a GPT-live id). Unset = no experiment. Assignment is a
-  // deterministic hash of the callSid (~50/50, reproducible), and the arm
-  // is recorded on the call log via callMeta so grades compare per arm.
+  // Phase 7 A/B carriage: AB_MODEL_B names the challenger model and
+  // AB_MODEL_B_AGENTS the participating slugs (legacy AZUL_AB_MODEL_B still
+  // implies azul-only). Unset = no experiment. Assignment is a deterministic
+  // hash of the callSid (~50/50, reproducible); the arm label is written into
+  // the callMetadataForDB initializer below (the entry doesn't exist yet
+  // here), so the timeline flush persists it for per-arm grading.
   let modelForCall = sessionOptions.model;
-  let abArmLabel: string | undefined;
-  if (effectiveSlug === 'azul-scheduling' && process.env.AZUL_AB_MODEL_B) {
-    const sid = twilioCallSid || callId || '';
-    const hash = [...sid].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 0);
-    const arm = hash % 2 === 0 ? 'A' : 'B';
-    if (arm === 'B') modelForCall = process.env.AZUL_AB_MODEL_B as typeof sessionOptions.model;
-    // The metadata entry doesn't exist yet at this point — carry the label and
-    // write it when callMetadataForDB is initialized below, so the timeline
-    // flush can persist the arm for per-arm grading.
-    abArmLabel = `${arm}:${modelForCall}`;
-    console.info(`[AB-CARRIAGE] azul call ${callId} → arm ${arm} (${modelForCall})`);
+  const abAssignment = resolveAbAssignment(
+    effectiveSlug,
+    twilioCallSid || callId || '',
+    String(sessionOptions.model),
+  );
+  const abArmLabel = abAssignment.armLabel;
+  if (abAssignment.challengerModel) {
+    modelForCall = abAssignment.challengerModel as typeof sessionOptions.model;
+  }
+  if (abArmLabel) {
+    console.info(`[AB-CARRIAGE] ${effectiveSlug} call ${callId} → arm ${abArmLabel}`);
   }
   const session = new RealtimeSession(sessionAgent, {
     transport: new OpenAIRealtimeSIP(),
@@ -2257,7 +2260,7 @@ async function observeCall(
     // Carried so the end-of-call enrichment reuses this lookup instead of
     // billing a second identical one.
     ...(azulCarrierName ? { carrierCallerName: azulCarrierName } : {}),
-    // A/B experiment arm (azul only) — persisted by the timeline flush.
+    // A/B experiment arm (allowlisted agents) — persisted by the timeline flush.
     ...(abArmLabel ? { abArm: abArmLabel } : {}),
   });
 
