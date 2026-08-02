@@ -145,11 +145,14 @@ export class ShadowWorkflowEngine {
       }
     }
 
-    // 4. Completion criteria: don't complete with an unserved primary intent.
+    // 4. Completion criteria: don't complete with an unserved primary intent —
+    // unless the caller explicitly cancelled the request.
     if (action === 'complete') {
       const informational = def.informationalIntents.includes(reasoning.intent);
+      const callerCancelled = reasoning.rationaleCode === 'caller_cancelled';
       const served =
         informational ||
+        callerCancelled ||
         state.completedActions.length > 0 ||
         state.simulatedToolHistory.some((t) => t.allowed);
       if (!served && state.turnCount > 1) {

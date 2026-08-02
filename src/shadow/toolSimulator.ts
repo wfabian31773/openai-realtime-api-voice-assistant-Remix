@@ -106,32 +106,21 @@ export function simulateToolCall(
       confirmationRequired: false, executionMode: 'simulation-only', mutating: true, atTurn: state.turnCount,
     };
   }
-  if (!policy.agents.includes(state.agentId)) {
+  const fail = (code: string): void => {
     allowed = false;
-    validationCode = 'tool_not_available_to_agent';
-  }
+    if (validationCode === 'ok') validationCode = code; // first failure wins
+  };
+  if (!policy.agents.includes(state.agentId)) fail('tool_not_available_to_agent');
   const parse = policy.argsSchema.safeParse(args);
-  if (!parse.success) {
-    allowed = false;
-    validationCode = 'args_schema_invalid';
-  }
+  if (!parse.success) fail('args_schema_invalid');
   for (const f of policy.requiredFields) {
     if (!state.collectedFields[f] && !(f in (args ?? {})) && !reasoning.extractedFields[f]) {
       missing.push(f);
     }
   }
-  if (missing.length > 0 && policy.mutating) {
-    allowed = false;
-    validationCode = 'missing_required_fields';
-  }
-  if (policy.mutating && state.completedActions.includes(tool)) {
-    allowed = false;
-    validationCode = 'duplicate_completed_mutation';
-  }
-  if ((state.retryCounts[tool] ?? 0) > policy.retryLimit) {
-    allowed = false;
-    validationCode = 'retry_limit_exceeded';
-  }
+  if (missing.length > 0 && policy.mutating) fail('missing_required_fields');
+  if (policy.mutating && state.completedActions.includes(tool)) fail('duplicate_completed_mutation');
+  if ((state.retryCounts[tool] ?? 0) > policy.retryLimit) fail('retry_limit_exceeded');
 
   // Replay: does a copied production result exist for this tool this session?
   const production = state.productionToolHistory.filter((t) => t.tool === tool);

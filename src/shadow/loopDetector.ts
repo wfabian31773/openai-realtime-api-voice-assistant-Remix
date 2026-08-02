@@ -74,8 +74,9 @@ export class LoopDetector {
       const topic = topicOfQuestion(obs.agentText);
       if (topic) {
         const turns = this.prodQuestionTopics.get(topic) ?? [];
-        // Ignored answer / repeated question: asked again although the field is stored
-        if (state.collectedFields[topic] && state.collectedFields[topic].providedAtTurn < obs.turn) {
+        // Ignored answer / repeated question: asked again although the field is
+        // stored (including "provided this same turn, then re-asked").
+        if (state.collectedFields[topic] && state.collectedFields[topic].providedAtTurn <= obs.turn) {
           this.push({
             loopType: 'ignored_answer', source: 'production',
             firstAtTurn: state.collectedFields[topic].providedAtTurn, repeatAtTurn: obs.turn,

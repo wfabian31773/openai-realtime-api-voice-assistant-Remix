@@ -16,7 +16,8 @@ import {
 import { compareTurn, summarizeSession, type ProductionTurnFacts, type SessionComparisonSummary, type TurnComparison } from './comparison';
 import { evaluateSession, ReviewQueue, type SessionEvaluation } from './evaluation';
 import { LoopDetector } from './loopDetector';
-import { interpretTurn, type ReasoningDeps } from './reasoning';
+import { interpretTurn, toolForIntent, type ReasoningDeps } from './reasoning';
+import type { EngineDecision } from './workflowEngine';
 import { redactPayload } from './redaction';
 import { metrics, shadowLog } from './observability';
 import { ShadowBundleSender } from './n8nSimulator';
@@ -32,6 +33,10 @@ export interface SessionRecord {
   seenEventIds: Set<string>;
   turnComparisons: TurnComparison[];
   loopDetector: LoopDetector;
+  /** Analysis of the latest turn, compared only once that turn's production
+   *  events (tools fire AFTER the caller speaks) have had a chance to arrive:
+   *  flushed when the next user turn starts, or at session finalization. */
+  pendingTurn: { turn: number; reasoning: ShadowReasoningResult; decision: EngineDecision } | null;
   pendingUserText: string | null;
   lastActivity: number;
   finalized: boolean;
@@ -90,6 +95,7 @@ export class ShadowPipeline {
         seenEventIds: new Set(),
         turnComparisons: [],
         loopDetector: new LoopDetector(),
+        pendingTurn: null,
         pendingUserText: null,
         lastActivity: Date.now(),
         finalized: false,
@@ -216,10 +222,28 @@ export class ShadowPipeline {
     }
   }
 
+  /** Compare the previous turn now that its production events have arrived. */
+  private flushPendingComparison(s: SessionRecord): void {
+    const pending = s.pendingTurn;
+    if (!pending) return;
+    s.pendingTurn = null;
+    const cfg = getShadowConfig();
+    if (!cfg.comparisonEnabled) return;
+    const stAtTurn = { ...s.state, turnCount: pending.turn };
+    const prodFacts = this.productionFactsForTurn(s, pending.turn);
+    const cmp = compareTurn(stAtTurn, prodFacts, pending.reasoning, pending.decision, s.loopDetector.signals);
+    s.turnComparisons.push(cmp);
+    metrics.inc('turns_compared');
+    if (cmp.reviewRequired) metrics.inc('turns_review_required');
+  }
+
   private async analyzeTurn(s: SessionRecord, userText: string): Promise<void> {
     const cfg = getShadowConfig();
     const st = s.state;
     const def = this.engine.getDefinition(st.agentId);
+    // Previous turn's production actions are complete by the time the caller
+    // speaks again — compare it before folding this turn's information.
+    this.flushPendingComparison(s);
     const started = Date.now();
 
     const reasoning = await interpretTurn(
@@ -240,6 +264,22 @@ export class ShadowPipeline {
           provenance: 'caller',
           confirmed: false,
         };
+      }
+    }
+    // Caller assent after a shadow read-back confirms the pending mutation and
+    // upgrades this turn's advisory action from 'confirm' to the tool itself.
+    if (reasoning.extractedFields['patientAssent'] && st.lastShadowRecommendedAction === 'confirm') {
+      const tool = toolForIntent(st.agentId, reasoning.intent) ?? toolForIntent(st.agentId, st.intent ?? '');
+      if (tool) {
+        if (!st.confirmedFields.includes(`confirm:${tool}`)) {
+          st.confirmedFields.push(`confirm:${tool}`);
+        }
+        if (reasoning.recommendedAction === 'confirm' && reasoning.missingFields.length === 0) {
+          reasoning.recommendedAction = 'simulate_tool_call';
+          reasoning.recommendedTool = tool;
+          reasoning.rationaleCode = 'confirmed_tool_eligible';
+          reasoning.userFacingQuestion = undefined;
+        }
       }
     }
     st.intent = reasoning.intent;
@@ -288,32 +328,32 @@ export class ShadowPipeline {
     st.loopSignals = s.loopDetector.signals;
 
     if (cfg.comparisonEnabled) {
-      const prodFacts = this.productionFactsForTurn(s);
-      const cmp = compareTurn(st, prodFacts, reasoning, decision, s.loopDetector.signals);
-      s.turnComparisons.push(cmp);
-      metrics.inc('turns_compared');
-      if (cmp.reviewRequired) metrics.inc('turns_review_required');
+      s.pendingTurn = { turn: st.turnCount, reasoning, decision };
     }
     metrics.inc('state_transitions');
     metrics.setLabeled('model_tier_selected', reasoning.selectedModelTier, 1, true);
   }
 
-  private productionFactsForTurn(s: SessionRecord): ProductionTurnFacts {
+  private productionFactsForTurn(s: SessionRecord, turn: number): ProductionTurnFacts {
     const st = s.state;
-    const toolThisTurn = st.productionToolHistory.filter((t) => t.atTurn === st.turnCount).slice(-1)[0];
-    const n8nThisTurn = st.productionN8nHistory.filter((r) => r.atTurn === st.turnCount).slice(-1)[0];
+    const toolThisTurn = st.productionToolHistory.filter((t) => t.atTurn === turn).slice(-1)[0];
+    const n8nThisTurn = st.productionN8nHistory.filter((r) => r.atTurn === turn).slice(-1)[0];
     const policy = toolThisTurn ? getToolPolicy(toolThisTurn.tool) : undefined;
+    // Premature = a required field the caller had NOT provided by that turn.
     const prematureFields = policy?.mutating
-      ? policy.requiredFields.filter((f) => !st.collectedFields[f])
+      ? policy.requiredFields.filter((f) => {
+          const field = st.collectedFields[f];
+          return !field || field.providedAtTurn > turn;
+        })
       : [];
     return {
-      turn: st.turnCount,
+      turn,
       assistantMessage: st.lastProductionAssistantMessage,
       toolRequest: toolThisTurn
         ? { tool: toolThisTurn.tool, argsDigest: toolThisTurn.argsDigest, prematureFields }
         : null,
       n8nEndpoint: n8nThisTurn?.endpoint ?? null,
-      inferredIntent: null, // production intent is unobservable (doc 02 §4.1)
+      inferredIntent: null, // production intent is unobservable (doc 02 §1)
       inferredState: null,
       escalated: st.productionToolHistory.some((t) =>
         ['transfer_to_office', 'escalate_to_human', 'transfer_to_human'].includes(t.tool) && !t.errored,
@@ -327,6 +367,7 @@ export class ShadowPipeline {
       return;
     }
     s.finalized = true;
+    this.flushPendingComparison(s); // last turn's production events are final now
     const st = s.state;
     st.status = event.type === 'session_failed' ? 'failed' : st.escalationReason ? 'escalated' : 'completed';
     st.productionOutcome = String(event.payload.status ?? st.status);

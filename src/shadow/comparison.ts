@@ -152,9 +152,10 @@ export function compareTurn(
   if (shadowSim && !shadowSim.allowed && shadowSim.validationCode === 'missing_required_fields') {
     codes.push('shadow_premature_tool');
   }
-  if (shadowSim && shadowSim.mutating && shadowSim.allowed) {
-    // Every allowed mutating simulation is, by definition, a mutation the
-    // shadow was technically blocked from making. Recorded for review priority.
+  if (shadowSim && shadowSim.mutating && shadowSim.allowed && !(toolMatch && prodTool)) {
+    // The shadow would have made a mutation production did NOT make — the
+    // blocked-divergent-mutation case reviewers must see. (An agreeing
+    // mutation is just tool agreement, not a review trigger.)
     codes.push('shadow_blocked_would_be_mutation');
   }
 

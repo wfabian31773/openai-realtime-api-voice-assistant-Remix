@@ -43,7 +43,9 @@ const FANTASY_INTENTS: IntentPattern[] = [
 ];
 
 const FIELD_EXTRACTORS: Array<{ field: string; re: RegExp; group?: number }> = [
-  { field: 'callerName', re: /(?:my name is|this is|i'?m)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/i, group: 1 },
+  // Case-sensitive name capture (the /i flag would swallow lowercase words
+  // like "and" into the name); only the lead-in phrase is case-tolerant.
+  { field: 'callerName', re: /(?:[Mm]y name is|[Tt]his is|[Ii]'?m)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/, group: 1 },
   { field: 'callerPhone', re: /(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/ },
   { field: 'dob', re: /\b(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})\b/ },
   { field: 'patientAssent', re: /\b(yes,? (i )?confirm|that'?s (right|correct)|sounds good|yes please|correct)\b/i },
@@ -103,6 +105,11 @@ const TOOL_FOR_INTENT: Record<string, Record<string, string>> = {
   'fantasy-football': { player_question: 'getPlayerStats', comparison_question: 'comparePlayers' },
 };
 TOOL_FOR_INTENT['dev-no-ivr'] = TOOL_FOR_INTENT['no-ivr'];
+
+/** The tool the shadow would use for an intent on an agent (or undefined). */
+export function toolForIntent(agentId: string, intent: string): string | undefined {
+  return (TOOL_FOR_INTENT[agentId] ?? {})[intent];
+}
 
 /** Intents mapped to ticket_request family for ticket agents. */
 function normalizeIntent(agentId: string, intent: string): string {
