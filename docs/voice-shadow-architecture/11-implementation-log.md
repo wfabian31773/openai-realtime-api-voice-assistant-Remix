@@ -156,3 +156,7 @@ Running log of checkpoint certifications and work units. Times UTC.
 | 2026-08-02 21:35 | `src/shadow/**` + 4 taps | engine implemented, tsc clean (`a6b8b9a`) |
 | 2026-08-02 21:55 | 98-test matrix + fixes | deferred comparison, assent folding, regex, verdict scoping (`c472afe`) |
 | 2026-08-02 22:10 | Docs 00/07/08/09/10/12/14/16 + n8n bundle JSON | all checkpoints certified; stopped at production approval gate |
+| 2026-08-02 21:45 | **Operator approval received** | "approved — merge PR #60 and enable staging shadow on all active agents" |
+| 2026-08-02 21:47 | PR #60 merged (`ec2db8a`, squash) | branch restarted from main |
+| 2026-08-02 21:55 | Shadow enabled via `.replit userenv.shared` (all 8 agents, 100%, safe defaults) | requires Replit republish |
+| 2026-08-02 22:00 | Shadow Agent Review card + stored-call replay + mode endpoints | follow-up PR; 277 tests green, tsc clean, client build clean |

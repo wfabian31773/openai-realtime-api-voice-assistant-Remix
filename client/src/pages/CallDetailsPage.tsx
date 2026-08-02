@@ -35,6 +35,32 @@ interface CallReviewResult {
   patientExperience: number;
 }
 
+interface ShadowReplayResult {
+  agentId: string;
+  verdict: 'better' | 'equivalent' | 'worse' | 'indeterminate' | 'human_review';
+  reviewPriority: number;
+  reviewReasons: string[];
+  summary: {
+    turns: number;
+    actionAgreementPct: number;
+    toolAgreementPct: number;
+    n8nAgreementPct: number;
+    loopCount: number;
+    reviewRequiredPct: number;
+    disagreementCodeCounts: Record<string, number>;
+    limitation: string;
+  } | null;
+  flags: string[];
+  approximations: string[];
+}
+
+interface ShadowStatus {
+  mode: 'shadow' | 'live_requested';
+  modeUpdatedBy: string | null;
+  capture: { enabled: boolean; agentAllowlist: string[]; capturePct: number };
+  liveCutoverAvailable: boolean;
+}
+
 export function CallDetailsPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -42,6 +68,8 @@ export function CallDetailsPage() {
   const [isPlaying, setIsPlaying] = useState(false)
   const [showReview, setShowReview] = useState(false)
   const [reviewResult, setReviewResult] = useState<CallReviewResult | null>(null)
+  const [showShadow, setShowShadow] = useState(false)
+  const [shadowResult, setShadowResult] = useState<ShadowReplayResult | null>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
 
   const { data: callLog, isLoading } = useQuery({
@@ -89,6 +117,36 @@ export function CallDetailsPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['call-log', id] })
+    }
+  })
+
+  const { data: shadowStatus } = useQuery({
+    queryKey: ['shadow-status'],
+    queryFn: async () => {
+      const { data } = await apiClient.get<ShadowStatus>('/shadow/status')
+      return data
+    },
+    staleTime: 60_000,
+  })
+
+  const shadowReplayMutation = useMutation({
+    mutationFn: async () => {
+      const { data } = await apiClient.post<{ success: boolean; result: ShadowReplayResult }>(`/call-logs/${id}/shadow-replay`)
+      return data.result
+    },
+    onSuccess: (data) => {
+      setShadowResult(data)
+      setShowShadow(true)
+    }
+  })
+
+  const shadowModeMutation = useMutation({
+    mutationFn: async (mode: 'shadow' | 'live_requested') => {
+      const { data } = await apiClient.post<{ success: boolean; mode: string; note: string }>('/shadow/mode', { mode })
+      return data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shadow-status'] })
     }
   })
 
@@ -1007,6 +1065,162 @@ export function CallDetailsPage() {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {callLog.transcript && (
+        <Card className="border-cyan-200 bg-cyan-50/30">
+          <CardHeader className="flex flex-row items-center justify-between">
+            <CardTitle className="flex items-center gap-2">
+              <Cpu className="h-5 w-5 text-cyan-600" />
+              Shadow Agent Review
+            </CardTitle>
+            <div className="flex items-center gap-2">
+              <Button
+                variant={shadowStatus?.mode === 'shadow' || !shadowStatus ? 'default' : 'outline'}
+                size="sm"
+                className={shadowStatus?.mode === 'shadow' || !shadowStatus ? 'bg-cyan-600 hover:bg-cyan-700' : ''}
+                disabled={shadowModeMutation.isPending}
+                onClick={() => shadowModeMutation.mutate('shadow')}
+              >
+                Keep in Shadow Mode
+              </Button>
+              <Button
+                variant={shadowStatus?.mode === 'live_requested' ? 'default' : 'outline'}
+                size="sm"
+                className={shadowStatus?.mode === 'live_requested' ? 'bg-amber-600 hover:bg-amber-700' : ''}
+                disabled={shadowModeMutation.isPending}
+                onClick={() => shadowModeMutation.mutate('live_requested')}
+              >
+                Turn Live
+              </Button>
+              {shadowResult && (
+                <Button variant="ghost" size="sm" onClick={() => setShowShadow(!showShadow)}>
+                  {showShadow ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {shadowStatus?.mode === 'live_requested' && (
+              <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                <span className="font-medium">Live requested</span> — recorded
+                {shadowStatus.modeUpdatedBy ? ` by ${shadowStatus.modeUpdatedBy}` : ''}. The shadow agent
+                remains observation-only until the live-cutover deployment ships
+                (docs/voice-shadow-architecture/09); no call handling has changed.
+              </div>
+            )}
+            {shadowStatus && !shadowStatus.capture.enabled && (
+              <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                Live shadow capture is currently disabled (SHADOW_MODE_ENABLED). Replay of stored calls still works below.
+              </div>
+            )}
+
+            {shadowReplayMutation.isError && (
+              <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                Failed to run the shadow replay for this call. Please try again.
+              </div>
+            )}
+
+            {!shadowResult && !shadowReplayMutation.isError && (
+              <div className="flex items-center justify-between gap-4">
+                <p className="text-sm text-muted-foreground">
+                  Replay this call through the parallel shadow agent to see what it would have done at each
+                  turn — intent, next action, tool eligibility — and how that compares to what production did.
+                </p>
+                <Button
+                  onClick={() => shadowReplayMutation.mutate()}
+                  disabled={shadowReplayMutation.isPending}
+                  className="shrink-0 bg-cyan-600 hover:bg-cyan-700"
+                >
+                  {shadowReplayMutation.isPending ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Replaying...
+                    </>
+                  ) : (
+                    <>
+                      <Cpu className="mr-2 h-4 w-4" />
+                      Run Shadow Replay
+                    </>
+                  )}
+                </Button>
+              </div>
+            )}
+
+            {shadowResult && showShadow && (
+              <div className="space-y-6">
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="rounded-lg border bg-white p-3 text-center">
+                    <div className={`text-2xl font-bold ${
+                      shadowResult.verdict === 'better' ? 'text-green-600'
+                      : shadowResult.verdict === 'worse' ? 'text-red-600'
+                      : shadowResult.verdict === 'human_review' ? 'text-amber-600'
+                      : 'text-cyan-600'
+                    }`}>
+                      {shadowResult.verdict.replace('_', ' ')}
+                    </div>
+                    <div className="text-xs text-muted-foreground">Shadow Verdict</div>
+                  </div>
+                  <div className="rounded-lg border bg-white p-3 text-center">
+                    <div className="text-2xl font-bold text-cyan-600">{shadowResult.summary?.actionAgreementPct ?? 0}%</div>
+                    <div className="text-xs text-muted-foreground">Next-Action Agreement</div>
+                  </div>
+                  <div className="rounded-lg border bg-white p-3 text-center">
+                    <div className={`text-2xl font-bold ${(shadowResult.summary?.loopCount ?? 0) > 0 ? 'text-orange-600' : 'text-green-600'}`}>
+                      {shadowResult.summary?.loopCount ?? 0}
+                    </div>
+                    <div className="text-xs text-muted-foreground">Loop / State-Loss Signals</div>
+                  </div>
+                </div>
+
+                {shadowResult.reviewReasons.length > 0 && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+                    <h4 className="mb-2 font-semibold text-amber-800">Needs Human Review</h4>
+                    <ul className="list-inside list-disc space-y-1 text-sm text-amber-700">
+                      {shadowResult.reviewReasons.map((r, i) => (
+                        <li key={i}>{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {shadowResult.summary && Object.keys(shadowResult.summary.disagreementCodeCounts).length > 0 && (
+                  <div className="rounded-lg border border-cyan-200 bg-cyan-50 p-4">
+                    <h4 className="mb-3 font-semibold text-cyan-800">Production vs Shadow Disagreements</h4>
+                    <div className="flex flex-wrap gap-2">
+                      {Object.entries(shadowResult.summary.disagreementCodeCounts).map(([code, count]) => (
+                        <Badge key={code} variant="secondary" className="bg-white text-cyan-800">
+                          {code.replace(/_/g, ' ')} ×{count}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {shadowResult.flags.length > 0 && (
+                  <div className="rounded-lg border bg-white p-4">
+                    <h4 className="mb-2 font-semibold text-foreground">Turn-Level Findings</h4>
+                    <ul className="list-inside list-disc space-y-1 text-sm text-muted-foreground">
+                      {shadowResult.flags.slice(0, 12).map((f, i) => (
+                        <li key={i}>{f.replace(/_/g, ' ')}</li>
+                      ))}
+                      {shadowResult.flags.length > 12 && (
+                        <li>…and {shadowResult.flags.length - 12} more</li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+
+                <div className="rounded border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
+                  {shadowResult.summary?.limitation}
+                  {shadowResult.approximations.length > 0 && (
+                    <> Replay approximations: {shadowResult.approximations.join('; ')}.</>
+                  )}
+                </div>
               </div>
             )}
           </CardContent>

@@ -31,6 +31,22 @@ Secrets: none required. Optional: `SHADOW_N8N_WEBHOOK_URL` + `SHADOW_N8N_TOKEN`
 
 The production path reads none of these; only `src/shadow/**` does.
 
+## 2.1 Enablement state (updated 2026-08-02, operator-approved)
+
+PR #60 merged. Per operator approval ("enable staging shadow on all active
+agents"), `.replit [userenv.shared]` now sets `SHADOW_MODE_ENABLED=true`,
+`SHADOW_AGENT_ALLOWLIST=<all 8 agents>`, `SHADOW_CAPTURE_PCT=100` for both the
+development and production deployments. All riskier flags remain at their off
+defaults (no transcript storage, no model calls, zero n8n executions).
+**A Replit republish is required for the deployment to pick this up.**
+Operator surface: the **Shadow Agent Review** card on every call-details page —
+replay any stored call through the shadow engine, and record the rollout
+decision with the *Keep in Shadow Mode / Turn Live* buttons
+(`GET/POST /api/shadow/mode|status`, persisted in `app_settings.shadow_rollout_mode`).
+"Turn Live" records the operator's approval only: the shadow engine remains
+observation-only until a live-cutover deployment is built and shipped — it has
+no code path to speak or mutate, by design.
+
 ## 3. Enablement ladder (each step reversible instantly)
 
 1. **Local replay (no flags):**
