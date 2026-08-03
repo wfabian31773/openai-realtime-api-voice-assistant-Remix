@@ -91,9 +91,12 @@ SHADOW_CAPTURE_PCT = "100"
 # blocks a re-ask of a field the caller already answered, blocks bundled
 # questions, and escalates past suggestion (authoring the turn, then forcing
 # the exit) when the model ignores it. Deterministic, inline, sub-ms.
-# Add after-hours / no-ivr here once the first day of traffic looks right.
+# after-hours + no-ivr added 2026-08-03 12:xx: two caller-ID name disclosures
+# happened on no-ivr within the hour (12:35 greeted an unverified caller by
+# name unprompted; 12:48 named the WRONG person to an outside pharmacy rep),
+# and nothing was watching those lines.
 # Instant disable: empty this list and republish.
-DIRECTOR_AGENTS = "azul-scheduling,answering-service"
+DIRECTOR_AGENTS = "azul-scheduling,answering-service,no-ivr,after-hours"
 SHADOW_MODEL_ROUTING_ENABLED = "true"
 SHADOW_MODEL_LOW = "gpt-5.6-luna"
 SHADOW_MODEL_MID = "gpt-5.6-terra"
