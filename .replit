@@ -91,14 +91,13 @@ SHADOW_MODEL_ROUTING_ENABLED = "true"
 SHADOW_MODEL_LOW = "gpt-5.6-luna"
 SHADOW_MODEL_MID = "gpt-5.6-terra"
 SHADOW_MODEL_HIGH = "gpt-5.6-sol"
-# Production realtime A/B (operator-approved 2026-08-02/03): challenger model
-# for ~50% of calls on the listed agents, deterministic by callSid, arm
-# recorded on the call log so grades + shadow verdicts compare per arm.
-# Identifier verified against OpenAI docs 2026-08-02. INSTANT ROLLBACK: remove
-# AB_MODEL_B (unset = no experiment anywhere) and republish; or trim
-# AB_MODEL_B_AGENTS to narrow scope.
-AB_MODEL_B = "gpt-realtime-2.1"
-AB_MODEL_B_AGENTS = "azul-scheduling,answering-service,no-ivr"
+# Production realtime A/B — DISABLED 2026-08-03 after an operator-reported bad
+# call following the first republish with the experiment live. Every call is
+# back on the control model (gpt-realtime); unset AB_MODEL_B = no experiment
+# anywhere, on any agent. Do not re-enable until the bad call is diagnosed and
+# an arm-B test call is verified on a non-production number.
+# AB_MODEL_B = "gpt-realtime-2.1"
+# AB_MODEL_B_AGENTS = "azul-scheduling,answering-service,no-ivr"
 
 [userenv.development]
 DOMAIN = "dcf9f10f-5436-45b2-9ddd-3056216aaa94-00-3uh0nmdcvfbs6.spock.replit.dev"
