@@ -1,1 +1,2 @@
 - [Supabase pooler URL + failover](supabase-pooler-failover.md) — pooler password = direct DB password, port 6543; bad secret trips circuit breaker; db.ts validates + fails over, await `dbReady` before DB work.
+- [Deployment health probe](deployment-health-probe.md) — Replit probe path is not configurable; app endpoints must return non-2xx on failed init (Twilio voice paths still need 200 TwiML).

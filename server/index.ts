@@ -10,6 +10,7 @@ import http from "http";
 // top level delayed port binding by ~20s under tsx, causing deployment
 // healthcheck failures at startup.
 import { validateEnv, API_SERVER_REQUIRED } from "../src/lib/env";
+import { createHealthState, registerHealthEndpoints } from "./health";
 import { getEnvironmentConfig } from "../src/config/environment";
 
 const envConfig = getEnvironmentConfig();
@@ -36,6 +37,14 @@ const HOP_BY_HOP_HEADERS = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade'
 ]);
+
+// ─── Liveness / readiness (registered FIRST so they precede all other middleware) ───
+// /healthz is the deployment probe: instant 200 during startup, but flips to 503
+// if initialization fails so a broken deployment is marked unhealthy. /readyz is
+// 200 only once routes/auth/DB init succeeded. The failure gate refuses all other
+// traffic (TwiML apology for voice webhooks) when init failed. See server/health.ts.
+const healthState = createHealthState();
+registerHealthEndpoints(app, healthState);
 
 app.use('/api/voice', (req, res) => {
   const startTime = Date.now();
@@ -424,12 +433,6 @@ function scheduleNightlyReconciliation(): void {
   scheduleNext();
 }
 
-// Healthcheck must respond immediately — registered before any async work
-// so Replit's startup probe sees 200 while initialization is still in progress.
-app.get('/healthz', (_req, res) => res.status(200).send('OK'));
-
-let isReady = false;
-
 async function startServer() {
   // Start listening immediately so Replit's healthcheck succeeds right away.
   // All async initialization (DB warmup, route registration) runs after the
@@ -477,7 +480,7 @@ async function startServer() {
       res.sendFile('index.html', { root: 'client/dist' });
     });
 
-    isReady = true;
+    healthState.isReady = true;
     console.log("[STARTUP] Server fully initialized");
 
     // Cleanup stale calls from previous sessions
@@ -491,9 +494,17 @@ async function startServer() {
     // Schedule nightly reconciliation at configured UTC hour
     scheduleNightlyReconciliation();
   } catch (error) {
-    console.error("Failed to initialize API server:", error);
-    // Keep the server alive (healthcheck still responds) even if init fails
-    // so Replit doesn't keep restarting us in a crash loop.
+    healthState.initFailed = true;
+    console.error("════════════════════════════════════════════════════════");
+    console.error("[CRITICAL] API server FAILED TO INITIALIZE — routes/auth/DB");
+    console.error("[CRITICAL] are NOT set up. All non-health requests now return");
+    console.error("[CRITICAL] 503 (voice webhooks get a TwiML apology) and /readyz");
+    console.error("[CRITICAL] reports 503 until this is fixed and redeployed.");
+    console.error("[CRITICAL] Error:", error);
+    console.error("════════════════════════════════════════════════════════");
+    // Keep the process alive so Replit doesn't crash-loop, but the failure
+    // gate registered at the top of the middleware chain (before the voice
+    // proxy) refuses all traffic — nothing is served in a silently broken state.
   }
 }
 
