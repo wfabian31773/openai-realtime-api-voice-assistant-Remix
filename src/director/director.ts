@@ -215,15 +215,50 @@ const NAME_STOPLIST = new Set([
  * Seeding the provider's name could never have caught that; Dr. Choi is not
  * the caller and would never be in the seed list.
  *
- * So this matches SHAPE, not content: possessive framing ("you have", "your
- * appointment", "scheduled for") together with a concrete time or date. That
- * deliberately does NOT match offering availability ("I could do 9:00 AM
- * Tuesday"), which reveals nothing about the caller.
+ * So this matches SHAPE, not content: possessive framing together with a
+ * concrete time or date. It deliberately does NOT match offering availability
+ * ("I could do 9:00 AM Tuesday"), which reveals nothing about the caller.
+ *
+ * POSSESSIVE FRAMING IS NOT ENOUGH ON ITS OWN (Codex, PR #69). A bare "you
+ * have" plus a weekday also matches "Do you have availability Tuesday at 9:00
+ * AM?" — an ordinary scheduling question, and precisely the flow the previous
+ * paragraph claims to exclude. At `author` enforcement that would cancel a
+ * harmless turn, which is the mistake that cost 48 calls this afternoon. The
+ * line must therefore ALSO be about an appointment, not merely address the
+ * caller in the second person.
  */
 const EXISTING_APPOINTMENT =
-  /\b(?:you have|your (?:upcoming )?appointment|we have you|i see you have|you'?re scheduled|scheduled for|on record for you|no upcoming appointment)\b/i;
+  /\b(?:you have|we have you|i see you have|you'?re scheduled|scheduled for|on record for you)\b/i;
+/** The line is about an appointment, not about the caller's availability. */
+const APPOINTMENT_CONTEXT = /\b(?:appointments?|visits?|scheduled)\b/i;
 const CONCRETE_WHEN =
   /\b\d{1,2}:\d{2}\s*(?:a\.?m\.?|p\.?m\.?)|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b|\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
+
+/**
+ * The ABSENCE of an appointment — a fact about the caller's record just as
+ * much as its presence, and one that by definition carries no date. Requiring
+ * CONCRETE_WHEN here made the absence branch dead code: "You have no upcoming
+ * appointments on record" scored nothing. My own test only passed because I
+ * had padded it with "Tuesday or otherwise", which should have been the tell.
+ */
+const APPOINTMENT_ABSENCE =
+  /\b(?:no|not|don'?t|doesn'?t|nothing)\b[^.?!]{0,30}\b(?:upcoming\s+)?appointments?\b|\bappointments?\b[^.?!]{0,20}\b(?:not (?:showing|on record)|nothing on record)\b/i;
+
+/**
+ * Does this line ASSERT the given name, as opposed to asking about it?
+ *
+ * Scoped per clause (Codex, PR #69). Testing NAME_CONFIRM_QUESTION against the
+ * whole line meant one confirm-shaped phrase disabled the check for every
+ * later sentence: "Am I speaking with Elena? I see you have an appointment
+ * Tuesday at 9:00 AM" passed clean. The exemption belongs to the clause that
+ * asks, not to the turn that contains it.
+ */
+function assertsName(line: string, name: string): boolean {
+  const re = new RegExp(`\\b${name}\\b`, 'i');
+  return line
+    .split(/(?<=[.?!])\s+/)
+    .some((clause) => re.test(clause) && !NAME_CONFIRM_QUESTION.test(clause));
+}
 
 /** A record-sourced name worth guarding: long enough, and not a common word. */
 function guardableName(name: string): boolean {
@@ -354,17 +389,22 @@ export class Director {
       // with Mildred?" to a pharmacy rep (wrong person); and "we found records
       // ... for a different patient, Wayne Fabian" to a caller asking about
       // their mother. Every prompt involved already forbade it.
-      // Three exclusions, every one paid for by a real call:
+      // Two exclusions apply to the whole block:
       //   - the caller has established who they are (the original rule)
-      //   - the line ASKS rather than asserts ("Am I speaking with Elena?")
       //   - we already fired and the caller has not spoken since (the stutter)
-      if (!identityEstablished(s) && !NAME_CONFIRM_QUESTION.test(line) && !s.disclosureFiredSinceCaller) {
-        const spoken = s.recordNames.find(
-          // Echoing back a name the caller has already said is courtesy.
-          (n) => !s.callerWords.has(n) && new RegExp(`\\b${n}\\b`, 'i').test(line),
-        );
-        // Appointment details are a disclosure too — see EXISTING_APPOINTMENT.
-        if (!spoken && EXISTING_APPOINTMENT.test(line) && CONCRETE_WHEN.test(line)) {
+      // The "asking is not asserting" exemption is NOT one of them: it is
+      // scoped to the clause holding the name (see assertsName), so a confirm
+      // question can no longer license an appointment disclosure later in the
+      // same turn.
+      if (!identityEstablished(s) && !s.disclosureFiredSinceCaller) {
+        // Echoing back a name the caller has already said is courtesy.
+        const spoken = s.recordNames.find((n) => !s.callerWords.has(n) && assertsName(line, n));
+        // Appointment details are a disclosure too. Absence needs no date —
+        // it never has one.
+        const detail =
+          APPOINTMENT_ABSENCE.test(line) ||
+          (EXISTING_APPOINTMENT.test(line) && APPOINTMENT_CONTEXT.test(line) && CONCRETE_WHEN.test(line));
+        if (!spoken && detail) {
           const level = this.bump(s, 'disclosure');
           s.disclosureFiredSinceCaller = true;
           return this.action(s, 'record_detail_disclosed', 'identity', level, {
