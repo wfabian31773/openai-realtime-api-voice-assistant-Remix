@@ -42,7 +42,8 @@ export interface DirectorAction {
     | 'reask_answered_field'
     | 'repeat_after_directive'
     | 'bundled_questions'
-    | 'readback_loop';
+    | 'readback_loop'
+    | 'record_name_disclosed';
   topic: string;
   /** System-message text (all enforcement levels). */
   text: string;
@@ -66,6 +67,13 @@ interface CallState {
   escalation: Map<string, number>;
   /** Distinct dates the caller has spoken, in order. */
   spokenDobs: string[];
+  /** Names known from the RECORD (caller-ID pre-context, carrier lookup) but
+   *  not yet confirmed by the caller. Speaking one of these to an unverified
+   *  caller is a disclosure, not a courtesy. */
+  recordNames: string[];
+  /** Topics the caller has confirmed once already. One read-back is good
+   *  practice; a second is the loop. */
+  confirmed: Set<string>;
   lastAgentLine: string;
   callerSpokeSinceAgent: boolean;
 }
@@ -129,6 +137,11 @@ export function askCount(line: string): number {
 
 /** Field answers the caller has given. Deliberately conservative: a field is
  *  only "answered" on strong evidence, so we never suppress a genuine ask. */
+const MONTHS = new Set([
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+]);
+
 export function extractAnswers(callerLine: string): Record<string, string> {
   const out: Record<string, string> = {};
   const dates = spokenDates(callerLine);
@@ -139,9 +152,44 @@ export function extractAnswers(callerLine: string): Record<string, string> {
   // swallows following words like "and" into the name).
   const name =
     callerLine.match(/(?:[Mm]y name is|[Tt]his is|[Ii]'?m|[Nn]ame'?s)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/) ??
-    callerLine.match(/^\s*([A-Z][a-z]{2,})\s*,\s*([A-Z][a-z]{2,})/);
-  if (name) out['full name'] = (name[1] ?? '').trim();
+    // "Surname, Firstname" — but NOT "Fabian, March 17, 1973", which on the
+    // 12:01 call banked "Fabian" as a full name and made the agent's perfectly
+    // reasonable spelling request look like a re-ask. The second token must be
+    // a name, not a month, and must not be followed by a date.
+    callerLine.match(/^\s*([A-Z][a-z]{2,})\s*,\s*([A-Z][a-z]{2,})(?!\w*\s+\d)/);
+  if (name && !MONTHS.has(String(name[2] ?? '').toLowerCase())) {
+    out['full name'] = (name[1] ?? '').trim();
+  }
   return out;
+}
+
+/**
+ * Names too ordinary to treat as an identifier. "Hi, Mark" from a record match
+ * is a disclosure; "that's a good mark" is not, and a guard that cannot tell
+ * them apart gets switched off within a week.
+ */
+const NAME_STOPLIST = new Set([
+  'may', 'will', 'mark', 'bill', 'rose', 'grace', 'art', 'dawn', 'frank',
+  'hope', 'joy', 'sunny', 'drew', 'sue', 'don', 'ray', 'jean', 'faith',
+  'rich', 'chase', 'summer', 'autumn', 'guy', 'earl', 'miles', 'penny',
+]);
+
+/** A record-sourced name worth guarding: long enough, and not a common word. */
+function guardableName(name: string): boolean {
+  const n = name.trim().toLowerCase();
+  return n.length >= 3 && /^[a-z][a-z'-]+$/.test(n) && !NAME_STOPLIST.has(n);
+}
+
+/**
+ * Has the caller established who they are THIS call?
+ *
+ * Deliberately strict — name AND date of birth, the same bar the prompts set.
+ * A caller-ID match is not identity: family members, spouses, care homes and
+ * pharmacies all share phones, and every one of the 2026-08-03 disclosures
+ * happened on a call where the phone matched and the person did not.
+ */
+function identityEstablished(s: CallState): boolean {
+  return s.answered.has('full name') && s.answered.has('date of birth');
 }
 
 const EXIT_LINE: Record<string, string> = {
@@ -166,12 +214,44 @@ export class Director {
         asks: new Map(),
         escalation: new Map(),
         spokenDobs: [],
+        recordNames: [],
+        confirmed: new Set(),
         lastAgentLine: '',
         callerSpokeSinceAgent: false,
       };
       this.calls.set(callId, s);
     }
     return s;
+  }
+
+  /**
+   * Tell the director which names came from the RECORD rather than from the
+   * caller's mouth — caller-ID pre-context, a carrier lookup, caller memory.
+   *
+   * LIMITATION, stated plainly: the director sees an agent line from the
+   * assistant transcript, which arrives AFTER the audio has been spoken. It
+   * cannot un-say the first disclosure. What it can do is record it, stop the
+   * agent building on it, and end the call if it keeps going. Preventing the
+   * first one is the prompt's job; catching the prompt failing is this.
+   */
+  seedRecordNames(callId: string, agentSlug: string, names: Array<string | null | undefined>): void {
+    try {
+      const s = this.state(callId, agentSlug);
+      for (const raw of names) {
+        for (const part of String(raw ?? '').split(/[\s,]+/)) {
+          if (guardableName(part) && !s.recordNames.includes(part.toLowerCase())) {
+            s.recordNames.push(part.toLowerCase());
+          }
+        }
+      }
+    } catch {
+      /* the director must never break a call */
+    }
+  }
+
+  /** Test/telemetry view. */
+  guardedNames(callId: string): string[] {
+    return [...(this.calls.get(callId)?.recordNames ?? [])];
   }
 
   release(callId: string | undefined): void {
@@ -212,6 +292,33 @@ export class Director {
       s.lastAgentLine = line;
       s.callerSpokeSinceAgent = false;
 
+      // PRIVACY FIRST. Speaking a name we only know from the record, to a
+      // caller who has not established they are that person, is a disclosure.
+      // 2026-08-03 produced three in one hour: "Hi Fulvia, I see you've called
+      // us before" to a caller who had not yet spoken a word; "Am I speaking
+      // with Mildred?" to a pharmacy rep (wrong person); and "we found records
+      // ... for a different patient, Wayne Fabian" to a caller asking about
+      // their mother. Every prompt involved already forbade it.
+      if (!identityEstablished(s)) {
+        const spoken = s.recordNames.find((n) => new RegExp(`\\b${n}\\b`, 'i').test(line));
+        if (spoken) {
+          const level = this.bump(s, 'disclosure');
+          return this.action(s, 'record_name_disclosed', 'identity', level, {
+            why:
+              `You spoke a name from the record ("${spoken}") to a caller who has NOT stated ` +
+              `their own name and date of birth this call. A phone number is not identity.`,
+            fix:
+              `Do not use any name, appointment, or history from the record until the caller ` +
+              `states their name AND date of birth and they match. Ask them who you are speaking with.`,
+            speak: `Sorry — before we go on, may I get your full name?`,
+            // level + 1: a disclosure starts at 'author', because the words
+            // have already reached the caller's ear by the time we see the
+            // line — a suggestion cannot un-say them. A second one ends the
+            // call rather than let it keep naming people.
+          }, level + 1);
+        }
+      }
+
       // One question at a time.
       if (askCount(line) >= 2) {
         const level = this.bump(s, 'bundled');
@@ -229,8 +336,23 @@ export class Director {
 
       const answer = s.answered.get(topic);
       if (answer) {
-        // The caller already told us. Asking again is the defect that made
-        // tonight's call unbearable — flag on the FIRST repeat, not the third.
+        // ONE read-back is good practice and several prompts require it
+        // ("STILL COLLECT THE DATE OF BIRTH, and read it back before you use
+        // it"). Firing on it produced two false positives on 2026-08-03 —
+        // 12:01:29 and 12:58:28, both a single, correct confirmation. So a
+        // confirmation-SHAPED line gets one free pass per topic; a fresh open
+        // re-ask ("What is your date of birth?" after they gave it) never
+        // does, because that one is always wrong.
+        // A confirmation is a line the DIRECT ask-classifier did not see but
+        // the read-back path did. Testing CONFIRM_INTENT here instead was
+        // wrong: it contains "is your date of birth", which also matches the
+        // fresh open ask "What is your date of birth?" — the one case that
+        // must never get a free pass.
+        const isConfirmation = !classifyAsk(line) && !!classifyAskOrReadback(line);
+        if (isConfirmation && !s.confirmed.has(topic)) {
+          s.confirmed.add(topic);
+          return null;
+        }
         const level = this.bump(s, topic);
         const readable =
           topic === 'date of birth' ? formatDob(answer.value) : answer.value;
@@ -280,11 +402,14 @@ export class Director {
     topic: string,
     level: number,
     parts: { why: string; fix: string; speak?: string },
+    /** Effective level, when a violation must start harder than a hint.
+     *  Defaults to `level`. */
+    effectiveLevel: number = level,
   ): DirectorAction {
     // 1 = suggest. 2 = the model already ignored us once, so take the turn.
     // 3 = it is still looping; end it rather than let the caller suffer.
     const enforcement: DirectorEnforcement =
-      level >= 3 ? 'force_exit' : level >= 2 ? 'author' : 'inject';
+      effectiveLevel >= 3 ? 'force_exit' : effectiveLevel >= 2 ? 'author' : 'inject';
     if (enforcement === 'force_exit') {
       const speak = EXIT_LINE[s.agentSlug] ?? EXIT_LINE.default;
       return {

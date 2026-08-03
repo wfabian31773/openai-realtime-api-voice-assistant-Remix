@@ -1608,6 +1608,15 @@ async function observeCall(
     azulPrecontextPromise = import('./agents/azulSchedulingAgent')
       .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
       .catch(() => null);
+    // Every agent that gets pre-context gets it from HERE, so this is the one
+    // place the director needs to learn which names came from the record
+    // rather than from the caller. Speaking one of these before the caller has
+    // stated their name and DOB is a disclosure — see director.seedRecordNames.
+    void azulPrecontextPromise.then((pc) => {
+      if (pc?.matched && directorEnabledFor(effectiveSlug)) {
+        director.seedRecordNames(callId, effectiveSlug, [pc.firstName, pc.lastNameOnFile]);
+      }
+    });
     // Carrier lookup stays AZUL-ONLY: its whole job is to contradict a bad
     // pre-context match before verify_patient_identity is called, and azul is
     // the only agent that verifies. Fetching it for the fleet would bill a
@@ -1618,6 +1627,12 @@ async function observeCall(
         .catch(() => null);
       void azulCarrierNamePromise.then((n) => {
         azulCarrierName = n;
+        // The carrier subscriber name is record-sourced too — arguably the
+        // least trustworthy source of the three, since it names the account
+        // holder, not whoever picked up.
+        if (n && directorEnabledFor(effectiveSlug)) {
+          director.seedRecordNames(callId, effectiveSlug, [n.replace(/^\[Lookup\]\s*/i, '')]);
+        }
       });
     }
   }
