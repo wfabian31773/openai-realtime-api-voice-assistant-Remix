@@ -75,6 +75,14 @@ interface CallState {
   /** Topics the caller has confirmed once already. One read-back is good
    *  practice; a second is the loop. */
   confirmed: Set<string>;
+  /** Every word the CALLER has spoken, lowercased. Repeating a name back to
+   *  the person who just said it is courtesy, not disclosure — azul's 16:56
+   *  call fired on "Thanks, Gary Raskin" one turn after the caller said
+   *  "Gary Raskin, R-A-S-K-I-N". */
+  callerWords: Set<string>;
+  /** Suppresses a second disclosure action before the caller has had a
+   *  chance to respond to the first (the 17:00 stutter). */
+  disclosureFiredSinceCaller: boolean;
   lastAgentLine: string;
   callerSpokeSinceAgent: boolean;
 }
@@ -96,6 +104,28 @@ const READBACK_TOPICS: Array<[string, RegExp]> = [
   ],
   ['last name', /\bspell(?:ing)?\b[^.?!]{0,40}\b(?:last name|surname|name)\b|\b(?:last name|surname)\b[^.?!]{0,30}\bspell/i],
 ];
+
+/**
+ * "Am I speaking with Elena?" — ASKING whether the caller is the matched
+ * person, rather than ASSERTING that they are.
+ *
+ * This is the sanctioned flow. Every prompt instructs it explicitly ("YOUR
+ * OPENING GREETING ALREADY ASKED 'Am I speaking with {first}?'"), and it
+ * exists so a known patient is not interrogated from scratch. Flagging it
+ * was the single worst thing the director has done: on 2026-08-03 between
+ * 15:00 and 17:00 it fired on 48 real patient calls at `author` enforcement,
+ * cancelling the agent mid-sentence and substituting "Sorry — before we go
+ * on, may I get your full name?" — sometimes twice in a row. The cure was
+ * worse than the disease, and it hit every matched caller rather than the
+ * few where the agent actually volunteered a name.
+ *
+ * Trade-off worth stating plainly: this pattern still tells whoever is
+ * holding the handset that the number is associated with an "Elena". The
+ * practice chose that deliberately. It is not the director's call to
+ * override, so the rule now covers ASSERTIVE use only.
+ */
+const NAME_CONFIRM_QUESTION =
+  /\b(?:am i speaking (?:with|to)|is this|may i ask if (?:this|you)|do i have)\b/i;
 
 const CONFIRM_INTENT =
   /\b(is that (?:correct|right)|did you mean|could you confirm|confirm once more|just to (?:make sure|confirm)|let'?s confirm|double-?check|one more time|is your date of birth)\b/i;
@@ -237,6 +267,8 @@ export class Director {
         spokenDobs: [],
         recordNames: [],
         confirmed: new Set(),
+        callerWords: new Set(),
+        disclosureFiredSinceCaller: false,
         lastAgentLine: '',
         callerSpokeSinceAgent: false,
       };
@@ -290,6 +322,8 @@ export class Director {
       const s = this.state(callId, agentSlug);
       s.turn += 1;
       s.callerSpokeSinceAgent = true;
+      s.disclosureFiredSinceCaller = false;
+      for (const w of line.toLowerCase().match(/[a-z'-]{3,}/g) ?? []) s.callerWords.add(w);
       for (const [field, value] of Object.entries(extractAnswers(line))) {
         // A later answer supersedes an earlier one — corrections must win.
         s.answered.set(field, { value, turn: s.turn });
@@ -320,11 +354,19 @@ export class Director {
       // with Mildred?" to a pharmacy rep (wrong person); and "we found records
       // ... for a different patient, Wayne Fabian" to a caller asking about
       // their mother. Every prompt involved already forbade it.
-      if (!identityEstablished(s)) {
-        const spoken = s.recordNames.find((n) => new RegExp(`\\b${n}\\b`, 'i').test(line));
+      // Three exclusions, every one paid for by a real call:
+      //   - the caller has established who they are (the original rule)
+      //   - the line ASKS rather than asserts ("Am I speaking with Elena?")
+      //   - we already fired and the caller has not spoken since (the stutter)
+      if (!identityEstablished(s) && !NAME_CONFIRM_QUESTION.test(line) && !s.disclosureFiredSinceCaller) {
+        const spoken = s.recordNames.find(
+          // Echoing back a name the caller has already said is courtesy.
+          (n) => !s.callerWords.has(n) && new RegExp(`\\b${n}\\b`, 'i').test(line),
+        );
         // Appointment details are a disclosure too — see EXISTING_APPOINTMENT.
         if (!spoken && EXISTING_APPOINTMENT.test(line) && CONCRETE_WHEN.test(line)) {
           const level = this.bump(s, 'disclosure');
+          s.disclosureFiredSinceCaller = true;
           return this.action(s, 'record_detail_disclosed', 'identity', level, {
             why:
               `You described an appointment from the record to a caller who has NOT stated ` +
@@ -337,6 +379,7 @@ export class Director {
         }
         if (spoken) {
           const level = this.bump(s, 'disclosure');
+          s.disclosureFiredSinceCaller = true;
           return this.action(s, 'record_name_disclosed', 'identity', level, {
             why:
               `You spoke a name from the record ("${spoken}") to a caller who has NOT stated ` +
