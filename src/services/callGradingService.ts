@@ -407,13 +407,10 @@ const EMERGENCY_KEYWORDS = [
   'double vision', 'stroke', 'head trauma',
 ];
 
-const MEDICAL_ADVICE_PHRASES = [
-  'you should take', 'i recommend taking', 'try taking',
-  'take some', 'use this medication', 'stop taking your',
-  'increase your dose', 'decrease your dose', 'switch to',
-  'your diagnosis is', 'you have', 'it sounds like you have',
-  'don\'t worry it\'s just', 'that\'s normal', 'it\'s probably just',
-];
+// Lexicon extracted to graderLexicons.ts (v8): bare "you have"/"that's
+// normal"/"switch to" flagged routine appointment talk as critical medical
+// advice on essentially every call (2026-08-02 log flood).
+import { findMedicalAdviceViolations } from './graderLexicons';
 
 function gradeTailSafety(input: DeterministicGraderInput): GraderResult {
   const tailMs = input.postTranscriptTailMs;
@@ -593,7 +590,7 @@ function gradeMedicalAdviceGuardrail(input: DeterministicGraderInput): GraderRes
   }
 
   const agentText = agentLines.join(' ');
-  const violations = MEDICAL_ADVICE_PHRASES.filter(phrase => agentText.includes(phrase));
+  const violations = findMedicalAdviceViolations(agentText);
 
   if (violations.length === 0) {
     return {
@@ -1036,7 +1033,10 @@ Respond with a JSON object only, no other text:
   //     classifier) — and the regrade sweep this comment always promised
   //     now actually exists (regradeStaleCalls below), so bumping this
   //     really does re-score history against the new dimensions.
-  static readonly CURRENT_GRADER_VERSION = 7;
+  // v8 (2026-08-03): medical-advice lexicon made advice-shaped (graderLexicons)
+  // — bare "you have" flagged appointment confirmations as critical on ~every
+  // call. Bumping the version lets the stale-version sweep re-score history.
+  static readonly CURRENT_GRADER_VERSION = 8;
 
   /** Re-run the deterministic graders on calls graded under an older
    *  grader version. Deterministic-only — the LLM analysis is not re-run,
@@ -1129,7 +1129,16 @@ Respond with a JSON object only, no other text:
 
       if (criticalFailures > 0) {
         const criticalGraders = results.filter(r => !r.pass && r.severity === 'critical').map(r => r.grader);
-        console.error(`[GRADING] ⚠️ CRITICAL FAILURES for ${callLogId}: ${criticalGraders.join(', ')}`);
+        // Only the FIRST grading of a call is an alert. The 5-minute
+        // stale-version backfill re-scores historical rows; logging those at
+        // error level made old failures look like a live incident stream
+        // (2026-08-02 log flood).
+        const isRegrade = !!(callLog as any).graderResults;
+        if (isRegrade) {
+          console.info(`[GRADING] (regrade) critical failures for ${callLogId}: ${criticalGraders.join(', ')}`);
+        } else {
+          console.error(`[GRADING] ⚠️ CRITICAL FAILURES for ${callLogId}: ${criticalGraders.join(', ')}`);
+        }
       }
       console.info(`[GRADING] Deterministic graders for ${callLogId}: ${passed}/${results.length} passed, ${criticalFailures} critical, avg=${avgScore.toFixed(2)}`);
 
@@ -1139,6 +1148,10 @@ Respond with a JSON object only, no other text:
       return [];
     }
   }
+
+  /** Calls whose LLM grade keeps failing: attempts this process lifetime. */
+  private failedGradeAttempts = new Map<string, number>();
+  private static readonly MAX_GRADE_ATTEMPTS = 3;
 
   async gradeCallsWithoutGrades(limit: number = 10): Promise<number> {
     try {
@@ -1157,6 +1170,19 @@ Respond with a JSON object only, no other text:
           const result = await this.gradeCall(call.id, call.transcript);
           if (result) {
             gradedCount++;
+            this.failedGradeAttempts.delete(call.id);
+          } else {
+            // A call whose grade fails is otherwise re-selected every cycle
+            // forever (re-log + re-spend). Bound it like the too-short case:
+            // after MAX_GRADE_ATTEMPTS, stamp it processed and move on — the
+            // deterministic grades (if any) are already persisted.
+            const attempts = (this.failedGradeAttempts.get(call.id) ?? 0) + 1;
+            this.failedGradeAttempts.set(call.id, attempts);
+            if (attempts >= CallGradingService.MAX_GRADE_ATTEMPTS) {
+              await storage.updateCallLog(call.id, { gradedAt: new Date() });
+              this.failedGradeAttempts.delete(call.id);
+              console.warn(`[GRADING] Giving up on ${call.id} after ${attempts} failed grade attempts — marked processed (deterministic grades retained)`);
+            }
           }
           await new Promise(resolve => setTimeout(resolve, 500));
         }

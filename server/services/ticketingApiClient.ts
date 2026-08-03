@@ -1,5 +1,6 @@
 import { getEnvironmentConfig } from '../../src/config/environment';
 import { shadowTap } from '../../src/shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
+import { isNoTicketError } from './ticketingSyncPolicy';
 
 interface CallData {
   callSid?: string;
@@ -323,7 +324,14 @@ export class TicketingApiClient {
       }
 
       if (!response.ok) {
-        console.error(`[TICKETING API] Error ${response.status}:`, data);
+        // A 404 "no ticket found" is deterministic and expected for calls
+        // that never created a ticket (see ticketingSyncPolicy) — info, not
+        // an error dump.
+        if (response.status === 404 && isNoTicketError(String(data?.error ?? ''))) {
+          console.info(`[TICKETING API] 404 no-ticket for ${endpoint} (expected for info-only calls)`);
+        } else {
+          console.error(`[TICKETING API] Error ${response.status}:`, data);
+        }
         shadowTap.emit('n8n_workflow_failed', shadowSession, shadowAgent,
           { endpoint, method, viaGateway: shadowViaGateway, status: response.status, body: body ?? {}, response: data ?? {} },
           { sensitive: true, component: 'ticketingApiClient' });
@@ -578,10 +586,17 @@ export class TicketingApiClient {
 
       return response;
     } catch (error) {
-      console.error("[TICKETING API] ✗ Failed to update ticket call data:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      if (isNoTicketError(message)) {
+        // Deterministic outcome: this call created no ticket, so there is
+        // nothing to enrich. The sync policy handles terminal classification.
+        console.info(`[TICKETING API] No ticket to enrich for callSid ${params.callSid} (expected for info-only calls)`);
+      } else {
+        console.error("[TICKETING API] ✗ Failed to update ticket call data:", error);
+      }
       return {
         success: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
       };
     }
   }
