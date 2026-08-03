@@ -323,14 +323,19 @@ export class ScheduleLookupService {
     }
   }
 
-  async lookupByNameAndDOB(firstName: string, lastName: string, dob: string): Promise<PatientScheduleContext> {
+  async lookupByNameAndDOB(
+    firstName: string,
+    lastName: string,
+    dob: string,
+    options: { logIdentifiers?: boolean } = {},
+  ): Promise<PatientScheduleContext> {
     try {
       const normalizedFirst = firstName.trim().toLowerCase();
       const normalizedLast = lastName.trim().toLowerCase();
       const normalizedDOB = normalizeDOB(dob);
       
       if (!normalizedDOB) {
-        console.warn('[ScheduleLookup] Invalid DOB format:', dob);
+        console.warn(options.logIdentifiers === false ? '[ScheduleLookup] Invalid DOB format' : `[ScheduleLookup] Invalid DOB format: ${dob}`);
         return this.emptyContext();
       }
       
@@ -350,11 +355,15 @@ export class ScheduleLookupService {
         return this.emptyContext();
       }
 
-      console.log(`[ScheduleLookup] Found ${appointments.length} appointments for ${firstName} ${lastName} (DOB: ${normalizedDOB})`);
+      if (options.logIdentifiers === false) {
+        console.log(`[ScheduleLookup] Found ${appointments.length} appointments for verified professional lookup`);
+      } else {
+        console.log(`[ScheduleLookup] Found ${appointments.length} appointments for ${firstName} ${lastName} (DOB: ${normalizedDOB})`);
+      }
       return this.buildContext(appointments, 'name_and_dob');
       
     } catch (error) {
-      console.error('[ScheduleLookup] Error looking up by name and DOB:', error);
+      console.error('[ScheduleLookup] Error looking up by name and DOB:', error instanceof Error ? error.message : 'unknown');
       return this.emptyContext();
     }
   }

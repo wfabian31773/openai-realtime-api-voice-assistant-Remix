@@ -1,6 +1,7 @@
 import { getEnvironmentConfig } from '../../src/config/environment';
 import { shadowTap } from '../../src/shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { isNoTicketError } from './ticketingSyncPolicy';
+import type { PcpTicketPayload, PcpTicketResponse } from '../../src/pcp/pcpTicketing';
 
 interface CallData {
   callSid?: string;
@@ -598,6 +599,21 @@ export class TicketingApiClient {
         success: false,
         error: message,
       };
+    }
+  }
+
+  /** PCP uses a caller-first contract and always bypasses the n8n/patient path. */
+  async createPcpTicket(params: PcpTicketPayload): Promise<PcpTicketResponse> {
+    try {
+      return await this.makeRequest<PcpTicketResponse>(
+        '/api/voice-agent/pcp-ticket',
+        'POST',
+        params,
+        15_000,
+        true,
+      );
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'pcp_ticket_request_failed' };
     }
   }
 

@@ -471,3 +471,11 @@ KEY SPECIALISTS BY SERVICE:
 NOTE: When caller asks about a specific doctor, accept their request. If unknown, document and proceed.
 `;
 }
+
+/** Public-only reference for the PCP line. It intentionally excludes patient,
+ * payer-participation, accessibility, and accommodation assertions. */
+export function buildPcpPublicKnowledgePrompt(): string {
+  return `${buildCompactLocationReference()}\n\n${buildProvidersReference()}\n\n${buildServicesReference()}\n\n` +
+    'PCP SAFETY LIMITS: This reference may answer public location, provider, and service questions only. ' +
+    'It is not authoritative for plan participation, accessibility, accommodations, patient records, or appointment status. Create a PCP Support task for those topics.';
+}
