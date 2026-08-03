@@ -162,3 +162,5 @@ Running log of checkpoint certifications and work units. Times UTC.
 | 2026-08-02 22:00 | Shadow Agent Review card + stored-call replay + mode endpoints | follow-up PR; 277 tests green, tsc clean, client build clean |
 | 2026-08-02 23:25 | GPT-5.6 tier upgrade + live LLM refinement adapter | identifiers verified vs OpenAI docs; routing enabled in .replit; 114 shadow tests |
 | 2026-08-02 23:40 | Production realtime A/B armed: `AZUL_AB_MODEL_B=gpt-realtime-2.1` (azul pilot, pre-existing Phase-7 carriage, env-only) | operator-approved; rollback = unset var |
+| 2026-08-03 09:25 | Director deployed (`DIRECTOR_AGENTS=azul-scheduling,answering-service`) | Replit republish confirmed; `/readyz` green |
+| 2026-08-03 10:00 | **Director telemetry** — interventions persisted to `call_logs.tool_timeline.director`, `director` block on `/api/shadow/status`, Director card on the call detail page | closes the observability gap: the director previously only `console.warn`'d, so "is it ruling on turns?" could only be answered from a deploy log. Verdict only (enforcement/code/field name); `action.text` and `.speak` quote the caller and are never stored. |

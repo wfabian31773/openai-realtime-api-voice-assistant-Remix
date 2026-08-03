@@ -25,6 +25,8 @@ import { db } from '../../server/db';
 import { callLogs } from '../../shared/schema';
 import { eq } from 'drizzle-orm';
 import { shadowTap } from '../shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
+import { callMetadataForDB } from './callMetadataStore';
+import type { DirectorAction } from '../director/director';
 
 export interface AzulToolEvent {
   at: string;               // ISO timestamp
@@ -32,6 +34,24 @@ export interface AzulToolEvent {
   args: Record<string, unknown>;   // REDACTED subset of arguments
   outcome: Record<string, unknown>; // outcome-relevant subset of the result
   ms: number;               // tool latency
+}
+
+/**
+ * One director intervention, in the only form that may leave the call.
+ *
+ * PHI discipline, and it is the whole reason this is a separate type rather
+ * than the DirectorAction itself: `DirectorAction.text` and `.speak` quote the
+ * caller back to themselves — "The caller already gave their date of birth:
+ * \"October 5th, 1983\"" — so both are PHI and NEITHER is stored. What lands
+ * in the database is the verdict only: how hard we pushed, why, and on which
+ * FIELD NAME. `topic` is a field name from ASK_TOPICS ('date of birth', 'last
+ * name', 'bundled'), never a field value.
+ */
+export interface DirectorTimelineAction {
+  at: string;                                        // ISO timestamp
+  enforcement: 'inject' | 'author' | 'force_exit';   // how hard the director pushed
+  code: string;                                      // why, e.g. reask_answered_field
+  topic: string;                                     // WHICH FIELD, never its value
 }
 
 const timelines = new Map<string, {
@@ -45,7 +65,34 @@ const timelines = new Map<string, {
   /** How many events the last successful DB write persisted. A flush is a
    *  no-op when this still equals events.length. */
   flushedCount?: number;
+  /** Director interventions on this call (2026-08-03). Kept beside `events`
+   *  rather than inside it so tool_call_count, the purpose/result classifiers,
+   *  the graders and the shadow replay all keep counting tool calls only. */
+  directorActions?: DirectorTimelineAction[];
+  /** Flush idempotence for the director block, mirroring flushedCount. */
+  flushedDirectorCount?: number;
+  /** When this entry was opened. The reaper used to date an entry by its first
+   *  TOOL event, which leaks any entry that only ever held director actions. */
+  startedAt: number;
 }>();
+
+type TimelineEntry = NonNullable<ReturnType<typeof timelines.get>>;
+
+/** Get or open the entry for a call, and fold in whatever ids we were given. */
+function entryFor(
+  callId: string,
+  ids?: { callSid?: string; callLogId?: string; agentSlug?: string },
+): TimelineEntry {
+  let entry = timelines.get(callId);
+  if (!entry) {
+    entry = { events: [], startedAt: Date.now() };
+    timelines.set(callId, entry);
+  }
+  if (ids?.callSid) entry.callSid = ids.callSid;
+  if (ids?.callLogId) entry.callLogId = ids.callLogId;
+  if (ids?.agentSlug) entry.agentSlug = ids.agentSlug;
+  return entry;
+}
 
 /** Argument keys that are safe to persist per tool (everything else dropped). */
 const SAFE_ARG_KEYS = new Set([
@@ -150,14 +197,7 @@ export function recordAzulToolEvent(
   ids?: { callSid?: string; callLogId?: string; agentSlug?: string },
 ): void {
   if (!callId) return;
-  let entry = timelines.get(callId);
-  if (!entry) {
-    entry = { events: [] };
-    timelines.set(callId, entry);
-  }
-  if (ids?.callSid) entry.callSid = ids.callSid;
-  if (ids?.callLogId) entry.callLogId = ids.callLogId;
-  if (ids?.agentSlug) entry.agentSlug = ids.agentSlug;
+  const entry = entryFor(callId, ids);
   entry.events.push({
     at: new Date().toISOString(),
     tool,
@@ -224,6 +264,57 @@ export function recordingExecute<A, R>(
     }
     return result;
   };
+}
+
+/**
+ * Record a director intervention so it survives the call.
+ *
+ * Until now the director only console.warn'd, which meant the single question
+ * that matters on the morning it went live — "is it actually ruling on turns?"
+ * — could only be answered by scrolling a deploy log. Now every intervention
+ * lands on the call row next to the tool timeline.
+ *
+ * Same contract as the tool recorder: never throws, never blocks, and cannot
+ * change what the director did. This runs AFTER the action has been applied to
+ * the session, so a telemetry failure costs a record, not an intervention.
+ */
+export function recordDirectorAction(
+  callId: string,
+  agentSlug: string,
+  action: Pick<DirectorAction, 'enforcement' | 'code' | 'topic'>,
+): void {
+  try {
+    if (!callId) return;
+    // A call whose director fired before its first tool call has no entry yet,
+    // and a director-only call never gets one from the tool path at all — so
+    // resolve the ids here or the flush has nothing to write against.
+    const meta = callMetadataForDB.get(callId);
+    const entry = entryFor(callId, {
+      callSid: meta?.twilioCallSid,
+      callLogId: meta?.dbCallLogId,
+      agentSlug: agentSlug || meta?.agentSlug,
+    });
+    (entry.directorActions ??= []).push({
+      at: new Date().toISOString(),
+      enforcement: action.enforcement,
+      code: action.code,
+      topic: action.topic,
+    });
+  } catch (e) {
+    console.error('[DIRECTOR] timeline record failed:', e);
+  }
+}
+
+/** Live view of director interventions (active calls + tests). */
+export function getDirectorActions(callIdOrSid: string): DirectorTimelineAction[] {
+  const direct = timelines.get(callIdOrSid);
+  if (direct) return direct.directorActions ?? [];
+  for (const entry of timelines.values()) {
+    if (entry.callSid === callIdOrSid || entry.callLogId === callIdOrSid) {
+      return entry.directorActions ?? [];
+    }
+  }
+  return [];
 }
 
 /** Live view for the SD Pilot dashboard (active calls). */
@@ -345,7 +436,10 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
   // is how it was first read. The events were never lost in memory — only the
   // row was. Keeping the entry means late events append and every subsequent
   // flush writes a superset. The 2h reaper below owns deletion.
-  if (entry.flushedCount === entry.events.length) return; // nothing new since last write
+  const directorCount = entry.directorActions?.length ?? 0;
+  if (entry.flushedCount === entry.events.length && (entry.flushedDirectorCount ?? 0) === directorCount) {
+    return; // nothing new since last write
+  }
   try {
     const { purpose, result } = classifyForAgent(entry.agentSlug, entry.events);
     // A/B carriage arm (Phase 7): stamped on call metadata at session
@@ -355,6 +449,22 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
       const { callMetadataForDB } = await import('./callMetadataStore');
       abArm = (callMetadataForDB.get(key) as { abArm?: string } | undefined)?.abArm;
     } catch { /* optional */ }
+    // Director block. Present only when the director actually intervened, so
+    // `tool_timeline->'director' IS NOT NULL` is the "did the reasoning layer
+    // do anything on this call?" query, and `maxEnforcement` is the severity
+    // to sort a review queue by.
+    const director = directorCount
+      ? {
+          count: directorCount,
+          maxEnforcement: ['inject', 'author', 'force_exit'].reduce(
+            (worst, level) =>
+              entry!.directorActions!.some((a) => a.enforcement === level) ? level : worst,
+            'inject',
+          ),
+          topics: [...new Set(entry.directorActions!.map((a) => a.topic))],
+          actions: entry.directorActions,
+        }
+      : null;
     const payload = {
       events: entry.events,
       purpose,
@@ -362,6 +472,7 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
       toolCallCount: entry.events.length,
       ...(entry.agentSlug ? { agentSlug: entry.agentSlug } : {}),
       ...(abArm ? { abArm } : {}),
+      ...(director ? { director } : {}),
     };
     if (entry.callLogId) {
       await db.update(callLogs)
@@ -373,7 +484,11 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
         .where(eq(callLogs.callSid, entry.callSid));
     }
     entry.flushedCount = entry.events.length;
-    console.info(`[TOOL-TIMELINE] ${entry.agentSlug ?? 'azul-scheduling'}: flushed ${entry.events.length} tool event(s) (${purpose} → ${result})`);
+    entry.flushedDirectorCount = directorCount;
+    console.info(
+      `[TOOL-TIMELINE] ${entry.agentSlug ?? 'azul-scheduling'}: flushed ${entry.events.length} tool event(s) (${purpose} → ${result})` +
+        (director ? ` + ${director.count} director action(s), max ${director.maxEnforcement}` : ''),
+    );
     // Phase 7: rubric pass with the just-persisted events. Forced because
     // grade-then-flush ordering would otherwise leave a rubric graded with an
     // empty timeline; the gradeCall-side pass is forced too, so whichever
@@ -402,9 +517,14 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
 setInterval(() => {
   const cutoff = Date.now() - 2 * 60 * 60 * 1000;
   for (const [callId, entry] of timelines.entries()) {
-    const first = entry.events[0];
-    if (!first || new Date(first.at).getTime() >= cutoff) continue;
-    if (entry.flushedCount === entry.events.length) {
+    // Age by when the entry was OPENED, not by its first tool event: an entry
+    // holding only director actions has no tool event to date it by, and the
+    // old `!first → continue` left it in the map forever.
+    if (entry.startedAt >= cutoff) continue;
+    if (
+      entry.flushedCount === entry.events.length &&
+      (entry.flushedDirectorCount ?? 0) === (entry.directorActions?.length ?? 0)
+    ) {
       timelines.delete(callId); // already durable — just free it
     } else {
       void flushAzulTimeline(callId).finally(() => timelines.delete(callId));
