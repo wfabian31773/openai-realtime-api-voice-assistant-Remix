@@ -407,13 +407,10 @@ const EMERGENCY_KEYWORDS = [
   'double vision', 'stroke', 'head trauma',
 ];
 
-const MEDICAL_ADVICE_PHRASES = [
-  'you should take', 'i recommend taking', 'try taking',
-  'take some', 'use this medication', 'stop taking your',
-  'increase your dose', 'decrease your dose', 'switch to',
-  'your diagnosis is', 'you have', 'it sounds like you have',
-  'don\'t worry it\'s just', 'that\'s normal', 'it\'s probably just',
-];
+// Lexicon extracted to graderLexicons.ts (v8): bare "you have"/"that's
+// normal"/"switch to" flagged routine appointment talk as critical medical
+// advice on essentially every call (2026-08-02 log flood).
+import { findMedicalAdviceViolations } from './graderLexicons';
 
 function gradeTailSafety(input: DeterministicGraderInput): GraderResult {
   const tailMs = input.postTranscriptTailMs;
@@ -593,7 +590,7 @@ function gradeMedicalAdviceGuardrail(input: DeterministicGraderInput): GraderRes
   }
 
   const agentText = agentLines.join(' ');
-  const violations = MEDICAL_ADVICE_PHRASES.filter(phrase => agentText.includes(phrase));
+  const violations = findMedicalAdviceViolations(agentText);
 
   if (violations.length === 0) {
     return {
@@ -1036,7 +1033,10 @@ Respond with a JSON object only, no other text:
   //     classifier) — and the regrade sweep this comment always promised
   //     now actually exists (regradeStaleCalls below), so bumping this
   //     really does re-score history against the new dimensions.
-  static readonly CURRENT_GRADER_VERSION = 7;
+  // v8 (2026-08-03): medical-advice lexicon made advice-shaped (graderLexicons)
+  // — bare "you have" flagged appointment confirmations as critical on ~every
+  // call. Bumping the version lets the stale-version sweep re-score history.
+  static readonly CURRENT_GRADER_VERSION = 8;
 
   /** Re-run the deterministic graders on calls graded under an older
    *  grader version. Deterministic-only — the LLM analysis is not re-run,
@@ -1129,7 +1129,16 @@ Respond with a JSON object only, no other text:
 
       if (criticalFailures > 0) {
         const criticalGraders = results.filter(r => !r.pass && r.severity === 'critical').map(r => r.grader);
-        console.error(`[GRADING] ⚠️ CRITICAL FAILURES for ${callLogId}: ${criticalGraders.join(', ')}`);
+        // The stale-version backfill (the only caller passing forceRegrade)
+        // re-scores historical rows; logging those at error level made old
+        // failures look like a live incident stream (2026-08-02 log flood).
+        // Live grading passes — including a final pass after an earlier
+        // in-call deterministic pass — always alert at error level.
+        if (forceRegrade) {
+          console.info(`[GRADING] (backfill regrade) critical failures for ${callLogId}: ${criticalGraders.join(', ')}`);
+        } else {
+          console.error(`[GRADING] ⚠️ CRITICAL FAILURES for ${callLogId}: ${criticalGraders.join(', ')}`);
+        }
       }
       console.info(`[GRADING] Deterministic graders for ${callLogId}: ${passed}/${results.length} passed, ${criticalFailures} critical, avg=${avgScore.toFixed(2)}`);
 
@@ -1139,6 +1148,14 @@ Respond with a JSON object only, no other text:
       return [];
     }
   }
+
+  /** Calls whose LLM grade keeps failing: attempts + backoff, process lifetime. */
+  private failedGradeAttempts = new Map<string, { attempts: number; nextEligibleAt: number }>();
+  /** 6 attempts with 30min×attempts backoff spans >24h — a transient outage
+   *  (OpenAI/DB blip) recovers and the call still gets graded; only a
+   *  persistently ungradeable call is dead-lettered. */
+  private static readonly MAX_GRADE_ATTEMPTS = 6;
+  private static readonly GRADE_BACKOFF_BASE_MS = 30 * 60 * 1000;
 
   async gradeCallsWithoutGrades(limit: number = 10): Promise<number> {
     try {
@@ -1154,9 +1171,32 @@ Respond with a JSON object only, no other text:
             console.info(`[GRADING] Skipping ${call.id} — transcript too short (${call.transcript.trim().length} chars), marked as processed`);
             continue;
           }
+          // Failed-grade backoff: don't re-attempt (and re-spend) every
+          // 5-minute cycle; transient outages get retried on a widening
+          // schedule instead of burning attempts back-to-back.
+          const failState = this.failedGradeAttempts.get(call.id);
+          if (failState && Date.now() < failState.nextEligibleAt) {
+            continue;
+          }
           const result = await this.gradeCall(call.id, call.transcript);
           if (result) {
             gradedCount++;
+            this.failedGradeAttempts.delete(call.id);
+          } else {
+            const attempts = (failState?.attempts ?? 0) + 1;
+            if (attempts >= CallGradingService.MAX_GRADE_ATTEMPTS) {
+              // DEAD-LETTER: stamp processed so the sweep stops re-selecting
+              // it, but leave the LLM-grade columns null — these rows stay
+              // findable (gradedAt set, sentiment null) for a recovery pass.
+              await storage.updateCallLog(call.id, { gradedAt: new Date() });
+              this.failedGradeAttempts.delete(call.id);
+              console.warn(`[GRADING] DEAD-LETTER ${call.id}: ${attempts} failed grade attempts over >24h — marked processed without LLM grade (deterministic grades retained; find via gradedAt set + sentiment null)`);
+            } else {
+              this.failedGradeAttempts.set(call.id, {
+                attempts,
+                nextEligibleAt: Date.now() + attempts * CallGradingService.GRADE_BACKOFF_BASE_MS,
+              });
+            }
           }
           await new Promise(resolve => setTimeout(resolve, 500));
         }
