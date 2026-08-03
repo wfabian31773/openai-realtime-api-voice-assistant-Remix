@@ -793,6 +793,68 @@ function logHistoryItem(item: RealtimeItem, callId?: string): void {
   }
 }
 
+/**
+ * The urgent-escalation safety net: whatever happened to the transfer, the
+ * patient ends up as an URGENT ticket somebody has to work.
+ *
+ * Shared by both failure paths. It used to cover only "the human did not
+ * answer"; a dial that THREW — Twilio down, circuit breaker open, an
+ * unroutable number — returned silently and left the urgent caller existing
+ * nowhere but a console line. Same net under both.
+ */
+async function fileUrgentHandoffFallbackTicket(
+  openAiCallId: string,
+  escalationDetails: { reason?: string; symptomsSummary?: string; patientFirstName?: string; patientLastName?: string } | undefined,
+  callerID: string | null | undefined,
+  ctx: { why: string; dialTarget?: string },
+): Promise<void> {
+  console.warn(`[HANDOFF] Creating urgent fallback ticket — ${ctx.why}`);
+  try {
+    const { SyncAgentService } = await import('./services/syncAgentService');
+    const { AFTER_HOURS_DEPARTMENT_ID, TRIAGE_OUTCOME_MAPPINGS } = await import('./config/afterHoursTicketing');
+
+    const urgentMapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // generic urgent
+    const patientFirst = escalationDetails?.patientFirstName || 'Unknown';
+    const patientLast = escalationDetails?.patientLastName || 'Caller';
+    const rawPhone = callerID || '';
+    const digits = rawPhone.replace(/\D/g, '');
+    const formattedPhone = digits.length === 10
+      ? `+1${digits}`
+      : rawPhone.startsWith('+') ? rawPhone : `+${digits}`;
+
+    const descParts: string[] = [ctx.why, 'Please call the patient back immediately.'];
+    if (ctx.dialTarget) descParts.push(`Attempted transfer to: ${ctx.dialTarget}`);
+    if (escalationDetails?.reason) descParts.push(`Reason: ${escalationDetails.reason}`);
+    if (escalationDetails?.symptomsSummary) descParts.push(`Symptoms: ${escalationDetails.symptomsSummary}`);
+
+    const conferenceName = getConferenceName(openAiCallId);
+    const ticketResult = await SyncAgentService.createTicket({
+      departmentId: AFTER_HOURS_DEPARTMENT_ID,
+      requestTypeId: urgentMapping.requestTypeId,
+      requestReasonId: urgentMapping.requestReasonId,
+      patientFirstName: patientFirst,
+      patientLastName: patientLast,
+      patientPhone: formattedPhone,
+      description: descParts.join('\n'),
+      priority: 'urgent',
+      callData: {
+        callSid: conferenceName ? getTwilioCallSid(conferenceName) : undefined,
+        callerPhone: callerID || undefined,
+        // Label with the agent actually on the call, not a hardcoded slug.
+        agentUsed: callMetadataForDB.get(openAiCallId)?.agentSlug || 'after-hours',
+      },
+    });
+
+    if (ticketResult.success) {
+      console.log('[HANDOFF] ✓ Urgent fallback ticket created:', ticketResult.ticketNumber);
+    } else {
+      console.error('[HANDOFF] ✗ Urgent fallback ticket creation failed:', ticketResult.error);
+    }
+  } catch (ticketErr) {
+    console.error('[HANDOFF] ✗ Exception creating urgent fallback ticket:', ticketErr);
+  }
+}
+
 // Handle human agent handoff
 async function addHumanAgent(openAiCallId: string): Promise<void> {
   // Use wrapper function that checks both legacy maps and service cache
@@ -827,7 +889,7 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
   console.log('\n========================================');
   console.log(`[HANDOFF] ✓ Validated - Transferring to human agent`);
   console.log(`   Conference: ${conferenceName}`);
-  console.log(`   Human Number: ${HUMAN_AGENT_NUMBER}`);
+  console.log(`   On-call fallback: ${HUMAN_AGENT_NUMBER}`);
   if (escalationDetails) {
     console.log(`   Reason: ${escalationDetails.reason || 'Not specified'}`);
     console.log(`   Caller Type: ${escalationDetails.callerType || 'Unknown'}`);
@@ -846,6 +908,22 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
     console.error('[HANDOFF] ✗ Missing callerID');
     return;
   }
+
+  // WHERE the urgent call goes. Until 2026-08-03 this was always the global
+  // HUMAN_AGENT_NUMBER (the operator's mobile), at any hour, for any location.
+  // Operator directive: reach the OFFICE directly during business hours, keep
+  // on-call outside them, urgent ticket as the fallback either way. The
+  // resolver degrades to HUMAN_AGENT_NUMBER on every failure path, so this is
+  // never worse than the behaviour it replaces.
+  const { resolveUrgentTransferTarget } = await import('./services/urgentTransfer');
+  const target = await resolveUrgentTransferTarget({
+    reason: escalationDetails?.reason ?? 'urgent escalation',
+    callerPhone: callerID || undefined,
+    onCallNumber: HUMAN_AGENT_NUMBER,
+  });
+  const dialTarget = target?.number ?? HUMAN_AGENT_NUMBER;
+
+  console.log(`[HANDOFF] Dialing ${dialTarget} (${target?.source ?? 'on_call_default'}${target?.queueLabel ? ` — ${target.queueLabel}` : ''})`);
 
   try {
     // Initialize Twilio client if not already done
@@ -942,8 +1020,8 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
       const handoffResult = await withResiliency(
         async () => twilioClient.conferences(conferenceName).participants.create({
           from: twilioPhoneNumber,
-          to: HUMAN_AGENT_NUMBER,
-          label: 'human agent',
+          to: dialTarget,
+          label: target?.source === 'office_queue' ? 'office queue' : 'human agent',
           // Operator-specified UX (2026-07-22, applies to ALL transfers):
           // no pre-answer ringback into the conference — the caller hears
           // the agent, then the human, never the raw ring.
@@ -986,8 +1064,15 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
       });
     } catch (dialError) {
       console.error('[HANDOFF] ✗ Failed to dial human agent:', dialError);
-      // AI is still connected - caller is not stranded
-      // Don't throw - let the AI continue the conversation
+      // The AI is still connected, so the caller is not stranded mid-air —
+      // but until 2026-08-03 this path left NO RECORD AT ALL. A no-answer
+      // filed an urgent fallback ticket; a dial that threw (Twilio down,
+      // circuit breaker open, bad number) filed nothing, and the urgent
+      // caller existed only in a console line. Same fallback, both paths.
+      void fileUrgentHandoffFallbackTicket(openAiCallId, escalationDetails, callerID, {
+        why: `Transfer dial failed: ${dialError instanceof Error ? dialError.message : String(dialError)}`,
+        dialTarget,
+      });
       return;
     }
 
@@ -1004,60 +1089,10 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
         handoffReadyResolvers.delete(humanCallSid);
       }
 
-      // CREATE FALLBACK TICKET: Human didn't answer — create an urgent callback ticket
-      // so staff knows to call the patient back
-      console.warn('[HANDOFF] Creating fallback ticket because human did not answer the transfer');
-      try {
-        const { SyncAgentService } = await import('./services/syncAgentService');
-        const { AFTER_HOURS_DEPARTMENT_ID, TRIAGE_OUTCOME_MAPPINGS } = await import('./config/afterHoursTicketing');
-
-        // Use escalationDetails if available, otherwise fall back to minimal info
-        const urgentMapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // generic urgent
-        const patientFirst = escalationDetails?.patientFirstName || 'Unknown';
-        const patientLast  = escalationDetails?.patientLastName  || 'Caller';
-        const rawPhone     = callerID || '';
-        const formattedPhone = rawPhone.replace(/\D/g, '').length === 10
-          ? `+1${rawPhone.replace(/\D/g, '')}`
-          : rawPhone.startsWith('+') ? rawPhone : `+${rawPhone.replace(/\D/g, '')}`;
-
-        const descParts: string[] = [
-          'URGENT TRANSFER NOT ANSWERED: The patient was transferred to the on-call team but no one picked up.',
-          'Please call the patient back immediately.',
-        ];
-        if (escalationDetails?.reason) {
-          descParts.push(`Reason: ${escalationDetails.reason}`);
-        }
-        if (escalationDetails?.symptomsSummary) {
-          descParts.push(`Symptoms: ${escalationDetails.symptomsSummary}`);
-        }
-
-        const ticketResult = await SyncAgentService.createTicket({
-          departmentId: AFTER_HOURS_DEPARTMENT_ID,
-          requestTypeId: urgentMapping.requestTypeId,
-          requestReasonId: urgentMapping.requestReasonId,
-          patientFirstName: patientFirst,
-          patientLastName: patientLast,
-          patientPhone: formattedPhone,
-          description: descParts.join('\n'),
-          priority: 'urgent',
-          callData: {
-            callSid: getTwilioCallSid(conferenceName),
-            callerPhone: callerID,
-            // This shared fallback fires for ANY agent whose transfer went
-            // unanswered — label the ticket with the agent actually on the
-            // call (no-ivr in production) instead of a hardcoded slug.
-            agentUsed: callMetadataForDB.get(openAiCallId)?.agentSlug || 'after-hours',
-          },
-        });
-
-        if (ticketResult.success) {
-          console.log('[HANDOFF] ✓ Fallback ticket created:', ticketResult.ticketNumber);
-        } else {
-          console.error('[HANDOFF] ✗ Fallback ticket creation failed:', ticketResult.error);
-        }
-      } catch (ticketErr) {
-        console.error('[HANDOFF] ✗ Exception creating fallback ticket:', ticketErr);
-      }
+      await fileUrgentHandoffFallbackTicket(openAiCallId, escalationDetails, callerID, {
+        why: 'URGENT TRANSFER NOT ANSWERED: The patient was transferred but no one picked up.',
+        dialTarget,
+      });
 
       return;
     }
