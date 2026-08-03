@@ -34,7 +34,7 @@ import { resolveAbAssignment } from './services/abCarriage';
 import { director, directorEnabledFor, type DirectorAction } from './director/director';
 import { getEnvironmentConfig } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
-import { resolveHandoffDestination } from './services/handoffPolicy';
+import { resolveHandoffDestination, resolvePcpDialSequence } from './services/handoffPolicy';
 import { pcpAgentConfig } from './agents/pcpAgent';
 
 // Load centralized environment configuration
@@ -62,6 +62,8 @@ try {
       phoneNumber: process.env.TWILIO_PHONE_NUMBER,
       humanAgentNumber: process.env.HUMAN_AGENT_NUMBER,
       pcpHumanAgentNumber: process.env.PCP_HUMAN_AGENT_NUMBER,
+      pcpAgentDids: (process.env.PCP_AGENT_DIDS || '').split(',').map((number) => number.trim()).filter(Boolean),
+      pcpRoutingMode: process.env.PCP_ROUTING_MODE === 'sequential' ? 'sequential' : 'queue',
       urgentNotificationNumber: process.env.URGENT_NOTIFICATION_NUMBER,
     },
     ticketing: {
@@ -824,7 +826,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     console.warn(`[HANDOFF]   Policy reason: ${policy.reason}`);
     return { ok: false, status: 'HANDOFF_UNAVAILABLE', reason: policy.reason };
   }
-  const handoffDestination = policy.destination;
+  let handoffDestination = policy.destination;
   
   console.log('\n========================================');
   console.log(`[HANDOFF] ✓ Validated - Transferring to human agent`);
@@ -867,6 +869,14 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       throw new Error('TWILIO_PHONE_NUMBER environment variable not set');
     }
     console.log(`[HANDOFF] Using Twilio phone number: ${twilioPhoneNumber}`);
+
+    const pcpDialSequence = policy.policy === 'pcp'
+      ? resolvePcpDialSequence({
+          mode: envConfig.twilio.pcpRoutingMode,
+          queueNumber: envConfig.twilio.pcpHumanAgentNumber,
+          agentDids: envConfig.twilio.pcpAgentDids,
+        })
+      : [];
     
     // STEP 1: Send SMS notification immediately (fire and forget)
     // Provider gets heads-up while we're dialing them
@@ -922,6 +932,50 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       console.log('[HANDOFF] ℹ️ SMS notification skipped - URGENT_NOTIFICATION_NUMBER not configured');
     }
     
+    let sequentialPcpAnswered = false;
+    if (policy.policy === 'pcp' && envConfig.twilio.pcpRoutingMode === 'sequential') {
+      if (pcpDialSequence.length === 0) return { ok: false, status: 'HANDOFF_UNAVAILABLE', reason: 'pcp_agent_dids_not_configured' };
+      const statusCallbackUrl = `https://${envConfig.domain}/api/voice/handoff-status`;
+      for (let index = 0; index < pcpDialSequence.length; index += 1) {
+        const destination = pcpDialSequence[index];
+        console.log(`[HANDOFF] PCP sequential attempt ${index + 1}/${pcpDialSequence.length}`);
+        try {
+          const participant = await twilioClient.conferences(conferenceName).participants.create({
+            from: twilioPhoneNumber,
+            to: destination,
+            label: `pcp-agent-${index + 1}`,
+            earlyMedia: false,
+            endConferenceOnExit: true,
+            statusCallback: statusCallbackUrl,
+            statusCallbackEvent: ['answered', 'completed'],
+            timeout: 20,
+          });
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(async () => {
+              handoffReadyResolvers.delete(participant.callSid);
+              try { await twilioClient!.calls(participant.callSid).update({ status: 'completed' }); } catch { /* already ended */ }
+              reject(new Error('PCP agent did not answer within 20 seconds'));
+            }, 22000);
+            handoffReadyResolvers.set(participant.callSid, {
+              resolve: () => { clearTimeout(timer); resolve(); },
+              reject: (error) => { clearTimeout(timer); reject(error); },
+              openAiCallId,
+              conferenceName,
+              callLogId: callMetadataForDB.get(openAiCallId)?.dbCallLogId,
+            });
+          });
+          handoffDestination = destination;
+          sequentialPcpAnswered = true;
+          console.log(`[HANDOFF] ✓ PCP sequential attempt ${index + 1} answered`);
+          break;
+        } catch (error) {
+          console.warn(`[HANDOFF] PCP sequential attempt ${index + 1} was not answered`, error);
+        }
+      }
+      if (!sequentialPcpAnswered) return { ok: false, status: 'NO_ANSWER', reason: 'pcp_sequence_no_answer' };
+    }
+
+    if (!sequentialPcpAnswered) {
     // STEP 2: Dial human agent into the conference WHILE AI is still connected
     // Use statusCallback to know when human actually answers
     console.log('[HANDOFF] Step 1: Dialing human agent into conference (AI still connected)...');
@@ -1071,6 +1125,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       }
 
       return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer' };
+    }
     }
     
     // STEP 4: Disconnect AI agent ONLY AFTER human successfully answers
@@ -1869,7 +1924,7 @@ async function observeCall(
       }
 
       case 'pcp':
-        factoryResult = agentFactory(handoffCallback, {
+        factoryResult = agentFactory(() => addHumanAgent(callId), {
           callId,
           callSid: twilioCallSid,
           callerPhone: from,
