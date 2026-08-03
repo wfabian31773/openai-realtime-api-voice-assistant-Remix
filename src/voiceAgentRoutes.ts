@@ -31,6 +31,7 @@ import { registerTicketingSyncRoutes } from './voiceAgent';
 import './services/azulRegressionWatch'; // Phase 7: daily grade-regression check (side-effect timers)
 import { shadowTap } from './shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { resolveAbAssignment } from './services/abCarriage';
+import { director, directorEnabledFor, type DirectorAction } from './director/director';
 import { getEnvironmentConfig } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 
@@ -644,6 +645,53 @@ function sendLoopGuardDirective(session: any, callId: string, directive: LoopGua
     console.warn(`[LOOP-GUARD] ${directive.kind}${directive.topic ? `:${directive.topic}` : ''} injected for ${callId}`);
   } catch (e) {
     console.error(`[LOOP-GUARD] failed to inject directive for ${callId}:`, e);
+  }
+}
+
+/**
+ * Apply a director decision to the live session.
+ *
+ * 'inject' is the existing loop-guard mechanism: a system message the model
+ * MAY heed. Call afb1e688 proved it may also ignore it — the guard fired on
+ * the third date-of-birth ask and the model asked four more times.
+ *
+ * 'author' and 'force_exit' therefore stop asking and take the turn: cancel
+ * whatever the model is saying, state the required words as a system
+ * instruction, and drive a fresh response with those instructions. The caller
+ * hears one clean sentence instead of the seventh repeat of a question they
+ * already answered.
+ */
+function applyDirectorAction(session: any, callId: string, action: DirectorAction): void {
+  try {
+    const transport = session?.transport as any;
+    if (!transport?.sendEvent) return;
+
+    transport.sendEvent({
+      type: 'conversation.item.create',
+      item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: action.text }] },
+    });
+
+    if (action.enforcement !== 'inject') {
+      // Cut the in-flight utterance. Mid-loop this is a mercy: the model is
+      // repeating a question the caller has already answered.
+      try {
+        transport.sendEvent({ type: 'response.cancel' });
+      } catch { /* nothing in flight — fine */ }
+      transport.sendEvent({
+        type: 'response.create',
+        response: {
+          instructions:
+            `${action.text}\n\nSpeak ONLY this, verbatim, then stop: "${action.speak}"`,
+        },
+      });
+    }
+
+    console.warn(
+      `[DIRECTOR] ${action.enforcement}:${action.code}:${action.topic} applied for ${callId}`,
+    );
+  } catch (e) {
+    // A director failure must never break a call.
+    console.error(`[DIRECTOR] failed to apply action for ${callId}:`, e);
   }
 }
 
@@ -2136,6 +2184,12 @@ async function observeCall(
         const lgCallerDirective = conversationLoopGuard.onCallerLine(callId, effectiveSlug, transcript);
         if (lgCallerDirective) sendLoopGuardDirective(session, callId, lgCallerDirective);
 
+        // Director: bank what the caller just told us, so re-asking it is
+        // detectable on the FIRST repeat rather than the third.
+        if (directorEnabledFor(effectiveSlug)) {
+          director.observeCaller(callId, effectiveSlug, transcript);
+        }
+
         // AIRCALL WORKAROUND: Auto-press "1" to accept forwarded calls
         // AirCall plays "Press 1 to answer" when forwarding to external numbers
         // Detect this prompt and automatically send DTMF tone to accept the call
@@ -2215,6 +2269,14 @@ async function observeCall(
         // Loop guard: a third same-topic ask trips the re-ask directive.
         const lgAgentDirective = conversationLoopGuard.onAgentLine(callId, effectiveSlug, transcript);
         if (lgAgentDirective) sendLoopGuardDirective(session, callId, lgAgentDirective);
+
+        // Director: the reasoning layer rules on this turn. Unlike the loop
+        // guard it knows what the caller has already ANSWERED, and it escalates
+        // past suggestion when the model ignores it (afb1e688).
+        if (directorEnabledFor(effectiveSlug)) {
+          const decision = director.observeAgent(callId, effectiveSlug, transcript);
+          if (decision) applyDirectorAction(session, callId, decision);
+        }
       }
     } else if (eventType === 'response.done') {
       // Also capture from response.done which contains output items
@@ -3111,6 +3173,7 @@ async function observeCall(
     callTranscripts.delete(callId);
     conversationLoopGuard.releaseCall(callId);
     void import('./services/identityArgGuard').then(({ releaseIdentityGuard }) => releaseIdentityGuard(callId));
+    director.release(callId);
     
     // Clean up conference mappings to prevent stale entries
     // Use wrapper for restart recovery - may find session in service cache

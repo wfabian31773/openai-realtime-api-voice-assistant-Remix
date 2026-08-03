@@ -211,9 +211,56 @@ interface Attempt {
 }
 
 const attempts = new Map<string, Attempt>();
+/** Verification attempts that actually reached the service, per call. */
+const attemptCounts = new Map<string, number>();
+
+/** After this many real verification attempts, stop trying and hand off.
+ *  Call afb1e688 (2026-08-03) burned four attempts and ten minutes on a
+ *  name that could never match; the caller was swearing by minute three. */
+export const MAX_IDENTITY_ATTEMPTS = 3;
+
+/**
+ * Did the model invent a first name the caller never said?
+ *
+ * Call afb1e688 (2026-08-03): caller-ID pre-context matched the phone to
+ * "Wayne Fabian". The caller said "Ferreras, Pedro". The model sent
+ * firstName "Wayne" (from pre-context) with lastName "Herreras" (a
+ * mis-transcription of what the caller said) — a person who does not
+ * exist, assembled from two different people. It could never match, so the
+ * agent looped until the caller gave up.
+ *
+ * The rule: once the caller states a first name, THEIR word wins. Pre-context
+ * is only a hint for a caller who hasn't said anything yet.
+ */
+export function firstNameContradicted(
+  sentFirstName: string | undefined,
+  callerText: string,
+): { conflict: boolean; callerSaid?: string } {
+  if (!sentFirstName) return { conflict: false };
+  const sent = nameTokens(sentFirstName)[0];
+  if (!sent) return { conflict: false };
+  const said = callerText.toUpperCase();
+  // The caller said it at some point → not a contradiction, whatever else
+  // is in the transcript.
+  if (new RegExp(`\\b${sent}\\b`).test(said)) return { conflict: false };
+
+  // The caller never said it. Only call that a conflict when they clearly
+  // offered a DIFFERENT first name, so a silent/garbled caller doesn't trip it.
+  const introduced =
+    callerText.match(/\b(?:my name is|this is|i'?m|it'?s|name'?s)\s+([A-Za-z]{2,})/i) ??
+    // "Ferreras, Pedro" / "Ferreras Pedro" — surname-first, as spoken here.
+    callerText.match(/\b([A-Za-z]{2,})\s*,\s*([A-Za-z]{2,})\b/);
+  if (!introduced) return { conflict: false };
+  const candidate = (introduced[2] ?? introduced[1] ?? '').toUpperCase();
+  if (!candidate || candidate === sent) return { conflict: false };
+  return { conflict: true, callerSaid: candidate };
+}
 
 export function releaseIdentityGuard(callId: string | undefined): void {
-  if (callId) attempts.delete(callId);
+  if (callId) {
+    attempts.delete(callId);
+    attemptCounts.delete(callId);
+  }
 }
 
 /** Exposed for tests. */
@@ -230,7 +277,12 @@ export interface IdentityGuardVerdict {
   note?: string;
   /** Args to actually send, with a caller-contradicted DOB left untouched —
    *  we never silently rewrite an identity field; we make the model redo it. */
-  telemetry: { dobConflict: boolean; retryBlocked: boolean };
+  telemetry: {
+    dobConflict: boolean;
+    retryBlocked: boolean;
+    firstNameConflict?: boolean;
+    attemptsExhausted?: boolean;
+  };
 }
 
 /** The single gate in front of verify_patient_identity. */
@@ -241,6 +293,36 @@ export function guardIdentityArgs(
 ): IdentityGuardVerdict {
   const said = callerSpeech(transcript);
   const prev = callId ? attempts.get(callId) : undefined;
+  const soFar = callId ? attemptCounts.get(callId) ?? 0 : 0;
+
+  // Stop the call from dying by a thousand retries. Three real attempts is
+  // already more than a person tolerates (afb1e688: four attempts, ten
+  // minutes, caller swearing).
+  if (soFar >= MAX_IDENTITY_ATTEMPTS) {
+    return {
+      blocked: true,
+      instruction:
+        `${MAX_IDENTITY_ATTEMPTS} verification attempts have already failed on this call. Do NOT try again ` +
+        `and do NOT ask for the name or date of birth another time. Say: "I'm not able to find you in the ` +
+        `system, and I don't want to keep you any longer — let me get you to someone who can sort this out." ` +
+        `Then call sage_handoff with reason patient_identity_uncertain.`,
+      telemetry: { dobConflict: false, retryBlocked: true, attemptsExhausted: true },
+    };
+  }
+
+  // The caller's own first name beats caller-ID pre-context, always.
+  const fn = firstNameContradicted(args.firstName, said);
+  if (fn.conflict) {
+    return {
+      blocked: true,
+      instruction:
+        `You are sending firstName "${args.firstName}", but the caller said their first name is ` +
+        `"${fn.callerSaid}". The number we recognized belongs to someone else — a first name from ` +
+        `caller-ID combined with a last name from this caller is a person who does not exist and can ` +
+        `never match. Resend with firstName "${fn.callerSaid}" and the last name THEY gave.`,
+      telemetry: { dobConflict: false, retryBlocked: false, firstNameConflict: true },
+    };
+  }
 
   const dob = args.dateOfBirth ? checkDob(String(args.dateOfBirth), said) : { conflict: false } as DobCheck;
   if (dob.conflict) {
@@ -265,10 +347,18 @@ export function guardIdentityArgs(
     };
   }
 
-  if (callId) attempts.set(callId, { ...args });
+  if (callId) {
+    attempts.set(callId, { ...args });
+    attemptCounts.set(callId, soFar + 1);
+  }
+  const lastChance = soFar + 1 >= MAX_IDENTITY_ATTEMPTS;
+  const note = lastChance
+    ? `${retry.reason ? retry.reason + ' ' : ''}This is verification attempt ${soFar + 1} of ` +
+      `${MAX_IDENTITY_ATTEMPTS}. If it fails, do NOT ask again — hand off with patient_identity_uncertain.`
+    : retry.reason;
   return {
     blocked: false,
-    ...(retry.reason ? { note: retry.reason } : {}),
+    ...(note ? { note } : {}),
     telemetry: { dobConflict: false, retryBlocked: false },
   };
 }

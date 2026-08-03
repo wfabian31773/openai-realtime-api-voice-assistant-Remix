@@ -183,6 +183,27 @@ export class ShadowPipeline {
           turn: st.turnCount,
           toolCalls: [{ tool, argsDigest: digest(argsRedacted), failed }],
         });
+        // Identity grounding. Names never reach the shadow (the tool tap
+        // redacts them), so production emits a NON-PHI verdict code on an
+        // 'identity_grounding' event and we react to that. afb1e688.
+        if (tool === 'identity_grounding') {
+          const code = String((event.payload.outcome as Record<string, unknown> | undefined)?.decision ?? '');
+          const sources = String((event.payload.outcome as Record<string, unknown> | undefined)?.status ?? '');
+          if (code && code !== 'grounded' && code !== 'no_caller_speech') {
+            st.loopSignals.push({
+              loopType: 'identity_ungrounded',
+              source: 'production',
+              firstAtTurn: st.turnCount,
+              repeatAtTurn: st.turnCount,
+              affectedState: code,
+              likelyCause: `identity arguments sourced ${sources} (firstName/lastName)`,
+              recommendedCorrection:
+                'Send the first AND last name the caller actually said; never mix caller-ID pre-context with a caller-supplied name.',
+            });
+            metrics.inc(`identity_${code}`);
+            st.metadata.identityGrounding = code;
+          }
+        }
         // transfer synthesis
         if (['transfer_to_office', 'escalate_to_human', 'transfer_to_human'].includes(tool) && !failed) {
           st.escalationReason = st.escalationReason ?? `production tool ${tool}`;

@@ -146,6 +146,7 @@ export const loopSignalSchema = z.object({
     'derailed_side_question',
     'bundled_questions',
     'premature_action_claim',
+    'identity_ungrounded',
   ]),
   source: z.enum(['production', 'shadow']),
   firstAtTurn: z.number().int().nonnegative(),

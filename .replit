@@ -87,18 +87,24 @@ SHADOW_CAPTURE_PCT = "100"
 # Tiered reasoning models (GPT-5.6 family, verified 2026-08-02): Luna for
 # routine turns, Terra for ambiguity/corrections, Sol for escalation-grade
 # reasoning. Budget-capped: 6 calls/session, $5/day (SHADOW_MODEL_* to tune).
+# DIRECTOR — the reasoning layer rules on live turns for these agents: it
+# blocks a re-ask of a field the caller already answered, blocks bundled
+# questions, and escalates past suggestion (authoring the turn, then forcing
+# the exit) when the model ignores it. Deterministic, inline, sub-ms.
+# Add after-hours / no-ivr here once the first day of traffic looks right.
+# Instant disable: empty this list and republish.
+DIRECTOR_AGENTS = "azul-scheduling,answering-service"
 SHADOW_MODEL_ROUTING_ENABLED = "true"
 SHADOW_MODEL_LOW = "gpt-5.6-luna"
 SHADOW_MODEL_MID = "gpt-5.6-terra"
 SHADOW_MODEL_HIGH = "gpt-5.6-sol"
-# Production realtime A/B (operator-approved 2026-08-02/03): challenger model
-# for ~50% of calls on the listed agents, deterministic by callSid, arm
-# recorded on the call log so grades + shadow verdicts compare per arm.
-# Identifier verified against OpenAI docs 2026-08-02. INSTANT ROLLBACK: remove
-# AB_MODEL_B (unset = no experiment anywhere) and republish; or trim
-# AB_MODEL_B_AGENTS to narrow scope.
-AB_MODEL_B = "gpt-realtime-2.1"
-AB_MODEL_B_AGENTS = "azul-scheduling,answering-service,no-ivr"
+# Production realtime A/B — DISABLED 2026-08-03 after an operator-reported bad
+# call following the first republish with the experiment live. Every call is
+# back on the control model (gpt-realtime); unset AB_MODEL_B = no experiment
+# anywhere, on any agent. Do not re-enable until the bad call is diagnosed and
+# an arm-B test call is verified on a non-production number.
+# AB_MODEL_B = "gpt-realtime-2.1"
+# AB_MODEL_B_AGENTS = "azul-scheduling,answering-service,no-ivr"
 
 [userenv.development]
 DOMAIN = "dcf9f10f-5436-45b2-9ddd-3056216aaa94-00-3uh0nmdcvfbs6.spock.replit.dev"
