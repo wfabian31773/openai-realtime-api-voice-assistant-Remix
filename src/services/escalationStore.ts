@@ -2,6 +2,7 @@
 // Used by noIvrAgent.ts and voiceAgentRoutes.ts
 
 export interface EscalationDetails {
+  agentSlug?: string;
   reason?: string;
   callerType?: string;
   patientFirstName?: string;

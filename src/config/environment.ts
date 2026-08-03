@@ -12,6 +12,7 @@ const sharedEnvSchema = z.object({
   // Falls back to TICKETING_SYSTEM_URL when unset, so behavior is unchanged by default.
   TICKETING_ENRICHMENT_URL: z.string().optional(),
   HUMAN_AGENT_NUMBER: z.string().optional(),
+  PCP_HUMAN_AGENT_NUMBER: z.string().optional(),
   TWILIO_PHONE_NUMBER: z.string().optional(),
   URGENT_NOTIFICATION_NUMBER: z.string().optional(),
   VOICE_AGENT_WEBHOOK_SECRET: z.string().optional(),
@@ -68,6 +69,7 @@ export interface EnvironmentConfig {
     authToken: string;
     phoneNumber: string | undefined;
     humanAgentNumber: string | undefined;
+    pcpHumanAgentNumber: string | undefined;
     urgentNotificationNumber: string | undefined;
   };
   ticketing: {
@@ -172,6 +174,7 @@ export function getEnvironmentConfig(): EnvironmentConfig {
       authToken: (env as any).TWILIO_AUTH_TOKEN || '',
       phoneNumber: env.TWILIO_PHONE_NUMBER,
       humanAgentNumber: env.HUMAN_AGENT_NUMBER,
+      pcpHumanAgentNumber: env.PCP_HUMAN_AGENT_NUMBER,
       urgentNotificationNumber: env.URGENT_NOTIFICATION_NUMBER,
     },
     ticketing: {
