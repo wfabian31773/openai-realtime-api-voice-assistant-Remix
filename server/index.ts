@@ -464,6 +464,12 @@ async function startServer() {
     // ever runs against an invalid pooler pool
     await dbReady;
 
+    // Keep the hardcoded PCP runtime agent visible and routable in the
+    // operations dashboard. Publishing snapshots does not run one-off seed
+    // scripts, so startup owns this idempotent configuration row.
+    const { seedPcpAgent } = await import('../scripts/seed-pcp-agent');
+    await seedPcpAgent();
+
     // Warm up database connection
     console.log("[STARTUP] Warming up database connection...");
     await warmupDatabase();
