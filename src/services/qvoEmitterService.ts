@@ -92,9 +92,11 @@ async function postWithRetry(path: string, body: object): Promise<void> {
       // a multi-line dump (the 2026-08-02 flood was a misconfigured ingest
       // URL returning Replit's placeholder page on every retry).
       const brief = text.replace(/\s+/g, ' ').slice(0, 120);
-      if (res.status >= 400 && res.status < 500 && res.status !== 429) {
+      const transient4xx = res.status === 408 || res.status === 425 || res.status === 429;
+      if (res.status >= 400 && res.status < 500 && !transient4xx) {
         // Permanent client error (bad URL/auth/route) — retrying cannot
-        // succeed. One concise warning, then count the failure.
+        // succeed. One concise warning, then count the failure. Transient
+        // 4xx (408/425/429) still retry below.
         console.warn(`[QVO EMITTER] Permanent HTTP ${res.status} from ${url} — not retrying (check QVO_INGEST_URL): ${brief}`);
         onFailure();
         return;

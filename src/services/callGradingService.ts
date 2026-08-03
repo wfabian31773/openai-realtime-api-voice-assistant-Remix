@@ -1129,13 +1129,13 @@ Respond with a JSON object only, no other text:
 
       if (criticalFailures > 0) {
         const criticalGraders = results.filter(r => !r.pass && r.severity === 'critical').map(r => r.grader);
-        // Only the FIRST grading of a call is an alert. The 5-minute
-        // stale-version backfill re-scores historical rows; logging those at
-        // error level made old failures look like a live incident stream
-        // (2026-08-02 log flood).
-        const isRegrade = !!(callLog as any).graderResults;
-        if (isRegrade) {
-          console.info(`[GRADING] (regrade) critical failures for ${callLogId}: ${criticalGraders.join(', ')}`);
+        // The stale-version backfill (the only caller passing forceRegrade)
+        // re-scores historical rows; logging those at error level made old
+        // failures look like a live incident stream (2026-08-02 log flood).
+        // Live grading passes — including a final pass after an earlier
+        // in-call deterministic pass — always alert at error level.
+        if (forceRegrade) {
+          console.info(`[GRADING] (backfill regrade) critical failures for ${callLogId}: ${criticalGraders.join(', ')}`);
         } else {
           console.error(`[GRADING] ⚠️ CRITICAL FAILURES for ${callLogId}: ${criticalGraders.join(', ')}`);
         }
@@ -1149,9 +1149,13 @@ Respond with a JSON object only, no other text:
     }
   }
 
-  /** Calls whose LLM grade keeps failing: attempts this process lifetime. */
-  private failedGradeAttempts = new Map<string, number>();
-  private static readonly MAX_GRADE_ATTEMPTS = 3;
+  /** Calls whose LLM grade keeps failing: attempts + backoff, process lifetime. */
+  private failedGradeAttempts = new Map<string, { attempts: number; nextEligibleAt: number }>();
+  /** 6 attempts with 30min×attempts backoff spans >24h — a transient outage
+   *  (OpenAI/DB blip) recovers and the call still gets graded; only a
+   *  persistently ungradeable call is dead-lettered. */
+  private static readonly MAX_GRADE_ATTEMPTS = 6;
+  private static readonly GRADE_BACKOFF_BASE_MS = 30 * 60 * 1000;
 
   async gradeCallsWithoutGrades(limit: number = 10): Promise<number> {
     try {
@@ -1167,21 +1171,31 @@ Respond with a JSON object only, no other text:
             console.info(`[GRADING] Skipping ${call.id} — transcript too short (${call.transcript.trim().length} chars), marked as processed`);
             continue;
           }
+          // Failed-grade backoff: don't re-attempt (and re-spend) every
+          // 5-minute cycle; transient outages get retried on a widening
+          // schedule instead of burning attempts back-to-back.
+          const failState = this.failedGradeAttempts.get(call.id);
+          if (failState && Date.now() < failState.nextEligibleAt) {
+            continue;
+          }
           const result = await this.gradeCall(call.id, call.transcript);
           if (result) {
             gradedCount++;
             this.failedGradeAttempts.delete(call.id);
           } else {
-            // A call whose grade fails is otherwise re-selected every cycle
-            // forever (re-log + re-spend). Bound it like the too-short case:
-            // after MAX_GRADE_ATTEMPTS, stamp it processed and move on — the
-            // deterministic grades (if any) are already persisted.
-            const attempts = (this.failedGradeAttempts.get(call.id) ?? 0) + 1;
-            this.failedGradeAttempts.set(call.id, attempts);
+            const attempts = (failState?.attempts ?? 0) + 1;
             if (attempts >= CallGradingService.MAX_GRADE_ATTEMPTS) {
+              // DEAD-LETTER: stamp processed so the sweep stops re-selecting
+              // it, but leave the LLM-grade columns null — these rows stay
+              // findable (gradedAt set, sentiment null) for a recovery pass.
               await storage.updateCallLog(call.id, { gradedAt: new Date() });
               this.failedGradeAttempts.delete(call.id);
-              console.warn(`[GRADING] Giving up on ${call.id} after ${attempts} failed grade attempts — marked processed (deterministic grades retained)`);
+              console.warn(`[GRADING] DEAD-LETTER ${call.id}: ${attempts} failed grade attempts over >24h — marked processed without LLM grade (deterministic grades retained; find via gradedAt set + sentiment null)`);
+            } else {
+              this.failedGradeAttempts.set(call.id, {
+                attempts,
+                nextEligibleAt: Date.now() + attempts * CallGradingService.GRADE_BACKOFF_BASE_MS,
+              });
             }
           }
           await new Promise(resolve => setTimeout(resolve, 500));
