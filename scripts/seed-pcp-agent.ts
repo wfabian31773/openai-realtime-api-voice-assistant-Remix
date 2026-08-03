@@ -11,7 +11,7 @@ function requiredE164(name: string): string {
   return value;
 }
 
-async function seed(): Promise<void> {
+export async function seedPcpAgent(): Promise<void> {
   const twilioPhoneNumber = requiredE164('PCP_TWILIO_PHONE_NUMBER');
   requiredE164('PCP_HUMAN_AGENT_NUMBER');
   await dbReady;
@@ -41,11 +41,13 @@ async function seed(): Promise<void> {
   }
 }
 
-seed()
-  .catch((error) => {
-    console.error('[PCP SEED] Failed:', error instanceof Error ? error.message : 'unknown error');
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await (pool as { end?: () => Promise<void> }).end?.();
-  });
+if (require.main === module) {
+  seedPcpAgent()
+    .catch((error) => {
+      console.error('[PCP SEED] Failed:', error instanceof Error ? error.message : 'unknown error');
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await (pool as { end?: () => Promise<void> }).end?.();
+    });
+}
