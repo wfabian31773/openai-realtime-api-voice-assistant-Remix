@@ -30,6 +30,8 @@ export const DISAGREEMENT_CODES = [
   'urgency_mismatch',
   'duplicate_action_risk',
   'shadow_blocked_would_be_mutation',
+  'production_identity_ungrounded',
+  'production_identity_chimera',
 ] as const;
 export type DisagreementCode = (typeof DISAGREEMENT_CODES)[number];
 
@@ -145,6 +147,13 @@ export function compareTurn(
     }
     if (s.loopType === 'state_regression' || s.loopType === 'unchanged_state') codes.push('state_loss_signal');
     if (s.loopType === 'duplicate_completed_action') codes.push('duplicate_action_risk');
+    if (s.loopType === 'identity_ungrounded') {
+      codes.push(
+        s.affectedState === 'chimera_mixed_sources'
+          ? 'production_identity_chimera'
+          : 'production_identity_ungrounded',
+      );
+    }
   }
 
   if (prod.toolRequest?.prematureFields?.length) codes.push('production_premature_tool');
@@ -165,7 +174,7 @@ export function compareTurn(
   if (reasoning.urgency !== 'none' && !prodEscalated && shadowEscalates) codes.push('urgency_mismatch');
 
   const reviewRequired = codes.some((c) =>
-    ['tool_mismatch', 'escalation_mismatch', 'urgency_mismatch', 'duplicate_action_risk', 'state_loss_signal', 'n8n_workflow_mismatch'].includes(c),
+    ['tool_mismatch', 'escalation_mismatch', 'urgency_mismatch', 'duplicate_action_risk', 'state_loss_signal', 'n8n_workflow_mismatch', 'production_identity_chimera', 'production_identity_ungrounded'].includes(c),
   );
 
   return {

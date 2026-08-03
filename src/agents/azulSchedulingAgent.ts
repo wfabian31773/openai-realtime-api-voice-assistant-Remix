@@ -31,7 +31,8 @@ import { medicalSafetyGuardrails } from '../guardrails/medicalSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
 import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall, type AzulToolEvent } from '../services/toolTimeline';
 import { callMetadataForDB } from '../services/callMetadataStore';
-import { guardIdentityArgs, surnameDisagrees } from '../services/identityArgGuard';
+import { callerSpeech, guardIdentityArgs, surnameDisagrees } from '../services/identityArgGuard';
+import { checkIdentityGrounding } from '../services/identityGrounding';
 
 const EYECARE_BASE_URL =
   process.env.EYECARE_SCHEDULING_BASE_URL ||
@@ -1061,8 +1062,10 @@ function buildDynamicTail(metadata?: AzulSchedulingMetadata): string {
       `This phone number matches an existing patient on file: first name "${first}"${last ? `, last name on file "${last}"` : ''}. This is a STRONG hint, not verification.\n` +
       `- YOUR OPENING GREETING ALREADY ASKED "Am I speaking with ${first}?" — do NOT ask it a second time.\n` +
       `- CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. After they confirm, ask for the last name AND the date of birth: "Thanks ${first} — can I get your last name and your date of birth?"${last ? ` If the last name they give is that same name, send "${last}" — the ON-FILE spelling beats a transcription. If it is a DIFFERENT name, this number matched the WRONG patient: send what THEY said, and never "${last}".` : ''}\n` +
-      `- READ THE DATE OF BIRTH BACK before you call verify_patient_identity — "just to make sure I have it right, that's <month> <day>, <year>?" — and send the date they confirm. The caller-ID match tells you nothing about their date of birth, so it never excuses skipping the read-back.\n` +
-      `- Then call verify_patient_identity with firstName "${first}", the last name, and that confirmed date of birth.\n` +
+      `- THE CALLER'S OWN WORDS OUTRANK THIS PRE-CONTEXT. The moment they give a name that is not "${first}"${last ? ` ${last}` : ''} — a different first name, a different last name, or both — this number matched the WRONG person. From that point on send EXACTLY the first and last name THEY said and forget "${first}" entirely. NEVER combine the pre-context first name with a last name the caller gave: that is a person who does not exist and verification can never match it.\n` +
+      `- READ THE DATE OF BIRTH BACK ONCE — "just to make sure I have it right, that's <month> <day>, <year>?" — and send the date they confirm. The caller-ID match tells you nothing about their date of birth, so it never excuses skipping the read-back.\n` +
+      `- A NUMERIC DATE LIKE "5/10/1983" IS AMBIGUOUS. Resolve it in ONE question, using month NAMES, never digit positions: "Is that May tenth or October fifth?" Send whichever they pick. If the caller corrects you, the correction is FINAL — say "Got it, <month> <day>, <year>" and call verify_patient_identity immediately. NEVER re-propose a date they already rejected, and never ask about the same date of birth a third time; if you still cannot pin it down, hand off with patient_identity_uncertain.\n` +
+      `- Then call verify_patient_identity with that first name, that last name, and that confirmed date of birth.\n` +
       `- If the conversation has moved on and identity is still needed later, ask it then — but only once.\n` +
       `- Do NOT ask them to spell their name unless verification fails. Do NOT mention we recognized their number — just greet warmly and confirm.\n` +
       `- If they say NO (calling for someone else / different person), run the standard verification flow for the actual patient.\n` +
@@ -1580,6 +1583,30 @@ export function createAzulSchedulingAgent(
       // that resent a value which had already failed. Neither is detectable
       // downstream — the service only ever sees a name and a date that look
       // perfectly well-formed.
+      // Grounding verdict: are these names traceable to the caller or to the
+      // record the phone matched? Recorded as a NON-PHI code so the shadow
+      // (which never receives names) can flag wrong-patient risk. afb1e688.
+      try {
+        const grounding = checkIdentityGrounding(
+          { firstName: args.firstName, lastName: args.lastName },
+          callerSpeech(liveTranscriptFor(metadata?.callId)),
+          metadata?.precontext,
+        );
+        if (grounding.code !== 'grounded') {
+          recordAzulToolEvent(
+            metadata?.callId ?? metadata?.callSid ?? '',
+            'identity_grounding',
+            {},
+            JSON.stringify({
+              decision: grounding.code,
+              status: `${grounding.firstNameSource}/${grounding.lastNameSource}`,
+            }),
+            0,
+            { callSid: metadata?.callSid, callLogId: metadata?.callLogId, agentSlug: 'azul-scheduling' },
+          );
+        }
+      } catch { /* telemetry must never block a verification */ }
+
       const verdict = guardIdentityArgs(metadata?.callId, args, liveTranscriptFor(metadata?.callId));
       if (verdict.blocked) {
         console.warn(

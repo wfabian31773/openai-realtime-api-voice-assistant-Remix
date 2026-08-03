@@ -44,6 +44,16 @@ export function evaluateSession(summary: SessionComparisonSummary, turns: TurnCo
     priority = Math.max(priority, 90);
     reviewReasons.push('different escalation decisions');
   }
+  // A chimera identity would verify the WRONG patient if it ever matched —
+  // that ranks with safety, above tool-choice disagreements.
+  if ((codes['production_identity_chimera'] ?? 0) > 0) {
+    priority = Math.max(priority, 95);
+    reviewReasons.push('identity arguments mixed caller-ID with caller-supplied name (wrong-patient risk)');
+  }
+  if ((codes['production_identity_ungrounded'] ?? 0) > 0) {
+    priority = Math.max(priority, 65);
+    reviewReasons.push('identity argument not grounded in caller speech or the on-file record');
+  }
   if ((codes['tool_mismatch'] ?? 0) > 0) {
     priority = Math.max(priority, 80);
     reviewReasons.push('different tool choices');
