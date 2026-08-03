@@ -43,7 +43,8 @@ export interface DirectorAction {
     | 'repeat_after_directive'
     | 'bundled_questions'
     | 'readback_loop'
-    | 'record_name_disclosed';
+    | 'record_name_disclosed'
+    | 'record_detail_disclosed';
   topic: string;
   /** System-message text (all enforcement levels). */
   text: string;
@@ -174,6 +175,26 @@ const NAME_STOPLIST = new Set([
   'rich', 'chase', 'summer', 'autumn', 'guy', 'earl', 'miles', 'penny',
 ]);
 
+/**
+ * An agent line that states an appointment the caller ALREADY HAS.
+ *
+ * Names were only half of it. On the 14:24 no-ivr call the agent said "I see
+ * you have an upcoming appointment today, on August 3rd, at 8:25 AM in
+ * Glendale with Dr. Daniel Choi" to a caller who had given neither a name nor
+ * a date of birth — date, time, location and provider, on caller-ID alone.
+ * Seeding the provider's name could never have caught that; Dr. Choi is not
+ * the caller and would never be in the seed list.
+ *
+ * So this matches SHAPE, not content: possessive framing ("you have", "your
+ * appointment", "scheduled for") together with a concrete time or date. That
+ * deliberately does NOT match offering availability ("I could do 9:00 AM
+ * Tuesday"), which reveals nothing about the caller.
+ */
+const EXISTING_APPOINTMENT =
+  /\b(?:you have|your (?:upcoming )?appointment|we have you|i see you have|you'?re scheduled|scheduled for|on record for you|no upcoming appointment)\b/i;
+const CONCRETE_WHEN =
+  /\b\d{1,2}:\d{2}\s*(?:a\.?m\.?|p\.?m\.?)|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b|\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
+
 /** A record-sourced name worth guarding: long enough, and not a common word. */
 function guardableName(name: string): boolean {
   const n = name.trim().toLowerCase();
@@ -301,6 +322,19 @@ export class Director {
       // their mother. Every prompt involved already forbade it.
       if (!identityEstablished(s)) {
         const spoken = s.recordNames.find((n) => new RegExp(`\\b${n}\\b`, 'i').test(line));
+        // Appointment details are a disclosure too — see EXISTING_APPOINTMENT.
+        if (!spoken && EXISTING_APPOINTMENT.test(line) && CONCRETE_WHEN.test(line)) {
+          const level = this.bump(s, 'disclosure');
+          return this.action(s, 'record_detail_disclosed', 'identity', level, {
+            why:
+              `You described an appointment from the record to a caller who has NOT stated ` +
+              `their own name and date of birth this call.`,
+            fix:
+              `Say nothing further about their appointments, providers or locations until they ` +
+              `state a name AND a date of birth and both match. Ask who you are speaking with.`,
+            speak: `Before I look at anything, may I get your full name and date of birth?`,
+          }, level + 1);
+        }
         if (spoken) {
           const level = this.bump(s, 'disclosure');
           return this.action(s, 'record_name_disclosed', 'identity', level, {
