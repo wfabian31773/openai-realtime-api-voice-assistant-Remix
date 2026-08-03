@@ -43,7 +43,8 @@ export interface DirectorAction {
     | 'repeat_after_directive'
     | 'bundled_questions'
     | 'readback_loop'
-    | 'record_name_disclosed';
+    | 'record_name_disclosed'
+    | 'record_detail_disclosed';
   topic: string;
   /** System-message text (all enforcement levels). */
   text: string;
@@ -74,6 +75,14 @@ interface CallState {
   /** Topics the caller has confirmed once already. One read-back is good
    *  practice; a second is the loop. */
   confirmed: Set<string>;
+  /** Every word the CALLER has spoken, lowercased. Repeating a name back to
+   *  the person who just said it is courtesy, not disclosure — azul's 16:56
+   *  call fired on "Thanks, Gary Raskin" one turn after the caller said
+   *  "Gary Raskin, R-A-S-K-I-N". */
+  callerWords: Set<string>;
+  /** Suppresses a second disclosure action before the caller has had a
+   *  chance to respond to the first (the 17:00 stutter). */
+  disclosureFiredSinceCaller: boolean;
   lastAgentLine: string;
   callerSpokeSinceAgent: boolean;
 }
@@ -95,6 +104,28 @@ const READBACK_TOPICS: Array<[string, RegExp]> = [
   ],
   ['last name', /\bspell(?:ing)?\b[^.?!]{0,40}\b(?:last name|surname|name)\b|\b(?:last name|surname)\b[^.?!]{0,30}\bspell/i],
 ];
+
+/**
+ * "Am I speaking with Elena?" — ASKING whether the caller is the matched
+ * person, rather than ASSERTING that they are.
+ *
+ * This is the sanctioned flow. Every prompt instructs it explicitly ("YOUR
+ * OPENING GREETING ALREADY ASKED 'Am I speaking with {first}?'"), and it
+ * exists so a known patient is not interrogated from scratch. Flagging it
+ * was the single worst thing the director has done: on 2026-08-03 between
+ * 15:00 and 17:00 it fired on 48 real patient calls at `author` enforcement,
+ * cancelling the agent mid-sentence and substituting "Sorry — before we go
+ * on, may I get your full name?" — sometimes twice in a row. The cure was
+ * worse than the disease, and it hit every matched caller rather than the
+ * few where the agent actually volunteered a name.
+ *
+ * Trade-off worth stating plainly: this pattern still tells whoever is
+ * holding the handset that the number is associated with an "Elena". The
+ * practice chose that deliberately. It is not the director's call to
+ * override, so the rule now covers ASSERTIVE use only.
+ */
+const NAME_CONFIRM_QUESTION =
+  /\b(?:am i speaking (?:with|to)|is this|may i ask if (?:this|you)|do i have)\b/i;
 
 const CONFIRM_INTENT =
   /\b(is that (?:correct|right)|did you mean|could you confirm|confirm once more|just to (?:make sure|confirm)|let'?s confirm|double-?check|one more time|is your date of birth)\b/i;
@@ -174,6 +205,61 @@ const NAME_STOPLIST = new Set([
   'rich', 'chase', 'summer', 'autumn', 'guy', 'earl', 'miles', 'penny',
 ]);
 
+/**
+ * An agent line that states an appointment the caller ALREADY HAS.
+ *
+ * Names were only half of it. On the 14:24 no-ivr call the agent said "I see
+ * you have an upcoming appointment today, on August 3rd, at 8:25 AM in
+ * Glendale with Dr. Daniel Choi" to a caller who had given neither a name nor
+ * a date of birth — date, time, location and provider, on caller-ID alone.
+ * Seeding the provider's name could never have caught that; Dr. Choi is not
+ * the caller and would never be in the seed list.
+ *
+ * So this matches SHAPE, not content: possessive framing together with a
+ * concrete time or date. It deliberately does NOT match offering availability
+ * ("I could do 9:00 AM Tuesday"), which reveals nothing about the caller.
+ *
+ * POSSESSIVE FRAMING IS NOT ENOUGH ON ITS OWN (Codex, PR #69). A bare "you
+ * have" plus a weekday also matches "Do you have availability Tuesday at 9:00
+ * AM?" — an ordinary scheduling question, and precisely the flow the previous
+ * paragraph claims to exclude. At `author` enforcement that would cancel a
+ * harmless turn, which is the mistake that cost 48 calls this afternoon. The
+ * line must therefore ALSO be about an appointment, not merely address the
+ * caller in the second person.
+ */
+const EXISTING_APPOINTMENT =
+  /\b(?:you have|we have you|i see you have|you'?re scheduled|scheduled for|on record for you)\b/i;
+/** The line is about an appointment, not about the caller's availability. */
+const APPOINTMENT_CONTEXT = /\b(?:appointments?|visits?|scheduled)\b/i;
+const CONCRETE_WHEN =
+  /\b\d{1,2}:\d{2}\s*(?:a\.?m\.?|p\.?m\.?)|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b|\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
+
+/**
+ * The ABSENCE of an appointment — a fact about the caller's record just as
+ * much as its presence, and one that by definition carries no date. Requiring
+ * CONCRETE_WHEN here made the absence branch dead code: "You have no upcoming
+ * appointments on record" scored nothing. My own test only passed because I
+ * had padded it with "Tuesday or otherwise", which should have been the tell.
+ */
+const APPOINTMENT_ABSENCE =
+  /\b(?:no|not|don'?t|doesn'?t|nothing)\b[^.?!]{0,30}\b(?:upcoming\s+)?appointments?\b|\bappointments?\b[^.?!]{0,20}\b(?:not (?:showing|on record)|nothing on record)\b/i;
+
+/**
+ * Does this line ASSERT the given name, as opposed to asking about it?
+ *
+ * Scoped per clause (Codex, PR #69). Testing NAME_CONFIRM_QUESTION against the
+ * whole line meant one confirm-shaped phrase disabled the check for every
+ * later sentence: "Am I speaking with Elena? I see you have an appointment
+ * Tuesday at 9:00 AM" passed clean. The exemption belongs to the clause that
+ * asks, not to the turn that contains it.
+ */
+function assertsName(line: string, name: string): boolean {
+  const re = new RegExp(`\\b${name}\\b`, 'i');
+  return line
+    .split(/(?<=[.?!])\s+/)
+    .some((clause) => re.test(clause) && !NAME_CONFIRM_QUESTION.test(clause));
+}
+
 /** A record-sourced name worth guarding: long enough, and not a common word. */
 function guardableName(name: string): boolean {
   const n = name.trim().toLowerCase();
@@ -216,6 +302,8 @@ export class Director {
         spokenDobs: [],
         recordNames: [],
         confirmed: new Set(),
+        callerWords: new Set(),
+        disclosureFiredSinceCaller: false,
         lastAgentLine: '',
         callerSpokeSinceAgent: false,
       };
@@ -269,6 +357,8 @@ export class Director {
       const s = this.state(callId, agentSlug);
       s.turn += 1;
       s.callerSpokeSinceAgent = true;
+      s.disclosureFiredSinceCaller = false;
+      for (const w of line.toLowerCase().match(/[a-z'-]{3,}/g) ?? []) s.callerWords.add(w);
       for (const [field, value] of Object.entries(extractAnswers(line))) {
         // A later answer supersedes an earlier one — corrections must win.
         s.answered.set(field, { value, turn: s.turn });
@@ -299,10 +389,37 @@ export class Director {
       // with Mildred?" to a pharmacy rep (wrong person); and "we found records
       // ... for a different patient, Wayne Fabian" to a caller asking about
       // their mother. Every prompt involved already forbade it.
-      if (!identityEstablished(s)) {
-        const spoken = s.recordNames.find((n) => new RegExp(`\\b${n}\\b`, 'i').test(line));
+      // Two exclusions apply to the whole block:
+      //   - the caller has established who they are (the original rule)
+      //   - we already fired and the caller has not spoken since (the stutter)
+      // The "asking is not asserting" exemption is NOT one of them: it is
+      // scoped to the clause holding the name (see assertsName), so a confirm
+      // question can no longer license an appointment disclosure later in the
+      // same turn.
+      if (!identityEstablished(s) && !s.disclosureFiredSinceCaller) {
+        // Echoing back a name the caller has already said is courtesy.
+        const spoken = s.recordNames.find((n) => !s.callerWords.has(n) && assertsName(line, n));
+        // Appointment details are a disclosure too. Absence needs no date —
+        // it never has one.
+        const detail =
+          APPOINTMENT_ABSENCE.test(line) ||
+          (EXISTING_APPOINTMENT.test(line) && APPOINTMENT_CONTEXT.test(line) && CONCRETE_WHEN.test(line));
+        if (!spoken && detail) {
+          const level = this.bump(s, 'disclosure');
+          s.disclosureFiredSinceCaller = true;
+          return this.action(s, 'record_detail_disclosed', 'identity', level, {
+            why:
+              `You described an appointment from the record to a caller who has NOT stated ` +
+              `their own name and date of birth this call.`,
+            fix:
+              `Say nothing further about their appointments, providers or locations until they ` +
+              `state a name AND a date of birth and both match. Ask who you are speaking with.`,
+            speak: `Before I look at anything, may I get your full name and date of birth?`,
+          }, level + 1);
+        }
         if (spoken) {
           const level = this.bump(s, 'disclosure');
+          s.disclosureFiredSinceCaller = true;
           return this.action(s, 'record_name_disclosed', 'identity', level, {
             why:
               `You spoke a name from the record ("${spoken}") to a caller who has NOT stated ` +
