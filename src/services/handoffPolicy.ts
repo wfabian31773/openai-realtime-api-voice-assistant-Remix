@@ -23,6 +23,15 @@ export type HandoffPolicyResult =
   | { allowed: true; destination: string; policy: 'clinical' | 'pcp' }
   | { allowed: false; reason: string };
 
+export function resolvePcpDialSequence(params: {
+  mode: 'queue' | 'sequential';
+  queueNumber?: string;
+  agentDids: string[];
+}): string[] {
+  if (params.mode === 'sequential') return params.agentDids.filter(Boolean);
+  return params.queueNumber ? [params.queueNumber] : [];
+}
+
 export function resolveHandoffDestination(params: Params): HandoffPolicyResult {
   if (params.agentSlug === 'pcp') {
     if (!params.callerType || !PCP_CALLER_TYPES.has(params.callerType)) {

@@ -13,6 +13,8 @@ const sharedEnvSchema = z.object({
   TICKETING_ENRICHMENT_URL: z.string().optional(),
   HUMAN_AGENT_NUMBER: z.string().optional(),
   PCP_HUMAN_AGENT_NUMBER: z.string().optional(),
+  PCP_AGENT_DIDS: z.string().optional(),
+  PCP_ROUTING_MODE: z.enum(['queue', 'sequential']).default('queue'),
   TWILIO_PHONE_NUMBER: z.string().optional(),
   URGENT_NOTIFICATION_NUMBER: z.string().optional(),
   VOICE_AGENT_WEBHOOK_SECRET: z.string().optional(),
@@ -70,6 +72,8 @@ export interface EnvironmentConfig {
     phoneNumber: string | undefined;
     humanAgentNumber: string | undefined;
     pcpHumanAgentNumber: string | undefined;
+    pcpAgentDids: string[];
+    pcpRoutingMode: 'queue' | 'sequential';
     urgentNotificationNumber: string | undefined;
   };
   ticketing: {
@@ -175,6 +179,8 @@ export function getEnvironmentConfig(): EnvironmentConfig {
       phoneNumber: env.TWILIO_PHONE_NUMBER,
       humanAgentNumber: env.HUMAN_AGENT_NUMBER,
       pcpHumanAgentNumber: env.PCP_HUMAN_AGENT_NUMBER,
+      pcpAgentDids: (env.PCP_AGENT_DIDS || '').split(',').map((number) => number.trim()).filter(Boolean),
+      pcpRoutingMode: env.PCP_ROUTING_MODE,
       urgentNotificationNumber: env.URGENT_NOTIFICATION_NUMBER,
     },
     ticketing: {

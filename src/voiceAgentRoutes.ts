@@ -34,7 +34,7 @@ import { resolveAbAssignment } from './services/abCarriage';
 import { director, directorEnabledFor, type DirectorAction } from './director/director';
 import { getEnvironmentConfig } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
-import { resolveHandoffDestination } from './services/handoffPolicy';
+import { resolveHandoffDestination, resolvePcpDialSequence } from './services/handoffPolicy';
 import { pcpAgentConfig } from './agents/pcpAgent';
 
 // Load centralized environment configuration
@@ -62,6 +62,8 @@ try {
       phoneNumber: process.env.TWILIO_PHONE_NUMBER,
       humanAgentNumber: process.env.HUMAN_AGENT_NUMBER,
       pcpHumanAgentNumber: process.env.PCP_HUMAN_AGENT_NUMBER,
+      pcpAgentDids: (process.env.PCP_AGENT_DIDS || '').split(',').map((number) => number.trim()).filter(Boolean),
+      pcpRoutingMode: process.env.PCP_ROUTING_MODE === 'sequential' ? 'sequential' : 'queue',
       urgentNotificationNumber: process.env.URGENT_NOTIFICATION_NUMBER,
     },
     ticketing: {
@@ -252,6 +254,7 @@ const handoffReadyResolvers = new Map<string, {
   conferenceName?: string;
   callLogId?: string;
 }>();
+const pcpHandoffProgress = new Map<string, (instructions: string) => void>();
 
 // Pending agent additions - stored by incoming-call handler, processed by webhook handler
 // This ensures OpenAI SIP is only added AFTER we accept the call via REST API
@@ -824,7 +827,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     console.warn(`[HANDOFF]   Policy reason: ${policy.reason}`);
     return { ok: false, status: 'HANDOFF_UNAVAILABLE', reason: policy.reason };
   }
-  const handoffDestination = policy.destination;
+  let handoffDestination = policy.destination;
   
   console.log('\n========================================');
   console.log(`[HANDOFF] ✓ Validated - Transferring to human agent`);
@@ -867,6 +870,14 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       throw new Error('TWILIO_PHONE_NUMBER environment variable not set');
     }
     console.log(`[HANDOFF] Using Twilio phone number: ${twilioPhoneNumber}`);
+
+    const pcpDialSequence = policy.policy === 'pcp'
+      ? resolvePcpDialSequence({
+          mode: envConfig.twilio.pcpRoutingMode,
+          queueNumber: envConfig.twilio.pcpHumanAgentNumber,
+          agentDids: envConfig.twilio.pcpAgentDids,
+        })
+      : [];
     
     // STEP 1: Send SMS notification immediately (fire and forget)
     // Provider gets heads-up while we're dialing them
@@ -922,6 +933,47 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       console.log('[HANDOFF] ℹ️ SMS notification skipped - URGENT_NOTIFICATION_NUMBER not configured');
     }
     
+    let sequentialPcpAnswered = false;
+    if (policy.policy === 'pcp' && envConfig.twilio.pcpRoutingMode === 'sequential') {
+      if (pcpDialSequence.length === 0) return { ok: false, status: 'HANDOFF_UNAVAILABLE', reason: 'pcp_agent_dids_not_configured' };
+      const briefing = [
+        'This is the Azul Vision PCP support assistant with a live professional caller transfer.',
+        escalationDetails?.providerInfo ? `Caller organization and role: ${escalationDetails.providerInfo}.` : null,
+        escalationDetails?.reason ? `Reason: ${escalationDetails.reason}.` : null,
+        'Press any key to accept, or remain on the line to connect.',
+      ].filter(Boolean).join(' ');
+      for (let index = 0; index < pcpDialSequence.length; index += 1) {
+        const destination = pcpDialSequence[index];
+        console.log(`[HANDOFF] PCP sequential attempt ${index + 1}/${pcpDialSequence.length}`);
+        if (index > 0) {
+          pcpHandoffProgress.get(openAiCallId)?.(
+            `The previous PCP team member was unavailable. Tell the caller in one short, warm sentence that you are trying the next team member now and they should stay on the line. Say nothing else.`,
+          );
+        }
+        const progress = pcpHandoffProgress.get(openAiCallId);
+        let progressInterval: ReturnType<typeof setInterval> | undefined;
+        const progressFirst = progress ? setTimeout(() => {
+          progress('You are still trying the current PCP team member. Give the caller one short, warm reassurance that you are still working on the connection and they should stay on the line. Say nothing else.');
+          progressInterval = setInterval(() => progress('The PCP transfer is still in progress. Give one brief, varied reassurance to the caller, then go quiet again. Say nothing else.'), 10_000);
+        }, 8_000) : undefined;
+        const outcome = await transferConferenceToNumber(openAiCallId, destination, `PCP team member ${index + 1}`, briefing);
+        if (progressFirst) clearTimeout(progressFirst);
+        if (progressInterval) clearInterval(progressInterval);
+        if (outcome.ok) {
+          handoffDestination = destination;
+          sequentialPcpAnswered = true;
+          console.log(`[HANDOFF] ✓ PCP sequential attempt ${index + 1} answered`);
+          return { ok: true, destination };
+        }
+        console.warn(`[HANDOFF] PCP sequential attempt ${index + 1} was not accepted: ${outcome.detail || 'unknown'}`);
+      }
+      pcpHandoffProgress.get(openAiCallId)?.(
+        'No PCP team member answered. Tell the caller warmly and accurately that you could not reach the team live, but their PCP request has already been recorded for follow-up. Say nothing else and do not claim a transfer occurred.',
+      );
+      return { ok: false, status: 'NO_ANSWER', reason: 'pcp_sequence_no_answer' };
+    }
+
+    if (!sequentialPcpAnswered) {
     // STEP 2: Dial human agent into the conference WHILE AI is still connected
     // Use statusCallback to know when human actually answers
     console.log('[HANDOFF] Step 1: Dialing human agent into conference (AI still connected)...');
@@ -1071,6 +1123,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       }
 
       return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer' };
+    }
     }
     
     // STEP 4: Disconnect AI agent ONLY AFTER human successfully answers
@@ -1869,7 +1922,7 @@ async function observeCall(
       }
 
       case 'pcp':
-        factoryResult = agentFactory(handoffCallback, {
+        factoryResult = agentFactory(() => addHumanAgent(callId), {
           callId,
           callSid: twilioCallSid,
           callerPhone: from,
@@ -2783,7 +2836,7 @@ async function observeCall(
     // Between a function_call and its output there is no active response,
     // so an out-of-band response.create is protocol-safe (same mechanism as
     // the greeting trigger below).
-    if (agentConfig?.id === 'azul-scheduling' && callId) {
+    if ((agentConfig?.id === 'azul-scheduling' || agentConfig?.id === 'pcp') && callId) {
       registerAzulHoldingCallback(callId, (instructionOverride?: string) => {
         try {
           (session.transport as any).sendEvent({
@@ -2798,6 +2851,16 @@ async function observeCall(
           console.error(`[SESSION] azul holding update failed for ${callId}:`, e);
         }
       });
+
+      if (agentConfig?.id === 'pcp') {
+        pcpHandoffProgress.set(callId, (instructions: string) => {
+          try {
+            (session.transport as any).sendEvent({ type: 'response.create', response: { instructions } });
+          } catch (e) {
+            console.error(`[SESSION] PCP handoff update failed for ${callId}:`, e);
+          }
+        });
+      }
 
       // Tier-2 WARM transfer: lets the agent's transfer_to_office tool dial
       // the sage_handoff packet's office queue number with a briefing +
@@ -2941,6 +3004,7 @@ async function observeCall(
     // persist the pilot tool timeline (all no-ops for other agents)
     unregisterAzulHoldingCallback(callId);
     unregisterAzulOfficeTransferCallback(callId);
+    pcpHandoffProgress.delete(callId);
     // Terminal-disposition sweep BEFORE the flush (the sweep reads — and may
     // append a ticket event to — the in-memory timeline the flush deletes).
     // Bounded at 25s: a wedged sweep must never block the flush (2026-07-24
