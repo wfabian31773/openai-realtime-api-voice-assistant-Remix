@@ -92,6 +92,19 @@ export interface CallLog {
       outcome: Record<string, unknown>
       ms: number
     }>
+    /** Director interventions — present only when the reasoning layer acted.
+     *  Verdict only: `topic` is a field NAME, never the caller's answer. */
+    director?: {
+      count: number
+      maxEnforcement: 'inject' | 'author' | 'force_exit'
+      topics: string[]
+      actions: Array<{
+        at: string
+        enforcement: 'inject' | 'author' | 'force_exit'
+        code: string
+        topic: string
+      }>
+    }
   }
 
   // Quality grading

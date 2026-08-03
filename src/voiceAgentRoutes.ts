@@ -20,7 +20,7 @@ import {
 import { getTwilioClient, getTwilioFromPhoneNumber } from './lib/twilioClient';
 import { medicalSafetyGuardrails, WELCOME_GREETING, getUrgentTriageGreeting } from './agents/afterHoursAgent';
 import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulHoldingCallback, registerAzulOfficeTransferCallback, unregisterAzulOfficeTransferCallback, registerAzulTranscriptProvider, unregisterAzulTranscriptProvider } from './agents/azulSchedulingAgent';
-import { flushAzulTimeline, getAzulTimeline } from './services/toolTimeline';
+import { flushAzulTimeline, getAzulTimeline, recordDirectorAction } from './services/toolTimeline';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
 import { callSessionService } from './services/callSessionService';
@@ -661,7 +661,7 @@ function sendLoopGuardDirective(session: any, callId: string, directive: LoopGua
  * hears one clean sentence instead of the seventh repeat of a question they
  * already answered.
  */
-function applyDirectorAction(session: any, callId: string, action: DirectorAction): void {
+function applyDirectorAction(session: any, callId: string, agentSlug: string, action: DirectorAction): void {
   try {
     const transport = session?.transport as any;
     if (!transport?.sendEvent) return;
@@ -689,6 +689,13 @@ function applyDirectorAction(session: any, callId: string, action: DirectorActio
     console.warn(
       `[DIRECTOR] ${action.enforcement}:${action.code}:${action.topic} applied for ${callId}`,
     );
+
+    // Durable record. Deliberately AFTER the transport writes: the
+    // intervention is the product, the telemetry is the receipt, and a
+    // telemetry failure must never cost the caller the intervention. Only the
+    // verdict is stored — action.text and action.speak quote the caller and
+    // never leave the call.
+    recordDirectorAction(callId, agentSlug, action);
   } catch (e) {
     // A director failure must never break a call.
     console.error(`[DIRECTOR] failed to apply action for ${callId}:`, e);
@@ -2275,7 +2282,7 @@ async function observeCall(
         // past suggestion when the model ignores it (afb1e688).
         if (directorEnabledFor(effectiveSlug)) {
           const decision = director.observeAgent(callId, effectiveSlug, transcript);
-          if (decision) applyDirectorAction(session, callId, decision);
+          if (decision) applyDirectorAction(session, callId, effectiveSlug, decision);
         }
       }
     } else if (eventType === 'response.done') {

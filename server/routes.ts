@@ -3044,6 +3044,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const rows = await db.select().from(appSettings).where(eq(appSettings.key, 'shadow_rollout_mode'));
       const { getShadowConfig } = await import('../src/shadow/config');
       const cfg = getShadowConfig();
+      // Director state. Separate from `capture` on purpose: the shadow observes
+      // and the director ACTS, so conflating them in one "enabled" flag is
+      // exactly the confusion this endpoint exists to prevent.
+      const { directorAgents } = await import('../src/director/director');
+      const dirAgents = directorAgents();
       res.json({
         mode: rows[0]?.value === 'live_requested' ? 'live_requested' : 'shadow',
         modeUpdatedBy: rows[0]?.updatedBy ?? null,
@@ -3052,6 +3057,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           enabled: cfg.enabled,
           agentAllowlist: cfg.agentAllowlist,
           capturePct: cfg.capturePct,
+        },
+        director: {
+          enabled: dirAgents.length > 0,
+          agents: dirAgents,
         },
         liveCutoverAvailable: false, // shadow is observation-only by design
       });

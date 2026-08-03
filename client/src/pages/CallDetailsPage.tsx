@@ -5,7 +5,7 @@ import apiClient from '@/lib/apiClient'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ArrowLeft, Download, Play, Pause, DollarSign, Star, ThumbsUp, ThumbsDown, Meh, AlertCircle, Sparkles, Loader2, ChevronDown, ChevronUp, Phone, Signal, RefreshCw, Cpu } from 'lucide-react'
+import { ArrowLeft, Download, Play, Pause, DollarSign, Star, ThumbsUp, ThumbsDown, Meh, AlertCircle, Sparkles, Loader2, ChevronDown, ChevronUp, Phone, Signal, RefreshCw, Cpu, Gavel } from 'lucide-react'
 import type { CallLog } from '@/types'
 
 interface RecordingData {
@@ -58,8 +58,37 @@ interface ShadowStatus {
   mode: 'shadow' | 'live_requested';
   modeUpdatedBy: string | null;
   capture: { enabled: boolean; agentAllowlist: string[]; capturePct: number };
+  /** The director ACTS on live turns — deliberately separate from `capture`,
+   *  which only observes. Absent on a server that predates the director. */
+  director?: { enabled: boolean; agents: string[] };
   liveCutoverAvailable: boolean;
 }
+
+/** How an intervention is described to a non-engineer reading the call. */
+const DIRECTOR_ENFORCEMENT: Record<string, { label: string; blurb: string; className: string }> = {
+  inject: {
+    label: 'Corrected',
+    blurb: 'The director told the agent it was off-script. The agent kept the microphone.',
+    className: 'border-sky-200 bg-sky-50 text-sky-800',
+  },
+  author: {
+    label: 'Took the turn',
+    blurb: 'The correction had already been ignored once, so the director wrote the sentence the agent said.',
+    className: 'border-amber-200 bg-amber-50 text-amber-800',
+  },
+  force_exit: {
+    label: 'Ended it',
+    blurb: 'Still looping after two corrections. The director closed the call out rather than let it continue.',
+    className: 'border-red-200 bg-red-50 text-red-800',
+  },
+};
+
+const DIRECTOR_CODE_LABEL: Record<string, string> = {
+  reask_answered_field: 'asked again for something the caller had already given',
+  repeat_after_directive: 'kept asking for the same thing without getting it',
+  bundled_questions: 'asked for more than one thing at once',
+  readback_loop: 'kept confirming a detail instead of settling it',
+};
 
 export function CallDetailsPage() {
   const { id } = useParams<{ id: string }>()
@@ -1070,6 +1099,73 @@ export function CallDetailsPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* DIRECTOR — what the reasoning layer DID on this call. Distinct from the
+          shadow card below it: the shadow watches and reports, the director
+          intervened while the caller was still on the line. */}
+      {(() => {
+        const director = callLog.toolTimeline?.director
+        const watching = shadowStatus?.director?.agents?.includes(callLog.agentUsed ?? '')
+        if (!director && !watching) return null
+        if (!director) {
+          return (
+            <Card className="border-slate-200 bg-slate-50/40">
+              <CardContent className="flex items-center gap-3 py-4 text-sm text-muted-foreground">
+                <Gavel className="h-4 w-4 shrink-0 text-slate-400" />
+                <span>
+                  The director was watching this call and did not need to step in.
+                </span>
+              </CardContent>
+            </Card>
+          )
+        }
+        const worst = DIRECTOR_ENFORCEMENT[director.maxEnforcement] ?? DIRECTOR_ENFORCEMENT.inject
+        return (
+          <Card className="border-indigo-200 bg-indigo-50/30">
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle className="flex items-center gap-2">
+                <Gavel className="h-5 w-5 text-indigo-600" />
+                Director Interventions
+              </CardTitle>
+              <Badge className={worst.className} variant="outline">
+                {worst.label}
+              </Badge>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                The reasoning layer stepped in {director.count}{' '}
+                {director.count === 1 ? 'time' : 'times'} on this call
+                {director.topics.length > 0 && <> — {director.topics.join(', ')}</>}. {worst.blurb}
+              </p>
+
+              <div className="space-y-2">
+                {director.actions.map((a, i) => {
+                  const style = DIRECTOR_ENFORCEMENT[a.enforcement] ?? DIRECTOR_ENFORCEMENT.inject
+                  return (
+                    <div
+                      key={i}
+                      className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded border p-3 text-sm ${style.className}`}
+                    >
+                      <span className="font-semibold">{style.label}</span>
+                      <span className="opacity-90">
+                        The agent {DIRECTOR_CODE_LABEL[a.code] ?? a.code.replace(/_/g, ' ')}
+                        {a.topic && a.topic !== 'bundled' && <> ({a.topic})</>}.
+                      </span>
+                      <span className="ml-auto shrink-0 font-mono text-xs opacity-70">
+                        {formatTime(a.at)}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                Only the verdict is stored — what the caller actually said never leaves the call.
+              </p>
+            </CardContent>
+          </Card>
+        )
+      })()}
 
       {callLog.transcript && (
         <Card className="border-cyan-200 bg-cyan-50/30">
