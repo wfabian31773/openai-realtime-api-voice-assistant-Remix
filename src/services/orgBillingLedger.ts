@@ -4,6 +4,7 @@ import { storage } from '../../server/storage';
 import { eq } from 'drizzle-orm';
 import { getModelPricing } from './modelPricing';
 import { sendDiscrepancyAlert } from './reconciliationAlertService';
+import { formatOrgBillingError } from './orgBillingError';
 
 interface OrgCostResult {
   totalCostDollars: number;
@@ -375,7 +376,7 @@ export class OrgBillingLedgerService {
 
       return { success: true, dateStr, actualUsd, estimatedUsd, deltaUsd, deltaPercent };
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorMsg = formatOrgBillingError(error);
       console.error(`[ORG BILLING] Error reconciling ${dateStr}:`, errorMsg);
       return { success: false, dateStr, error: errorMsg };
     }
