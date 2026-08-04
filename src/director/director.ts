@@ -44,7 +44,8 @@ export interface DirectorAction {
     | 'bundled_questions'
     | 'readback_loop'
     | 'record_name_disclosed'
-    | 'record_detail_disclosed';
+    | 'record_detail_disclosed'
+    | 'language_switch_unwarranted';
   topic: string;
   /** System-message text (all enforcement levels). */
   text: string;
@@ -83,14 +84,20 @@ interface CallState {
   /** Suppresses a second disclosure action before the caller has had a
    *  chance to respond to the first (the 17:00 stutter). */
   disclosureFiredSinceCaller: boolean;
-  /** A record name the agent has just ASKED the caller to confirm. If the
-   *  caller says yes, they have told us the name is theirs — see
-   *  observeCaller. */
-  pendingNameConfirm?: string;
-  /** The topic the agent just asked about. The caller's next turn is the
-   *  answer to it, even when that turn is bare ("Leslie") and matches none
-   *  of extractAnswers' phrasings. */
-  pendingAsk?: string;
+  /** AUTHORITATIVE identity, stamped by the tool layer when
+   *  verify_patient_identity returns verified:true. The director's own
+   *  `answered` ledger is a transcript heuristic; this is the real answer, and
+   *  it outranks the heuristic in both directions. See markIdentityVerified. */
+  identityVerified: boolean;
+  /** The topic of the LAST thing the agent asked for. A caller answering "Allen"
+   *  is only interpretable against the question it answers. */
+  pendingAsk: string | null;
+  /** The caller has spoken Spanish, or asked for it by name. Until then, the
+   *  agent switching to Spanish is a guess — see language_switch_unwarranted. */
+  callerLicensedSpanish: boolean;
+  /** The caller produced a script or letter that is positively neither English
+   *  nor Spanish. Required before the language rule will contradict the agent. */
+  callerSpokeForeign: boolean;
   lastAgentLine: string;
   callerSpokeSinceAgent: boolean;
 }
@@ -133,38 +140,11 @@ const READBACK_TOPICS: Array<[string, RegExp]> = [
  * override, so the rule now covers ASSERTIVE use only.
  */
 const NAME_CONFIRM_QUESTION =
-  // Spanish added 2026-08-04: the fleet takes Spanish calls all day, and
-  // "¿Estoy hablando con Reginaldo?" is the same sanctioned question. An
-  // English-only pattern flagged it as a disclosure and the director took
-  // the turn — in English, on a Spanish call.
+  // Spanish included deliberately: the fleet takes Spanish calls all day and
+  // "¿Estoy hablando con Reginaldo?" is the same sanctioned question. On
+  // 2026-08-04 15:32 an English-only pattern scored it as a disclosure and
+  // the director answered IN ENGLISH, on a Spanish call.
   /\b(?:am i speaking (?:with|to)|is this|may i ask if (?:this|you)|do i have|estoy hablando con|hablo con|es usted|le habla a)\b/i;
-
-/** "Yes." / "Sí." — the caller confirming they are who we asked about.
- *
- *  Tested against an ACCENT-STRIPPED copy of the line. JavaScript's \b is
- *  ASCII-only, so /s[íi]\b/ never matches "Sí." — the boundary it wants sits
- *  before the accented character, not after it. Normalising first is the only
- *  reading of this that behaves the same in both languages. */
-const AFFIRMATIVE =
-  /^\s*(?:yes|yeah|yep|yup|correct|that'?s right|that'?s me|speaking|this is (?:he|she|him|her)|si|claro|correcto|asi es|ella habla|el habla)\b/i;
-
-const deaccent = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
-/**
- * Names the caller mentioned only to DENY.
- *
- * "No, it's not Mildred" contains the word Mildred, and the caller-echo rule
- * read that as the caller claiming the name — which silenced the guard on the
- * exact call it exists for. Denying a name is the strongest possible signal
- * that the number matched the wrong person.
- */
-function deniedNames(line: string, names: string[]): string[] {
-  const flat = deaccent(line);
-  return names.filter((n) =>
-    new RegExp(`\\b(?:not|no|isn'?t|ain'?t|nope|wrong|neither)\\b[^.?!]{0,30}\\b${n}\\b`, 'i').test(flat) ||
-    new RegExp(`\\b${n}\\b[^.?!]{0,20}\\b(?:no|not|wrong)\\b`, 'i').test(flat),
-  );
-}
 
 const CONFIRM_INTENT =
   /\b(is that (?:correct|right)|did you mean|could you confirm|confirm once more|just to (?:make sure|confirm)|let'?s confirm|double-?check|one more time|is your date of birth)\b/i;
@@ -306,22 +286,170 @@ function guardableName(name: string): boolean {
 }
 
 /**
+ * LANGUAGE. The agent may speak Spanish when the CALLER has established
+ * Spanish. Guessing it from an utterance that is merely not-English is how a
+ * Russian speaker got answered in Spanish.
+ *
+ * Call ecd0b233 (2026-08-04 09:13): the caller said, in Russian, "give me
+ * someone to talk to on the phone". The agent replied "¡Claro que sí! Puedo
+ * hablar en español..." and the call died at 53 seconds having helped nobody.
+ * Same shape on 3c07d83a, where a single unintelligible token ("Aynı.") sent
+ * the whole call into Spanish.
+ *
+ * The prompt already forbids exactly this — "ONLY auto-switch to Spanish if the
+ * caller clearly and unambiguously speaks Spanish to you. Never switch on a
+ * hunch, an accent, or a name. Any unrecognized or ambiguous utterance stays in
+ * English." It is the director's founding problem restated: the instruction is
+ * correct and the model treats it as a suggestion.
+ *
+ * Deliberately asymmetric. The rule fires ONLY on the agent speaking
+ * unlicensed Spanish; it never pushes a call INTO Spanish. A caller mentioning
+ * "Spanish" in English licenses it, even if they turn out to be declining it —
+ * not firing is always the safe direction here.
+ */
+const SPANISH_PUNCTUATION = /[¿¡]/;
+/** Words that do not occur in ordinary English call transcripts. */
+const SPANISH_MARKERS =
+  /\b(?:que|para|con|por|una|unos|unas|est[áa]|estoy|c[óo]mo|puedo|puede|necesito|necesita|gracias|se[ñn]or|se[ñn]ora|cita|citas|nombre|fecha|nacimiento|ayudar|ayudarle|ayudarte|decir|hablar|habla|espa[ñn]ol|favor|buenas|buenos|d[íi]as|tardes|noches|usted|tiene|tengo|quiero|quisiera|vamos|aqu[íi]|tambi[ée]n|entiendo|perfecto|claro|ma[ñn]ana|ahora|bien|hacer|esto|eso|s[íi])\b/gi;
+
+/** Is this line Spanish? One inverted mark, or two distinct Spanish words. */
+export function looksSpanish(line: string): boolean {
+  if (SPANISH_PUNCTUATION.test(line)) return true;
+  const hits = new Set((line.toLowerCase().match(SPANISH_MARKERS) ?? []).map((w) => w));
+  return hits.size >= 2;
+}
+
+/** The caller asking for Spanish in any language, by name. */
+const SPANISH_REQUEST = /\b(?:spanish|espa[ñn]ol|espanol|hispano|hispana)\b/i;
+
+/**
+ * Characters outside the English + Spanish alphabet — a POSITIVE signal that
+ * the caller is speaking neither.
+ *
+ * This is the whole precision of the language rule, and it is why the rule
+ * requires it. Transcription garbles Spanish into English-looking ASCII
+ * constantly: call 88d2c270's caller opened with "Bon tardis" — a mangled
+ * "buenas tardes" — and the agent switching to Spanish there was CORRECT.
+ * A rule that fires on "the caller has not demonstrably spoken Spanish" would
+ * have broken that call, because the transcript is the only thing we get and it
+ * said nothing Spanish at all.
+ *
+ * So we only contradict the agent when we can positively identify a script or
+ * letter that is neither English nor Spanish: Cyrillic (call ecd0b233's Russian
+ * caller), CJK, Arabic, Hebrew, Devanagari, Thai, Greek, or a Latin-extended
+ * letter Spanish does not use — the dotless ı of 3c07d83a's "Aynı". Garbled
+ * ASCII is left to the model, which knows the audio and we do not.
+ */
+const NON_EN_ES_SCRIPT =
+  /[Ͱ-ϿЀ-ӿԀ-ԯ֐-׿؀-ۿ܀-ݏऀ-ॿ฀-๿ᄀ-ᇿ぀-ヿ㄰-㆏㐀-䶿一-鿿ꥠ-꥿가-힯]/;
+/** Latin letters used by neither English nor Spanish (Spanish adds áéíóúüñ). */
+const NON_EN_ES_LATIN = /[ıışşğğþðøåæœëïÿâêîôûàèìòùäöĳčšžńłżźćęąůřť]/i;
+
+/** Can we positively tell this is neither English nor Spanish? */
+export function looksForeignToEnglishAndSpanish(line: string): boolean {
+  if (NON_EN_ES_SCRIPT.test(line)) return true;
+  // Strip the letters Spanish legitimately uses before looking for the rest.
+  return NON_EN_ES_LATIN.test(line.replace(/[áéíóúüñ¿¡]/gi, ''));
+}
+
+/** "Yes", "mm-hmm", "that's me" — the caller assenting to what was just asked. */
+const AFFIRMATIVE =
+  /^\s*(?:yes|yeah|yep|yup|yes\s+ma'?am|yes\s+sir|sure|correct|right|that'?s\s+(?:right|correct|me|her|him)|speaking|this\s+is\s+(?:she|he|her|him)|uh[\s-]?huh|mm[\s-]?hmm|mhm+|of\s+course|i\s+am|si|claro|correcto|asi es|exacto|ella habla|el habla)\b/i;
+
+/** Accents stripped before matching. JavaScript's \b is ASCII-only, so
+ *  /s[íi]\b/ never matches "Sí." — the boundary it wants sits BEFORE the
+ *  accented character, not after it. Normalising is the only reading that
+ *  behaves identically in both languages. */
+export const deaccent = (t: string) =>
+  t.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+export function isAffirmative(line: string): boolean {
+  return AFFIRMATIVE.test(deaccent(line).trim());
+}
+
+/**
+ * Names the caller mentioned only to DENY.
+ *
+ * "No, it's not Mildred" contains the word Mildred, and the courtesy-echo
+ * exemption reads that as the caller having said their name — silencing the
+ * guard on exactly the call it exists for. Denying a name is the strongest
+ * available signal that the number matched the wrong person (call 12:48,
+ * a pharmacy rep told "Am I speaking with Mildred?").
+ */
+export function deniedNames(line: string, names: string[]): string[] {
+  const flat = deaccent(line);
+  return names.filter((n) =>
+    new RegExp(`\\b(?:not|no|isn'?t|ain'?t|nope|wrong|neither)\\b[^.?!]{0,30}\\b${n}\\b`, 'i').test(flat) ||
+    new RegExp(`\\b${n}\\b[^.?!]{0,20}\\b(?:no|not|wrong)\\b`, 'i').test(flat),
+  );
+}
+
+/**
+ * The name inside an answer to a name question.
+ *
+ * Deliberately permissive about SHAPE and strict about NOISE: a caller
+ * answering "what's your last name?" says "Allen", "Allen, A-l-l-e-n", or
+ * "It's Allen" — none of which extractAnswers recognises, because it only
+ * looks for a volunteered "my name is X". Spelled runs collapse to the word
+ * they spell. Returns null for anything that is not plausibly a name, so a
+ * shrug never banks an answer and suppresses a genuine re-ask.
+ */
+/** Conversational filler and interrogatives — never a caller's name. A name
+ *  that survives this list is one we are willing to bank as an answer. */
+const NOT_A_NAME = new Set([
+  'uh', 'um', 'er', 'ah', 'oh', 'hmm', 'huh', 'mhm', 'okay', 'ok', 'yes', 'no',
+  'yeah', 'yep', 'nope', 'sure', 'thanks', 'thank', 'you', 'hello', 'hi',
+  'please', 'sorry', 'pardon', 'and', 'the', 'is', 'as', 'in', 'of', 'for',
+  'so', 'well', 'like', 'just', 'know', 'dont', 'don', 'not', 'what', 'who',
+  'why', 'when', 'where', 'how', 'again', 'idea', 'mean', 'means', 'said',
+  'say', 'nothing', 'maybe', 'guess', 'think', 'wait', 'hold', 'speaking',
+  'this', 'that', 'there', 'here', 'name', 'last', 'first', 'full', 'middle',
+  'my', 'me', 'it', 'its', 'was', 'are', 'can', 'could', 'right', 'correct',
+  'have', 'had', 'get', 'got', 'about', 'with', 'but', 'her', 'his', 'him',
+  'she', 'they', 'them', 'yet', 'now', 'then', 'one', 'two', 'all', 'any',
+]);
+
+export function nameFromAnswer(line: string): string | null {
+  // "Yes" answers a yes/no question, never a name question.
+  if (isAffirmative(line)) return null;
+  const cleaned = line
+    .replace(/\b(?:it'?s|my name is|this is|i'?m|name'?s|the name is|last name is|first name is)\b/gi, ' ')
+    // "A-l-l-e-n" / "R A S K I N" → "Allen" / "RASKIN"
+    .replace(/\b(?:[a-z](?:\s*[-.]\s*|\s+)){2,}[a-z]\b/gi, (m) => m.replace(/[^a-z]/gi, ''))
+    .replace(/[^A-Za-z\s'-]/g, ' ');
+  const words = cleaned
+    .split(/\s+/)
+    .map((w) => w.trim().replace(/^[-']+|[-']+$/g, ''))
+    .filter((w) => w.length >= 2 && /^[A-Za-z][A-Za-z'-]*$/.test(w))
+    .filter((w) => !NOT_A_NAME.has(w.toLowerCase()));
+  if (words.length === 0 || words.length > 3) return null;
+  const titled = words.map((w) => w[0].toUpperCase() + w.slice(1).toLowerCase());
+  return titled.join(' ');
+}
+
+/**
  * Has the caller established who they are THIS call?
  *
  * Deliberately strict — name AND date of birth, the same bar the prompts set.
  * A caller-ID match is not identity: family members, spouses, care homes and
  * pharmacies all share phones, and every one of the 2026-08-03 disclosures
  * happened on a call where the phone matched and the person did not.
+ * The tool layer's verdict OUTRANKS the transcript heuristic. When
+ * verify_patient_identity has returned verified:true, this call has cleared a
+ * stronger bar than any regex over prose can measure — the name and date of
+ * birth were matched against the record server-side. Reading only the
+ * heuristic is what broke 2026-08-04: `answered` is written solely by
+ * extractAnswers, which yields 'full name' ONLY from a volunteered "my name is
+ * X" / "this is X" / "Surname, Firstname". The agent collects the first and
+ * last name in SEPARATE turns (the prompts require it — "ONE AT A TIME"), and
+ * nothing merged them, so 'full name' was near-unreachable through the
+ * sanctioned flow and identityEstablished returned false on calls the server
+ * had already verified. 22 of 54 verified calls on 08-03 and 3 of 6 on 08-04
+ * were interrupted at `author` on that basis.
  */
 function identityEstablished(s: CallState): boolean {
-  // "full name" OR first+last collected separately. azul asks the three
-  // fields ONE AT A TIME — which is what we told it to do — so a fully
-  // identified caller never populates a single 'full name' slot, and this
-  // function used to return false for every one of them.
-  const named =
-    s.answered.has('full name') ||
-    (s.answered.has('first name') && s.answered.has('last name'));
-  return named && s.answered.has('date of birth');
+  if (s.identityVerified) return true;
+  return s.answered.has('full name') && s.answered.has('date of birth');
 }
 
 const EXIT_LINE: Record<string, string> = {
@@ -350,6 +478,10 @@ export class Director {
         confirmed: new Set(),
         callerWords: new Set(),
         disclosureFiredSinceCaller: false,
+        identityVerified: false,
+        pendingAsk: null,
+        callerLicensedSpanish: false,
+        callerSpokeForeign: false,
         lastAgentLine: '',
         callerSpokeSinceAgent: false,
       };
@@ -383,9 +515,48 @@ export class Director {
     }
   }
 
+  /**
+   * The SERVER verified this caller. Stamped from the tool layer the moment
+   * verify_patient_identity returns verified:true.
+   *
+   * This is the authoritative signal the director previously lacked. It had
+   * only its own regex ledger, and enforced against that ledger at `author` —
+   * the strongest level driven by the weakest signal. Once the server has
+   * matched a name and date of birth against the record, the caller's own name
+   * is theirs to hear: nothing about saying it back is a disclosure.
+   *
+   * The verified name also lands in callerWords, so the courtesy-echo
+   * exemption covers the on-file spelling the agent is instructed to adopt
+   * ("The result's note may give the ON-FILE spelling — use it from then on"),
+   * which the caller may never have pronounced.
+   */
+  markIdentityVerified(
+    callId: string,
+    agentSlug: string,
+    names: Array<string | null | undefined> = [],
+  ): void {
+    try {
+      const s = this.state(callId, agentSlug);
+      s.identityVerified = true;
+      for (const raw of names) {
+        for (const part of String(raw ?? '').split(/[\s,]+/)) {
+          const n = part.trim().toLowerCase();
+          if (n.length >= 2) s.callerWords.add(n);
+        }
+      }
+    } catch {
+      /* the director must never break a call */
+    }
+  }
+
   /** Test/telemetry view. */
   guardedNames(callId: string): string[] {
     return [...(this.calls.get(callId)?.recordNames ?? [])];
+  }
+
+  /** Test/telemetry view. */
+  isIdentityVerified(callId: string): boolean {
+    return this.calls.get(callId)?.identityVerified ?? false;
   }
 
   release(callId: string | undefined): void {
@@ -403,47 +574,83 @@ export class Director {
       const s = this.state(callId, agentSlug);
       s.turn += 1;
       s.callerSpokeSinceAgent = true;
-      const answers = extractAnswers(line);
       s.disclosureFiredSinceCaller = false;
-      for (const w of deaccent(line).toLowerCase().match(/[a-z'-]{3,}/g) ?? []) s.callerWords.add(w);
-      // ...but a name the caller DENIED is not a name the caller gave.
-      for (const denied of deniedNames(line, s.recordNames)) s.callerWords.delete(denied);
-
-      // "Am I speaking with Anthony?" → "Yes." The caller has just told us
-      // the name is theirs, so using it is no longer a disclosure — it is
-      // the whole point of having asked. Without this the agent's natural
-      // next line, "Thank you, Anthony", was flagged and the director took
-      // the turn (2026-08-04 15:11, a real call).
-      // "Can I get your first name?" → "Leslie". A bare answer matches none
-      // of extractAnswers' phrasings ("my name is…", "Surname, Firstname"),
-      // so a caller who answered every question exactly as asked still read
-      // as having established nothing — and the appointment-disclosure rule
-      // then cancelled the agent mid-sentence on a fully identified caller
-      // (2026-08-04, azul, 12 of 26 calls). Bank the answer to the question
-      // we just asked.
-      if (s.pendingAsk && !answers[s.pendingAsk]) {
-        const bare = line.trim();
-        const words = bare.split(/\s+/).length;
-        // Conservative: a short, question-free turn only. "Hello?" and
-        // "I need to reschedule" must not become someone's surname.
-        if (bare.length >= 2 && bare.length <= 60 && words <= 5 && !bare.includes('?') &&
-            /[a-z]/i.test(bare) && !/^(hello|hi|hey|what|sorry|yes|no|okay|ok)\b/i.test(bare)) {
-          s.answered.set(s.pendingAsk, { value: bare, turn: s.turn });
+      for (const w of deaccent(line).toLowerCase().match(/[a-z'-]{3,}/g) ?? []) {
+        s.callerWords.add(w);
+        // A SPELLED name is a said name. "Allen, A-l-l-e-n" tokenises to
+        // "allen" and "a-l-l-e-n"; a caller who ONLY spells ("M-A-I-V-O-N-E")
+        // produced no plain token at all, so the courtesy exemption missed the
+        // very turn in which they identified themselves (call 458c029c, which
+        // then looped for 228s and never reached a human).
+        if (w.includes('-')) {
+          const joined = w.replace(/-/g, '');
+          if (joined.length >= 3) s.callerWords.add(joined);
         }
       }
-      s.pendingAsk = undefined;
-
-      if (s.pendingNameConfirm) {
-        if (AFFIRMATIVE.test(deaccent(line))) s.callerWords.add(s.pendingNameConfirm);
-        // A denial leaves the name guarded — the number matched the WRONG
-        // person, which is exactly when speaking it matters most.
-        s.pendingNameConfirm = undefined;
-      }
-      for (const [field, value] of Object.entries(answers)) {
+      // ...but a name the caller DENIED is not a name the caller gave.
+      for (const denied of deniedNames(line, s.recordNames)) s.callerWords.delete(denied);
+      for (const [field, value] of Object.entries(extractAnswers(line))) {
         // A later answer supersedes an earlier one — corrections must win.
         s.answered.set(field, { value, turn: s.turn });
         if (field === 'date of birth' && !s.spokenDobs.includes(value)) {
           s.spokenDobs.push(value);
+        }
+      }
+      // A name is an ANSWER when it answers a name question. extractAnswers
+      // only recognises a volunteered name ("my name is X"), but the prompts
+      // require the agent to collect first and last SEPARATELY, one per turn —
+      // so the commonest real answer ("Allen") banked nothing and 'full name'
+      // stayed empty for the whole call.
+      if (s.pendingAsk === 'first name' || s.pendingAsk === 'last name' || s.pendingAsk === 'full name') {
+        const given = nameFromAnswer(line);
+        if (given) {
+          if (s.pendingAsk === 'full name' && /\s/.test(given)) {
+            s.answered.set('full name', { value: given, turn: s.turn });
+          } else {
+            const part = s.pendingAsk === 'full name' ? 'first name' : s.pendingAsk;
+            s.answered.set(part, { value: given, turn: s.turn });
+          }
+          const first = s.answered.get('first name')?.value;
+          const last = s.answered.get('last name')?.value;
+          if (first && last && !s.answered.has('full name')) {
+            s.answered.set('full name', { value: `${first} ${last}`, turn: s.turn });
+          }
+          s.pendingAsk = null;
+        }
+      }
+      // "Am I speaking with Irma?" → "Mm-hmm." The caller just claimed that
+      // name. It never entered callerWords (they said "mm-hmm", not "Irma"),
+      // so the agent's next perfectly ordinary "Thanks, Irma" was scored a
+      // record disclosure and cancelled mid-turn at `author`. Call 13ecb51d,
+      // 2026-08-04 09:42 — twice in one call, on a caller the server had
+      // already returned verified:true for.
+      // The caller establishes the call's language, never the agent.
+      if (!s.callerLicensedSpanish && (looksSpanish(line) || SPANISH_REQUEST.test(line))) {
+        s.callerLicensedSpanish = true;
+      }
+      if (!s.callerSpokeForeign && looksForeignToEnglishAndSpanish(line)) {
+        s.callerSpokeForeign = true;
+      }
+      if (NAME_CONFIRM_QUESTION.test(s.lastAgentLine) && isAffirmative(line)) {
+        for (const n of s.recordNames) {
+          if (!new RegExp(`\\b${n}\\b`, 'i').test(s.lastAgentLine)) continue;
+          s.callerWords.add(n);
+          // Assenting to "Am I speaking with Irma?" IS the caller stating that
+          // name — it is the sanctioned opening every prompt mandates, and the
+          // agent never asks for the first name again afterwards. Without
+          // banking it, 'full name' could only ever be completed by a caller
+          // who volunteered both parts unprompted.
+          if (!s.answered.has('first name') && !s.answered.has('full name')) {
+            s.answered.set('first name', {
+              value: n[0].toUpperCase() + n.slice(1),
+              turn: s.turn,
+            });
+          }
+        }
+        const first = s.answered.get('first name')?.value;
+        const last = s.answered.get('last name')?.value;
+        if (first && last && !s.answered.has('full name')) {
+          s.answered.set('full name', { value: `${first} ${last}`, turn: s.turn });
         }
       }
     } catch {
@@ -479,12 +686,6 @@ export class Director {
       if (!identityEstablished(s) && !s.disclosureFiredSinceCaller) {
         // Echoing back a name the caller has already said is courtesy.
         const spoken = s.recordNames.find((n) => !s.callerWords.has(n) && assertsName(line, n));
-        // Remember a name we are ASKING about, so an affirmative answer can
-        // clear it on the caller's next turn.
-        if (NAME_CONFIRM_QUESTION.test(line)) {
-          const asked = s.recordNames.find((n) => new RegExp(`\\b${n}\\b`, 'i').test(line));
-          if (asked) s.pendingNameConfirm = asked;
-        }
         // Appointment details are a disclosure too. Absence needs no date —
         // it never has one.
         const detail =
@@ -501,7 +702,8 @@ export class Director {
               `Say nothing further about their appointments, providers or locations until they ` +
               `state a name AND a date of birth and both match. Ask who you are speaking with.`,
             speak: `Before I look at anything, may I get your full name and date of birth?`,
-          }, level + 1);
+            // No level bump — see the note on record_name_disclosed below.
+          });
         }
         if (spoken) {
           const level = this.bump(s, 'disclosure');
@@ -514,12 +716,42 @@ export class Director {
               `Do not use any name, appointment, or history from the record until the caller ` +
               `states their name AND date of birth and they match. Ask them who you are speaking with.`,
             speak: `Sorry — before we go on, may I get your full name?`,
-            // level + 1: a disclosure starts at 'author', because the words
-            // have already reached the caller's ear by the time we see the
-            // line — a suggestion cannot un-say them. A second one ends the
-            // call rather than let it keep naming people.
-          }, level + 1);
+            // A disclosure NO LONGER starts at 'author'. The original reasoning
+            // was sound in isolation — the words have already reached the
+            // caller's ear, so a suggestion cannot un-say them — but it put the
+            // most destructive enforcement level behind the least certain
+            // signal, and `author` cannot un-say them either. All it does is
+            // cancel the agent mid-sentence and dictate a replacement.
+            //
+            // That asymmetry is what turned two detection bugs into two mass
+            // regressions in 48 hours: 48 calls on 08-03 (PR #66, "the cure was
+            // worse than the disease"), then 08-04 — 21 of 23 calls touched,
+            // zero bookings, patients audibly giving up ("I hate this").
+            // Detection was narrowed both times; enforcement stayed at maximum.
+            //
+            // So: first fire injects. A SECOND on the same call escalates to
+            // `author` and a third exits — the model ignoring one correction is
+            // exactly the evidence the escalation ladder was built to act on,
+            // and it costs a stray sentence instead of the call.
+          });
         }
+      }
+
+      // Language the caller never established, AND positively not their
+      // language. Both halves are required — see looksForeignToEnglishAndSpanish
+      // for why "not demonstrably Spanish" is not a safe trigger on its own.
+      if (!s.callerLicensedSpanish && s.callerSpokeForeign && looksSpanish(line)) {
+        const level = this.bump(s, 'language');
+        return this.action(s, 'language_switch_unwarranted', 'language', level, {
+          why:
+            `You answered in Spanish, but the caller has not spoken Spanish or asked for it. ` +
+            `An utterance you could not place is NOT Spanish — it is unrecognised.`,
+          fix:
+            `Continue in ENGLISH. If you genuinely cannot tell what language they are speaking, ` +
+            `ask once, in English, whether they would prefer English or Spanish. If it is neither, ` +
+            `hand off to a person who can arrange an interpreter — do not guess a language at them.`,
+          speak: `I'm sorry — I want to get you the right help. Would you prefer to continue in English, or in Spanish?`,
+        });
       }
 
       // One question at a time.
@@ -536,6 +768,10 @@ export class Director {
       if (!topic) return null;
       const n = (s.asks.get(topic) ?? 0) + 1;
       s.asks.set(topic, n);
+      // Remember what we just asked for, so the caller's next line can be read
+      // as the answer to it (see observeCaller). Without this the ledger only
+      // ever saw volunteered names.
+      s.pendingAsk = topic;
 
       const answer = s.answered.get(topic);
       if (answer) {
@@ -568,10 +804,6 @@ export class Director {
               : `Thanks — I have that as ${readable}. Let me take it from here.`,
         });
       }
-
-      // Remember what we just asked, so the caller's next turn can be banked
-      // against it even if it is a bare "Leslie".
-      s.pendingAsk = topic;
 
       // Never answered, but we keep asking: two asks is a stall, three is a loop.
       if (n >= 2) {

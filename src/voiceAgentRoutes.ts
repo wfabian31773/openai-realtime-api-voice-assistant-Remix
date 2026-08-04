@@ -37,6 +37,8 @@ import { CallDiagnostics } from './services/callDiagnostics';
 import { resolveHandoffDestination, resolvePcpDialSequence } from './services/handoffPolicy';
 import { pcpAgentConfig } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
+import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
+import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
 
 // Load centralized environment configuration
 let envConfig: ReturnType<typeof getEnvironmentConfig>;
@@ -549,7 +551,7 @@ const sessionOptions: Partial<RealtimeSessionOptions> = {
     audio: {
       input: {
         format: 'g711_ulaw',
-        transcription: { model: 'gpt-4o-mini-transcribe' },
+        transcription: buildTranscriptionConfig(),
         turnDetection: {
           type: 'semantic_vad',
           eagerness: 'medium',
@@ -2261,7 +2263,28 @@ async function observeCall(
   const languageForCall = (metadata as any)?.languageForCall;
   const agentLanguage = agentConfig?.language || 'en';
   const languageCode = languageForCall || (isSpanish ? 'es' : agentLanguage);
-  console.info(`[SESSION] Call config: voice=${voiceForCall}, language=${languageCode}, isSpanish=${isSpanish}, ivrSelection=${metadata?.ivrSelection || 'none'}`);
+
+  // ESTABLISHED vs ASSUMED — the distinction the transcription config needs and
+  // `languageCode` cannot express, because languageCode always resolves to
+  // something (it falls back to agentLanguage, which falls back to 'en').
+  // Pinning a transcription language the caller never established does not
+  // degrade gracefully: it produces confident nonsense. "Bon tardis" is a
+  // Spanish speaker's "buenas tardes" decoded as English.
+  //
+  // Established = the caller or the routing SAID so: an explicit languageForCall,
+  // IVR option 4 / metadata Spanish, or an agent deliberately configured to a
+  // non-English language. Plain 'en' from the default chain is an ASSUMPTION, so
+  // it is left undefined and the transcriber auto-detects.
+  const establishedLanguageCode: string | undefined =
+    languageForCall ||
+    (isSpanish ? 'es' : undefined) ||
+    (agentConfig?.language && agentConfig.language !== 'en' ? agentConfig.language : undefined);
+
+  console.info(
+    `[SESSION] Call config: voice=${voiceForCall}, language=${languageCode}, ` +
+    `established=${establishedLanguageCode ?? 'auto-detect'}, transcription=${transcriptionModel()}, ` +
+    `isSpanish=${isSpanish}, ivrSelection=${metadata?.ivrSelection || 'none'}`,
+  );
   
   console.info(`[SESSION] CHECKPOINT C: Creating RealtimeSession... (T+${Date.now() - observeCallStart}ms)`);
   // Phase 7 A/B carriage: AB_MODEL_B names the challenger model and
@@ -2301,7 +2324,7 @@ async function observeCall(
       audio: {
         input: {
           format: 'g711_ulaw',
-          transcription: { model: 'gpt-4o-mini-transcribe', language: languageCode },
+          transcription: buildTranscriptionConfig({ establishedLanguage: establishedLanguageCode }),
           turnDetection: {
             type: 'semantic_vad',
             eagerness: vadEagernessFor(agentConfig?.id),
@@ -2327,6 +2350,23 @@ async function observeCall(
   
   // Store session for potential cleanup from conference events
   activeSessions.set(callId, session);
+
+  // DEAD AIR. Once the webhook lands, cancelSIPWatchdog clears the only
+  // max-duration timer this call had, and the DB reconciler ignores rows that
+  // are not stuck in a transient status. Between those two, a connected session
+  // that simply stops talking runs to the per-agent cap — 20 minutes of billed
+  // silence on call 438e06f8, while the caller redialled and started a second
+  // one. See services/deadAirWatchdog.ts.
+  deadAirWatchdog.arm(callId, (idleMs) => {
+    console.warn(
+      `[DEAD-AIR] No conversational activity for ${Math.round(idleMs / 1000)}s on ${callId} (${effectiveSlug}) — closing session`,
+    );
+    try {
+      session.transport.close();
+    } catch (e) {
+      console.error(`[DEAD-AIR] Failed to close transport for ${callId}:`, e);
+    }
+  });
   const confName = getConferenceName(callId); // Uses wrapper with fallback to service cache
   if (confName) {
     conferenceNameToCallID[confName] = callId;
@@ -2373,6 +2413,11 @@ async function observeCall(
   // The SDK's history_added fires before transcription completes
   session.transport.on('*', (event: any) => {
     const eventType = event?.type;
+
+    // Proof of life for the dead-air watchdog. Transcript- and tool-shaped
+    // events only: audio deltas and keepalives keep flowing on a session that
+    // has stopped conversing, so counting those would defeat the whole thing.
+    if (isActivityEvent(eventType)) deadAirWatchdog.touch(callId);
 
     // Accumulate real token usage for cost attribution (see callTokenUsage).
     if (eventType === 'response.done' && event?.response?.usage) {
@@ -2585,9 +2630,7 @@ async function observeCall(
         audio: {
           input: {
             format: 'g711_ulaw',
-            transcription: languageCode 
-              ? { model: 'gpt-4o-mini-transcribe', language: languageCode }
-              : { model: 'gpt-4o-mini-transcribe' },
+            transcription: buildTranscriptionConfig({ establishedLanguage: establishedLanguageCode }),
             turnDetection: {
               type: 'semantic_vad',
               eagerness: vadEagernessFor(agentConfig?.id),
@@ -2631,10 +2674,14 @@ async function observeCall(
       };
     }
     if (!acceptPayload.audio.input.transcription) {
-      acceptPayload.audio.input.transcription = {
-        model: 'gpt-4o-mini-transcribe',
-        language: languageCode || 'en',
-      };
+      // NOT `languageCode || 'en'`. This payload starts the session and the
+      // later session.update cannot change it, so a wrong pin here decides the
+      // whole call — every Spanish speaker who did not press 4 in the IVR was
+      // force-decoded as English. buildTranscriptionConfig omits the language
+      // unless the call actually established one.
+      acceptPayload.audio.input.transcription = buildTranscriptionConfig({
+        establishedLanguage: establishedLanguageCode,
+      });
     }
     // SIP MODE: ALWAYS strip audio format from accept payload.
     // The codec is negotiated at the SIP/SDP transport layer between Twilio and OpenAI.
@@ -3416,8 +3463,10 @@ async function observeCall(
     activeSessions.delete(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
+    deadAirWatchdog.release(callId);
     conversationLoopGuard.releaseCall(callId);
     void import('./services/identityArgGuard').then(({ releaseIdentityGuard }) => releaseIdentityGuard(callId));
+    void import('./agents/azulSchedulingAgent').then(({ releaseAzulCallState }) => releaseAzulCallState(callId));
     director.release(callId);
     
     // Clean up conference mappings to prevent stale entries
