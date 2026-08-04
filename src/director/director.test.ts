@@ -614,3 +614,89 @@ describe('REGRESSION: unwarranted language switch (2026-08-04)', () => {
     expect(looksSpanish('Necesito su fecha de nacimiento')).toBe(true);
   });
 });
+
+/**
+ * REGRESSION: live call 6bd612c1, 2026-08-04 14:23 — the first
+ * language_switch_unwarranted fire in production.
+ *
+ * It fired CORRECTLY (the caller emitted a CJK glyph mid-call and the agent kept
+ * going in Spanish; the injected directive worked — the agent's next turn asked
+ * "Would you prefer English or Spanish?", the caller said "Español", and the call
+ * resolved). But it should never have been reachable: the caller opened in
+ * Spanish, which should have licensed it.
+ *
+ * `\b` without /u treats an accented vowel as a NON-word character, so `\bque\b`
+ * missed "qué" and `\bs[íi]\b` missed "sé". The opening line scored ONE marker
+ * instead of three.
+ */
+describe('REGRESSION: accented Spanish is Spanish (live call 6bd612c1)', () => {
+  it('recognises the exact line that was missed', () => {
+    expect(looksSpanish('Yo no, no sé por qué no contestan.')).toBe(true);
+  });
+
+  it('recognises short accented Spanish generally', () => {
+    for (const line of [
+      '¿Podría decirme su nombre completo?',
+      'Sí, necesito una cita para mañana.',
+      'Gracias, ahora entiendo.',
+    ]) {
+      expect(looksSpanish(line), line).toBe(true);
+    }
+  });
+
+  it('LIMITATION — recall is deliberately incomplete, and that is safe', () => {
+    // "Los encargue unos lentes y no he recibido ninguna respuesta" is Spanish
+    // but hits only ONE marker ("unos"). Chasing the rest would mean adding
+    // 'los'/'las'/'de'/'y' — which appear in English transcripts ("Los Angeles"
+    // is in this very call) and would cost false positives in the expensive
+    // direction.
+    //
+    // It does not matter, and this test records why: licensing is per CALL, not
+    // per line. One recognised Spanish line unlocks the whole call, and the rule
+    // additionally requires a positively-foreign glyph before it will contradict
+    // the agent at all.
+    // Two-word utterances cannot clear a two-distinct-marker bar at all
+    // ("Ella habla." hits only "habla"), and longer lines can still miss on
+    // vocabulary.
+    expect(looksSpanish('Ella habla.')).toBe(false);
+    expect(looksSpanish('Los encargue unos lentes y no he recibido ninguna respuesta.')).toBe(false);
+    d.observeCaller('sp3', 'answering-service', 'Yo no, no sé por qué no contestan.');
+    d.observeCaller('sp3', 'answering-service', 'Los encargue unos lentes y no he recibido ninguna respuesta.');
+    expect(d.observeAgent('sp3', 'answering-service', '¿Podría decirme su nombre completo?')).toBeNull();
+  });
+
+  it('so the caller licenses Spanish and the rule stays quiet', () => {
+    d.observeCaller('sp1', 'answering-service', 'Yo no, no sé por qué no contestan.');
+    expect(
+      d.observeAgent('sp1', 'answering-service',
+        'Parece que ha habido algo de demora, lamento mucho la espera.'),
+    ).toBeNull();
+    // Even after an unintelligible glyph later in the call, Spanish stays licensed.
+    d.observeCaller('sp1', 'answering-service', '六');
+    expect(
+      d.observeAgent('sp1', 'answering-service',
+        'Entiendo, por favor disculpe la confusión. ¿Me podría decir su nombre completo?'),
+    ).toBeNull();
+  });
+
+  it('still fires when the caller never spoke Spanish at all', () => {
+    d.observeCaller('sp2', 'answering-service', 'Блядь, дайте поговорить по телефону.');
+    const a = d.observeAgent('sp2', 'answering-service',
+      '¡Claro que sí! Puedo hablar en español.');
+    expect(a!.code).toBe('language_switch_unwarranted');
+  });
+
+  it('does not mistake ordinary English for Spanish after normalisation', () => {
+    for (const line of [
+      'Thanks for calling Azul Vision — how can I help you today?',
+      'I see you have an appointment on August 13 at 10:20 AM.',
+      "No problem, we can do that. Could you tell me your date of birth?",
+      'Let me get you to someone on our team who can help.',
+      'Is that correct? Just to make sure I have it right.',
+      'I have Monday, August 10 at 09:30 AM with Ashlynne Kim at Encinitas.',
+      "Sorry, I wasn't able to reach them directly. Our team will call you back.",
+    ]) {
+      expect(looksSpanish(line), line).toBe(false);
+    }
+  });
+});
