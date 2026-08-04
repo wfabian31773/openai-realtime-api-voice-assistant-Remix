@@ -36,6 +36,7 @@ import { getEnvironmentConfig } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 import { resolveHandoffDestination, resolvePcpDialSequence } from './services/handoffPolicy';
 import { pcpAgentConfig } from './agents/pcpAgent';
+import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 
 // Load centralized environment configuration
 let envConfig: ReturnType<typeof getEnvironmentConfig>;
@@ -285,6 +286,7 @@ interface SIPWatchdog {
 // did nothing, which is a trap for anyone trying to adjust call length.
 // Call durations are configured in AGENT_MAX_DURATION_MS, one place.
 const sipWatchdogs = new Map<string, SIPWatchdog>();
+const sipConferenceLifecycle = new SipConferenceLifecycle();
 
 // Cancel watchdog when webhook arrives (also clears max-duration timer)
 function cancelSIPWatchdog(conferenceName: string) {
@@ -301,25 +303,27 @@ function cancelSIPWatchdog(conferenceName: string) {
 // This prevents 60-minute OpenAI sessions when caller hangs up early
 async function terminateOrphanedSIPCall(conferenceName: string, reason: string) {
   const watchdog = sipWatchdogs.get(conferenceName);
-  if (!watchdog) {
-    return; // No orphaned SIP call for this conference
-  }
+  const directSipCallSid = sipConferenceLifecycle.takeSipLegForConference(conferenceName);
+  const sipCallSid = watchdog?.sipCallSid ?? directSipCallSid;
+  if (!sipCallSid) return;
   
-  console.warn(`[WATCHDOG] ⚠️ Terminating orphaned SIP call: ${watchdog.sipCallSid} (reason: ${reason})`);
+  console.warn(`[WATCHDOG] ⚠️ Terminating orphaned SIP call: ${sipCallSid} (reason: ${reason})`);
   
   // Cancel both watchdog timers
-  clearTimeout(watchdog.timer);
-  clearTimeout(watchdog.maxDurationTimer);
-  sipWatchdogs.delete(conferenceName);
+  if (watchdog) {
+    clearTimeout(watchdog.timer);
+    clearTimeout(watchdog.maxDurationTimer);
+    sipWatchdogs.delete(conferenceName);
+  }
   
   try {
     const client = await getTwilioClient();
-    await client.calls(watchdog.sipCallSid).update({ status: 'completed' });
-    console.info(`[WATCHDOG] ✓ Orphaned SIP call terminated: ${watchdog.sipCallSid}`);
+    await client.calls(sipCallSid).update({ status: 'completed' });
+    console.info(`[WATCHDOG] ✓ Orphaned SIP call terminated: ${sipCallSid}`);
   } catch (error: any) {
     // Call may already be completed, which is fine
     if (error.code === 20404) {
-      console.info(`[WATCHDOG] SIP call already completed: ${watchdog.sipCallSid}`);
+      console.info(`[WATCHDOG] SIP call already completed: ${sipCallSid}`);
     } else {
       console.error(`[WATCHDOG] ✗ Failed to terminate orphaned SIP call:`, error.message);
     }
@@ -1290,6 +1294,62 @@ function escapeXml(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+function conferenceWasTransferredToHuman(conferenceName: string): boolean {
+  const openAiCallId = getCallIdByConference(conferenceName);
+  return Boolean(openAiCallId && callMetadataForDB.get(openAiCallId)?.transferredToHuman);
+}
+
+/**
+ * If the OpenAI/Sage leg disappears while the caller is still connected,
+ * replace the stranded conference with the established answering-service
+ * fallback. The caller leg is fetched first so a late/duplicate SIP callback
+ * cannot resurrect or redirect an already-ended call.
+ */
+async function recoverCallerAfterSipTermination(conferenceName: string, status: string): Promise<void> {
+  if (conferenceWasTransferredToHuman(conferenceName)) {
+    console.info(`[SIP-RECOVERY] Skipping ${conferenceName}: human transfer already completed`);
+    return;
+  }
+
+  const callerCallSid = getTwilioCallSid(conferenceName);
+  if (!callerCallSid) {
+    console.warn(`[SIP-RECOVERY] No caller CallSid found for ${conferenceName}`);
+    return;
+  }
+
+  try {
+    const client = await getTwilioClient();
+    const callerCall = await client.calls(callerCallSid).fetch();
+    if (callerCall.status !== 'in-progress') {
+      console.info(`[SIP-RECOVERY] Caller ${callerCallSid} already ${callerCall.status}; no fallback needed`);
+      return;
+    }
+
+    const fallbackNumber = HUMAN_AGENT_NUMBER || '+18186021567';
+    const callerIdAttribute = envConfig.twilio.phoneNumber
+      ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
+      : '';
+    await client.calls(callerCallSid).update({
+      twiml: `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">We apologize, but our assistant was disconnected. Please hold while we transfer you to our answering service.</Say>
+  <Dial${callerIdAttribute}>
+    <Number>${escapeXml(fallbackNumber)}</Number>
+  </Dial>
+  <Say voice="Polly.Joanna">We were unable to complete your call. Please try again later or call back during regular business hours. Goodbye.</Say>
+  <Hangup/>
+</Response>`,
+    });
+    console.warn(`[SIP-RECOVERY] Caller ${callerCallSid} redirected after Sage leg ${status}`);
+  } catch (error: any) {
+    if (error?.code === 20404) {
+      console.info(`[SIP-RECOVERY] Caller ${callerCallSid} already ended`);
+      return;
+    }
+    console.error(`[SIP-RECOVERY] Failed for ${conferenceName}:`, error?.message ?? error);
+  }
 }
 
 const warmTransferAccepts = new Map<string, {
@@ -4222,6 +4282,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         .participants
         .create(participantParams);
       sipParticipantCallSid = participant.callSid;
+      sipConferenceLifecycle.registerSipLeg(conferenceName, participant.callSid);
       console.info(`[TRACE-2] ✓ SIP PARTICIPANT CREATED`);
       console.info(`[TRACE-2]   participant.callSid: ${participant.callSid}`);
       console.info(`[TRACE-2]   participant.status:  ${(participant as any).status ?? 'not-in-response'}`);
@@ -4233,6 +4294,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       console.error(`[TRACE-2]   error.status:  ${error?.status}`);
       console.error(`[TRACE-2]   error.code:    ${error?.code}`);
       console.error(`[TRACE-2]   full error:`, JSON.stringify(error, Object.getOwnPropertyNames(error)));
+      void recoverCallerAfterSipTermination(conferenceName, 'creation_failed');
     }
 
   });
@@ -5401,6 +5463,26 @@ export function setupVoiceAgentRoutes(app: Express): void {
       console.error(`[SIP-STATUS]   ErrorCode:      ${errorCode}`);
       console.error(`[SIP-STATUS]   ErrorMessage:   ${errorMsg}`);
       console.error(`[SIP-STATUS]   Full body:      ${rawBody.substring(0, 500)}`);
+
+      const conferenceName = sipConferenceLifecycle.resolveConferenceName(callSid, to);
+      const recoveryPlan = sipConferenceLifecycle.beginCallerRecovery({
+        sipCallSid: callSid,
+        status,
+        to,
+        transferredToHuman: conferenceName ? conferenceWasTransferredToHuman(conferenceName) : false,
+      });
+      if (recoveryPlan) {
+        // Callback already received its 200 above. Recovery remains non-blocking
+        // and waits briefly for any simultaneous human-join event to land.
+        setTimeout(() => {
+          const transferredToHuman = conferenceWasTransferredToHuman(recoveryPlan.conferenceName);
+          if (sipConferenceLifecycle.canExecuteCallerRecovery(recoveryPlan.conferenceName, transferredToHuman)) {
+            void recoverCallerAfterSipTermination(recoveryPlan.conferenceName, status || 'terminal');
+          } else {
+            console.info(`[SIP-RECOVERY] Transfer won race for ${recoveryPlan.conferenceName}`);
+          }
+        }, 750);
+      }
     } catch (e: any) {
       console.error(`[SIP-STATUS] Failed to parse callback:`, e.message);
     }
@@ -5420,6 +5502,14 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const friendlyName = parsedBody.FriendlyName;
     const conferenceSid = parsedBody.ConferenceSid;
     const participantCallSid = parsedBody.CallSid;
+
+    const isOfficeLegParticipant = Boolean(participantCallSid && officeLegBridges.has(participantCallSid));
+    const isHumanParticipant = label === 'human agent' || isOfficeLegParticipant;
+    if (isHumanParticipant && event === 'participant-join') {
+      sipConferenceLifecycle.markHumanJoined(friendlyName);
+    } else if (isHumanParticipant && event === 'participant-leave') {
+      sipConferenceLifecycle.markHumanLeft(friendlyName);
+    }
 
     // Office-leg bridge telemetry. These events arrive HERE, not at
     // /api/voice/office-leg-events — see the note on
@@ -5577,7 +5667,10 @@ export function setupVoiceAgentRoutes(app: Express): void {
       // This catches cases where caller hangs up before the call was fully registered
       // Without this, the OpenAI SIP connection stays open for 60 minutes
       if (friendlyName) {
-        terminateOrphanedSIPCall(friendlyName, event === 'conference-end' ? 'conference_ended' : 'customer_left');
+        void terminateOrphanedSIPCall(friendlyName, event === 'conference-end' ? 'conference_ended' : 'customer_left');
+        if (event === 'conference-end') {
+          sipConferenceLifecycle.clearConference(friendlyName);
+        }
       }
     }
 
