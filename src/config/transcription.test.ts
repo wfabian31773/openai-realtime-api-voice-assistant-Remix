@@ -7,24 +7,66 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_TRANSCRIPTION_MODEL,
+  PREVIOUS_TRANSCRIPTION_MODEL,
   TRANSCRIPTION_KEYWORDS,
   TRANSCRIPTION_PROMPT,
   buildTranscriptionConfig,
   practiceLanguages,
   supportsVocabularyHints,
+  transcriptionDelay,
   transcriptionModel,
 } from './transcription';
 
 const env = (o: Record<string, string>) => o as unknown as NodeJS.ProcessEnv;
 
 describe('transcriptionModel', () => {
-  it('defaults to the model currently in production — a swap is opt-in', () => {
-    expect(transcriptionModel(env({}))).toBe(DEFAULT_TRANSCRIPTION_MODEL);
-    expect(transcriptionModel(env({ TRANSCRIPTION_MODEL: '  ' }))).toBe(DEFAULT_TRANSCRIPTION_MODEL);
+  it('defaults to gpt-live-transcribe (flipped 2026-08-04)', () => {
+    expect(DEFAULT_TRANSCRIPTION_MODEL).toBe('gpt-live-transcribe');
+    expect(transcriptionModel(env({}))).toBe('gpt-live-transcribe');
+    expect(transcriptionModel(env({ TRANSCRIPTION_MODEL: '  ' }))).toBe('gpt-live-transcribe');
   });
 
-  it('is overridable by environment, so the upgrade needs no deploy', () => {
-    expect(transcriptionModel(env({ TRANSCRIPTION_MODEL: 'gpt-live-transcribe' }))).toBe('gpt-live-transcribe');
+  it('rolls back to the previous model by environment alone, no deploy', () => {
+    expect(PREVIOUS_TRANSCRIPTION_MODEL).toBe('gpt-4o-mini-transcribe');
+    expect(transcriptionModel(env({ TRANSCRIPTION_MODEL: PREVIOUS_TRANSCRIPTION_MODEL })))
+      .toBe('gpt-4o-mini-transcribe');
+  });
+
+  it('the default carries the bilingual + vocabulary treatment', () => {
+    // The whole reason for the flip: the previous model accepts none of these.
+    const c = buildTranscriptionConfig({ env: env({}) });
+    expect(c.languages).toEqual(['en', 'es']);
+    expect(c.keywords).toEqual(TRANSCRIPTION_KEYWORDS);
+    expect(c.prompt).toBe(TRANSCRIPTION_PROMPT);
+    expect(c.language).toBeUndefined();
+  });
+});
+
+describe('transcriptionDelay', () => {
+  it('is absent unless set, so the model flip is the only variable', () => {
+    expect(transcriptionDelay(env({}))).toBeUndefined();
+    expect(buildTranscriptionConfig({ env: env({}) }).delay).toBeUndefined();
+  });
+
+  it('accepts the documented values and ignores anything else', () => {
+    for (const d of ['minimal', 'low', 'medium', 'high', 'xhigh']) {
+      expect(transcriptionDelay(env({ TRANSCRIPTION_DELAY: d })), d).toBe(d);
+    }
+    expect(transcriptionDelay(env({ TRANSCRIPTION_DELAY: 'HIGH' }))).toBe('high');
+    for (const bad of ['fastest', '200ms', 'true', '']) {
+      expect(transcriptionDelay(env({ TRANSCRIPTION_DELAY: bad })), bad).toBeUndefined();
+    }
+  });
+
+  it('reaches the payload when set', () => {
+    expect(buildTranscriptionConfig({ env: env({ TRANSCRIPTION_DELAY: 'low' }) }).delay).toBe('low');
+  });
+
+  it('is not sent to a model that would reject it', () => {
+    const c = buildTranscriptionConfig({
+      env: env({ TRANSCRIPTION_MODEL: PREVIOUS_TRANSCRIPTION_MODEL, TRANSCRIPTION_DELAY: 'low' }),
+    });
+    expect(c.delay).toBeUndefined();
   });
 });
 
@@ -38,26 +80,29 @@ describe('supportsVocabularyHints', () => {
 });
 
 describe('language pinning — the 2026-08-04 regression', () => {
+  // These cover the LEGACY single-language field, which is what the bug lived
+  // in. The default model now uses `languages` (plural) and is covered above.
+  const legacy = env({ TRANSCRIPTION_MODEL: PREVIOUS_TRANSCRIPTION_MODEL });
+
   it('sends NO language when the call has not established one', () => {
     // The whole bug: `languageCode || 'en'`. An unasked caller is auto-detect,
     // not English.
-    const c = buildTranscriptionConfig({ env: env({}) });
+    const c = buildTranscriptionConfig({ env: legacy });
     expect(c.language).toBeUndefined();
-    expect(c.model).toBe(DEFAULT_TRANSCRIPTION_MODEL);
+    expect(c.model).toBe(PREVIOUS_TRANSCRIPTION_MODEL);
   });
 
   it('pins the language when the call DID establish one (IVR option 4)', () => {
-    const c = buildTranscriptionConfig({ establishedLanguage: 'es', env: env({}) });
-    expect(c.language).toBe('es');
+    expect(buildTranscriptionConfig({ establishedLanguage: 'es', env: legacy }).language).toBe('es');
   });
 
   it('treats blank and null as not established', () => {
-    expect(buildTranscriptionConfig({ establishedLanguage: '', env: env({}) }).language).toBeUndefined();
-    expect(buildTranscriptionConfig({ establishedLanguage: null, env: env({}) }).language).toBeUndefined();
+    expect(buildTranscriptionConfig({ establishedLanguage: '', env: legacy }).language).toBeUndefined();
+    expect(buildTranscriptionConfig({ establishedLanguage: null, env: legacy }).language).toBeUndefined();
   });
 
   it('normalises case', () => {
-    expect(buildTranscriptionConfig({ establishedLanguage: 'ES', env: env({}) }).language).toBe('es');
+    expect(buildTranscriptionConfig({ establishedLanguage: 'ES', env: legacy }).language).toBe('es');
   });
 });
 
@@ -92,7 +137,7 @@ describe('next-generation models get the bilingual + vocabulary treatment', () =
   });
 
   it('legacy models get neither, since they would be rejected', () => {
-    const c = buildTranscriptionConfig({ env: env({ TRANSCRIPTION_MODEL: 'gpt-4o-mini-transcribe' }) });
+    const c = buildTranscriptionConfig({ env: env({ TRANSCRIPTION_MODEL: PREVIOUS_TRANSCRIPTION_MODEL }) });
     expect(c.keywords).toBeUndefined();
     expect(c.prompt).toBeUndefined();
     expect(c.languages).toBeUndefined();

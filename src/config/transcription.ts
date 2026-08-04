@@ -42,21 +42,46 @@
  * hallucinations than previous gpt-4o-transcribe models, so even staying on this
  * family, the undated alias is the wrong thing to pin.
  *
- * The default here stays on the CURRENT model deliberately: a model swap changes
- * every live patient call and cannot be verified from a dev box with no audio
- * path. Everything else — bilingual languages, keywords, prompt — is wired and
- * tested, so the upgrade is one environment variable:
- *
- *     TRANSCRIPTION_MODEL=gpt-live-transcribe
- *
- * Flip it, place one call in each language, confirm names and dates come back
- * clean, and it stays. Roll back by unsetting it; no deploy either way.
+ * DEFAULT FLIPPED to `gpt-live-transcribe` on 2026-08-04, on the operator's
+ * instruction, with live verification calls to follow. See the note on
+ * DEFAULT_TRANSCRIPTION_MODEL for the rollback and for what those calls should
+ * check. This cannot be verified from a dev box: there is no audio path here, so
+ * the first real evidence is a call.
  */
 
 /** Models that accept `languages` (plural), `keywords` and `prompt`. */
 const NEXT_GEN_MODELS = new Set(['gpt-live-transcribe', 'gpt-transcribe']);
 
-export const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
+/**
+ * `gpt-live-transcribe` as of 2026-08-04, on the operator's call — they are
+ * verifying with live calls in both languages.
+ *
+ * ROLLBACK, if those calls come back wrong: set
+ *
+ *     TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
+ *
+ * and restart. No deploy, no code change. Every session logs the model it
+ * started with (`[SESSION] Call config: ... transcription=...`), so which model a
+ * given call actually used is answerable from the logs rather than inferred.
+ *
+ * WHAT TO WATCH on the verification calls, in the order these fail:
+ *   1. Audio at all — this model string reaches the SIP accept payload, which is
+ *      what starts the session. A model the API rejects fails the session, not
+ *      just the transcript.
+ *   2. Surnames and dates of birth. That is the whole point: every identity gate
+ *      keys on them, and the old config returned "nelsum" for Nelson.
+ *   3. A Spanish call WITHOUT pressing 4 in the IVR. That is the case the old
+ *      `language: languageCode || 'en'` pin broke, and the one `languages`
+ *      (plural) exists for.
+ *   4. Turn-taking latency. Streaming transcription trades latency for quality;
+ *      if responses lag, TRANSCRIPTION_DELAY tunes it (see transcriptionDelay).
+ *      Note the VAD eagerness 'low' experiment was reverted on 2026-07-20 for
+ *      exactly this reason, so the call is sensitive to it.
+ */
+export const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-live-transcribe';
+
+/** The model to fall back to if the new one misbehaves. Documented, not used. */
+export const PREVIOUS_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
 
 export function transcriptionModel(env: NodeJS.ProcessEnv = process.env): string {
   const m = (env.TRANSCRIPTION_MODEL ?? '').trim();
@@ -65,6 +90,24 @@ export function transcriptionModel(env: NodeJS.ProcessEnv = process.env): string
 
 export function supportsVocabularyHints(model: string): boolean {
   return NEXT_GEN_MODELS.has(model);
+}
+
+/** The `delay` values gpt-live-transcribe accepts, cheapest latency first. */
+const DELAY_VALUES = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
+
+/**
+ * Latency/accuracy trade for the streaming transcriber.
+ *
+ * Unset by default and therefore ABSENT from the payload, so the API's own
+ * default applies and the model flip is the only variable in the operator's
+ * verification calls. If those calls show the agent lagging the caller, this is
+ * the knob — and it is the same failure the VAD eagerness 'low' experiment
+ * produced on 2026-07-20 (responses lagged, callers repeated themselves and
+ * "hello?"-ed into the gap), which is why it is not being pre-tuned blind.
+ */
+export function transcriptionDelay(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const d = (env.TRANSCRIPTION_DELAY ?? '').trim().toLowerCase();
+  return DELAY_VALUES.has(d) ? d : undefined;
 }
 
 /**
@@ -139,11 +182,13 @@ export function buildTranscriptionConfig(
     const ordered = established
       ? [established, ...langs.filter((l) => l !== established)]
       : langs;
+    const delay = transcriptionDelay(env);
     return {
       model,
       languages: ordered,
       prompt: TRANSCRIPTION_PROMPT,
       keywords: TRANSCRIPTION_KEYWORDS,
+      ...(delay ? { delay } : {}),
     };
   }
 

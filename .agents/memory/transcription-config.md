@@ -54,20 +54,37 @@ OpenAI also reports the `gpt-4o-mini-transcribe-2025-12-15` snapshot producing
 ~70% fewer hallucinations than previous gpt-4o-transcribe models, so even staying
 in this family, pinning the undated alias is the wrong move.
 
-## Upgrading (one env var, no deploy)
+## Current model, and rolling back
 
-The default deliberately stays on the current model: a swap changes every live
-patient call and **cannot be verified from a dev box with no audio path**.
-Everything else — bilingual `languages`, `keywords`, `prompt` — is wired and
-tested behind the model check.
+**Default is `gpt-live-transcribe`** (flipped 2026-08-04 on the operator's
+instruction, verified by live calls rather than here — there is no audio path on a
+dev box, so the first real evidence is a call).
 
 ```
-TRANSCRIPTION_MODEL=gpt-live-transcribe     # recommended
-TRANSCRIPTION_LANGUAGES=en,es               # optional; this is the default
+TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe   # rollback: env only, no deploy
+TRANSCRIPTION_LANGUAGES=en,es                # optional; this is the default
+TRANSCRIPTION_DELAY=low|medium|high|...      # optional; unset = API default
 ```
 
-Flip it, place one call in each language, confirm surnames and dates come back
-clean, and keep it. Unset to roll back.
+Every session logs what it started with — `[SESSION] Call config: ...
+transcription=...` — so which model a given call used is answerable from the logs
+rather than inferred.
+
+### What a verification call should check, in the order these fail
+
+1. **Audio at all.** The model string reaches the SIP accept payload, which is
+   what starts the session. A model the API rejects fails the *session*, not just
+   the transcript.
+2. **Surnames and dates of birth.** The whole point: every identity gate keys on
+   them, and the old config returned "nelsum" for Nelson.
+3. **A Spanish call WITHOUT pressing 4 in the IVR.** That is the case the old
+   `language: languageCode || 'en'` pin broke, and what `languages` (plural)
+   exists for.
+4. **Turn-taking latency.** Streaming transcription trades latency for quality.
+   If the agent lags, `TRANSCRIPTION_DELAY` is the knob — deliberately unset so
+   the model flip was the only variable. Related: the VAD eagerness `'low'`
+   experiment was reverted on 2026-07-20 because responses lagged and callers
+   repeated themselves, so this call is sensitive to it.
 
 `TRANSCRIPTION_PROMPT` and `TRANSCRIPTION_KEYWORDS` contain **no patient data** —
 they ship in every session payload and describe the setting only. Keep it that
