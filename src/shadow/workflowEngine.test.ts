@@ -27,7 +27,7 @@ function reasoning(partial: Partial<ShadowReasoningResult>): ShadowReasoningResu
 
 describe('ShadowWorkflowEngine legality', () => {
   it('has a definition for every active agent (doc 01)', () => {
-    for (const slug of ['no-ivr', 'dev-no-ivr', 'answering-service', 'after-hours', 'azul-scheduling', 'appointment-confirmation', 'drs-scheduler', 'fantasy-football']) {
+    for (const slug of ['no-ivr', 'dev-no-ivr', 'answering-service', 'after-hours', 'azul-scheduling', 'pcp', 'appointment-confirmation', 'drs-scheduler', 'fantasy-football']) {
       expect(engine.getDefinition(slug), slug).toBeDefined();
     }
   });

@@ -76,6 +76,10 @@ waitForPort = 5000
 [userenv.shared]
 HUMAN_AGENT_NUMBER = "+16262229400"
 URGENT_NOTIFICATION_NUMBER = "+16262229400"
+PCP_TWILIO_PHONE_NUMBER = "+16269000771"
+PCP_HUMAN_AGENT_NUMBER = "+17149564300"
+PCP_AGENT_DIDS = "+17143990670,+19097291250,+17143990721,+17143990681"
+PCP_ROUTING_MODE = "sequential"
 DISABLE_PHI_LOGGING = "true"
 # Shadow observer (approved 2026-08-02): observation-only capture on all active
 # agents. Zero caller impact, zero n8n executions, no transcript storage, no

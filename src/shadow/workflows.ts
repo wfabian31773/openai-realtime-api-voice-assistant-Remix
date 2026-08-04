@@ -131,6 +131,29 @@ export function buildWorkflowDefinitions(): Map<string, WorkflowDefinition> {
     escalationUrgency: 'urgent',
   });
 
+  defs.set('pcp', {
+    agentId: 'pcp',
+    steps: ['start', 'identify_intent', 'verify_identity', ...BASE_STEPS.slice(2)],
+    transitions: {
+      ...baseTransitions(),
+      start: ['identify_intent', 'collect_fields', 'respond'],
+      identify_intent: ['verify_identity', 'collect_fields', 'respond', 'transfer'],
+      verify_identity: ['verify_identity', 'collect_fields', 'respond', 'transfer'],
+      collect_fields: ['collect_fields', 'verify_identity', 'confirm', 'validate', 'respond', 'transfer'],
+    },
+    requiredFields: {
+      pcp_request: ['callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber', 'callPurpose'],
+      patient_record_request: ['callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber', 'callPurpose', 'statedRelationship', 'identityVerified'],
+      handoff_request: ['callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber', 'callPurpose'],
+      other: [],
+    },
+    mutatingTools: ['create_pcp_task', 'record_automated_resolution', 'handoff_to_pcp', 'handle_patient_medical_records_request'],
+    confirmationRequired: ['create_pcp_task', 'record_automated_resolution'],
+    retryLimit: 2,
+    informationalIntents: ['other'],
+    escalationUrgency: 'urgent',
+  });
+
   defs.set('appointment-confirmation', {
     agentId: 'appointment-confirmation',
     steps: BASE_STEPS,

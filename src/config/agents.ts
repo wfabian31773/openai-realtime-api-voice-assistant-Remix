@@ -7,6 +7,7 @@ import { createFantasyFootballAgent } from '../agents/fantasyFootballAgent';
 import { createNoIvrAgent, noIvrAgentConfig, type NoIvrAgentMetadata } from '../agents/noIvrAgent';
 import { createNoIvrAgentV2, noIvrAgentV2Config } from '../agents/noIvrAgentV2';
 import { createAzulSchedulingAgent, azulSchedulingAgentConfig } from '../agents/azulSchedulingAgent';
+import { createPcpAgent, pcpAgentConfig } from '../agents/pcpAgent';
 
 export type AgentFactory = (...args: any[]) => RealtimeAgent | Promise<RealtimeAgent>;
 
@@ -103,6 +104,19 @@ export class AgentRegistry {
       voice: azulSchedulingAgentConfig.voice,
       language: azulSchedulingAgentConfig.language,
       greeting: azulSchedulingAgentConfig.greeting,
+    });
+
+    this.register({
+      id: pcpAgentConfig.slug,
+      factory: createPcpAgent as AgentFactory,
+      enabled: true,
+      description: pcpAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'inbound',
+      version: pcpAgentConfig.version,
+      voice: pcpAgentConfig.voice,
+      language: pcpAgentConfig.language,
+      greeting: pcpAgentConfig.greeting,
     });
 
     // Outbound agents

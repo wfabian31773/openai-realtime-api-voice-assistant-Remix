@@ -37,6 +37,7 @@ const AGENT_MAX_DURATION_MS: Record<string, number> = {
   'answering-service':       15 * 60 * 1000,  // 15 min — was nominally 7, never actually applied
   'no-ivr':                  15 * 60 * 1000,  // 15 min — explicit; previously fell through to DEFAULT
   'azul-scheduling':         20 * 60 * 1000,  // 20 min — identity + search + book, longest tail of any agent
+  'pcp':                     15 * 60 * 1000,  // 15 min — professional intake + possible live handoff
 };
 const DEFAULT_MAX_DURATION_MS = 15 * 60 * 1000; // 15 min — unknown/new agents
 

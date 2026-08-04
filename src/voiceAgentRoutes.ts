@@ -34,6 +34,9 @@ import { resolveAbAssignment } from './services/abCarriage';
 import { director, directorEnabledFor, type DirectorAction } from './director/director';
 import { getEnvironmentConfig } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
+import { resolveHandoffDestination, resolvePcpDialSequence } from './services/handoffPolicy';
+import { pcpAgentConfig } from './agents/pcpAgent';
+import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 
 // Load centralized environment configuration
 let envConfig: ReturnType<typeof getEnvironmentConfig>;
@@ -59,6 +62,9 @@ try {
       authToken: process.env.TWILIO_AUTH_TOKEN || '',
       phoneNumber: process.env.TWILIO_PHONE_NUMBER,
       humanAgentNumber: process.env.HUMAN_AGENT_NUMBER,
+      pcpHumanAgentNumber: process.env.PCP_HUMAN_AGENT_NUMBER,
+      pcpAgentDids: (process.env.PCP_AGENT_DIDS || '').split(',').map((number) => number.trim()).filter(Boolean),
+      pcpRoutingMode: process.env.PCP_ROUTING_MODE === 'sequential' ? 'sequential' : 'queue',
       urgentNotificationNumber: process.env.URGENT_NOTIFICATION_NUMBER,
     },
     ticketing: {
@@ -249,6 +255,7 @@ const handoffReadyResolvers = new Map<string, {
   conferenceName?: string;
   callLogId?: string;
 }>();
+const pcpHandoffProgress = new Map<string, (instructions: string) => void>();
 
 // Pending agent additions - stored by incoming-call handler, processed by webhook handler
 // This ensures OpenAI SIP is only added AFTER we accept the call via REST API
@@ -279,6 +286,7 @@ interface SIPWatchdog {
 // did nothing, which is a trap for anyone trying to adjust call length.
 // Call durations are configured in AGENT_MAX_DURATION_MS, one place.
 const sipWatchdogs = new Map<string, SIPWatchdog>();
+const sipConferenceLifecycle = new SipConferenceLifecycle();
 
 // Cancel watchdog when webhook arrives (also clears max-duration timer)
 function cancelSIPWatchdog(conferenceName: string) {
@@ -295,25 +303,27 @@ function cancelSIPWatchdog(conferenceName: string) {
 // This prevents 60-minute OpenAI sessions when caller hangs up early
 async function terminateOrphanedSIPCall(conferenceName: string, reason: string) {
   const watchdog = sipWatchdogs.get(conferenceName);
-  if (!watchdog) {
-    return; // No orphaned SIP call for this conference
-  }
+  const directSipCallSid = sipConferenceLifecycle.takeSipLegForConference(conferenceName);
+  const sipCallSid = watchdog?.sipCallSid ?? directSipCallSid;
+  if (!sipCallSid) return;
   
-  console.warn(`[WATCHDOG] ⚠️ Terminating orphaned SIP call: ${watchdog.sipCallSid} (reason: ${reason})`);
+  console.warn(`[WATCHDOG] ⚠️ Terminating orphaned SIP call: ${sipCallSid} (reason: ${reason})`);
   
   // Cancel both watchdog timers
-  clearTimeout(watchdog.timer);
-  clearTimeout(watchdog.maxDurationTimer);
-  sipWatchdogs.delete(conferenceName);
+  if (watchdog) {
+    clearTimeout(watchdog.timer);
+    clearTimeout(watchdog.maxDurationTimer);
+    sipWatchdogs.delete(conferenceName);
+  }
   
   try {
     const client = await getTwilioClient();
-    await client.calls(watchdog.sipCallSid).update({ status: 'completed' });
-    console.info(`[WATCHDOG] ✓ Orphaned SIP call terminated: ${watchdog.sipCallSid}`);
+    await client.calls(sipCallSid).update({ status: 'completed' });
+    console.info(`[WATCHDOG] ✓ Orphaned SIP call terminated: ${sipCallSid}`);
   } catch (error: any) {
     // Call may already be completed, which is fine
     if (error.code === 20404) {
-      console.info(`[WATCHDOG] SIP call already completed: ${watchdog.sipCallSid}`);
+      console.info(`[WATCHDOG] SIP call already completed: ${sipCallSid}`);
     } else {
       console.error(`[WATCHDOG] ✗ Failed to terminate orphaned SIP call:`, error.message);
     }
@@ -856,48 +866,51 @@ async function fileUrgentHandoffFallbackTicket(
 }
 
 // Handle human agent handoff
-async function addHumanAgent(openAiCallId: string): Promise<void> {
+type HandoffOutcome = { ok: true; destination: string } | { ok: false; status: string; reason: string };
+
+async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
   // Use wrapper function that checks both legacy maps and service cache
   const conferenceName = getConferenceName(openAiCallId);
   if (!conferenceName) {
     console.error('[HANDOFF] ✗ Conference name not found for call ID:', openAiCallId);
-    return;
-  }
-
-  if (!HUMAN_AGENT_NUMBER) {
-    console.error('[HANDOFF] ✗ HUMAN_AGENT_NUMBER not configured');
-    return;
+    return { ok: false, status: 'FAILED', reason: 'conference_not_found' };
   }
 
   // Get escalation details for this call
   const escalationDetails = escalationDetailsMap.get(openAiCallId);
   
-  // SERVER-SIDE VALIDATION: Only allow handoffs for legitimate urgent cases
-  // This prevents the AI from making handoffs for routine requests like cancellations
-  const ALLOWED_HANDOFF_CALLER_TYPES = ['patient_urgent', 'patient_urgent_medical', 'healthcare_provider', 'patient_unresponsive'];
   const callerType = escalationDetails?.callerType;
-  
-  if (!callerType || !ALLOWED_HANDOFF_CALLER_TYPES.includes(callerType)) {
+  const policy = resolveHandoffDestination({
+    agentSlug: escalationDetails?.agentSlug,
+    callerType,
+    clinicalNumber: HUMAN_AGENT_NUMBER,
+    pcpNumber: envConfig.twilio.pcpHumanAgentNumber,
+  });
+
+  if (!policy.allowed) {
     console.warn(`[HANDOFF] ⚠️ BLOCKED - Invalid caller type for handoff: "${callerType || 'none'}"`);
     console.warn(`[HANDOFF]   Reason given: ${escalationDetails?.reason || 'Not specified'}`);
-    console.warn(`[HANDOFF]   Allowed types: ${ALLOWED_HANDOFF_CALLER_TYPES.join(', ')}`);
-    console.warn(`[HANDOFF]   AI should have created a ticket instead - blocking this handoff`);
-    // Don't disconnect caller - AI will continue the conversation
-    return;
+    console.warn(`[HANDOFF]   Policy reason: ${policy.reason}`);
+    return { ok: false, status: 'HANDOFF_UNAVAILABLE', reason: policy.reason };
   }
+  let handoffDestination = policy.destination;
   
   console.log('\n========================================');
   console.log(`[HANDOFF] ✓ Validated - Transferring to human agent`);
   console.log(`   Conference: ${conferenceName}`);
-  console.log(`   On-call fallback: ${HUMAN_AGENT_NUMBER}`);
+  console.log(`   Human Number: ${handoffDestination}`);
   if (escalationDetails) {
-    console.log(`   Reason: ${escalationDetails.reason || 'Not specified'}`);
     console.log(`   Caller Type: ${escalationDetails.callerType || 'Unknown'}`);
-    if (escalationDetails.providerInfo) {
-      console.log(`   Provider: ${escalationDetails.providerInfo}`);
-    }
-    if (escalationDetails.patientFirstName) {
-      console.log(`   Patient: ${escalationDetails.patientFirstName} ${escalationDetails.patientLastName || ''}`);
+    if (policy.policy === 'pcp') {
+      console.log(`   PCP context present: reason=${Boolean(escalationDetails.reason)}, organization=${Boolean(escalationDetails.providerInfo)}, patient=${Boolean(escalationDetails.patientFirstName)}`);
+    } else {
+      console.log(`   Reason: ${escalationDetails.reason || 'Not specified'}`);
+      if (escalationDetails.providerInfo) {
+        console.log(`   Provider: ${escalationDetails.providerInfo}`);
+      }
+      if (escalationDetails.patientFirstName) {
+        console.log(`   Patient: ${escalationDetails.patientFirstName} ${escalationDetails.patientLastName || ''}`);
+      }
     }
   }
   console.log('========================================\n');
@@ -906,7 +919,7 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
 
   if (!callerID) {
     console.error('[HANDOFF] ✗ Missing callerID');
-    return;
+    return { ok: false, status: 'FAILED', reason: 'caller_id_missing' };
   }
 
   // WHERE the urgent call goes. Until 2026-08-03 this was always the global
@@ -915,15 +928,26 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
   // on-call outside them, urgent ticket as the fallback either way. The
   // resolver degrades to HUMAN_AGENT_NUMBER on every failure path, so this is
   // never worse than the behaviour it replaces.
-  const { resolveUrgentTransferTarget } = await import('./services/urgentTransfer');
-  const target = await resolveUrgentTransferTarget({
-    reason: escalationDetails?.reason ?? 'urgent escalation',
-    callerPhone: callerID || undefined,
-    onCallNumber: HUMAN_AGENT_NUMBER,
-  });
-  const dialTarget = target?.number ?? HUMAN_AGENT_NUMBER;
-
-  console.log(`[HANDOFF] Dialing ${dialTarget} (${target?.source ?? 'on_call_default'}${target?.queueLabel ? ` — ${target.queueLabel}` : ''})`);
+  // Layered ON TOP of resolveHandoffDestination, never instead of it. The
+  // policy resolver decides WHICH CONTRACT this call falls under — clinical
+  // or PCP — and that decision is not ours to second-guess. A PCP handoff is
+  // a professional caller with its own dial sequence and its own ticketing;
+  // routing one into an office front desk would be wrong. So the office queue
+  // only ever replaces the CLINICAL destination.
+  let dialSource = 'policy';
+  if (policy.policy !== 'pcp') {
+    const { resolveUrgentTransferTarget } = await import('./services/urgentTransfer');
+    const target = await resolveUrgentTransferTarget({
+      reason: escalationDetails?.reason ?? 'urgent escalation',
+      callerPhone: callerID || undefined,
+      onCallNumber: handoffDestination,
+    });
+    if (target?.number) {
+      handoffDestination = target.number;
+      dialSource = target.source + (target.queueLabel ? ` — ${target.queueLabel}` : '');
+    }
+  }
+  console.log(`[HANDOFF] Dialing ${handoffDestination} (${dialSource})`);
 
   try {
     // Initialize Twilio client if not already done
@@ -939,12 +963,20 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
       throw new Error('TWILIO_PHONE_NUMBER environment variable not set');
     }
     console.log(`[HANDOFF] Using Twilio phone number: ${twilioPhoneNumber}`);
+
+    const pcpDialSequence = policy.policy === 'pcp'
+      ? resolvePcpDialSequence({
+          mode: envConfig.twilio.pcpRoutingMode,
+          queueNumber: envConfig.twilio.pcpHumanAgentNumber,
+          agentDids: envConfig.twilio.pcpAgentDids,
+        })
+      : [];
     
     // STEP 1: Send SMS notification immediately (fire and forget)
     // Provider gets heads-up while we're dialing them
     // Use centralized config for production compatibility
     const URGENT_NOTIFICATION_NUMBER = envConfig.twilio.urgentNotificationNumber;
-    if (URGENT_NOTIFICATION_NUMBER) {
+    if (URGENT_NOTIFICATION_NUMBER && policy.policy !== 'pcp') {
       (async () => {
         try {
           const callerNumber = callerID || 'Unknown';
@@ -994,6 +1026,50 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
       console.log('[HANDOFF] ℹ️ SMS notification skipped - URGENT_NOTIFICATION_NUMBER not configured');
     }
     
+    let sequentialPcpAnswered = false;
+    if (policy.policy === 'pcp' && envConfig.twilio.pcpRoutingMode === 'sequential') {
+      abortedPcpHandoffs.delete(openAiCallId);
+      if (pcpDialSequence.length === 0) return { ok: false, status: 'HANDOFF_UNAVAILABLE', reason: 'pcp_agent_dids_not_configured' };
+      const briefing = [
+        'This is the Azul Vision PCP support assistant with a live professional caller transfer.',
+        escalationDetails?.providerInfo ? `Caller organization and role: ${escalationDetails.providerInfo}.` : null,
+        escalationDetails?.reason ? `Reason: ${escalationDetails.reason}.` : null,
+        'Press any key to accept, or remain on the line to connect.',
+      ].filter(Boolean).join(' ');
+      for (let index = 0; index < pcpDialSequence.length; index += 1) {
+        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected' };
+        const destination = pcpDialSequence[index];
+        console.log(`[HANDOFF] PCP sequential attempt ${index + 1}/${pcpDialSequence.length}`);
+        if (index > 0) {
+          pcpHandoffProgress.get(openAiCallId)?.(
+            `Say exactly: "That team member wasn't available, so I'm trying the next person now. Please stay with me." Say nothing else.`,
+          );
+        }
+        const progress = pcpHandoffProgress.get(openAiCallId);
+        let progressInterval: ReturnType<typeof setInterval> | undefined;
+        const progressFirst = progress ? setTimeout(() => {
+          progress('Say exactly: "I’m still working on the connection for you. Please stay on the line." Say nothing else.');
+          progressInterval = setInterval(() => progress('Say exactly: "Thank you for holding. I’m still trying to reach the PCP team." Say nothing else.'), 10_000);
+        }, 8_000) : undefined;
+        const outcome = await transferConferenceToNumber(openAiCallId, destination, `PCP team member ${index + 1}`, briefing);
+        if (progressFirst) clearTimeout(progressFirst);
+        if (progressInterval) clearInterval(progressInterval);
+        if (outcome.ok) {
+          handoffDestination = destination;
+          sequentialPcpAnswered = true;
+          console.log(`[HANDOFF] ✓ PCP sequential attempt ${index + 1} answered`);
+          return { ok: true, destination };
+        }
+        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected' };
+        console.warn(`[HANDOFF] PCP sequential attempt ${index + 1} was not accepted: ${outcome.detail || 'unknown'}`);
+      }
+      pcpHandoffProgress.get(openAiCallId)?.(
+        'Say exactly: "Thanks for holding. I couldn’t reach the team live, but your PCP request has already been recorded for follow-up." Say nothing else and do not claim a transfer occurred.',
+      );
+      return { ok: false, status: 'NO_ANSWER', reason: 'pcp_sequence_no_answer' };
+    }
+
+    if (!sequentialPcpAnswered) {
     // STEP 2: Dial human agent into the conference WHILE AI is still connected
     // Use statusCallback to know when human actually answers
     console.log('[HANDOFF] Step 1: Dialing human agent into conference (AI still connected)...');
@@ -1020,8 +1096,8 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
       const handoffResult = await withResiliency(
         async () => twilioClient.conferences(conferenceName).participants.create({
           from: twilioPhoneNumber,
-          to: dialTarget,
-          label: target?.source === 'office_queue' ? 'office queue' : 'human agent',
+          to: handoffDestination,
+          label: dialSource.startsWith('office_queue') ? 'office queue' : 'human agent',
           // Operator-specified UX (2026-07-22, applies to ALL transfers):
           // no pre-answer ringback into the conference — the caller hears
           // the agent, then the human, never the raw ring.
@@ -1065,15 +1141,22 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
     } catch (dialError) {
       console.error('[HANDOFF] ✗ Failed to dial human agent:', dialError);
       // The AI is still connected, so the caller is not stranded mid-air —
-      // but until 2026-08-03 this path left NO RECORD AT ALL. A no-answer
-      // filed an urgent fallback ticket; a dial that threw (Twilio down,
-      // circuit breaker open, bad number) filed nothing, and the urgent
-      // caller existed only in a console line. Same fallback, both paths.
-      void fileUrgentHandoffFallbackTicket(openAiCallId, escalationDetails, callerID, {
-        why: `Transfer dial failed: ${dialError instanceof Error ? dialError.message : String(dialError)}`,
-        dialTarget,
-      });
-      return;
+      // but this path used to leave NO RECORD AT ALL. A no-answer filed an
+      // urgent fallback ticket; a dial that threw (Twilio down, circuit
+      // breaker open, bad number) filed nothing, and the urgent caller
+      // existed only in a console line. Same net under both.
+      //
+      // PCP is excluded for the same reason the no-answer path excludes it:
+      // it files its own structured ticket before dialing, and a
+      // professional-caller failure must never land in the patient
+      // after-hours contract.
+      if (policy.policy !== 'pcp') {
+        void fileUrgentHandoffFallbackTicket(openAiCallId, escalationDetails, callerID, {
+          why: `Transfer dial failed: ${dialError instanceof Error ? dialError.message : String(dialError)}`,
+          dialTarget: handoffDestination,
+        });
+      }
+      return { ok: false, status: 'FAILED', reason: 'dial_failed' };
     }
 
     // STEP 3: Wait for human to actually answer before disconnecting AI
@@ -1089,12 +1172,18 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
         handoffReadyResolvers.delete(humanCallSid);
       }
 
+      // PCP creates its own structured ticket before dialing. Never route a
+      // professional-caller failure into the patient/after-hours contract.
+      if (policy.policy === 'pcp') {
+        return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer' };
+      }
       await fileUrgentHandoffFallbackTicket(openAiCallId, escalationDetails, callerID, {
         why: 'URGENT TRANSFER NOT ANSWERED: The patient was transferred but no one picked up.',
-        dialTarget,
+        dialTarget: handoffDestination,
       });
 
-      return;
+      return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer' };
+    }
     }
     
     // STEP 4: Disconnect AI agent ONLY AFTER human successfully answers
@@ -1169,7 +1258,7 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
             // DO NOT SET DURATION - Twilio status callback will set it
             transcript,
             transferredToHuman: true,
-            humanAgentNumber: HUMAN_AGENT_NUMBER,
+            humanAgentNumber: handoffDestination,
             costIsEstimated: true,  // Mark as estimated until Twilio confirms
             ...(capturedCallerName ? { callerName: capturedCallerName } : {}),
           });
@@ -1235,9 +1324,10 @@ async function addHumanAgent(openAiCallId: string): Promise<void> {
         }
       }
     }, 1000);
+    return { ok: true, destination: handoffDestination };
   } catch (error) {
     console.error('[HANDOFF ERROR]', error);
-    throw error;
+    return { ok: false, status: 'FAILED', reason: error instanceof Error ? error.message : 'handoff_failed' };
   }
 }
 
@@ -1259,6 +1349,62 @@ function escapeXml(s: string): string {
     .replace(/'/g, '&apos;');
 }
 
+function conferenceWasTransferredToHuman(conferenceName: string): boolean {
+  const openAiCallId = getCallIdByConference(conferenceName);
+  return Boolean(openAiCallId && callMetadataForDB.get(openAiCallId)?.transferredToHuman);
+}
+
+/**
+ * If the OpenAI/Sage leg disappears while the caller is still connected,
+ * replace the stranded conference with the established answering-service
+ * fallback. The caller leg is fetched first so a late/duplicate SIP callback
+ * cannot resurrect or redirect an already-ended call.
+ */
+async function recoverCallerAfterSipTermination(conferenceName: string, status: string): Promise<void> {
+  if (conferenceWasTransferredToHuman(conferenceName)) {
+    console.info(`[SIP-RECOVERY] Skipping ${conferenceName}: human transfer already completed`);
+    return;
+  }
+
+  const callerCallSid = getTwilioCallSid(conferenceName);
+  if (!callerCallSid) {
+    console.warn(`[SIP-RECOVERY] No caller CallSid found for ${conferenceName}`);
+    return;
+  }
+
+  try {
+    const client = await getTwilioClient();
+    const callerCall = await client.calls(callerCallSid).fetch();
+    if (callerCall.status !== 'in-progress') {
+      console.info(`[SIP-RECOVERY] Caller ${callerCallSid} already ${callerCall.status}; no fallback needed`);
+      return;
+    }
+
+    const fallbackNumber = HUMAN_AGENT_NUMBER || '+18186021567';
+    const callerIdAttribute = envConfig.twilio.phoneNumber
+      ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
+      : '';
+    await client.calls(callerCallSid).update({
+      twiml: `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">We apologize, but our assistant was disconnected. Please hold while we transfer you to our answering service.</Say>
+  <Dial${callerIdAttribute}>
+    <Number>${escapeXml(fallbackNumber)}</Number>
+  </Dial>
+  <Say voice="Polly.Joanna">We were unable to complete your call. Please try again later or call back during regular business hours. Goodbye.</Say>
+  <Hangup/>
+</Response>`,
+    });
+    console.warn(`[SIP-RECOVERY] Caller ${callerCallSid} redirected after Sage leg ${status}`);
+  } catch (error: any) {
+    if (error?.code === 20404) {
+      console.info(`[SIP-RECOVERY] Caller ${callerCallSid} already ended`);
+      return;
+    }
+    console.error(`[SIP-RECOVERY] Failed for ${conferenceName}:`, error?.message ?? error);
+  }
+}
+
 const warmTransferAccepts = new Map<string, {
   resolve: (info: { acceptMethod: 'keypress' | 'stay_on_line'; amdVerdict: string }) => void;
   reject: (err: Error) => void;
@@ -1269,6 +1415,18 @@ const warmTransferAccepts = new Map<string, {
   // consulted when the office never pressed a key — see the accept handler.
   answeredBy?: string;
 }>();
+const activeOfficeLegsByCall = new Map<string, Set<string>>();
+const abortedPcpHandoffs = new Set<string>();
+
+async function cancelActiveOfficeLegs(openAiCallId: string): Promise<void> {
+  const legs = [...(activeOfficeLegsByCall.get(openAiCallId) ?? [])];
+  activeOfficeLegsByCall.delete(openAiCallId);
+  await Promise.all(legs.map(async (callSid) => {
+    warmTransferAccepts.delete(callSid);
+    officeLegBridges.delete(callSid);
+    try { await twilioClient?.calls(callSid).update({ status: 'completed' }); } catch { /* already terminal */ }
+  }));
+}
 
 /** Office legs currently bridged (or about to be) into a caller conference,
  *  keyed by the office leg's CallSid.
@@ -1345,7 +1503,7 @@ async function transferConferenceToNumber(
         from: twilioPhoneNumber,
         to: toNumber,
         twiml,
-        timeout: 30, // ring the office queue for up to 30s
+        timeout: 15, // test queue: advance promptly when a DID does not answer
         statusCallback: statusUrl,
         statusCallbackEvent: ['completed'],
         statusCallbackMethod: 'POST',
@@ -1363,15 +1521,18 @@ async function transferConferenceToNumber(
     if (!dialResult.success) {
       throw dialResult.error;
     }
-    const dialedSid: string = dialResult.result!.sid;
+        const dialedSid: string = dialResult.result!.sid;
     officeCallSid = dialedSid;
+    const activeLegs = activeOfficeLegsByCall.get(openAiCallId) ?? new Set<string>();
+    activeLegs.add(dialedSid);
+    activeOfficeLegsByCall.set(openAiCallId, activeLegs);
     console.log(`[WARM-TRANSFER] Dialing ${label} (${toNumber}) with briefing, CallSid: ${dialedSid}`);
 
-    // Overall window: 30s ring + up to ~35s briefing/gather + margin.
+    // Bounded acceptance window; voicemail is rejected immediately by AMD.
     timeoutId = setTimeout(() => {
       warmTransferAccepts.delete(dialedSid);
       rejectAccepted(new Error('Office did not accept the transfer within the window'));
-    }, 80_000);
+    }, 45_000);
 
     officeLegBridges.set(dialedSid, { openAiCallId, label });
     // Office-leg telemetry (2026-07-30): remember what we dialed so the
@@ -1409,6 +1570,8 @@ async function transferConferenceToNumber(
     if (officeCallSid) {
       warmTransferAccepts.delete(officeCallSid);
       officeLegBridges.delete(officeCallSid);
+      activeOfficeLegsByCall.get(openAiCallId)?.delete(officeCallSid);
+      try { await twilioClient.calls(officeCallSid).update({ status: 'completed' }); } catch { /* already terminal */ }
     }
     return { ok: false, detail };
   }
@@ -1431,6 +1594,7 @@ async function transferConferenceToNumber(
   // which is precisely the "same patient calling again and we lost the
   // original" the front office reported.
   const { callLifecycleCoordinator } = await import('./services/callLifecycleCoordinator');
+  if (officeCallSid) activeOfficeLegsByCall.get(openAiCallId)?.delete(officeCallSid);
   callLifecycleCoordinator.markTransferred(openAiCallId);
   const callMeta = callMetadataForDB.get(openAiCallId);
   if (callMeta) {
@@ -1473,7 +1637,7 @@ async function observeCall(
   
   // AGENT ROUTING with strict validation
   // Only these agents are allowed (defense in depth - validated at webhook AND here)
-  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
+  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
   const legacyDeletedSlugs = ['greeter', 'non-urgent-ticketing'];
   
   let effectiveSlug = agentSlug || 'no-ivr';
@@ -1890,6 +2054,16 @@ async function observeCall(
         );
         break;
       }
+
+      case 'pcp':
+        factoryResult = agentFactory(() => addHumanAgent(callId), {
+          callId,
+          callSid: twilioCallSid,
+          callerPhone: from,
+          dialedNumber: to,
+          getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
+        });
+        break;
 
       case 'azul-scheduling': {
         // createAzulSchedulingAgent(handoffCallback?, metadata?) — NextGen
@@ -2796,7 +2970,7 @@ async function observeCall(
     // Between a function_call and its output there is no active response,
     // so an out-of-band response.create is protocol-safe (same mechanism as
     // the greeting trigger below).
-    if (agentConfig?.id === 'azul-scheduling' && callId) {
+    if ((agentConfig?.id === 'azul-scheduling' || agentConfig?.id === 'pcp') && callId) {
       registerAzulHoldingCallback(callId, (instructionOverride?: string) => {
         try {
           (session.transport as any).sendEvent({
@@ -2811,6 +2985,16 @@ async function observeCall(
           console.error(`[SESSION] azul holding update failed for ${callId}:`, e);
         }
       });
+
+      if (agentConfig?.id === 'pcp') {
+        pcpHandoffProgress.set(callId, (instructions: string) => {
+          try {
+            (session.transport as any).sendEvent({ type: 'response.create', response: { instructions } });
+          } catch (e) {
+            console.error(`[SESSION] PCP handoff update failed for ${callId}:`, e);
+          }
+        });
+      }
 
       // Tier-2 WARM transfer: lets the agent's transfer_to_office tool dial
       // the sage_handoff packet's office queue number with a briefing +
@@ -2950,10 +3134,14 @@ async function observeCall(
     console.error(`[SESSION ERROR] Failed to connect call ${callId}:`, error);
     throw error;
   } finally {
+    abortedPcpHandoffs.add(callId);
+    await cancelActiveOfficeLegs(callId);
+    setTimeout(() => abortedPcpHandoffs.delete(callId), 10 * 60_000);
     // Azul scheduling: stop the holding heartbeat, drop the transfer hook +
     // persist the pilot tool timeline (all no-ops for other agents)
     unregisterAzulHoldingCallback(callId);
     unregisterAzulOfficeTransferCallback(callId);
+    pcpHandoffProgress.delete(callId);
     // Terminal-disposition sweep BEFORE the flush (the sweep reads — and may
     // append a ticket event to — the in-memory timeline the flush deletes).
     // Bounded at 25s: a wedged sweep must never block the flush (2026-07-24
@@ -3147,7 +3335,7 @@ async function observeCall(
             const hasValidTicket = updatedCallLog?.ticketNumber && updatedCallLog.ticketNumber.trim().length > 0;
             const hasValidTranscript = finalTranscript && finalTranscript.length > 50;
             
-            if (twilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service' || agentSlug === 'azul-scheduling') && hasValidTicket && hasValidTranscript) {
+            if (twilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service' || agentSlug === 'azul-scheduling' || agentSlug === 'pcp') && hasValidTicket && hasValidTranscript) {
               
               // Use shared retry utility for ticketing API updates
               const ticketResult = await withRetry(
@@ -3544,7 +3732,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         // 4. Default to after-hours (IVR-based calls) - no-ivr uses dedicated endpoint
         
         // Valid inbound agents (strict allowlist)
-        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'azul-scheduling'];
+        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'pcp'];
         const validOutboundAgents = ['drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
         const legacyDeletedAgents = ['greeter', 'non-urgent-ticketing'];
         
@@ -4147,6 +4335,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         .participants
         .create(participantParams);
       sipParticipantCallSid = participant.callSid;
+      sipConferenceLifecycle.registerSipLeg(conferenceName, participant.callSid);
       console.info(`[TRACE-2] ✓ SIP PARTICIPANT CREATED`);
       console.info(`[TRACE-2]   participant.callSid: ${participant.callSid}`);
       console.info(`[TRACE-2]   participant.status:  ${(participant as any).status ?? 'not-in-response'}`);
@@ -4158,6 +4347,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       console.error(`[TRACE-2]   error.status:  ${error?.status}`);
       console.error(`[TRACE-2]   error.code:    ${error?.code}`);
       console.error(`[TRACE-2]   full error:`, JSON.stringify(error, Object.getOwnPropertyNames(error)));
+      void recoverCallerAfterSipTermination(conferenceName, 'creation_failed');
     }
 
   });
@@ -4382,6 +4572,66 @@ export function setupVoiceAgentRoutes(app: Express): void {
       console.info(`[ANSWERING-SERVICE] ✓ Answering-service agent successfully added to conference: ${conferenceName}`);
     } catch (error) {
       console.error(`[ANSWERING-SERVICE] ✗ Failed to add agent to conference:`, error);
+    }
+  });
+
+  // Dedicated professional-caller line. This route always stamps X-agentSlug=pcp;
+  // it never inherits the after-hours default or patient-facing agent metadata.
+  app.post('/api/voice/pcp', webhookRateLimiter, async (req, res) => {
+    const rawBody = req.body.toString('utf8');
+    const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
+    const callSid = parsedBody.CallSid;
+    const callToken = parsedBody.CallToken;
+    const callerIDNumber = parsedBody.From;
+    const dialedNumber = parsedBody.To;
+
+    if (!callSid || !/^CA[0-9A-Za-z]{10,64}$/.test(callSid) || !callerIDNumber) {
+      res.status(400).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Invalid request</Say></Response>');
+      return;
+    }
+
+    const domain = envConfig.domain;
+    const conferenceName = `conf_${callSid}`;
+    callIDtoConferenceNameMapping[callSid] = conferenceName;
+    ConferenceNametoCallerIDMapping[conferenceName] = callerIDNumber;
+    ConferenceNametoCalledNumberMapping[conferenceName] = dialedNumber;
+    ConferenceNametoCallTokenMapping[conferenceName] = callToken;
+    conferenceNameToTwilioCallSid[conferenceName] = callSid;
+    callMetadata.set(conferenceName, {
+      agentSlug: 'pcp',
+      agentGreeting: pcpAgentConfig.greeting,
+      language: 'english',
+      ivrSelection: undefined,
+    });
+    const extendedMeta = callMetadata.get(conferenceName) as typeof callMetadata extends Map<string, infer T> ? T & { voiceForCall?: string; languageForCall?: string } : never;
+    if (extendedMeta) {
+      extendedMeta.voiceForCall = pcpAgentConfig.voice;
+      extendedMeta.languageForCall = pcpAgentConfig.language;
+    }
+
+    const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">Please hold while we connect you to PCP Support.</Say>
+  <Dial>
+    <Conference beep="false" waitUrl="http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical" startConferenceOnEnter="true" endConferenceOnExit="true" participantLabel="customer" record="record-from-start" recordingStatusCallback="https://${domain}/api/voice/recording-status" recordingStatusCallbackMethod="POST" recordingStatusCallbackEvent="completed" statusCallback="https://${domain}/api/voice/conference-events" statusCallbackEvent="start end join leave" statusCallbackMethod="POST">${escapeXml(conferenceName)}</Conference>
+  </Dial>
+</Response>`;
+    res.type('text/xml').send(twimlResponse);
+
+    try {
+      if (!twilioClient) twilioClient = await getTwilioClient();
+      await twilioClient.conferences(conferenceName).participants.create({
+        from: envConfig.twilio.phoneNumber!,
+        label: 'virtual agent',
+        to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=pcp`,
+        earlyMedia: true,
+        callToken: callToken || '',
+        conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
+        conferenceStatusCallbackEvent: ['join'],
+      });
+      console.info(`[PCP] Agent participant added for call ${callSid.slice(-6)}`);
+    } catch (error) {
+      console.error('[PCP] Failed to add agent participant:', error instanceof Error ? error.message : 'unknown');
     }
   });
 
@@ -5182,6 +5432,14 @@ export function setupVoiceAgentRoutes(app: Express): void {
     if (pending) {
       pending.answeredBy = answeredBy;
       console.log(`[WARM-TRANSFER] AMD verdict for ${callSid}: ${answeredBy || 'unknown'}`);
+      if (answeredBy.startsWith('machine') || answeredBy === 'fax') {
+        warmTransferAccepts.delete(callSid);
+        officeLegBridges.delete(callSid);
+        activeOfficeLegsByCall.get(pending.openAiCallId)?.delete(callSid);
+        pending.reject(new Error(`Office leg answered by ${answeredBy}`));
+        void recordTransferOutcome(callSid, 'machine', { amdVerdict: answeredBy });
+        void twilioClient?.calls(callSid).update({ status: 'completed' }).catch(() => undefined);
+      }
     } else {
       console.warn(`[WARM-TRANSFER] AMD verdict for unknown/expired CallSid ${callSid}: ${answeredBy}`);
     }
@@ -5258,6 +5516,26 @@ export function setupVoiceAgentRoutes(app: Express): void {
       console.error(`[SIP-STATUS]   ErrorCode:      ${errorCode}`);
       console.error(`[SIP-STATUS]   ErrorMessage:   ${errorMsg}`);
       console.error(`[SIP-STATUS]   Full body:      ${rawBody.substring(0, 500)}`);
+
+      const conferenceName = sipConferenceLifecycle.resolveConferenceName(callSid, to);
+      const recoveryPlan = sipConferenceLifecycle.beginCallerRecovery({
+        sipCallSid: callSid,
+        status,
+        to,
+        transferredToHuman: conferenceName ? conferenceWasTransferredToHuman(conferenceName) : false,
+      });
+      if (recoveryPlan) {
+        // Callback already received its 200 above. Recovery remains non-blocking
+        // and waits briefly for any simultaneous human-join event to land.
+        setTimeout(() => {
+          const transferredToHuman = conferenceWasTransferredToHuman(recoveryPlan.conferenceName);
+          if (sipConferenceLifecycle.canExecuteCallerRecovery(recoveryPlan.conferenceName, transferredToHuman)) {
+            void recoverCallerAfterSipTermination(recoveryPlan.conferenceName, status || 'terminal');
+          } else {
+            console.info(`[SIP-RECOVERY] Transfer won race for ${recoveryPlan.conferenceName}`);
+          }
+        }, 750);
+      }
     } catch (e: any) {
       console.error(`[SIP-STATUS] Failed to parse callback:`, e.message);
     }
@@ -5277,6 +5555,14 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const friendlyName = parsedBody.FriendlyName;
     const conferenceSid = parsedBody.ConferenceSid;
     const participantCallSid = parsedBody.CallSid;
+
+    const isOfficeLegParticipant = Boolean(participantCallSid && officeLegBridges.has(participantCallSid));
+    const isHumanParticipant = label === 'human agent' || isOfficeLegParticipant;
+    if (isHumanParticipant && event === 'participant-join') {
+      sipConferenceLifecycle.markHumanJoined(friendlyName);
+    } else if (isHumanParticipant && event === 'participant-leave') {
+      sipConferenceLifecycle.markHumanLeft(friendlyName);
+    }
 
     // Office-leg bridge telemetry. These events arrive HERE, not at
     // /api/voice/office-leg-events — see the note on
@@ -5434,7 +5720,10 @@ export function setupVoiceAgentRoutes(app: Express): void {
       // This catches cases where caller hangs up before the call was fully registered
       // Without this, the OpenAI SIP connection stays open for 60 minutes
       if (friendlyName) {
-        terminateOrphanedSIPCall(friendlyName, event === 'conference-end' ? 'conference_ended' : 'customer_left');
+        void terminateOrphanedSIPCall(friendlyName, event === 'conference-end' ? 'conference_ended' : 'customer_left');
+        if (event === 'conference-end') {
+          sipConferenceLifecycle.clearConference(friendlyName);
+        }
       }
     }
 
@@ -5958,7 +6247,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       const agentSlug = callLog?.agentId ? (await storage.getAgent(callLog.agentId))?.slug : null;
       const hasTicket = callLog?.ticketNumber && callLog.ticketNumber.trim().length > 0;
       
-      if (effectiveTwilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service' || agentSlug === 'azul-scheduling') && hasTicket) {
+      if (effectiveTwilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service' || agentSlug === 'azul-scheduling' || agentSlug === 'pcp') && hasTicket) {
         try {
           const ticketUpdateResult = await ticketingApiClient.updateTicketCallData({
             callSid: effectiveTwilioCallSid,

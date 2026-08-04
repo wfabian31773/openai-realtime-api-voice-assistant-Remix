@@ -11,6 +11,7 @@
     "start": "npx tsx src/server.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
+    "seed:pcp-agent": "tsx scripts/seed-pcp-agent.ts",
     "sim": "node scripts/sim-personas.mjs",
     "sim:conv": "tsx scripts/sim-conversations.mjs"
   },
