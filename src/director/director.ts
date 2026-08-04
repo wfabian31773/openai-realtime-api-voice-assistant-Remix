@@ -87,6 +87,10 @@ interface CallState {
    *  caller says yes, they have told us the name is theirs — see
    *  observeCaller. */
   pendingNameConfirm?: string;
+  /** The topic the agent just asked about. The caller's next turn is the
+   *  answer to it, even when that turn is bare ("Leslie") and matches none
+   *  of extractAnswers' phrasings. */
+  pendingAsk?: string;
   lastAgentLine: string;
   callerSpokeSinceAgent: boolean;
 }
@@ -310,7 +314,14 @@ function guardableName(name: string): boolean {
  * happened on a call where the phone matched and the person did not.
  */
 function identityEstablished(s: CallState): boolean {
-  return s.answered.has('full name') && s.answered.has('date of birth');
+  // "full name" OR first+last collected separately. azul asks the three
+  // fields ONE AT A TIME — which is what we told it to do — so a fully
+  // identified caller never populates a single 'full name' slot, and this
+  // function used to return false for every one of them.
+  const named =
+    s.answered.has('full name') ||
+    (s.answered.has('first name') && s.answered.has('last name'));
+  return named && s.answered.has('date of birth');
 }
 
 const EXIT_LINE: Record<string, string> = {
@@ -392,6 +403,7 @@ export class Director {
       const s = this.state(callId, agentSlug);
       s.turn += 1;
       s.callerSpokeSinceAgent = true;
+      const answers = extractAnswers(line);
       s.disclosureFiredSinceCaller = false;
       for (const w of deaccent(line).toLowerCase().match(/[a-z'-]{3,}/g) ?? []) s.callerWords.add(w);
       // ...but a name the caller DENIED is not a name the caller gave.
@@ -402,13 +414,32 @@ export class Director {
       // the whole point of having asked. Without this the agent's natural
       // next line, "Thank you, Anthony", was flagged and the director took
       // the turn (2026-08-04 15:11, a real call).
+      // "Can I get your first name?" → "Leslie". A bare answer matches none
+      // of extractAnswers' phrasings ("my name is…", "Surname, Firstname"),
+      // so a caller who answered every question exactly as asked still read
+      // as having established nothing — and the appointment-disclosure rule
+      // then cancelled the agent mid-sentence on a fully identified caller
+      // (2026-08-04, azul, 12 of 26 calls). Bank the answer to the question
+      // we just asked.
+      if (s.pendingAsk && !answers[s.pendingAsk]) {
+        const bare = line.trim();
+        const words = bare.split(/\s+/).length;
+        // Conservative: a short, question-free turn only. "Hello?" and
+        // "I need to reschedule" must not become someone's surname.
+        if (bare.length >= 2 && bare.length <= 60 && words <= 5 && !bare.includes('?') &&
+            /[a-z]/i.test(bare) && !/^(hello|hi|hey|what|sorry|yes|no|okay|ok)\b/i.test(bare)) {
+          s.answered.set(s.pendingAsk, { value: bare, turn: s.turn });
+        }
+      }
+      s.pendingAsk = undefined;
+
       if (s.pendingNameConfirm) {
         if (AFFIRMATIVE.test(deaccent(line))) s.callerWords.add(s.pendingNameConfirm);
         // A denial leaves the name guarded — the number matched the WRONG
         // person, which is exactly when speaking it matters most.
         s.pendingNameConfirm = undefined;
       }
-      for (const [field, value] of Object.entries(extractAnswers(line))) {
+      for (const [field, value] of Object.entries(answers)) {
         // A later answer supersedes an earlier one — corrections must win.
         s.answered.set(field, { value, turn: s.turn });
         if (field === 'date of birth' && !s.spokenDobs.includes(value)) {
@@ -537,6 +568,10 @@ export class Director {
               : `Thanks — I have that as ${readable}. Let me take it from here.`,
         });
       }
+
+      // Remember what we just asked, so the caller's next turn can be banked
+      // against it even if it is a bare "Leslie".
+      s.pendingAsk = topic;
 
       // Never answered, but we keep asking: two asks is a stall, three is a loop.
       if (n >= 2) {
