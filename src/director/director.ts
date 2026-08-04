@@ -44,7 +44,8 @@ export interface DirectorAction {
     | 'bundled_questions'
     | 'readback_loop'
     | 'record_name_disclosed'
-    | 'record_detail_disclosed';
+    | 'record_detail_disclosed'
+    | 'language_switch_unwarranted';
   topic: string;
   /** System-message text (all enforcement levels). */
   text: string;
@@ -91,6 +92,12 @@ interface CallState {
   /** The topic of the LAST thing the agent asked for. A caller answering "Allen"
    *  is only interpretable against the question it answers. */
   pendingAsk: string | null;
+  /** The caller has spoken Spanish, or asked for it by name. Until then, the
+   *  agent switching to Spanish is a guess — see language_switch_unwarranted. */
+  callerLicensedSpanish: boolean;
+  /** The caller produced a script or letter that is positively neither English
+   *  nor Spanish. Required before the language rule will contradict the agent. */
+  callerSpokeForeign: boolean;
   lastAgentLine: string;
   callerSpokeSinceAgent: boolean;
 }
@@ -274,6 +281,73 @@ function guardableName(name: string): boolean {
   return n.length >= 3 && /^[a-z][a-z'-]+$/.test(n) && !NAME_STOPLIST.has(n);
 }
 
+/**
+ * LANGUAGE. The agent may speak Spanish when the CALLER has established
+ * Spanish. Guessing it from an utterance that is merely not-English is how a
+ * Russian speaker got answered in Spanish.
+ *
+ * Call ecd0b233 (2026-08-04 09:13): the caller said, in Russian, "give me
+ * someone to talk to on the phone". The agent replied "¡Claro que sí! Puedo
+ * hablar en español..." and the call died at 53 seconds having helped nobody.
+ * Same shape on 3c07d83a, where a single unintelligible token ("Aynı.") sent
+ * the whole call into Spanish.
+ *
+ * The prompt already forbids exactly this — "ONLY auto-switch to Spanish if the
+ * caller clearly and unambiguously speaks Spanish to you. Never switch on a
+ * hunch, an accent, or a name. Any unrecognized or ambiguous utterance stays in
+ * English." It is the director's founding problem restated: the instruction is
+ * correct and the model treats it as a suggestion.
+ *
+ * Deliberately asymmetric. The rule fires ONLY on the agent speaking
+ * unlicensed Spanish; it never pushes a call INTO Spanish. A caller mentioning
+ * "Spanish" in English licenses it, even if they turn out to be declining it —
+ * not firing is always the safe direction here.
+ */
+const SPANISH_PUNCTUATION = /[¿¡]/;
+/** Words that do not occur in ordinary English call transcripts. */
+const SPANISH_MARKERS =
+  /\b(?:que|para|con|por|una|unos|unas|est[áa]|estoy|c[óo]mo|puedo|puede|necesito|necesita|gracias|se[ñn]or|se[ñn]ora|cita|citas|nombre|fecha|nacimiento|ayudar|ayudarle|ayudarte|decir|hablar|habla|espa[ñn]ol|favor|buenas|buenos|d[íi]as|tardes|noches|usted|tiene|tengo|quiero|quisiera|vamos|aqu[íi]|tambi[ée]n|entiendo|perfecto|claro|ma[ñn]ana|ahora|bien|hacer|esto|eso|s[íi])\b/gi;
+
+/** Is this line Spanish? One inverted mark, or two distinct Spanish words. */
+export function looksSpanish(line: string): boolean {
+  if (SPANISH_PUNCTUATION.test(line)) return true;
+  const hits = new Set((line.toLowerCase().match(SPANISH_MARKERS) ?? []).map((w) => w));
+  return hits.size >= 2;
+}
+
+/** The caller asking for Spanish in any language, by name. */
+const SPANISH_REQUEST = /\b(?:spanish|espa[ñn]ol|espanol|hispano|hispana)\b/i;
+
+/**
+ * Characters outside the English + Spanish alphabet — a POSITIVE signal that
+ * the caller is speaking neither.
+ *
+ * This is the whole precision of the language rule, and it is why the rule
+ * requires it. Transcription garbles Spanish into English-looking ASCII
+ * constantly: call 88d2c270's caller opened with "Bon tardis" — a mangled
+ * "buenas tardes" — and the agent switching to Spanish there was CORRECT.
+ * A rule that fires on "the caller has not demonstrably spoken Spanish" would
+ * have broken that call, because the transcript is the only thing we get and it
+ * said nothing Spanish at all.
+ *
+ * So we only contradict the agent when we can positively identify a script or
+ * letter that is neither English nor Spanish: Cyrillic (call ecd0b233's Russian
+ * caller), CJK, Arabic, Hebrew, Devanagari, Thai, Greek, or a Latin-extended
+ * letter Spanish does not use — the dotless ı of 3c07d83a's "Aynı". Garbled
+ * ASCII is left to the model, which knows the audio and we do not.
+ */
+const NON_EN_ES_SCRIPT =
+  /[Ͱ-ϿЀ-ӿԀ-ԯ֐-׿؀-ۿ܀-ݏऀ-ॿ฀-๿ᄀ-ᇿ぀-ヿ㄰-㆏㐀-䶿一-鿿ꥠ-꥿가-힯]/;
+/** Latin letters used by neither English nor Spanish (Spanish adds áéíóúüñ). */
+const NON_EN_ES_LATIN = /[ıışşğğþðøåæœëïÿâêîôûàèìòùäöĳčšžńłżźćęąůřť]/i;
+
+/** Can we positively tell this is neither English nor Spanish? */
+export function looksForeignToEnglishAndSpanish(line: string): boolean {
+  if (NON_EN_ES_SCRIPT.test(line)) return true;
+  // Strip the letters Spanish legitimately uses before looking for the rest.
+  return NON_EN_ES_LATIN.test(line.replace(/[áéíóúüñ¿¡]/gi, ''));
+}
+
 /** "Yes", "mm-hmm", "that's me" — the caller assenting to what was just asked. */
 const AFFIRMATIVE =
   /^\s*(?:yes|yeah|yep|yup|yes\s+ma'?am|yes\s+sir|sure|correct|right|that'?s\s+(?:right|correct|me|her|him)|speaking|this\s+is\s+(?:she|he|her|him)|uh[\s-]?huh|mm[\s-]?hmm|mhm+|of\s+course|i\s+am)\b/i;
@@ -378,6 +452,8 @@ export class Director {
         disclosureFiredSinceCaller: false,
         identityVerified: false,
         pendingAsk: null,
+        callerLicensedSpanish: false,
+        callerSpokeForeign: false,
         lastAgentLine: '',
         callerSpokeSinceAgent: false,
       };
@@ -518,6 +594,13 @@ export class Director {
       // record disclosure and cancelled mid-turn at `author`. Call 13ecb51d,
       // 2026-08-04 09:42 — twice in one call, on a caller the server had
       // already returned verified:true for.
+      // The caller establishes the call's language, never the agent.
+      if (!s.callerLicensedSpanish && (looksSpanish(line) || SPANISH_REQUEST.test(line))) {
+        s.callerLicensedSpanish = true;
+      }
+      if (!s.callerSpokeForeign && looksForeignToEnglishAndSpanish(line)) {
+        s.callerSpokeForeign = true;
+      }
       if (NAME_CONFIRM_QUESTION.test(s.lastAgentLine) && isAffirmative(line)) {
         for (const n of s.recordNames) {
           if (!new RegExp(`\\b${n}\\b`, 'i').test(s.lastAgentLine)) continue;
@@ -622,6 +705,23 @@ export class Director {
             // and it costs a stray sentence instead of the call.
           });
         }
+      }
+
+      // Language the caller never established, AND positively not their
+      // language. Both halves are required — see looksForeignToEnglishAndSpanish
+      // for why "not demonstrably Spanish" is not a safe trigger on its own.
+      if (!s.callerLicensedSpanish && s.callerSpokeForeign && looksSpanish(line)) {
+        const level = this.bump(s, 'language');
+        return this.action(s, 'language_switch_unwarranted', 'language', level, {
+          why:
+            `You answered in Spanish, but the caller has not spoken Spanish or asked for it. ` +
+            `An utterance you could not place is NOT Spanish — it is unrecognised.`,
+          fix:
+            `Continue in ENGLISH. If you genuinely cannot tell what language they are speaking, ` +
+            `ask once, in English, whether they would prefer English or Spanish. If it is neither, ` +
+            `hand off to a person who can arrange an interpreter — do not guess a language at them.`,
+          speak: `I'm sorry — I want to get you the right help. Would you prefer to continue in English, or in Spanish?`,
+        });
       }
 
       // One question at a time.

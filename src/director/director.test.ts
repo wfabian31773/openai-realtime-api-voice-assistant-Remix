@@ -14,6 +14,8 @@ import {
   extractAnswers,
   formatDob,
   isAffirmative,
+  looksSpanish,
+  looksForeignToEnglishAndSpanish,
   nameFromAnswer,
 } from './director';
 
@@ -528,5 +530,87 @@ describe('isAffirmative', () => {
     for (const n of ['No, no.', 'Ramirez', 'I need to schedule an appointment.']) {
       expect(isAffirmative(n), n).toBe(false);
     }
+  });
+});
+
+/**
+ * REGRESSION: 2026-08-04 — the agent answered a Russian speaker in Spanish.
+ *
+ * Call ecd0b233, 09:13, dead at 53s having helped nobody. Same shape on
+ * 3c07d83a, where one unintelligible token ("Aynı.") sent a whole call into
+ * Spanish. The prompt already forbids both ("Any unrecognized or ambiguous
+ * utterance stays in English") — which is the point: it is an instruction the
+ * model treats as a suggestion, so it needs a deterministic backstop.
+ */
+describe('REGRESSION: unwarranted language switch (2026-08-04)', () => {
+  it('call ecd0b233 — Russian in, Spanish out', () => {
+    d.observeCaller('l1', 'azul-scheduling', 'Блядь, дайте поговорить по телефону.');
+    const a = d.observeAgent('l1', 'azul-scheduling',
+      '¡Claro que sí! Puedo hablar en español. Solo necesito saber quién necesita ayuda.');
+    expect(a).not.toBeNull();
+    expect(a!.code).toBe('language_switch_unwarranted');
+    // Never starts at author — a language misread costs a sentence, not a call.
+    expect(a!.enforcement).toBe('inject');
+  });
+
+  it('call 3c07d83a — one garbled token is not Spanish', () => {
+    d.observeCaller('l2', 'no-ivr', 'Aynı.');
+    const a = d.observeAgent('l2', 'no-ivr',
+      'Claro, estoy aquí para ayudar. Por favor, cuéntame qué necesitas.');
+    expect(a!.code).toBe('language_switch_unwarranted');
+  });
+
+  it('does NOT fire when the caller actually spoke Spanish', () => {
+    d.observeCaller('l3', 'no-ivr', 'Sí, mire, yo tengo una cita para mañana pero no me siento bien.');
+    expect(d.observeAgent('l3', 'no-ivr', 'Claro, vamos a ayudarle con eso. ¿Podría decirme su nombre?')).toBeNull();
+  });
+
+  it('does NOT fire when the caller asked for Spanish in English', () => {
+    d.observeCaller('l4', 'answering-service', 'Do you speak Spanish?');
+    expect(d.observeAgent('l4', 'answering-service', '¡Claro que sí! ¿En qué le puedo ayudar?')).toBeNull();
+  });
+
+  it('does NOT fire on garbled ASCII that is plausibly mangled Spanish', () => {
+    // "Bon tardis" is a mangled "buenas tardes" — call 88d2c270 switched to
+    // Spanish on it and was RIGHT. Transcription garbles Spanish into
+    // English-looking ASCII constantly, so "the caller has not demonstrably
+    // spoken Spanish" is not a safe trigger. This is the false positive that
+    // set the rule's shape: it requires a POSITIVELY foreign script or letter.
+    d.observeCaller('l5', 'no-ivr', 'Bon tardis.');
+    expect(d.observeAgent('l5', 'no-ivr', 'Buenas tardes. ¿En qué le puedo ayudar hoy?')).toBeNull();
+  });
+
+  it('LIMITATION — plain-ASCII nonsense is left to the model', () => {
+    // Deliberate. We cannot tell "Hallo?" from a garbled "hola" in a
+    // transcript, and the model has the audio. Documented so the next person
+    // to widen this rule knows the trade was made on purpose.
+    d.observeCaller('l6', 'no-ivr', 'Hallo? Hallo?');
+    expect(d.observeAgent('l6', 'no-ivr', '¡Hola! ¿En qué le puedo ayudar?')).toBeNull();
+  });
+
+  it('identifies foreign scripts and letters, not Spanish ones', () => {
+    expect(looksForeignToEnglishAndSpanish('Блядь, дайте поговорить')).toBe(true);
+    expect(looksForeignToEnglishAndSpanish('Aynı.')).toBe(true);
+    expect(looksForeignToEnglishAndSpanish('请给我打电话')).toBe(true);
+    // Spanish's own accents are NOT foreign.
+    expect(looksForeignToEnglishAndSpanish('Sí, mañana. ¿Está bien?')).toBe(false);
+    expect(looksForeignToEnglishAndSpanish('Bon tardis.')).toBe(false);
+    expect(looksForeignToEnglishAndSpanish('My name is Jerry Perez.')).toBe(false);
+  });
+
+  it('does not mistake ordinary English for Spanish', () => {
+    for (const line of [
+      'Thanks for calling Azul Vision — how can I help you today?',
+      'I see you have an appointment on August 13 at 10:20 AM.',
+      'No problem, we can do that. Could you tell me your date of birth?',
+      'Let me get you to someone on our team who can help.',
+    ]) {
+      expect(looksSpanish(line), line).toBe(false);
+    }
+  });
+
+  it('recognises Spanish by inverted punctuation or by two markers', () => {
+    expect(looksSpanish('¿Podría decirme su nombre?')).toBe(true);
+    expect(looksSpanish('Necesito su fecha de nacimiento')).toBe(true);
   });
 });

@@ -50,6 +50,23 @@ straight to `author`.
    are both the caller stating their name. Both are handled in
    `observeCaller`; both were holes that produced live false positives.
 
+## Language (`language_switch_unwarranted`)
+
+Added 2026-08-04. The agent answered a Russian speaker in Spanish (ecd0b233,
+dead at 53s) and switched a whole call to Spanish on one garbled token
+("Aynı." — 3c07d83a). The prompt already forbids both; it is instruction-as-
+suggestion again.
+
+The rule requires **two** conditions, and the second is the whole point:
+the agent's line is Spanish, AND the caller produced a positively foreign
+script or letter (Cyrillic, CJK, Arabic, or a Latin-extended letter Spanish
+does not use). "The caller has not demonstrably spoken Spanish" is NOT a safe
+trigger on its own — transcription garbles Spanish into English-looking ASCII
+constantly. Call 88d2c270's caller opened with "Bon tardis", a mangled "buenas
+tardes", and switching to Spanish there was correct. Plain-ASCII nonsense is
+deliberately left to the model, which has the audio; we only have the
+transcript. The rule never pushes a call *into* Spanish.
+
 ## Kill switch
 
 `DIRECTOR_AGENTS` (comma-separated agent slugs, empty = off everywhere) gates

@@ -37,6 +37,7 @@ import { CallDiagnostics } from './services/callDiagnostics';
 import { resolveHandoffDestination, resolvePcpDialSequence } from './services/handoffPolicy';
 import { pcpAgentConfig } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
+import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
 
 // Load centralized environment configuration
 let envConfig: ReturnType<typeof getEnvironmentConfig>;
@@ -2274,6 +2275,23 @@ async function observeCall(
   
   // Store session for potential cleanup from conference events
   activeSessions.set(callId, session);
+
+  // DEAD AIR. Once the webhook lands, cancelSIPWatchdog clears the only
+  // max-duration timer this call had, and the DB reconciler ignores rows that
+  // are not stuck in a transient status. Between those two, a connected session
+  // that simply stops talking runs to the per-agent cap — 20 minutes of billed
+  // silence on call 438e06f8, while the caller redialled and started a second
+  // one. See services/deadAirWatchdog.ts.
+  deadAirWatchdog.arm(callId, (idleMs) => {
+    console.warn(
+      `[DEAD-AIR] No conversational activity for ${Math.round(idleMs / 1000)}s on ${callId} (${effectiveSlug}) — closing session`,
+    );
+    try {
+      session.transport.close();
+    } catch (e) {
+      console.error(`[DEAD-AIR] Failed to close transport for ${callId}:`, e);
+    }
+  });
   const confName = getConferenceName(callId); // Uses wrapper with fallback to service cache
   if (confName) {
     conferenceNameToCallID[confName] = callId;
@@ -2320,6 +2338,11 @@ async function observeCall(
   // The SDK's history_added fires before transcription completes
   session.transport.on('*', (event: any) => {
     const eventType = event?.type;
+
+    // Proof of life for the dead-air watchdog. Transcript- and tool-shaped
+    // events only: audio deltas and keepalives keep flowing on a session that
+    // has stopped conversing, so counting those would defeat the whole thing.
+    if (isActivityEvent(eventType)) deadAirWatchdog.touch(callId);
 
     // Accumulate real token usage for cost attribution (see callTokenUsage).
     if (eventType === 'response.done' && event?.response?.usage) {
@@ -3363,6 +3386,7 @@ async function observeCall(
     activeSessions.delete(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
+    deadAirWatchdog.release(callId);
     conversationLoopGuard.releaseCall(callId);
     void import('./services/identityArgGuard').then(({ releaseIdentityGuard }) => releaseIdentityGuard(callId));
     director.release(callId);
