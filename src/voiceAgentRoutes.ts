@@ -2357,15 +2357,38 @@ async function observeCall(
   // that simply stops talking runs to the per-agent cap — 20 minutes of billed
   // silence on call 438e06f8, while the caller redialled and started a second
   // one. See services/deadAirWatchdog.ts.
+  //
+  // HANG UP, do not merely close the transport. First live day (2026-08-04)
+  // this closed session.transport and a dead-air call still ran 459s: closing
+  // our transport tears down OUR end of the OpenAI session, it does not end the
+  // CALL, so the caller stayed connected to a line with no agent on it until the
+  // per-agent cap. The actual hangup is the same REST call terminate_call makes.
   deadAirWatchdog.arm(callId, (idleMs) => {
+    const secs = Math.round(idleMs / 1000);
     console.warn(
-      `[DEAD-AIR] No conversational activity for ${Math.round(idleMs / 1000)}s on ${callId} (${effectiveSlug}) — closing session`,
+      `[DEAD-AIR] No conversational activity for ${secs}s on ${callId} (${effectiveSlug}) — hanging up`,
     );
-    try {
-      session.transport.close();
-    } catch (e) {
-      console.error(`[DEAD-AIR] Failed to close transport for ${callId}:`, e);
-    }
+    void (async () => {
+      try {
+        const apiKey = process.env.OPENAI_API_KEY;
+        if (apiKey) {
+          const res = await fetch(
+            `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
+            { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` } },
+          );
+          console.warn(`[DEAD-AIR] hangup for ${callId} → ${res.status}`);
+        } else {
+          console.error('[DEAD-AIR] OPENAI_API_KEY missing — cannot hang up');
+        }
+      } catch (e) {
+        console.error(`[DEAD-AIR] hangup failed for ${callId}:`, e);
+      } finally {
+        // Cleanup only, after the hangup. Harmless if the call is already gone.
+        try {
+          session.transport.close();
+        } catch { /* already closed */ }
+      }
+    })();
   });
   const confName = getConferenceName(callId); // Uses wrapper with fallback to service cache
   if (confName) {
