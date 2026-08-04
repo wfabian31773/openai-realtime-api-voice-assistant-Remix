@@ -83,6 +83,10 @@ interface CallState {
   /** Suppresses a second disclosure action before the caller has had a
    *  chance to respond to the first (the 17:00 stutter). */
   disclosureFiredSinceCaller: boolean;
+  /** A record name the agent has just ASKED the caller to confirm. If the
+   *  caller says yes, they have told us the name is theirs — see
+   *  observeCaller. */
+  pendingNameConfirm?: string;
   lastAgentLine: string;
   callerSpokeSinceAgent: boolean;
 }
@@ -125,7 +129,38 @@ const READBACK_TOPICS: Array<[string, RegExp]> = [
  * override, so the rule now covers ASSERTIVE use only.
  */
 const NAME_CONFIRM_QUESTION =
-  /\b(?:am i speaking (?:with|to)|is this|may i ask if (?:this|you)|do i have)\b/i;
+  // Spanish added 2026-08-04: the fleet takes Spanish calls all day, and
+  // "¿Estoy hablando con Reginaldo?" is the same sanctioned question. An
+  // English-only pattern flagged it as a disclosure and the director took
+  // the turn — in English, on a Spanish call.
+  /\b(?:am i speaking (?:with|to)|is this|may i ask if (?:this|you)|do i have|estoy hablando con|hablo con|es usted|le habla a)\b/i;
+
+/** "Yes." / "Sí." — the caller confirming they are who we asked about.
+ *
+ *  Tested against an ACCENT-STRIPPED copy of the line. JavaScript's \b is
+ *  ASCII-only, so /s[íi]\b/ never matches "Sí." — the boundary it wants sits
+ *  before the accented character, not after it. Normalising first is the only
+ *  reading of this that behaves the same in both languages. */
+const AFFIRMATIVE =
+  /^\s*(?:yes|yeah|yep|yup|correct|that'?s right|that'?s me|speaking|this is (?:he|she|him|her)|si|claro|correcto|asi es|ella habla|el habla)\b/i;
+
+const deaccent = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+/**
+ * Names the caller mentioned only to DENY.
+ *
+ * "No, it's not Mildred" contains the word Mildred, and the caller-echo rule
+ * read that as the caller claiming the name — which silenced the guard on the
+ * exact call it exists for. Denying a name is the strongest possible signal
+ * that the number matched the wrong person.
+ */
+function deniedNames(line: string, names: string[]): string[] {
+  const flat = deaccent(line);
+  return names.filter((n) =>
+    new RegExp(`\\b(?:not|no|isn'?t|ain'?t|nope|wrong|neither)\\b[^.?!]{0,30}\\b${n}\\b`, 'i').test(flat) ||
+    new RegExp(`\\b${n}\\b[^.?!]{0,20}\\b(?:no|not|wrong)\\b`, 'i').test(flat),
+  );
+}
 
 const CONFIRM_INTENT =
   /\b(is that (?:correct|right)|did you mean|could you confirm|confirm once more|just to (?:make sure|confirm)|let'?s confirm|double-?check|one more time|is your date of birth)\b/i;
@@ -358,7 +393,21 @@ export class Director {
       s.turn += 1;
       s.callerSpokeSinceAgent = true;
       s.disclosureFiredSinceCaller = false;
-      for (const w of line.toLowerCase().match(/[a-z'-]{3,}/g) ?? []) s.callerWords.add(w);
+      for (const w of deaccent(line).toLowerCase().match(/[a-z'-]{3,}/g) ?? []) s.callerWords.add(w);
+      // ...but a name the caller DENIED is not a name the caller gave.
+      for (const denied of deniedNames(line, s.recordNames)) s.callerWords.delete(denied);
+
+      // "Am I speaking with Anthony?" → "Yes." The caller has just told us
+      // the name is theirs, so using it is no longer a disclosure — it is
+      // the whole point of having asked. Without this the agent's natural
+      // next line, "Thank you, Anthony", was flagged and the director took
+      // the turn (2026-08-04 15:11, a real call).
+      if (s.pendingNameConfirm) {
+        if (AFFIRMATIVE.test(deaccent(line))) s.callerWords.add(s.pendingNameConfirm);
+        // A denial leaves the name guarded — the number matched the WRONG
+        // person, which is exactly when speaking it matters most.
+        s.pendingNameConfirm = undefined;
+      }
       for (const [field, value] of Object.entries(extractAnswers(line))) {
         // A later answer supersedes an earlier one — corrections must win.
         s.answered.set(field, { value, turn: s.turn });
@@ -399,6 +448,12 @@ export class Director {
       if (!identityEstablished(s) && !s.disclosureFiredSinceCaller) {
         // Echoing back a name the caller has already said is courtesy.
         const spoken = s.recordNames.find((n) => !s.callerWords.has(n) && assertsName(line, n));
+        // Remember a name we are ASKING about, so an affirmative answer can
+        // clear it on the caller's next turn.
+        if (NAME_CONFIRM_QUESTION.test(line)) {
+          const asked = s.recordNames.find((n) => new RegExp(`\\b${n}\\b`, 'i').test(line));
+          if (asked) s.pendingNameConfirm = asked;
+        }
         // Appointment details are a disclosure too. Absence needs no date —
         // it never has one.
         const detail =
