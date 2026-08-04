@@ -304,14 +304,28 @@ function guardableName(name: string): boolean {
  * not firing is always the safe direction here.
  */
 const SPANISH_PUNCTUATION = /[¿¡]/;
-/** Words that do not occur in ordinary English call transcripts. */
+/** Words that do not occur in ordinary English call transcripts. Matched against
+ *  an accent-stripped copy of the line, so list the UNACCENTED form. */
 const SPANISH_MARKERS =
-  /\b(?:que|para|con|por|una|unos|unas|est[áa]|estoy|c[óo]mo|puedo|puede|necesito|necesita|gracias|se[ñn]or|se[ñn]ora|cita|citas|nombre|fecha|nacimiento|ayudar|ayudarle|ayudarte|decir|hablar|habla|espa[ñn]ol|favor|buenas|buenos|d[íi]as|tardes|noches|usted|tiene|tengo|quiero|quisiera|vamos|aqu[íi]|tambi[ée]n|entiendo|perfecto|claro|ma[ñn]ana|ahora|bien|hacer|esto|eso|s[íi])\b/gi;
+  /\b(?:que|para|con|por|una|unos|unas|esta|estoy|como|puedo|puede|podria|necesito|necesita|gracias|senor|senora|cita|citas|nombre|completo|fecha|nacimiento|ayudar|ayudarle|ayudarte|decir|decirme|hablar|habla|hablando|espanol|favor|buenas|buenos|dias|tardes|noches|usted|tiene|tengo|quiero|quisiera|vamos|aqui|tambien|entiendo|entendido|disculpe|perfecto|claro|manana|ahora|bien|hacer|esto|eso|mas|muy|donde|cuando|si|se|sus)\b/gi;
 
-/** Is this line Spanish? One inverted mark, or two distinct Spanish words. */
+/**
+ * Is this line Spanish? One inverted mark, or two distinct Spanish words.
+ *
+ * ACCENTS ARE STRIPPED BEFORE MATCHING (live call 6bd612c1, 2026-08-04 14:23).
+ * `\b` without the /u flag treats an accented vowel as a NON-word character, so
+ * `\bque\b` never matched "qué" and `\bs[íi]\b` never matched "sé". The caller's
+ * "Yo no, no sé por qué no contestan." scored ONE marker instead of three and
+ * was not recognised as Spanish — so a genuinely Spanish call went unlicensed
+ * and language_switch_unwarranted fired on it later. Cost was one system
+ * message, because the rule injects rather than authors; had it been at `author`
+ * it would have cancelled a turn on a Spanish speaker mid-sentence. That is the
+ * enforcement asymmetry earning its keep.
+ */
 export function looksSpanish(line: string): boolean {
   if (SPANISH_PUNCTUATION.test(line)) return true;
-  const hits = new Set((line.toLowerCase().match(SPANISH_MARKERS) ?? []).map((w) => w));
+  const plain = line.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const hits = new Set(plain.match(SPANISH_MARKERS) ?? []);
   return hits.size >= 2;
 }
 

@@ -29,7 +29,20 @@ simply stopped. A prompt cannot enforce its own execution — same lesson as
 `deadAirWatchdog.arm(callId, onDeadAir)` at session creation, `.touch(callId)`
 from the `session.transport.on('*')` handler, `.release(callId)` in cleanup.
 
-Two things that matter if you change it:
+**HANGING UP IS A REST CALL, NOT A TRANSPORT CLOSE.** The first live version
+called `session.transport.close()` and a dead-air call still ran **459s**
+(2026-08-04 14:25, after deploy). Closing the transport tears down *our* end of
+the OpenAI session; it does not end the **call**, so the caller stays connected
+to a line with no agent on it until the per-agent cap. The real hangup is the
+same endpoint `terminate_call` uses:
+
+```
+POST https://api.openai.com/v1/realtime/calls/{callId}/hangup
+```
+
+Close the transport *after* that, as cleanup only.
+
+Three things that matter if you change it:
 
 - **Only transcript- and tool-shaped events count as activity.** A stalled
   session keeps streaming `response.output_audio.delta` and keepalives; counting
