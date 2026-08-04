@@ -25,6 +25,17 @@ describe('PcpDirector', () => {
     expect(director.next('call-2').nextQuestion?.field).toBe('patientFirstName');
   });
 
+  it('routes explicit patient medical-record requests to a task, never peer-to-peer handoff', () => {
+    const director = new PcpDirector();
+    director.update('records-1', {
+      ...professional,
+      callPurpose: 'patient_medical_records_request',
+      statedRelationship: 'Mutual treating provider',
+      patientFirstName: 'Pat', patientLastName: 'Lee', patientDob: '1980-01-02',
+    });
+    expect(director.next('records-1')).toMatchObject({ disposition: 'CREATE_TASK', handoffEligible: false });
+  });
+
   it('allows hotline schedule lookup while post-call staff verification is pending', () => {
     const director = new PcpDirector();
     director.update('call-3', {

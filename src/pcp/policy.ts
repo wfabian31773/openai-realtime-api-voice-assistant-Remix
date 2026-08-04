@@ -18,6 +18,7 @@ export const PCP_CALL_PURPOSE_SLUGS = [
   'health_plan_visit_inquiry',
   'grievance_follow_up',
   'peer_to_peer',
+  'patient_medical_records_request',
   'pharmaceutical_representative',
 ] as const;
 
@@ -51,6 +52,7 @@ export const PCP_CALL_PURPOSES: readonly PcpCallPurpose[] = [
   { slug: 'health_plan_visit_inquiry', defaultDisposition: 'HAND_OFF', allowedDispositions: ['HAND_OFF', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'grievance_follow_up', defaultDisposition: 'HAND_OFF', allowedDispositions: ['HAND_OFF', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'peer_to_peer', defaultDisposition: 'HAND_OFF', allowedDispositions: ['HAND_OFF', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
+  { slug: 'patient_medical_records_request', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'pharmaceutical_representative', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: false, authoritativeSource: null, containsPhi: false },
 ];
 

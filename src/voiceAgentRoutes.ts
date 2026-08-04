@@ -935,6 +935,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     
     let sequentialPcpAnswered = false;
     if (policy.policy === 'pcp' && envConfig.twilio.pcpRoutingMode === 'sequential') {
+      abortedPcpHandoffs.delete(openAiCallId);
       if (pcpDialSequence.length === 0) return { ok: false, status: 'HANDOFF_UNAVAILABLE', reason: 'pcp_agent_dids_not_configured' };
       const briefing = [
         'This is the Azul Vision PCP support assistant with a live professional caller transfer.',
@@ -943,18 +944,19 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
         'Press any key to accept, or remain on the line to connect.',
       ].filter(Boolean).join(' ');
       for (let index = 0; index < pcpDialSequence.length; index += 1) {
+        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected' };
         const destination = pcpDialSequence[index];
         console.log(`[HANDOFF] PCP sequential attempt ${index + 1}/${pcpDialSequence.length}`);
         if (index > 0) {
           pcpHandoffProgress.get(openAiCallId)?.(
-            `The previous PCP team member was unavailable. Tell the caller in one short, warm sentence that you are trying the next team member now and they should stay on the line. Say nothing else.`,
+            `Say exactly: "That team member wasn't available, so I'm trying the next person now. Please stay with me." Say nothing else.`,
           );
         }
         const progress = pcpHandoffProgress.get(openAiCallId);
         let progressInterval: ReturnType<typeof setInterval> | undefined;
         const progressFirst = progress ? setTimeout(() => {
-          progress('You are still trying the current PCP team member. Give the caller one short, warm reassurance that you are still working on the connection and they should stay on the line. Say nothing else.');
-          progressInterval = setInterval(() => progress('The PCP transfer is still in progress. Give one brief, varied reassurance to the caller, then go quiet again. Say nothing else.'), 10_000);
+          progress('Say exactly: "I’m still working on the connection for you. Please stay on the line." Say nothing else.');
+          progressInterval = setInterval(() => progress('Say exactly: "Thank you for holding. I’m still trying to reach the PCP team." Say nothing else.'), 10_000);
         }, 8_000) : undefined;
         const outcome = await transferConferenceToNumber(openAiCallId, destination, `PCP team member ${index + 1}`, briefing);
         if (progressFirst) clearTimeout(progressFirst);
@@ -965,10 +967,11 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
           console.log(`[HANDOFF] ✓ PCP sequential attempt ${index + 1} answered`);
           return { ok: true, destination };
         }
+        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected' };
         console.warn(`[HANDOFF] PCP sequential attempt ${index + 1} was not accepted: ${outcome.detail || 'unknown'}`);
       }
       pcpHandoffProgress.get(openAiCallId)?.(
-        'No PCP team member answered. Tell the caller warmly and accurately that you could not reach the team live, but their PCP request has already been recorded for follow-up. Say nothing else and do not claim a transfer occurred.',
+        'Say exactly: "Thanks for holding. I couldn’t reach the team live, but your PCP request has already been recorded for follow-up." Say nothing else and do not claim a transfer occurred.',
       );
       return { ok: false, status: 'NO_ANSWER', reason: 'pcp_sequence_no_answer' };
     }
@@ -1299,6 +1302,18 @@ const warmTransferAccepts = new Map<string, {
   // consulted when the office never pressed a key — see the accept handler.
   answeredBy?: string;
 }>();
+const activeOfficeLegsByCall = new Map<string, Set<string>>();
+const abortedPcpHandoffs = new Set<string>();
+
+async function cancelActiveOfficeLegs(openAiCallId: string): Promise<void> {
+  const legs = [...(activeOfficeLegsByCall.get(openAiCallId) ?? [])];
+  activeOfficeLegsByCall.delete(openAiCallId);
+  await Promise.all(legs.map(async (callSid) => {
+    warmTransferAccepts.delete(callSid);
+    officeLegBridges.delete(callSid);
+    try { await twilioClient?.calls(callSid).update({ status: 'completed' }); } catch { /* already terminal */ }
+  }));
+}
 
 /** Office legs currently bridged (or about to be) into a caller conference,
  *  keyed by the office leg's CallSid.
@@ -1375,7 +1390,7 @@ async function transferConferenceToNumber(
         from: twilioPhoneNumber,
         to: toNumber,
         twiml,
-        timeout: 30, // ring the office queue for up to 30s
+        timeout: 15, // test queue: advance promptly when a DID does not answer
         statusCallback: statusUrl,
         statusCallbackEvent: ['completed'],
         statusCallbackMethod: 'POST',
@@ -1393,15 +1408,18 @@ async function transferConferenceToNumber(
     if (!dialResult.success) {
       throw dialResult.error;
     }
-    const dialedSid: string = dialResult.result!.sid;
+        const dialedSid: string = dialResult.result!.sid;
     officeCallSid = dialedSid;
+    const activeLegs = activeOfficeLegsByCall.get(openAiCallId) ?? new Set<string>();
+    activeLegs.add(dialedSid);
+    activeOfficeLegsByCall.set(openAiCallId, activeLegs);
     console.log(`[WARM-TRANSFER] Dialing ${label} (${toNumber}) with briefing, CallSid: ${dialedSid}`);
 
-    // Overall window: 30s ring + up to ~35s briefing/gather + margin.
+    // Bounded acceptance window; voicemail is rejected immediately by AMD.
     timeoutId = setTimeout(() => {
       warmTransferAccepts.delete(dialedSid);
       rejectAccepted(new Error('Office did not accept the transfer within the window'));
-    }, 80_000);
+    }, 45_000);
 
     officeLegBridges.set(dialedSid, { openAiCallId, label });
     // Office-leg telemetry (2026-07-30): remember what we dialed so the
@@ -1439,6 +1457,8 @@ async function transferConferenceToNumber(
     if (officeCallSid) {
       warmTransferAccepts.delete(officeCallSid);
       officeLegBridges.delete(officeCallSid);
+      activeOfficeLegsByCall.get(openAiCallId)?.delete(officeCallSid);
+      try { await twilioClient.calls(officeCallSid).update({ status: 'completed' }); } catch { /* already terminal */ }
     }
     return { ok: false, detail };
   }
@@ -1461,6 +1481,7 @@ async function transferConferenceToNumber(
   // which is precisely the "same patient calling again and we lost the
   // original" the front office reported.
   const { callLifecycleCoordinator } = await import('./services/callLifecycleCoordinator');
+  if (officeCallSid) activeOfficeLegsByCall.get(openAiCallId)?.delete(officeCallSid);
   callLifecycleCoordinator.markTransferred(openAiCallId);
   const callMeta = callMetadataForDB.get(openAiCallId);
   if (callMeta) {
@@ -3000,6 +3021,9 @@ async function observeCall(
     console.error(`[SESSION ERROR] Failed to connect call ${callId}:`, error);
     throw error;
   } finally {
+    abortedPcpHandoffs.add(callId);
+    await cancelActiveOfficeLegs(callId);
+    setTimeout(() => abortedPcpHandoffs.delete(callId), 10 * 60_000);
     // Azul scheduling: stop the holding heartbeat, drop the transfer hook +
     // persist the pilot tool timeline (all no-ops for other agents)
     unregisterAzulHoldingCallback(callId);
@@ -5293,6 +5317,14 @@ export function setupVoiceAgentRoutes(app: Express): void {
     if (pending) {
       pending.answeredBy = answeredBy;
       console.log(`[WARM-TRANSFER] AMD verdict for ${callSid}: ${answeredBy || 'unknown'}`);
+      if (answeredBy.startsWith('machine') || answeredBy === 'fax') {
+        warmTransferAccepts.delete(callSid);
+        officeLegBridges.delete(callSid);
+        activeOfficeLegsByCall.get(pending.openAiCallId)?.delete(callSid);
+        pending.reject(new Error(`Office leg answered by ${answeredBy}`));
+        void recordTransferOutcome(callSid, 'machine', { amdVerdict: answeredBy });
+        void twilioClient?.calls(callSid).update({ status: 'completed' }).catch(() => undefined);
+      }
     } else {
       console.warn(`[WARM-TRANSFER] AMD verdict for unknown/expired CallSid ${callSid}: ${answeredBy}`);
     }
