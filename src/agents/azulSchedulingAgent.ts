@@ -33,6 +33,7 @@ import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall, type AzulToolEv
 import { callMetadataForDB } from '../services/callMetadataStore';
 import { callerSpeech, guardIdentityArgs, surnameDisagrees } from '../services/identityArgGuard';
 import { checkIdentityGrounding } from '../services/identityGrounding';
+import { director, directorEnabledFor } from '../director/director';
 
 const EYECARE_BASE_URL =
   process.env.EYECARE_SCHEDULING_BASE_URL ||
@@ -1120,6 +1121,35 @@ export function createAzulSchedulingAgent(
 
   /** Execute on the Eye Care service AND record to the pilot tool timeline. */
   const tracked = async (name: string, args: Record<string, unknown>): Promise<string> => {
+    /**
+     * Tell the director the SERVER verified this caller.
+     *
+     * Synchronous, and deliberately NOT inside stampVerifiedIdentity: that one
+     * returns early without a callLogId and awaits a DB write, while this must
+     * land before the agent's very next line. Until 2026-08-04 the director had
+     * no access to this verdict at all — it inferred identity from a regex over
+     * the transcript and cancelled the agent mid-sentence at `author` when the
+     * inference disagreed with the server. It disagreed on 22 of 54 verified
+     * calls on 08-03 and 3 of 6 on 08-04.
+     */
+    const markDirectorVerified = (resultJson: string): void => {
+      const callId = metadata?.callId;
+      if (!callId || !directorEnabledFor('azul-scheduling')) return;
+      try {
+        let parsed: any = JSON.parse(resultJson);
+        parsed = parsed?.result ?? parsed; // {tool, result} envelope
+        if (parsed?.verified !== true) return;
+        // The ON-FILE spelling too: the prompt tells the agent to adopt it from
+        // then on, and the caller may never have pronounced it.
+        director.markIdentityVerified(callId, 'azul-scheduling', [
+          parsed.firstName,
+          parsed.lastName,
+        ]);
+      } catch (e) {
+        console.error('[AZUL-SCHED] director identity mark failed:', e);
+      }
+    };
+
     const stampVerifiedIdentity = async (resultJson: string): Promise<void> => {
       const callLogId = metadata?.callLogId;
       if (!callLogId) return;
@@ -1172,7 +1202,10 @@ export function createAzulSchedulingAgent(
       // call reads "[Lookup] JO WARD" in the call list while the transcript is a
       // verified Wayne Burley throughout, which reads like the agent addressed
       // the wrong person. It didn't; the console was showing the phone bill.
-      if (name === 'verify_patient_identity') void stampVerifiedIdentity(result);
+      if (name === 'verify_patient_identity') {
+        markDirectorVerified(result);
+        void stampVerifiedIdentity(result);
+      }
       return result;
     } finally {
       if (firstBeat) clearTimeout(firstBeat);

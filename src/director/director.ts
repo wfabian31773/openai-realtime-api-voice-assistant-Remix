@@ -83,6 +83,14 @@ interface CallState {
   /** Suppresses a second disclosure action before the caller has had a
    *  chance to respond to the first (the 17:00 stutter). */
   disclosureFiredSinceCaller: boolean;
+  /** AUTHORITATIVE identity, stamped by the tool layer when
+   *  verify_patient_identity returns verified:true. The director's own
+   *  `answered` ledger is a transcript heuristic; this is the real answer, and
+   *  it outranks the heuristic in both directions. See markIdentityVerified. */
+  identityVerified: boolean;
+  /** The topic of the LAST thing the agent asked for. A caller answering "Allen"
+   *  is only interpretable against the question it answers. */
+  pendingAsk: string | null;
   lastAgentLine: string;
   callerSpokeSinceAgent: boolean;
 }
@@ -266,6 +274,57 @@ function guardableName(name: string): boolean {
   return n.length >= 3 && /^[a-z][a-z'-]+$/.test(n) && !NAME_STOPLIST.has(n);
 }
 
+/** "Yes", "mm-hmm", "that's me" — the caller assenting to what was just asked. */
+const AFFIRMATIVE =
+  /^\s*(?:yes|yeah|yep|yup|yes\s+ma'?am|yes\s+sir|sure|correct|right|that'?s\s+(?:right|correct|me|her|him)|speaking|this\s+is\s+(?:she|he|her|him)|uh[\s-]?huh|mm[\s-]?hmm|mhm+|of\s+course|i\s+am)\b/i;
+
+export function isAffirmative(line: string): boolean {
+  return AFFIRMATIVE.test(line.trim());
+}
+
+/**
+ * The name inside an answer to a name question.
+ *
+ * Deliberately permissive about SHAPE and strict about NOISE: a caller
+ * answering "what's your last name?" says "Allen", "Allen, A-l-l-e-n", or
+ * "It's Allen" — none of which extractAnswers recognises, because it only
+ * looks for a volunteered "my name is X". Spelled runs collapse to the word
+ * they spell. Returns null for anything that is not plausibly a name, so a
+ * shrug never banks an answer and suppresses a genuine re-ask.
+ */
+/** Conversational filler and interrogatives — never a caller's name. A name
+ *  that survives this list is one we are willing to bank as an answer. */
+const NOT_A_NAME = new Set([
+  'uh', 'um', 'er', 'ah', 'oh', 'hmm', 'huh', 'mhm', 'okay', 'ok', 'yes', 'no',
+  'yeah', 'yep', 'nope', 'sure', 'thanks', 'thank', 'you', 'hello', 'hi',
+  'please', 'sorry', 'pardon', 'and', 'the', 'is', 'as', 'in', 'of', 'for',
+  'so', 'well', 'like', 'just', 'know', 'dont', 'don', 'not', 'what', 'who',
+  'why', 'when', 'where', 'how', 'again', 'idea', 'mean', 'means', 'said',
+  'say', 'nothing', 'maybe', 'guess', 'think', 'wait', 'hold', 'speaking',
+  'this', 'that', 'there', 'here', 'name', 'last', 'first', 'full', 'middle',
+  'my', 'me', 'it', 'its', 'was', 'are', 'can', 'could', 'right', 'correct',
+  'have', 'had', 'get', 'got', 'about', 'with', 'but', 'her', 'his', 'him',
+  'she', 'they', 'them', 'yet', 'now', 'then', 'one', 'two', 'all', 'any',
+]);
+
+export function nameFromAnswer(line: string): string | null {
+  // "Yes" answers a yes/no question, never a name question.
+  if (isAffirmative(line)) return null;
+  const cleaned = line
+    .replace(/\b(?:it'?s|my name is|this is|i'?m|name'?s|the name is|last name is|first name is)\b/gi, ' ')
+    // "A-l-l-e-n" / "R A S K I N" → "Allen" / "RASKIN"
+    .replace(/\b(?:[a-z](?:\s*[-.]\s*|\s+)){2,}[a-z]\b/gi, (m) => m.replace(/[^a-z]/gi, ''))
+    .replace(/[^A-Za-z\s'-]/g, ' ');
+  const words = cleaned
+    .split(/\s+/)
+    .map((w) => w.trim().replace(/^[-']+|[-']+$/g, ''))
+    .filter((w) => w.length >= 2 && /^[A-Za-z][A-Za-z'-]*$/.test(w))
+    .filter((w) => !NOT_A_NAME.has(w.toLowerCase()));
+  if (words.length === 0 || words.length > 3) return null;
+  const titled = words.map((w) => w[0].toUpperCase() + w.slice(1).toLowerCase());
+  return titled.join(' ');
+}
+
 /**
  * Has the caller established who they are THIS call?
  *
@@ -273,8 +332,21 @@ function guardableName(name: string): boolean {
  * A caller-ID match is not identity: family members, spouses, care homes and
  * pharmacies all share phones, and every one of the 2026-08-03 disclosures
  * happened on a call where the phone matched and the person did not.
+ * The tool layer's verdict OUTRANKS the transcript heuristic. When
+ * verify_patient_identity has returned verified:true, this call has cleared a
+ * stronger bar than any regex over prose can measure — the name and date of
+ * birth were matched against the record server-side. Reading only the
+ * heuristic is what broke 2026-08-04: `answered` is written solely by
+ * extractAnswers, which yields 'full name' ONLY from a volunteered "my name is
+ * X" / "this is X" / "Surname, Firstname". The agent collects the first and
+ * last name in SEPARATE turns (the prompts require it — "ONE AT A TIME"), and
+ * nothing merged them, so 'full name' was near-unreachable through the
+ * sanctioned flow and identityEstablished returned false on calls the server
+ * had already verified. 22 of 54 verified calls on 08-03 and 3 of 6 on 08-04
+ * were interrupted at `author` on that basis.
  */
 function identityEstablished(s: CallState): boolean {
+  if (s.identityVerified) return true;
   return s.answered.has('full name') && s.answered.has('date of birth');
 }
 
@@ -304,6 +376,8 @@ export class Director {
         confirmed: new Set(),
         callerWords: new Set(),
         disclosureFiredSinceCaller: false,
+        identityVerified: false,
+        pendingAsk: null,
         lastAgentLine: '',
         callerSpokeSinceAgent: false,
       };
@@ -337,9 +411,48 @@ export class Director {
     }
   }
 
+  /**
+   * The SERVER verified this caller. Stamped from the tool layer the moment
+   * verify_patient_identity returns verified:true.
+   *
+   * This is the authoritative signal the director previously lacked. It had
+   * only its own regex ledger, and enforced against that ledger at `author` —
+   * the strongest level driven by the weakest signal. Once the server has
+   * matched a name and date of birth against the record, the caller's own name
+   * is theirs to hear: nothing about saying it back is a disclosure.
+   *
+   * The verified name also lands in callerWords, so the courtesy-echo
+   * exemption covers the on-file spelling the agent is instructed to adopt
+   * ("The result's note may give the ON-FILE spelling — use it from then on"),
+   * which the caller may never have pronounced.
+   */
+  markIdentityVerified(
+    callId: string,
+    agentSlug: string,
+    names: Array<string | null | undefined> = [],
+  ): void {
+    try {
+      const s = this.state(callId, agentSlug);
+      s.identityVerified = true;
+      for (const raw of names) {
+        for (const part of String(raw ?? '').split(/[\s,]+/)) {
+          const n = part.trim().toLowerCase();
+          if (n.length >= 2) s.callerWords.add(n);
+        }
+      }
+    } catch {
+      /* the director must never break a call */
+    }
+  }
+
   /** Test/telemetry view. */
   guardedNames(callId: string): string[] {
     return [...(this.calls.get(callId)?.recordNames ?? [])];
+  }
+
+  /** Test/telemetry view. */
+  isIdentityVerified(callId: string): boolean {
+    return this.calls.get(callId)?.identityVerified ?? false;
   }
 
   release(callId: string | undefined): void {
@@ -358,12 +471,73 @@ export class Director {
       s.turn += 1;
       s.callerSpokeSinceAgent = true;
       s.disclosureFiredSinceCaller = false;
-      for (const w of line.toLowerCase().match(/[a-z'-]{3,}/g) ?? []) s.callerWords.add(w);
+      for (const w of line.toLowerCase().match(/[a-z'-]{3,}/g) ?? []) {
+        s.callerWords.add(w);
+        // A SPELLED name is a said name. "Allen, A-l-l-e-n" tokenises to
+        // "allen" and "a-l-l-e-n"; a caller who ONLY spells ("M-A-I-V-O-N-E")
+        // produced no plain token at all, so the courtesy exemption missed the
+        // very turn in which they identified themselves (call 458c029c, which
+        // then looped for 228s and never reached a human).
+        if (w.includes('-')) {
+          const joined = w.replace(/-/g, '');
+          if (joined.length >= 3) s.callerWords.add(joined);
+        }
+      }
       for (const [field, value] of Object.entries(extractAnswers(line))) {
         // A later answer supersedes an earlier one — corrections must win.
         s.answered.set(field, { value, turn: s.turn });
         if (field === 'date of birth' && !s.spokenDobs.includes(value)) {
           s.spokenDobs.push(value);
+        }
+      }
+      // A name is an ANSWER when it answers a name question. extractAnswers
+      // only recognises a volunteered name ("my name is X"), but the prompts
+      // require the agent to collect first and last SEPARATELY, one per turn —
+      // so the commonest real answer ("Allen") banked nothing and 'full name'
+      // stayed empty for the whole call.
+      if (s.pendingAsk === 'first name' || s.pendingAsk === 'last name' || s.pendingAsk === 'full name') {
+        const given = nameFromAnswer(line);
+        if (given) {
+          if (s.pendingAsk === 'full name' && /\s/.test(given)) {
+            s.answered.set('full name', { value: given, turn: s.turn });
+          } else {
+            const part = s.pendingAsk === 'full name' ? 'first name' : s.pendingAsk;
+            s.answered.set(part, { value: given, turn: s.turn });
+          }
+          const first = s.answered.get('first name')?.value;
+          const last = s.answered.get('last name')?.value;
+          if (first && last && !s.answered.has('full name')) {
+            s.answered.set('full name', { value: `${first} ${last}`, turn: s.turn });
+          }
+          s.pendingAsk = null;
+        }
+      }
+      // "Am I speaking with Irma?" → "Mm-hmm." The caller just claimed that
+      // name. It never entered callerWords (they said "mm-hmm", not "Irma"),
+      // so the agent's next perfectly ordinary "Thanks, Irma" was scored a
+      // record disclosure and cancelled mid-turn at `author`. Call 13ecb51d,
+      // 2026-08-04 09:42 — twice in one call, on a caller the server had
+      // already returned verified:true for.
+      if (NAME_CONFIRM_QUESTION.test(s.lastAgentLine) && isAffirmative(line)) {
+        for (const n of s.recordNames) {
+          if (!new RegExp(`\\b${n}\\b`, 'i').test(s.lastAgentLine)) continue;
+          s.callerWords.add(n);
+          // Assenting to "Am I speaking with Irma?" IS the caller stating that
+          // name — it is the sanctioned opening every prompt mandates, and the
+          // agent never asks for the first name again afterwards. Without
+          // banking it, 'full name' could only ever be completed by a caller
+          // who volunteered both parts unprompted.
+          if (!s.answered.has('first name') && !s.answered.has('full name')) {
+            s.answered.set('first name', {
+              value: n[0].toUpperCase() + n.slice(1),
+              turn: s.turn,
+            });
+          }
+        }
+        const first = s.answered.get('first name')?.value;
+        const last = s.answered.get('last name')?.value;
+        if (first && last && !s.answered.has('full name')) {
+          s.answered.set('full name', { value: `${first} ${last}`, turn: s.turn });
         }
       }
     } catch {
@@ -415,7 +589,8 @@ export class Director {
               `Say nothing further about their appointments, providers or locations until they ` +
               `state a name AND a date of birth and both match. Ask who you are speaking with.`,
             speak: `Before I look at anything, may I get your full name and date of birth?`,
-          }, level + 1);
+            // No level bump — see the note on record_name_disclosed below.
+          });
         }
         if (spoken) {
           const level = this.bump(s, 'disclosure');
@@ -428,11 +603,24 @@ export class Director {
               `Do not use any name, appointment, or history from the record until the caller ` +
               `states their name AND date of birth and they match. Ask them who you are speaking with.`,
             speak: `Sorry — before we go on, may I get your full name?`,
-            // level + 1: a disclosure starts at 'author', because the words
-            // have already reached the caller's ear by the time we see the
-            // line — a suggestion cannot un-say them. A second one ends the
-            // call rather than let it keep naming people.
-          }, level + 1);
+            // A disclosure NO LONGER starts at 'author'. The original reasoning
+            // was sound in isolation — the words have already reached the
+            // caller's ear, so a suggestion cannot un-say them — but it put the
+            // most destructive enforcement level behind the least certain
+            // signal, and `author` cannot un-say them either. All it does is
+            // cancel the agent mid-sentence and dictate a replacement.
+            //
+            // That asymmetry is what turned two detection bugs into two mass
+            // regressions in 48 hours: 48 calls on 08-03 (PR #66, "the cure was
+            // worse than the disease"), then 08-04 — 21 of 23 calls touched,
+            // zero bookings, patients audibly giving up ("I hate this").
+            // Detection was narrowed both times; enforcement stayed at maximum.
+            //
+            // So: first fire injects. A SECOND on the same call escalates to
+            // `author` and a third exits — the model ignoring one correction is
+            // exactly the evidence the escalation ladder was built to act on,
+            // and it costs a stray sentence instead of the call.
+          });
         }
       }
 
@@ -450,6 +638,10 @@ export class Director {
       if (!topic) return null;
       const n = (s.asks.get(topic) ?? 0) + 1;
       s.asks.set(topic, n);
+      // Remember what we just asked for, so the caller's next line can be read
+      // as the answer to it (see observeCaller). Without this the ledger only
+      // ever saw volunteered names.
+      s.pendingAsk = topic;
 
       const answer = s.answered.get(topic);
       if (answer) {

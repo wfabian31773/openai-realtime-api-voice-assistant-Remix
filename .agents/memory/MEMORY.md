@@ -1,2 +1,3 @@
 - [Supabase pooler URL + failover](supabase-pooler-failover.md) — pooler password = direct DB password, port 6543; bad secret trips circuit breaker; db.ts validates + fails over, await `dbReady` before DB work.
 - [Deployment health probe](deployment-health-probe.md) — Replit probe path is not configurable; app endpoints must return non-2xx on failed init (Twilio voice paths still need 200 TwiML).
+- [Director enforcement](director-enforcement.md) — `author`/`force_exit` cancel live audio; never wire a rule to them on an inferred signal (two mass regressions in 48h). Authoritative identity comes from `verify_patient_identity` via `markIdentityVerified`, not from a transcript regex. Kill switch: `DIRECTOR_AGENTS`.
