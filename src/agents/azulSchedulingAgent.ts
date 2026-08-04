@@ -1542,9 +1542,21 @@ export function createAzulSchedulingAgent(
           callbackNumber: patientPhone ?? metadata?.callerPhone,
           symptomsSummary: urgencyScreenResult ?? patientResponse,
         });
-        handoffCallback().catch((err) =>
-          console.error('[AZUL-SCHED] urgent handoff dial failed:', err),
-        );
+        try {
+          await handoffCallback();
+        } catch (err) {
+          console.error('[AZUL-SCHED] urgent handoff dial failed:', err);
+          // Surface the failed dial to the model instead of implying the
+          // on-call human is being connected. The tier-3 urgent ticket was
+          // already filed above, so the patient request is not lost.
+          return {
+            ...(typeof result === 'object' && result !== null ? result : { result }),
+            urgentEscalationDialed: false,
+            error: 'urgent_escalation_dial_failed',
+            instruction:
+              'The on-call transfer could NOT be completed. Do not tell the caller they are being transferred. Tell them the on-call doctor will be paged with their message and will call them back, confirm their callback number, and advise calling 911 for emergencies.',
+          };
+        }
       }
       return result;
     },

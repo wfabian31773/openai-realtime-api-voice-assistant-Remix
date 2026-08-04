@@ -1955,7 +1955,16 @@ async function observeCall(
   
   // Handoff callback for all agents
   const handoffCallback = async () => {
-    await addHumanAgent(callId);
+    const outcome = await addHumanAgent(callId);
+    if (!outcome.ok) {
+      // A blocked/failed handoff must surface as a tool failure — otherwise
+      // the agent tells the caller "transferring you now" while nobody is
+      // dialed and no urgent SMS goes out (observed 2026-08-04 03:55 UTC).
+      // Only the fixed status code goes to the model/tool trace; the detailed
+      // reason (which may contain raw provider error text) stays server-side.
+      console.error(`[HANDOFF] callback failed for ${callId}: ${outcome.status} (${outcome.reason})`);
+      throw new Error(`handoff_failed:${outcome.status}`);
+    }
   };
   
   // Patient info callback for after-hours and no-ivr agents
