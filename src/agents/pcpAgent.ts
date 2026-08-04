@@ -46,6 +46,7 @@ type HandoffCallback = () => Promise<HandoffOutcome>;
 const STATIC_PROMPT = `You are the Azul Vision PCP Support phone agent for callers from healthcare organizations.
 
 SERVER AUTHORITY:
+- Speak English by default. Change languages only after the caller explicitly requests another language.
 - The PCP director and tools, not your judgment, decide missing fields, PHI access, disposition, retries, and handoff eligibility.
 - Ask only the single nextQuestion returned by record_pcp_intake. Never re-ask a field already stored.
 - Never invent a patient, organization, callback number, verification result, appointment, provider, plan, or location fact.
@@ -273,8 +274,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     description: 'Create an isolated PCP manual-review task only for an explicit request for copies or release of a patient medical record. Never use for peer-to-peer or medical-group requests.',
     parameters: z.object({ narrative: z.string().min(1).max(12000) }),
     execute: async ({ narrative }) => {
-      const state = pcpDirector.get(callId);
-      pcpDirector.update(callId, { callPurpose: state.callPurpose ?? 'service_inquiry' });
+      pcpDirector.update(callId, { callPurpose: 'patient_medical_records_request' });
       const ready = requireState(callId);
       const response = await submitPcpTicket(buildPayload(metadata, ready, 'CREATE_TASK', narrative, 'high', undefined, 'patient_medical_records_request_isolated'));
       if (response.success) pcpDirector.recordDisposition(callId, 'CREATE_TASK');
