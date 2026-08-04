@@ -31,7 +31,8 @@ import { medicalSafetyGuardrails } from '../guardrails/medicalSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
 import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall, type AzulToolEvent } from '../services/toolTimeline';
 import { callMetadataForDB } from '../services/callMetadataStore';
-import { callerSpeech, guardIdentityArgs, surnameDisagrees } from '../services/identityArgGuard';
+import { callerSpeech, guardIdentityArgs, surnameDisagrees, lastIdentityAttempt } from '../services/identityArgGuard';
+import { checkAppointmentOrdinal, checkHandoffIdentity, handoffIdentity, refusalJson } from '../services/azulToolGuards';
 import { checkIdentityGrounding } from '../services/identityGrounding';
 import { director, directorEnabledFor } from '../director/director';
 
@@ -65,6 +66,64 @@ const AZUL_AGENT_VERSION = '2.28.0';
 const HOLDING_FIRST_MS = 6_000;
 const HOLDING_UPDATE_MS = 15_000;
 const holdingCallbacks = new Map<string, (instructionOverride?: string) => void>();
+
+/**
+ * Calls where verify_patient_identity came back verified. The server injects the
+ * personId for these from its own call session, so sage_handoff must NOT also
+ * send a patient name — see the patientName param description.
+ */
+const azulVerifiedCalls = new Set<string>();
+/** sage_handoff refusals for want of identity, per call. */
+const handoffIdentityRefusals = new Map<string, number>();
+
+export function releaseAzulCallState(callId: string | undefined): void {
+  if (!callId) return;
+  azulVerifiedCalls.delete(callId);
+  handoffIdentityRefusals.delete(callId);
+}
+
+/**
+ * How many appointments the caller's own lookup returned on THIS call, or null
+ * if no successful get_patient_appointments has run.
+ *
+ * The appointment-ordinal tools (sage_reschedule, sage_confirm_appointment,
+ * get_appointment_details, cancel_appointment) all resolve their target from an
+ * ordinal in that list, and the server answers `appointment_reference_unknown`
+ * when it cannot. That refusal cost 15 blocked calls between 07-27 and 08-03,
+ * and sage_reschedule alone burned 34 invocations across 9 calls — the model
+ * re-sending an ordinal that could never resolve, roughly two seconds of caller
+ * silence each time.
+ *
+ * The count is already in the timeline: get_patient_appointments records
+ * `appointmentCount` in its outcome. So the precondition is answerable locally,
+ * before the network call, exactly like guardIdentityArgs does for verification.
+ */
+function appointmentCountForCall(callId: string | undefined): number | null {
+  if (!callId) return null;
+  const events = getAzulTimeline(callId);
+  if (!events) return null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.tool !== 'get_patient_appointments') continue;
+    const n = (e.outcome as Record<string, unknown> | undefined)?.appointmentCount;
+    if (typeof n === 'number') return n;
+  }
+  return null;
+}
+
+/**
+ * Thin wrapper: look up this call's appointment count, then apply the pure
+ * policy in services/azulToolGuards. Returns a tool-result string to return
+ * INSTEAD of calling the service, or null to proceed.
+ */
+function guardAppointmentOrdinal(
+  callId: string | undefined,
+  tool: string,
+  ordinal: unknown,
+): string | null {
+  const refusal = checkAppointmentOrdinal(appointmentCountForCall(callId), ordinal);
+  return refusal ? refusalJson(tool, refusal) : null;
+}
 export function registerAzulHoldingCallback(callId: string, cb: (instructionOverride?: string) => void): void {
   holdingCallbacks.set(callId, cb);
 }
@@ -1119,6 +1178,11 @@ export function createAzulSchedulingAgent(
     dialedNumber: metadata?.dialedNumber,
   });
 
+  /** Calls whose identity the SERVER confirmed. Drives the sage_handoff
+   *  fallback below; independent of the director, which can be switched off. */
+  const verifiedThisCall = (): boolean =>
+    !!metadata?.callId && azulVerifiedCalls.has(metadata.callId);
+
   /** Execute on the Eye Care service AND record to the pilot tool timeline. */
   const tracked = async (name: string, args: Record<string, unknown>): Promise<string> => {
     /**
@@ -1134,11 +1198,16 @@ export function createAzulSchedulingAgent(
      */
     const markDirectorVerified = (resultJson: string): void => {
       const callId = metadata?.callId;
-      if (!callId || !directorEnabledFor('azul-scheduling')) return;
+      if (!callId) return;
       try {
         let parsed: any = JSON.parse(resultJson);
         parsed = parsed?.result ?? parsed; // {tool, result} envelope
         if (parsed?.verified !== true) return;
+        // Record the verdict FIRST and unconditionally. sage_handoff's identity
+        // fallback depends on it, and DIRECTOR_AGENTS is a kill switch that must
+        // not take unrelated behaviour down with it.
+        azulVerifiedCalls.add(callId);
+        if (!directorEnabledFor('azul-scheduling')) return;
         // The ON-FILE spelling too: the prompt tells the agent to adopt it from
         // then on, and the caller may never have pronounced it.
         director.markIdentityVerified(callId, 'azul-scheduling', [
@@ -1313,6 +1382,7 @@ export function createAzulSchedulingAgent(
       optionNumber: z.number().describe('The NUMBER of the option the caller chose from the LATEST sage_availability offer. The server resolves the slot — you never handle IDs.'),
     }),
     execute: async (args) =>
+      guardAppointmentOrdinal(metadata?.callId, 'sage_reschedule', args.appointmentOrdinal) ??
       tracked('sage_reschedule', compact({ ...args, callId: metadata?.callId })),
   });
 
@@ -1329,6 +1399,7 @@ export function createAzulSchedulingAgent(
       appointmentOrdinal: z.number().describe('The NUMBER of the appointment being confirmed, from the get_patient_appointments list on THIS call.'),
     }),
     execute: async (args) =>
+      guardAppointmentOrdinal(metadata?.callId, 'sage_confirm_appointment', args.appointmentOrdinal) ??
       tracked('sage_confirm_appointment', compact({ ...args, callId: metadata?.callId })),
   });
 
@@ -1360,11 +1431,31 @@ export function createAzulSchedulingAgent(
       const { patientName, patientDob, patientPhone,
         reasonForCall, requestedLocation, requestedTimeframe,
         urgencyScreenResult, patientResponse, ...rest } = args;
+
+      // IDENTITY FOR THE PACKET. The server rejects an anonymous handoff with
+      // `identity_required` — 24 refusals between 07-24 and 08-03, every one of
+      // them a caller who had asked for a person and got silence instead. The
+      // policy, and the catch-22 behind it, is in services/azulToolGuards.
+      const verified = verifiedThisCall();
+      const { name: effectiveName, dob: effectiveDob } = handoffIdentity({
+        verified,
+        patientName,
+        patientDob,
+        attempt: metadata?.callId ? lastIdentityAttempt(metadata.callId) ?? null : null,
+      });
+
+      const identityRefusal = checkHandoffIdentity({
+        verified,
+        name: effectiveName,
+        priorRefusals: metadata?.callId ? handoffIdentityRefusals.get(metadata.callId) ?? 0 : 0,
+      });
+      if (identityRefusal) return refusalJson('sage_handoff', identityRefusal);
+
       const result = await tracked('sage_handoff', compact({
         ...rest,
         patient: compact({
-          name: patientName,
-          dob: patientDob,
+          name: effectiveName,
+          dob: effectiveDob,
           phone: patientPhone ?? metadata?.callerPhone,
           // personId injected server-side from the call session (zero-id)
         }),
@@ -1376,7 +1467,7 @@ export function createAzulSchedulingAgent(
 
       const handoffContext = {
         handoffReason: args.handoffReason,
-        patient: { name: patientName, dob: patientDob, phone: patientPhone ?? metadata?.callerPhone },
+        patient: { name: effectiveName, dob: effectiveDob, phone: patientPhone ?? metadata?.callerPhone },
         callContext: { reasonForCall, patientResponse, requestedLocation },
       };
       // The service wraps every response as {tool, result: {...}} — unwrap
@@ -1389,6 +1480,15 @@ export function createAzulSchedulingAgent(
         const env = JSON.parse(result);
         parsed = env?.result ?? env;
       } catch { /* raw text */ }
+
+      // Remember an identity refusal so the next identical attempt is stopped
+      // here rather than costing the caller another round trip of silence.
+      if (parsed?.error === 'identity_required' && metadata?.callId) {
+        handoffIdentityRefusals.set(
+          metadata.callId,
+          (handoffIdentityRefusals.get(metadata.callId) ?? 0) + 1,
+        );
+      }
 
       if (parsed?.method === 'cold_transfer' && parsed?.transferNumberE164 && metadata?.callId) {
         // Tier 2: routing says connect the caller live. Capture the target
@@ -1694,7 +1794,9 @@ export function createAzulSchedulingAgent(
     parameters: z.object({
       appointmentOrdinal: z.number().describe('The appointment NUMBER from the get_patient_appointments list.'),
     }),
-    execute: async (args) => tracked('get_appointment_details', compact({ ...args, callId: metadata?.callId })),
+    execute: async (args) =>
+      guardAppointmentOrdinal(metadata?.callId, 'get_appointment_details', args.appointmentOrdinal) ??
+      tracked('get_appointment_details', compact({ ...args, callId: metadata?.callId })),
   });
 
   const cancelAppointmentTool = tool({
@@ -1706,7 +1808,9 @@ export function createAzulSchedulingAgent(
       reasonName: z.string().optional().describe("Reason in plain words, e.g. 'patient cancel'. Defaults to the patient-initiated reason."),
       comment: z.string().optional().describe('Brief note, e.g. "Patient called to cancel".'),
     }),
-    execute: async (args) => tracked('cancel_appointment', compact({ ...args, callId: metadata?.callId })),
+    execute: async (args) =>
+      guardAppointmentOrdinal(metadata?.callId, 'cancel_appointment', args.appointmentOrdinal) ??
+      tracked('cancel_appointment', compact({ ...args, callId: metadata?.callId })),
   });
 
   const lookupLocationTool = tool({
