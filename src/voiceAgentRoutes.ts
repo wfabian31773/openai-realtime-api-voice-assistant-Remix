@@ -39,6 +39,7 @@ import { pcpAgentConfig } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
 import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
+import { startProviderRosterRefresh } from './services/providerRoster';
 
 // Load centralized environment configuration
 let envConfig: ReturnType<typeof getEnvironmentConfig>;
@@ -93,6 +94,11 @@ const OPENAI_PROJECT_ID = envConfig.openai.projectId;
 const isProductionEnv = envConfig.isProduction;
 const WEBHOOK_SECRET = envConfig.openai.webhookSecret;
 const HUMAN_AGENT_NUMBER = envConfig.twilio.humanAgentNumber;
+
+// Transcription vocabulary comes from the live schedule, refreshed daily. The
+// hand-maintained list it replaces had 3 of 13 current providers and hinted a
+// 'Thompson' who has not been on the schedule in ninety days.
+startProviderRosterRefresh();
 const CONFIGURED_DOMAIN = envConfig.domain;
 const WEBHOOK_BASE_URL = envConfig.webhookBaseUrl;
 
@@ -1771,6 +1777,11 @@ async function observeCall(
   // opening turn. If the lookup ever regresses, the pre-connect write-through
   // below is the safety net rather than the primary path.
   let azulPrecontextPromise: Promise<import('./agents/azulSchedulingAgent').AzulPrecontext | null> | null = null;
+  /** Pre-context surname, for the transcription keyword hint. Written by the
+   *  resolve hook below and READ WITHOUT AWAITING at the accept payload — if
+   *  the lookup has not landed by then, the call proceeds with no hint rather
+   *  than waiting on it. The payload starts the call; nothing blocks it. */
+  let resolvedPrecontextSurname: string | null = null;
   // Late-arriving pre-context is PARKED here and applied only at a turn
   // boundary (response.done) — operator report 2026-07-24 (live): injecting
   // context while the agent is mid-greeting makes her "lose her speech and
@@ -1816,6 +1827,9 @@ async function observeCall(
     void azulPrecontextPromise.then((pc) => {
       if (pc?.matched && directorEnabledFor(effectiveSlug)) {
         director.seedRecordNames(callId, effectiveSlug, [pc.firstName, pc.lastNameOnFile]);
+      }
+      if (pc?.matched && pc.lastNameOnFile) {
+        resolvedPrecontextSurname = String(pc.lastNameOnFile).trim() || null;
       }
     });
     // Carrier lookup stays AZUL-ONLY: its whole job is to contradict a bad
@@ -2702,8 +2716,12 @@ async function observeCall(
       // whole call — every Spanish speaker who did not press 4 in the IVR was
       // force-decoded as English. buildTranscriptionConfig omits the language
       // unless the call actually established one.
+      // The caller's own surname is the highest-value hint on the call and the
+      // thing the transcriber mangles most. Read from whatever pre-context has
+      // already resolved — never awaited, because this payload starts the call.
       acceptPayload.audio.input.transcription = buildTranscriptionConfig({
         establishedLanguage: establishedLanguageCode,
+        callerSurname: resolvedPrecontextSurname,
       });
     }
     // SIP MODE: ALWAYS strip audio format from accept payload.
