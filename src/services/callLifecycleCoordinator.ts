@@ -889,7 +889,43 @@ class CallLifecycleCoordinator extends EventEmitter {
 
     const timeout = setTimeout(async () => {
       const record = this.activeCalls.get(callLogId);
+
+      // A STALE LOCAL RECORD IS NOT EVIDENCE THE CALL ENDED.
+      //
+      // This used to return here whenever the record was missing or not
+      // 'in_progress', on the assumption that our bookkeeping knew. It does
+      // not: cancelMaxDurationTimeout() clears this timer on every clean
+      // finalize, so the timer FIRING AT ALL means we never saw the call end.
+      // Giving up at that exact moment is giving up on the only calls that
+      // need it.
+      //
+      // 2026-08-03/04: eight answering-service calls ran past their 15-minute
+      // cap. The longest was 11,584s — three hours and sixteen minutes — with
+      // five conversational turns on it. The line sat open, billing, long
+      // after anyone stopped talking. Twilio still had the call up the whole
+      // time; only our record had gone stale.
+      //
+      // So: no record, or a record in an unexpected state, and we hold a
+      // CallSid → still ask Twilio to end it. Terminating an already-finished
+      // call is a no-op; leaving a live one up costs hours.
       if (!record || record.state !== 'in_progress') {
+        const orphanSid = record?.twilioCallSid || twilioCallSid;
+        if (orphanSid) {
+          logger.warn(
+            `Max duration reached with no live local record — asking Twilio to end it anyway`,
+            { callId: callLogId, twilioCallSid: orphanSid, agentSlug, state: record?.state ?? 'no_record',
+              event: 'max_duration_orphan' },
+          );
+          try {
+            const client = await getTwilioClient();
+            await client.calls(orphanSid).update({ status: 'completed' });
+          } catch (error) {
+            // Already finished is the expected case and not worth an error.
+            logger.info(`Orphan termination returned an error (call likely already ended)`, {
+              callId: callLogId, twilioCallSid: orphanSid, error: String(error),
+            });
+          }
+        }
         this.maxDurationTimeouts.delete(callLogId);
         return;
       }

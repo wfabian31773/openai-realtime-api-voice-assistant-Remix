@@ -45,6 +45,7 @@ export interface DirectorAction {
     | 'readback_loop'
     | 'record_name_disclosed'
     | 'record_detail_disclosed'
+    | 'identity_ceiling'
     | 'language_switch_unwarranted';
   topic: string;
   /** System-message text (all enforcement levels). */
@@ -92,6 +93,11 @@ interface CallState {
   /** The topic of the LAST thing the agent asked for. A caller answering "Allen"
    *  is only interpretable against the question it answers. */
   pendingAsk: string | null;
+  /** Identity questions asked on this call, across ALL identity fields. */
+  identityAsks: number;
+  /** The ceiling fires once. After it, the agent has been told to file or hand
+   *  off; repeating the instruction every turn would be its own loop. */
+  ceilingFired: boolean;
   /** The caller has spoken Spanish, or asked for it by name. Until then, the
    *  agent switching to Spanish is a guess — see language_switch_unwarranted. */
   callerLicensedSpanish: boolean;
@@ -466,6 +472,60 @@ function identityEstablished(s: CallState): boolean {
   return s.answered.has('full name') && s.answered.has('date of birth');
 }
 
+/**
+ * IDENTITY CEILING — the change that owns the biggest number in the system.
+ *
+ * Of 1,391 calls over 2026-08-03/05, 679 produced no recorded action at all.
+ * 219 of those were real conversations — averaging 189 seconds and 6.6 caller
+ * turns — and 195 of THOSE (89%) died inside identity collection. Twelve and a
+ * half hours of caller time, and not one ticket, booking or answer came out of
+ * it.
+ *
+ * Nothing was looping in the sense the loop guard understands. The agent just
+ * kept asking, politely, forever, because nothing ever told it to stop. One
+ * call reached 85 minutes on "Am I speaking with Marcos?" / "Sorry — before we
+ * go on, may I get your full name?".
+ *
+ * The practice does not need the name to do its job. answering-service exists
+ * to raise a ticket for the Optical, Surgery and Technician queues; it has the
+ * caller's phone number from the carrier and their stated reason from the
+ * first turn. A ticket that says "caller on +1... wants to reschedule, name not
+ * captured" is worth a great deal more than a 20-minute call that produces
+ * nothing, and the front desk can resolve the name in five seconds.
+ *
+ * So: after this many identity questions without success, stop asking and use
+ * what we have.
+ */
+const IDENTITY_ASK_CEILING = 5;
+
+/** The identity fields, for counting against the ceiling. */
+const IDENTITY_TOPICS = new Set(['full name', 'first name', 'last name', 'date of birth']);
+
+/**
+ * What to do INSTEAD of asking again — per agent, because the right answer
+ * differs. answering-service and no-ivr file the ticket; azul hands off,
+ * because it cannot book without a verified patient and should not pretend
+ * otherwise.
+ */
+const CEILING_ACTION: Record<string, { fix: string; speak: string }> = {
+  'answering-service': {
+    fix: 'Call create_ticket NOW with what you already have — the callback number is attached to the call, and the reason they gave in their first turn is enough. Set the name fields to whatever you managed to capture, or leave them empty. Do NOT ask for the name or date of birth again.',
+    speak: "I'm having trouble getting that down clearly, and I don't want to keep you. Let me pass on what I have with your number and have the team call you back.",
+  },
+  'no-ivr': {
+    fix: 'Call create_ticket NOW with what you already have — the callback number is attached to the call. Do NOT ask for the name or date of birth again.',
+    speak: "I'm having trouble getting that down clearly, and I don't want to keep you any longer. Let me take what I have and make sure someone calls you back.",
+  },
+  'after-hours': {
+    fix: 'Call create_ticket NOW with what you already have. Do NOT ask for the name or date of birth again.',
+    speak: "I'm having trouble getting that down clearly. Let me take what I have and make sure someone calls you back.",
+  },
+  default: {
+    fix: 'Stop collecting identity. Hand off with sage_handoff reason patient_identity_uncertain, or file what you have. Do NOT ask again.',
+    speak: "I'm having trouble getting that down, and I don't want to keep you any longer. Let me get this to someone who can help.",
+  },
+};
+
 const EXIT_LINE: Record<string, string> = {
   'azul-scheduling':
     "I'm sorry — I'm clearly going in circles and I don't want to keep you any longer. Let me get you to someone on our team who can take it from here.",
@@ -494,6 +554,8 @@ export class Director {
         disclosureFiredSinceCaller: false,
         identityVerified: false,
         pendingAsk: null,
+        identityAsks: 0,
+        ceilingFired: false,
         callerLicensedSpanish: false,
         callerSpokeForeign: false,
         lastAgentLine: '',
@@ -787,6 +849,25 @@ export class Director {
       // ever saw volunteered names.
       s.pendingAsk = topic;
 
+      // IDENTITY CEILING. Counted across ALL identity fields, not per topic:
+      // the calls that died here were not repeating one question, they were
+      // cycling name → last name → date of birth → name, each of which looks
+      // reasonable on its own. Only the total gives it away.
+      if (IDENTITY_TOPICS.has(topic) && !identityEstablished(s)) {
+        s.identityAsks += 1;
+        if (s.identityAsks >= IDENTITY_ASK_CEILING && !s.ceilingFired) {
+          s.ceilingFired = true;
+          const plan = CEILING_ACTION[s.agentSlug] ?? CEILING_ACTION.default;
+          return this.action(s, 'identity_ceiling', 'identity', 2, {
+            why:
+              `You have asked for identity ${s.identityAsks} times and still do not have it. ` +
+              `The caller has been on the line ${s.turn} turns. Asking again will not work.`,
+            fix: plan.fix,
+            speak: plan.speak,
+          }, 2);
+        }
+      }
+
       const answer = s.answered.get(topic);
       if (answer) {
         // ONE read-back is good practice and several prompts require it
@@ -883,9 +964,14 @@ export class Director {
         code,
         topic,
         speak,
+        // parts.fix is carried into the authored turn, not dropped. Telling the
+        // model what to SAY without telling it what to DO is how the identity
+        // ceiling first shipped saying "let me pass this on" to an agent that
+        // had been given no instruction to file anything.
         text:
           `DIRECTOR — TAKING THIS TURN. ${parts.why} A previous correction was ignored. ` +
-          `Say exactly this and nothing else: "${speak}" Then continue WITHOUT asking about ${topic} again.`,
+          `Say exactly this and nothing else: "${speak}" Then continue WITHOUT asking about ${topic} again. ` +
+          parts.fix,
       };
     }
     return {
