@@ -130,7 +130,8 @@ export function practiceLanguages(env: NodeJS.ProcessEnv = process.env): string[
  * describes the setting only.
  */
 export const TRANSCRIPTION_PROMPT =
-  'Inbound telephone calls to a San Diego area ophthalmology and optometry practice. ' +
+  'Inbound telephone calls to a Southern California ophthalmology and optometry ' +
+  'practice with offices across greater Los Angeles, Orange County and San Diego County. ' +
   'Callers state their surname, spell it letter by letter, and give a date of birth. ' +
   'Expect patient surnames, clinic locations, provider names, and eye-care terms.';
 
@@ -141,10 +142,22 @@ export const TRANSCRIPTION_PROMPT =
  * what `prompt` is for.
  */
 export const TRANSCRIPTION_KEYWORDS = [
-  // Offices and practice
-  'Azul Vision', 'Encinitas', 'Oceanside', 'Carlsbad', 'Vista', 'San Marcos',
-  // Providers seen in live appointment records
-  'Nayer', 'Bock', 'Kim', 'Thompson', 'Choi',
+  // Offices. Counted from 2026-08-03/04 transcripts, most-mentioned first.
+  // The original list held the SD pilot offices only, which is the azul
+  // footprint — but answering-service and no-ivr are practice-wide and carry
+  // more LA/OC traffic than SD: Glendale 31, Pasadena 26, Anaheim 25,
+  // Covina 14, Huntington Beach 13, Upland 8, none of them hinted, against
+  // Encinitas 52, Oceanside 20, Vista 9, Carlsbad 1.
+  'Azul Vision',
+  'Encinitas', 'Glendale', 'Pasadena', 'Anaheim', 'Oceanside', 'Covina',
+  'Huntington Beach', 'Vista', 'Upland', 'Burbank', 'Carlsbad', 'San Marcos',
+  // Providers, same source. 'Thompson' was hinted and the provider on the
+  // schedule is Dr Brett TOMPKINS (16 mentions vs Thompson's 10) — a keyword
+  // pushing the transcriber toward the wrong spelling of a name the booking
+  // flow keys on. Both are listed now rather than guessed between; if only
+  // one is real, drop the other.
+  'Nayer', 'Bock', 'Kim', 'Choi', 'Tompkins', 'Thompson',
+  'Logan', 'Patel', 'Nguyen', 'Lee', 'Mahdavi', 'Amani', 'Chau', 'Kaplan',
   // Appointment and clinical vocabulary the rules engine keys on
   'refraction', 'dilated exam', 'comprehensive exam', 'glaucoma', 'cataract',
   'follow up', 'consult', 'post-op', 'OCT', 'visual field', 'optometrist',

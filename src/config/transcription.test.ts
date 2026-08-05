@@ -10,6 +10,7 @@ import {
   PREVIOUS_TRANSCRIPTION_MODEL,
   TRANSCRIPTION_KEYWORDS,
   TRANSCRIPTION_PROMPT,
+  TRANSCRIPTION_PROMPT,
   buildTranscriptionConfig,
   practiceLanguages,
   supportsVocabularyHints,
@@ -152,5 +153,48 @@ describe('practiceLanguages', () => {
   it('is configurable and tolerates sloppy input', () => {
     expect(practiceLanguages(env({ TRANSCRIPTION_LANGUAGES: 'en, es , tl' }))).toEqual(['en', 'es', 'tl']);
     expect(practiceLanguages(env({ TRANSCRIPTION_LANGUAGES: ' , , ' }))).toEqual(['en', 'es']);
+  });
+});
+
+/**
+ * Vocabulary hints measured against real traffic (2026-08-03/04 transcripts),
+ * not against the shape of the pilot.
+ *
+ * The original list held the San Diego pilot offices only. azul IS SD-only,
+ * but answering-service and no-ivr are practice-wide and carry more LA/OC
+ * traffic than SD — 120 mentions of offices that were never hinted, against
+ * 82 that were. The `prompt` went further and asserted "San Diego area",
+ * which biases the transcriber AGAINST a caller saying "Pasadena". Same
+ * class of error as the old `language: 'en'` pin, one layer up.
+ */
+describe('vocabulary hints match the practice, not the pilot', () => {
+  const kw = TRANSCRIPTION_KEYWORDS.map((k) => k.toLowerCase());
+
+  it('hints the LA and Orange County offices, not just the SD pilot', () => {
+    for (const office of ['glendale', 'pasadena', 'anaheim', 'covina', 'huntington beach', 'upland']) {
+      expect(kw, office).toContain(office);
+    }
+    // and still the SD ones
+    for (const office of ['encinitas', 'oceanside', 'vista', 'carlsbad']) {
+      expect(kw, office).toContain(office);
+    }
+  });
+
+  it('hints Tompkins — the provider the booking flow actually keys on', () => {
+    // 'Thompson' was hinted and Dr Brett TOMPKINS is who is on the schedule
+    // (16 mentions vs 10). A keyword can push the transcriber toward the
+    // wrong spelling of a name a booking depends on.
+    expect(kw).toContain('tompkins');
+  });
+
+  it('hints the busiest provider surnames seen in traffic', () => {
+    for (const p of ['logan', 'patel', 'nguyen', 'choi', 'kim']) {
+      expect(kw, p).toContain(p);
+    }
+  });
+
+  it('does not describe the practice as San Diego only', () => {
+    expect(TRANSCRIPTION_PROMPT).not.toMatch(/^Inbound telephone calls to a San Diego area/);
+    expect(TRANSCRIPTION_PROMPT).toMatch(/los angeles|southern california/i);
   });
 });
