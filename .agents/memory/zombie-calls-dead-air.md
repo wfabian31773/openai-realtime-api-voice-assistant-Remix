@@ -44,9 +44,14 @@ Close the transport *after* that, as cleanup only.
 
 Three things that matter if you change it:
 
-- **Only transcript- and tool-shaped events count as activity.** A stalled
-  session keeps streaming `response.output_audio.delta` and keepalives; counting
-  those makes the watchdog never fire. See `isActivityEvent`.
+- **Only WORDS or WORK count as activity** — a caller transcript, an agent
+  transcript, or tool traffic. Nothing else. `conversation.item.created`,
+  `conversation.item.truncated` and `response.done` were in the first list and
+  had to come out (2026-08-05, call 822f7347 — 1201s on four turns): a line with
+  nobody on it keeps opening items on ambient noise, and `response.done` fires
+  for empty and cancelled responses. See `isActivityEvent`.
+- **`total_turns <= 2` is too narrow a detector.** 822f7347 had four turns and
+  300 seconds of silence per turn. Measure `duration / total_turns` instead.
 - **120s default, and the binding constraint is the warm transfer, not the
   prompt's ~30s silence ladder.** `transfer_to_office` averages 28s and has been
   observed at **71.5s** producing no transcript at all. Anything under ~90s will

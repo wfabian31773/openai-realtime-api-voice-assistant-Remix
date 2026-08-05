@@ -2541,6 +2541,22 @@ async function observeCall(
                 // caller line between are ignored inside the guard).
                 const lgDoneDirective = conversationLoopGuard.onAgentLine(callId, effectiveSlug, content.transcript);
                 if (lgDoneDirective) sendLoopGuardDirective(session, callId, lgDoneDirective);
+
+                // DIRECTOR ON THIS PATH TOO. It was wired only to
+                // response.output_audio_transcript.done, so any agent line that
+                // surfaces ONLY here was invisible to it — while the stored
+                // transcript is assembled from both paths, which is why the
+                // transcript could show a loop the director's telemetry did not.
+                // Call 4511a0a3 (2026-08-05 18:34): replaying its transcript
+                // offline produces FIVE actions, including inject+author on the
+                // "which office do you visit" loop; the row recorded three, all
+                // on name/date of birth. Same double-capture safety as the loop
+                // guard — the director drops a line identical to the last one
+                // when the caller has not spoken since.
+                if (directorEnabledFor(effectiveSlug)) {
+                  const doneDecision = director.observeAgent(callId, effectiveSlug, content.transcript);
+                  if (doneDecision) applyDirectorAction(session, callId, effectiveSlug, doneDecision);
+                }
               }
             });
           }

@@ -67,6 +67,24 @@ tardes", and switching to Spanish there was correct. Plain-ASCII nonsense is
 deliberately left to the model, which has the audio; we only have the
 transcript. The rule never pushes a call *into* Spanish.
 
+## The director only sees what it is wired to
+
+`observeAgent` must be called from BOTH agent-transcript paths in
+`voiceAgentRoutes`: `response.output_audio_transcript.done` **and** the
+`response.done` output-items block. It was wired only to the first until
+2026-08-05, while the stored transcript is assembled from both — so a loop
+visible in the transcript could be entirely absent from
+`tool_timeline->'director'`.
+
+Call 4511a0a3 is the case: replaying its transcript offline produces **five**
+actions, including `inject` then `author` on a six-deep "which office do you
+visit" loop; the row recorded **three**, all on name/date of birth. Double
+capture is safe — the director drops a line identical to the last one when the
+caller has not spoken since (the same property the loop guard relies on).
+
+If you are judging whether the director is over- or under-firing, confirm the
+wiring first. Twice in this review the telemetry was the thing that was wrong.
+
 ## Kill switch
 
 `DIRECTOR_AGENTS` (comma-separated agent slugs, empty = off everywhere) gates
