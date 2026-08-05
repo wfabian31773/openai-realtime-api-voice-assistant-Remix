@@ -36,7 +36,10 @@ describe('transcriptionModel', () => {
     // The whole reason for the flip: the previous model accepts none of these.
     const c = buildTranscriptionConfig({ env: env({}) });
     expect(c.languages).toEqual(['en', 'es']);
-    expect(c.keywords).toEqual(TRANSCRIPTION_KEYWORDS);
+    // The payload list is COMPOSED now — schedule roster (or the seeds when
+    // it has not loaded) plus the clinical vocabulary, plus any per-call
+    // caller surname. Containment, not equality.
+    expect(c.keywords as string[]).toEqual(expect.arrayContaining(TRANSCRIPTION_KEYWORDS));
     expect(c.prompt).toBe(TRANSCRIPTION_PROMPT);
     expect(c.language).toBeUndefined();
   });
@@ -124,7 +127,10 @@ describe('next-generation models get the bilingual + vocabulary treatment', () =
   it('carries the domain prompt and keywords', () => {
     const c = buildTranscriptionConfig({ env: e });
     expect(c.prompt).toBe(TRANSCRIPTION_PROMPT);
-    expect(c.keywords).toEqual(TRANSCRIPTION_KEYWORDS);
+    // The payload list is COMPOSED now — schedule roster (or the seeds when
+    // it has not loaded) plus the clinical vocabulary, plus any per-call
+    // caller surname. Containment, not equality.
+    expect(c.keywords as string[]).toEqual(expect.arrayContaining(TRANSCRIPTION_KEYWORDS));
     // The two office names the routing depends on.
     expect(TRANSCRIPTION_KEYWORDS).toContain('Encinitas');
     expect(TRANSCRIPTION_KEYWORDS).toContain('Oceanside');
@@ -152,5 +158,97 @@ describe('practiceLanguages', () => {
   it('is configurable and tolerates sloppy input', () => {
     expect(practiceLanguages(env({ TRANSCRIPTION_LANGUAGES: 'en, es , tl' }))).toEqual(['en', 'es', 'tl']);
     expect(practiceLanguages(env({ TRANSCRIPTION_LANGUAGES: ' , , ' }))).toEqual(['en', 'es']);
+  });
+});
+
+/**
+ * Vocabulary hints measured against real traffic (2026-08-03/04 transcripts),
+ * not against the shape of the pilot.
+ *
+ * The original list held the San Diego pilot offices only. azul IS SD-only,
+ * but answering-service and no-ivr are practice-wide and carry more LA/OC
+ * traffic than SD — 120 mentions of offices that were never hinted, against
+ * 82 that were. The `prompt` went further and asserted "San Diego area",
+ * which biases the transcriber AGAINST a caller saying "Pasadena". Same
+ * class of error as the old `language: 'en'` pin, one layer up.
+ */
+describe('vocabulary hints match the practice, not the pilot', () => {
+  const kw = TRANSCRIPTION_KEYWORDS.map((k) => k.toLowerCase());
+
+  it('hints the LA and Orange County offices, not just the SD pilot', () => {
+    for (const office of ['glendale', 'pasadena', 'anaheim', 'covina', 'huntington beach', 'upland']) {
+      expect(kw, office).toContain(office);
+    }
+    // and still the SD ones
+    for (const office of ['encinitas', 'oceanside', 'vista', 'carlsbad']) {
+      expect(kw, office).toContain(office);
+    }
+  });
+
+  it('hints Tompkins — the provider the booking flow actually keys on', () => {
+    // 'Thompson' was hinted and Dr Brett TOMPKINS is who is on the schedule
+    // (16 mentions vs 10). A keyword can push the transcriber toward the
+    // wrong spelling of a name a booking depends on.
+    expect(kw).toContain('tompkins');
+  });
+
+  it('hints the busiest provider surnames seen in traffic', () => {
+    for (const p of ['logan', 'patel', 'nguyen', 'choi', 'kim']) {
+      expect(kw, p).toContain(p);
+    }
+  });
+
+  it('does not describe the practice as San Diego only', () => {
+    expect(TRANSCRIPTION_PROMPT).not.toMatch(/^Inbound telephone calls to a San Diego area/);
+    expect(TRANSCRIPTION_PROMPT).toMatch(/los angeles|southern california/i);
+  });
+});
+
+/**
+ * Live roster + the per-call caller surname hint.
+ *
+ * The keyword list is no longer a constant: it comes from the schedule when
+ * that has loaded, and falls back to the seeds when it has not — which is the
+ * behaviour that shipped before, so a roster outage costs hints, not calls.
+ */
+describe('live roster and the caller-surname hint', () => {
+  const env = (o: Record<string, string> = {}) => o as unknown as NodeJS.ProcessEnv;
+
+  it('falls back to the seed keywords when the roster has not loaded', () => {
+    const c = buildTranscriptionConfig({ env: env({}) });
+    expect(c.keywords as string[]).toContain('Azul Vision');
+    // Clinical vocabulary is not in the schedule and is always sent.
+    expect(c.keywords as string[]).toContain('glaucoma');
+  });
+
+  it('hints the caller surname from pre-context', () => {
+    const c = buildTranscriptionConfig({ callerSurname: 'Ferreras', env: env({}) });
+    expect(c.keywords as string[]).toContain('Ferreras');
+  });
+
+  it('honours the kill switch', () => {
+    // The trade-off: pre-context is a phone-number match, not identity, so on
+    // a shared handset this biases the transcriber toward the wrong surname.
+    const c = buildTranscriptionConfig({
+      callerSurname: 'Ferreras',
+      env: env({ TRANSCRIPTION_CALLER_HINT: 'false' }),
+    });
+    expect(c.keywords as string[]).not.toContain('Ferreras');
+  });
+
+  it('ignores a surname that is not one', () => {
+    for (const junk of ['', '   ', '12345', 'A', 'not a name at all']) {
+      const c = buildTranscriptionConfig({ callerSurname: junk, env: env({}) });
+      expect((c.keywords as string[]).includes(junk), junk).toBe(false);
+    }
+  });
+
+  it('sends no keywords at all to a model that cannot take them', () => {
+    const c = buildTranscriptionConfig({
+      callerSurname: 'Ferreras',
+      env: env({ TRANSCRIPTION_MODEL: 'gpt-4o-mini-transcribe' }),
+    });
+    expect(c.keywords).toBeUndefined();
+    expect(c.prompt).toBeUndefined();
   });
 });

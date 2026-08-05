@@ -39,6 +39,8 @@ import { pcpAgentConfig } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
 import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
+import { startProviderRosterRefresh } from './services/providerRoster';
+import { recordTurn, flushTurns, releaseTurns } from './services/turnLog';
 
 // Load centralized environment configuration
 let envConfig: ReturnType<typeof getEnvironmentConfig>;
@@ -93,6 +95,11 @@ const OPENAI_PROJECT_ID = envConfig.openai.projectId;
 const isProductionEnv = envConfig.isProduction;
 const WEBHOOK_SECRET = envConfig.openai.webhookSecret;
 const HUMAN_AGENT_NUMBER = envConfig.twilio.humanAgentNumber;
+
+// Transcription vocabulary comes from the live schedule, refreshed daily. The
+// hand-maintained list it replaces had 3 of 13 current providers and hinted a
+// 'Thompson' who has not been on the schedule in ninety days.
+startProviderRosterRefresh();
 const CONFIGURED_DOMAIN = envConfig.domain;
 const WEBHOOK_BASE_URL = envConfig.webhookBaseUrl;
 
@@ -805,6 +812,68 @@ function logHistoryItem(item: RealtimeItem, callId?: string): void {
   }
 }
 
+/**
+ * The urgent-escalation safety net: whatever happened to the transfer, the
+ * patient ends up as an URGENT ticket somebody has to work.
+ *
+ * Shared by both failure paths. It used to cover only "the human did not
+ * answer"; a dial that THREW — Twilio down, circuit breaker open, an
+ * unroutable number — returned silently and left the urgent caller existing
+ * nowhere but a console line. Same net under both.
+ */
+async function fileUrgentHandoffFallbackTicket(
+  openAiCallId: string,
+  escalationDetails: { reason?: string; symptomsSummary?: string; patientFirstName?: string; patientLastName?: string } | undefined,
+  callerID: string | null | undefined,
+  ctx: { why: string; dialTarget?: string },
+): Promise<void> {
+  console.warn(`[HANDOFF] Creating urgent fallback ticket — ${ctx.why}`);
+  try {
+    const { SyncAgentService } = await import('./services/syncAgentService');
+    const { AFTER_HOURS_DEPARTMENT_ID, TRIAGE_OUTCOME_MAPPINGS } = await import('./config/afterHoursTicketing');
+
+    const urgentMapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // generic urgent
+    const patientFirst = escalationDetails?.patientFirstName || 'Unknown';
+    const patientLast = escalationDetails?.patientLastName || 'Caller';
+    const rawPhone = callerID || '';
+    const digits = rawPhone.replace(/\D/g, '');
+    const formattedPhone = digits.length === 10
+      ? `+1${digits}`
+      : rawPhone.startsWith('+') ? rawPhone : `+${digits}`;
+
+    const descParts: string[] = [ctx.why, 'Please call the patient back immediately.'];
+    if (ctx.dialTarget) descParts.push(`Attempted transfer to: ${ctx.dialTarget}`);
+    if (escalationDetails?.reason) descParts.push(`Reason: ${escalationDetails.reason}`);
+    if (escalationDetails?.symptomsSummary) descParts.push(`Symptoms: ${escalationDetails.symptomsSummary}`);
+
+    const conferenceName = getConferenceName(openAiCallId);
+    const ticketResult = await SyncAgentService.createTicket({
+      departmentId: AFTER_HOURS_DEPARTMENT_ID,
+      requestTypeId: urgentMapping.requestTypeId,
+      requestReasonId: urgentMapping.requestReasonId,
+      patientFirstName: patientFirst,
+      patientLastName: patientLast,
+      patientPhone: formattedPhone,
+      description: descParts.join('\n'),
+      priority: 'urgent',
+      callData: {
+        callSid: conferenceName ? getTwilioCallSid(conferenceName) : undefined,
+        callerPhone: callerID || undefined,
+        // Label with the agent actually on the call, not a hardcoded slug.
+        agentUsed: callMetadataForDB.get(openAiCallId)?.agentSlug || 'after-hours',
+      },
+    });
+
+    if (ticketResult.success) {
+      console.log('[HANDOFF] ✓ Urgent fallback ticket created:', ticketResult.ticketNumber);
+    } else {
+      console.error('[HANDOFF] ✗ Urgent fallback ticket creation failed:', ticketResult.error);
+    }
+  } catch (ticketErr) {
+    console.error('[HANDOFF] ✗ Exception creating urgent fallback ticket:', ticketErr);
+  }
+}
+
 // Handle human agent handoff
 type HandoffOutcome = { ok: true; destination: string } | { ok: false; status: string; reason: string };
 
@@ -861,6 +930,33 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     console.error('[HANDOFF] ✗ Missing callerID');
     return { ok: false, status: 'FAILED', reason: 'caller_id_missing' };
   }
+
+  // WHERE the urgent call goes. Until 2026-08-03 this was always the global
+  // HUMAN_AGENT_NUMBER (the operator's mobile), at any hour, for any location.
+  // Operator directive: reach the OFFICE directly during business hours, keep
+  // on-call outside them, urgent ticket as the fallback either way. The
+  // resolver degrades to HUMAN_AGENT_NUMBER on every failure path, so this is
+  // never worse than the behaviour it replaces.
+  // Layered ON TOP of resolveHandoffDestination, never instead of it. The
+  // policy resolver decides WHICH CONTRACT this call falls under — clinical
+  // or PCP — and that decision is not ours to second-guess. A PCP handoff is
+  // a professional caller with its own dial sequence and its own ticketing;
+  // routing one into an office front desk would be wrong. So the office queue
+  // only ever replaces the CLINICAL destination.
+  let dialSource = 'policy';
+  if (policy.policy !== 'pcp') {
+    const { resolveUrgentTransferTarget } = await import('./services/urgentTransfer');
+    const target = await resolveUrgentTransferTarget({
+      reason: escalationDetails?.reason ?? 'urgent escalation',
+      callerPhone: callerID || undefined,
+      onCallNumber: handoffDestination,
+    });
+    if (target?.number) {
+      handoffDestination = target.number;
+      dialSource = target.source + (target.queueLabel ? ` — ${target.queueLabel}` : '');
+    }
+  }
+  console.log(`[HANDOFF] Dialing ${handoffDestination} (${dialSource})`);
 
   try {
     // Initialize Twilio client if not already done
@@ -1010,7 +1106,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
         async () => twilioClient.conferences(conferenceName).participants.create({
           from: twilioPhoneNumber,
           to: handoffDestination,
-          label: 'human agent',
+          label: dialSource.startsWith('office_queue') ? 'office queue' : 'human agent',
           // Operator-specified UX (2026-07-22, applies to ALL transfers):
           // no pre-answer ringback into the conference — the caller hears
           // the agent, then the human, never the raw ring.
@@ -1053,8 +1149,22 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       });
     } catch (dialError) {
       console.error('[HANDOFF] ✗ Failed to dial human agent:', dialError);
-      // AI is still connected - caller is not stranded
-      // Don't throw - let the AI continue the conversation
+      // The AI is still connected, so the caller is not stranded mid-air —
+      // but this path used to leave NO RECORD AT ALL. A no-answer filed an
+      // urgent fallback ticket; a dial that threw (Twilio down, circuit
+      // breaker open, bad number) filed nothing, and the urgent caller
+      // existed only in a console line. Same net under both.
+      //
+      // PCP is excluded for the same reason the no-answer path excludes it:
+      // it files its own structured ticket before dialing, and a
+      // professional-caller failure must never land in the patient
+      // after-hours contract.
+      if (policy.policy !== 'pcp') {
+        void fileUrgentHandoffFallbackTicket(openAiCallId, escalationDetails, callerID, {
+          why: `Transfer dial failed: ${dialError instanceof Error ? dialError.message : String(dialError)}`,
+          dialTarget: handoffDestination,
+        });
+      }
       return { ok: false, status: 'FAILED', reason: 'dial_failed' };
     }
 
@@ -1071,65 +1181,15 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
         handoffReadyResolvers.delete(humanCallSid);
       }
 
-      // CREATE FALLBACK TICKET: Human didn't answer — create an urgent callback ticket
-      // so staff knows to call the patient back
       // PCP creates its own structured ticket before dialing. Never route a
       // professional-caller failure into the patient/after-hours contract.
       if (policy.policy === 'pcp') {
         return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer' };
       }
-      console.warn('[HANDOFF] Creating fallback ticket because human did not answer the transfer');
-      try {
-        const { SyncAgentService } = await import('./services/syncAgentService');
-        const { AFTER_HOURS_DEPARTMENT_ID, TRIAGE_OUTCOME_MAPPINGS } = await import('./config/afterHoursTicketing');
-
-        // Use escalationDetails if available, otherwise fall back to minimal info
-        const urgentMapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // generic urgent
-        const patientFirst = escalationDetails?.patientFirstName || 'Unknown';
-        const patientLast  = escalationDetails?.patientLastName  || 'Caller';
-        const rawPhone     = callerID || '';
-        const formattedPhone = rawPhone.replace(/\D/g, '').length === 10
-          ? `+1${rawPhone.replace(/\D/g, '')}`
-          : rawPhone.startsWith('+') ? rawPhone : `+${rawPhone.replace(/\D/g, '')}`;
-
-        const descParts: string[] = [
-          'URGENT TRANSFER NOT ANSWERED: The patient was transferred to the on-call team but no one picked up.',
-          'Please call the patient back immediately.',
-        ];
-        if (escalationDetails?.reason) {
-          descParts.push(`Reason: ${escalationDetails.reason}`);
-        }
-        if (escalationDetails?.symptomsSummary) {
-          descParts.push(`Symptoms: ${escalationDetails.symptomsSummary}`);
-        }
-
-        const ticketResult = await SyncAgentService.createTicket({
-          departmentId: AFTER_HOURS_DEPARTMENT_ID,
-          requestTypeId: urgentMapping.requestTypeId,
-          requestReasonId: urgentMapping.requestReasonId,
-          patientFirstName: patientFirst,
-          patientLastName: patientLast,
-          patientPhone: formattedPhone,
-          description: descParts.join('\n'),
-          priority: 'urgent',
-          callData: {
-            callSid: getTwilioCallSid(conferenceName),
-            callerPhone: callerID,
-            // This shared fallback fires for ANY agent whose transfer went
-            // unanswered — label the ticket with the agent actually on the
-            // call (no-ivr in production) instead of a hardcoded slug.
-            agentUsed: callMetadataForDB.get(openAiCallId)?.agentSlug || 'after-hours',
-          },
-        });
-
-        if (ticketResult.success) {
-          console.log('[HANDOFF] ✓ Fallback ticket created:', ticketResult.ticketNumber);
-        } else {
-          console.error('[HANDOFF] ✗ Fallback ticket creation failed:', ticketResult.error);
-        }
-      } catch (ticketErr) {
-        console.error('[HANDOFF] ✗ Exception creating fallback ticket:', ticketErr);
-      }
+      await fileUrgentHandoffFallbackTicket(openAiCallId, escalationDetails, callerID, {
+        why: 'URGENT TRANSFER NOT ANSWERED: The patient was transferred but no one picked up.',
+        dialTarget: handoffDestination,
+      });
 
       return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer' };
     }
@@ -1718,6 +1778,11 @@ async function observeCall(
   // opening turn. If the lookup ever regresses, the pre-connect write-through
   // below is the safety net rather than the primary path.
   let azulPrecontextPromise: Promise<import('./agents/azulSchedulingAgent').AzulPrecontext | null> | null = null;
+  /** Pre-context surname, for the transcription keyword hint. Written by the
+   *  resolve hook below and READ WITHOUT AWAITING at the accept payload — if
+   *  the lookup has not landed by then, the call proceeds with no hint rather
+   *  than waiting on it. The payload starts the call; nothing blocks it. */
+  let resolvedPrecontextSurname: string | null = null;
   // Late-arriving pre-context is PARKED here and applied only at a turn
   // boundary (response.done) — operator report 2026-07-24 (live): injecting
   // context while the agent is mid-greeting makes her "lose her speech and
@@ -1763,6 +1828,9 @@ async function observeCall(
     void azulPrecontextPromise.then((pc) => {
       if (pc?.matched && directorEnabledFor(effectiveSlug)) {
         director.seedRecordNames(callId, effectiveSlug, [pc.firstName, pc.lastNameOnFile]);
+      }
+      if (pc?.matched && pc.lastNameOnFile) {
+        resolvedPrecontextSurname = String(pc.lastNameOnFile).trim() || null;
       }
     });
     // Carrier lookup stays AZUL-ONLY: its whole job is to contradict a bad
@@ -2436,6 +2504,16 @@ async function observeCall(
           director.observeCaller(callId, effectiveSlug, transcript);
         }
 
+        // The turn table. Recorded for EVERY agent, not only the ones the
+        // director watches — the calls hardest to debug are the ones with no
+        // director ruling on them at all.
+        recordTurn(callId, 'caller', transcript, {
+          state: director.stateSnapshot(callId),
+          callSid: twilioCallSid,
+          callLogId: callMetadataForDB.get(callId)?.dbCallLogId,
+          agentSlug: effectiveSlug,
+        });
+
         // AIRCALL WORKAROUND: Auto-press "1" to accept forwarded calls
         // AirCall plays "Press 1 to answer" when forwarding to external numbers
         // Detect this prompt and automatically send DTMF tone to accept the call
@@ -2519,10 +2597,22 @@ async function observeCall(
         // Director: the reasoning layer rules on this turn. Unlike the loop
         // guard it knows what the caller has already ANSWERED, and it escalates
         // past suggestion when the model ignores it (afb1e688).
+        let turnDecision: DirectorAction | null = null;
         if (directorEnabledFor(effectiveSlug)) {
-          const decision = director.observeAgent(callId, effectiveSlug, transcript);
-          if (decision) applyDirectorAction(session, callId, effectiveSlug, decision);
+          turnDecision = director.observeAgent(callId, effectiveSlug, transcript);
+          if (turnDecision) applyDirectorAction(session, callId, effectiveSlug, turnDecision);
         }
+        recordTurn(callId, 'agent', transcript, {
+          state: director.stateSnapshot(callId),
+          // Verdict only — action.text and .speak quote the caller.
+          directorDecision: turnDecision
+            ? { enforcement: turnDecision.enforcement, code: turnDecision.code, topic: turnDecision.topic }
+            : null,
+          modelOutput: { tools: (getAzulTimeline(callId) ?? []).map((e) => e.tool) },
+          callSid: twilioCallSid,
+          callLogId: callMetadataForDB.get(callId)?.dbCallLogId,
+          agentSlug: effectiveSlug,
+        });
       }
     } else if (eventType === 'response.done') {
       // Also capture from response.done which contains output items
@@ -2649,8 +2739,12 @@ async function observeCall(
       // whole call — every Spanish speaker who did not press 4 in the IVR was
       // force-decoded as English. buildTranscriptionConfig omits the language
       // unless the call actually established one.
+      // The caller's own surname is the highest-value hint on the call and the
+      // thing the transcriber mangles most. Read from whatever pre-context has
+      // already resolved — never awaited, because this payload starts the call.
       acceptPayload.audio.input.transcription = buildTranscriptionConfig({
         establishedLanguage: establishedLanguageCode,
+        callerSurname: resolvedPrecontextSurname,
       });
     }
     // SIP MODE: ALWAYS strip audio format from accept payload.
@@ -3438,6 +3532,9 @@ async function observeCall(
     void import('./services/identityArgGuard').then(({ releaseIdentityGuard }) => releaseIdentityGuard(callId));
     void import('./agents/azulSchedulingAgent').then(({ releaseAzulCallState }) => releaseAzulCallState(callId));
     director.release(callId);
+    // Turn table: write before releasing, then free. Fire-and-forget — a
+    // debugging record must never delay teardown.
+    void flushTurns(callId).finally(() => releaseTurns(callId));
     
     // Clean up conference mappings to prevent stale entries
     // Use wrapper for restart recovery - may find session in service cache

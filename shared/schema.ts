@@ -1339,3 +1339,60 @@ export const reconciliationRuns = pgTable("reconciliation_runs", {
 
 export type ReconciliationRun = typeof reconciliationRuns.$inferSelect;
 export type InsertReconciliationRun = typeof reconciliationRuns.$inferInsert;
+
+/**
+ * CALL TURNS — one row per conversational turn. The debugging table.
+ *
+ * Everything before this was aggregate: a transcript blob, a tool timeline, a
+ * director summary, each in a different shape, none aligned to each other. To
+ * find out why a call went wrong you had to read three columns and reconstruct
+ * the ordering in your head, and the thing you actually wanted to know — what
+ * did the system BELIEVE at turn 7 — was recorded nowhere at all.
+ *
+ * The operator's framing, and it was right: "you're not missing intelligence,
+ * you're missing instrumentation. Without that, every fix is just a guess."
+ *
+ * Each row is one turn with everything that happened on it side by side:
+ * what was heard, what the state machine believed afterwards, what the
+ * director ruled, and what the model did about it.
+ *
+ * PHI: rawTranscript and finalTranscript are the caller's words, the same
+ * content already held in call_logs.transcript — this widens no boundary and
+ * adds no processor. `state` holds identity FIELD NAMES and flags, never the
+ * values.
+ */
+export const callTurns = pgTable("call_turns", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  callLogId: varchar("call_log_id"),
+  callSid: varchar("call_sid"),
+  agentSlug: varchar("agent_slug"),
+  /** 1-based, in the order the turns happened. "Scroll to turn 7." */
+  turnIndex: integer("turn_index").notNull(),
+  /** 'caller' | 'agent' */
+  role: varchar("role").notNull(),
+  at: timestamp("at").defaultNow(),
+  /** What the transcriber emitted, before anything touched it. */
+  rawTranscript: text("raw_transcript"),
+  /** What the system acted on. Equal to raw today; the column exists so that
+   *  when correction is added, the two can be compared instead of one
+   *  silently replacing the other. */
+  finalTranscript: text("final_transcript"),
+  /** The conversation constants AFTER this turn: which identity fields are
+   *  known, whether identity is verified, the running intent. Field names and
+   *  booleans only. */
+  state: jsonb("state"),
+  /** The director's ruling on this turn, or null if it stayed silent. */
+  directorDecision: jsonb("director_decision"),
+  /** What the model did: tools called, and their outcomes. */
+  modelOutput: jsonb("model_output"),
+  /** Milliseconds since the previous turn — where the dead air shows up. */
+  sincePrevMs: integer("since_prev_ms"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => [
+  index("idx_call_turns_call_log").on(table.callLogId, table.turnIndex),
+  index("idx_call_turns_sid").on(table.callSid),
+  index("idx_call_turns_created").on(table.createdAt),
+]);
+
+export type CallTurn = typeof callTurns.$inferSelect;
+export type InsertCallTurn = typeof callTurns.$inferInsert;

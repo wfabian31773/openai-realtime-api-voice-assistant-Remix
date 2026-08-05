@@ -17,6 +17,7 @@ import {
   looksSpanish,
   looksForeignToEnglishAndSpanish,
   nameFromAnswer,
+  deniedNames,
 } from './director';
 
 let d: Director;
@@ -616,7 +617,40 @@ describe('REGRESSION: unwarranted language switch (2026-08-04)', () => {
 });
 
 /**
- * REGRESSION: live call 6bd612c1, 2026-08-04 14:23 — the first
+
+ * Spanish and denial handling — additive to the 08-04 de-escalation work.
+ *
+ * The de-escalation fix (cf68010) rebuilt identity on an authoritative
+ * verify_patient_identity stamp, which is the right foundation. These three
+ * cases sit outside it: they are about the LANGUAGE the caller answers in,
+ * and about a caller saying a name in order to reject it.
+ */
+describe('Spanish confirm question, Spanish assent, and denials', () => {
+  it('¿Estoy hablando con X? is the same sanctioned question', () => {
+    d.seedRecordNames('sp1', 'answering-service', ['Reginaldo']);
+    // 2026-08-04 15:32: an English-only pattern flagged this and the director
+    // replied in English, on a Spanish call.
+    expect(d.observeAgent('sp1', 'answering-service', 'Buenos días. ¿Estoy hablando con Reginaldo?')).toBeNull();
+  });
+
+  it('"Sí." is assent — \\b is ASCII-only, so the accent has to come off first', () => {
+    expect(isAffirmative('Sí.')).toBe(true);
+    expect(isAffirmative('Claro')).toBe(true);
+    expect(isAffirmative('Así es')).toBe(true);
+    expect(isAffirmative('No')).toBe(false);
+  });
+
+  it('a name the caller DENIED is not a name the caller gave', () => {
+    // The pharmacy rep told "Am I speaking with Mildred?" — "No, it's not
+    // Mildred." Tokenising that turn credited "mildred" to the caller and
+    // silenced the guard on the one call it exists for.
+    expect(deniedNames("No, it's not Mildred.", ['mildred'])).toEqual(['mildred']);
+    expect(deniedNames('Mildred speaking.', ['mildred'])).toEqual([]);
+  });
+});
+
+/**
+* REGRESSION: live call 6bd612c1, 2026-08-04 14:23 — the first
  * language_switch_unwarranted fire in production.
  *
  * It fired CORRECTLY (the caller emitted a CJK glyph mid-call and the agent kept
@@ -698,5 +732,66 @@ describe('REGRESSION: accented Spanish is Spanish (live call 6bd612c1)', () => {
     ]) {
       expect(looksSpanish(line), line).toBe(false);
     }
+
+  });
+});
+
+/**
+ * REGRESSION: the identity ceiling.
+ *
+ * 219 real conversations over 2026-08-03/05 produced no action at all, and
+ * 195 of them (89%) died inside identity collection — 12.6 hours of caller
+ * time. Nothing was looping in the sense the loop guard understands: the
+ * agent cycled name → last name → date of birth → name, each question
+ * reasonable on its own, forever, because nothing told it to stop. One call
+ * reached 85 minutes.
+ */
+describe('REGRESSION: identity ceiling (the 219)', () => {
+  const askIdentity = (id: string, agent: string, n: number) => {
+    const asks = ['May I have your first name?', 'And your last name?', 'What is your date of birth?'];
+    const out: Array<ReturnType<Director['observeAgent']>> = [];
+    for (let i = 0; i < n; i++) {
+      out.push(d.observeAgent(id, agent, asks[i % asks.length]));
+      d.observeCaller(id, agent, 'What?');
+    }
+    return out;
+  };
+
+  it('stops answering-service asking and sends it to file the ticket', () => {
+    const fired = askIdentity('ceil1', 'answering-service', 6).filter((a) => a?.code === 'identity_ceiling');
+    expect(fired).toHaveLength(1);
+    expect(fired[0]!.enforcement).toBe('author');
+    expect(fired[0]!.text).toMatch(/create_ticket/i);
+    expect(fired[0]!.speak).toMatch(/call you back/i);
+  });
+
+  it('tells azul to hand off instead — it cannot book an unverified patient', () => {
+    const fired = askIdentity('ceil2', 'azul-scheduling', 6).filter((a) => a?.code === 'identity_ceiling');
+    expect(fired[0]!.text).toMatch(/sage_handoff|patient_identity_uncertain/i);
+  });
+
+  it('counts across ALL identity fields, not per question', () => {
+    // The dead calls cycled between fields; no single topic hit a per-topic
+    // threshold, which is exactly why they ran for twenty minutes.
+    const fired = askIdentity('ceil3', 'answering-service', 5).filter((a) => a?.code === 'identity_ceiling');
+    expect(fired).toHaveLength(1);
+  });
+
+  it('fires once, then stays quiet', () => {
+    const fired = askIdentity('ceil4', 'answering-service', 12).filter((a) => a?.code === 'identity_ceiling');
+    expect(fired).toHaveLength(1);
+  });
+
+  it('never fires on a caller who answers', () => {
+    d.observeAgent('ceil5', 'answering-service', 'May I have your first name?');
+    d.observeCaller('ceil5', 'answering-service', 'Wayne');
+    d.observeAgent('ceil5', 'answering-service', 'And your last name?');
+    d.observeCaller('ceil5', 'answering-service', 'Fabian');
+    d.observeAgent('ceil5', 'answering-service', 'And your date of birth?');
+    d.observeCaller('ceil5', 'answering-service', 'March 17, 1973');
+    // Identity established — further questions are a different problem, and
+    // the ceiling must not claim them.
+    const a = d.observeAgent('ceil5', 'answering-service', 'And your date of birth?');
+    expect(a?.code).not.toBe('identity_ceiling');
   });
 });

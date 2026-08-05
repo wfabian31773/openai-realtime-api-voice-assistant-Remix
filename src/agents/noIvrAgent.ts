@@ -1297,6 +1297,31 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     }),
     execute: async (params) => {
       console.log(`[TOOL] terminate_call - reason: ${params.reason}, callId: ${callId}`);
+
+      // NEVER hang up on a call that is being handed to a human.
+      //
+      // 2026-08-04 03:55:09 the agent called escalate_to_human ("caller is
+      // speaking incoherently ... not progressing"), and ONE SECOND LATER
+      // called terminate_call(ghost_call) on the same call. transferred_to_human
+      // came out false: it decided the caller needed a person, then killed the
+      // line before the transfer could land. That one really was a ghost call,
+      // so nobody was harmed — but the race is indifferent to who is on the
+      // phone, and the same second would hang up on sudden vision loss.
+      //
+      // An escalation is a one-way door. Once it is open, ending the call is
+      // the transfer's job (or the fallback ticket's), never the model's.
+      if (escalationDetailsMap.has(callId)) {
+        console.warn(
+          `[TOOL] terminate_call REFUSED for ${callId} — escalate_to_human already fired ` +
+            `(reason given: ${params.reason}). A handoff in flight outranks a hangup.`,
+        );
+        return {
+          success: false,
+          error: 'escalation_in_progress',
+          say: 'Stay on the line — I am connecting you with someone now.',
+        };
+      }
+
       try {
         const apiKey = process.env.OPENAI_API_KEY;
         if (!apiKey) {

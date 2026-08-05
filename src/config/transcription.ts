@@ -130,7 +130,8 @@ export function practiceLanguages(env: NodeJS.ProcessEnv = process.env): string[
  * describes the setting only.
  */
 export const TRANSCRIPTION_PROMPT =
-  'Inbound telephone calls to a San Diego area ophthalmology and optometry practice. ' +
+  'Inbound telephone calls to a Southern California ophthalmology and optometry ' +
+  'practice with offices across greater Los Angeles, Orange County and San Diego County. ' +
   'Callers state their surname, spell it letter by letter, and give a date of birth. ' +
   'Expect patient surnames, clinic locations, provider names, and eye-care terms.';
 
@@ -141,22 +142,99 @@ export const TRANSCRIPTION_PROMPT =
  * what `prompt` is for.
  */
 export const TRANSCRIPTION_KEYWORDS = [
-  // Offices and practice
-  'Azul Vision', 'Encinitas', 'Oceanside', 'Carlsbad', 'Vista', 'San Marcos',
-  // Providers seen in live appointment records
-  'Nayer', 'Bock', 'Kim', 'Thompson', 'Choi',
-  // Appointment and clinical vocabulary the rules engine keys on
+  // Offices. Counted from 2026-08-03/04 transcripts, most-mentioned first.
+  // The original list held the SD pilot offices only, which is the azul
+  // footprint — but answering-service and no-ivr are practice-wide and carry
+  // more LA/OC traffic than SD: Glendale 31, Pasadena 26, Anaheim 25,
+  // Covina 14, Huntington Beach 13, Upland 8, none of them hinted, against
+  // Encinitas 52, Oceanside 20, Vista 9, Carlsbad 1.
+  'Azul Vision',
+  'Encinitas', 'Glendale', 'Pasadena', 'Anaheim', 'Oceanside', 'Covina',
+  'Huntington Beach', 'Vista', 'Upland', 'Burbank', 'Carlsbad', 'San Marcos',
+  // Providers, same source. 'Thompson' was hinted and the provider on the
+  // schedule is Dr Brett TOMPKINS (16 mentions vs Thompson's 10) — a keyword
+  // pushing the transcriber toward the wrong spelling of a name the booking
+  // flow keys on. Both are listed now rather than guessed between; if only
+  // one is real, drop the other.
+  'Nayer', 'Bock', 'Kim', 'Choi', 'Tompkins', 'Thompson',
+  'Logan', 'Patel', 'Nguyen', 'Lee', 'Mahdavi', 'Amani', 'Chau', 'Kaplan',
+];
+
+/**
+ * Clinical vocabulary. Not in the schedule and not going to change, so this
+ * one stays a constant and is always sent alongside the live roster.
+ */
+export const CLINICAL_KEYWORDS = [
   'refraction', 'dilated exam', 'comprehensive exam', 'glaucoma', 'cataract',
   'follow up', 'consult', 'post-op', 'OCT', 'visual field', 'optometrist',
   'ophthalmologist', 'intraocular', 'IOL', 'YAG', 'blepharitis',
 ];
+
+/**
+ * The caller's surname from caller-ID pre-context, hinted for this one call.
+ *
+ * Highest-value hint available: the surname is what every identity gate keys
+ * on and what the transcriber mangles most ("nelsum" for Nelson, "Maniwan
+ * Butsali" → "Moutsali" → "Boutsalee").
+ *
+ * THE TRADE-OFF, stated because it is the failure this system has spent the
+ * week fighting: pre-context is a PHONE NUMBER MATCH, not identity. Families,
+ * spouses, care homes and pharmacies share handsets. When the number matched
+ * the wrong person, this biases the transcriber toward the wrong surname —
+ * the identity chimera, moved one layer down into the audio.
+ *
+ * It ships on because the operator asked for it and the common case is a
+ * match, the bias is a hint rather than a constraint, and the downstream
+ * guards (identityArgGuard, firstNameContradicted, the director's record-name
+ * rule) all still require the caller's own words before anything is booked.
+ * If mis-transcribed surnames on shared handsets show up, this is the switch:
+ *
+ *     TRANSCRIPTION_CALLER_HINT=false
+ *
+ * No deploy, no code change.
+ */
+export function callerHintEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.TRANSCRIPTION_CALLER_HINT ?? '').trim().toLowerCase() !== 'false';
+}
 
 export interface TranscriptionConfigInput {
   /** ISO code, ONLY when the call has actually established a language (IVR
    *  option 4, an explicit metadata language, a stored agent language).
    *  Undefined means "we do not know" — and we must not guess. */
   establishedLanguage?: string | null;
+  /** Surname from caller-ID pre-context. See callerHintEnabled. */
+  callerSurname?: string | null;
   env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * The keyword list actually sent: the live schedule roster when it has
+ * loaded, the seed constants when it has not.
+ *
+ * Read synchronously from an in-memory cache — this sits in the call-accept
+ * path and must never wait on a query.
+ */
+export function activeKeywords(callerSurname?: string | null, env: NodeJS.ProcessEnv = process.env): string[] {
+  const out = new Set<string>(['Azul Vision']);
+  let live = 0;
+  try {
+    // Required lazily: this module is imported by the SIP accept path, and a
+    // static import would drag the database client into it.
+    const { providerSurnames, officeNames } = require('../services/providerRoster') as
+      typeof import('../services/providerRoster');
+    for (const o of officeNames()) { out.add(o); live++; }
+    for (const p of providerSurnames()) { out.add(p); live++; }
+  } catch {
+    /* roster unavailable — seeds below cover it */
+  }
+  if (live === 0) for (const k of TRANSCRIPTION_KEYWORDS) out.add(k);
+  // Clinical vocabulary is stable and not in the schedule; always included.
+  for (const k of CLINICAL_KEYWORDS) out.add(k);
+  const surname = (callerSurname ?? '').trim();
+  if (surname && callerHintEnabled(env) && /^[A-Za-z][A-Za-z'-]{1,}$/.test(surname)) {
+    out.add(surname);
+  }
+  return [...out];
 }
 
 /**
@@ -187,7 +265,7 @@ export function buildTranscriptionConfig(
       model,
       languages: ordered,
       prompt: TRANSCRIPTION_PROMPT,
-      keywords: TRANSCRIPTION_KEYWORDS,
+      keywords: activeKeywords(input.callerSurname, env),
       ...(delay ? { delay } : {}),
     };
   }
