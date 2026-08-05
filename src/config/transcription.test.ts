@@ -10,7 +10,6 @@ import {
   PREVIOUS_TRANSCRIPTION_MODEL,
   TRANSCRIPTION_KEYWORDS,
   TRANSCRIPTION_PROMPT,
-  TRANSCRIPTION_PROMPT,
   buildTranscriptionConfig,
   practiceLanguages,
   supportsVocabularyHints,
