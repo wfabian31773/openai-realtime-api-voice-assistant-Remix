@@ -1,4 +1,5 @@
 import { getTwilioClient, getTwilioAccountSid } from '../lib/twilioClient';
+import { getEnvironmentConfig, isDevCallbackUrl } from '../config/environment';
 import { db } from '../../server/db';
 import { phoneEndpoints } from '../../shared/schema';
 import { eq } from 'drizzle-orm';
@@ -167,6 +168,16 @@ class TwilioPhoneManagementService {
     }
 
     if (options?.updateTwilio) {
+      // Never point a live number at a development host. Publishing recomputes
+      // callback URLs, and a dev URL written onto a production number sends every
+      // inbound call to a workspace that no longer answers — with the number looking
+      // correctly configured in Twilio. Saving the URL in our own table is still
+      // allowed (syncStatus stays 'pending') so the intent isn't lost.
+      if (getEnvironmentConfig().isProduction && isDevCallbackUrl(webhookUrl)) {
+        throw new Error(
+          `Refusing to write a development webhook (${webhookUrl}) onto ${endpoint.phoneNumber} from a production deployment. Use the published host, or set the DOMAIN secret and retry.`,
+        );
+      }
       try {
         const client = await getTwilioClient();
         await client.incomingPhoneNumbers(endpoint.twilioSid).update({

@@ -32,7 +32,7 @@ import './services/azulRegressionWatch'; // Phase 7: daily grade-regression chec
 import { shadowTap } from './shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { resolveAbAssignment } from './services/abCarriage';
 import { director, directorEnabledFor, type DirectorAction } from './director/director';
-import { getEnvironmentConfig } from './config/environment';
+import { getEnvironmentConfig, resolveAppDomain } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 import { resolveHandoffDestination, resolvePcpDialSequence } from './services/handoffPolicy';
 import { pcpAgentConfig } from './agents/pcpAgent';
@@ -48,18 +48,26 @@ try {
   envConfig = getEnvironmentConfig();
 } catch (e) {
   console.error('[ENV] Failed to load environment config, using fallback:', e);
+  // Resolve the domain the same way the real config does, so this degraded path can't
+  // emit `https://undefined/...` callbacks (DOMAIN unset) or reach for a dev host.
+  const fallbackDomain = resolveAppDomain({
+    domain: process.env.DOMAIN,
+    replitDomains: process.env.REPLIT_DOMAINS,
+    replitDevDomain: process.env.REPLIT_DEV_DOMAIN,
+    isProduction: process.env.APP_ENV === 'production',
+  }).domain;
   envConfig = {
     env: (process.env.APP_ENV as 'development' | 'production') || 'development',
     isDevelopment: process.env.APP_ENV !== 'production',
     isProduction: process.env.APP_ENV === 'production',
-    domain: process.env.DOMAIN || 'localhost:8000',
-    webhookBaseUrl: `https://${process.env.DOMAIN || 'localhost:8000'}`,
+    domain: fallbackDomain,
+    webhookBaseUrl: `https://${fallbackDomain}`,
     database: { url: process.env.DATABASE_URL || '', isSupabase: false },
     openai: {
       apiKey: process.env.OPENAI_API_KEY || '',
       projectId: process.env.OPENAI_PROJECT_ID || '',
       webhookSecret: process.env.OPENAI_WEBHOOK_SECRET || '',
-      realtimeWebhookUrl: `https://${process.env.DOMAIN}/api/voice/realtime`,
+      realtimeWebhookUrl: `https://${fallbackDomain}/api/voice/realtime`,
     },
     twilio: {
       accountSid: process.env.TWILIO_ACCOUNT_SID || '',
@@ -2870,7 +2878,10 @@ async function observeCall(
         }
       }
       
-      const domain = process.env.DOMAIN || 'dcf9f10f-5436-45b2-9ddd-3056216aaa94-00-10mvu4n0j43c2.worf.replit.dev';
+      // Use the resolved callback domain, never a hardcoded workspace host. This line
+      // used to fall back to a specific old dev URL, so any deployment without DOMAIN
+      // pointed its failover TwiML action at a workspace that no longer serves it.
+      const domain = envConfig.domain;
       const hasValidCallSid = twilioCallSid && twilioCallSid.startsWith('CA') && twilioCallSid.length === 34;
       
       console.error(`[SESSION] ✗ All ${MAX_ACCEPT_RETRIES} accept attempts failed for call ${callId}`);
