@@ -164,6 +164,17 @@ let twilioClient: Awaited<ReturnType<typeof getTwilioClient>>;
 // Tracking active calls and conference mappings
 const activeCallTasks = new Map<string, Promise<void>>();
 const activeSessions = new Map<string, RealtimeSession>();
+
+/**
+ * Calls with a model response currently generating: added on `response.created`,
+ * removed on `response.done`/`cancelled`.
+ *
+ * Exists so the director never sends a `response.cancel` with nothing to
+ * cancel. That produces a server error, and this file's session error handler
+ * treats every error off a three-item allowlist as fatal — so the cancel tore
+ * down live calls. See applyDirectorAction for the measurement.
+ */
+const responseInFlight = new Set<string>();
 const callMetadata = new Map<string, { agentSlug: string; campaignId?: string; contactId?: string; agentGreeting?: string; language?: string; ivrSelection?: '1' | '2' | '3' | '4' }>();
 const callIDtoConferenceNameMapping: Record<string, string | undefined> = {};
 const ConferenceNametoCallerIDMapping: Record<string, string | undefined> = {};
@@ -693,9 +704,29 @@ function applyDirectorAction(session: any, callId: string, agentSlug: string, ac
     if (action.enforcement !== 'inject') {
       // Cut the in-flight utterance. Mid-loop this is a mercy: the model is
       // repeating a question the caller has already answered.
-      try {
-        transport.sendEvent({ type: 'response.cancel' });
-      } catch { /* nothing in flight — fine */ }
+      //
+      // ONLY when something is actually in flight. The try/catch below looks
+      // like it covers the empty case and does not: sendEvent returns as soon
+      // as the frame is written, and the "no active response" complaint comes
+      // back later as a server `error` event. session.on('error') treats
+      // anything off its three-item allowlist as fatal and runs full cleanup —
+      // so a cancel with nothing to cancel tore down a LIVE call: coordinator
+      // notified of session end, director state released, transcript buffer
+      // deleted, call-log mapping dropped, post-call cost/grading/ticketing
+      // pipeline started while the caller was still talking.
+      //
+      // Measured on 2026-08-05, first day the turn table could see it: 41 calls
+      // took an author/force_exit action, 15 of them (37%) split into two turn
+      // buffers seconds later, the second with no call_log_id. Zero calls split
+      // without an authored action. The director rules on
+      // response.audio_transcript.done, which fires BEFORE response.done, so
+      // whether anything is still in flight is a race — which is exactly why it
+      // was intermittent rather than obvious.
+      if (responseInFlight.has(callId)) {
+        try {
+          transport.sendEvent({ type: 'response.cancel' });
+        } catch { /* already gone — fine */ }
+      }
       // The closing line is the last and most specific thing the model reads,
       // so it is the one it obeys. "Speak ONLY this, then stop" is right when
       // the goal is to stop the model talking — and wrong when the goal is to
@@ -2466,6 +2497,19 @@ async function observeCall(
     // has stopped conversing, so counting those would defeat the whole thing.
     if (isActivityEvent(eventType)) deadAirWatchdog.touch(callId);
 
+    // Is a response actually in flight? See responseInFlight — a `response.cancel`
+    // with nothing to cancel comes back as a server error, and this session's
+    // error handler treats anything off its three-item allowlist as fatal.
+    if (eventType === 'response.created') {
+      responseInFlight.add(callId);
+    } else if (
+      eventType === 'response.done' ||
+      eventType === 'response.cancelled' ||
+      eventType === 'response.canceled'
+    ) {
+      responseInFlight.delete(callId);
+    }
+
     // Accumulate real token usage for cost attribution (see callTokenUsage).
     if (eventType === 'response.done' && event?.response?.usage) {
       accumulateUsage(callId, event.response.usage);
@@ -3534,6 +3578,7 @@ async function observeCall(
     
     // Clean up metadata and session
     activeSessions.delete(callId);
+    responseInFlight.delete(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
     deadAirWatchdog.release(callId);
