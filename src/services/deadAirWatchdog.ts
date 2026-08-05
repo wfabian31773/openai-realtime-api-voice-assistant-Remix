@@ -36,16 +36,25 @@
  * DEAD_AIR_TIMEOUT_MS; 0 disables.
  */
 
-/** Session events that mean the call is still alive. Anything transcript- or
- *  tool-shaped counts; keepalives and audio deltas deliberately do NOT, since
- *  a dead session keeps emitting those. */
+/**
+ * Session events that mean the call is still alive: WORDS, or WORK. Nothing else.
+ *
+ * Narrowed 2026-08-05 after call 822f7347 ran the full 20-minute azul cap on FOUR
+ * turns — the agent's last line was "¿cuál es su fecha de nacimiento?" and the
+ * transcript ends there. The first list included `conversation.item.created` and
+ * `conversation.item.truncated`, which a line with nobody on it keeps producing:
+ * semantic VAD opens an item on ambient noise, transcription yields nothing, and
+ * the watchdog gets touched forever. `response.done` went too — it fires for
+ * empty and cancelled responses, so it is not evidence anyone spoke.
+ *
+ * What remains: a CALLER transcript, an AGENT transcript, or tool traffic. If
+ * none of those arrive for the timeout, nothing is happening on the call, whether
+ * or not the transport is still chattering.
+ */
 const ACTIVITY_EVENTS = new Set([
   'conversation.item.input_audio_transcription.completed',
   'response.output_audio_transcript.done',
   'response.audio_transcript.done',
-  'response.done',
-  'conversation.item.created',
-  'conversation.item.truncated',
 ]);
 
 export function isActivityEvent(eventType: unknown): boolean {

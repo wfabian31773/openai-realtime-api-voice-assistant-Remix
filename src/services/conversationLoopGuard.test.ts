@@ -57,6 +57,43 @@ describe('isHumanRequest', () => {
     expect(isHumanRequest('CALLER: I need an eye exam as soon as possible')).toBe(false);
     expect(isHumanRequest('CALLER: June 27, 1965')).toBe(false);
   });
+
+  /**
+   * REGRESSION: call 4511a0a3 (2026-08-05 18:34). "Just put somebody on the
+   * phone that I can speak to." matched NOTHING, so a caller who had already
+   * endured six variations of "which office do you visit" asked for a human in
+   * as many words and the escalation path never saw it. Graded 2/5, frustrated,
+   * follow_up_needed.
+   *
+   * Every old alternative required the person-word to FOLLOW the verb ("speak to
+   * someone") — but a frustrated caller puts it first.
+   */
+  it('matches the person-first phrasings a frustrated caller actually uses', () => {
+    for (const line of [
+      "You're a crackerjack individual, aren't you? Just put somebody on the phone that I can speak to.",
+      'Just put somebody on the phone',
+      'Get someone on the phone please',
+      'Put me through to the office',
+      'Is there anyone I can speak to',
+      'I need somebody I can talk to',
+      'Put a human on',
+      'I want to speak to a person',
+    ]) {
+      expect(isHumanRequest(line), line).toBe(true);
+    }
+  });
+
+  it('still does not fire on lines that merely mention people', () => {
+    for (const line of [
+      'My glasses are on the counter in their trailer',
+      'Somebody told me the exam was covered',
+      'I have someone driving me to the appointment',
+      'October 18th, 1972.',
+      'Campbell, C-A-M-P-B-E-L-L.',
+    ]) {
+      expect(isHumanRequest(line), line).toBe(false);
+    }
+  });
 });
 
 describe('re-ask caps', () => {

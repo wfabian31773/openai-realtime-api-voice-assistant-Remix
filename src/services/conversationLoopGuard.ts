@@ -55,8 +55,20 @@ export function classifyAsk(agentLine: string): string | null {
 
 /** Caller demands for a human. Scanned on CALLER lines only, so the
  *  agent's own "our agents are busy" greeting never counts. */
+/**
+ * 2026-08-05: "Just put somebody on the phone that I can speak to." matched
+ * NOTHING. The old alternatives all required the person-word to FOLLOW the verb
+ * ("speak to someone"), so every phrasing that puts it first — which is how
+ * frustrated callers actually say it — was invisible. That caller (4511a0a3) had
+ * already endured six variations of "which office do you visit", asked for a
+ * human in as many words, and the escalation path never saw it. Quality graded
+ * 2/5, sentiment frustrated, outcome follow_up_needed.
+ *
+ * So: match the person-on-the-phone shape in both orders, and add the bare
+ * "a person" / "put me through" forms.
+ */
 const HUMAN_REQUEST =
-  /\b(representative|customer service|real person|live person|a human|an operator|the operator|receptionist|front desk|speak (?:to|with) (?:a|an|someone|somebody)|talk (?:to|with) (?:a|an|someone|somebody)|transfer me|connect me|on.?call doctor|representante|una persona|con alguien|servicio al cliente)\b/i;
+  /\b(representative|customer service|real person|live person|a human|a person|an operator|the operator|receptionist|front desk|speak (?:to|with) (?:a|an|someone|somebody)|talk (?:to|with) (?:a|an|someone|somebody)|(?:someone|somebody|anyone|anybody)\b[^.?!]{0,24}\b(?:i can (?:speak|talk)|on the (?:phone|line))|(?:put|get)\b[^.?!]{0,16}\b(?:someone|somebody|a human|a person)|put me through|transfer me|connect me|on.?call doctor|representante|una persona|con alguien|servicio al cliente|pasar con)\b/i;
 
 export function isHumanRequest(callerLine: string): boolean {
   return HUMAN_REQUEST.test(callerLine);

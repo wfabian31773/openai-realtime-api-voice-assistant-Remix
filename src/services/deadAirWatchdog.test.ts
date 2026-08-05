@@ -45,12 +45,11 @@ describe('deadAirTimeoutMs', () => {
 });
 
 describe('isActivityEvent', () => {
-  it('counts transcripts, completed turns and tool traffic', () => {
+  it('counts caller transcripts, agent transcripts and tool traffic', () => {
     for (const t of [
       'conversation.item.input_audio_transcription.completed',
       'response.output_audio_transcript.done',
       'response.audio_transcript.done',
-      'response.done',
       'response.function_call_arguments.done',
     ]) {
       expect(isActivityEvent(t), t).toBe(true);
@@ -60,11 +59,20 @@ describe('isActivityEvent', () => {
   it('does NOT count the events a dead session keeps emitting', () => {
     // This is the whole point: a stalled session still streams audio deltas and
     // keepalives, so counting them would make the watchdog never fire.
+    //
+    // The last three were REMOVED from the list on 2026-08-05, after call
+    // 822f7347 ran the full 20-minute cap on four turns. A line with nobody on
+    // it keeps opening conversation items on ambient noise, and response.done
+    // fires for empty and cancelled responses — none of it is evidence that
+    // anyone spoke.
     for (const t of [
       'response.output_audio.delta',
       'response.audio.delta',
       'input_audio_buffer.speech_started',
       'session.updated',
+      'conversation.item.created',
+      'conversation.item.truncated',
+      'response.done',
       undefined,
       null,
     ]) {
@@ -154,5 +162,34 @@ describe('lifecycle', () => {
   it('touch and release on an unknown call are harmless', () => {
     expect(() => { d.touch('nope'); d.release('nope'); d.release(undefined); }).not.toThrow();
     expect(d.idleMs('nope')).toBeNull();
+  });
+});
+
+/**
+ * REGRESSION: call 822f7347 (2026-08-05 18:16, azul-scheduling) ran 1201s — the
+ * 20-minute cap to the second — on FOUR turns. The transcript ends on the agent
+ * asking "¿cuál es su fecha de nacimiento?" and nothing follows.
+ *
+ * The watchdog was armed and the hangup was correct by then. What kept it alive
+ * was the activity list: an open line with nobody on it goes on producing
+ * conversation items and empty responses indefinitely.
+ */
+describe('call 822f7347 — a line with nobody on it', () => {
+  it('is not kept alive by item/response churn on a silent line', () => {
+    const onDeadAir = vi.fn();
+    d.arm('sil', onDeadAir, 120_000);
+    // Four real turns, then silence — with the churn a dead line keeps emitting.
+    for (const t of ['response.audio_transcript.done', 'conversation.item.input_audio_transcription.completed']) {
+      if (isActivityEvent(t)) d.touch('sil');
+    }
+    for (let i = 0; i < 40; i++) {
+      advance(30_000); // 20 minutes total
+      for (const t of ['conversation.item.created', 'response.done', 'conversation.item.truncated', 'response.audio.delta']) {
+        if (isActivityEvent(t)) d.touch('sil');
+      }
+    }
+    expect(onDeadAir).toHaveBeenCalledTimes(1);
+    // Fired in the first ~2 minutes, not at the 20-minute cap.
+    expect(onDeadAir.mock.calls[0][0]).toBeLessThan(180_000);
   });
 });
