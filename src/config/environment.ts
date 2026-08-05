@@ -97,6 +97,59 @@ export interface EnvironmentConfig {
 
 let cachedConfig: EnvironmentConfig | null = null;
 
+/**
+ * Which host this service tells Twilio and OpenAI to call back on.
+ *
+ * This is not cosmetic: `webhookBaseUrl` derived from it becomes the OpenAI realtime
+ * webhook, the warm-transfer accept/status/AMD callbacks, and the office-leg bridge
+ * URL. It is recomputed on every boot, so a wrong value re-applies itself on every
+ * publish — which is exactly how a production deployment ends up pointing at an old
+ * development workspace.
+ *
+ * The previous resolution was `DOMAIN || REPLIT_DEV_DOMAIN || localhost`. Replit still
+ * exports REPLIT_DEV_DOMAIN inside a published deployment, so a missing DOMAIN secret
+ * silently sent live call control to the dev host with nothing in the logs to say so.
+ *
+ * Production therefore NEVER falls back to a dev domain: it prefers the published
+ * `.replit.app` host from REPLIT_DOMAINS, and if it cannot find one it reports the
+ * misconfiguration loudly instead of quietly using the dev workspace.
+ */
+export function resolveAppDomain(params: {
+  domain?: string;
+  replitDomains?: string;
+  replitDevDomain?: string;
+  isProduction: boolean;
+}): { domain: string; source: string; warning?: string } {
+  const explicit = params.domain?.trim();
+  if (explicit) return { domain: explicit, source: 'DOMAIN' };
+
+  const hosts = (params.replitDomains || '').split(',').map((h) => h.trim()).filter(Boolean);
+  const published = hosts.find((h) => h.endsWith('.replit.app'));
+  const dev = params.replitDevDomain?.trim();
+
+  if (params.isProduction) {
+    if (published) return { domain: published, source: 'REPLIT_DOMAINS' };
+    // A non-dev host is still better than the dev workspace.
+    const other = hosts.find((h) => !h.endsWith('.replit.dev'));
+    if (other) return { domain: other, source: 'REPLIT_DOMAINS' };
+    return {
+      domain: dev || 'localhost:8000',
+      source: dev ? 'REPLIT_DEV_DOMAIN' : 'fallback',
+      warning: 'DOMAIN is not set in this PRODUCTION deployment and no .replit.app host was found.',
+    };
+  }
+
+  if (dev) return { domain: dev, source: 'REPLIT_DEV_DOMAIN' };
+  if (published) return { domain: published, source: 'REPLIT_DOMAINS' };
+  return { domain: 'localhost:8000', source: 'fallback' };
+}
+
+/** Would writing this callback URL point production traffic at a development host? */
+export function isDevCallbackUrl(url: string): boolean {
+  const host = url.replace(/^https?:\/\//, '').split('/')[0].toLowerCase();
+  return host.endsWith('.replit.dev') || host.startsWith('localhost') || host.startsWith('127.0.0.1');
+}
+
 export function getEnvironmentConfig(): EnvironmentConfig {
   if (cachedConfig) {
     return cachedConfig;
@@ -136,7 +189,24 @@ export function getEnvironmentConfig(): EnvironmentConfig {
 
   const env = parsed.data;
 
-  const domain = env.DOMAIN || process.env.REPLIT_DEV_DOMAIN || 'localhost:8000';
+  const resolvedDomain = resolveAppDomain({
+    domain: env.DOMAIN,
+    replitDomains: process.env.REPLIT_DOMAINS,
+    replitDevDomain: process.env.REPLIT_DEV_DOMAIN,
+    isProduction,
+  });
+  const domain = resolvedDomain.domain;
+
+  if (resolvedDomain.warning) {
+    console.error('═══════════════════════════════════════════════════════════════');
+    console.error(`[FATAL] ${resolvedDomain.warning}`);
+    console.error('[FATAL] Every callback this service hands to Twilio and OpenAI is built');
+    console.error(`[FATAL] from this domain (currently: ${domain}). Set the DOMAIN secret to`);
+    console.error('[FATAL] the published host so calls come back to THIS deployment.');
+    console.error('═══════════════════════════════════════════════════════════════');
+  } else {
+    console.info(`[ENV] Callback domain: ${domain} (source: ${resolvedDomain.source})`);
+  }
 
   const productionDbUrl = process.env.PRODUCTION_DATABASE_URL;
   const databaseUrl = (isProduction && productionDbUrl) ? productionDbUrl : env.DATABASE_URL;
