@@ -40,6 +40,7 @@ import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
 import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
 import { startProviderRosterRefresh } from './services/providerRoster';
+import { recordTurn, flushTurns, releaseTurns } from './services/turnLog';
 
 // Load centralized environment configuration
 let envConfig: ReturnType<typeof getEnvironmentConfig>;
@@ -2503,6 +2504,16 @@ async function observeCall(
           director.observeCaller(callId, effectiveSlug, transcript);
         }
 
+        // The turn table. Recorded for EVERY agent, not only the ones the
+        // director watches — the calls hardest to debug are the ones with no
+        // director ruling on them at all.
+        recordTurn(callId, 'caller', transcript, {
+          state: director.stateSnapshot(callId),
+          callSid: twilioCallSid,
+          callLogId: callMetadataForDB.get(callId)?.dbCallLogId,
+          agentSlug: effectiveSlug,
+        });
+
         // AIRCALL WORKAROUND: Auto-press "1" to accept forwarded calls
         // AirCall plays "Press 1 to answer" when forwarding to external numbers
         // Detect this prompt and automatically send DTMF tone to accept the call
@@ -2586,10 +2597,22 @@ async function observeCall(
         // Director: the reasoning layer rules on this turn. Unlike the loop
         // guard it knows what the caller has already ANSWERED, and it escalates
         // past suggestion when the model ignores it (afb1e688).
+        let turnDecision: DirectorAction | null = null;
         if (directorEnabledFor(effectiveSlug)) {
-          const decision = director.observeAgent(callId, effectiveSlug, transcript);
-          if (decision) applyDirectorAction(session, callId, effectiveSlug, decision);
+          turnDecision = director.observeAgent(callId, effectiveSlug, transcript);
+          if (turnDecision) applyDirectorAction(session, callId, effectiveSlug, turnDecision);
         }
+        recordTurn(callId, 'agent', transcript, {
+          state: director.stateSnapshot(callId),
+          // Verdict only — action.text and .speak quote the caller.
+          directorDecision: turnDecision
+            ? { enforcement: turnDecision.enforcement, code: turnDecision.code, topic: turnDecision.topic }
+            : null,
+          modelOutput: { tools: (getAzulTimeline(callId) ?? []).map((e) => e.tool) },
+          callSid: twilioCallSid,
+          callLogId: callMetadataForDB.get(callId)?.dbCallLogId,
+          agentSlug: effectiveSlug,
+        });
       }
     } else if (eventType === 'response.done') {
       // Also capture from response.done which contains output items
@@ -3509,6 +3532,9 @@ async function observeCall(
     void import('./services/identityArgGuard').then(({ releaseIdentityGuard }) => releaseIdentityGuard(callId));
     void import('./agents/azulSchedulingAgent').then(({ releaseAzulCallState }) => releaseAzulCallState(callId));
     director.release(callId);
+    // Turn table: write before releasing, then free. Fire-and-forget — a
+    // debugging record must never delay teardown.
+    void flushTurns(callId).finally(() => releaseTurns(callId));
     
     // Clean up conference mappings to prevent stale entries
     // Use wrapper for restart recovery - may find session in service cache

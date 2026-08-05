@@ -639,6 +639,30 @@ export class Director {
     if (callId) this.calls.delete(callId);
   }
 
+  /**
+   * The conversation constants, for the turn table.
+   *
+   * Field NAMES and flags only — whether we believe we have a surname is the
+   * debugging question; what the surname is stays in the transcript columns.
+   * Safe to call for a call the director is not watching: an unknown call
+   * returns the empty state rather than creating one.
+   */
+  stateSnapshot(callId: string): {
+    known: string[];
+    identityVerified: boolean;
+    identityAsks: number;
+    intent?: string | null;
+  } {
+    const s = this.calls.get(callId);
+    if (!s) return { known: [], identityVerified: false, identityAsks: 0, intent: null };
+    return {
+      known: [...s.answered.keys()],
+      identityVerified: s.identityVerified,
+      identityAsks: s.identityAsks,
+      intent: null,
+    };
+  }
+
   /** Test/telemetry view. */
   answeredFields(callId: string): string[] {
     return [...(this.calls.get(callId)?.answered.keys() ?? [])];
