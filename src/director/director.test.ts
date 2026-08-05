@@ -794,4 +794,41 @@ describe('REGRESSION: identity ceiling (the 219)', () => {
     const a = d.observeAgent('ceil5', 'answering-service', 'And your date of birth?');
     expect(a?.code).not.toBe('identity_ceiling');
   });
+
+  /**
+   * The director rules on a line that has already been spoken, so its action
+   * lands on the NEXT turn. A ceiling of N therefore changes behaviour on ask
+   * N+1, which is why the first live firing (call aeea9be8) came one turn too
+   * late to matter: asks hit the old ceiling of 5 on the final turn and the
+   * caller was gone before the replacement could be spoken.
+   */
+  it('fires by the fourth ask, so the change lands on the fifth', () => {
+    expect(askIdentity('ceil6', 'answering-service', 4).filter((a) => a?.code === 'identity_ceiling'))
+      .toHaveLength(1);
+  });
+
+  it('still gives an honest call room — three asks is a mishearing, not a loop', () => {
+    // Happy path spends two (name, then date of birth). One genuine
+    // "sorry, could you repeat that" spends a third. Neither is the 219.
+    expect(askIdentity('ceil7', 'answering-service', 3).filter((a) => a?.code === 'identity_ceiling'))
+      .toHaveLength(0);
+  });
+
+  /**
+   * REGRESSION: the ceiling asked for a ticket and forbade the model to file
+   * one. The system message ended with "Call create_ticket NOW"; the response
+   * instruction that followed it ended with "then stop" — the last and most
+   * specific instruction, and therefore the one obeyed. `then` is what
+   * applyDirectorAction uses to require the action instead of suppressing it.
+   */
+  it('carries the tool call the agent must make, not just the words to say', () => {
+    const fired = askIdentity('ceil8', 'answering-service', 5).find((a) => a?.code === 'identity_ceiling');
+    expect(fired!.then).toMatch(/create_ticket/i);
+  });
+
+  it('sends azul to hand off rather than file — it cannot book an unverified patient', () => {
+    const fired = askIdentity('ceil9', 'azul-scheduling', 5).find((a) => a?.code === 'identity_ceiling');
+    expect(fired!.then).toMatch(/sage_handoff/i);
+    expect(fired!.then).not.toMatch(/create_ticket/i);
+  });
 });

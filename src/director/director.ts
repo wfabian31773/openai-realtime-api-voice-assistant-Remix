@@ -52,6 +52,22 @@ export interface DirectorAction {
   text: string;
   /** For 'author'/'force_exit': the exact sentence the agent must say. */
   speak?: string;
+  /**
+   * For 'author'/'force_exit': the thing the agent must DO in the same turn,
+   * phrased as an imperative clause ("call create_ticket with what you have").
+   *
+   * This exists because the authored turn used to end with "Speak ONLY this,
+   * verbatim, then stop", which is the last and most specific instruction the
+   * model sees and therefore the one it obeys. For most rules that is correct —
+   * the whole point is to stop the model talking. For the identity ceiling it
+   * was self-defeating: the system message said "call create_ticket NOW" and
+   * the response instruction said "then stop", so the ceiling asked for a
+   * ticket and forbade the model to file one in the same breath.
+   *
+   * When this is set the closing instruction requires the action instead of
+   * suppressing it. When it is absent the behaviour is unchanged.
+   */
+  then?: string;
 }
 
 interface FieldAnswer {
@@ -495,8 +511,23 @@ function identityEstablished(s: CallState): boolean {
  *
  * So: after this many identity questions without success, stop asking and use
  * what we have.
+ *
+ * WHY FOUR AND NOT FIVE. The director rules on an agent line from
+ * `response.audio_transcript.done` — the words are already in the caller's ear
+ * by the time we see them. Every action therefore lands on the FOLLOWING turn,
+ * so a ceiling of N changes behaviour on ask N+1. The first live firing
+ * (2026-08-05 15:2x, call aeea9be8) showed the cost exactly: asks reached 5 on
+ * turn 12, the ceiling fired, and turn 13 never happened because the caller had
+ * already given up. Turns 11 and 12 were both "Could you please tell me your
+ * last name?".
+ *
+ * Four fires on turn 11 in that call and turn 12 becomes the ticket instead of
+ * the duplicate. It still clears the honest paths: the happy path spends two
+ * (name, date of birth — the DOB ask is counted because identity is not yet
+ * established when it is asked), and one genuine mishearing spends three. Four
+ * is only reached when something is actually wrong.
  */
-const IDENTITY_ASK_CEILING = 5;
+const IDENTITY_ASK_CEILING = 4;
 
 /** The identity fields, for counting against the ceiling. */
 const IDENTITY_TOPICS = new Set(['full name', 'first name', 'last name', 'date of birth']);
@@ -507,22 +538,26 @@ const IDENTITY_TOPICS = new Set(['full name', 'first name', 'last name', 'date o
  * because it cannot book without a verified patient and should not pretend
  * otherwise.
  */
-const CEILING_ACTION: Record<string, { fix: string; speak: string }> = {
+const CEILING_ACTION: Record<string, { fix: string; speak: string; then: string }> = {
   'answering-service': {
     fix: 'Call create_ticket NOW with what you already have — the callback number is attached to the call, and the reason they gave in their first turn is enough. Set the name fields to whatever you managed to capture, or leave them empty. Do NOT ask for the name or date of birth again.',
     speak: "I'm having trouble getting that down clearly, and I don't want to keep you. Let me pass on what I have with your number and have the team call you back.",
+    then: 'call create_ticket with the reason the caller already gave and whatever name you captured — leave the name fields empty if you captured none',
   },
   'no-ivr': {
     fix: 'Call create_ticket NOW with what you already have — the callback number is attached to the call. Do NOT ask for the name or date of birth again.',
     speak: "I'm having trouble getting that down clearly, and I don't want to keep you any longer. Let me take what I have and make sure someone calls you back.",
+    then: 'call create_ticket with the reason the caller already gave and whatever name you captured — leave the name fields empty if you captured none',
   },
   'after-hours': {
     fix: 'Call create_ticket NOW with what you already have. Do NOT ask for the name or date of birth again.',
     speak: "I'm having trouble getting that down clearly. Let me take what I have and make sure someone calls you back.",
+    then: 'call create_ticket with the reason the caller already gave and whatever name you captured — leave the name fields empty if you captured none',
   },
   default: {
     fix: 'Stop collecting identity. Hand off with sage_handoff reason patient_identity_uncertain, or file what you have. Do NOT ask again.',
     speak: "I'm having trouble getting that down, and I don't want to keep you any longer. Let me get this to someone who can help.",
+    then: 'call sage_handoff with handoffReason patient_identity_uncertain',
   },
 };
 
@@ -888,6 +923,7 @@ export class Director {
               `The caller has been on the line ${s.turn} turns. Asking again will not work.`,
             fix: plan.fix,
             speak: plan.speak,
+            then: plan.then,
           }, 2);
         }
       }
@@ -959,7 +995,7 @@ export class Director {
     code: DirectorAction['code'],
     topic: string,
     level: number,
-    parts: { why: string; fix: string; speak?: string },
+    parts: { why: string; fix: string; speak?: string; then?: string },
     /** Effective level, when a violation must start harder than a hint.
      *  Defaults to `level`. */
     effectiveLevel: number = level,
@@ -975,6 +1011,13 @@ export class Director {
         code,
         topic,
         speak,
+        // A hard stop still has to DO something — the exit line promises the
+        // caller a callback, and an unfiled promise is worse than the loop.
+        then:
+          parts.then ??
+          (s.agentSlug === 'azul-scheduling'
+            ? 'call sage_handoff'
+            : 'call create_ticket with what you have and close the call'),
         text:
           `DIRECTOR — HARD STOP on "${topic}". ${parts.why} You have ignored two corrections. ` +
           `Say exactly: "${speak}" then hand off immediately (sage_handoff for scheduling, ` +
@@ -988,6 +1031,7 @@ export class Director {
         code,
         topic,
         speak,
+        then: parts.then,
         // parts.fix is carried into the authored turn, not dropped. Telling the
         // model what to SAY without telling it what to DO is how the identity
         // ceiling first shipped saying "let me pass this on" to an agent that

@@ -696,12 +696,21 @@ function applyDirectorAction(session: any, callId: string, agentSlug: string, ac
       try {
         transport.sendEvent({ type: 'response.cancel' });
       } catch { /* nothing in flight — fine */ }
+      // The closing line is the last and most specific thing the model reads,
+      // so it is the one it obeys. "Speak ONLY this, then stop" is right when
+      // the goal is to stop the model talking — and wrong when the goal is to
+      // make it act. The identity ceiling shipped with the system message
+      // saying "call create_ticket NOW" and this line saying "then stop": it
+      // asked for a ticket and forbade the model to file one in the same
+      // breath. When the action names a required tool call, require it here.
+      const closing = action.then
+        ? `Say this, verbatim, and say nothing else: "${action.speak}"\n` +
+          `Then, in this same turn, ${action.then}. ` +
+          `Do not ask the caller any further questions — you already have enough to act.`
+        : `Speak ONLY this, verbatim, then stop: "${action.speak}"`;
       transport.sendEvent({
         type: 'response.create',
-        response: {
-          instructions:
-            `${action.text}\n\nSpeak ONLY this, verbatim, then stop: "${action.speak}"`,
-        },
+        response: { instructions: `${action.text}\n\n${closing}` },
       });
     }
 
