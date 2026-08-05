@@ -14,7 +14,9 @@ The hotline uses these operational boundaries:
 Voice service secrets:
 
 - `PCP_TWILIO_PHONE_NUMBER`: dedicated inbound E.164 number.
-- `PCP_HUMAN_AGENT_NUMBER`: dedicated PCP human queue in E.164 format. There is deliberately no fallback to `HUMAN_AGENT_NUMBER`.
+- `PCP_HUMAN_AGENT_NUMBER`: the PCP queue DID — **`+17149564300`**. Every PCP handoff is placed to this one number. There is deliberately no fallback to `HUMAN_AGENT_NUMBER`: unset means the handoff is refused (`pcp_destination_not_configured`) rather than PCP callers landing in the clinical queue. Numbers written as `714-956-4300` or `(714) 956-4300` are normalized to E.164 before dialing, so a pasted value still connects.
+- `PCP_ROUTING_MODE`: retained for compatibility but it no longer changes where transfers land. The queue DID is the single recipient of every PCP transfer; a stale `sequential` logs a warning and still dials the queue, so it cannot divert calls to individual phones.
+- `PCP_AGENT_DIDS`: was the `sequential` testing roster. No longer part of routing — kept only so existing environments validate. Individual agents are not transfer recipients.
 - `PCP_PHARMA_HANDOFF_ENABLED`: defaults to false; pharmaceutical callers create tasks unless this is explicitly set to `true` after operations approves the live destination.
 - `TICKETING_ENRICHMENT_URL`: direct ticketing-app origin. PCP traffic bypasses n8n and its patient-oriented contract.
 - Existing `TICKETING_API_KEY`, `TWILIO_*`, `OPENAI_*`, and `DISABLE_PHI_LOGGING=true` remain required.
@@ -34,9 +36,10 @@ Ticketing app, in order:
 
 Voice service:
 
-1. Set `PCP_TWILIO_PHONE_NUMBER` and `PCP_HUMAN_AGENT_NUMBER`.
+1. Set `PCP_TWILIO_PHONE_NUMBER`, `PCP_HUMAN_AGENT_NUMBER=+17149564300`, and `PCP_ROUTING_MODE=queue`.
 2. Run `npm run seed:pcp-agent`.
 3. Verify the `agents` row has slug `pcp`, status `active`, and the dedicated Twilio number.
+4. Confirm the routing that is actually live: a handoff logs `[HANDOFF] Human Number: +17149564300`. If it logs an individual agent DID, `PCP_ROUTING_MODE` is still `sequential`; if it logs `pcp_destination_not_configured`, the queue number is unset in that environment.
 
 The seed scripts are idempotent. They were not run as part of this code change.
 
