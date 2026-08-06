@@ -81,10 +81,24 @@ describe('PcpDirector', () => {
     }
   });
 
-  it('still withholds the scheduling handoff until patient context is collected', () => {
+  /**
+   * The transfer must not wait on a DOB the caller may not have to hand. This line
+   * cannot schedule at all, so the staffer who takes the call collects what they need;
+   * gating the connection on patient context is how a scheduling request silently
+   * became a task instead of a transfer.
+   */
+  it('offers the scheduling handoff on professional identity alone', () => {
     const director = new PcpDirector();
-    director.update('sched-partial', { ...professional, callPurpose: 'schedule_appointment' });
-    const decision = director.next('sched-partial');
+    director.update('sched-minimal', { ...professional, callPurpose: 'schedule_appointment' });
+    const decision = director.next('sched-minimal');
+    expect(decision.handoffEligible).toBe(true);
+    expect(decision.nextQuestion).toBeUndefined();
+  });
+
+  it('still requires full professional identity before any scheduling handoff', () => {
+    const director = new PcpDirector();
+    director.update('sched-anon', { callPurpose: 'schedule_appointment', callerName: 'Dr. Lee' });
+    const decision = director.next('sched-anon');
     expect(decision.handoffEligible).toBe(false);
     expect(decision.nextQuestion).toBeDefined();
   });

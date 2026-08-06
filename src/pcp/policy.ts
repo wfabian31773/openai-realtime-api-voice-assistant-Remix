@@ -44,9 +44,15 @@ export const PCP_CALL_PURPOSES: readonly PcpCallPurpose[] = [
   // every one filed as a task with handoff status NOT_REQUESTED. A failed transfer
   // still degrades to CREATE_TASK via the handoffFailed path, so the task-filing
   // behavior remains the floor rather than the ceiling.
-  { slug: 'schedule_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['AUTOMATE', 'CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
-  { slug: 'reschedule_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['AUTOMATE', 'CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
-  { slug: 'cancel_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['AUTOMATE', 'CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
+  // The PCP line CANNOT schedule. Scheduling is only set up for San Diego and PCPs
+  // call from everywhere, so a scheduling request must reach a human in the PCP queue.
+  // AUTOMATE is therefore not permitted on these purposes: with it allowed, the agent
+  // could call record_automated_resolution off a read-only appointment lookup and
+  // represent a booking that never happened. HAND_OFF is the default; CREATE_TASK
+  // remains only as the fallback when the transfer does not connect.
+  { slug: 'schedule_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
+  { slug: 'reschedule_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
+  { slug: 'cancel_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'notify_referral_approval', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'check_patient_scheduled', defaultDisposition: 'AUTOMATE', allowedDispositions: ['AUTOMATE', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
   { slug: 'check_patient_kept_appointment', defaultDisposition: 'AUTOMATE', allowedDispositions: ['AUTOMATE', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
