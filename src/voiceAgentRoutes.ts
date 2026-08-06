@@ -26,6 +26,7 @@ import { callMetadataForDB } from './services/callMetadataStore';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
+import { resolveConfiguredGreeting, scheduleGreetingCacheWarm } from './services/greetingResolver';
 import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
 import './services/azulRegressionWatch'; // Phase 7: daily grade-regression check (side-effect timers)
@@ -183,6 +184,104 @@ const activeSessions = new Map<string, RealtimeSession>();
  * down live calls. See applyDirectorAction for the measurement.
  */
 const responseInFlight = new Set<string>();
+
+/**
+ * GREETING GUARANTEE. `response.create` is fire-and-forget: when the model is
+ * already generating — semantic VAD auto-answers a caller who speaks first,
+ * routine on the SD line where the hold TwiML invites a "hello?" — OpenAI
+ * rejects the greeting as an async error event and nothing retried it. The
+ * scripted opening simply never played and the model improvised from its
+ * post-greeting flow (diagnosed on live SD calls 2026-08-06, after the DB
+ * greeting rescue shipped and answering-service/pcp went verbatim).
+ *
+ * Protocol: the greeting is parked here at greeting time. If no response is
+ * in flight it is also sent immediately. On every response.done/cancelled we
+ * check whether the finished response actually spoke it (transcript prefix
+ * match — a barge-in that truncates a started greeting still counts as
+ * delivered); if not, resend at the turn boundary — the one moment a
+ * response.create cannot collide. Two attempts inside a 20s window: past
+ * that, a late greeting is weirder than the miss.
+ */
+const GREETING_GUARANTEE_WINDOW_MS = 20_000;
+interface PendingGreeting {
+  instructions: string;
+  prefix: string;
+  attempts: number;
+  expiresAt: number;
+  transport: { sendEvent: (e: unknown) => void };
+}
+const pendingGreetings = new Map<string, PendingGreeting>();
+
+function normaliseSpoken(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function sendPendingGreeting(callId: string, pending: PendingGreeting): void {
+  pending.attempts++;
+  try {
+    pending.transport.sendEvent({
+      type: 'response.create',
+      response: { instructions: pending.instructions },
+    });
+  } catch (err) {
+    console.error(`[GREETING] Failed to send greeting for ${callId}:`, err);
+  }
+}
+
+function armGreetingGuarantee(
+  callId: string,
+  greeting: string,
+  instructions: string,
+  transport: { sendEvent: (e: unknown) => void },
+): void {
+  const pending: PendingGreeting = {
+    instructions,
+    prefix: normaliseSpoken(greeting).slice(0, 15),
+    attempts: 0,
+    expiresAt: Date.now() + GREETING_GUARANTEE_WINDOW_MS,
+    transport,
+  };
+  pendingGreetings.set(callId, pending);
+  if (responseInFlight.has(callId)) {
+    console.info(`[GREETING] Response already in flight for ${callId} — greeting parked for the next turn boundary`);
+    return;
+  }
+  sendPendingGreeting(callId, pending);
+}
+
+function extractResponseTranscript(event: any): string {
+  const parts: string[] = [];
+  for (const item of event?.response?.output ?? []) {
+    for (const c of item?.content ?? []) {
+      if (typeof c?.transcript === 'string') parts.push(c.transcript);
+      else if (typeof c?.text === 'string') parts.push(c.text);
+    }
+  }
+  return parts.join(' ');
+}
+
+/** Turn-boundary check: did the response that just finished speak the greeting? */
+function checkGreetingDelivered(callId: string, event: any): void {
+  const pending = pendingGreetings.get(callId);
+  if (!pending) return;
+  if (Date.now() > pending.expiresAt) {
+    pendingGreetings.delete(callId);
+    return;
+  }
+  const spoken = normaliseSpoken(extractResponseTranscript(event));
+  if (pending.attempts > 0 && pending.prefix && spoken.startsWith(pending.prefix)) {
+    pendingGreetings.delete(callId); // greeting (or its barged-in start) played
+    return;
+  }
+  if (pending.attempts >= 2) {
+    console.warn(`[GREETING] Giving up on greeting for ${callId} after ${pending.attempts} attempts (last turn heard: "${spoken.slice(0, 60)}")`);
+    pendingGreetings.delete(callId);
+    return;
+  }
+  console.info(`[GREETING] Turn ended without the scripted greeting on ${callId} (heard: "${spoken.slice(0, 60)}") — resending at turn boundary`);
+  sendPendingGreeting(callId, pending);
+}
+
 const callMetadata = new Map<string, { agentSlug: string; campaignId?: string; contactId?: string; agentGreeting?: string; language?: string; ivrSelection?: '1' | '2' | '3' | '4' }>();
 const callIDtoConferenceNameMapping: Record<string, string | undefined> = {};
 const ConferenceNametoCallerIDMapping: Record<string, string | undefined> = {};
@@ -2553,6 +2652,9 @@ async function observeCall(
       eventType === 'response.canceled'
     ) {
       responseInFlight.delete(callId);
+      // Greeting guarantee: turn boundary is the one collision-free moment
+      // to resend a greeting that never played (see pendingGreetings).
+      checkGreetingDelivered(callId, event);
     }
 
     // Accumulate real token usage for cost attribution (see callTokenUsage).
@@ -3260,6 +3362,26 @@ async function observeCall(
     // Fix: when the caller is recognised, the FORCED greeting becomes the
     // familiar one, so there is exactly one instruction to follow.
     let agentGreeting = metadata?.agentGreeting;
+    // The database `agents.welcome_greeting` outranks the hardcoded route/
+    // config strings — see greetingResolver. Critically, it also RESCUES the
+    // greeting when in-memory call metadata is lost (the webhook can land on
+    // a different instance than the one that stored it — the root cause of
+    // agents improvising their openings; diagnosed 2026-08-06 on four live
+    // SD calls). The slug survives that loss via SIP header / phone lookup,
+    // so it — not the metadata — is what the DB lookup keys on.
+    //
+    // The one case the DB must NOT override: a path that deliberately set an
+    // EMPTY greeting (listen-first — TwiML already spoke, or the Spanish IVR
+    // handler sets it later). Metadata present + empty means intent; metadata
+    // absent means loss, and loss gets the configured greeting.
+    const listenFirst = metadata?.agentGreeting !== undefined && metadata.agentGreeting.trim() === '';
+    const configuredGreeting = listenFirst ? null : await resolveConfiguredGreeting(agentSlug);
+    if (configuredGreeting) {
+      if (!agentGreeting || agentGreeting.trim() === '') {
+        console.info(`[GREETING] In-memory metadata missing for ${callId} — configured greeting rescued from DB (agent: ${agentSlug})`);
+      }
+      agentGreeting = configuredGreeting;
+    }
     const recognisedFirstName = azulMetadataRef?.precontext?.matched
       ? String(azulMetadataRef.precontext.firstName ?? '').trim()
       : '';
@@ -3270,19 +3392,15 @@ async function observeCall(
 
     if (agentGreeting && agentGreeting.trim() !== '') {
       console.info(`[SESSION] Triggering greeting via response.create: "${agentGreeting.substring(0, 50)}..."`);
-      
-      try {
-        (session.transport as any).sendEvent({
-          type: 'response.create',
-          response: {
-            instructions: `Say exactly this greeting to the caller: "${agentGreeting}" - Then wait for their response.`,
-          },
-        });
-        console.info(`[SESSION] ✓ Greeting triggered for call ${callId}`);
-        CallDiagnostics.recordStage(callId, 'first_audio_sent', true, { source: 'agent_greeting' });
-      } catch (greetingError) {
-        console.error(`[SESSION] Failed to trigger greeting:`, greetingError);
-      }
+
+      armGreetingGuarantee(
+        callId,
+        agentGreeting,
+        `Say this greeting to the caller word-for-word, without adding, removing, or rephrasing anything: "${agentGreeting}" - Then stop and wait for their response.`,
+        session.transport as any,
+      );
+      console.info(`[SESSION] ✓ Greeting triggered for call ${callId}`);
+      CallDiagnostics.recordStage(callId, 'first_audio_sent', true, { source: 'agent_greeting' });
     } else {
       console.info(`[SESSION] TwiML delivered greeting — sending response.create to activate agent for call ${callId}`);
       try {
@@ -3643,6 +3761,7 @@ async function observeCall(
     // Clean up metadata and session
     activeSessions.delete(callId);
     responseInFlight.delete(callId);
+    pendingGreetings.delete(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
     deadAirWatchdog.release(callId);
@@ -3680,6 +3799,10 @@ async function observeCall(
 
 // Setup voice agent routes on Express app
 export function setupVoiceAgentRoutes(app: Express): void {
+  // Preload every agent's configured greeting so the first calls after a
+  // boot don't race a cold database connection (greetingResolver).
+  scheduleGreetingCacheWarm();
+
   // Apply cache control to all voice routes
   app.use('/api/voice', noCacheHeaders);
   
