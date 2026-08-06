@@ -109,6 +109,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Openings: what each agent actually says first vs its configured
+  // greeting, with an adherence rate (Wayne 2026-08-06 — greetings were
+  // drifting with no visibility).
+  app.get('/api/observatory/openings', isAuthenticated, async (req, res) => {
+    try {
+      const days = Math.min(30, Math.max(1, parseInt(String(req.query.days ?? '7'), 10) || 7));
+      const { agentOpenings } = await import('./observatory/queries');
+      res.json({ windowDays: days, agents: await agentOpenings(days) });
+    } catch (error) {
+      console.error('[observatory] openings failed:', error);
+      res.status(500).json({
+        message: 'Observatory openings failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
   app.get('/api/observatory/funnel', isAuthenticated, async (req, res) => {
     try {
       const weeks = Math.min(26, Math.max(1, parseInt(String(req.query.weeks ?? '12'), 10) || 12));

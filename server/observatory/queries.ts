@@ -299,3 +299,106 @@ export async function sageFunnelWeekly(weeks = 12): Promise<SageFunnelWeek[]> {
     pendingReview: r.pending_review,
   }));
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Openings — what each agent ACTUALLY says first, vs its configured
+// greeting (Wayne 2026-08-06: greetings drifting/improvised; adherence
+// must be observable). "Up to the verify point": the first three assistant
+// turns are sampled so the whole opening ramp is reviewable.
+// ────────────────────────────────────────────────────────────────────────
+
+export interface AgentOpenings {
+  agentSlug: string;
+  agentName: string;
+  configuredGreeting: string | null;
+  callsSampled: number;
+  /** Share of calls whose first assistant turn starts with the configured greeting (first 24 chars, case/space-insensitive). */
+  greetingAdherence: number | null;
+  topOpenings: Array<{ opening: string; n: number }>;
+  sampleOpeningSequences: Array<{ callLogId: string; turns: string[] }>;
+}
+
+export async function agentOpenings(days = 7): Promise<AgentOpenings[]> {
+  const { rows } = await pool.query(
+    `
+    WITH firsts AS (
+      SELECT ct.agent_slug, ct.call_log_id,
+             COALESCE(ct.final_transcript, ct.raw_transcript) AS text,
+             ROW_NUMBER() OVER (PARTITION BY ct.call_log_id ORDER BY ct.turn_index) AS rn
+      FROM call_turns ct
+      WHERE ct.role IN ('assistant','agent','ai')
+        AND ct.created_at >= NOW() - make_interval(days => $1::int)
+    ),
+    first_only AS (SELECT * FROM firsts WHERE rn = 1 AND text IS NOT NULL AND LENGTH(text) > 12)
+    SELECT a.slug AS agent_slug, a.name AS agent_name, a.welcome_greeting,
+           COUNT(f.call_log_id)::int AS calls_sampled,
+           ROUND(AVG(CASE WHEN a.welcome_greeting IS NOT NULL AND
+             LOWER(REGEXP_REPLACE(f.text, '\\s+', ' ', 'g')) LIKE
+             LOWER(REGEXP_REPLACE(LEFT(a.welcome_greeting, 24), '\\s+', ' ', 'g')) || '%'
+           THEN 1 ELSE 0 END)::numeric, 3) AS adherence
+    FROM agents a
+    LEFT JOIN first_only f ON f.agent_slug = a.slug
+    WHERE a.status = 'active'
+    GROUP BY a.slug, a.name, a.welcome_greeting
+    ORDER BY calls_sampled DESC
+    `,
+    [days],
+  );
+  const tops = await pool.query(
+    `
+    WITH firsts AS (
+      SELECT ct.agent_slug, ct.call_log_id,
+             LEFT(COALESCE(ct.final_transcript, ct.raw_transcript), 120) AS opening,
+             ROW_NUMBER() OVER (PARTITION BY ct.call_log_id ORDER BY ct.turn_index) AS rn
+      FROM call_turns ct
+      WHERE ct.role IN ('assistant','agent','ai')
+        AND ct.created_at >= NOW() - make_interval(days => $1::int)
+    )
+    SELECT agent_slug, opening, COUNT(*)::int AS n
+    FROM firsts WHERE rn = 1 AND opening IS NOT NULL AND LENGTH(opening) > 12
+    GROUP BY 1, 2
+    ORDER BY agent_slug, n DESC
+    `,
+    [days],
+  );
+  const seqs = await pool.query(
+    `
+    WITH recent_calls AS (
+      SELECT DISTINCT ON (ct.agent_slug) ct.agent_slug, ct.call_log_id
+      FROM call_turns ct
+      WHERE ct.created_at >= NOW() - make_interval(days => $1::int)
+      ORDER BY ct.agent_slug, ct.created_at DESC
+    )
+    SELECT rc.agent_slug, rc.call_log_id,
+           ARRAY(
+             SELECT LEFT(COALESCE(t.final_transcript, t.raw_transcript), 160)
+             FROM call_turns t
+             WHERE t.call_log_id = rc.call_log_id AND t.role IN ('assistant','agent','ai')
+             ORDER BY t.turn_index LIMIT 3
+           ) AS turns
+    FROM recent_calls rc
+    `,
+    [days],
+  );
+  const topMap = new Map<string, Array<{ opening: string; n: number }>>();
+  for (const r of tops.rows) {
+    const arr = topMap.get(r.agent_slug) ?? [];
+    if (arr.length < 6) arr.push({ opening: r.opening, n: r.n });
+    topMap.set(r.agent_slug, arr);
+  }
+  const seqMap = new Map<string, Array<{ callLogId: string; turns: string[] }>>();
+  for (const r of seqs.rows) {
+    const arr = seqMap.get(r.agent_slug) ?? [];
+    arr.push({ callLogId: r.call_log_id, turns: r.turns ?? [] });
+    seqMap.set(r.agent_slug, arr);
+  }
+  return rows.map((r: any) => ({
+    agentSlug: r.agent_slug,
+    agentName: r.agent_name,
+    configuredGreeting: r.welcome_greeting,
+    callsSampled: r.calls_sampled,
+    greetingAdherence: r.adherence === null ? null : Number(r.adherence),
+    topOpenings: topMap.get(r.agent_slug) ?? [],
+    sampleOpeningSequences: seqMap.get(r.agent_slug) ?? [],
+  }));
+}
