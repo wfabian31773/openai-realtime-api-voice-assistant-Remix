@@ -86,6 +86,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // OBS-A1: scorecards for all five agents (four Ops Hub + SAGE) and the
+  // SAGE reference funnel. Every field maps 1:1 to a named query in
+  // server/observatory/queries.ts (design law 1).
+  app.get('/api/observatory/scorecards', isAuthenticated, async (req, res) => {
+    try {
+      const days = Math.min(90, Math.max(1, parseInt(String(req.query.days ?? '30'), 10) || 30));
+      const { opsHubAgentScorecards, sageScorecard } = await import('./observatory/queries');
+      const [opsHub, sage] = await Promise.all([
+        opsHubAgentScorecards(days),
+        sageScorecard(days).catch((err) => ({ error: err instanceof Error ? err.message : String(err) })),
+      ]);
+      res.json({ windowDays: days, opsHub, sage });
+    } catch (error) {
+      console.error('[observatory] scorecards failed:', error);
+      res.status(500).json({ message: 'Observatory scorecards failed' });
+    }
+  });
+
+  app.get('/api/observatory/funnel', isAuthenticated, async (req, res) => {
+    try {
+      const weeks = Math.min(26, Math.max(1, parseInt(String(req.query.weeks ?? '12'), 10) || 12));
+      const { sageFunnelWeekly } = await import('./observatory/queries');
+      res.json({ weeks, sage: await sageFunnelWeekly(weeks) });
+    } catch (error) {
+      console.error('[observatory] funnel failed:', error);
+      res.status(500).json({ message: 'Observatory funnel failed' });
+    }
+  });
+
   // ==================== Legacy Auth Routes (Replit Auth compatibility) ====================
   app.get('/api/auth/user', isAuthenticated, async (req: any, res) => {
     try {
