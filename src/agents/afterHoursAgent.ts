@@ -345,7 +345,7 @@ export async function createAfterHoursAgent(
       patient_last_name: z.string().describe('Patient last name'),
       phone_number: z.string().describe('Callback phone number'),
       triage_outcome: triageOutcomeEnum.describe('Best match for the reason'),
-      description: z.string().describe('Summary of the patient concern'),
+      description: z.string().describe('Summary of the patient concern. ALWAYS write in English, even if the caller speaks another language (this is forwarded to English-speaking staff).'),
       patient_birth_month: z.string().nullable().describe('Birth month (2 digits) or null'),
       patient_birth_day: z.string().nullable().describe('Birth day (2 digits) or null'),
       patient_birth_year: z.string().nullable().describe('Birth year (4 digits) or null'),

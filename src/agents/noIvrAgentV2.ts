@@ -531,7 +531,7 @@ Call this ONLY when you have collected ALL required information.`,
 
 ❌ NEVER ESCALATE FOR routine requests (appointments, refills, billing, etc.)`,
     parameters: z.object({
-      reason: z.string().describe("Specific urgent symptoms or provider details"),
+      reason: z.string().describe("Specific urgent symptoms or provider details. ALWAYS write in English, even if the caller speaks another language (this goes to English-speaking staff via SMS)."),
       caller_type: z.enum([
         "patient_urgent_medical",
         "healthcare_provider",
@@ -541,8 +541,8 @@ Call this ONLY when you have collected ALL required information.`,
       patient_last_name: z.string().optional(),
       patient_dob: z.string().optional(),
       callback_number: z.string().optional(),
-      symptoms_summary: z.string().optional(),
-      provider_info: z.string().optional(),
+      symptoms_summary: z.string().optional().describe("ALWAYS write in English regardless of the caller's language."),
+      provider_info: z.string().optional().describe("ALWAYS write in English regardless of the caller's language."),
     }),
     execute: async (params) => {
       console.log("[No-IVR V2] escalate_to_human called:", params);

@@ -639,7 +639,14 @@ async function addSIPParticipantWithWatchdog(
       clearTimeout(existingWatchdog.maxDurationTimer);
     }
     sipWatchdogs.delete(conf);
-    
+
+    // Heads-up SMS BEFORE the operator's phone rings — assistant never
+    // connected, so there are no escalation details to include.
+    sendUrgentTransferSms({
+      callerNumber: getCallerNumber(conf) || callerIDNumber,
+      note: 'TECH FALLBACK — assistant never connected; caller transferred directly (no AI summary)',
+    });
+
     try {
       // Update the caller's leg with a fallback TwiML
       await client.calls(callSid).update({
@@ -1072,6 +1079,66 @@ async function fileUrgentHandoffFallbackTicket(
   }
 }
 
+/**
+ * URGENT-TRANSFER SMS — the operator's heads-up before their phone rings.
+ *
+ * Until 2026-08-06 only the normal escalation path (addHumanAgent) sent the
+ * "📞 INCOMING TRANSFER" SMS. The three TECHNICAL FALLBACK paths — SIP
+ * watchdog, accept-failure, and SIP-recovery — all dial HUMAN_AGENT_NUMBER
+ * directly with <Dial> TwiML and sent NOTHING, so the operator's phone rang
+ * with zero context (and a missed one looked like a random number). Observed
+ * 2026-08-05 17:54 PT: a 224s no-ivr call lost its assistant leg, the caller
+ * was auto-transferred, and the operator missed it because no SMS arrived.
+ *
+ * Fire-and-forget by design: SMS failure must never delay or block the dial.
+ * Callers pass whatever context they have; escalation details are included
+ * when the call got far enough to record them.
+ */
+function sendUrgentTransferSms(opts: {
+  callerNumber?: string;
+  escalationDetails?: EscalationDetails;
+  /** Extra context line for fallback paths, e.g. why this is a direct dial. */
+  note?: string;
+}): void {
+  const to = envConfig.twilio.urgentNotificationNumber;
+  const from = envConfig.twilio.phoneNumber;
+  if (!to || !from) {
+    console.log('[HANDOFF] ℹ️ SMS notification skipped - URGENT_NOTIFICATION_NUMBER or TWILIO_PHONE_NUMBER not configured');
+    return;
+  }
+  (async () => {
+    try {
+      const client = twilioClient ?? (twilioClient = await getTwilioClient());
+      const callTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/Los_Angeles' });
+      const d = opts.escalationDetails;
+
+      let smsBody = `📞 INCOMING TRANSFER - ${callTime}\n`;
+      smsBody += `From: ${opts.callerNumber || 'Unknown'}\n`;
+      if (opts.note) {
+        smsBody += `\n⚠️ ${opts.note}\n`;
+      }
+      if (d) {
+        if (d.callerType === 'healthcare_provider' && d.providerInfo) {
+          smsBody += `\n👨‍⚕️ PROVIDER CALL\nProvider: ${d.providerInfo}\n`;
+        } else if (d.callerType === 'patient_urgent') {
+          smsBody += `\n🚨 URGENT PATIENT\n`;
+        }
+        if (d.patientFirstName) smsBody += `Patient: ${d.patientFirstName} ${d.patientLastName || ''}\n`;
+        if (d.patientDob) smsBody += `DOB: ${d.patientDob}\n`;
+        if (d.callbackNumber) smsBody += `Callback: ${d.callbackNumber}\n`;
+        if (d.reason) smsBody += `\nReason: ${d.reason}\n`;
+        if (d.symptomsSummary) smsBody += `Symptoms: ${d.symptomsSummary}\n`;
+      }
+      smsBody += `\n📱 Connecting patient to you now...`;
+
+      await client.messages.create({ body: smsBody, from, to });
+      console.log('[HANDOFF] ✓ SMS notification sent to', to);
+    } catch (smsError) {
+      console.error('[HANDOFF] ⚠️ SMS notification failed:', smsError);
+    }
+  })();
+}
+
 // Handle human agent handoff
 type HandoffOutcome = { ok: true; destination: string } | { ok: false; status: string; reason: string };
 
@@ -1185,56 +1252,8 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     
     // STEP 1: Send SMS notification immediately (fire and forget)
     // Provider gets heads-up while we're dialing them
-    // Use centralized config for production compatibility
-    const URGENT_NOTIFICATION_NUMBER = envConfig.twilio.urgentNotificationNumber;
-    if (URGENT_NOTIFICATION_NUMBER && policy.policy !== 'pcp') {
-      (async () => {
-        try {
-          const callerNumber = callerID || 'Unknown';
-          const callTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/Los_Angeles' });
-          
-          let smsBody = `📞 INCOMING TRANSFER - ${callTime}\n`;
-          smsBody += `From: ${callerNumber}\n`;
-          
-          if (escalationDetails) {
-            if (escalationDetails.callerType === 'healthcare_provider' && escalationDetails.providerInfo) {
-              smsBody += `\n👨‍⚕️ PROVIDER CALL\n`;
-              smsBody += `Provider: ${escalationDetails.providerInfo}\n`;
-            } else if (escalationDetails.callerType === 'patient_urgent') {
-              smsBody += `\n🚨 URGENT PATIENT\n`;
-            }
-            
-            if (escalationDetails.patientFirstName) {
-              smsBody += `Patient: ${escalationDetails.patientFirstName} ${escalationDetails.patientLastName || ''}\n`;
-            }
-            if (escalationDetails.patientDob) {
-              smsBody += `DOB: ${escalationDetails.patientDob}\n`;
-            }
-            if (escalationDetails.callbackNumber) {
-              smsBody += `Callback: ${escalationDetails.callbackNumber}\n`;
-            }
-            if (escalationDetails.reason) {
-              smsBody += `\nReason: ${escalationDetails.reason}\n`;
-            }
-            if (escalationDetails.symptomsSummary) {
-              smsBody += `Symptoms: ${escalationDetails.symptomsSummary}\n`;
-            }
-          }
-          
-          smsBody += `\n📱 Connecting patient to you now...`;
-          
-          await twilioClient!.messages.create({
-            body: smsBody,
-            from: twilioPhoneNumber,
-            to: URGENT_NOTIFICATION_NUMBER,
-          });
-          console.log('[HANDOFF] ✓ SMS notification sent to', URGENT_NOTIFICATION_NUMBER);
-        } catch (smsError) {
-          console.error('[HANDOFF] ⚠️ SMS notification failed:', smsError);
-        }
-      })();
-    } else {
-      console.log('[HANDOFF] ℹ️ SMS notification skipped - URGENT_NOTIFICATION_NUMBER not configured');
+    if (policy.policy !== 'pcp') {
+      sendUrgentTransferSms({ callerNumber: callerID, escalationDetails });
     }
     
     let sequentialPcpAnswered = false;
@@ -1618,6 +1637,14 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
     const callerIdAttribute = envConfig.twilio.phoneNumber
       ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
       : '';
+    // Heads-up SMS BEFORE the operator's phone rings. This path fires when the
+    // assistant leg died mid-call, so escalation details may or may not exist.
+    const recoveredCallId = getCallIdByConference(conferenceName);
+    sendUrgentTransferSms({
+      callerNumber: getCallerNumber(conferenceName) || callerCall.from,
+      escalationDetails: recoveredCallId ? escalationDetailsMap.get(recoveredCallId) : undefined,
+      note: 'TECH FALLBACK — assistant disconnected mid-call; caller transferred directly (no AI summary)',
+    });
     await client.calls(callerCallSid).update({
       twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -3343,7 +3370,14 @@ async function observeCall(
                                (from && from !== 'Unknown' ? from : undefined) || 
                                '+16263821543';
           const humanNumber = process.env.HUMAN_AGENT_NUMBER || '+18186021567';
-          
+
+          // Heads-up SMS BEFORE the operator's phone rings — the assistant
+          // never accepted the call, so no escalation details exist.
+          sendUrgentTransferSms({
+            callerNumber: getCallerNumber(confName) || (from && from !== 'Unknown' ? from : undefined),
+            note: 'TECH FALLBACK — assistant failed to answer; caller transferred directly (no AI summary)',
+          });
+
           await client.calls(twilioCallSid!).update({
             twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
