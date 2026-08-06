@@ -55,7 +55,7 @@ export async function opsHubAgentScorecards(days = 30): Promise<OpsHubScorecard[
   );
   const outcomes = await pool.query(
     `
-    SELECT agent_id, COALESCE(agent_outcome, '(none)') AS outcome, COUNT(*)::int AS n
+    SELECT agent_id, COALESCE(agent_outcome::text, '(none)') AS outcome, COUNT(*)::int AS n
     FROM call_logs
     WHERE created_at >= NOW() - make_interval(days => $1::int) AND agent_id IS NOT NULL
     GROUP BY 1, 2
