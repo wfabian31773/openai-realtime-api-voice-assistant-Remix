@@ -27,6 +27,7 @@ import { UrgentCallsPage } from '@/pages/UrgentCallsPage'
 import { TwilioPage } from '@/pages/TwilioPage'
 import TestingPage from '@/pages/TestingPage'
 import { OperationsMonitorPage } from '@/pages/OperationsMonitorPage'
+import ObservatoryPage from '@/pages/ObservatoryPage'
 import { SdPilotPage } from '@/pages/SdPilotPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -141,6 +142,7 @@ function AppRoutes() {
         <Route path="/live-calls" element={<LiveCallsPage />} />
         <Route path="/sd-pilot" element={<SdPilotPage />} />
         <Route path="/scheduling-monitor" element={<SchedulingMonitorPage />} />
+        <Route path="/observatory" element={<ObservatoryPage />} />
         <Route path="/cost-dashboard" element={<CostDashboardPage />} />
         <Route path="/documentation" element={<DocumentationPage />} />
         <Route path="/testing" element={<TestingPage />} />

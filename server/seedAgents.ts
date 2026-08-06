@@ -234,7 +234,16 @@ async function seedAgents() {
       if (existing.length > 0) {
         console.log(`✓ Agent "${agentData.name}" already exists (${agentData.slug})`);
         
-        // Update existing agent with latest configuration
+        // Update existing agent with latest configuration.
+        //
+        // welcomeGreeting is deliberately NOT overwritten: the database is
+        // the source of truth for greetings (greetingResolver), and this
+        // very block was the "someone wiped my greeting" culprit — every
+        // deploy's boot silently reverted operator-configured greetings to
+        // the hardcoded seed text (caught by agent_change_log on
+        // 2026-08-06: the 23:09 boot reverted pcp's greeting eight minutes
+        // after the operator set it). Seed greetings still apply to NEWLY
+        // created agents below.
         await db
           .update(agents)
           .set({
@@ -244,7 +253,6 @@ async function seedAgents() {
             voice: agentData.voice,
             temperature: agentData.temperature,
             systemPrompt: agentData.systemPrompt,
-            welcomeGreeting: agentData.welcomeGreeting,
             status: 'active',
             updatedAt: new Date(),
           })
