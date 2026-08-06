@@ -402,3 +402,42 @@ export async function agentOpenings(days = 7): Promise<AgentOpenings[]> {
     sampleOpeningSequences: seqMap.get(r.agent_slug) ?? [],
   }));
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Agent change trail — the DB-trigger audit log (migration
+// agent_change_log_global_versioning, 2026-08-06). Every INSERT/UPDATE/
+// DELETE on agents / agent_prompts / agent_prompt_versions / agent_tools,
+// no matter who wrote it. Timestamp-only touches are filtered at the
+// trigger, so every row here is a REAL change.
+// ────────────────────────────────────────────────────────────────────────
+
+export interface AgentChange {
+  id: number;
+  changedAt: string;
+  tableName: string;
+  operation: string;
+  agentRef: string | null;
+  dbUser: string;
+  changedFields: Record<string, unknown> | null;
+}
+
+export async function agentChangeTrail(limit = 100): Promise<AgentChange[]> {
+  const { rows } = await pool.query(
+    `
+    SELECT id, changed_at, table_name, operation, agent_ref, db_user, changed_fields
+    FROM agent_change_log
+    ORDER BY id DESC
+    LIMIT $1::int
+    `,
+    [Math.min(500, Math.max(1, limit))],
+  );
+  return rows.map((r: any) => ({
+    id: r.id,
+    changedAt: r.changed_at,
+    tableName: r.table_name,
+    operation: r.operation,
+    agentRef: r.agent_ref,
+    dbUser: r.db_user,
+    changedFields: r.changed_fields,
+  }));
+}
