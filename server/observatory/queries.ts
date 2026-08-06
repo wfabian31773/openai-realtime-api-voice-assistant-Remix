@@ -402,6 +402,7 @@ export async function agentOpenings(days = 7): Promise<AgentOpenings[]> {
     sampleOpeningSequences: seqMap.get(r.agent_slug) ?? [],
   }));
 }
+<<<<<<< HEAD
 
 // ────────────────────────────────────────────────────────────────────────
 // Agent change trail — the DB-trigger audit log (migration
@@ -441,3 +442,5 @@ export async function agentChangeTrail(limit = 100): Promise<AgentChange[]> {
     changedFields: r.changed_fields,
   }));
 }
+=======
+>>>>>>> origin/main
