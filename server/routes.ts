@@ -100,7 +100,46 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ windowDays: days, opsHub, sage });
     } catch (error) {
       console.error('[observatory] scorecards failed:', error);
-      res.status(500).json({ message: 'Observatory scorecards failed' });
+      // Surface the real reason (design law 2: no mute failures). Messages
+      // here are driver/SQL errors, never secrets.
+      res.status(500).json({
+        message: 'Observatory scorecards failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  // Openings: what each agent actually says first vs its configured
+  // greeting, with an adherence rate (Wayne 2026-08-06 — greetings were
+  // drifting with no visibility).
+  app.get('/api/observatory/openings', isAuthenticated, async (req, res) => {
+    try {
+      const days = Math.min(30, Math.max(1, parseInt(String(req.query.days ?? '7'), 10) || 7));
+      const { agentOpenings } = await import('./observatory/queries');
+      res.json({ windowDays: days, agents: await agentOpenings(days) });
+    } catch (error) {
+      console.error('[observatory] openings failed:', error);
+      res.status(500).json({
+        message: 'Observatory openings failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  // Agent change trail — "I want to know anytime anything on any agent is
+  // touched" (Wayne 2026-08-06). Backed by database triggers, so it captures
+  // every writer: this app, AI agents, or raw SQL.
+  app.get('/api/observatory/agent-changes', isAuthenticated, async (req, res) => {
+    try {
+      const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit ?? '100'), 10) || 100));
+      const { agentChangeTrail } = await import('./observatory/queries');
+      res.json({ changes: await agentChangeTrail(limit) });
+    } catch (error) {
+      console.error('[observatory] agent-changes failed:', error);
+      res.status(500).json({
+        message: 'Observatory agent-changes failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   });
 
@@ -111,7 +150,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ weeks, sage: await sageFunnelWeekly(weeks) });
     } catch (error) {
       console.error('[observatory] funnel failed:', error);
-      res.status(500).json({ message: 'Observatory funnel failed' });
+      res.status(500).json({
+        message: 'Observatory funnel failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   });
 
