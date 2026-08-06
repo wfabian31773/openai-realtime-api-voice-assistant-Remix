@@ -1597,7 +1597,12 @@ async function transferConferenceToNumber(
     activeOfficeLegsByCall.set(openAiCallId, activeLegs);
     console.log(`[WARM-TRANSFER] Dialing ${label} (${toNumber}) with briefing, CallSid: ${dialedSid}`);
 
-    // Bounded acceptance window; voicemail is rejected immediately by AMD.
+    // Bounded acceptance window (45s) — comfortably longer than the briefing's
+    // two Gathers (8s + 10s) plus speech, so a staffer who listens to the whole
+    // thing still has room to press a key. Voicemail is NOT rejected by AMD any
+    // more (see the AMD handler); it falls out here or at the no-keypress
+    // branch of the accept handler, which is the same answer a few seconds
+    // later and without hanging up on live people.
     timeoutId = setTimeout(() => {
       warmTransferAccepts.delete(dialedSid);
       rejectAccepted(new Error('Office did not accept the transfer within the window'));
@@ -5644,16 +5649,26 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const answeredBy = parsedBody.AnsweredBy ?? '';
     const pending = callSid ? warmTransferAccepts.get(callSid) : undefined;
     if (pending) {
+      // RECORD THE VERDICT, DO NOT ACT ON IT. This handler used to hang up the
+      // office leg the moment AMD said 'machine' — and AMD judges from the
+      // first audio, so a staffed queue answering with its own greeting scores
+      // machine_start in 4-5 seconds.
+      //
+      // The accept handler was already rewritten for exactly this reason ("the
+      // AMD verdict is now recorded for diagnosis rather than used to decide"),
+      // but this half of the change was never made, so the keypress rule could
+      // never run: the leg was dead before the briefing finished playing.
+      // Every one of the first 32 PCP handoffs to +17149564300 died here —
+      // 6 of 6 recorded outcomes read machine / machine_start / ring 4-5s, and
+      // transferred_to_human is 0 across all 81 PCP calls.
+      //
+      // Voicemail is still rejected, just a few seconds later and by positive
+      // evidence instead of a guess: a real machine never presses a key, so the
+      // briefing plays out, the second Gather fires with no digits, and the
+      // accept handler hangs up and records 'machine' using the verdict stored
+      // here. A person presses a key and is connected.
       pending.answeredBy = answeredBy;
-      console.log(`[WARM-TRANSFER] AMD verdict for ${callSid}: ${answeredBy || 'unknown'}`);
-      if (answeredBy.startsWith('machine') || answeredBy === 'fax') {
-        warmTransferAccepts.delete(callSid);
-        officeLegBridges.delete(callSid);
-        activeOfficeLegsByCall.get(pending.openAiCallId)?.delete(callSid);
-        pending.reject(new Error(`Office leg answered by ${answeredBy}`));
-        void recordTransferOutcome(callSid, 'machine', { amdVerdict: answeredBy });
-        void twilioClient?.calls(callSid).update({ status: 'completed' }).catch(() => undefined);
-      }
+      console.log(`[WARM-TRANSFER] AMD verdict for ${callSid}: ${answeredBy || 'unknown'} (recorded, not acted on — keypress decides)`);
     } else {
       console.warn(`[WARM-TRANSFER] AMD verdict for unknown/expired CallSid ${callSid}: ${answeredBy}`);
     }
