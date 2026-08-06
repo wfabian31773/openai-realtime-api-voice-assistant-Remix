@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { buildPcpPublicKnowledgePrompt } from '../config/azulVisionKnowledge';
 import { pcpSafetyGuardrails } from '../guardrails/pcpSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
+import { recordingExecute } from '../services/toolTimeline';
 import { scheduleLookupService } from '../services/scheduleLookupService';
 import { PCP_FACILITY_TYPES, pcpDirector, type PcpConversationState } from '../pcp/director';
 import {
@@ -126,7 +127,19 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
   const callId = metadata.callId;
   pcpDirector.update(callId, { verificationStatus: metadata.professionalVerificationStatus ?? 'pending' });
 
-  const recordIntake = tool({
+  // Tool timeline. The fleet got this on 2026-08-01; the PCP agent was added
+  // on 08-03 and never inherited it, so on 08-06 all 167 PCP calls recorded
+  // ZERO tool events while every other agent recorded — which is exactly why
+  // "the system is blocking the ticket" could be heard on the call and not
+  // explained from the data. Arguments are allow-listed inside the timeline
+  // module, so no name, DOB or free text is persisted.
+  // No callLogId on PcpAgentMetadata; the flush resolves by callSid, which is
+  // the same fallback the other agents rely on when the id arrives late.
+  const timelineCtx = { callId, callSid: metadata.callSid, agentSlug: 'pcp' };
+  const recordedTool: typeof tool = ((def: any) =>
+    tool({ ...def, execute: recordingExecute(timelineCtx, def.name, def.execute) })) as typeof tool;
+
+  const recordIntake = recordedTool({
     name: 'record_pcp_intake',
     description: 'Store professional caller and request facts. Send only facts the caller actually provided. Returns exactly one next question and server policy state.',
     parameters: z.object({
@@ -148,7 +161,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     },
   });
 
-  const publicKnowledge = tool({
+  const publicKnowledge = recordedTool({
     name: 'get_public_practice_information',
     description: 'Retrieve authoritative public Azul Vision location, provider, or service information. Never use for patient, insurance participation, accessibility, or accommodation claims.',
     parameters: z.object({ topic: z.enum(['location', 'provider', 'service']) }),
@@ -162,7 +175,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     },
   });
 
-  const appointmentLookup = tool({
+  const appointmentLookup = recordedTool({
     name: 'lookup_patient_appointments',
     description: 'Look up schedule/attendance for a patient-specific request after the required caller and patient context is collected.',
     parameters: z.object({
@@ -197,7 +210,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     },
   });
 
-  const createTask = tool({
+  const createTask = recordedTool({
     name: 'create_pcp_task',
     description: 'Create a durable PCP Support task. Does not send patient or caller SMS.',
     parameters: z.object({
@@ -218,7 +231,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     },
   });
 
-  const recordAutomated = tool({
+  const recordAutomated = recordedTool({
     name: 'record_automated_resolution',
     description: 'Record a no-ticket automated outcome, but only after an authoritative tool succeeded.',
     parameters: z.object({ narrative: z.string().min(1).max(12000) }),
@@ -233,7 +246,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     },
   });
 
-  const handoff = tool({
+  const handoff = recordedTool({
     name: 'handoff_to_pcp',
     description: 'Create the required durable PCP ticket, then dial the configured PCP human queue. If transfer fails, update the same ticket as the fallback task.',
     parameters: z.object({ narrative: z.string().min(1).max(12000), urgency: z.enum(['normal', 'high', 'urgent']).default('high') }),
@@ -280,7 +293,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     },
   });
 
-  const patientMedicalRecordsIntake = tool({
+  const patientMedicalRecordsIntake = recordedTool({
     name: 'handle_patient_medical_records_request',
     description: 'Create an isolated PCP manual-review task only for an explicit request for copies or release of a patient medical record. Never use for peer-to-peer or medical-group requests.',
     parameters: z.object({ narrative: z.string().min(1).max(12000) }),
@@ -293,7 +306,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     },
   });
 
-  const terminate = tool({
+  const terminate = recordedTool({
     name: 'terminate_call',
     description: 'End the call only after the PCP director confirms the disposition is durably recorded.',
     parameters: z.object({ reason: z.enum(['completed', 'caller_declined', 'ghost_call', 'spam']) }),
