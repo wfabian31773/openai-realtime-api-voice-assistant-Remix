@@ -26,7 +26,7 @@ import { callMetadataForDB } from './services/callMetadataStore';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
-import { resolveConfiguredGreeting } from './services/greetingResolver';
+import { resolveConfiguredGreeting, scheduleGreetingCacheWarm } from './services/greetingResolver';
 import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
 import './services/azulRegressionWatch'; // Phase 7: daily grade-regression check (side-effect timers)
@@ -3262,10 +3262,23 @@ async function observeCall(
     // familiar one, so there is exactly one instruction to follow.
     let agentGreeting = metadata?.agentGreeting;
     // The database `agents.welcome_greeting` outranks the hardcoded route/
-    // config strings — see greetingResolver. Falls back to the legacy
-    // string only when the DB has no value or the lookup fails.
-    const configuredGreeting = await resolveConfiguredGreeting(agentSlug);
-    if (configuredGreeting && agentGreeting && agentGreeting.trim() !== '') {
+    // config strings — see greetingResolver. Critically, it also RESCUES the
+    // greeting when in-memory call metadata is lost (the webhook can land on
+    // a different instance than the one that stored it — the root cause of
+    // agents improvising their openings; diagnosed 2026-08-06 on four live
+    // SD calls). The slug survives that loss via SIP header / phone lookup,
+    // so it — not the metadata — is what the DB lookup keys on.
+    //
+    // The one case the DB must NOT override: a path that deliberately set an
+    // EMPTY greeting (listen-first — TwiML already spoke, or the Spanish IVR
+    // handler sets it later). Metadata present + empty means intent; metadata
+    // absent means loss, and loss gets the configured greeting.
+    const listenFirst = metadata?.agentGreeting !== undefined && metadata.agentGreeting.trim() === '';
+    const configuredGreeting = listenFirst ? null : await resolveConfiguredGreeting(agentSlug);
+    if (configuredGreeting) {
+      if (!agentGreeting || agentGreeting.trim() === '') {
+        console.info(`[GREETING] In-memory metadata missing for ${callId} — configured greeting rescued from DB (agent: ${agentSlug})`);
+      }
       agentGreeting = configuredGreeting;
     }
     const recognisedFirstName = azulMetadataRef?.precontext?.matched
@@ -3688,6 +3701,10 @@ async function observeCall(
 
 // Setup voice agent routes on Express app
 export function setupVoiceAgentRoutes(app: Express): void {
+  // Preload every agent's configured greeting so the first calls after a
+  // boot don't race a cold database connection (greetingResolver).
+  scheduleGreetingCacheWarm();
+
   // Apply cache control to all voice routes
   app.use('/api/voice', noCacheHeaders);
   
