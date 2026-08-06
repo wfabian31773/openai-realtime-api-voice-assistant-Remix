@@ -646,7 +646,7 @@ const officeLegDials = new Map<string, { openAiCallId: string; dialedNumber: str
  *  office manager found a routing bug that no dashboard could have shown. */
 async function recordTransferOutcome(
   officeCallSid: string,
-  outcome: 'accepted' | 'no_answer' | 'busy' | 'failed' | 'canceled' | 'machine',
+  outcome: 'accepted' | 'no_answer' | 'busy' | 'failed' | 'canceled' | 'machine' | 'no_keypress',
   extra: { acceptMethod?: 'keypress' | 'stay_on_line' | null; amdVerdict?: string | null } = {},
 ): Promise<void> {
   const dial = officeLegDials.get(officeCallSid);
@@ -1544,15 +1544,27 @@ async function transferConferenceToNumber(
     // staying on the line now connects too. Answering machines are filtered
     // by the async AMD verdict in the accept handler rather than by relying
     // on a human to press a digit.
+    // A KEYPRESS IS THE ONLY WAY TO ACCEPT, and the briefing says so before and
+    // after the details, so silence is never ambiguous.
+    //
+    // Staying on the line used to connect too, gated on the async AMD verdict. On a
+    // staffed queue that inverted: staffers answered, listened, pressed nothing, and
+    // AMD — judging the hunt-group greeting on the first audio — labelled the line
+    // 'machine', so the accept handler hung up on a live human. Both of the first PCP
+    // transfers to +17149564300 came back `machine` this way. A keypress is positive
+    // proof of a person and bypasses AMD entirely, so requiring one removes the
+    // guesswork instead of tuning it.
+    const PRESS_PROMPT = 'Press any key to take this caller.';
     const twiml =
       `<?xml version="1.0" encoding="UTF-8"?><Response>` +
       `<Gather input="dtmf" numDigits="1" timeout="8" action="${acceptUrl}" method="POST">` +
+      `<Say voice="Polly.Joanna">${PRESS_PROMPT}</Say>` +
       `<Say voice="Polly.Joanna">${say}</Say>` +
-      `<Say voice="Polly.Joanna">Press any key to accept the call.</Say>` +
+      `<Say voice="Polly.Joanna">${PRESS_PROMPT}</Say>` +
       `</Gather>` +
-      `<Gather input="dtmf" numDigits="1" timeout="8" actionOnEmptyResult="true" action="${acceptUrl}" method="POST">` +
+      `<Gather input="dtmf" numDigits="1" timeout="10" actionOnEmptyResult="true" action="${acceptUrl}" method="POST">` +
       `<Say voice="Polly.Joanna">Repeating: ${say}</Say>` +
-      `<Say voice="Polly.Joanna">Press any key to accept, or just stay on the line and I will connect you.</Say>` +
+      `<Say voice="Polly.Joanna">${PRESS_PROMPT}</Say>` +
       `</Gather>` +
       `</Response>`;
     const dialResult = await withResiliency(
@@ -5507,28 +5519,33 @@ export function setupVoiceAgentRoutes(app: Express): void {
       res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">This transfer has expired. Goodbye.</Say><Hangup/></Response>`);
       return;
     }
-    // Two ways to get here: the office pressed a key (Digits present), or the
-    // briefing played out and the second Gather fired on an empty result.
-    // A keypress is proof of a human and is always honoured. A silent
-    // fall-through is only honoured if answering-machine detection did NOT
-    // say we are talking to a machine — otherwise we would merrily connect a
-    // waiting patient to the office voicemail greeting.
+    // A KEYPRESS IS THE ONLY ACCEPT. The briefing asks for one before and after the
+    // details, so reaching here with no digits means the briefing played out
+    // unanswered — an unattended line, a voicemail greeting, or nobody listening.
+    // Either way the waiting caller must not be bridged into it.
+    //
+    // This replaced a silence-accepts rule gated on answering-machine detection.
+    // AMD judges from the first audio on the line, so a staffed hunt group with a
+    // greeting scored 'machine' and the handler hung up on live people: both of the
+    // first PCP transfers to the queue failed exactly that way. A digit is positive
+    // proof of a person and needs no verdict, so the AMD verdict is now recorded for
+    // diagnosis rather than used to decide.
     const digits = (parsedBody.Digits ?? '').trim();
     const answeredBy = pending.answeredBy ?? '';
-    const isMachine = answeredBy.startsWith('machine') || answeredBy === 'fax';
-    if (!digits && isMachine) {
+    if (!digits) {
+      const isMachine = answeredBy.startsWith('machine') || answeredBy === 'fax';
       console.warn(
-        `[WARM-TRANSFER] ✗ Silent fall-through on ${callSid} but AMD says '${answeredBy}' — refusing to connect the patient to voicemail`,
+        `[WARM-TRANSFER] ✗ No keypress on ${callSid} after the briefing (AMD: '${answeredBy || 'no verdict'}') — not bridging the caller`,
       );
       res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
       warmTransferAccepts.delete(callSid);
-      void recordTransferOutcome(callSid, 'machine', { amdVerdict: answeredBy });
-      pending.reject(new Error(`Office leg answered by ${answeredBy}`));
+      void recordTransferOutcome(callSid, isMachine ? 'machine' : 'no_keypress', { amdVerdict: answeredBy || null });
+      pending.reject(new Error(isMachine ? `Office leg answered by ${answeredBy}` : 'Office leg did not press a key to accept'));
       return;
     }
+    // Only a keypress reaches here now, so acceptMethod is always 'keypress'.
     console.log(
-      `[WARM-TRANSFER] ✓ ${digits ? 'Keypress' : 'Stay-on-line'} accept from ${callSid}` +
-        `${digits ? '' : ` (AMD: ${answeredBy || 'no verdict'})`} → joining conference ${pending.conferenceName}`,
+      `[WARM-TRANSFER] ✓ Keypress accept from ${callSid} (AMD: ${answeredBy || 'no verdict'}) → joining conference ${pending.conferenceName}`,
     );
     // join/leave on THIS conference is the only hard evidence that the two
     // legs were actually bridged, and how long for. Every other conference in
@@ -5536,7 +5553,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     // `transferred_live` — a record of our DECISION to connect — was standing
     // in for a measurement of what happened.
     void recordTransferOutcome(callSid, 'accepted', {
-      acceptMethod: digits ? 'keypress' : 'stay_on_line',
+      acceptMethod: 'keypress',
       amdVerdict: answeredBy || null,
     });
     const bridgeEvents = `https://${envConfig.domain}/api/voice/office-leg-events`;
@@ -5550,7 +5567,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     );
     warmTransferAccepts.delete(callSid);
     pending.resolve({
-      acceptMethod: digits ? 'keypress' : 'stay_on_line',
+      acceptMethod: 'keypress',
       amdVerdict: answeredBy,
     });
   });
