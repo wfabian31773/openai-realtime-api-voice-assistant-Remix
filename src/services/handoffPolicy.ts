@@ -1,3 +1,5 @@
+import { PCP_CALL_PURPOSES } from '../pcp/policy';
+
 const CLINICAL_CALLER_TYPES = new Set([
   'patient_urgent',
   'patient_urgent_medical',
@@ -5,12 +7,25 @@ const CLINICAL_CALLER_TYPES = new Set([
   'patient_unresponsive',
 ]);
 
-const PCP_CALLER_TYPES = new Set([
-  'peer_to_peer',
-  'health_plan_visit_inquiry',
-  'grievance_follow_up',
-  'pharmaceutical_representative',
-]);
+/**
+ * Which PCP call purposes may be transferred to a human, DERIVED from the purpose
+ * table rather than restated here.
+ *
+ * This used to be a hand-written list of four slugs, and it silently disagreed with
+ * src/pcp/policy.ts: scheduling purposes carry HAND_OFF in `allowedDispositions`, but
+ * the list did not include them, so a scheduling caller who reached the transfer would
+ * be refused at the dial with `pcp_reason_not_allowed` — after the durable ticket had
+ * already been filed. Two tables describing the same rule is the actual defect; one
+ * derived set cannot drift.
+ */
+// Set<string>, not Set<PcpCallPurposeSlug>: callerType arrives as an unvalidated
+// string off the call's escalation details, and an unknown value must fail the
+// membership check rather than fail to compile.
+const PCP_CALLER_TYPES: ReadonlySet<string> = new Set<string>(
+  PCP_CALL_PURPOSES
+    .filter((purpose) => purpose.allowedDispositions.includes('HAND_OFF'))
+    .map((purpose) => purpose.slug),
+);
 
 type Params = {
   agentSlug?: string;

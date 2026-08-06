@@ -61,6 +61,48 @@ describe('PcpDirector', () => {
     expect(decision.handoffEligible).toBe(true);
   });
 
+  /**
+   * Scheduling was the dominant PCP purpose in production and defaulted to CREATE_TASK,
+   * so handoffEligible was never true and handoff_to_pcp refused before dialing —
+   * 8 of the first 10 PCP tickets were schedule_appointment with handoff NOT_REQUESTED.
+   */
+  it('makes scheduling requests eligible for handoff once patient context is known', () => {
+    for (const purpose of ['schedule_appointment', 'reschedule_appointment', 'cancel_appointment'] as const) {
+      const director = new PcpDirector();
+      director.update(purpose, {
+        ...professional,
+        callPurpose: purpose,
+        statedRelationship: 'Referring provider',
+        patientFirstName: 'Pat',
+        patientLastName: 'Lee',
+        patientDob: '1980-01-02',
+      });
+      expect(director.next(purpose)).toMatchObject({ disposition: 'HAND_OFF', handoffEligible: true });
+    }
+  });
+
+  /**
+   * The transfer must not wait on a DOB the caller may not have to hand. This line
+   * cannot schedule at all, so the staffer who takes the call collects what they need;
+   * gating the connection on patient context is how a scheduling request silently
+   * became a task instead of a transfer.
+   */
+  it('offers the scheduling handoff on professional identity alone', () => {
+    const director = new PcpDirector();
+    director.update('sched-minimal', { ...professional, callPurpose: 'schedule_appointment' });
+    const decision = director.next('sched-minimal');
+    expect(decision.handoffEligible).toBe(true);
+    expect(decision.nextQuestion).toBeUndefined();
+  });
+
+  it('still requires full professional identity before any scheduling handoff', () => {
+    const director = new PcpDirector();
+    director.update('sched-anon', { callPurpose: 'schedule_appointment', callerName: 'Dr. Lee' });
+    const decision = director.next('sched-anon');
+    expect(decision.handoffEligible).toBe(false);
+    expect(decision.nextQuestion).toBeDefined();
+  });
+
   it('converts an unavailable handoff into a durable task fallback', () => {
     const director = new PcpDirector();
     director.update('call-5', { ...professional, callPurpose: 'peer_to_peer' });

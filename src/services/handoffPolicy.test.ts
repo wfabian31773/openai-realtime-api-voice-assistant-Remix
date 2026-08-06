@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { resolveHandoffDestination, resolvePcpDialSequence } from './handoffPolicy';
+import { PCP_CALL_PURPOSES } from '../pcp/policy';
+
+const QUEUE = '+17149564300';
 
 describe('slug-aware handoff policy', () => {
   it('preserves the existing clinical allowlist', () => {
@@ -69,5 +72,44 @@ describe('destination normalization', () => {
   it('leaves an unrecognized format alone rather than guessing at it', () => {
     // A 4-digit extension or a short code must not be silently turned into a US number.
     expect(resolvePcpDialSequence({ mode: 'queue', queueNumber: '4300', agentDids: [] })).toEqual(['4300']);
+  });
+});
+
+/**
+ * The production failure this guards: scheduling was the dominant PCP purpose (8 of 10
+ * tickets in the first 24 hours) and could never reach a human. Two separate tables
+ * described transfer eligibility and disagreed, so the dial was refused with
+ * `pcp_reason_not_allowed` for purposes the policy table permits.
+ */
+describe('PCP transfer eligibility tracks the purpose table', () => {
+  const eligible = PCP_CALL_PURPOSES.filter((p) => p.allowedDispositions.includes('HAND_OFF')).map((p) => p.slug);
+  const ineligible = PCP_CALL_PURPOSES.filter((p) => !p.allowedDispositions.includes('HAND_OFF')).map((p) => p.slug);
+
+  it('accepts every purpose the policy table allows to hand off', () => {
+    const refused = eligible.filter(
+      (slug) => !resolveHandoffDestination({ agentSlug: 'pcp', callerType: slug, pcpNumber: QUEUE }).allowed,
+    );
+    expect(refused).toEqual([]);
+  });
+
+  it('routes scheduling requests to the PCP queue', () => {
+    for (const slug of ['schedule_appointment', 'reschedule_appointment', 'cancel_appointment']) {
+      expect(resolveHandoffDestination({ agentSlug: 'pcp', callerType: slug, pcpNumber: QUEUE }))
+        .toEqual({ allowed: true, destination: QUEUE, policy: 'pcp' });
+    }
+  });
+
+  it('still refuses purposes the policy table does not allow to hand off', () => {
+    // e.g. patient_medical_records_request stays on its isolated manual-review path.
+    expect(ineligible).toContain('patient_medical_records_request');
+    const wronglyAllowed = ineligible.filter(
+      (slug) => resolveHandoffDestination({ agentSlug: 'pcp', callerType: slug, pcpNumber: QUEUE }).allowed,
+    );
+    expect(wronglyAllowed).toEqual([]);
+  });
+
+  it('still fails closed on an unknown caller type', () => {
+    expect(resolveHandoffDestination({ agentSlug: 'pcp', callerType: 'not_a_purpose', pcpNumber: QUEUE }))
+      .toEqual({ allowed: false, reason: 'pcp_reason_not_allowed' });
   });
 });
