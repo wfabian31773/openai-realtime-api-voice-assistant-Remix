@@ -26,6 +26,7 @@ import { callMetadataForDB } from './services/callMetadataStore';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
+import { resolveConfiguredGreeting } from './services/greetingResolver';
 import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
 import './services/azulRegressionWatch'; // Phase 7: daily grade-regression check (side-effect timers)
@@ -3260,6 +3261,13 @@ async function observeCall(
     // Fix: when the caller is recognised, the FORCED greeting becomes the
     // familiar one, so there is exactly one instruction to follow.
     let agentGreeting = metadata?.agentGreeting;
+    // The database `agents.welcome_greeting` outranks the hardcoded route/
+    // config strings — see greetingResolver. Falls back to the legacy
+    // string only when the DB has no value or the lookup fails.
+    const configuredGreeting = await resolveConfiguredGreeting(agentSlug);
+    if (configuredGreeting && agentGreeting && agentGreeting.trim() !== '') {
+      agentGreeting = configuredGreeting;
+    }
     const recognisedFirstName = azulMetadataRef?.precontext?.matched
       ? String(azulMetadataRef.precontext.firstName ?? '').trim()
       : '';
@@ -3270,12 +3278,12 @@ async function observeCall(
 
     if (agentGreeting && agentGreeting.trim() !== '') {
       console.info(`[SESSION] Triggering greeting via response.create: "${agentGreeting.substring(0, 50)}..."`);
-      
+
       try {
         (session.transport as any).sendEvent({
           type: 'response.create',
           response: {
-            instructions: `Say exactly this greeting to the caller: "${agentGreeting}" - Then wait for their response.`,
+            instructions: `Say this greeting to the caller word-for-word, without adding, removing, or rephrasing anything: "${agentGreeting}" - Then stop and wait for their response.`,
           },
         });
         console.info(`[SESSION] ✓ Greeting triggered for call ${callId}`);
