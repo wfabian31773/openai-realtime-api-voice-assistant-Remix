@@ -103,9 +103,30 @@ const FIELD_LABELS: Record<string, string> = {
   callerOrganization: 'organization',
   callerFacilityType: 'organization type',
   callbackNumber: 'callback number',
+  statedRelationship: 'relationship to the patient',
+  patientFirstName: 'patient first name',
+  patientLastName: 'patient last name',
+  patientDob: 'patient date of birth',
 };
 
-const TICKET_FIELDS = ['callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber'] as const;
+/**
+ * Fields worth reporting as gaps on the ticket.
+ *
+ * TWO CLASSES, and missing the second is what made the first pass at this
+ * incomplete. The director requires the professional block on every call, and
+ * ADDITIONALLY the patient block whenever the purpose has
+ * patientContextRequired and does not connect to a human — which includes
+ * `patient_medical_records_request`. The live timeline showed one records call
+ * burning ELEVEN attempts on `missing_required_field:statedRelationship`.
+ *
+ * None of these is required by the ticket schema (the patient block is all
+ * optionalText), so they never block filing — but "we do not know which patient"
+ * is exactly what the staffer needs told, not left to infer from a blank field.
+ */
+const TICKET_FIELDS = [
+  'callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber',
+  'statedRelationship', 'patientFirstName', 'patientLastName', 'patientDob',
+] as const;
 
 /**
  * The state to file a ticket from, and which administrative fields are absent.

@@ -87,6 +87,24 @@ describe('a records request survives an incomplete intake', () => {
     }
   });
 
+  it('reports the PATIENT-context gaps too, not just the professional ones', async () => {
+    // The live timeline showed a records call burning ELEVEN attempts on
+    // missing_required_field:statedRelationship — a second class of required
+    // field the first pass at this fix did not account for. None of these
+    // blocks filing, but "we do not know which patient" must be stated.
+    const callId = freshCall();
+    const agent = build(callId, '+15626022508');
+    await call(agent, 'record_pcp_intake', { callerName: 'Edna', callerRole: 'receptionist' });
+    await call(agent, 'handle_patient_medical_records_request', { narrative: 'Records request.' });
+
+    expect(filed).toHaveLength(1);
+    for (const gap of ['patient first name', 'patient last name', 'patient date of birth', 'relationship to the patient']) {
+      expect(filed[0].narrative).toContain(gap);
+    }
+    // and it still files, which is the whole point
+    expect(filed[0].callPurpose).toBe('patient_medical_records_request');
+  });
+
   it('never lets a placeholder read as something the caller said', async () => {
     const callId = freshCall();
     await call(build(callId), 'handle_patient_medical_records_request', { narrative: 'Records request.' });
