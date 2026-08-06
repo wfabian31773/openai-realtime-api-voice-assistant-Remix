@@ -23,6 +23,7 @@ import {
   Sun,
   Settings2,
   Target,
+  Telescope,
 } from 'lucide-react'
 import { useState } from 'react'
 
@@ -30,6 +31,7 @@ const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Urgent Calls', href: '/urgent-calls', icon: AlertTriangle },
   { name: 'Live Calls', href: '/live-calls', icon: Activity },
+  { name: 'Observatory', href: '/observatory', icon: Telescope },
   { name: 'SD Pilot', href: '/sd-pilot', icon: Target },
   { name: 'Agents', href: '/agents', icon: Bot },
   { name: 'Campaigns', href: '/campaigns', icon: Megaphone },
