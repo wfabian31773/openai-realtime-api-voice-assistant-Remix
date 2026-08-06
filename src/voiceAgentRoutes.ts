@@ -998,6 +998,9 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       reason: escalationDetails?.reason ?? 'urgent escalation',
       callerPhone: callerID || undefined,
       onCallNumber: handoffDestination,
+      // Only an authorized agent may be handed the on-call phone. Without
+      // this, an office-less result fell back to it from ANY agent.
+      agentSlug: escalationDetails?.agentSlug,
     });
     if (target?.number) {
       handoffDestination = target.number;

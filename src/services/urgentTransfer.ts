@@ -107,6 +107,18 @@ async function askRulesEngineForOffice(
   }
 }
 
+/**
+ * WHICH AGENTS MAY RING THE ON-CALL PERSON'S PHONE.
+ *
+ * Operator directive 2026-08-06: "The only agent that is authorized to call me
+ * is the no ivr agent that is used for after hours triage."
+ *
+ * Everything else resolves to an office queue or it does not transfer at all.
+ * This is an allow-list, not a deny-list: a new agent gets no access to that
+ * phone until someone deliberately adds it here.
+ */
+const ON_CALL_AUTHORIZED_AGENTS: ReadonlySet<string> = new Set(['no-ivr']);
+
 export async function resolveUrgentTransferTarget(input: {
   reason: string;
   callerPhone?: string;
@@ -114,8 +126,21 @@ export async function resolveUrgentTransferTarget(input: {
   /** Injected in tests; defaults to the real clock. */
   businessHours?: boolean;
   onCallNumber?: string;
+  /** Which agent is asking. Absent = not authorized for the on-call phone. */
+  agentSlug?: string;
 }): Promise<UrgentTransferTarget | null> {
-  const onCall = input.onCallNumber ?? process.env.HUMAN_AGENT_NUMBER ?? '';
+  const configuredOnCall = input.onCallNumber ?? process.env.HUMAN_AGENT_NUMBER ?? '';
+  // The on-call number exists for THIS agent only if it is allowed to use it.
+  //
+  // Before this gate, azul-scheduling rang the on-call phone 7 times between
+  // 07-22 and 08-06 — every one of them DURING business hours Pacific (Thu
+  // 12:03, Thu 11:24, Mon 08:38, Mon 08:10, Fri 09:22, Wed 16:17, Wed 14:32),
+  // so none came from the after-hours branch. They came from the in-hours
+  // fallback below: the rules engine returned no office, and the code handed
+  // the caller to the on-call phone instead. None of those callers was even
+  // urgent — they were asking to schedule an appointment and whether we take
+  // Blue Shield Medi-Cal.
+  const onCall = ON_CALL_AUTHORIZED_AGENTS.has(input.agentSlug ?? '') ? configuredOnCall : '';
   const inHours = input.businessHours ?? isBusinessHours();
 
   if (!inHours) {
