@@ -100,7 +100,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ windowDays: days, opsHub, sage });
     } catch (error) {
       console.error('[observatory] scorecards failed:', error);
-      res.status(500).json({ message: 'Observatory scorecards failed' });
+      // Surface the real reason (design law 2: no mute failures). Messages
+      // here are driver/SQL errors, never secrets.
+      res.status(500).json({
+        message: 'Observatory scorecards failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   });
 
@@ -111,7 +116,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ weeks, sage: await sageFunnelWeekly(weeks) });
     } catch (error) {
       console.error('[observatory] funnel failed:', error);
-      res.status(500).json({ message: 'Observatory funnel failed' });
+      res.status(500).json({
+        message: 'Observatory funnel failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   });
 
