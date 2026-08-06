@@ -1,4 +1,5 @@
 import { PCP_CALL_PURPOSES } from '../pcp/policy';
+import { isLunchClosure } from '../utils/timeAware';
 
 const CLINICAL_CALLER_TYPES = new Set([
   'patient_urgent',
@@ -32,6 +33,8 @@ type Params = {
   callerType?: string;
   clinicalNumber?: string;
   pcpNumber?: string;
+  /** Injected by tests; production reads the Pacific clock. */
+  lunchClosure?: boolean;
 };
 
 export type HandoffPolicyResult =
@@ -94,6 +97,21 @@ export function resolveHandoffDestination(params: Params): HandoffPolicyResult {
   if (params.agentSlug === 'pcp') {
     if (!params.callerType || !PCP_CALLER_TYPES.has(params.callerType)) {
       return { allowed: false, reason: 'pcp_reason_not_allowed' };
+    }
+    // LUNCH CLOSURE, 12:00-13:00 Pacific (operator directive 2026-08-06).
+    // Nobody is at the desk, so a warm transfer can only ring out while the
+    // caller holds in silence. Refusing here — at the same boundary that
+    // already refuses an unconfigured destination — means the PCP tool takes
+    // its existing failure path: the durable ticket it filed BEFORE dialing is
+    // updated to CREATE_TASK with the fallback open, so the caller gets a
+    // callback instead of a dead transfer.
+    //
+    // Deliberately NOT applied to the clinical policy below. That path carries
+    // patient_urgent, patient_urgent_medical, patient_unresponsive and
+    // healthcare_provider — an urgent clinical transfer must not be blocked
+    // because it is 12:30. Lunch gates the ADMINISTRATIVE queue only.
+    if (params.lunchClosure ?? isLunchClosure()) {
+      return { allowed: false, reason: 'pcp_lunch_closure' };
     }
     const pcpDestination = toE164(params.pcpNumber);
     if (!pcpDestination) return { allowed: false, reason: 'pcp_destination_not_configured' };

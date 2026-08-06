@@ -124,6 +124,24 @@ export function isBusinessHours(
 }
 
 /**
+ * The practice closes 12:00-13:00 Pacific for lunch, every weekday, at every
+ * location — `si_locations.lunch_window` is '12:00-13:00' on all of them.
+ *
+ * During that hour nobody is at the desk to take a warm transfer, so dialing
+ * one only produces a ring-out while the caller holds in silence. Operator
+ * directive 2026-08-06: calls in this window get a callback or follow-up
+ * instead of a transfer attempt.
+ *
+ * Weekdays only — a weekend noon is already outside business hours, and
+ * treating it as "lunch" would report the wrong reason.
+ */
+export function isLunchClosure(now?: { hour: number; shortDay: string }): boolean {
+  const { hour, shortDay } = now ?? getPacificTimeInfo();
+  if (shortDay === 'Sat' || shortDay === 'Sun') return false;
+  return hour === 12;
+}
+
+/**
  * Get time-of-day appropriate greeting
  * Returns "Good morning", "Good afternoon", or "Good evening"
  */
