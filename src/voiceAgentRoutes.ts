@@ -1115,15 +1115,32 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
           handoffDestination = destination;
           sequentialPcpAnswered = true;
           console.log(`[HANDOFF] ✓ PCP sequential attempt ${index + 1} answered`);
-          return { ok: true, destination };
+          // BREAK, do not return. Returning here skipped STEP 4 entirely —
+          // the block that disconnects the AI from the conference, sets
+          // callMeta.transferredToHuman, calls markTransferred() so the
+          // lifecycle coordinator cannot overwrite it, and writes the call log
+          // as status 'transferred'. `sequentialPcpAnswered = true` on the line
+          // above exists precisely so the clinical dial below is skipped and
+          // execution reaches STEP 4; the return made that flag dead code.
+          //
+          // Call 532f09ac (2026-08-06 18:51): a staffer pressed a key at
+          // 18:56:39 and the row still reads transferred_to_human=false, with
+          // the agent audible on the line afterwards because it was never
+          // disconnected from the conference. The transfer itself worked; the
+          // completion of it never ran.
+          break;
         }
         if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected' };
         console.warn(`[HANDOFF] PCP sequential attempt ${index + 1} was not accepted: ${outcome.detail || 'unknown'}`);
       }
-      pcpHandoffProgress.get(openAiCallId)?.(
-        'Say exactly: "Thanks for holding. I couldn’t reach the team live, but your PCP request has already been recorded for follow-up." Say nothing else and do not claim a transfer occurred.',
-      );
-      return { ok: false, status: 'NO_ANSWER', reason: 'pcp_sequence_no_answer' };
+      // Only when the loop exhausted every destination without an accept —
+      // reached by falling out of the for, never by the break above.
+      if (!sequentialPcpAnswered) {
+        pcpHandoffProgress.get(openAiCallId)?.(
+          'Say exactly: "Thanks for holding. I couldn’t reach the team live, but your PCP request has already been recorded for follow-up." Say nothing else and do not claim a transfer occurred.',
+        );
+        return { ok: false, status: 'NO_ANSWER', reason: 'pcp_sequence_no_answer' };
+      }
     }
 
     if (!sequentialPcpAnswered) {
