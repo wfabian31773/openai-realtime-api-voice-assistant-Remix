@@ -61,6 +61,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // New custom auth routes (login, register, invite, password reset)
   app.use('/api/auth', authRouter);
 
+  // ==================== Observatory (docs/observatory/) ====================
+  // OBS-0 health: proves both data planes before any widget ships — this
+  // app's own database plus the read-only 5Star connection (SAGE). Also
+  // surfaces the 5Star NGE-mirror freshness + latest deploy sha for the
+  // Observatory header (see 01-data-contracts.md "Freshness / integrity").
+  app.get('/api/observatory/health', isAuthenticated, async (_req, res) => {
+    try {
+      const { checkFivestarHealth } = await import('./observatory/fivestarDb');
+      const { pool } = await import('./db');
+      const opshub = { reachable: false as boolean, error: null as string | null };
+      try {
+        await pool.query('SELECT 1');
+        opshub.reachable = true;
+      } catch (err) {
+        opshub.error = err instanceof Error ? err.message : String(err);
+      }
+      const fivestar = await checkFivestarHealth();
+      const ok = opshub.reachable && fivestar.reachable && fivestar.readOnly;
+      res.status(ok ? 200 : 503).json({ ok, opshub, fivestar });
+    } catch (error) {
+      console.error('[observatory] health check failed:', error);
+      res.status(500).json({ ok: false, message: 'Observatory health check failed' });
+    }
+  });
+
   // ==================== Legacy Auth Routes (Replit Auth compatibility) ====================
   app.get('/api/auth/user', isAuthenticated, async (req: any, res) => {
     try {
