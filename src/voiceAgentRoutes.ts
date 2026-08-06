@@ -3386,7 +3386,7 @@ async function observeCall(
       ? String(azulMetadataRef.precontext.firstName ?? '').trim()
       : '';
     if (recognisedFirstName && agentGreeting) {
-      agentGreeting = `Thanks for calling Azul Vision. Am I speaking with ${recognisedFirstName}?`;
+      agentGreeting = `Hello, thank you for calling Azul Vision. Am I speaking with ${recognisedFirstName}?`;
       console.info(`[AZUL-SCHED] Greeting personalised for recognised caller (${recognisedFirstName})`);
     }
 
