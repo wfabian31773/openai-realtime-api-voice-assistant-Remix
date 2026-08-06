@@ -126,6 +126,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Agent change trail — "I want to know anytime anything on any agent is
+  // touched" (Wayne 2026-08-06). Backed by database triggers, so it captures
+  // every writer: this app, AI agents, or raw SQL.
+  app.get('/api/observatory/agent-changes', isAuthenticated, async (req, res) => {
+    try {
+      const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit ?? '100'), 10) || 100));
+      const { agentChangeTrail } = await import('./observatory/queries');
+      res.json({ changes: await agentChangeTrail(limit) });
+    } catch (error) {
+      console.error('[observatory] agent-changes failed:', error);
+      res.status(500).json({
+        message: 'Observatory agent-changes failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
   app.get('/api/observatory/funnel', isAuthenticated, async (req, res) => {
     try {
       const weeks = Math.min(26, Math.max(1, parseInt(String(req.query.weeks ?? '12'), 10) || 12));

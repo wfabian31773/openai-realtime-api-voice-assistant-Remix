@@ -47,11 +47,7 @@ export async function opsHubAgentScorecards(days = 30): Promise<OpsHubScorecard[
            ROUND(AVG(cl.duration)::numeric, 0) AS avg_duration_sec
     FROM agents a
     LEFT JOIN call_logs cl
-<<<<<<< HEAD
       ON cl.agent_id = a.id AND cl.created_at >= NOW() - make_interval(days => $1::int)
-=======
-      ON cl.agent_id = a.id AND cl.created_at >= NOW() - ($1 || ' days')::interval
->>>>>>> origin/main
     GROUP BY a.id, a.name
     ORDER BY calls DESC
     `,
@@ -61,11 +57,7 @@ export async function opsHubAgentScorecards(days = 30): Promise<OpsHubScorecard[
     `
     SELECT agent_id, COALESCE(agent_outcome, '(none)') AS outcome, COUNT(*)::int AS n
     FROM call_logs
-<<<<<<< HEAD
     WHERE created_at >= NOW() - make_interval(days => $1::int) AND agent_id IS NOT NULL
-=======
-    WHERE created_at >= NOW() - ($1 || ' days')::interval AND agent_id IS NOT NULL
->>>>>>> origin/main
     GROUP BY 1, 2
     `,
     [days],
@@ -115,7 +107,6 @@ export async function sageScorecard(days = 30): Promise<SageScorecard> {
   const core = await fivestarQuery<any>(
     `
     SELECT
-<<<<<<< HEAD
       (SELECT COUNT(*) FROM call_logs WHERE created_at >= NOW() - make_interval(days => $1::int) AND COALESCE(simulated,false)=false)::int AS calls,
       (SELECT COUNT(*) FROM call_logs WHERE created_at >= NOW() - INTERVAL '7 days' AND COALESCE(simulated,false)=false)::int AS calls_7d,
       (SELECT COUNT(*) FROM sage_hallucination_incidents WHERE created_at >= NOW() - make_interval(days => $1::int))::int AS halluc,
@@ -128,20 +119,6 @@ export async function sageScorecard(days = 30): Promise<SageScorecard> {
          FROM sage_voice_call_telemetry WHERE started_at >= NOW() - make_interval(days => $1::int)) AS max_latency,
       (SELECT ROUND(AVG(reviewer_score)::numeric, 2)
          FROM sage_voice_call_telemetry WHERE started_at >= NOW() - make_interval(days => $1::int) AND reviewer_score IS NOT NULL) AS reviews_avg
-=======
-      (SELECT COUNT(*) FROM call_logs WHERE created_at >= NOW() - ($1 || ' days')::interval AND COALESCE(simulated,false)=false)::int AS calls,
-      (SELECT COUNT(*) FROM call_logs WHERE created_at >= NOW() - INTERVAL '7 days' AND COALESCE(simulated,false)=false)::int AS calls_7d,
-      (SELECT COUNT(*) FROM sage_hallucination_incidents WHERE created_at >= NOW() - ($1 || ' days')::interval)::int AS halluc,
-      (SELECT COUNT(*) FROM sage_booking_validation_warnings WHERE created_at >= NOW() - ($1 || ' days')::interval AND warning_reason IS NOT NULL)::int AS booking_warns,
-      (SELECT ROUND(AVG(CASE WHEN openai_error_count > 0 THEN 1 ELSE 0 END)::numeric, 4)
-         FROM sage_voice_call_telemetry WHERE started_at >= NOW() - ($1 || ' days')::interval) AS oai_err_rate,
-      (SELECT ROUND((SUM(response_latency_total_ms)::numeric / NULLIF(SUM(response_latency_sample_count),0)), 0)
-         FROM sage_voice_call_telemetry WHERE started_at >= NOW() - ($1 || ' days')::interval) AS avg_latency,
-      (SELECT MAX(response_latency_max_ms)
-         FROM sage_voice_call_telemetry WHERE started_at >= NOW() - ($1 || ' days')::interval) AS max_latency,
-      (SELECT ROUND(AVG(reviewer_score)::numeric, 2)
-         FROM sage_voice_call_telemetry WHERE started_at >= NOW() - ($1 || ' days')::interval AND reviewer_score IS NOT NULL) AS reviews_avg
->>>>>>> origin/main
     `,
     [days],
   );
@@ -149,11 +126,7 @@ export async function sageScorecard(days = 30): Promise<SageScorecard> {
     `
     SELECT COALESCE(outcome::text, '(none)') AS outcome, COUNT(*)::int AS n
     FROM call_logs
-<<<<<<< HEAD
     WHERE created_at >= NOW() - make_interval(days => $1::int) AND COALESCE(simulated,false)=false
-=======
-    WHERE created_at >= NOW() - ($1 || ' days')::interval AND COALESCE(simulated,false)=false
->>>>>>> origin/main
     GROUP BY 1
     `,
     [days],
@@ -169,11 +142,7 @@ export async function sageScorecard(days = 30): Promise<SageScorecard> {
            END AS reason_class,
            COUNT(*)::int AS n
     FROM handoff_attempts
-<<<<<<< HEAD
     WHERE initiated_at >= NOW() - make_interval(days => $1::int)
-=======
-    WHERE initiated_at >= NOW() - ($1 || ' days')::interval
->>>>>>> origin/main
     GROUP BY 1
     `,
     [days],
@@ -186,11 +155,7 @@ export async function sageScorecard(days = 30): Promise<SageScorecard> {
       ROUND(AVG(CASE WHEN c.direction='outbound' AND c.outcome::text IN ('scheduled','scheduled_with_drift','rescheduled') THEN 1
                      WHEN c.direction='outbound' THEN 0 END)::numeric, 4) AS outbound_sched
     FROM call_logs c
-<<<<<<< HEAD
     WHERE c.created_at >= NOW() - make_interval(days => $1::int)
-=======
-    WHERE c.created_at >= NOW() - ($1 || ' days')::interval
->>>>>>> origin/main
       AND COALESCE(c.simulated,false)=false
       AND c.outcome IS NOT NULL
       AND c.outcome::text NOT IN ('voicemail','no_answer','wrong_number','patient_unavailable','abandoned')
@@ -239,11 +204,7 @@ export async function sageFunnelWeekly(weeks = 12): Promise<SageFunnelWeek[]> {
     `
     WITH weeks AS (
       SELECT generate_series(
-<<<<<<< HEAD
         date_trunc('week', NOW() - make_interval(weeks => $1::int)),
-=======
-        date_trunc('week', NOW() - ($1 || ' weeks')::interval),
->>>>>>> origin/main
         date_trunc('week', NOW()),
         '1 week'
       )::date AS wk
@@ -400,5 +361,44 @@ export async function agentOpenings(days = 7): Promise<AgentOpenings[]> {
     greetingAdherence: r.adherence === null ? null : Number(r.adherence),
     topOpenings: topMap.get(r.agent_slug) ?? [],
     sampleOpeningSequences: seqMap.get(r.agent_slug) ?? [],
+  }));
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Agent change trail — the DB-trigger audit log (migration
+// agent_change_log_global_versioning, 2026-08-06). Every INSERT/UPDATE/
+// DELETE on agents / agent_prompts / agent_prompt_versions / agent_tools,
+// no matter who wrote it. Timestamp-only touches are filtered at the
+// trigger, so every row here is a REAL change.
+// ────────────────────────────────────────────────────────────────────────
+
+export interface AgentChange {
+  id: number;
+  changedAt: string;
+  tableName: string;
+  operation: string;
+  agentRef: string | null;
+  dbUser: string;
+  changedFields: Record<string, unknown> | null;
+}
+
+export async function agentChangeTrail(limit = 100): Promise<AgentChange[]> {
+  const { rows } = await pool.query(
+    `
+    SELECT id, changed_at, table_name, operation, agent_ref, db_user, changed_fields
+    FROM agent_change_log
+    ORDER BY id DESC
+    LIMIT $1::int
+    `,
+    [Math.min(500, Math.max(1, limit))],
+  );
+  return rows.map((r: any) => ({
+    id: r.id,
+    changedAt: r.changed_at,
+    tableName: r.table_name,
+    operation: r.operation,
+    agentRef: r.agent_ref,
+    dbUser: r.db_user,
+    changedFields: r.changed_fields,
   }));
 }
