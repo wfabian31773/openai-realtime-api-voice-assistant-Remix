@@ -61,6 +61,34 @@ describe('PcpDirector', () => {
     expect(decision.handoffEligible).toBe(true);
   });
 
+  /**
+   * Scheduling was the dominant PCP purpose in production and defaulted to CREATE_TASK,
+   * so handoffEligible was never true and handoff_to_pcp refused before dialing —
+   * 8 of the first 10 PCP tickets were schedule_appointment with handoff NOT_REQUESTED.
+   */
+  it('makes scheduling requests eligible for handoff once patient context is known', () => {
+    for (const purpose of ['schedule_appointment', 'reschedule_appointment', 'cancel_appointment'] as const) {
+      const director = new PcpDirector();
+      director.update(purpose, {
+        ...professional,
+        callPurpose: purpose,
+        statedRelationship: 'Referring provider',
+        patientFirstName: 'Pat',
+        patientLastName: 'Lee',
+        patientDob: '1980-01-02',
+      });
+      expect(director.next(purpose)).toMatchObject({ disposition: 'HAND_OFF', handoffEligible: true });
+    }
+  });
+
+  it('still withholds the scheduling handoff until patient context is collected', () => {
+    const director = new PcpDirector();
+    director.update('sched-partial', { ...professional, callPurpose: 'schedule_appointment' });
+    const decision = director.next('sched-partial');
+    expect(decision.handoffEligible).toBe(false);
+    expect(decision.nextQuestion).toBeDefined();
+  });
+
   it('converts an unavailable handoff into a durable task fallback', () => {
     const director = new PcpDirector();
     director.update('call-5', { ...professional, callPurpose: 'peer_to_peer' });

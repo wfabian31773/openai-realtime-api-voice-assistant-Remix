@@ -36,9 +36,17 @@ export type PcpCallPurpose = {
 };
 
 export const PCP_CALL_PURPOSES: readonly PcpCallPurpose[] = [
-  { slug: 'schedule_appointment', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['AUTOMATE', 'CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
-  { slug: 'reschedule_appointment', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['AUTOMATE', 'CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
-  { slug: 'cancel_appointment', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['AUTOMATE', 'CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
+  // Scheduling requests hand off to the PCP queue. These carried HAND_OFF in
+  // allowedDispositions but defaulted to CREATE_TASK, and the director only offers a
+  // transfer when the DEFAULT is HAND_OFF (see director.next) — so a scheduling caller
+  // could never be connected to anyone. It was also the dominant purpose in
+  // production: 8 of 10 PCP tickets in the first 24 hours were schedule_appointment,
+  // every one filed as a task with handoff status NOT_REQUESTED. A failed transfer
+  // still degrades to CREATE_TASK via the handoffFailed path, so the task-filing
+  // behavior remains the floor rather than the ceiling.
+  { slug: 'schedule_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['AUTOMATE', 'CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
+  { slug: 'reschedule_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['AUTOMATE', 'CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
+  { slug: 'cancel_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['AUTOMATE', 'CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
   { slug: 'notify_referral_approval', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'check_patient_scheduled', defaultDisposition: 'AUTOMATE', allowedDispositions: ['AUTOMATE', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
   { slug: 'check_patient_kept_appointment', defaultDisposition: 'AUTOMATE', allowedDispositions: ['AUTOMATE', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
@@ -87,11 +95,18 @@ export function classifyPcpToolAccess(
   return { allowed: true, source: purpose.authoritativeSource };
 }
 
+/**
+ * Eligibility keys off `allowedDispositions`, not `defaultDisposition`. The previous
+ * rule ("default must be HAND_OFF, plus a hardcoded pharma exception") described the
+ * same policy a third time and disagreed with the other two: it refused every purpose
+ * that merely PERMITS a transfer. Purposes that permit HAND_OFF are eligible; the
+ * director decides whether to take it on a given call.
+ */
 export function resolvePcpHandoffPolicy(
   slug: PcpCallPurposeSlug,
   pcpNumber: string | undefined,
 ): { allowed: true; destination: string } | { allowed: false; reason: string } {
-  if (getPcpCallPurpose(slug).defaultDisposition !== 'HAND_OFF' && slug !== 'pharmaceutical_representative') {
+  if (!getPcpCallPurpose(slug).allowedDispositions.includes('HAND_OFF')) {
     return { allowed: false, reason: 'purpose_not_handoff_eligible' };
   }
   if (!pcpNumber) return { allowed: false, reason: 'pcp_destination_not_configured' };
