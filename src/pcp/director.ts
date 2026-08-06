@@ -4,6 +4,7 @@ import {
   type PcpDisposition,
   type PcpVerificationStatus,
 } from './policy';
+import { isLunchClosure } from '../utils/timeAware';
 
 export const PCP_FACILITY_TYPES = [
   'pcp_office', 'referring_provider', 'health_plan', 'ipa_medical_group',
@@ -62,7 +63,7 @@ const PROMPTS: Partial<Record<keyof PcpConversationState, string>> = {
 export class PcpDirector {
   private states = new Map<string, PcpConversationState>();
 
-  constructor(private readonly options: { pharmaHandoffEnabled?: boolean } = {}) {}
+  constructor(private readonly options: { pharmaHandoffEnabled?: boolean; /** Injected by tests; production reads the Pacific clock. */ lunchClosure?: () => boolean } = {}) {}
 
   get(callId: string): PcpConversationState {
     let state = this.states.get(callId);
@@ -129,6 +130,18 @@ export class PcpDirector {
     const source = purpose?.authoritativeSource;
     const retryExhausted = source ? (state.toolFailures[source] ?? 0) >= 2 : false;
     if (retryExhausted) disposition = 'CREATE_TASK';
+    // LUNCH CLOSURE, 12:00-13:00 Pacific weekdays (operator directive
+    // 2026-08-06): the desk is unstaffed, so a transfer can only ring out
+    // while the caller holds. Downgraded HERE, in the director, rather than
+    // only at the dial — the prompt tells the agent that the director decides
+    // handoff eligibility, so turning it off here means the agent offers a
+    // callback instead of promising "one moment while I connect you" and then
+    // failing. handoffPolicy refuses the dial too, as the backstop.
+    //
+    // Administrative PCP traffic only. The clinical/urgent path does not pass
+    // through this director and is deliberately never gated on lunch.
+    const lunchClosure = this.options.lunchClosure?.() ?? isLunchClosure();
+    if (lunchClosure && disposition === 'HAND_OFF') disposition = 'CREATE_TASK';
 
     const phiDisclosureAllowed = Boolean(purpose && (!purpose.containsPhi || state.verificationStatus !== 'failed'));
     const authoritativeToolAllowed = Boolean(source && !retryExhausted && (!purpose?.containsPhi || state.verificationStatus !== 'failed'));
