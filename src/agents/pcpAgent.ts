@@ -4,6 +4,7 @@ import { buildPcpPublicKnowledgePrompt } from '../config/azulVisionKnowledge';
 import { pcpSafetyGuardrails } from '../guardrails/pcpSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
 import { recordingExecute } from '../services/toolTimeline';
+import { withToolDirection } from '../services/toolDirection';
 import { scheduleLookupService } from '../services/scheduleLookupService';
 import { PCP_FACILITY_TYPES, pcpDirector, type PcpConversationState } from '../pcp/director';
 import {
@@ -231,7 +232,11 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
   // the same fallback the other agents rely on when the id arrives late.
   const timelineCtx = { callId, callSid: metadata.callSid, agentSlug: 'pcp' };
   const recordedTool: typeof tool = ((def: any) =>
-    tool({ ...def, execute: recordingExecute(timelineCtx, def.name, def.execute) })) as typeof tool;
+    tool({
+      ...def,
+      // CP-3: the approved next line rides inside the tool result (script-listing §6).
+      execute: withToolDirection('pcp', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
+    })) as typeof tool;
 
   const recordIntake = recordedTool({
     name: 'record_pcp_intake',

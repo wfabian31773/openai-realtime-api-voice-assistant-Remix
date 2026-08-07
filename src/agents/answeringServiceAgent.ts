@@ -2,6 +2,7 @@ import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { getPacificTimeContext, formatPhoneLast4, formatPhoneForSpeech } from '../utils/timeAware';
 import { scheduleLookupService, PatientScheduleContext } from '../services/scheduleLookupService';
+import { withToolDirection } from '../services/toolDirection';
 // LAZY IMPORT: SyncAgentService is loaded dynamically inside tool handlers to prevent
 // module initialization errors during agent instantiation (ticketingApiClient validation)
 import { CallerMemoryService, CallerMemory } from '../services/callerMemoryService';
@@ -595,7 +596,11 @@ export async function createAnsweringServiceAgent(
   // no name, DOB, phone, or free-text description is persisted.
   const timelineCtx = { callId, callSid, callLogId, agentSlug: 'answering-service' };
   const recordedTool: typeof tool = ((def: any) =>
-    tool({ ...def, execute: recordingExecute(timelineCtx, def.name, def.execute) })) as typeof tool;
+    tool({
+      ...def,
+      // CP-3: the approved next line rides inside the tool result (script-listing §6).
+      execute: withToolDirection('answering-service', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
+    })) as typeof tool;
 
   console.log(`[${agentTag}] Creating agent for call:`, {
     callId,
