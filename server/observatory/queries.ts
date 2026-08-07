@@ -910,3 +910,159 @@ export async function syncsOverview(): Promise<SyncsOverview> {
   feeds.sort((a, b) => rank(a.status) - rank(b.status) || a.app.localeCompare(b.app) || a.name.localeCompare(b.name));
   return { feeds, consoleActivity, consoleConfigured: isConsoleConfigured() };
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Command center — TODAY only (Wayne 2026-08-07: "the overview should be
+// all about today... a command center where I can watch everything from
+// one place"). Business day = America/Los_Angeles.
+// ────────────────────────────────────────────────────────────────────────
+
+export interface OpsHubTodayAgent {
+  agentId: string;
+  agentName: string;
+  agentSlug: string;
+  callsToday: number;
+  activeNow: number;
+  criticalsToday: number;
+  qualityToday: number | null;
+  outcomesToday: Record<string, number>;
+}
+
+export interface SageActiveCall {
+  callLogId: string | null;
+  startedAt: string;
+  direction: string | null;
+  transcriptTail: string | null;
+}
+
+export interface SageToday {
+  callsToday: number;
+  activeNow: number;
+  bookedToday: number;
+  enteredToday: number;
+  pendingNextgenEntry: number;
+  reasoningTimeoutsToday: number;
+  outcomesToday: Record<string, number>;
+  activeCalls: SageActiveCall[];
+}
+
+export interface TodayOverview {
+  opsHub: OpsHubTodayAgent[];
+  sage: SageToday | { error: string };
+}
+
+export async function todayOverview(): Promise<TodayOverview> {
+  const opsHub = await pool.query(
+    `
+    WITH la AS (SELECT (NOW() AT TIME ZONE 'America/Los_Angeles')::date AS today)
+    SELECT a.id AS agent_id, a.name AS agent_name, a.slug AS agent_slug,
+           COUNT(cl.id)::int AS calls_today,
+           COUNT(cl.id) FILTER (WHERE cl.status IN ('in_progress','ringing','initiated'))::int AS active_now,
+           COUNT(cl.id) FILTER (WHERE COALESCE(((cl.grader_results::jsonb)->'summary'->>'criticalFailures')::int, 0) > 0)::int AS criticals_today,
+           ROUND(AVG(cl.quality_score)::numeric, 2) AS quality_today
+    FROM agents a
+    LEFT JOIN call_logs cl
+      ON cl.agent_id = a.id
+     AND ((cl.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date = (SELECT today FROM la)
+    WHERE a.status = 'active'
+    GROUP BY a.id, a.name, a.slug
+    ORDER BY calls_today DESC
+    `,
+  );
+  const outcomes = await pool.query(
+    `
+    SELECT agent_id, COALESCE(agent_outcome::text, '(none)') AS outcome, COUNT(*)::int AS n
+    FROM call_logs
+    WHERE agent_id IS NOT NULL
+      AND ((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date
+          = (NOW() AT TIME ZONE 'America/Los_Angeles')::date
+    GROUP BY 1, 2
+    `,
+  );
+  const outcomeMap = new Map<string, Record<string, number>>();
+  for (const r of outcomes.rows) {
+    const m = outcomeMap.get(r.agent_id) ?? {};
+    m[r.outcome] = r.n;
+    outcomeMap.set(r.agent_id, m);
+  }
+
+  let sage: TodayOverview['sage'];
+  try {
+    const core = await fivestarQuery<any>(
+      `
+      WITH la AS (SELECT (NOW() AT TIME ZONE 'America/Los_Angeles')::date AS today)
+      SELECT
+        (SELECT COUNT(*) FROM call_logs c
+          WHERE COALESCE(c.simulated,false)=false
+            AND ((c.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date=(SELECT today FROM la))::int AS calls_today,
+        (SELECT COUNT(*) FROM sage_voice_call_telemetry t
+          WHERE t.ended_at IS NULL AND t.started_at > NOW() - INTERVAL '30 minutes')::int AS active_now,
+        (SELECT COUNT(*) FROM internal_bookings ib
+          WHERE ib.booked_by_name LIKE 'AI Voice Agent%'
+            AND ((ib.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date=(SELECT today FROM la))::int AS booked_today,
+        (SELECT COUNT(*) FROM internal_bookings ib
+          WHERE ib.booked_by_name LIKE 'AI Voice Agent%'
+            AND ib.status::text IN ('entered_in_nextgen','completed','no_show')
+            AND ((ib.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date=(SELECT today FROM la))::int AS entered_today,
+        (SELECT COUNT(*) FROM internal_bookings ib
+          WHERE ib.status::text = 'manual_import_needed')::int AS pending_entry,
+        (SELECT COUNT(*) FROM handoff_attempts h
+          WHERE h.reason ILIKE 'reasoning_timeout%'
+            AND ((h.initiated_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date=(SELECT today FROM la))::int AS timeouts_today
+      `,
+    );
+    const oc = await fivestarQuery<any>(
+      `
+      SELECT COALESCE(outcome::text, '(in progress)') AS outcome, COUNT(*)::int AS n
+      FROM call_logs
+      WHERE COALESCE(simulated,false)=false
+        AND ((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date
+            = (NOW() AT TIME ZONE 'America/Los_Angeles')::date
+      GROUP BY 1
+      `,
+    );
+    const act = await fivestarQuery<any>(
+      `
+      SELECT t.call_log_id, t.started_at::text AS started_at, t.direction,
+             RIGHT(cl.transcript, 1200) AS tail
+      FROM sage_voice_call_telemetry t
+      LEFT JOIN call_logs cl ON cl.id = t.call_log_id
+      WHERE t.ended_at IS NULL AND t.started_at > NOW() - INTERVAL '30 minutes'
+      ORDER BY t.started_at DESC
+      LIMIT 10
+      `,
+    );
+    const c = core.rows[0];
+    sage = {
+      callsToday: c.calls_today,
+      activeNow: c.active_now,
+      bookedToday: c.booked_today,
+      enteredToday: c.entered_today,
+      pendingNextgenEntry: c.pending_entry,
+      reasoningTimeoutsToday: c.timeouts_today,
+      outcomesToday: Object.fromEntries(oc.rows.map((r: any) => [r.outcome, r.n])),
+      activeCalls: act.rows.map((r: any) => ({
+        callLogId: r.call_log_id,
+        startedAt: r.started_at,
+        direction: r.direction,
+        transcriptTail: r.tail,
+      })),
+    };
+  } catch (err) {
+    sage = { error: err instanceof Error ? err.message : String(err) };
+  }
+
+  return {
+    opsHub: opsHub.rows.map((r: any) => ({
+      agentId: r.agent_id,
+      agentName: r.agent_name,
+      agentSlug: r.agent_slug,
+      callsToday: r.calls_today,
+      activeNow: r.active_now,
+      criticalsToday: r.criticals_today,
+      qualityToday: r.quality_today === null ? null : Number(r.quality_today),
+      outcomesToday: outcomeMap.get(r.agent_id) ?? {},
+    })),
+    sage,
+  };
+}
