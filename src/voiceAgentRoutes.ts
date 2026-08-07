@@ -2728,6 +2728,11 @@ async function observeCall(
             try {
               const { scheduleLookupService } = await import('./services/scheduleLookupService');
               const step = await onCallerUtterance(callId, transcript, async (first, last, dob) => {
+                // Recognized caller: compare against the record we ALREADY
+                // pulled — no fresh lookup to miss (operator 2026-08-07).
+                const { dobMatchesContext } = await import('./services/callFactsLedger');
+                const ctx = dobMatchesContext(callId, dob);
+                if (ctx !== null) return ctx;
                 const r = await scheduleLookupService.lookupByNameAndDOB(first, last, dob);
                 return Boolean((r as any)?.patientFound);
               });

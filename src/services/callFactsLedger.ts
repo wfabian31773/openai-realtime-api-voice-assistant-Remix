@@ -21,6 +21,8 @@ export interface CallFacts {
   /** Matched via caller-ID pre-context — a hint until verified. */
   matchedFirstName?: string;
   matchedLastName?: string;
+  /** DOB from the matched record — verification compares against THIS. */
+  matchedDob?: string;
   /** Stated/confirmed by the caller. */
   firstName?: string;
   lastName?: string;
@@ -153,4 +155,32 @@ export function harvestCallerLine(callId: string, text: string): void {
   } catch {
     /* harvesting must never affect a call */
   }
+}
+
+const MONTHS: Record<string, number> = { january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12 };
+
+/** Normalize any spoken/stored DOB form to m-d-y for direct comparison. */
+export function dobKey(raw: string | undefined | null): string | null {
+  if (!raw) return null;
+  const s = String(raw).toLowerCase();
+  const named = s.match(/(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+((19|20)\d{2})/);
+  if (named) return `${MONTHS[named[1]]}-${Number(named[2])}-${named[3]}`;
+  const iso = s.match(/((19|20)\d{2})-(\d{1,2})-(\d{1,2})/);
+  if (iso) return `${Number(iso[3])}-${Number(iso[4])}-${iso[1]}`;
+  const num = s.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.]((19|20)\d{2})/);
+  if (num) return `${Number(num[1])}-${Number(num[2])}-${num[3]}`;
+  return null;
+}
+
+/**
+ * "Why are we comparing to the system when we should compare to the context
+ * we already pulled?" (Wayne 2026-08-07) — recognized callers verify by
+ * DIRECT comparison against the matched record's DOB. No lookup, no miss.
+ */
+export function dobMatchesContext(callId: string, spokenDob: string): boolean | null {
+  const f = ledgers.get(callId) as (CallFacts & { matchedDob?: string }) | undefined;
+  const known = dobKey(f?.matchedDob);
+  if (!known) return null; // no context DOB — caller falls back to lookup
+  const spoken = dobKey(spokenDob);
+  return spoken !== null && spoken === known;
 }

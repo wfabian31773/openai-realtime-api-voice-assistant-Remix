@@ -638,6 +638,7 @@ export async function createAnsweringServiceAgent(
         callerPhone,
         matchedFirstName: scheduleContext?.patientData?.firstName || undefined,
         matchedLastName: scheduleContext?.patientData?.lastName || undefined,
+        matchedDob: scheduleContext?.patientData?.dateOfBirth || undefined,
         priorCallsSameIssue: callerMemory?.totalCalls || undefined,
       });
       console.info(`[RAMP] Ledger seeded synchronously for ${callId} (matched=${Boolean(scheduleContext?.patientData?.firstName)})`);
