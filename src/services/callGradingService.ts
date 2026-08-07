@@ -164,6 +164,62 @@ function gradeHumanRequestDeflection(input: DeterministicGraderInput): GraderRes
       metadata: { humanRequests: requests, threshold },
     };
   }
+  // Capability matrix (docs/ramp/playbook.md, operator 2026-08-07): the
+  // Answering Service and After-Hours lines NEVER transfer — tickets only.
+  // On those lines, holding the line with the busy-team script and taking a
+  // message IS the correct behavior, however many times the caller asks.
+  // What fails them: promising a transfer they cannot make, or ending with
+  // no ticket AND no message offer. A caller who declines the offered
+  // message is the caller's choice, not an agent failure.
+  const TICKET_ONLY_AGENTS = new Set(['answering-service', 'no-ivr', 'after-hours', 'dev-no-ivr']);
+  if (TICKET_ONLY_AGENTS.has(input.agentSlug ?? '')) {
+    const agentText = input.transcript
+      .split('\n')
+      .filter(l => /^agent:/i.test(l.trim()))
+      .join(' ')
+      .toLowerCase();
+    const promisedTransfer =
+      /(transfer|connect) you|one moment while i (connect|transfer)|putting you through/.test(agentText);
+    const offeredMessage =
+      /take (a |your |down )?(message|information|details)|have (the |our )?team (contact|call|reach)|call you (right )?back|(team member|someone) (will )?(call|contact|reach)/.test(agentText);
+    if (promisedTransfer) {
+      return {
+        grader: 'human_request_deflection',
+        pass: false,
+        score: 0.0,
+        severity: 'critical' as const,
+        reason: `Caller asked for a human ${requests}× and the agent PROMISED A TRANSFER on a ticket-only line — this line cannot transfer; the busy-team script and a message are the only correct response`,
+        metadata: { humanRequests: requests, threshold, promisedTransfer, offeredMessage, ticket: input.ticketNumber },
+      };
+    }
+    if (input.ticketNumber) {
+      return {
+        grader: 'human_request_deflection',
+        pass: true,
+        score: 1.0,
+        reason: `Caller asked for a human ${requests}×; ticket-only line correctly took a message (ticket filed)`,
+        metadata: { humanRequests: requests, threshold, offeredMessage, ticket: input.ticketNumber },
+      };
+    }
+    if (offeredMessage) {
+      return {
+        grader: 'human_request_deflection',
+        pass: true,
+        score: 0.9,
+        reason: `Caller asked for a human ${requests}×; agent delivered the message offer per the capability script — no ticket filed (caller declined or call ended)`,
+        metadata: { humanRequests: requests, threshold, offeredMessage },
+      };
+    }
+    return {
+      grader: 'human_request_deflection',
+      pass: false,
+      score: 0.0,
+      severity: 'critical' as const,
+      reason: `Caller asked for a human ${requests}× on a ticket-only line and the agent neither offered to take a message nor filed a ticket — the deflection loop`,
+      metadata: { humanRequests: requests, threshold, offeredMessage: false },
+    };
+  }
+
   const resolved = input.transferredToHuman || Boolean(input.ticketNumber);
   return {
     grader: 'human_request_deflection',
