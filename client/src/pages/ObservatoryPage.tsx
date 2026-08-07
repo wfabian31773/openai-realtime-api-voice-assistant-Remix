@@ -1658,6 +1658,8 @@ function CommandCenterTab({
         </div>
       </div>
 
+      <SpineStrip />
+
       {/* Today per agent */}
       <div>
         <h2 className="mb-2 text-lg font-semibold">Today — every agent at a glance</h2>
@@ -1990,5 +1992,26 @@ function DailyBriefTab() {
         </div>
       )}
     </section>
+  )
+}
+
+function SpineStrip() {
+  const spine = useQuery<{ rampAgents: string[]; today: Array<{ slug: string; named: number; verified: number; calls: number }> }>({
+    queryKey: ['obs-spine'],
+    queryFn: async () => (await apiClient.get('/observatory/spine')).data,
+    refetchInterval: 60_000,
+  })
+  if (!spine.data) return null
+  return (
+    <div className="flex flex-wrap gap-2 text-xs">
+      {spine.data.today.map((t) => {
+        const ramp = spine.data!.rampAgents.includes(t.slug)
+        return (
+          <span key={t.slug} className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 ${ramp ? 'border-green-500/50' : ''}`}>
+            {t.slug}: {ramp ? 'ramp ON' : 'ramp off'} · {t.named}/{t.calls} named · {t.verified} verified today
+          </span>
+        )
+      })}
+    </div>
   )
 }

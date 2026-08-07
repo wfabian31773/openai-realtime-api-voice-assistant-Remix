@@ -209,6 +209,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // CP-9: spine status — which lines run the deterministic ramp, and how
+  // many of today's calls carry a ledger-known caller (verified = with check).
+  app.get('/api/observatory/spine', isAuthenticated, async (_req, res) => {
+    try {
+      const rampAgents = (process.env.RAMP_AGENTS ?? 'answering-service,pcp,azul-scheduling')
+        .split(',').map((x) => x.trim()).filter(Boolean);
+      const { pool } = await import('./db');
+      const r = await pool.query(`
+        SELECT a.slug, COUNT(cl.id) FILTER (WHERE cl.caller_name IS NOT NULL)::int AS named,
+               COUNT(cl.id) FILTER (WHERE cl.caller_name LIKE '%✓')::int AS verified,
+               COUNT(cl.id)::int AS calls
+        FROM agents a LEFT JOIN call_logs cl ON cl.agent_id = a.id
+          AND ((cl.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date
+              = (NOW() AT TIME ZONE 'America/Los_Angeles')::date
+        WHERE a.status='active' GROUP BY a.slug`);
+      res.json({ rampAgents, today: r.rows });
+    } catch (error) {
+      res.status(500).json({ message: 'Spine status failed', error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   // Command center: today-only stats for every agent + SAGE active calls.
   app.get('/api/observatory/today', isAuthenticated, async (_req, res) => {
     try {
