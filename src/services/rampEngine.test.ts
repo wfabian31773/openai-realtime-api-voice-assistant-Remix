@@ -93,3 +93,25 @@ describe('rampEngine — PCP professional mode (S §3)', () => {
     expect(f.medicalGroup).toContain('Scripps Coastal');
   });
 });
+
+describe('rampEngine — SD front mode (CP-6)', () => {
+  beforeEach(() => { clearAllLedgers(); releaseRamp('s'); });
+
+  it('confirm yes → forced DOB ask → hands DOB answer to the verify tool flow', async () => {
+    seedLedger('s', { matchedFirstName: 'Wayne', matchedLastName: 'Fabian' });
+    startRamp('s', 'sd_front');
+    let st = await onCallerUtterance('s', 'yes speaking', verifyYes);
+    expect(st.line).toBe(RAMP_LINES.confirmDob);
+    st = await onCallerUtterance('s', 'June 4th 1975', verifyYes);
+    expect(st.line).toBeNull();
+    expect(rampActive('s')).toBe(false);
+  });
+
+  it('new patient on SD gets the exact approved transfer script', async () => {
+    seedLedger('s', {});
+    startRamp('s', 'sd_front');
+    const st = await onCallerUtterance('s', 'I would be a new patient', verifyYes);
+    expect(st.line).toContain('unable to schedule new patients');
+    expect(rampActive('s')).toBe(false);
+  });
+});
