@@ -75,7 +75,7 @@ export function withToolDirection<A extends unknown[]>(
   execute: (...args: A) => Promise<unknown> | unknown,
 ): (...args: A) => Promise<unknown> {
   return async (...args: A) => {
-    const blocked = await gateBeforeExecution(agentSlug, callId, toolName);
+    const blocked = await gateBeforeExecution(agentSlug, callId, toolName, args[0]);
     if (blocked) return blocked;
     const raw = await execute(...args);
     try {
@@ -131,12 +131,29 @@ export async function gateBeforeExecution(
   agentSlug: string,
   callId: string | undefined,
   toolName: string,
+  toolArgs?: unknown,
 ): Promise<string | null> {
-  if (!callId || !/^(terminate_call|end_call)$/.test(toolName)) return null;
+  const argText = JSON.stringify(toolArgs ?? '').toLowerCase();
+  // Request-type requirements (live retest 2026-08-07): a refill ticket
+  // without the medication name is a message worth nothing — block filing.
+  if (toolName === 'create_ticket' && /refill|medication/.test(argText)) {
+    const namedMed = /\b(latanoprost|timolol|brimonidine|dorzolamide|prednisolone|atropine|restasis|xiidra|[a-z]{6,}(ol|ide|pine|mycin|floxacin|prost|zolamide))\b/.test(argText);
+    if (!namedMed) {
+      console.warn(`[TOOL-GATE] create_ticket BLOCKED on ${agentSlug} — refill request without a medication name`);
+      return 'BLOCKED — a medication refill ticket REQUIRES the medication name. Ask: "Which medication do you need refilled?" and file the ticket with the answer included.';
+    }
+  }
+  if (!callId || !/^(terminate_call|end_call|handle_patient_medical_records_request)$/.test(toolName)) return null;
   try {
-    const { getLedger } = await import('./callFactsLedger');
+    const { getLedger, updateLedger } = await import('./callFactsLedger');
     const f = getLedger(callId);
     if (!f) return null;
+    // A records request implies delivery: default the contact method to fax
+    // so the fax-number requirement engages (operator rule 2026-08-07).
+    if (agentSlug === 'pcp' && (toolName === 'handle_patient_medical_records_request' || /record/.test(argText)) && !f.contactMethod) {
+      updateLedger(callId, { contactMethod: 'fax' });
+      f.contactMethod = 'fax';
+    }
     const missing: string[] = [];
     if (agentSlug === 'pcp') {
       if (!f.medicalGroup) missing.push('the caller\'s name and office/medical group');
