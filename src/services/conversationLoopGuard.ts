@@ -132,6 +132,8 @@ export function humanRequestCapFor(agentSlug: string): number {
 }
 
 const AGENT_EXIT: Record<string, string> = {
+  pcp:
+    'This line CAN transfer. Call handoff_to_pcp NOW — do NOT ask another question first. If a reason field is required and the caller gave none, use "caller requests a representative" as the reason. Say only: "Of course — one moment while I connect you." Never promise a connection and then keep interviewing (live failure 2026-08-07: a caller asked three times and was still being asked the purpose of their call).',
   'azul-scheduling':
     'If identity was already verified this call, act on the request NOW (for a human: sage_handoff immediately — the server remembers who was verified; do NOT re-ask name or date of birth). If the caller refuses to identify, call sage_handoff with the refusal noted in patientResponse — it routes without identity.',
   default:
