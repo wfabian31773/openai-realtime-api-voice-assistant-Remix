@@ -3251,6 +3251,14 @@ async function observeCall(
             });
             lastFactsRender.set(callId, facts);
             console.info(`[LEDGER] KNOWN FACTS injected for ${callId} (${facts.length} chars)`);
+            // CP-7: the call log shows WHO is calling the moment we know.
+            const lf = getCallFacts(callId);
+            const displayName = `${lf?.firstName ?? lf?.matchedFirstName ?? ''} ${lf?.lastName ?? lf?.matchedLastName ?? ''}`.trim();
+            const logId = callMetadataForDB.get(callId)?.dbCallLogId;
+            if (displayName && logId) {
+              void storage.updateCallLog(logId, { callerName: lf?.identityVerified ? `${displayName} ✓` : displayName })
+                .catch((e) => console.warn(`[LEDGER] callerName update failed for ${callId}:`, e));
+            }
           }
         } catch (factsErr) {
           console.warn(`[LEDGER] Facts injection failed for ${callId}:`, factsErr);

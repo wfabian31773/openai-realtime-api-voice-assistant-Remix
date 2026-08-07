@@ -332,9 +332,13 @@ export function CallLogsPage() {
                         </TableCell>
                         <TableCell>
                           <div>
-                            <div className="font-medium text-foreground">{log.from || '-'}</div>
-                            {log.callerName && (
-                              <div className="text-sm text-muted-foreground">{log.callerName}</div>
+                            {log.callerName ? (
+                              <>
+                                <div className="font-medium text-foreground">{log.callerName}</div>
+                                <div className="text-sm text-muted-foreground">{log.from || '-'}</div>
+                              </>
+                            ) : (
+                              <div className="font-medium text-foreground">{log.from || '-'}</div>
                             )}
                           </div>
                         </TableCell>
