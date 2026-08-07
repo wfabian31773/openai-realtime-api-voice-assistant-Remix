@@ -703,3 +703,210 @@ export async function sageCallTranscript(callLogId: string): Promise<{
   const r = rows[0];
   return { id: r.id, createdAt: r.created_at, direction: r.direction, outcome: r.outcome, transcript: r.transcript };
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Scripts & Syncs — every feed that keeps every application's data fresh
+// (Wayne 2026-08-07: "if the whole thing is gonna be based on me running
+// these sync scripts on my computer, we should be tracking that"). One
+// row per feed: what runs it, what it populates, last success, age vs
+// SLA. Reads three databases; a database that isn't configured or
+// reachable degrades to rows that say so instead of failing the tab.
+// ────────────────────────────────────────────────────────────────────────
+
+import { consoleQuery, isConsoleConfigured } from './consoleDb';
+
+export interface SyncFeedStatus {
+  key: string;
+  app: '5Star (SAGE)' | 'Patient Console' | 'Operations Hub';
+  name: string;
+  /** What breaks when this goes stale. */
+  feeds: string;
+  /** How it runs: manual morning script, app cron, etc. */
+  runBy: string;
+  lastRunAt: string | null;
+  ageHours: number | null;
+  slaHours: number;
+  status: 'ok' | 'stale' | 'error' | 'unavailable';
+  detail: string | null;
+}
+
+export interface ConsoleActivityDay {
+  day: string;
+  apptsSynced: number;
+  cancelled: number;
+}
+
+export interface SyncsOverview {
+  feeds: SyncFeedStatus[];
+  consoleActivity: ConsoleActivityDay[];
+  consoleConfigured: boolean;
+}
+
+function ageHrs(ts: string | Date | null): number | null {
+  if (!ts) return null;
+  const t = ts instanceof Date ? ts.getTime() : new Date(String(ts).includes('+') || String(ts).endsWith('Z') ? String(ts) : String(ts) + 'Z').getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.round(((Date.now() - t) / 3_600_000) * 10) / 10;
+}
+
+function feedStatus(age: number | null, sla: number): SyncFeedStatus['status'] {
+  if (age === null) return 'unavailable';
+  return age > sla ? 'stale' : 'ok';
+}
+
+export async function syncsOverview(): Promise<SyncsOverview> {
+  const feeds: SyncFeedStatus[] = [];
+  const push = (
+    f: Omit<SyncFeedStatus, 'ageHours' | 'status'> & { status?: SyncFeedStatus['status'] },
+  ) => {
+    const age = ageHrs(f.lastRunAt);
+    feeds.push({ ...f, ageHours: age, status: f.status ?? feedStatus(age, f.slaHours) });
+  };
+
+  // ── 5Star ──
+  try {
+    const m = await fivestarQuery<any>(`SELECT MAX(last_run_at)::text AS last FROM nge_schedule_sync_state`);
+    push({
+      key: '5star-nge-mirror',
+      app: '5Star (SAGE)',
+      name: 'NextGen schedule mirror (sync_schedule_5star.py)',
+      feeds: 'Booking verification, reconciler verdicts — when stale, destructive verdicts are deferred (the #173 gate)',
+      runBy: 'Your Mac, mornings, VPN (morning-sync runner)',
+      lastRunAt: m.rows[0]?.last ?? null,
+      slaHours: 26,
+      detail: null,
+    });
+  } catch (err) {
+    push({
+      key: '5star-nge-mirror', app: '5Star (SAGE)', name: 'NextGen schedule mirror (sync_schedule_5star.py)',
+      feeds: 'Booking verification, reconciler verdicts', runBy: 'Your Mac, mornings, VPN',
+      lastRunAt: null, slaHours: 26, status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // ── Ops Hub (this app's own database) ──
+  try {
+    const r = await pool.query(
+      `SELECT 'schedule' AS k, MAX("lastSyncedAt")::text AS last FROM "ScheduleSyncState"
+       UNION ALL SELECT 'charges', MAX("lastSyncedAt")::text FROM "ChargeSyncState"`,
+    );
+    for (const row of r.rows) {
+      if (row.k === 'schedule') {
+        push({
+          key: 'opshub-schedule', app: 'Operations Hub', name: 'NextGen schedule sync',
+          feeds: 'SD pilot appointment lookups and reconciliation on this side',
+          runBy: 'App cron', lastRunAt: row.last, slaHours: 6, detail: null,
+        });
+      } else {
+        push({
+          key: 'opshub-charges', app: 'Operations Hub', name: 'NextGen charges sync',
+          feeds: 'Charge/DRS reconciliation views',
+          runBy: 'App cron', lastRunAt: row.last, slaHours: 26,
+          detail: null,
+        });
+      }
+    }
+  } catch (err) {
+    push({
+      key: 'opshub-syncs', app: 'Operations Hub', name: 'Schedule/Charges syncs',
+      feeds: 'SD pilot lookups, charge views', runBy: 'App cron',
+      lastRunAt: null, slaHours: 6, status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // ── Patient Console ──
+  let consoleActivity: ConsoleActivityDay[] = [];
+  if (!isConsoleConfigured()) {
+    push({
+      key: 'console-unconfigured', app: 'Patient Console', name: 'All console feeds',
+      feeds: 'Caller-ID recognition (patients_master), slot offers, appointment facts',
+      runBy: '—', lastRunAt: null, slaHours: 0, status: 'unavailable',
+      detail: 'OBS_CONSOLE_DATABASE_URL secret not set — add it and redeploy to light this section up.',
+    });
+  } else {
+    try {
+      const pm = await consoleQuery<any>(
+        `SELECT last_synced_at::text AS last, hours_stale, is_stale, row_count FROM patients_master_freshness LIMIT 1`,
+      );
+      const pmr = pm.rows[0];
+      push({
+        key: 'console-patients-master', app: 'Patient Console', name: 'patients_master EDW sync',
+        feeds: `Caller-ID recognition and identity verification for every agent (${pmr?.row_count ? Number(pmr.row_count).toLocaleString() + ' persons' : 'person base'})`,
+        runBy: 'Your Mac, mornings, VPN', lastRunAt: pmr?.last ?? null, slaHours: 26, detail: null,
+      });
+      const edw = await consoleQuery<any>(
+        `SELECT job_name, last_run_at::text AS last, status FROM edw_sync_state ORDER BY job_name`,
+      );
+      for (const j of edw.rows) {
+        if (j.job_name === 'patients_master_sync') continue; // covered by freshness row above
+        push({
+          key: `console-edw-${j.job_name}`, app: 'Patient Console', name: `EDW sync: ${j.job_name}`,
+          feeds: 'Console EDW-backed tables', runBy: 'Your Mac, mornings, VPN',
+          lastRunAt: j.last, slaHours: 26, detail: j.status && j.status !== 'ok' ? `status: ${j.status}` : null,
+        });
+      }
+      const slots = await consoleQuery<any>(
+        `SELECT MAX(last_rebuilt_at)::text AS last,
+                COUNT(*) FILTER (WHERE last_error IS NOT NULL)::int AS err_days
+         FROM open_slots_sync_state`,
+      );
+      push({
+        key: 'console-open-slots', app: 'Patient Console', name: 'Open-slots rebuild',
+        feeds: 'The slots agents can offer callers — stale slots = empty offers and phantom availability',
+        runBy: 'Console cron (continuous)', lastRunAt: slots.rows[0]?.last ?? null, slaHours: 3,
+        detail: slots.rows[0]?.err_days ? `${slots.rows[0].err_days} slot-days with errors` : null,
+      });
+      const sched = await consoleQuery<any>(
+        `SELECT MAX(last_success_at)::text AS last, BOOL_OR(circuit_open) AS circuit_open FROM schedule_sync_state`,
+      );
+      push({
+        key: 'console-week-schedule', app: 'Patient Console', name: 'Week-schedule cache',
+        feeds: 'Agent schedule lookups',
+        runBy: 'Console cron (continuous)', lastRunAt: sched.rows[0]?.last ?? null, slaHours: 6,
+        status: sched.rows[0]?.circuit_open ? 'error' : undefined,
+        detail: sched.rows[0]?.circuit_open ? 'Circuit breaker OPEN — sync halted after repeated failures' : null,
+      });
+      const facts = await consoleQuery<any>(
+        `SELECT MAX(last_ingested_at)::text AS last FROM si_facts_sync_state`,
+      );
+      push({
+        key: 'console-appt-facts', app: 'Patient Console', name: 'Appointment-facts mirror',
+        feeds: 'NextGen appointment activity (all sources: Sage, SD pilot, staff in the console)',
+        runBy: 'Console cron', lastRunAt: facts.rows[0]?.last ?? null, slaHours: 26, detail: null,
+      });
+      const crons = await consoleQuery<any>(
+        `SELECT job_name, MAX(ran_at) FILTER (WHERE ok)::text AS last_ok,
+                (ARRAY_AGG(error_message ORDER BY ran_at DESC) FILTER (WHERE NOT ok))[1] AS last_err
+         FROM cron_runs GROUP BY job_name ORDER BY job_name`,
+      );
+      for (const c of crons.rows) {
+        push({
+          key: `console-cron-${c.job_name}`, app: 'Patient Console', name: `Cron: ${c.job_name}`,
+          feeds: 'Console background job', runBy: 'Console cron',
+          lastRunAt: c.last_ok, slaHours: 26,
+          detail: c.last_err ? `latest error: ${String(c.last_err).slice(0, 160)}` : null,
+        });
+      }
+      const act = await consoleQuery<any>(
+        `SELECT DATE(synced_at)::text AS day, COUNT(*)::int AS n, COUNT(*) FILTER (WHERE is_cancelled)::int AS cancelled
+         FROM si_appointment_facts WHERE synced_at >= NOW() - INTERVAL '7 days'
+         GROUP BY 1 ORDER BY 1 DESC`,
+      );
+      consoleActivity = act.rows.map((r: any) => ({ day: r.day, apptsSynced: r.n, cancelled: r.cancelled }));
+    } catch (err) {
+      push({
+        key: 'console-error', app: 'Patient Console', name: 'Console feeds',
+        feeds: 'Caller-ID recognition, slot offers, appointment facts', runBy: '—',
+        lastRunAt: null, slaHours: 0, status: 'error',
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Stale/error first, then by app.
+  const rank = (s: SyncFeedStatus['status']) => (s === 'error' ? 0 : s === 'stale' ? 1 : s === 'unavailable' ? 2 : 3);
+  feeds.sort((a, b) => rank(a.status) - rank(b.status) || a.app.localeCompare(b.app) || a.name.localeCompare(b.name));
+  return { feeds, consoleActivity, consoleConfigured: isConsoleConfigured() };
+}

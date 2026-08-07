@@ -110,6 +110,23 @@ interface AgentChange {
 interface ChangesResponse {
   changes: AgentChange[]
 }
+interface SyncFeedStatus {
+  key: string
+  app: string
+  name: string
+  feeds: string
+  runBy: string
+  lastRunAt: string | null
+  ageHours: number | null
+  slaHours: number
+  status: 'ok' | 'stale' | 'error' | 'unavailable'
+  detail: string | null
+}
+interface SyncsOverview {
+  feeds: SyncFeedStatus[]
+  consoleActivity: Array<{ day: string; apptsSynced: number; cancelled: number }>
+  consoleConfigured: boolean
+}
 
 interface GraderCheckStat {
   grader: string
@@ -287,7 +304,7 @@ function StatusDot({ tone }: { tone: Tone }) {
 // 2026-08-07). Overview answers "is anything red"; every red opens into
 // the tab that explains WHY.
 
-type ObsTab = 'overview' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'changes'
+type ObsTab = 'overview' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'syncs' | 'changes'
 
 const TABS: Array<{ key: ObsTab; label: string }> = [
   { key: 'overview', label: 'Overview' },
@@ -296,6 +313,7 @@ const TABS: Array<{ key: ObsTab; label: string }> = [
   { key: 'telemetry', label: 'Telemetry & Tools' },
   { key: 'openings', label: 'Openings' },
   { key: 'funnel', label: 'Funnel' },
+  { key: 'syncs', label: 'Scripts & Syncs' },
   { key: 'changes', label: 'Change Trail' },
 ]
 
@@ -459,6 +477,7 @@ export default function ObservatoryPage() {
       {tab === 'telemetry' && <TelemetryTab days={windowDays} />}
       {tab === 'openings' && <OpeningsTab />}
       {tab === 'funnel' && <FunnelTab />}
+      {tab === 'syncs' && <SyncsTab />}
       {tab === 'changes' && <ChangesTab />}
     </div>
   )
@@ -1276,5 +1295,104 @@ function SageTranscriptModal({ callLogId, onClose }: { callLogId: string; onClos
         )}
       </div>
     </div>
+  )
+}
+
+// ─── Scripts & Syncs tab ─────────────────────────────────────────────────
+
+function SyncsTab() {
+  const syncs = useQuery<SyncsOverview>({
+    queryKey: ['obs-syncs'],
+    queryFn: async () => (await apiClient.get('/observatory/syncs')).data,
+    refetchInterval: 120_000,
+  })
+  if (syncs.isLoading) return <p className="text-sm text-muted-foreground">Loading sync feeds…</p>
+  if (syncs.isError)
+    return (
+      <p className="text-sm text-red-600">
+        Syncs failed: {(syncs.error as any)?.response?.data?.error ?? String(syncs.error)}
+      </p>
+    )
+  const d = syncs.data!
+  const toneFor = (s: SyncFeedStatus['status']): Tone =>
+    s === 'ok' ? 'green' : s === 'stale' ? 'red' : s === 'error' ? 'red' : 'grey'
+  return (
+    <section className="space-y-5">
+      <p className="text-sm text-muted-foreground">
+        Every feed that keeps every application's data fresh — including the scripts that run on your Mac each
+        morning. Red = past its freshness SLA: run the script or investigate before trusting downstream numbers.
+      </p>
+      <div className="overflow-x-auto rounded-lg border">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b bg-muted/50 text-left text-xs uppercase text-muted-foreground">
+              <th className="px-3 py-2"></th>
+              <th className="px-3 py-2">Application</th>
+              <th className="px-3 py-2">Feed</th>
+              <th className="px-3 py-2">What it keeps fresh</th>
+              <th className="px-3 py-2">Runs via</th>
+              <th className="px-3 py-2 text-right">Last success</th>
+              <th className="px-3 py-2 text-right">Age</th>
+              <th className="px-3 py-2 text-right">SLA</th>
+              <th className="px-3 py-2">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {d.feeds.map((f) => (
+              <tr key={f.key} className={`border-b text-xs last:border-0 ${f.status === 'stale' || f.status === 'error' ? 'bg-red-500/5' : ''}`}>
+                <td className="px-3 py-1.5">
+                  <StatusDot tone={toneFor(f.status)} />
+                </td>
+                <td className="whitespace-nowrap px-3 py-1.5">{f.app}</td>
+                <td className="px-3 py-1.5 font-medium">{f.name}</td>
+                <td className="max-w-xs px-3 py-1.5 text-muted-foreground">{f.feeds}</td>
+                <td className="whitespace-nowrap px-3 py-1.5">{f.runBy}</td>
+                <td className="whitespace-nowrap px-3 py-1.5 text-right font-mono">
+                  {f.lastRunAt ? new Date(f.lastRunAt).toLocaleString() : '—'}
+                </td>
+                <td className={`px-3 py-1.5 text-right ${f.status === 'stale' ? 'font-semibold text-red-600 dark:text-red-400' : ''}`}>
+                  {f.ageHours != null ? `${f.ageHours}h` : '—'}
+                </td>
+                <td className="px-3 py-1.5 text-right text-muted-foreground">{f.slaHours ? `${f.slaHours}h` : '—'}</td>
+                <td className="max-w-xs px-3 py-1.5 text-muted-foreground">{f.detail ?? ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div>
+        <h4 className="mb-1.5 text-sm font-medium">
+          Patient Console — NextGen appointment activity (all sources: Sage, SD pilot, staff in the console)
+        </h4>
+        {!d.consoleConfigured && (
+          <p className="text-xs text-muted-foreground">
+            Add the OBS_CONSOLE_DATABASE_URL secret and redeploy to light this up.
+          </p>
+        )}
+        {d.consoleActivity.length > 0 && (
+          <div className="overflow-x-auto rounded-md border">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b bg-muted/50 text-left uppercase text-muted-foreground">
+                  <th className="px-3 py-1.5">Day (sync date)</th>
+                  <th className="px-3 py-1.5 text-right">Appointments synced</th>
+                  <th className="px-3 py-1.5 text-right">Of which cancelled</th>
+                </tr>
+              </thead>
+              <tbody>
+                {d.consoleActivity.map((a) => (
+                  <tr key={a.day} className="border-b last:border-0">
+                    <td className="px-3 py-1.5 font-mono">{a.day}</td>
+                    <td className="px-3 py-1.5 text-right">{a.apptsSynced.toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-right">{a.cancelled.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
   )
 }
