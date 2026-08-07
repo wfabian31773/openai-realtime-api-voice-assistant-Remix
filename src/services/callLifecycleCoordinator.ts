@@ -262,11 +262,53 @@ class CallLifecycleCoordinator extends EventEmitter {
     return this.activeCalls.get(callLogId);
   }
 
+  /** externalId → callLogId resolved straight from the database (see appendViaDbBySid). */
+  private dbResolvedTranscriptIds = new Map<string, string>();
+
+  /**
+   * Cross-instance fallback: in-memory registration does not survive the
+   * OpenAI session landing on a different instance than the Twilio webhook
+   * (2026-08-07: command-center live transcripts froze at line 1 — every
+   * later line sat in pendingTranscripts for 60s and was dropped). A Twilio
+   * CallSid always resolves against call_logs.call_sid, and the append is
+   * an atomic SQL concat so two instances can never clobber each other.
+   */
+  private async appendViaDbBySid(externalId: string, line: string): Promise<boolean> {
+    try {
+      let resolvedId = this.dbResolvedTranscriptIds.get(externalId);
+      if (!resolvedId) {
+        const rows = await db
+          .select({ id: callLogs.id })
+          .from(callLogs)
+          .where(eq(callLogs.callSid, externalId))
+          .limit(1);
+        if (!rows.length) return false;
+        resolvedId = rows[0].id;
+        if (this.dbResolvedTranscriptIds.size > 2000) this.dbResolvedTranscriptIds.clear();
+        this.dbResolvedTranscriptIds.set(externalId, resolvedId);
+      }
+      await db
+        .update(callLogs)
+        .set({ transcript: sql`COALESCE(${callLogs.transcript} || E'\n', '') || ${line}` })
+        .where(eq(callLogs.id, resolvedId));
+      return true;
+    } catch (error) {
+      logger.error(`DB-fallback transcript append failed`, { externalId, error: String(error) });
+      return false;
+    }
+  }
+
   async appendTranscript(callLogIdOrExternalId: string, line: string): Promise<void> {
     const callLogId = this.callIdMappings.get(callLogIdOrExternalId) || callLogIdOrExternalId;
     const record = this.activeCalls.get(callLogId);
-    
+
     if (!record) {
+      // A Twilio CallSid resolves via the database even when this instance
+      // never registered the call — prefer that over buffer-and-drop.
+      if (/^CA[0-9a-fA-F]{32}$/.test(callLogIdOrExternalId)) {
+        const appended = await this.appendViaDbBySid(callLogIdOrExternalId, line);
+        if (appended) return;
+      }
       // Buffer transcript lines that arrive before call is registered
       // This happens when OpenAI sends transcript events before Twilio webhook completes
       if (!this.pendingTranscripts.has(callLogIdOrExternalId)) {

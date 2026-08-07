@@ -2681,8 +2681,10 @@ async function observeCall(
         if (callLogId) {
           callLifecycleCoordinator.appendTranscript(callLogId, `CALLER: ${transcript}`);
         } else {
-          // Fallback: try to append using openAiCallId (coordinator may have the mapping)
-          callLifecycleCoordinator.appendTranscript(callId, `CALLER: ${transcript}`);
+          // Fallback: the Twilio CallSid (from the conference name) resolves
+          // via the DB even across instances; the openai callId cannot.
+          const twilioSid = confName?.replace(/^(test_|outbound_)?conf_/, '');
+          callLifecycleCoordinator.appendTranscript(twilioSid || callId, `CALLER: ${transcript}`);
         }
         // Also keep in-memory for backward compatibility
         if (!callTranscripts.has(callId)) {
@@ -2778,8 +2780,10 @@ async function observeCall(
         if (callLogId) {
           callLifecycleCoordinator.appendTranscript(callLogId, `AGENT: ${transcript}`);
         } else {
-          // Fallback: try to append using openAiCallId (coordinator may have the mapping)
-          callLifecycleCoordinator.appendTranscript(callId, `AGENT: ${transcript}`);
+          // Fallback: the Twilio CallSid (from the conference name) resolves
+          // via the DB even across instances; the openai callId cannot.
+          const twilioSid = confName?.replace(/^(test_|outbound_)?conf_/, '');
+          callLifecycleCoordinator.appendTranscript(twilioSid || callId, `AGENT: ${transcript}`);
         }
         // Also keep in-memory for backward compatibility
         if (!callTranscripts.has(callId)) {
