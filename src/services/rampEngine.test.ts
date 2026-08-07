@@ -175,3 +175,39 @@ describe('rampEngine — full rails (Answering Service end-to-end)', () => {
     expect(s2.line).toBe(RAMP_LINES.confirmCallback('4444'));
   });
 });
+
+describe('rampEngine — PCP full rails (professional end-to-end)', () => {
+  beforeEach(() => { clearAllLedgers(); releaseRamp('p2'); });
+
+  it('records request → collect caller → fax number → file directive', async () => {
+    seedLedger('p2', { callerPhone: '+17605551000' });
+    startRamp('p2', 'professional');
+    let s = await onCallerUtterance('p2', 'I need medical records for a mutual patient', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.collectCaller);
+    s = await onCallerUtterance('p2', 'Dr. Perez from Scripps Coastal', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.collectFax);
+    s = await onCallerUtterance('p2', 'fax it to 760-555-1234', verifyYes);
+    expect(s.line).toContain('file this request');
+    expect(getLedger('p2')!.faxNumber).toContain('7605551234');
+    expect(rampActive('p2')).toBe(false);
+  });
+
+  it('scheduling request → immediate PCP queue transfer directive', async () => {
+    seedLedger('p2', {});
+    startRamp('p2', 'professional');
+    await onCallerUtterance('p2', 'I want to schedule a patient for a screening', verifyYes);
+    const s = await onCallerUtterance('p2', 'Maria at High Desert Medical Group', verifyYes);
+    expect(s.line).toContain('handoff_to_pcp');
+    expect(rampActive('p2')).toBe(false);
+  });
+
+  it('other request → callback confirm from caller-ID → PCP file directive', async () => {
+    seedLedger('p2', { callerPhone: '+17605552000' });
+    startRamp('p2', 'professional');
+    await onCallerUtterance('p2', 'question about a referral status', verifyYes);
+    let s = await onCallerUtterance('p2', 'front desk at Oceanside Family Practice', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.confirmCallback('2000'));
+    s = await onCallerUtterance('p2', 'yes', verifyYes);
+    expect(s.line).toContain("I'll make sure that gets to the right team");
+  });
+});
