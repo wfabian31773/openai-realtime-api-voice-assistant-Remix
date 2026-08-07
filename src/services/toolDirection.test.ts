@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { directionFor, withToolDirection, releaseDirectionState } from './toolDirection';
+import { directionFor, withToolDirection, releaseDirectionState, acknowledgeDayMismatch } from './toolDirection';
 
 describe('toolDirection', () => {
   it('appends the approved filed line on ticket success (answering service)', async () => {
@@ -33,5 +33,25 @@ describe('toolDirection', () => {
   it('pcp success uses the office follow-up line', () => {
     const d = directionFor('pcp', 'create_ticket', 'VA-2', 'call4')!;
     expect(d).toContain('follow up with your office');
+  });
+});
+
+describe('acknowledgeDayMismatch — S6', () => {
+  const say = (t: string) => JSON.stringify({ result: { say: t, options: 2 } });
+
+  it('prefixes the admission when the offer is on a different day', () => {
+    const out = acknowledgeDayMismatch(say('I have Wednesday, August 12 at 1:40 PM with Dr. Kim.'), '2026-08-11');
+    expect(JSON.parse(out).result.say).toMatch(/^I don't have anything on Tuesday — the closest I have is:/);
+  });
+
+  it('leaves matching-day offers untouched', () => {
+    const raw = say('I have Tuesday, August 11 at 3:10 PM with Dr. Kim.');
+    expect(acknowledgeDayMismatch(raw, '2026-08-11')).toBe(raw);
+  });
+
+  it('leaves no-availability messages and malformed results untouched', () => {
+    const raw = say('I have no openings for that visit type right now.');
+    expect(acknowledgeDayMismatch(raw, '2026-08-11')).toBe(raw);
+    expect(acknowledgeDayMismatch('not json', '2026-08-11')).toBe('not json');
   });
 });

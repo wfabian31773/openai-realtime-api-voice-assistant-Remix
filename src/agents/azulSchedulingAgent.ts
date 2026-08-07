@@ -1329,8 +1329,12 @@ export function createAzulSchedulingAgent(
       providerName: z.string().optional().describe("The provider AS THE CALLER SAID IT (e.g. 'Dr. Wernow') when the caller wants a specific provider."),
       daysAhead: z.number().optional().describe('Provider-specific search window, default 21.'),
     }),
-    execute: async (args) =>
-      tracked('sage_availability', compact({ ...args, callId: metadata?.callId })),
+    execute: async (args) => {
+      const raw = await tracked('sage_availability', compact({ ...args, callId: metadata?.callId }));
+      // S6: day-mismatch admission comes FIRST (rewrites the 'say' directive).
+      const { acknowledgeDayMismatch } = await import('../services/toolDirection');
+      return acknowledgeDayMismatch(raw, (args as { preferredDate?: string }).preferredDate);
+    },
   });
 
   const sageNewPatientIntakeTool = tool({

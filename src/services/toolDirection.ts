@@ -85,3 +85,36 @@ export function withToolDirection<A extends unknown[]>(
     }
   };
 }
+
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+/**
+ * S6 (approved): when the caller asked for a specific day and availability
+ * comes back on a DIFFERENT day, the admission comes FIRST — the offer is
+ * rewritten to "I don't have anything on {day} — the closest I have is…"
+ * before the model ever reads it (live SD failure 2026-08-07: Tuesday
+ * asked, Wednesday offered twice with no acknowledgement).
+ */
+export function acknowledgeDayMismatch(raw: string, preferredDate?: string): string {
+  if (!preferredDate || typeof raw !== 'string') return raw;
+  try {
+    const reqDay = WEEKDAYS[new Date(`${preferredDate}T12:00:00`).getDay()];
+    if (!reqDay) return raw;
+    const parsed = JSON.parse(raw);
+    const env = parsed?.result ?? parsed;
+    if (!env || typeof env.say !== 'string') return raw;
+    const sayLower = env.say.toLowerCase();
+    if (sayLower.includes(reqDay)) return raw; // offer matches the asked day
+    const offersOtherDay = WEEKDAYS.some((d) => d !== reqDay && sayLower.includes(d));
+    if (!offersOtherDay) return raw; // no-availability messages pass through
+    const cap = reqDay.charAt(0).toUpperCase() + reqDay.slice(1);
+    env.say = `I don't have anything on ${cap} — the closest I have is: ${env.say}`;
+    if (parsed?.result) {
+      parsed.result = env;
+      return JSON.stringify(parsed);
+    }
+    return JSON.stringify(env);
+  } catch {
+    return raw;
+  }
+}
