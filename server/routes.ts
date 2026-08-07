@@ -143,6 +143,53 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Drill-downs — the nuts and bolts behind every tile ("this tells me
+  // nothing about WHY they are breaking", Wayne 2026-08-06). Grader checks
+  // + worst calls per Ops Hub agent; guards, director feed, tool errors,
+  // and telemetry for SAGE; and full transcripts on click-through.
+  app.get('/api/observatory/agent-detail/:agentId', isAuthenticated, async (req, res) => {
+    try {
+      const days = Math.min(30, Math.max(1, parseInt(String(req.query.days ?? '7'), 10) || 7));
+      const { opsHubAgentDetail } = await import('./observatory/queries');
+      res.json({ windowDays: days, ...(await opsHubAgentDetail(req.params.agentId, days)) });
+    } catch (error) {
+      console.error('[observatory] agent-detail failed:', error);
+      res.status(500).json({
+        message: 'Observatory agent detail failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  app.get('/api/observatory/sage-detail', isAuthenticated, async (req, res) => {
+    try {
+      const days = Math.min(30, Math.max(1, parseInt(String(req.query.days ?? '7'), 10) || 7));
+      const { sageDetail } = await import('./observatory/queries');
+      res.json({ windowDays: days, ...(await sageDetail(days)) });
+    } catch (error) {
+      console.error('[observatory] sage-detail failed:', error);
+      res.status(500).json({
+        message: 'Observatory SAGE detail failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  app.get('/api/observatory/sage-transcript/:callLogId', isAuthenticated, async (req, res) => {
+    try {
+      const { sageCallTranscript } = await import('./observatory/queries');
+      const t = await sageCallTranscript(req.params.callLogId);
+      if (!t) return res.status(404).json({ message: 'Call not found' });
+      res.json(t);
+    } catch (error) {
+      console.error('[observatory] sage-transcript failed:', error);
+      res.status(500).json({
+        message: 'Observatory SAGE transcript failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
   app.get('/api/observatory/funnel', isAuthenticated, async (req, res) => {
     try {
       const weeks = Math.min(26, Math.max(1, parseInt(String(req.query.weeks ?? '12'), 10) || 12));

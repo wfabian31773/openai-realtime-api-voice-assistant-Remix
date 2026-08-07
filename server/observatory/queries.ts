@@ -402,3 +402,304 @@ export async function agentChangeTrail(limit = 100): Promise<AgentChange[]> {
     changedFields: r.changed_fields,
   }));
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Drill-downs — the nuts and bolts behind every tile (Wayne 2026-08-06:
+// "this tells me nothing about WHY they are breaking"). Card-anatomy law:
+// every red number opens into the guard that fired, the check that
+// failed, and the transcript of the call where it happened.
+// ────────────────────────────────────────────────────────────────────────
+
+export interface GraderCheckStat {
+  grader: string;
+  total: number;
+  fails: number;
+  criticalFails: number;
+  avgScore: number | null;
+  /** Latest human-written fail reasons from the grader itself. */
+  sampleReasons: string[];
+}
+
+export interface OpsHubWorstCall {
+  id: string;
+  createdAt: string;
+  durationSec: number | null;
+  outcome: string | null;
+  qualityScore: number | null;
+  criticalFailures: number;
+  failing: Array<{ grader: string; reason: string; severity: string | null }>;
+}
+
+export interface OpsHubAgentDetail {
+  graderChecks: GraderCheckStat[];
+  worstCalls: OpsHubWorstCall[];
+}
+
+export async function opsHubAgentDetail(agentId: string, days = 7): Promise<OpsHubAgentDetail> {
+  const checks = await pool.query(
+    `
+    SELECT g->>'grader' AS grader,
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE (g->>'pass')::boolean = false)::int AS fails,
+           COUNT(*) FILTER (WHERE (g->>'pass')::boolean = false AND g->>'severity' = 'critical')::int AS critical_fails,
+           ROUND(AVG((g->>'score')::numeric), 3) AS avg_score
+    FROM call_logs cl,
+         jsonb_array_elements((cl.grader_results::jsonb)->'graders') g
+    WHERE cl.agent_id = $1
+      AND cl.created_at >= NOW() - make_interval(days => $2::int)
+      AND cl.grader_results IS NOT NULL
+    GROUP BY 1
+    ORDER BY critical_fails DESC, fails DESC, 1
+    `,
+    [agentId, days],
+  );
+  const reasons = await pool.query(
+    `
+    SELECT g->>'grader' AS grader, g->>'reason' AS reason
+    FROM call_logs cl,
+         jsonb_array_elements((cl.grader_results::jsonb)->'graders') g
+    WHERE cl.agent_id = $1
+      AND cl.created_at >= NOW() - make_interval(days => $2::int)
+      AND cl.grader_results IS NOT NULL
+      AND (g->>'pass')::boolean = false
+    ORDER BY cl.created_at DESC
+    LIMIT 60
+    `,
+    [agentId, days],
+  );
+  const reasonMap = new Map<string, string[]>();
+  for (const r of reasons.rows) {
+    const arr = reasonMap.get(r.grader) ?? [];
+    if (arr.length < 3 && r.reason && !arr.includes(r.reason)) arr.push(r.reason);
+    reasonMap.set(r.grader, arr);
+  }
+  const worst = await pool.query(
+    `
+    SELECT cl.id, cl.created_at, cl.duration, cl.agent_outcome::text AS outcome, cl.quality_score,
+           COALESCE(((cl.grader_results::jsonb)->'summary'->>'criticalFailures')::int, 0) AS critical_failures,
+           (SELECT jsonb_agg(jsonb_build_object(
+              'grader', g->>'grader', 'reason', g->>'reason', 'severity', g->>'severity'))
+            FROM jsonb_array_elements((cl.grader_results::jsonb)->'graders') g
+            WHERE (g->>'pass')::boolean = false) AS failing
+    FROM call_logs cl
+    WHERE cl.agent_id = $1
+      AND cl.created_at >= NOW() - make_interval(days => $2::int)
+      AND cl.grader_results IS NOT NULL
+      AND COALESCE(((cl.grader_results::jsonb)->'summary'->>'criticalFailures')::int, 0) > 0
+    ORDER BY cl.created_at DESC
+    LIMIT 20
+    `,
+    [agentId, days],
+  );
+  return {
+    graderChecks: checks.rows.map((r: any) => ({
+      grader: r.grader,
+      total: r.total,
+      fails: r.fails,
+      criticalFails: r.critical_fails,
+      avgScore: r.avg_score === null ? null : Number(r.avg_score),
+      sampleReasons: reasonMap.get(r.grader) ?? [],
+    })),
+    worstCalls: worst.rows.map((r: any) => ({
+      id: r.id,
+      createdAt: r.created_at,
+      durationSec: r.duration,
+      outcome: r.outcome,
+      qualityScore: r.quality_score === null ? null : Number(r.quality_score),
+      criticalFailures: r.critical_failures,
+      failing: r.failing ?? [],
+    })),
+  };
+}
+
+export interface SageHallucinationIncident {
+  id: string;
+  createdAt: string;
+  guard: string | null;
+  detectedLanguage: string | null;
+  slotsOfferedSummary: string | null;
+  transcript: string | null;
+  callSid: string | null;
+}
+
+export interface SageDirectorEvent {
+  initiatedAt: string;
+  reason: string | null;
+  outcome: string | null;
+  answered: boolean;
+  bridgeSeconds: number | null;
+  resultedInAppointment: boolean | null;
+  callLogId: string | null;
+  notes: string | null;
+}
+
+export interface SageToolErrorStat {
+  toolName: string;
+  calls: number;
+  errors: number;
+  avgDurationMs: number | null;
+  sampleErrors: string[];
+}
+
+export interface SageWorstTelemetryCall {
+  callLogId: string | null;
+  callSid: string | null;
+  startedAt: string;
+  direction: string | null;
+  outcome: string | null;
+  maxLatencyMs: number | null;
+  greetingLatencyMs: number | null;
+  openaiErrors: number;
+  toolErrors: number;
+  reconnects: number;
+  terminationReason: string | null;
+}
+
+export interface SageDetail {
+  hallucinations: SageHallucinationIncident[];
+  hallucinationsByGuard: Record<string, number>;
+  directorFeed: SageDirectorEvent[];
+  toolErrors: SageToolErrorStat[];
+  worstTelemetry: SageWorstTelemetryCall[];
+}
+
+export async function sageDetail(days = 7): Promise<SageDetail> {
+  const halluc = await fivestarQuery<any>(
+    `
+    SELECT id, created_at, guard, detected_language, slots_offered_summary,
+           LEFT(transcript, 6000) AS transcript, call_sid
+    FROM sage_hallucination_incidents
+    WHERE created_at >= NOW() - make_interval(days => $1::int)
+    ORDER BY created_at DESC
+    LIMIT 25
+    `,
+    [days],
+  );
+  const byGuard = await fivestarQuery<any>(
+    `
+    SELECT COALESCE(guard, '(unlabelled)') AS guard, COUNT(*)::int AS n
+    FROM sage_hallucination_incidents
+    WHERE created_at >= NOW() - make_interval(days => $1::int)
+    GROUP BY 1 ORDER BY n DESC
+    `,
+    [days],
+  );
+  const director = await fivestarQuery<any>(
+    `
+    SELECT initiated_at, reason, outcome::text AS outcome,
+           (answered_at IS NOT NULL) AS answered,
+           bridge_duration_seconds, resulted_in_appointment, call_log_id,
+           LEFT(notes, 300) AS notes
+    FROM handoff_attempts
+    WHERE initiated_at >= NOW() - make_interval(days => $1::int)
+    ORDER BY initiated_at DESC
+    LIMIT 40
+    `,
+    [days],
+  );
+  const tools = await fivestarQuery<any>(
+    `
+    SELECT tool_name,
+           COUNT(*)::int AS calls,
+           COUNT(*) FILTER (WHERE outcome <> 'success' OR error_message IS NOT NULL)::int AS errors,
+           ROUND(AVG(duration_ms), 0) AS avg_ms
+    FROM sage_tool_calls
+    WHERE created_at >= NOW() - make_interval(days => $1::int)
+    GROUP BY 1
+    ORDER BY errors DESC, calls DESC
+    `,
+    [days],
+  );
+  const toolErrSamples = await fivestarQuery<any>(
+    `
+    SELECT tool_name, LEFT(error_message, 200) AS err
+    FROM sage_tool_calls
+    WHERE created_at >= NOW() - make_interval(days => $1::int) AND error_message IS NOT NULL
+    ORDER BY created_at DESC
+    LIMIT 60
+    `,
+    [days],
+  );
+  const errMap = new Map<string, string[]>();
+  for (const r of toolErrSamples.rows) {
+    const arr = errMap.get(r.tool_name) ?? [];
+    if (arr.length < 3 && r.err && !arr.includes(r.err)) arr.push(r.err);
+    errMap.set(r.tool_name, arr);
+  }
+  const telem = await fivestarQuery<any>(
+    `
+    SELECT call_log_id, call_sid, started_at, direction, outcome::text AS outcome,
+           response_latency_max_ms, greeting_latency_ms,
+           openai_error_count, tool_error_count, reconnect_count, termination_reason
+    FROM sage_voice_call_telemetry
+    WHERE started_at >= NOW() - make_interval(days => $1::int)
+      AND (openai_error_count > 0 OR tool_error_count > 0 OR reconnect_count > 0
+           OR response_latency_max_ms > 6000)
+    ORDER BY started_at DESC
+    LIMIT 25
+    `,
+    [days],
+  );
+  return {
+    hallucinations: halluc.rows.map((r: any) => ({
+      id: r.id,
+      createdAt: r.created_at,
+      guard: r.guard,
+      detectedLanguage: r.detected_language,
+      slotsOfferedSummary: r.slots_offered_summary,
+      transcript: r.transcript,
+      callSid: r.call_sid,
+    })),
+    hallucinationsByGuard: Object.fromEntries(byGuard.rows.map((r: any) => [r.guard, r.n])),
+    directorFeed: director.rows.map((r: any) => ({
+      initiatedAt: r.initiated_at,
+      reason: r.reason,
+      outcome: r.outcome,
+      answered: r.answered,
+      bridgeSeconds: r.bridge_duration_seconds,
+      resultedInAppointment: r.resulted_in_appointment,
+      callLogId: r.call_log_id,
+      notes: r.notes,
+    })),
+    toolErrors: tools.rows.map((r: any) => ({
+      toolName: r.tool_name,
+      calls: r.calls,
+      errors: r.errors,
+      avgDurationMs: r.avg_ms === null ? null : Number(r.avg_ms),
+      sampleErrors: errMap.get(r.tool_name) ?? [],
+    })),
+    worstTelemetry: telem.rows.map((r: any) => ({
+      callLogId: r.call_log_id,
+      callSid: r.call_sid,
+      startedAt: r.started_at,
+      direction: r.direction,
+      outcome: r.outcome,
+      maxLatencyMs: r.response_latency_max_ms,
+      greetingLatencyMs: r.greeting_latency_ms,
+      openaiErrors: r.openai_error_count ?? 0,
+      toolErrors: r.tool_error_count ?? 0,
+      reconnects: r.reconnect_count ?? 0,
+      terminationReason: r.termination_reason,
+    })),
+  };
+}
+
+/** Full transcript of one SAGE call — the click-through from any drill-down row. */
+export async function sageCallTranscript(callLogId: string): Promise<{
+  id: string;
+  createdAt: string;
+  direction: string | null;
+  outcome: string | null;
+  transcript: string | null;
+} | null> {
+  const { rows } = await fivestarQuery<any>(
+    `
+    SELECT id, created_at, direction, outcome::text AS outcome, transcript
+    FROM call_logs WHERE id = $1 LIMIT 1
+    `,
+    [callLogId],
+  );
+  if (!rows.length) return null;
+  const r = rows[0];
+  return { id: r.id, createdAt: r.created_at, direction: r.direction, outcome: r.outcome, transcript: r.transcript };
+}
