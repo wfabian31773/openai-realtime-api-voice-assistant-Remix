@@ -99,6 +99,10 @@ export function renderKnownFacts(callId: string): string | null {
       `Callback number: ${f.callbackNumber}${f.callbackConfirmed ? ' (confirmed)' : ` — confirm ONCE with "Is this number ending in ${f.callbackNumber.slice(-4)} the best one to reach you?", never ask them to read out digits`}.`,
     );
   if (f.newOrExisting) lines.push(`Caller classification: ${f.newOrExisting} patient (do not re-ask).`);
+  else if (f.matchedFirstName)
+    lines.push(
+      'This caller was RECOGNIZED from their phone number — they are an EXISTING patient by definition. NEVER ask whether they are a new or existing patient, and NEVER treat a failed lookup as reason to ask: if details do not match, say so and offer to take a message — do not interview them.',
+    );
   if (f.intent) lines.push(`Stated reason for calling: ${f.intent} (do not re-ask why they called).`);
   if (f.language) lines.push(`Preferred language: ${f.language}.`);
   if (f.medicalGroup) lines.push(`Calling from: ${f.medicalGroup}${f.callerRole ? ` (${f.callerRole})` : ''} (do not re-ask).`);
