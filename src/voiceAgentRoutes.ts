@@ -3255,9 +3255,28 @@ async function observeCall(
             const lf = getCallFacts(callId);
             const displayName = `${lf?.firstName ?? lf?.matchedFirstName ?? ''} ${lf?.lastName ?? lf?.matchedLastName ?? ''}`.trim();
             const logId = callMetadataForDB.get(callId)?.dbCallLogId;
-            if (displayName && logId) {
-              void storage.updateCallLog(logId, { callerName: lf?.identityVerified ? `${displayName} ✓` : displayName })
-                .catch((e) => console.warn(`[LEDGER] callerName update failed for ${callId}:`, e));
+            if (displayName) {
+              const nameValue = lf?.identityVerified ? `${displayName} ✓` : displayName;
+              if (logId) {
+                void storage.updateCallLog(logId, { callerName: nameValue })
+                  .catch((e) => console.warn(`[LEDGER] callerName update failed for ${callId}:`, e));
+              } else {
+                // Cross-instance: resolve by Twilio CallSid like the transcript path.
+                const nameConf = getConferenceName(callId);
+                const nameSid = nameConf?.replace(/^(test_|outbound_)?conf_/, '');
+                if (nameSid && /^CA[0-9a-fA-F]{32}$/.test(nameSid)) {
+                  void (async () => {
+                    try {
+                      const { db } = await import('../server/db');
+                      const { callLogs: clTable } = await import('../shared/schema');
+                      const { eq } = await import('drizzle-orm');
+                      await db.update(clTable).set({ callerName: nameValue }).where(eq(clTable.callSid, nameSid));
+                    } catch (e) {
+                      console.warn(`[LEDGER] callerName sid-update failed for ${callId}:`, e);
+                    }
+                  })();
+                }
+              }
             }
           }
         } catch (factsErr) {
