@@ -14,7 +14,7 @@ possible. Less room for errors and hallucinations."
 |---|---|---|---|
 | SD Pilot (azul-scheduling) | YES | live transfer | "I'm unable to schedule new patients, but our team can take care of that for you — one moment while I connect you." |
 | SAGE (5Star DRS) | YES | live transfer | same |
-| Answering Service | NO — tickets only | transfer FIRST; ticket only if staff don't pick up: "Let me try to connect you with our team — if they're unavailable I'll take your information and have them call you right back." | never claims scheduling ability |
+| Answering Service | NO — tickets only, NEVER transfers | ALWAYS, no matter how many times asked: "All of our agents are currently busy at the moment — I can take a message and have the team contact you as soon as they become available." | never claims scheduling or transfer ability |
 | No-IVR After-Hours | NO — tickets only | "Our offices are closed — I'll take your information and make sure the right team member calls you back first thing." | never claims scheduling ability |
 | PCP Support | NO | ALL schedule requests → PCP queue transfer | routes, never books |
 
@@ -39,9 +39,11 @@ possible. Less room for errors and hallucinations."
 - **S6 appointment intent (verified, scheduling-capable agent)**: "What
   day and times work best for you?" — never ask clinic/provider first;
   derive from the file and the answer.
-- **S7 human request**: 1st: "I can usually help faster — may I ask what
-  it's regarding?" 2nd: capability-matrix response, immediately. Never a
-  third deflection.
+- **S7 human request**: Answering Service: the busy-team script above,
+  EVERY time — it never transfers, so there is nothing to deflect to;
+  collect the message. Lines that CAN transfer (SD, SAGE, PCP-to-queue):
+  1st: "I can usually help faster — may I ask what it's regarding?" 2nd:
+  transfer immediately. Never a third deflection.
 - **S8 repeat caller (3+ calls, same issue)**: "I see you've called a few
   times about this — I'm going to make sure this gets elevated to a senior
   team member right away." → priority ticket. Cross-call memory keyed on
