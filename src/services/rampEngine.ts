@@ -70,11 +70,12 @@ export function startRamp(callId: string, mode: RampMode = 'patient'): RampStep 
   const facts = getLedger(callId);
   const matched = Boolean(facts?.matchedFirstName);
   const status: RampStatus = {
-    state:
-      mode === 'professional' ? 'CAPTURE_INTENT'
-      : matched ? 'CONFIRM_ID'
-      : mode === 'sd_front' ? 'CLASSIFY'
-      : 'CLASSIFY',
+    // ALL modes open intent-first (live finding 2026-08-07: greetings ask
+    // "how may I help", so the first utterance is the REASON — parsing it
+    // as yes/no killed the ramp silently). The ramp asks the identity
+    // question itself as a forced line, so greeting personalization races
+    // no longer matter.
+    state: mode === 'sd_front' ? (matched ? 'CONFIRM_ID' : 'CLASSIFY') : 'CAPTURE_INTENT',
     mode,
     unparsedCount: 0,
     verifyFails: 0,
@@ -117,20 +118,42 @@ export async function onCallerUtterance(
 
   if (URGENT.test(text)) return disengage(status); // safety: model + guardrails own urgency
 
+  const reask = (): string | null => {
+    const f = getLedger(callId);
+    switch (status.state) {
+      case 'CONFIRM_ID': return f?.matchedFirstName ? RAMP_LINES.confirmId(f.matchedFirstName) : RAMP_LINES.classify;
+      case 'CLASSIFY': return RAMP_LINES.classify;
+      case 'COLLECT_NAME': return RAMP_LINES.collectName;
+      case 'COLLECT_DOB': return RAMP_LINES.collectDob;
+      case 'COLLECT_CALLER': return RAMP_LINES.collectCaller;
+      default: return null;
+    }
+  };
   const unparsable = (): RampStep => {
     status.unparsedCount += 1;
-    if (status.unparsedCount >= 2) return disengage(status);
-    return { line: null, status }; // let the model handle one odd reply, ramp resumes next turn
+    if (status.unparsedCount >= 2) {
+      console.warn(`[RAMP] DISENGAGED (unparsable x2) at ${status.state} for ${callId}`);
+      return disengage(status);
+    }
+    // Rigidity: re-ask the SAME question as a forced line, never silent surrender.
+    return { line: reask(), status };
   };
 
   switch (status.state) {
     case 'CAPTURE_INTENT': {
-      // Professional line (PCP): the greeting already asked how to help —
-      // the first utterance IS the intent; then collect who/where from.
       if (text.trim().split(/\s+/).length >= 2) {
         updateLedger(callId, { intent: text.trim().slice(0, 200) });
-        status.state = 'COLLECT_CALLER';
-        return { line: RAMP_LINES.collectCaller, status };
+        if (status.mode === 'professional') {
+          status.state = 'COLLECT_CALLER';
+          return { line: RAMP_LINES.collectCaller, status };
+        }
+        const known = getLedger(callId);
+        if (known?.matchedFirstName) {
+          status.state = 'CONFIRM_ID';
+          return { line: RAMP_LINES.confirmId(known.matchedFirstName), status };
+        }
+        status.state = 'CLASSIFY';
+        return { line: RAMP_LINES.classify, status };
       }
       return unparsable();
     }

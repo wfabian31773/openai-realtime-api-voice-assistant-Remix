@@ -2731,11 +2731,15 @@ async function observeCall(
                 if (responseInFlight.has(callId)) {
                   try { (session.transport as any).sendEvent({ type: 'response.cancel' }); } catch { /* fine */ }
                 }
-                (session.transport as any).sendEvent({
-                  type: 'response.create',
-                  response: { instructions: `Say this to the caller word-for-word, without adding, removing, or rephrasing anything: "${step.line}" - Then stop and wait for their response.` },
-                });
-                console.info(`[RAMP] ${step.status.state} line forced for ${callId}`);
+                // Same guarantee as greetings: parked, transcript-verified at
+                // the turn boundary, resent once if it never played.
+                armGreetingGuarantee(
+                  callId,
+                  step.line,
+                  `Say this to the caller word-for-word, without adding, removing, or rephrasing anything: "${step.line}" - Then stop and wait for their response.`,
+                  session.transport as any,
+                );
+                console.info(`[RAMP] ${step.status.state} line forced (guaranteed) for ${callId}`);
               } else if (!step.status.active) {
                 console.info(`[RAMP] Exited (${step.status.state}) for ${callId} — model proceeds with locked facts`);
               }
