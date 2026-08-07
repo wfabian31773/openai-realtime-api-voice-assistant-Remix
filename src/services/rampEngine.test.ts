@@ -90,14 +90,13 @@ describe('rampEngine — approved scripts S1-S5', () => {
 describe('rampEngine — PCP professional mode (S §3)', () => {
   beforeEach(() => { clearAllLedgers(); releaseRamp('p'); });
 
-  it('captures intent, collects caller/medical group, then exits to the model', async () => {
+  it('captures intent, collects caller/medical group, then continues on rails (records → fax)', async () => {
     seedLedger('p', { callerPhone: '+15551234567' });
     startRamp('p', 'professional');
     let s = await onCallerUtterance('p', 'I need records faxed for a mutual patient', verifyYes);
     expect(s.line).toBe(RAMP_LINES.collectCaller);
     s = await onCallerUtterance('p', 'This is Dana from Scripps Coastal Medical Group', verifyYes);
-    expect(s.line).toBeNull();
-    expect(rampActive('p')).toBe(false);
+    expect(s.line).toBe(RAMP_LINES.collectFax);
     const f = getLedger('p')!;
     expect(f.intent).toContain('records faxed');
     expect(f.medicalGroup).toContain('Scripps Coastal');
