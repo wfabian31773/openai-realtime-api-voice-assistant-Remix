@@ -18,6 +18,7 @@ export type RampState =
   | 'CAPTURE_INTENT'
   | 'COLLECT_CALLER'
   | 'CONFIRM_ID'
+  | 'DOB_HANDOFF'
   | 'CLASSIFY'
   | 'COLLECT_NAME'
   | 'COLLECT_DOB'
@@ -26,7 +27,7 @@ export type RampState =
   | 'DONE_MESSAGE'
   | 'DISENGAGED';
 
-export type RampMode = 'patient' | 'professional';
+export type RampMode = 'patient' | 'professional' | 'sd_front';
 
 export interface RampStatus {
   state: RampState;
@@ -69,7 +70,11 @@ export function startRamp(callId: string, mode: RampMode = 'patient'): RampStep 
   const facts = getLedger(callId);
   const matched = Boolean(facts?.matchedFirstName);
   const status: RampStatus = {
-    state: mode === 'professional' ? 'CAPTURE_INTENT' : matched ? 'CONFIRM_ID' : 'CLASSIFY',
+    state:
+      mode === 'professional' ? 'CAPTURE_INTENT'
+      : matched ? 'CONFIRM_ID'
+      : mode === 'sd_front' ? 'CLASSIFY'
+      : 'CLASSIFY',
     mode,
     unparsedCount: 0,
     verifyFails: 0,
@@ -140,6 +145,13 @@ export async function onCallerUtterance(
     }
     case 'CONFIRM_ID': {
       if (YES.test(text) && !NO.test(text)) {
+        if (status.mode === 'sd_front') {
+          // SD: force the DOB ask, then hand the answer to the existing
+          // verify_patient_identity tool flow (guards, director marks,
+          // server-side personId) — the ramp never bypasses it.
+          status.state = 'DOB_HANDOFF';
+          return { line: RAMP_LINES.confirmDob, status };
+        }
         status.state = 'COLLECT_DOB';
         return { line: RAMP_LINES.confirmDob, status };
       }
@@ -149,7 +161,18 @@ export async function onCallerUtterance(
       }
       return unparsable();
     }
+    case 'DOB_HANDOFF': {
+      status.state = 'DONE_VERIFIED';
+      status.active = false;
+      return { line: null, status }; // model + verify tool own it from here
+    }
     case 'CLASSIFY': {
+      if (NEW_PAT.test(text) && !EXISTING.test(text) && status.mode === 'sd_front') {
+        updateLedger(callId, { newOrExisting: 'new' });
+        status.state = 'DONE_MESSAGE';
+        status.active = false;
+        return { line: "I'm unable to schedule new patients, but our team can take care of that for you — one moment while I connect you.", status };
+      }
       if (NEW_PAT.test(text) && !EXISTING.test(text)) {
         updateLedger(callId, { newOrExisting: 'new' });
         status.state = 'COLLECT_NAME';
@@ -174,6 +197,11 @@ export async function onCallerUtterance(
     case 'COLLECT_DOB': {
       if (DOB.test(text)) {
         updateLedger(callId, { dateOfBirth: text.trim() });
+        if (status.mode === 'sd_front') {
+          status.state = 'DONE_VERIFIED';
+          status.active = false;
+          return { line: null, status }; // model calls verify with collected facts
+        }
         // New patients on ticket lines don't verify — straight to message flow.
         if (facts?.newOrExisting === 'new') {
           status.state = 'DONE_MESSAGE';
