@@ -61,3 +61,19 @@ describe('harvestCallerLine — gathering independent of the driver', () => {
     expect(getLedger('h')!.dateOfBirth).toBe('01/01/1990');
   });
 });
+
+describe('dobMatchesContext — verify against the pulled record, not the system', () => {
+  beforeEach(() => clearAllLedgers());
+  it('matches spoken forms against stored ISO', async () => {
+    const { dobMatchesContext } = await import('./callFactsLedger');
+    seedLedger('d', { matchedDob: '1973-03-17' } as any);
+    expect(dobMatchesContext('d', 'March 17th, 1973')).toBe(true);
+    expect(dobMatchesContext('d', '3/17/1973')).toBe(true);
+    expect(dobMatchesContext('d', 'May 10 1983')).toBe(false);
+  });
+  it('returns null (fall back to lookup) when no context DOB exists', async () => {
+    const { dobMatchesContext } = await import('./callFactsLedger');
+    seedLedger('d', {});
+    expect(dobMatchesContext('d', '3/17/1973')).toBeNull();
+  });
+});
