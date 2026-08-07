@@ -27,6 +27,7 @@ import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
 import { resolveConfiguredGreeting, scheduleGreetingCacheWarm } from './services/greetingResolver';
+import { seedLedger, renderKnownFacts, releaseLedger } from './services/callFactsLedger';
 import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
 import './services/azulRegressionWatch'; // Phase 7: daily grade-regression check (side-effect timers)
@@ -212,6 +213,9 @@ interface PendingGreeting {
 }
 const pendingGreetings = new Map<string, PendingGreeting>();
 
+/** CP-2: last KNOWN-FACTS block injected per call — re-inject only on change. */
+const lastFactsRender = new Map<string, string>();
+
 function normaliseSpoken(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
 }
@@ -266,16 +270,22 @@ function checkGreetingDelivered(callId: string, event: any): void {
   if (!pending) return;
   if (Date.now() > pending.expiresAt) {
     pendingGreetings.delete(callId);
+    lastFactsRender.delete(callId);
+    releaseLedger(callId);
     return;
   }
   const spoken = normaliseSpoken(extractResponseTranscript(event));
   if (pending.attempts > 0 && pending.prefix && spoken.startsWith(pending.prefix)) {
-    pendingGreetings.delete(callId); // greeting (or its barged-in start) played
+    pendingGreetings.delete(callId);
+    lastFactsRender.delete(callId);
+    releaseLedger(callId); // greeting (or its barged-in start) played
     return;
   }
   if (pending.attempts >= 2) {
     console.warn(`[GREETING] Giving up on greeting for ${callId} after ${pending.attempts} attempts (last turn heard: "${spoken.slice(0, 60)}")`);
     pendingGreetings.delete(callId);
+    lastFactsRender.delete(callId);
+    releaseLedger(callId);
     return;
   }
   console.info(`[GREETING] Turn ended without the scripted greeting on ${callId} (heard: "${spoken.slice(0, 60)}") — resending at turn boundary`);
@@ -3188,6 +3198,22 @@ async function observeCall(
           pendingAzulPrecontext = null;
           console.log(`[AZUL-SCHED] Late pre-context APPLIED at turn boundary for ${callId}`);
         }
+        // CP-2: KNOWN-FACTS injection — at the turn boundary (the one safe
+        // moment), and only when the ledger actually changed. A system item
+        // is read on the next response without triggering speech.
+        try {
+          const facts = renderKnownFacts(callId);
+          if (facts && facts !== lastFactsRender.get(callId)) {
+            (session.transport as any).sendEvent({
+              type: 'conversation.item.create',
+              item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: facts }] },
+            });
+            lastFactsRender.set(callId, facts);
+            console.info(`[LEDGER] KNOWN FACTS injected for ${callId} (${facts.length} chars)`);
+          }
+        } catch (factsErr) {
+          console.warn(`[LEDGER] Facts injection failed for ${callId}:`, factsErr);
+        }
       }
     });
 
@@ -3365,6 +3391,20 @@ async function observeCall(
     //
     // Fix: when the caller is recognised, the FORCED greeting becomes the
     // familiar one, so there is exactly one instruction to follow.
+    // CP-2: seed the call-facts ledger before the first word — caller phone
+    // (callback candidate), pre-context match, language (docs/ramp/playbook.md).
+    try {
+      const seedConf = getConferenceName(callId);
+      seedLedger(callId, {
+        callerPhone: seedConf ? ConferenceNametoCallerIDMapping[seedConf] : undefined,
+        matchedFirstName: azulMetadataRef?.precontext?.matched ? azulMetadataRef.precontext.firstName : undefined,
+        matchedLastName: azulMetadataRef?.precontext?.matched ? azulMetadataRef.precontext.lastNameOnFile : undefined,
+        language: metadata?.language,
+      });
+    } catch (ledgerErr) {
+      console.warn(`[LEDGER] Seed failed for ${callId}:`, ledgerErr);
+    }
+
     let agentGreeting = metadata?.agentGreeting;
     // The database `agents.welcome_greeting` outranks the hardcoded route/
     // config strings — see greetingResolver. Critically, it also RESCUES the
@@ -3766,6 +3806,8 @@ async function observeCall(
     activeSessions.delete(callId);
     responseInFlight.delete(callId);
     pendingGreetings.delete(callId);
+    lastFactsRender.delete(callId);
+    releaseLedger(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
     deadAirWatchdog.release(callId);

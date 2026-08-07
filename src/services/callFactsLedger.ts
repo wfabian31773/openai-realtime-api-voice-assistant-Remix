@@ -32,6 +32,14 @@ export interface CallFacts {
   newOrExisting?: 'new' | 'existing';
   intent?: string;
   priorCallsSameIssue?: number;
+  /** PCP line (docs/ramp/playbook.md): who is calling and how to respond. */
+  callerRole?: string;
+  medicalGroup?: string;
+  /** Contact method MUST match the request: fax->faxNumber, email->email. */
+  contactMethod?: 'callback' | 'fax' | 'email';
+  faxNumber?: string;
+  email?: string;
+  patientReferenced?: string;
 }
 
 const ledgers = new Map<string, CallFacts>();
@@ -91,6 +99,13 @@ export function renderKnownFacts(callId: string): string | null {
   if (f.newOrExisting) lines.push(`Caller classification: ${f.newOrExisting} patient (do not re-ask).`);
   if (f.intent) lines.push(`Stated reason for calling: ${f.intent} (do not re-ask why they called).`);
   if (f.language) lines.push(`Preferred language: ${f.language}.`);
+  if (f.medicalGroup) lines.push(`Calling from: ${f.medicalGroup}${f.callerRole ? ` (${f.callerRole})` : ''} (do not re-ask).`);
+  if (f.contactMethod === 'fax')
+    lines.push(f.faxNumber ? `Fax number for this request: ${f.faxNumber} (confirmed — do not re-ask).` : 'A FAX was requested — collect a fax number, NOT a callback number.');
+  if (f.contactMethod === 'email')
+    lines.push(f.email ? `Email for this request: ${f.email} (confirmed — do not re-ask).` : 'EMAIL was requested — collect an email address, NOT a callback number.');
+  if (f.patientReferenced)
+    lines.push(`Patient referenced: ${f.patientReferenced} — attach silently if matched; NEVER block or interrogate the professional about it.`);
   if (f.priorCallsSameIssue && f.priorCallsSameIssue >= 3)
     lines.push(
       `This caller has called ${f.priorCallsSameIssue} times about this — acknowledge it and elevate: "I see you've called a few times about this — I'm going to make sure this gets elevated to a senior team member right away."`,
