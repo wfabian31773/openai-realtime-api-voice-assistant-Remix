@@ -171,7 +171,7 @@ describe('human-request escalation', () => {
     const d = conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Representative.');
     expect(d?.kind).toBe('human_request');
     expect(d?.text).toMatch(/CANNOT transfer calls/);
-    expect(d?.text).toMatch(/call them back/);
+    expect(d?.text).toMatch(/take a message and have the team contact you/);
     expect(d?.text).toMatch(/nobody is coming to this call/);
     expect(d?.text).toMatch(/Create the ticket NOW/); // the exit still rides along
     conversationLoopGuard.releaseCall(callId);

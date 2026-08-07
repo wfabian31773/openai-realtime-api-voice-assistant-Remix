@@ -141,7 +141,7 @@ const AGENT_EXIT: Record<string, string> = {
 /** What to say to a caller asking for a human on an agent that cannot
  *  transfer: name the limitation, offer the real alternative, then act. */
 const NO_TRANSFER_HUMAN_DIRECTIVE =
-  'SERVER STATE CHECK: The caller has asked to reach a person, and you CANNOT transfer calls — there is no handoff on this line. Tell them so NOW, plainly, in your own words: you are not able to connect them to someone, what you CAN do is put in a request and have a team member call them back. Do not say anyone will "be right with them" — nobody is coming to this call. Do not repeat a vague reassurance, and do not make them ask twice. Then take only what you still need and file the ticket with "CALLER REQUESTED A HUMAN" at the start of the description.';
+  'SERVER STATE CHECK: The caller asked to reach a person, and this line CANNOT transfer calls. Say this, word-for-word, without adding or rephrasing: "All of our agents are currently busy at the moment — I can take a message and have the team contact you as soon as they become available." Then take the message. If they ask again, repeat the SAME sentence — never improvise around it, never say you are "not a person", never promise anyone will pick up.';
 
 function exitFor(agentSlug: string): string {
   return AGENT_EXIT[agentSlug] ?? AGENT_EXIT.default;
