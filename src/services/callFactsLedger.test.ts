@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { seedLedger, updateLedger, renderKnownFacts, releaseLedger, clearAllLedgers, getLedger } from './callFactsLedger';
+import { seedLedger, updateLedger, renderKnownFacts, releaseLedger, clearAllLedgers, getLedger, harvestCallerLine } from './callFactsLedger';
 
 describe('callFactsLedger', () => {
   beforeEach(() => clearAllLedgers());
@@ -37,5 +37,27 @@ describe('callFactsLedger', () => {
     releaseLedger('c1');
     expect(getLedger('c1')).toBeUndefined();
     expect(renderKnownFacts('c1')).toBeNull();
+  });
+});
+
+describe('harvestCallerLine — gathering independent of the driver', () => {
+  beforeEach(() => clearAllLedgers());
+
+  it('harvests DOB, requested day, and fax intent from natural speech', () => {
+    seedLedger('h', {});
+    harvestCallerLine('h', 'Sure, it is March 17th, 1973');
+    harvestCallerLine('h', 'do you have any Tuesday afternoons open?');
+    harvestCallerLine('h', 'please fax it to 760-555-1234');
+    const f = getLedger('h')! as any;
+    expect(f.dateOfBirth).toContain('March 17');
+    expect(f.requestedDay).toBe('tuesday');
+    expect(f.contactMethod).toBe('fax');
+    expect(f.faxNumber).toContain('555');
+  });
+
+  it('never overwrites a filled slot', () => {
+    seedLedger('h', { dateOfBirth: '01/01/1990' });
+    harvestCallerLine('h', 'my birthday is 5/10/1983');
+    expect(getLedger('h')!.dateOfBirth).toBe('01/01/1990');
   });
 });
