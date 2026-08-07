@@ -714,7 +714,29 @@ Use this data to answer appointment questions AND for ticket creation.`,
       
       try {
         let result;
-        
+
+        // Context short-circuit (operator 2026-08-07: "compare to the
+        // context we already pulled"): a RECOGNIZED caller whose stated DOB
+        // matches the matched record is VERIFIED — return that record
+        // directly. No name search to garble, regardless of who is driving.
+        if (callId && params.date_of_birth) {
+          const { dobMatchesContext, updateLedger: ul, getLedger: gl } = await import('../services/callFactsLedger');
+          if (dobMatchesContext(callId, params.date_of_birth) === true && scheduleContext?.patientFound) {
+            const lf = gl(callId);
+            ul(callId, {
+              firstName: lf?.matchedFirstName,
+              lastName: lf?.matchedLastName,
+              identityVerified: true,
+            });
+            console.log(`[${agentTag}] ✓ VERIFIED via context DOB match — returning pre-loaded record for ${callId}`);
+            return {
+              ...scheduleContext,
+              verified: true,
+              note: 'Caller VERIFIED: recognized phone number + date of birth matches the record on file. Greet them by first name and proceed — do NOT ask any further identity questions.',
+            };
+          }
+        }
+
         if (params.phone) {
           const normalizedPhone = normalizePhoneNumber(params.phone);
           result = await withTimeout(
