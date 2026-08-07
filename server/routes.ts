@@ -190,6 +190,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Daily Brief — baseline-tracked morning review: categorized critical
+  // fails with proposals, vs yesterday and vs the day-one baseline
+  // ("inch by inch we will get to stability", Wayne 2026-08-07).
+  // The cron arms at boot so the brief exists by ~06:15 ET without a visit.
+  void import('./observatory/dailyBrief').then((m) => m.scheduleDailyBriefCron()).catch(() => {});
+  app.get('/api/observatory/daily-brief', isAuthenticated, async (_req, res) => {
+    try {
+      const { getBriefBundle, scheduleDailyBriefCron } = await import('./observatory/dailyBrief');
+      scheduleDailyBriefCron();
+      res.json(await getBriefBundle());
+    } catch (error) {
+      console.error('[observatory] daily-brief failed:', error);
+      res.status(500).json({
+        message: 'Observatory daily brief failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
   // Command center: today-only stats for every agent + SAGE active calls.
   app.get('/api/observatory/today', isAuthenticated, async (_req, res) => {
     try {

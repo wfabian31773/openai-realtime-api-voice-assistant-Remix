@@ -158,6 +158,51 @@ interface TodayOverview {
   opsHub: OpsHubTodayAgent[]
   sage: SageToday
 }
+interface BriefAgentMetric {
+  agentId: string
+  agentSlug: string
+  agentName: string
+  calls: number
+  criticalCalls: number
+  criticalRate: number | null
+  quality: number | null
+}
+interface BriefCategory {
+  key: string
+  agentName: string
+  grader: string
+  fails: number
+  totalGraded: number
+  failRate: number | null
+  sampleReasons: string[]
+  exampleCallIds: string[]
+  proposal: string
+}
+interface DailyBriefPayload {
+  briefDate: string
+  generatedAt: string
+  agents: BriefAgentMetric[]
+  categories: BriefCategory[]
+  sage:
+    | {
+        calls: number
+        booked: number
+        entered: number
+        directorReasons: Record<string, number>
+        toolErrorRates: Array<{ tool: string; errors: number; calls: number }>
+        hallucinations: number
+      }
+    | { error: string }
+  syncReds: Array<{ name: string; ageHours: number | null; detail: string | null }>
+}
+interface BriefBundle {
+  today: DailyBriefPayload
+  yesterday: DailyBriefPayload | null
+  baseline: DailyBriefPayload | null
+  baselineDate: string | null
+  daysTracked: number
+  history: Array<{ briefDate: string; totalCriticalCalls: number; totalCalls: number }>
+}
 interface LiveOpsCall {
   id: string
   callSid: string | null
@@ -347,10 +392,11 @@ function StatusDot({ tone }: { tone: Tone }) {
 // 2026-08-07). Overview answers "is anything red"; every red opens into
 // the tab that explains WHY.
 
-type ObsTab = 'overview' | 'health' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'syncs' | 'changes'
+type ObsTab = 'overview' | 'brief' | 'health' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'syncs' | 'changes'
 
 const TABS: Array<{ key: ObsTab; label: string }> = [
   { key: 'overview', label: 'Overview' },
+  { key: 'brief', label: 'Daily Brief' },
   { key: 'health', label: 'Health' },
   { key: 'guards', label: 'Guards & Failures' },
   { key: 'director', label: 'Director' },
@@ -507,6 +553,7 @@ export default function ObservatoryPage() {
       </div>
 
       {tab === 'overview' && <CommandCenterTab onOpenGuards={openGuardsFor} onOpenDirector={() => setTab('director')} />}
+      {tab === 'brief' && <DailyBriefTab />}
       {tab === 'health' && (
         <HealthTab scorecards={scorecards} onOpenGuards={openGuardsFor} onOpenDirector={() => setTab('director')} />
       )}
@@ -1743,6 +1790,205 @@ function CommandCenterTab({
           {sage?.error && <p className="text-sm text-red-600">SAGE today failed: {sage.error}</p>}
         </div>
       </div>
+    </section>
+  )
+}
+
+// ─── Daily Brief tab: baseline-tracked morning review ────────────────────
+
+function delta(now: number | null | undefined, base: number | null | undefined): string {
+  if (now == null || base == null) return ''
+  const d = Math.round((now - base) * 1000) / 1000
+  if (d === 0) return '='
+  return d < 0 ? `▼ ${Math.abs(d)}` : `▲ ${d}`
+}
+
+function DailyBriefTab() {
+  const brief = useQuery<BriefBundle>({
+    queryKey: ['obs-daily-brief'],
+    queryFn: async () => (await apiClient.get('/observatory/daily-brief')).data,
+    staleTime: 5 * 60 * 1000,
+  })
+  if (brief.isLoading)
+    return <p className="text-sm text-muted-foreground">Generating the brief (first view of the day computes it)…</p>
+  if (brief.isError)
+    return (
+      <p className="text-sm text-red-600">
+        Daily brief failed: {(brief.error as any)?.response?.data?.error ?? String(brief.error)}
+      </p>
+    )
+  const b = brief.data!
+  const t = b.today
+  const base = b.baseline && b.baseline.briefDate !== t.briefDate ? b.baseline : null
+  const yest = b.yesterday
+  const catFrom = (p: DailyBriefPayload | null, key: string) => p?.categories.find((c) => c.key === key)
+
+  return (
+    <section className="space-y-6">
+      <div>
+        <h2 className="text-lg font-semibold">
+          Morning brief — {t.briefDate}
+          <span className="ml-2 text-sm font-normal text-muted-foreground">
+            day {b.daysTracked} of tracking{b.baselineDate ? ` · baseline ${b.baselineDate}` : ''} · inch by inch to
+            stability
+          </span>
+        </h2>
+      </div>
+
+      {/* Stability scoreboard */}
+      <div>
+        <h3 className="mb-1.5 text-sm font-medium">Stability scoreboard — critical-fail rate per agent</h3>
+        <div className="overflow-x-auto rounded-lg border">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b bg-muted/50 text-left text-xs uppercase text-muted-foreground">
+                <th className="px-3 py-2">Agent</th>
+                <th className="px-3 py-2 text-right">Calls</th>
+                <th className="px-3 py-2 text-right">Critical calls</th>
+                <th className="px-3 py-2 text-right">Rate</th>
+                {yest && <th className="px-3 py-2 text-right">vs yesterday</th>}
+                {base && <th className="px-3 py-2 text-right">vs baseline</th>}
+                <th className="px-3 py-2 text-right">Quality</th>
+              </tr>
+            </thead>
+            <tbody>
+              {t.agents.map((a) => {
+                const yA = yest?.agents.find((x) => x.agentSlug === a.agentSlug)
+                const bA = base?.agents.find((x) => x.agentSlug === a.agentSlug)
+                const improving = bA?.criticalRate != null && a.criticalRate != null && a.criticalRate < bA.criticalRate
+                return (
+                  <tr key={a.agentSlug} className="border-b last:border-0">
+                    <td className="px-3 py-1.5 font-medium">{a.agentName}</td>
+                    <td className="px-3 py-1.5 text-right">{a.calls}</td>
+                    <td className="px-3 py-1.5 text-right">{a.criticalCalls}</td>
+                    <td className="px-3 py-1.5 text-right font-semibold">{pct(a.criticalRate)}</td>
+                    {yest && (
+                      <td className="px-3 py-1.5 text-right text-xs">
+                        {yA ? `${pct(yA.criticalRate)} ${delta(a.criticalRate, yA.criticalRate)}` : '—'}
+                      </td>
+                    )}
+                    {base && (
+                      <td
+                        className={`px-3 py-1.5 text-right text-xs ${
+                          improving ? 'text-green-600 dark:text-green-400' : ''
+                        }`}
+                      >
+                        {bA ? `${pct(bA.criticalRate)} ${delta(a.criticalRate, bA.criticalRate)}` : '—'}
+                      </td>
+                    )}
+                    <td className="px-3 py-1.5 text-right">{a.quality ?? '—'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        {!base && (
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            This is day one — today's numbers ARE the baseline. Every brief from tomorrow shows movement against them.
+          </p>
+        )}
+      </div>
+
+      {/* Categorized failures with proposals */}
+      <div>
+        <h3 className="mb-1.5 text-sm font-medium">
+          The work list — every critical-fail category, studied, with its proposed fix
+        </h3>
+        <div className="space-y-2">
+          {t.categories.map((c) => {
+            const bC = catFrom(base, c.key)
+            const yC = catFrom(yest, c.key)
+            return (
+              <div key={c.key} className="rounded-lg border bg-background p-3 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium">
+                    {c.agentName} · <span className="font-mono text-xs">{c.grader}</span>
+                  </span>
+                  <span className="text-xs">
+                    <span className="font-semibold">{c.fails} fails</span>
+                    {c.failRate != null && ` (${pct(c.failRate)})`}
+                    {yC && ` · yesterday ${yC.fails}`}
+                    {bC && ` · baseline ${bC.fails} ${delta(c.fails, bC.fails)}`}
+                  </span>
+                </div>
+                <p className="mt-1.5 text-xs">
+                  <span className="font-medium text-primary">Proposal: </span>
+                  {c.proposal}
+                </p>
+                {c.sampleReasons.length > 0 && (
+                  <div className="mt-1.5 text-xs text-muted-foreground">
+                    {c.sampleReasons.map((r, i) => (
+                      <p key={i}>· {r}</p>
+                    ))}
+                  </div>
+                )}
+                {c.exampleCallIds.length > 0 && (
+                  <p className="mt-1 text-xs">
+                    {c.exampleCallIds.map((id, i) => (
+                      <a key={id} href={`/call-logs/${id}`} className="mr-2 text-primary hover:underline">
+                        example call {i + 1} →
+                      </a>
+                    ))}
+                  </p>
+                )}
+              </div>
+            )
+          })}
+          {!t.categories.length && (
+            <p className="text-sm text-muted-foreground">No critical-fail categories recorded for this day.</p>
+          )}
+        </div>
+      </div>
+
+      {/* SAGE summary */}
+      {'error' in t.sage ? (
+        <p className="text-sm text-red-600">SAGE brief section failed: {t.sage.error}</p>
+      ) : (
+        <div className="rounded-lg border bg-background p-3 text-sm">
+          <h3 className="mb-1 font-medium">SAGE — {t.briefDate}</h3>
+          <p className="text-xs text-muted-foreground">
+            {t.sage.calls} calls · {t.sage.booked} booked · {t.sage.entered} entered ·{' '}
+            {t.sage.hallucinations} hallucination-guard hits
+          </p>
+          {Object.keys(t.sage.directorReasons).length > 0 && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Director:{' '}
+              {Object.entries(t.sage.directorReasons)
+                .sort((a, b) => b[1] - a[1])
+                .map(([k, v]) => `${k} ${v}`)
+                .join(' · ')}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Sync reds */}
+      {t.syncReds.length > 0 && (
+        <div className="rounded-lg border border-red-500/50 bg-red-500/5 p-3 text-sm">
+          <h3 className="mb-1 font-medium">Feeds needing attention this morning</h3>
+          {t.syncReds.map((r, i) => (
+            <p key={i} className="text-xs">
+              · {r.name} {r.ageHours != null ? `— ${r.ageHours}h old` : ''} {r.detail ? `— ${r.detail}` : ''}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {/* History */}
+      {b.history.length > 1 && (
+        <div>
+          <h3 className="mb-1.5 text-sm font-medium">Track record</h3>
+          <div className="flex flex-wrap gap-2 text-xs">
+            {b.history.slice(-14).map((h) => (
+              <span key={h.briefDate} className="rounded-md border px-2 py-1">
+                <span className="font-mono">{h.briefDate.slice(5)}</span> · {h.totalCriticalCalls}/{h.totalCalls}{' '}
+                critical
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   )
 }
