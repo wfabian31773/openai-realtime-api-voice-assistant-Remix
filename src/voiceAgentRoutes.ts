@@ -678,7 +678,11 @@ async function addSIPParticipantWithWatchdog(
 // responsiveness matters more; noise recovery is handled in the prompt
 // (resume-mid-sentence rules). Keep the hook for future per-agent tuning.
 function vadEagernessFor(_agentSlug?: string | null): 'low' | 'medium' {
-  return 'medium';
+  // 'low' after the 2026-08-07 noise findings: with medium, a car bump or
+  // background voice triggered barge-ins that truncated forced lines and
+  // fed garbage turns. Low waits for clearer end-of-speech evidence; the
+  // rails' forced lines make the slightly slower turn-taking safe.
+  return 'low';
 }
 
 // Session options for consistent configuration
@@ -697,10 +701,11 @@ const sessionOptions: Partial<RealtimeSessionOptions> = {
     audio: {
       input: {
         format: 'g711_ulaw',
+        noiseReduction: { type: 'far_field' },
         transcription: buildTranscriptionConfig(),
         turnDetection: {
           type: 'semantic_vad',
-          eagerness: 'medium',
+          eagerness: 'low',
           createResponse: true,
           interruptResponse: true,
         },
@@ -2545,6 +2550,7 @@ async function observeCall(
         input: {
           format: 'g711_ulaw',
           transcription: buildTranscriptionConfig({ establishedLanguage: establishedLanguageCode }),
+          noiseReduction: { type: 'far_field' },
           turnDetection: {
             type: 'semantic_vad',
             eagerness: vadEagernessFor(agentConfig?.id),
@@ -2974,6 +2980,13 @@ async function observeCall(
         audio: {
           input: {
             format: 'g711_ulaw',
+            // Operator diagnosis 2026-08-07 (validated: 3+ interruption calls
+            // fail at 59% critical vs 33% clean): phone callers bring cars,
+            // TVs and street noise, and NO noise reduction was configured —
+            // raw audio fed semantic VAD, so every bump barged in and every
+            // background voice polluted transcription. far_field is the
+            // telephony-correct profile.
+            noiseReduction: { type: 'far_field' },
             transcription: buildTranscriptionConfig({ establishedLanguage: establishedLanguageCode }),
             turnDetection: {
               type: 'semantic_vad',
@@ -3016,6 +3029,9 @@ async function observeCall(
         create_response: true,
         interrupt_response: true,
       };
+    }
+    if (!acceptPayload.audio.input.noise_reduction) {
+      acceptPayload.audio.input.noise_reduction = { type: 'far_field' };
     }
     if (!acceptPayload.audio.input.transcription) {
       // NOT `languageCode || 'en'`. This payload starts the session and the
