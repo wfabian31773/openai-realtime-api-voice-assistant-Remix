@@ -63,3 +63,19 @@ describe('human_request_deflection — capability matrix (ticket-only lines)', (
     expect(r.pass).toBe(false);
   });
 });
+
+describe('language_config_fault — CP-8', () => {
+  const langGrade = (transcript: string) =>
+    svc.runDeterministicGraders({ ...base, transcript, agentSlug: 'answering-service' }).find((r) => r.grader === 'language_config_fault')!;
+
+  it('flags a language refusal as a critical config fault', () => {
+    const r = langGrade('CALLER: en español por favor\nAGENT: I can only speak English on this line.');
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('critical');
+  });
+
+  it('passes normal bilingual handling', () => {
+    const r = langGrade('CALLER: en español por favor\nAGENT: Claro que sí, con gusto le ayudo en español.');
+    expect(r.pass).toBe(true);
+  });
+});
