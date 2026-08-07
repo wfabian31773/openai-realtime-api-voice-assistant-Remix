@@ -190,6 +190,64 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Command center: today-only stats for every agent + SAGE active calls.
+  app.get('/api/observatory/today', isAuthenticated, async (_req, res) => {
+    try {
+      const { todayOverview } = await import('./observatory/queries');
+      res.json(await todayOverview());
+    } catch (error) {
+      console.error('[observatory] today failed:', error);
+      res.status(500).json({
+        message: 'Observatory today failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  // Silent listen-in: dial the supervisor's phone into a live call's
+  // conference, muted (Wayne 2026-08-07: "join in the conversation
+  // silently and monitor"). Explicit per-call button click on the command
+  // center; the muted participant hears everything and is never heard.
+  app.post('/api/observatory/listen', isAuthenticated, async (req, res) => {
+    try {
+      const { callSid, phone, fromNumber } = req.body ?? {};
+      if (!callSid || !phone) {
+        return res.status(400).json({ message: 'callSid and phone are required' });
+      }
+      const client = await getTwilioClient();
+      // Conferences are named conf_<CallSid> (with optional prefixes).
+      const candidates = [`conf_${callSid}`, `outbound_conf_${callSid}`, `test_conf_${callSid}`];
+      let confSid: string | null = null;
+      for (const name of candidates) {
+        const list = await client.conferences.list({ friendlyName: name, status: 'in-progress', limit: 1 });
+        if (list.length) {
+          confSid = list[0].sid;
+          break;
+        }
+      }
+      if (!confSid) {
+        return res.status(404).json({ message: 'No in-progress conference found for that call — it may have just ended.' });
+      }
+      const from = fromNumber || (await getTwilioFromPhoneNumber());
+      const participant = await client.conferences(confSid).participants.create({
+        from,
+        to: phone,
+        muted: true,
+        label: 'observatory-supervisor',
+        endConferenceOnExit: false,
+        beep: 'false',
+      } as any);
+      console.info(`[observatory] Listen-in: supervisor ...${String(phone).slice(-4)} joined conference ${confSid} muted`);
+      res.json({ ok: true, participantCallSid: participant.callSid });
+    } catch (error) {
+      console.error('[observatory] listen-in failed:', error);
+      res.status(500).json({
+        message: 'Listen-in failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
   // Scripts & Syncs — every feed keeping every application fresh, incl.
   // the operator's manual morning scripts ("if the whole thing is gonna be
   // based on me running these sync scripts, we should be tracking that",

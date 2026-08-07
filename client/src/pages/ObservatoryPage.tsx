@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import apiClient from '@/lib/apiClient'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -126,6 +126,49 @@ interface SyncsOverview {
   feeds: SyncFeedStatus[]
   consoleActivity: Array<{ day: string; apptsSynced: number; cancelled: number }>
   consoleConfigured: boolean
+}
+interface OpsHubTodayAgent {
+  agentId: string
+  agentName: string
+  agentSlug: string
+  callsToday: number
+  activeNow: number
+  criticalsToday: number
+  qualityToday: number | null
+  outcomesToday: Record<string, number>
+}
+interface SageActiveCall {
+  callLogId: string | null
+  startedAt: string
+  direction: string | null
+  transcriptTail: string | null
+}
+interface SageToday {
+  callsToday: number
+  activeNow: number
+  bookedToday: number
+  enteredToday: number
+  pendingNextgenEntry: number
+  reasoningTimeoutsToday: number
+  outcomesToday: Record<string, number>
+  activeCalls: SageActiveCall[]
+  error?: string
+}
+interface TodayOverview {
+  opsHub: OpsHubTodayAgent[]
+  sage: SageToday
+}
+interface LiveOpsCall {
+  id: string
+  callSid: string | null
+  status: string
+  direction: string | null
+  from: string | null
+  to: string | null
+  startTime: string | null
+  createdAt: string
+  agentUsed: string | null
+  transcript: string | null
 }
 
 interface GraderCheckStat {
@@ -304,10 +347,11 @@ function StatusDot({ tone }: { tone: Tone }) {
 // 2026-08-07). Overview answers "is anything red"; every red opens into
 // the tab that explains WHY.
 
-type ObsTab = 'overview' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'syncs' | 'changes'
+type ObsTab = 'overview' | 'health' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'syncs' | 'changes'
 
 const TABS: Array<{ key: ObsTab; label: string }> = [
   { key: 'overview', label: 'Overview' },
+  { key: 'health', label: 'Health' },
   { key: 'guards', label: 'Guards & Failures' },
   { key: 'director', label: 'Director' },
   { key: 'telemetry', label: 'Telemetry & Tools' },
@@ -462,8 +506,9 @@ export default function ObservatoryPage() {
         ))}
       </div>
 
-      {tab === 'overview' && (
-        <OverviewTab scorecards={scorecards} onOpenGuards={openGuardsFor} onOpenDirector={() => setTab('director')} />
+      {tab === 'overview' && <CommandCenterTab onOpenGuards={openGuardsFor} onOpenDirector={() => setTab('director')} />}
+      {tab === 'health' && (
+        <HealthTab scorecards={scorecards} onOpenGuards={openGuardsFor} onOpenDirector={() => setTab('director')} />
       )}
       {tab === 'guards' && (
         <GuardsTab
@@ -483,9 +528,9 @@ export default function ObservatoryPage() {
   )
 }
 
-// ─── Overview tab ────────────────────────────────────────────────────────
+// ─── Health tab (windowed diagnosis scorecards) ──────────────────────────
 
-function OverviewTab({
+function HealthTab({
   scorecards,
   onOpenGuards,
   onOpenDirector,
@@ -1392,6 +1437,311 @@ function SyncsTab() {
             </table>
           </div>
         )}
+      </div>
+    </section>
+  )
+}
+
+// ─── Command center (Overview): TODAY only, live everything ──────────────
+
+function useTicker(intervalMs = 1000) {
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), intervalMs)
+    return () => clearInterval(t)
+  }, [intervalMs])
+}
+
+function elapsed(since: string | null): string {
+  if (!since) return '0:00'
+  const s = Math.max(0, Math.floor((Date.now() - new Date(since).getTime()) / 1000))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+function ListenInButton({ callSid, fromNumber }: { callSid: string | null; fromNumber: string | null }) {
+  const [state, setState] = useState<'idle' | 'dialing' | 'joined' | 'error'>('idle')
+  const [err, setErr] = useState<string | null>(null)
+  if (!callSid) return null
+  const join = async () => {
+    const stored = localStorage.getItem('obs-supervisor-phone') ?? ''
+    const phone = window.prompt('Dial your phone into this call, muted. Your number:', stored)
+    if (!phone) return
+    localStorage.setItem('obs-supervisor-phone', phone)
+    setState('dialing')
+    setErr(null)
+    try {
+      await apiClient.post('/observatory/listen', { callSid, phone, fromNumber })
+      setState('joined')
+    } catch (e: any) {
+      setState('error')
+      setErr(e?.response?.data?.error ?? e?.response?.data?.message ?? String(e))
+    }
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <button
+        onClick={join}
+        disabled={state === 'dialing'}
+        className="rounded-md border border-input px-2 py-0.5 text-xs font-medium text-primary hover:bg-accent disabled:opacity-50"
+        title="Dials your phone and joins you into this call muted — you hear everything, nobody hears you"
+      >
+        {state === 'dialing' ? 'Dialing you…' : state === 'joined' ? '✓ On the line (muted)' : '🎧 Listen in'}
+      </button>
+      {err && <span className="text-xs text-red-600">{err}</span>}
+    </span>
+  )
+}
+
+function LiveOpsCallCard({ call }: { call: LiveOpsCall }) {
+  useTicker()
+  const [expanded, setExpanded] = useState(true)
+  const tail = (call.transcript ?? '').split('\n').filter(Boolean).slice(-8)
+  return (
+    <div className="rounded-lg border border-red-500/40 bg-background p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+        <span className="flex items-center gap-2 font-medium">
+          <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />
+          {call.agentUsed ?? 'unknown agent'}
+          <span className="font-normal text-muted-foreground">
+            {call.direction ?? ''} · {call.from ?? 'unknown caller'}
+          </span>
+        </span>
+        <span className="flex items-center gap-3">
+          <span className="font-mono">{elapsed(call.startTime ?? call.createdAt)}</span>
+          <ListenInButton callSid={call.callSid} fromNumber={call.to} />
+          <button className="text-xs text-primary hover:underline" onClick={() => setExpanded(!expanded)}>
+            {expanded ? 'hide transcript ▴' : 'transcript ▾'}
+          </button>
+        </span>
+      </div>
+      {expanded && (
+        <div className="mt-2 space-y-0.5 border-t pt-2">
+          {tail.length ? (
+            tail.map((line, i) => (
+              <p key={i} className={`text-xs ${line.startsWith('AGENT') ? 'text-muted-foreground' : 'font-medium'}`}>
+                {line}
+              </p>
+            ))
+          ) : (
+            <p className="text-xs text-muted-foreground">Waiting for the first transcript line…</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CommandCenterTab({
+  onOpenGuards,
+  onOpenDirector,
+}: {
+  onOpenGuards: (t: { id: string; name: string } | 'sage') => void
+  onOpenDirector: () => void
+}) {
+  const live = useQuery<{ data: LiveOpsCall[] }>({
+    queryKey: ['obs-live-ops'],
+    queryFn: async () =>
+      (await apiClient.get('/call-logs?status=in_progress,ringing,initiated&limit=50')).data,
+    refetchInterval: 3000,
+  })
+  const today = useQuery<TodayOverview>({
+    queryKey: ['obs-today'],
+    queryFn: async () => (await apiClient.get('/observatory/today')).data,
+    refetchInterval: 15_000,
+  })
+
+  const activeOps = (live.data?.data ?? []).filter((c) =>
+    ['in_progress', 'ringing', 'initiated'].includes(c.status),
+  )
+  const sage = today.data?.sage
+  const sageOk = sage && !sage.error
+  const totalLive = activeOps.length + (sageOk ? sage.activeNow : 0)
+
+  return (
+    <section className="space-y-5">
+      {/* Live now */}
+      <div>
+        <h2 className="mb-2 flex items-center gap-2 text-lg font-semibold">
+          <span className={`h-3 w-3 rounded-full ${totalLive ? 'animate-pulse bg-red-500' : 'bg-gray-400'}`} />
+          Live now — {totalLive} call{totalLive === 1 ? '' : 's'}
+        </h2>
+        {live.isError && (
+          <p className="text-sm text-red-600">
+            Live feed failed: {(live.error as any)?.response?.data?.error ?? String(live.error)}
+          </p>
+        )}
+        <div className="space-y-2">
+          {activeOps.map((c) => (
+            <LiveOpsCallCard key={c.id} call={c} />
+          ))}
+          {sageOk &&
+            sage.activeCalls.map((c, i) => (
+              <div key={c.callLogId ?? i} className="rounded-lg border border-red-500/40 bg-background p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <span className="flex items-center gap-2 font-medium">
+                    <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />
+                    SAGE (DRS line)
+                    <span className="font-normal text-muted-foreground">{c.direction ?? ''}</span>
+                  </span>
+                  <span className="font-mono">{elapsed(c.startedAt)}</span>
+                </div>
+                <div className="mt-2 space-y-0.5 border-t pt-2">
+                  {c.transcriptTail ? (
+                    c.transcriptTail
+                      .split('\n')
+                      .filter(Boolean)
+                      .slice(-8)
+                      .map((line, j) => (
+                        <p key={j} className="text-xs">
+                          {line}
+                        </p>
+                      ))
+                  ) : (
+                    <p className="text-xs text-muted-foreground">Transcript pending (SAGE writes near-live)…</p>
+                  )}
+                </div>
+              </div>
+            ))}
+          {!totalLive && !live.isLoading && (
+            <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+              No calls in progress. This section lights up the moment any line rings — every agent, with live
+              transcript and a listen-in button.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Today per agent */}
+      <div>
+        <h2 className="mb-2 text-lg font-semibold">Today — every agent at a glance</h2>
+        {today.isError && (
+          <p className="text-sm text-red-600">
+            Today stats failed: {(today.error as any)?.response?.data?.error ?? String(today.error)}
+          </p>
+        )}
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {today.data?.opsHub.map((a) => {
+            const tone: Tone =
+              a.callsToday === 0 ? 'grey' : a.criticalsToday / Math.max(1, a.callsToday) >= 0.3 ? 'red' : a.criticalsToday > 0 ? 'amber' : 'green'
+            return (
+              <Card key={a.agentId} className={`border ${toneClasses[tone]}`}>
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center justify-between text-base">
+                    <span className="flex items-center gap-2">
+                      <StatusDot tone={tone} />
+                      {a.agentName}
+                    </span>
+                    {a.activeNow > 0 && (
+                      <span className="flex items-center gap-1 text-xs font-semibold text-red-600">
+                        <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" /> {a.activeNow} live
+                      </span>
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2 text-sm">
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <div>
+                      <p className="text-xl font-bold">{a.callsToday}</p>
+                      <p className="text-xs text-muted-foreground">calls today</p>
+                    </div>
+                    <div>
+                      <p className={`text-xl font-bold ${a.criticalsToday ? 'text-red-600 dark:text-red-400' : ''}`}>
+                        {a.criticalsToday}
+                      </p>
+                      <p className="text-xs text-muted-foreground">critical fails</p>
+                    </div>
+                    <div>
+                      <p className="text-xl font-bold">{a.qualityToday ?? '—'}</p>
+                      <p className="text-xs text-muted-foreground">quality</p>
+                    </div>
+                  </div>
+                  {Object.keys(a.outcomesToday).length > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      {Object.entries(a.outcomesToday)
+                        .sort((x, y) => y[1] - x[1])
+                        .map(([k, v]) => `${k} ${v}`)
+                        .join(' · ')}
+                    </p>
+                  )}
+                  <button
+                    className="text-xs font-medium text-primary hover:underline"
+                    onClick={() => onOpenGuards({ id: a.agentId, name: a.agentName })}
+                  >
+                    Today's failures →
+                  </button>
+                </CardContent>
+              </Card>
+            )
+          })}
+
+          {sageOk && (
+            <Card
+              className={`border ${
+                toneClasses[sage.reasoningTimeoutsToday >= 5 ? 'red' : sage.reasoningTimeoutsToday > 0 ? 'amber' : sage.callsToday ? 'green' : 'grey']
+              }`}
+            >
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center justify-between text-base">
+                  <span className="flex items-center gap-2">
+                    <StatusDot
+                      tone={sage.reasoningTimeoutsToday >= 5 ? 'red' : sage.reasoningTimeoutsToday > 0 ? 'amber' : sage.callsToday ? 'green' : 'grey'}
+                    />
+                    SAGE (5Star DRS line)
+                  </span>
+                  {sage.activeNow > 0 && (
+                    <span className="flex items-center gap-1 text-xs font-semibold text-red-600">
+                      <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" /> {sage.activeNow} live
+                    </span>
+                  )}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div>
+                    <p className="text-xl font-bold">{sage.callsToday}</p>
+                    <p className="text-xs text-muted-foreground">calls today</p>
+                  </div>
+                  <div>
+                    <p className="text-xl font-bold">{sage.bookedToday}</p>
+                    <p className="text-xs text-muted-foreground">booked today</p>
+                  </div>
+                  <div>
+                    <p className={`text-xl font-bold ${sage.pendingNextgenEntry ? 'text-amber-600' : ''}`}>
+                      {sage.pendingNextgenEntry}
+                    </p>
+                    <p className="text-xs text-muted-foreground">pending NextGen</p>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {sage.enteredToday} entered today
+                  {sage.reasoningTimeoutsToday > 0 && (
+                    <span className="ml-2 font-medium text-red-600 dark:text-red-400">
+                      · {sage.reasoningTimeoutsToday} director timeouts today
+                    </span>
+                  )}
+                </p>
+                {Object.keys(sage.outcomesToday).length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {Object.entries(sage.outcomesToday)
+                      .sort((x, y) => y[1] - x[1])
+                      .slice(0, 6)
+                      .map(([k, v]) => `${k} ${v}`)
+                      .join(' · ')}
+                  </p>
+                )}
+                <div className="flex gap-3">
+                  <button className="text-xs font-medium text-primary hover:underline" onClick={() => onOpenGuards('sage')}>
+                    Guards →
+                  </button>
+                  <button className="text-xs font-medium text-primary hover:underline" onClick={onOpenDirector}>
+                    Director →
+                  </button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+          {sage?.error && <p className="text-sm text-red-600">SAGE today failed: {sage.error}</p>}
+        </div>
       </div>
     </section>
   )
