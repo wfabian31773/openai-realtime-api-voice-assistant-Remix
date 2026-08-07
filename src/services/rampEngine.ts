@@ -19,6 +19,9 @@ export type RampState =
   | 'COLLECT_CALLER'
   | 'CONFIRM_ID'
   | 'DOB_HANDOFF'
+  | 'TAKE_MESSAGE'
+  | 'CONFIRM_CALLBACK'
+  | 'COLLECT_CALLBACK'
   | 'CLASSIFY'
   | 'COLLECT_NAME'
   | 'COLLECT_DOB'
@@ -27,7 +30,7 @@ export type RampState =
   | 'DONE_MESSAGE'
   | 'DISENGAGED';
 
-export type RampMode = 'patient' | 'professional' | 'sd_front';
+export type RampMode = 'patient' | 'professional' | 'sd_front' | 'full_rails';
 
 export interface RampStatus {
   state: RampState;
@@ -62,6 +65,10 @@ export const RAMP_LINES = {
     "I'm not finding a match on my end — I'll take your information and have the team contact you.",
   newPatientTickets: "I'll take your details so our team can get you set up. May I have the patient's first and last name?",
   collectCaller: 'Of course — may I have your name and the office or medical group you\'re calling from?',
+  confirmCallback: (last4: string) => `Is this number ending in ${last4} the best one to reach you?`,
+  collectCallback: "What's the best number to reach you?",
+  fileDirective: (message: string) =>
+    `Say: "Give me one moment while I get this submitted for you." Then, in this same turn, call create_ticket for this request: ${message}. Do not ask the caller anything else first.`,
 } as const;
 
 const sessions = new Map<string, RampStatus>();
@@ -126,6 +133,12 @@ export async function onCallerUtterance(
       case 'COLLECT_NAME': return RAMP_LINES.collectName;
       case 'COLLECT_DOB': return RAMP_LINES.collectDob;
       case 'COLLECT_CALLER': return RAMP_LINES.collectCaller;
+      case 'TAKE_MESSAGE': return 'What would you like the team to know?';
+      case 'CONFIRM_CALLBACK': {
+        const cb = getLedger(callId)?.callbackNumber;
+        return cb ? RAMP_LINES.confirmCallback(cb.slice(-4)) : RAMP_LINES.collectCallback;
+      }
+      case 'COLLECT_CALLBACK': return RAMP_LINES.collectCallback;
       default: return null;
     }
   };
@@ -184,6 +197,48 @@ export async function onCallerUtterance(
       }
       return unparsable();
     }
+    case 'TAKE_MESSAGE': {
+      if (text.trim().split(/\s+/).length >= 2) {
+        const prior = getLedger(callId)?.intent;
+        updateLedger(callId, { intent: `${prior ? prior + ' — ' : ''}${text.trim().slice(0, 300)}` });
+        const cb = getLedger(callId)?.callbackNumber;
+        if (cb && !getLedger(callId)?.callbackConfirmed) {
+          status.state = 'CONFIRM_CALLBACK';
+          return { line: RAMP_LINES.confirmCallback(cb.slice(-4)), status };
+        }
+        if (!cb) {
+          status.state = 'COLLECT_CALLBACK';
+          return { line: RAMP_LINES.collectCallback, status };
+        }
+        status.state = 'DONE_MESSAGE';
+        status.active = false;
+        return { line: RAMP_LINES.fileDirective(getLedger(callId)?.intent ?? text.trim()), status };
+      }
+      return unparsable();
+    }
+    case 'CONFIRM_CALLBACK': {
+      if (YES.test(text) && !NO.test(text)) {
+        updateLedger(callId, { callbackConfirmed: true });
+        status.state = 'DONE_MESSAGE';
+        status.active = false;
+        return { line: RAMP_LINES.fileDirective(getLedger(callId)?.intent ?? 'the caller request'), status };
+      }
+      if (NO.test(text)) {
+        status.state = 'COLLECT_CALLBACK';
+        return { line: RAMP_LINES.collectCallback, status };
+      }
+      return unparsable();
+    }
+    case 'COLLECT_CALLBACK': {
+      const num = text.match(/(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
+      if (num) {
+        updateLedger(callId, { callbackNumber: num[0].replace(/[^\d+]/g, ''), callbackConfirmed: true });
+        status.state = 'DONE_MESSAGE';
+        status.active = false;
+        return { line: RAMP_LINES.fileDirective(getLedger(callId)?.intent ?? 'the caller request'), status };
+      }
+      return unparsable();
+    }
     case 'DOB_HANDOFF': {
       status.state = 'DONE_VERIFIED';
       status.active = false;
@@ -227,6 +282,10 @@ export async function onCallerUtterance(
         }
         // New patients on ticket lines don't verify — straight to message flow.
         if (facts?.newOrExisting === 'new') {
+          if (status.mode === 'full_rails') {
+            status.state = 'TAKE_MESSAGE';
+            return { line: 'Thank you. And what would you like the team to know?', status };
+          }
           status.state = 'DONE_MESSAGE';
           status.active = false;
           return { line: null, status };
@@ -242,12 +301,21 @@ export async function onCallerUtterance(
         }
         if (ok) {
           updateLedger(callId, { firstName: first, lastName: last, identityVerified: true });
+          if (status.mode === 'full_rails') {
+            // Rails continue: the verified greeting invites the message.
+            status.state = 'TAKE_MESSAGE';
+            return { line: RAMP_LINES.verified(first), status };
+          }
           status.state = 'DONE_VERIFIED';
           status.active = false;
           return { line: RAMP_LINES.verified(first), status };
         }
         status.verifyFails += 1;
         if (status.verifyFails >= 2) {
+          if (status.mode === 'full_rails') {
+            status.state = 'TAKE_MESSAGE';
+            return { line: RAMP_LINES.verifyFail2Tickets, status };
+          }
           status.state = 'DONE_MESSAGE';
           status.active = false;
           return { line: RAMP_LINES.verifyFail2Tickets, status };

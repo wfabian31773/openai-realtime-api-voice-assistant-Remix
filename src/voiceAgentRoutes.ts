@@ -3524,7 +3524,7 @@ async function observeCall(
         agentGreeting = `Hello, thank you for calling Azul Vision. Am I speaking with ${rampFacts.matchedFirstName}?`;
         console.info(`[RAMP] Greeting personalised from ledger match for ${callId}`);
       }
-      startRamp(callId, agentSlug === 'pcp' ? 'professional' : agentSlug === 'azul-scheduling' ? 'sd_front' : 'patient');
+      startRamp(callId, agentSlug === 'pcp' ? 'professional' : agentSlug === 'azul-scheduling' ? 'sd_front' : agentSlug === 'answering-service' ? 'full_rails' : 'patient');
       console.info(`[RAMP] Ramp engaged for ${agentSlug} call ${callId}`);
     }
 

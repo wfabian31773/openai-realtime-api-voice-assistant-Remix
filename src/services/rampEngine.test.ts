@@ -125,3 +125,53 @@ describe('rampEngine — SD front mode (CP-6)', () => {
     expect(rampActive('s')).toBe(false);
   });
 });
+
+describe('rampEngine — full rails (Answering Service end-to-end)', () => {
+  beforeEach(() => { clearAllLedgers(); releaseRamp('f'); });
+
+  it('recognized: intent → confirm → DOB verify → message → callback confirm → file directive', async () => {
+    seedLedger('f', { matchedFirstName: 'Wayne', matchedLastName: 'Fabian', matchedDob: '1973-03-17', callerPhone: '+18455317471' });
+    startRamp('f', 'full_rails');
+    let s = await onCallerUtterance('f', 'I need a medication refill', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.confirmId('Wayne'));
+    s = await onCallerUtterance('f', 'yes it is', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.confirmDob);
+    s = await onCallerUtterance('f', 'March 17th, 1973', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.verified('Wayne'));
+    expect(s.status.state).toBe('TAKE_MESSAGE');
+    s = await onCallerUtterance('f', 'I need latanoprost refilled at the Encinitas office', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.confirmCallback('7471'));
+    s = await onCallerUtterance('f', 'yes that works', verifyYes);
+    expect(s.line).toContain('call create_ticket');
+    expect(s.line).toContain('latanoprost');
+    expect(rampActive('f')).toBe(false);
+  });
+
+  it('callback declined → collects a new number then files', async () => {
+    seedLedger('f', { matchedFirstName: 'Ana', matchedLastName: 'Diaz', callerPhone: '+15551112222' });
+    startRamp('f', 'full_rails');
+    await onCallerUtterance('f', 'calling about my glasses order', verifyYes);
+    await onCallerUtterance('f', 'yes', verifyYes);
+    await onCallerUtterance('f', '5/10/1983', verifyYes);
+    await onCallerUtterance('f', 'my glasses order status please', verifyYes);
+    let s = await onCallerUtterance('f', 'no use my work line', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.collectCallback);
+    s = await onCallerUtterance('f', 'sure, 760-555-9999', verifyYes);
+    expect(s.line).toContain('call create_ticket');
+    expect(getLedger('f')!.callbackNumber).toContain('7605559999');
+  });
+
+  it('failed verification still rails into message-taking, never dead-ends', async () => {
+    seedLedger('f', { matchedFirstName: 'Luis', matchedLastName: 'Perez', callerPhone: '+15553334444' });
+    startRamp('f', 'full_rails');
+    await onCallerUtterance('f', 'checking on a bill', verifyNo);
+    await onCallerUtterance('f', 'yes', verifyNo);
+    await onCallerUtterance('f', '1/2/1970', verifyNo);
+    await onCallerUtterance('f', 'Luis Perez', verifyNo);
+    const s = await onCallerUtterance('f', '1/2/1970', verifyNo);
+    expect(s.line).toBe(RAMP_LINES.verifyFail2Tickets);
+    expect(s.status.state).toBe('TAKE_MESSAGE');
+    const s2 = await onCallerUtterance('f', 'my billing question about the last visit', verifyNo);
+    expect(s2.line).toBe(RAMP_LINES.confirmCallback('4444'));
+  });
+});
