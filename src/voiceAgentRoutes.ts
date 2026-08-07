@@ -216,7 +216,7 @@ interface PendingGreeting {
 const pendingGreetings = new Map<string, PendingGreeting>();
 
 /** CP-4: lines running the deterministic ramp (env override RAMP_AGENTS). */
-const RAMP_AGENTS = new Set((process.env.RAMP_AGENTS ?? 'answering-service').split(',').map((x) => x.trim()).filter(Boolean));
+const RAMP_AGENTS = new Set((process.env.RAMP_AGENTS ?? 'answering-service,pcp').split(',').map((x) => x.trim()).filter(Boolean));
 
 /** CP-2: last KNOWN-FACTS block injected per call — re-inject only on change. */
 const lastFactsRender = new Map<string, string>();
@@ -3491,7 +3491,7 @@ async function observeCall(
         agentGreeting = `Hello, thank you for calling Azul Vision. Am I speaking with ${rampFacts.matchedFirstName}?`;
         console.info(`[RAMP] Greeting personalised from ledger match for ${callId}`);
       }
-      startRamp(callId);
+      startRamp(callId, agentSlug === 'pcp' ? 'professional' : 'patient');
       console.info(`[RAMP] Ramp engaged for ${agentSlug} call ${callId}`);
     }
 
