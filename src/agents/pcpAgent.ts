@@ -80,35 +80,115 @@ SAFETY:
 - Public practice information may be answered without patient verification. Plan participation, accessibility, and accommodation questions require a task at launch.
 - Keep a professional, concise tone and do not read sensitive details unless necessary and authorized.`;
 
-function requireState(callId: string): PcpConversationState & Required<Pick<PcpConversationState,
-  'callerName' | 'callerRole' | 'callerOrganization' | 'callerFacilityType' | 'callbackNumber' | 'callPurpose'
->> {
+/**
+ * Administrative fields we would LIKE on a ticket, and what to write when the
+ * call did not produce them.
+ *
+ * These are placeholders, not defaults: they exist so a request still reaches a
+ * human, and they say plainly that the field is missing so nobody mistakes
+ * "Not provided" for something the caller said.
+ */
+const FIELD_PLACEHOLDERS = {
+  callerName: 'Not provided by caller',
+  callerRole: 'Not provided',
+  callerOrganization: 'Not provided',
+  callerFacilityType: 'other_healthcare_organization' as const,
+  callbackNumber: 'NOT PROVIDED',
+};
+
+/** Human-readable names for the intake gap note on the ticket. */
+const FIELD_LABELS: Record<string, string> = {
+  callerName: 'caller name',
+  callerRole: 'caller role',
+  callerOrganization: 'organization',
+  callerFacilityType: 'organization type',
+  callbackNumber: 'callback number',
+  statedRelationship: 'relationship to the patient',
+  patientFirstName: 'patient first name',
+  patientLastName: 'patient last name',
+  patientDob: 'patient date of birth',
+};
+
+/**
+ * Fields worth reporting as gaps on the ticket.
+ *
+ * TWO CLASSES, and missing the second is what made the first pass at this
+ * incomplete. The director requires the professional block on every call, and
+ * ADDITIONALLY the patient block whenever the purpose has
+ * patientContextRequired and does not connect to a human — which includes
+ * `patient_medical_records_request`. The live timeline showed one records call
+ * burning ELEVEN attempts on `missing_required_field:statedRelationship`.
+ *
+ * None of these is required by the ticket schema (the patient block is all
+ * optionalText), so they never block filing — but "we do not know which patient"
+ * is exactly what the staffer needs told, not left to infer from a blank field.
+ */
+const TICKET_FIELDS = [
+  'callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber',
+  'statedRelationship', 'patientFirstName', 'patientLastName', 'patientDob',
+] as const;
+
+/**
+ * The state to file a ticket from, and which administrative fields are absent.
+ *
+ * NEVER THROWS. It used to: `requireState` raised
+ * `missing_required_field:<field>` whenever the director still wanted anything,
+ * and every ticket tool called it FIRST — so one uncaptured administrative
+ * field discarded the entire request. The tool timeline shipped 2026-08-06 and
+ * showed the shape within ten minutes of going live:
+ *
+ *   e0384db1 (253s): record_pcp_intake x5, then create_pcp_task, handoff x3 and
+ *                    create_pcp_task again — all ten calls dying on
+ *                    missing_required_field:callbackNumber.
+ *   e761053a (215s): five attempts, all missing_required_field:callerName.
+ *
+ * The caller heard "it seems like there was an issue recording" and nothing was
+ * filed. On the same day 21 medical-records requests reached this line and left
+ * no ticket at all. A caller who will not recite their job title, or who says
+ * "that's the number you already have" instead of reading one out, must not
+ * lose their request over it — the gap belongs ON the ticket, for staff to
+ * close, not in place of it.
+ */
+function ticketState(callId: string): { state: PcpConversationState; missing: string[] } {
   const state = pcpDirector.get(callId);
-  const decision = pcpDirector.next(callId);
-  if (decision.nextQuestion) throw new Error(`missing_required_field:${String(decision.nextQuestion.field)}`);
-  return state as ReturnType<typeof requireState>;
+  const missing = TICKET_FIELDS.filter((field) => !state[field]).map(String);
+  return { state, missing };
+}
+
+/** Note the intake gaps on the ticket itself, in the caller's terms, so the
+ *  staffer working it knows what to ask for rather than wondering. */
+function annotateGaps(narrative: string, missing: string[], callerPhone?: string): string {
+  if (!missing.length) return narrative;
+  const labels = missing.map((f) => FIELD_LABELS[f] ?? f).join(', ');
+  const ani = callerPhone && !missing.includes('callbackNumber')
+    ? ''
+    : callerPhone
+      ? ` Inbound caller ID was ${callerPhone}.`
+      : ' Caller ID was withheld on this call.';
+  return `${narrative}\n\n[Intake incomplete — not captured on the call: ${labels}.${ani}]`.trim();
 }
 
 function buildPayload(
   metadata: PcpAgentMetadata,
-  state: ReturnType<typeof requireState>,
+  state: PcpConversationState,
   disposition: PcpDisposition,
   narrative: string,
   urgency: 'routine' | 'normal' | 'high' | 'urgent',
   handoff?: PcpTicketPayload['handoff'],
   failureInformation?: string,
+  missing: string[] = [],
 ): PcpTicketPayload {
   return {
     callSid: metadata.callSid || metadata.callId,
     agentSlug: 'pcp',
     agentVersion: pcpAgentConfig.version,
-    callerName: state.callerName,
-    callerRole: state.callerRole,
-    callerOrganization: state.callerOrganization,
-    callerFacilityType: state.callerFacilityType,
-    callerCallbackNumber: state.callbackNumber,
+    callerName: state.callerName || FIELD_PLACEHOLDERS.callerName,
+    callerRole: state.callerRole || FIELD_PLACEHOLDERS.callerRole,
+    callerOrganization: state.callerOrganization || FIELD_PLACEHOLDERS.callerOrganization,
+    callerFacilityType: state.callerFacilityType || FIELD_PLACEHOLDERS.callerFacilityType,
+    callerCallbackNumber: state.callbackNumber || FIELD_PLACEHOLDERS.callbackNumber,
     statedRelationship: state.statedRelationship,
-    callPurpose: state.callPurpose,
+    callPurpose: state.callPurpose!,
     disposition,
     urgency,
     verificationStatus: state.verificationStatus,
@@ -116,7 +196,7 @@ function buildPayload(
     patientLastName: state.patientLastName,
     patientDob: state.patientDob,
     patientMrn: state.patientMrn,
-    narrative,
+    narrative: annotateGaps(narrative, missing, metadata.callerPhone),
     transcript: metadata.getTranscript?.() || undefined,
     handoff,
     failureInformation,
@@ -126,6 +206,20 @@ function buildPayload(
 export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAgentMetadata): RealtimeAgent {
   const callId = metadata.callId;
   pcpDirector.update(callId, { verificationStatus: metadata.professionalVerificationStatus ?? 'pending' });
+
+  // Seed the callback number from caller ID. We are ON A PHONE CALL with this
+  // person: their number is the one piece of contact information we never have
+  // to ask for, and on 2026-08-06 asking for it anyway was the single most
+  // common reason a request was thrown away (`missing_required_field:
+  // callbackNumber`). Professional callers routinely answer "that's the number
+  // you have" — which is true, and which used to cost them their ticket.
+  //
+  // Seeded, not pinned: record_pcp_intake overwrites it the moment the caller
+  // states a different number (a direct line or extension is better than the
+  // main switchboard they happened to dial from).
+  if (metadata.callerPhone && /^\+\d{10,15}$/.test(metadata.callerPhone)) {
+    pcpDirector.update(callId, { callbackNumber: metadata.callerPhone });
+  }
 
   // Tool timeline. The fleet got this on 2026-08-01; the PCP agent was added
   // on 08-03 and never inherited it, so on 08-06 all 167 PCP calls recorded
@@ -220,12 +314,19 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       failureInformation: z.string().max(2000).optional(),
     }),
     execute: async ({ narrative, urgency, disposition, failureInformation }) => {
-      const state = requireState(callId);
-      if (pcpDirector.next(callId).disposition !== disposition) {
+      const { state, missing } = ticketState(callId);
+      // The purpose is the one thing a ticket cannot be filed without — it is
+      // what routes the request to the right desk. Everything else degrades.
+      if (!state.callPurpose) return { success: false, error: 'call_purpose_required' };
+      // Only the HAND_OFF direction is gated on the director. Filing a task is
+      // always a safe floor, and refusing one because the director currently
+      // prefers a transfer is how a request ends up as neither.
+      if (disposition === 'HAND_OFF' && pcpDirector.next(callId).disposition !== 'HAND_OFF') {
         return { success: false, error: 'director_disposition_mismatch' };
       }
-      assertPcpDisposition(state.callPurpose, disposition);
-      const response = await submitPcpTicket(buildPayload(metadata, state, disposition, narrative, urgency, undefined, failureInformation));
+      const response = await submitPcpTicket(
+        buildPayload(metadata, state, disposition, narrative, urgency, undefined, failureInformation, missing),
+      );
       if (response.success) pcpDirector.recordDisposition(callId, disposition);
       return response;
     },
@@ -236,11 +337,17 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     description: 'Record a no-ticket automated outcome, but only after an authoritative tool succeeded.',
     parameters: z.object({ narrative: z.string().min(1).max(12000) }),
     execute: async ({ narrative }) => {
-      const state = requireState(callId);
-      assertPcpDisposition(state.callPurpose, 'AUTOMATE');
+      const { state, missing } = ticketState(callId);
+      if (!state.callPurpose) return { success: false, error: 'call_purpose_required' };
+      // The AUTOMATE gate is a real safety property and stays: an automated
+      // resolution may only be claimed off an authoritative tool that actually
+      // succeeded. It refuses structurally now rather than throwing.
+      if (!getPcpCallPurpose(state.callPurpose).allowedDispositions.includes('AUTOMATE')) {
+        return { success: false, error: 'automate_not_allowed_for_purpose' };
+      }
       const source = getPcpCallPurpose(state.callPurpose).authoritativeSource;
       if (!source || !state.completedTools.includes(source)) return { success: false, error: 'authoritative_tool_success_required' };
-      const response = await submitPcpTicket(buildPayload(metadata, state, 'AUTOMATE', narrative, 'routine'));
+      const response = await submitPcpTicket(buildPayload(metadata, state, 'AUTOMATE', narrative, 'routine', undefined, undefined, missing));
       if (response.success) pcpDirector.recordDisposition(callId, 'AUTOMATE');
       return response;
     },
@@ -251,12 +358,30 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     description: 'Create the required durable PCP ticket, then dial the configured PCP human queue. If transfer fails, update the same ticket as the fallback task.',
     parameters: z.object({ narrative: z.string().min(1).max(12000), urgency: z.enum(['normal', 'high', 'urgent']).default('high') }),
     execute: async ({ narrative, urgency }) => {
-      const state = requireState(callId);
-      if (!pcpDirector.next(callId).handoffEligible) return { success: false, error: 'handoff_not_eligible' };
+      const { state, missing } = ticketState(callId);
+      if (!state.callPurpose) return { success: false, error: 'call_purpose_required' };
+      // Not eligible to DIAL is not a reason to lose the request. Previously
+      // this threw before it even reached the eligibility check, so the caller
+      // got neither a transfer nor a ticket. Now the request is filed as a task
+      // and the agent is told so, in the same shape it already handles for a
+      // transfer that fails to connect.
+      if (!pcpDirector.next(callId).handoffEligible) {
+        const fallback = await submitPcpTicket(
+          buildPayload(metadata, state, 'CREATE_TASK', narrative, urgency, undefined, 'handoff_not_eligible', missing),
+        );
+        if (fallback.success) pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+        return {
+          success: false,
+          handoffStatus: 'HANDOFF_UNAVAILABLE',
+          ticketNumber: fallback.ticketNumber,
+          fallbackRecorded: fallback.success,
+          error: fallback.success ? 'handoff_not_eligible_task_created' : 'handoff_not_eligible',
+        };
+      }
       const requestedAt = new Date().toISOString();
       const initial = await submitPcpTicket(buildPayload(metadata, state, 'HAND_OFF', narrative, urgency, {
         requested: true, requestedAt, attempted: false, finalStatus: 'REQUESTED',
-      }));
+      }, undefined, missing));
       if (!initial.success) return { success: false, error: 'durable_ticket_required_before_handoff' };
 
       escalationDetailsMap.set(callId, {
@@ -275,7 +400,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const finalStatus: PcpHandoffStatus = ok ? 'CONNECTED' : ((outcome && !outcome.ok && outcome.status) || 'FAILED');
       pcpDirector.recordHandoffResult(callId, { status: finalStatus as PcpConversationState['handoffStatus'], reason: outcome && !outcome.ok ? outcome.reason : undefined });
       const finalDisposition: PcpDisposition = ok ? 'HAND_OFF' : 'CREATE_TASK';
-      const finalState = requireState(callId);
+      // Re-read rather than reuse: the caller may have given more during the
+      // transfer narration. Non-throwing — this runs AFTER the dial, so a throw
+      // here loses the outcome record on a call that really did connect.
+      const { state: finalState, missing: finalMissing } = ticketState(callId);
       const updated = await submitPcpTicket(buildPayload(metadata, finalState, finalDisposition, narrative, urgency, {
         requested: true,
         requestedAt,
@@ -287,7 +415,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         finalStatus,
         failureReason: outcome && !outcome.ok ? outcome.reason : undefined,
         fallbackTicketStatus: ok ? undefined : 'OPEN',
-      }, outcome && !outcome.ok ? outcome.reason : undefined));
+      }, outcome && !outcome.ok ? outcome.reason : undefined, finalMissing));
       if (updated.success) pcpDirector.recordDisposition(callId, finalDisposition);
       return { success: ok, handoffStatus: finalStatus, ticketNumber: initial.ticketNumber, fallbackRecorded: updated.success };
     },
@@ -299,8 +427,16 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     parameters: z.object({ narrative: z.string().min(1).max(12000) }),
     execute: async ({ narrative }) => {
       pcpDirector.update(callId, { callPurpose: 'patient_medical_records_request' });
-      const ready = requireState(callId);
-      const response = await submitPcpTicket(buildPayload(metadata, ready, 'CREATE_TASK', narrative, 'high', undefined, 'patient_medical_records_request_isolated'));
+      // Files with whatever intake produced. On 2026-08-06 this tool threw on a
+      // missing administrative field like every other, and 21 records requests
+      // reached this line with nothing filed behind them — including patients
+      // asking for their own records, and one caller who rang back eight
+      // minutes later and got nothing a second time. A records request is not
+      // discardable for want of a job title.
+      const { state, missing } = ticketState(callId);
+      const response = await submitPcpTicket(
+        buildPayload(metadata, state, 'CREATE_TASK', narrative, 'high', undefined, 'patient_medical_records_request_isolated', missing),
+      );
       if (response.success) pcpDirector.recordDisposition(callId, 'CREATE_TASK');
       return { ...response, recordsPathwayUsed: false, isolatedFromPcpPurposes: true };
     },
