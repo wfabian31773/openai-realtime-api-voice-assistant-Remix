@@ -118,3 +118,39 @@ export function renderKnownFacts(callId: string): string | null {
 export function clearAllLedgers(): void {
   ledgers.clear();
 }
+
+/**
+ * Passive harvester — gathering must NOT depend on who is driving the
+ * conversation (operator principle 2026-08-07: the morning failure left
+ * every slot empty because only the ramp wrote them). Called on EVERY
+ * caller line, any agent, ramp alive or dead: fills empty slots from
+ * recognizable answers. Never overwrites, never throws.
+ */
+const H_DOB = /\b(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s]((19|20)\d{2})\b|\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+((19|20)\d{2})\b/i;
+const H_DAY = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b/i;
+const H_FAX = /\bfax\b/i;
+const H_EMAIL = /\be-?mail\b/i;
+const H_FAX_NUM = /\b(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/;
+const H_EMAIL_ADDR = /\b[\w.+-]+@[\w-]+\.[a-z]{2,}\b/i;
+
+export function harvestCallerLine(callId: string, text: string): void {
+  try {
+    const f = ledgers.get(callId) ?? seedLedger(callId, {});
+    const dob = text.match(H_DOB);
+    if (dob && !f.dateOfBirth) f.dateOfBirth = dob[0];
+    const day = text.match(H_DAY);
+    if (day) (f as CallFacts & { requestedDay?: string }).requestedDay = day[1].toLowerCase();
+    if (H_FAX.test(text) && !f.contactMethod) f.contactMethod = 'fax';
+    if (H_EMAIL.test(text) && !f.contactMethod && !H_FAX.test(text)) f.contactMethod = 'email';
+    if (f.contactMethod === 'fax' && !f.faxNumber) {
+      const n = text.match(H_FAX_NUM);
+      if (n && H_FAX.test(text)) f.faxNumber = n[0];
+    }
+    if (f.contactMethod === 'email' && !f.email) {
+      const e = text.match(H_EMAIL_ADDR);
+      if (e) f.email = e[0];
+    }
+  } catch {
+    /* harvesting must never affect a call */
+  }
+}

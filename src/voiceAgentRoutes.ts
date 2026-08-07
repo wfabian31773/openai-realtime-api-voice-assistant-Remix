@@ -27,7 +27,7 @@ import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
 import { resolveConfiguredGreeting, scheduleGreetingCacheWarm } from './services/greetingResolver';
-import { seedLedger, renderKnownFacts, releaseLedger } from './services/callFactsLedger';
+import { seedLedger, renderKnownFacts, releaseLedger, harvestCallerLine } from './services/callFactsLedger';
 import { startRamp, onCallerUtterance, rampActive, releaseRamp } from './services/rampEngine';
 import { getLedger as getCallFacts } from './services/callFactsLedger';
 import { storage } from '../server/storage';
@@ -2715,6 +2715,10 @@ async function observeCall(
 
         // Shadow tap (observation only, default off): emit never throws or blocks.
         shadowTap.emit('user_transcript', callId, effectiveSlug, { text: transcript }, { sensitive: true, component: 'transcript' });
+
+        // Passive harvest FIRST — every caller line fills empty ledger slots
+        // regardless of who is driving (operator principle 2026-08-07).
+        harvestCallerLine(callId, transcript);
 
         // CP-4: the ramp state machine owns the opening — parse the answer,
         // force the operator's next line, preempting any improvised reply
