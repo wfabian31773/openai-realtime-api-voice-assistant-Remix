@@ -1215,6 +1215,10 @@ export function createAzulSchedulingAgent(
         // fallback depends on it, and DIRECTOR_AGENTS is a kill switch that must
         // not take unrelated behaviour down with it.
         azulVerifiedCalls.add(callId);
+        // Call-facts ledger (CP-2): identity becomes a locked constant.
+        void import('../services/callFactsLedger').then(({ updateLedger }) =>
+          updateLedger(callId, { firstName: parsed.firstName, lastName: parsed.lastName, identityVerified: true }),
+        );
         if (!directorEnabledFor('azul-scheduling')) return;
         // The ON-FILE spelling too: the prompt tells the agent to adopt it from
         // then on, and the caller may never have pronounced it.
