@@ -190,6 +190,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Scripts & Syncs — every feed keeping every application fresh, incl.
+  // the operator's manual morning scripts ("if the whole thing is gonna be
+  // based on me running these sync scripts, we should be tracking that",
+  // Wayne 2026-08-07). Reads 5Star, this app, and the Patient Console.
+  app.get('/api/observatory/syncs', isAuthenticated, async (_req, res) => {
+    try {
+      const { syncsOverview } = await import('./observatory/queries');
+      res.json(await syncsOverview());
+    } catch (error) {
+      console.error('[observatory] syncs failed:', error);
+      res.status(500).json({
+        message: 'Observatory syncs failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
   app.get('/api/observatory/funnel', isAuthenticated, async (req, res) => {
     try {
       const weeks = Math.min(26, Math.max(1, parseInt(String(req.query.weeks ?? '12'), 10) || 12));
