@@ -3480,6 +3480,7 @@ async function observeCall(
         callerPhone: seedConf ? ConferenceNametoCallerIDMapping[seedConf] : undefined,
         matchedFirstName: azulMetadataRef?.precontext?.matched ? azulMetadataRef.precontext.firstName : undefined,
         matchedLastName: azulMetadataRef?.precontext?.matched ? azulMetadataRef.precontext.lastNameOnFile : undefined,
+        matchedDob: azulMetadataRef?.precontext?.matched ? azulMetadataRef.precontext.dobOnFile ?? undefined : undefined,
         language: metadata?.language,
       });
     } catch (ledgerErr) {

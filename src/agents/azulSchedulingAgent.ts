@@ -434,6 +434,8 @@ export interface AzulPrecontext {
   matched: boolean;
   firstName?: string;
   lastNameOnFile?: string;
+  /** Matched record's DOB (eyecare PR #8) — context comparison, never spoken first. */
+  dobOnFile?: string | null;
   language?: string | null;
   hasChart?: boolean;
 }
