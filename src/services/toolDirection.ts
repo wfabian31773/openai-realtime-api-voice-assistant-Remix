@@ -75,6 +75,23 @@ export function withToolDirection<A extends unknown[]>(
   execute: (...args: A) => Promise<unknown> | unknown,
 ): (...args: A) => Promise<unknown> {
   return async (...args: A) => {
+    // Ledger auto-fill (2026-08-07 afternoon watch: callback_fields was
+    // still the top AS critical because the MODEL had to remember to copy
+    // the number into the ticket). The constants fill the form directly:
+    // an empty/missing callback field on any ticket tool gets the ledger's
+    // callback number — deterministic, never overwrites a provided value.
+    try {
+      if (callId && /ticket/i.test(toolName) && args[0] && typeof args[0] === 'object') {
+        const { getLedger } = await import('./callFactsLedger');
+        const cb = getLedger(callId)?.callbackNumber;
+        if (cb) {
+          const a0 = args[0] as Record<string, unknown>;
+          for (const key of ['callback_number', 'patientPhone', 'callbackNumber', 'phone']) {
+            if (key in a0 && (!a0[key] || String(a0[key]).replace(/\D/g, '').length < 10)) a0[key] = cb;
+          }
+        }
+      }
+    } catch { /* auto-fill must never affect the call */ }
     const blocked = await gateBeforeExecution(agentSlug, callId, toolName, args[0]);
     if (blocked) return blocked;
     const raw = await execute(...args);
