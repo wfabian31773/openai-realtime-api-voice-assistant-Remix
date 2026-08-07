@@ -633,14 +633,14 @@ export async function createAnsweringServiceAgent(
     // CP-2/CP-4: seed the call-facts ledger with the phone match and caller
     // memory so the ramp and KNOWN-FACTS injection start from what we know.
     if (callId) {
-      void import('../services/callFactsLedger').then(({ seedLedger }) =>
-        seedLedger(callId, {
-          callerPhone,
-          matchedFirstName: scheduleContext?.patientData?.firstName || undefined,
-          matchedLastName: scheduleContext?.patientData?.lastName || undefined,
-          priorCallsSameIssue: callerMemory?.totalCalls || undefined,
-        }),
-      );
+      const { seedLedger } = await import('../services/callFactsLedger');
+      seedLedger(callId, {
+        callerPhone,
+        matchedFirstName: scheduleContext?.patientData?.firstName || undefined,
+        matchedLastName: scheduleContext?.patientData?.lastName || undefined,
+        priorCallsSameIssue: callerMemory?.totalCalls || undefined,
+      });
+      console.info(`[RAMP] Ledger seeded synchronously for ${callId} (matched=${Boolean(scheduleContext?.patientData?.firstName)})`);
     }
 
     console.log(`[${agentTag}] Context lookup results:`, {

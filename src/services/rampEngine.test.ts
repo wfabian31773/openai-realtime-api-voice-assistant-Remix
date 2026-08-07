@@ -8,10 +8,12 @@ const verifyNo = async () => false;
 describe('rampEngine — approved scripts S1-S5', () => {
   beforeEach(() => { clearAllLedgers(); releaseRamp('c'); });
 
-  it('S1 happy path: matched → yes → DOB → verified, identity locked', async () => {
+  it('S1 happy path: intent → confirm → yes → DOB → verified, identity locked', async () => {
     seedLedger('c', { matchedFirstName: 'Maria', matchedLastName: 'Lopez' });
     startRamp('c');
-    let s = await onCallerUtterance('c', 'yes this is she', verifyYes);
+    let s = await onCallerUtterance('c', 'I need to check on my refill', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.confirmId('Maria'));
+    s = await onCallerUtterance('c', 'yes this is she', verifyYes);
     expect(s.line).toBe(RAMP_LINES.confirmDob);
     s = await onCallerUtterance('c', 'May 10 1983', verifyYes);
     expect(s.line).toBe(RAMP_LINES.verified('Maria'));
@@ -22,7 +24,9 @@ describe('rampEngine — approved scripts S1-S5', () => {
   it('S2: matched but "no" → classify → existing → collect name/DOB', async () => {
     seedLedger('c', { matchedFirstName: 'Maria' });
     startRamp('c');
-    let s = await onCallerUtterance('c', 'no, calling for my mother', verifyYes);
+    let s = await onCallerUtterance('c', 'calling about an appointment', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.confirmId('Maria'));
+    s = await onCallerUtterance('c', 'no, calling for my mother', verifyYes);
     expect(s.line).toBe(RAMP_LINES.classify);
     s = await onCallerUtterance('c', 'she is an existing patient', verifyYes);
     expect(s.line).toBe(RAMP_LINES.collectName);
@@ -30,10 +34,12 @@ describe('rampEngine — approved scripts S1-S5', () => {
     expect(s.line).toBe(RAMP_LINES.collectDob);
   });
 
-  it('S3/S4: unmatched → new patient → details flow, no verification gate', async () => {
+  it('S3/S4: unmatched → intent → classify → new patient details, no verification gate', async () => {
     seedLedger('c', {});
     startRamp('c');
-    let s = await onCallerUtterance('c', 'brand new patient', verifyYes);
+    let s = await onCallerUtterance('c', 'I want to make an appointment', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.classify);
+    s = await onCallerUtterance('c', 'brand new patient', verifyYes);
     expect(s.line).toBe(RAMP_LINES.newPatientTickets);
     s = await onCallerUtterance('c', 'John Smith', verifyYes);
     s = await onCallerUtterance('c', '3/4/1990', verifyYes);
@@ -43,6 +49,7 @@ describe('rampEngine — approved scripts S1-S5', () => {
   it('S5: two verification failures → no third attempt, message exit', async () => {
     seedLedger('c', { matchedFirstName: 'Maria', matchedLastName: 'Lopez' });
     startRamp('c');
+    await onCallerUtterance('c', 'checking on my glasses order', verifyNo);
     await onCallerUtterance('c', 'yes', verifyNo);
     let s = await onCallerUtterance('c', '5/10/1983', verifyNo);
     expect(s.line).toBe(RAMP_LINES.verifyFail1);
@@ -60,17 +67,20 @@ describe('rampEngine — approved scripts S1-S5', () => {
     expect(s.line).toBeNull();
   });
 
-  it('two unparsable answers disengage — the ramp never traps a caller', async () => {
-    seedLedger('c', { matchedFirstName: 'M' });
+  it('first unparsable answer RE-ASKS the question forced; second disengages', async () => {
+    seedLedger('c', { matchedFirstName: 'Maria' });
     startRamp('c');
-    await onCallerUtterance('c', 'banana rocket ship', verifyYes);
-    const s = await onCallerUtterance('c', 'purple monkey dishwasher', verifyYes);
+    await onCallerUtterance('c', 'calling about my appointment', verifyYes); // → CONFIRM_ID
+    let s = await onCallerUtterance('c', 'uh', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.confirmId('Maria')); // rigidity: re-ask, not silence
+    s = await onCallerUtterance('c', 'hm', verifyYes);
     expect(s.status.state).toBe('DISENGAGED');
   });
 
   it('verify lookup error follows the fail ladder, never crashes the ramp', async () => {
     seedLedger('c', { matchedFirstName: 'Maria', matchedLastName: 'Lopez' });
     startRamp('c');
+    await onCallerUtterance('c', 'need to reschedule something', verifyYes);
     await onCallerUtterance('c', 'yes', verifyYes);
     const s = await onCallerUtterance('c', '5/10/1983', async () => { throw new Error('db down'); });
     expect(s.line).toBe(RAMP_LINES.verifyFail1);
