@@ -1,6 +1,7 @@
 # Ramp Script Listing — FOR OPERATOR APPROVAL (CP-1)
-Status: DRAFT for Wayne's line-by-line review. Nothing builds until every
-line is approved. Structure: per agent → per state → per branch (including
+Status: APPROVED by Wayne 2026-08-07 (chat), with the PCP contact-method
+rule below. This document is now the single source of truth for the ramp
+engine, the graders, and the Observatory. Structure: per agent → per state → per branch (including
 every tool-call outcome), each with the recommended exact line.
 Format: `STATE | trigger/branch | LINE THE AGENT SAYS | next state`.
 
@@ -40,7 +41,10 @@ COLLECT_CALLER | entered | "May I have your name and the office or medical group
 COLLECT_REQ | caller identified | "How can I help you today?" | classify: schedule→ROUTE / clinical/records/other→TAKE_DETAILS
 ROUTE | any schedule request | "I'll get that over to our PCP scheduling queue right away — one moment." | transfer to PCP queue
 PATIENT_REF | caller names a patient | (SILENT: attempt match; attach to ticket if found — NEVER blocks, NEVER interrogates the professional) | continue
-TAKE_DETAILS | non-schedule request | "I'll make sure that gets to the right team — what's the best callback number for your office?" | FILE
+TAKE_DETAILS | non-schedule request | contact method MATCHES the request (operator 2026-08-07): | branch below
+CONTACT_CALLBACK | default | "I'll make sure that gets to the right team — what's the best callback number for your office?" | FILE
+CONTACT_FAX | fax/records-by-fax requested | "What's the best fax number to send that to?" → read back once | FILE
+CONTACT_EMAIL | email requested | "What's the best email address for that?" → read back once | FILE
 FILE | ticket filed | "Done — the team will follow up with your office. Anything else I can help with?" | WRAP
 
 ## 4. SD Pilot / azul-scheduling (schedules)
