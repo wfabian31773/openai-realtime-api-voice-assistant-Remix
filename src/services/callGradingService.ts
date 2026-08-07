@@ -233,6 +233,31 @@ function gradeHumanRequestDeflection(input: DeterministicGraderInput): GraderRes
   };
 }
 
+/** CP-8 (operator rule 2026-08-07): the realtime stack is natively
+ *  multilingual — an agent refusing or failing a caller's language is a
+ *  CONFIGURATION FAULT on our side, never excusable model behavior. */
+function gradeLanguageConfigFault(input: DeterministicGraderInput): GraderResult {
+  const agentText = input.transcript
+    .split('\n')
+    .filter(l => /^agent:/i.test(l.trim()))
+    .join(' ')
+    .toLowerCase();
+  const refusal =
+    /only (speak|assist in|help in|support) english|don'?t speak spanish|cannot speak (spanish|your language)|no puedo hablar|english only|unable to (speak|continue) in (spanish|that language)/.test(
+      agentText,
+    );
+  return {
+    grader: 'language_config_fault',
+    pass: !refusal,
+    score: refusal ? 0.0 : 1.0,
+    ...(refusal ? { severity: 'critical' as const } : {}),
+    reason: refusal
+      ? 'Agent refused or failed the caller\'s language — the realtime stack is natively multilingual, so this is a CONFIGURATION FAULT on our side (operator rule 2026-08-07)'
+      : 'No language refusals detected',
+    metadata: { refusal },
+  };
+}
+
 function gradeTicketRequiredVsCreated(input: DeterministicGraderInput): GraderResult {
   const transcriptLower = input.transcript.toLowerCase();
   const lines = input.transcript.split('\n');
@@ -912,6 +937,12 @@ export class CallGradingService {
       results.push(gradeHumanRequestDeflection(input));
     } catch (e) {
       console.error(`[GRADING] human request deflection grader error:`, e);
+    }
+
+    try {
+      results.push(gradeLanguageConfigFault(input));
+    } catch (e) {
+      console.error(`[GRADING] language config fault grader error:`, e);
     }
 
     try {
