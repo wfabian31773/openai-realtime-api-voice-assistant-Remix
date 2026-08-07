@@ -83,11 +83,24 @@ export function withToolDirection<A extends unknown[]>(
     try {
       if (callId && /ticket/i.test(toolName) && args[0] && typeof args[0] === 'object') {
         const { getLedger } = await import('./callFactsLedger');
-        const cb = getLedger(callId)?.callbackNumber;
-        if (cb) {
-          const a0 = args[0] as Record<string, unknown>;
+        const lf = getLedger(callId);
+        const a0 = args[0] as Record<string, unknown>;
+        if (lf?.callbackNumber) {
           for (const key of ['callback_number', 'patientPhone', 'callbackNumber', 'phone']) {
-            if (key in a0 && (!a0[key] || String(a0[key]).replace(/\D/g, '').length < 10)) a0[key] = cb;
+            if (key in a0 && (!a0[key] || String(a0[key]).replace(/\D/g, '').length < 10)) a0[key] = lf.callbackNumber;
+          }
+        }
+        // Name and reason fill from the constants too (live hour 2026-08-07:
+        // tickets graded critical for missing NAME and REASON the ledger held).
+        const ledgerName = `${lf?.firstName ?? lf?.matchedFirstName ?? ''} ${lf?.lastName ?? lf?.matchedLastName ?? ''}`.trim();
+        if (ledgerName) {
+          for (const key of ['patientName', 'patient_name', 'name', 'callerName']) {
+            if (key in a0 && (!a0[key] || String(a0[key]).trim().length < 2)) a0[key] = ledgerName;
+          }
+        }
+        if (lf?.intent) {
+          for (const key of ['reason', 'description', 'callReason']) {
+            if (key in a0 && (!a0[key] || String(a0[key]).trim().length < 5)) a0[key] = lf.intent;
           }
         }
       }
