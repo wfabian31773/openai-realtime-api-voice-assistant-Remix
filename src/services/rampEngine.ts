@@ -22,6 +22,7 @@ export type RampState =
   | 'TAKE_MESSAGE'
   | 'CONFIRM_CALLBACK'
   | 'COLLECT_CALLBACK'
+  | 'COLLECT_FAX'
   | 'CLASSIFY'
   | 'COLLECT_NAME'
   | 'COLLECT_DOB'
@@ -67,6 +68,10 @@ export const RAMP_LINES = {
   collectCaller: 'Of course — may I have your name and the office or medical group you\'re calling from?',
   confirmCallback: (last4: string) => `Is this number ending in ${last4} the best one to reach you?`,
   collectCallback: "What's the best number to reach you?",
+  collectFax: "What's the best fax number to send that to?",
+  routeSchedule: 'Say: "I\'ll get that over to our PCP scheduling queue right away — one moment." Then, in this same turn, call handoff_to_pcp with reason "scheduling request". Do not ask anything else first.',
+  fileDirectivePcp: (message: string) =>
+    `Say: "I'll make sure that gets to the right team." Then, in this same turn, file this request with the appropriate ticket tool: ${message}. Do not ask the caller anything else first.`,
   fileDirective: (message: string) =>
     `Say: "Give me one moment while I get this submitted for you." Then, in this same turn, call create_ticket for this request: ${message}. Do not ask the caller anything else first.`,
 } as const;
@@ -139,6 +144,7 @@ export async function onCallerUtterance(
         return cb ? RAMP_LINES.confirmCallback(cb.slice(-4)) : RAMP_LINES.collectCallback;
       }
       case 'COLLECT_CALLBACK': return RAMP_LINES.collectCallback;
+      case 'COLLECT_FAX': return RAMP_LINES.collectFax;
       default: return null;
     }
   };
@@ -173,9 +179,36 @@ export async function onCallerUtterance(
     case 'COLLECT_CALLER': {
       if (text.trim().split(/\s+/).length >= 2) {
         updateLedger(callId, { medicalGroup: text.trim().slice(0, 160), callerRole: 'healthcare professional' });
+        const intent = getLedger(callId)?.intent ?? '';
+        // Route by request type (playbook §3): schedule -> PCP queue transfer;
+        // records -> fax number; everything else -> callback confirm -> file.
+        if (/schedul|appointment|book/i.test(intent)) {
+          status.state = 'DONE_MESSAGE';
+          status.active = false;
+          return { line: RAMP_LINES.routeSchedule, status };
+        }
+        if (/record|fax|chart|notes|results/i.test(intent)) {
+          updateLedger(callId, { contactMethod: 'fax' });
+          status.state = 'COLLECT_FAX';
+          return { line: RAMP_LINES.collectFax, status };
+        }
+        const cb = getLedger(callId)?.callbackNumber;
+        if (cb) {
+          status.state = 'CONFIRM_CALLBACK';
+          return { line: RAMP_LINES.confirmCallback(cb.slice(-4)), status };
+        }
+        status.state = 'COLLECT_CALLBACK';
+        return { line: RAMP_LINES.collectCallback, status };
+      }
+      return unparsable();
+    }
+    case 'COLLECT_FAX': {
+      const fax = text.match(/(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
+      if (fax) {
+        updateLedger(callId, { faxNumber: fax[0].replace(/[^\d+]/g, '') });
         status.state = 'DONE_MESSAGE';
         status.active = false;
-        return { line: null, status }; // model proceeds: routing/contact-method per matrix + KNOWN FACTS
+        return { line: RAMP_LINES.fileDirectivePcp(getLedger(callId)?.intent ?? 'the records request'), status };
       }
       return unparsable();
     }
@@ -221,7 +254,8 @@ export async function onCallerUtterance(
         updateLedger(callId, { callbackConfirmed: true });
         status.state = 'DONE_MESSAGE';
         status.active = false;
-        return { line: RAMP_LINES.fileDirective(getLedger(callId)?.intent ?? 'the caller request'), status };
+        const mk = status.mode === 'professional' ? RAMP_LINES.fileDirectivePcp : RAMP_LINES.fileDirective;
+        return { line: mk(getLedger(callId)?.intent ?? 'the caller request'), status };
       }
       if (NO.test(text)) {
         status.state = 'COLLECT_CALLBACK';
@@ -235,7 +269,8 @@ export async function onCallerUtterance(
         updateLedger(callId, { callbackNumber: num[0].replace(/[^\d+]/g, ''), callbackConfirmed: true });
         status.state = 'DONE_MESSAGE';
         status.active = false;
-        return { line: RAMP_LINES.fileDirective(getLedger(callId)?.intent ?? 'the caller request'), status };
+        const mk = status.mode === 'professional' ? RAMP_LINES.fileDirectivePcp : RAMP_LINES.fileDirective;
+        return { line: mk(getLedger(callId)?.intent ?? 'the caller request'), status };
       }
       return unparsable();
     }
