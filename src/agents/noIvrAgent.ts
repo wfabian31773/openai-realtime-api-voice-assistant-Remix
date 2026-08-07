@@ -1,5 +1,6 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
+import { withToolDirection } from '../services/toolDirection';
 import { medicalSafetyGuardrails } from "../guardrails/medicalSafety";
 import { 
   scheduleLookupService, 
@@ -816,7 +817,11 @@ export async function createNoIvrAgent(
     agentSlug: 'no-ivr',
   };
   const recordedTool: typeof tool = ((def: any) =>
-    tool({ ...def, execute: recordingExecute(timelineCtx, def.name, def.execute) })) as typeof tool;
+    tool({
+      ...def,
+      // CP-3: the approved next line rides inside the tool result (script-listing §6).
+      execute: withToolDirection('no-ivr', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
+    })) as typeof tool;
 
   let scheduleContext: PatientScheduleContext | undefined;
   let callerMemory: CallerMemory | null = null;

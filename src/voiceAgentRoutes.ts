@@ -272,13 +272,15 @@ function checkGreetingDelivered(callId: string, event: any): void {
     pendingGreetings.delete(callId);
     lastFactsRender.delete(callId);
     releaseLedger(callId);
+    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
     return;
   }
   const spoken = normaliseSpoken(extractResponseTranscript(event));
   if (pending.attempts > 0 && pending.prefix && spoken.startsWith(pending.prefix)) {
     pendingGreetings.delete(callId);
     lastFactsRender.delete(callId);
-    releaseLedger(callId); // greeting (or its barged-in start) played
+    releaseLedger(callId);
+    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId)); // greeting (or its barged-in start) played
     return;
   }
   if (pending.attempts >= 2) {
@@ -286,6 +288,7 @@ function checkGreetingDelivered(callId: string, event: any): void {
     pendingGreetings.delete(callId);
     lastFactsRender.delete(callId);
     releaseLedger(callId);
+    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
     return;
   }
   console.info(`[GREETING] Turn ended without the scripted greeting on ${callId} (heard: "${spoken.slice(0, 60)}") — resending at turn boundary`);
@@ -3808,6 +3811,7 @@ async function observeCall(
     pendingGreetings.delete(callId);
     lastFactsRender.delete(callId);
     releaseLedger(callId);
+    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
     deadAirWatchdog.release(callId);
