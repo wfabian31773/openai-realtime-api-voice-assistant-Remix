@@ -28,6 +28,8 @@ import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG,
 import { getGreeterOpeningGreeting } from './utils/timeAware';
 import { resolveConfiguredGreeting, scheduleGreetingCacheWarm } from './services/greetingResolver';
 import { seedLedger, renderKnownFacts, releaseLedger } from './services/callFactsLedger';
+import { startRamp, onCallerUtterance, rampActive, releaseRamp } from './services/rampEngine';
+import { getLedger as getCallFacts } from './services/callFactsLedger';
 import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
 import './services/azulRegressionWatch'; // Phase 7: daily grade-regression check (side-effect timers)
@@ -213,6 +215,9 @@ interface PendingGreeting {
 }
 const pendingGreetings = new Map<string, PendingGreeting>();
 
+/** CP-4: lines running the deterministic ramp (env override RAMP_AGENTS). */
+const RAMP_AGENTS = new Set((process.env.RAMP_AGENTS ?? 'answering-service').split(',').map((x) => x.trim()).filter(Boolean));
+
 /** CP-2: last KNOWN-FACTS block injected per call — re-inject only on change. */
 const lastFactsRender = new Map<string, string>();
 
@@ -273,6 +278,7 @@ function checkGreetingDelivered(callId: string, event: any): void {
     lastFactsRender.delete(callId);
     releaseLedger(callId);
     void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
+    releaseRamp(callId);
     return;
   }
   const spoken = normaliseSpoken(extractResponseTranscript(event));
@@ -280,7 +286,8 @@ function checkGreetingDelivered(callId: string, event: any): void {
     pendingGreetings.delete(callId);
     lastFactsRender.delete(callId);
     releaseLedger(callId);
-    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId)); // greeting (or its barged-in start) played
+    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
+    releaseRamp(callId); // greeting (or its barged-in start) played
     return;
   }
   if (pending.attempts >= 2) {
@@ -289,6 +296,7 @@ function checkGreetingDelivered(callId: string, event: any): void {
     lastFactsRender.delete(callId);
     releaseLedger(callId);
     void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
+    releaseRamp(callId);
     return;
   }
   console.info(`[GREETING] Turn ended without the scripted greeting on ${callId} (heard: "${spoken.slice(0, 60)}") — resending at turn boundary`);
@@ -2708,6 +2716,36 @@ async function observeCall(
         // Shadow tap (observation only, default off): emit never throws or blocks.
         shadowTap.emit('user_transcript', callId, effectiveSlug, { text: transcript }, { sensitive: true, component: 'transcript' });
 
+        // CP-4: the ramp state machine owns the opening — parse the answer,
+        // force the operator's next line, preempting any improvised reply
+        // (the director's cancel-and-direct plumbing, deterministic here).
+        if (rampActive(callId)) {
+          void (async () => {
+            try {
+              const { scheduleLookupService } = await import('./services/scheduleLookupService');
+              const step = await onCallerUtterance(callId, transcript, async (first, last, dob) => {
+                const r = await scheduleLookupService.lookupByNameAndDOB(first, last, dob);
+                return Boolean((r as any)?.patientFound);
+              });
+              if (step.line) {
+                if (responseInFlight.has(callId)) {
+                  try { (session.transport as any).sendEvent({ type: 'response.cancel' }); } catch { /* fine */ }
+                }
+                (session.transport as any).sendEvent({
+                  type: 'response.create',
+                  response: { instructions: `Say this to the caller word-for-word, without adding, removing, or rephrasing anything: "${step.line}" - Then stop and wait for their response.` },
+                });
+                console.info(`[RAMP] ${step.status.state} line forced for ${callId}`);
+              } else if (!step.status.active) {
+                console.info(`[RAMP] Exited (${step.status.state}) for ${callId} — model proceeds with locked facts`);
+              }
+            } catch (rampErr) {
+              console.warn(`[RAMP] Error for ${callId} — disengaging:`, rampErr);
+              releaseRamp(callId);
+            }
+          })();
+        }
+
         // Loop guard: a repeated "representative / customer service" demand
         // trips the escalation directive.
         const lgCallerDirective = conversationLoopGuard.onCallerLine(callId, effectiveSlug, transcript);
@@ -3437,6 +3475,18 @@ async function observeCall(
       console.info(`[AZUL-SCHED] Greeting personalised for recognised caller (${recognisedFirstName})`);
     }
 
+    // CP-4 (spine S1): on ramp lines, a caller-ID match personalizes the
+    // greeting for ANY agent, and the deterministic ramp takes the opening.
+    if (agentSlug && RAMP_AGENTS.has(agentSlug)) {
+      const rampFacts = getCallFacts(callId);
+      if (!recognisedFirstName && rampFacts?.matchedFirstName && agentGreeting && agentGreeting.trim() !== '') {
+        agentGreeting = `Hello, thank you for calling Azul Vision. Am I speaking with ${rampFacts.matchedFirstName}?`;
+        console.info(`[RAMP] Greeting personalised from ledger match for ${callId}`);
+      }
+      startRamp(callId);
+      console.info(`[RAMP] Ramp engaged for ${agentSlug} call ${callId}`);
+    }
+
     if (agentGreeting && agentGreeting.trim() !== '') {
       console.info(`[SESSION] Triggering greeting via response.create: "${agentGreeting.substring(0, 50)}..."`);
 
@@ -3812,6 +3862,7 @@ async function observeCall(
     lastFactsRender.delete(callId);
     releaseLedger(callId);
     void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
+    releaseRamp(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
     deadAirWatchdog.release(callId);
