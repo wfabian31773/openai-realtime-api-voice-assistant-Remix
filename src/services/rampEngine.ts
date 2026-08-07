@@ -15,6 +15,8 @@
 import { getLedger, updateLedger } from './callFactsLedger';
 
 export type RampState =
+  | 'CAPTURE_INTENT'
+  | 'COLLECT_CALLER'
   | 'CONFIRM_ID'
   | 'CLASSIFY'
   | 'COLLECT_NAME'
@@ -24,8 +26,11 @@ export type RampState =
   | 'DONE_MESSAGE'
   | 'DISENGAGED';
 
+export type RampMode = 'patient' | 'professional';
+
 export interface RampStatus {
   state: RampState;
+  mode: RampMode;
   unparsedCount: number;
   verifyFails: number;
   active: boolean;
@@ -55,15 +60,17 @@ export const RAMP_LINES = {
   verifyFail2Tickets:
     "I'm not finding a match on my end — I'll take your information and have the team contact you.",
   newPatientTickets: "I'll take your details so our team can get you set up. May I have the patient's first and last name?",
+  collectCaller: 'Of course — may I have your name and the office or medical group you\'re calling from?',
 } as const;
 
 const sessions = new Map<string, RampStatus>();
 
-export function startRamp(callId: string): RampStep {
+export function startRamp(callId: string, mode: RampMode = 'patient'): RampStep {
   const facts = getLedger(callId);
   const matched = Boolean(facts?.matchedFirstName);
   const status: RampStatus = {
-    state: matched ? 'CONFIRM_ID' : 'CLASSIFY',
+    state: mode === 'professional' ? 'CAPTURE_INTENT' : matched ? 'CONFIRM_ID' : 'CLASSIFY',
+    mode,
     unparsedCount: 0,
     verifyFails: 0,
     active: true,
@@ -100,7 +107,7 @@ export async function onCallerUtterance(
   verifyFn: (first: string, last: string, dob: string) => Promise<boolean>,
 ): Promise<RampStep> {
   const status = sessions.get(callId);
-  if (!status || !status.active) return { line: null, status: status ?? { state: 'DISENGAGED', unparsedCount: 0, verifyFails: 0, active: false } };
+  if (!status || !status.active) return { line: null, status: status ?? { state: 'DISENGAGED', mode: 'patient', unparsedCount: 0, verifyFails: 0, active: false } };
   const facts = getLedger(callId);
 
   if (URGENT.test(text)) return disengage(status); // safety: model + guardrails own urgency
@@ -112,6 +119,25 @@ export async function onCallerUtterance(
   };
 
   switch (status.state) {
+    case 'CAPTURE_INTENT': {
+      // Professional line (PCP): the greeting already asked how to help —
+      // the first utterance IS the intent; then collect who/where from.
+      if (text.trim().split(/\s+/).length >= 2) {
+        updateLedger(callId, { intent: text.trim().slice(0, 200) });
+        status.state = 'COLLECT_CALLER';
+        return { line: RAMP_LINES.collectCaller, status };
+      }
+      return unparsable();
+    }
+    case 'COLLECT_CALLER': {
+      if (text.trim().split(/\s+/).length >= 2) {
+        updateLedger(callId, { medicalGroup: text.trim().slice(0, 160), callerRole: 'healthcare professional' });
+        status.state = 'DONE_MESSAGE';
+        status.active = false;
+        return { line: null, status }; // model proceeds: routing/contact-method per matrix + KNOWN FACTS
+      }
+      return unparsable();
+    }
     case 'CONFIRM_ID': {
       if (YES.test(text) && !NO.test(text)) {
         status.state = 'COLLECT_DOB';
