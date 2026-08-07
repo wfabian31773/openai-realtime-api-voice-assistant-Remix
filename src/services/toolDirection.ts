@@ -75,6 +75,8 @@ export function withToolDirection<A extends unknown[]>(
   execute: (...args: A) => Promise<unknown> | unknown,
 ): (...args: A) => Promise<unknown> {
   return async (...args: A) => {
+    const blocked = await gateBeforeExecution(agentSlug, callId, toolName);
+    if (blocked) return blocked;
     const raw = await execute(...args);
     try {
       const directive = directionFor(agentSlug, toolName, raw, callId);
@@ -117,4 +119,36 @@ export function acknowledgeDayMismatch(raw: string, preferredDate?: string): str
   } catch {
     return raw;
   }
+}
+
+/**
+ * Pre-execution gate (operator 2026-08-07: "the PCP line died abruptly —
+ * can't have that in production"): terminate_call REFUSES to run while
+ * required ledger slots for the request are still empty. Deterministic:
+ * the tool returns what to collect instead of ending the call.
+ */
+export async function gateBeforeExecution(
+  agentSlug: string,
+  callId: string | undefined,
+  toolName: string,
+): Promise<string | null> {
+  if (!callId || !/^(terminate_call|end_call)$/.test(toolName)) return null;
+  try {
+    const { getLedger } = await import('./callFactsLedger');
+    const f = getLedger(callId);
+    if (!f) return null;
+    const missing: string[] = [];
+    if (agentSlug === 'pcp') {
+      if (!f.medicalGroup) missing.push('the caller\'s name and office/medical group');
+      if (f.contactMethod === 'fax' && !f.faxNumber) missing.push('the FAX number for this records request');
+      if (f.contactMethod === 'email' && !f.email) missing.push('the email address for this request');
+    }
+    if (missing.length) {
+      console.warn(`[TOOL-GATE] terminate_call BLOCKED on ${agentSlug} call ${callId} — missing: ${missing.join('; ')}`);
+      return `BLOCKED — do NOT end the call yet. You still need to collect: ${missing.join('; ')}. Ask for it now, then wrap up properly with "Anything else I can help with?" before ending.`;
+    }
+  } catch {
+    /* gate must never break a call */
+  }
+  return null;
 }

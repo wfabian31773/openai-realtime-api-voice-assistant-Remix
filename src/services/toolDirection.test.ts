@@ -55,3 +55,25 @@ describe('acknowledgeDayMismatch — S6', () => {
     expect(acknowledgeDayMismatch('not json', '2026-08-11')).toBe('not json');
   });
 });
+
+describe('gateBeforeExecution — no abrupt endings (PCP)', () => {
+  it('blocks terminate_call while medical group or fax number is missing', async () => {
+    const { seedLedger, clearAllLedgers } = await import('./callFactsLedger');
+    clearAllLedgers();
+    seedLedger('g1', { contactMethod: 'fax' });
+    let executed = false;
+    const exec = withToolDirection('pcp', 'g1', 'terminate_call', async () => { executed = true; return 'ended'; });
+    const out = (await exec()) as string;
+    expect(executed).toBe(false);
+    expect(out).toContain('BLOCKED');
+    expect(out).toContain('FAX number');
+  });
+
+  it('allows terminate_call once required slots are filled', async () => {
+    const { seedLedger, clearAllLedgers } = await import('./callFactsLedger');
+    clearAllLedgers();
+    seedLedger('g2', { medicalGroup: 'Scripps Coastal', contactMethod: 'fax', faxNumber: '760-555-1234' });
+    const exec = withToolDirection('pcp', 'g2', 'terminate_call', async () => 'ended');
+    expect(await exec()).toBe('ended');
+  });
+});
