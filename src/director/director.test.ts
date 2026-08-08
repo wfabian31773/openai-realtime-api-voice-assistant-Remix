@@ -700,3 +700,62 @@ describe('REGRESSION: accented Spanish is Spanish (live call 6bd612c1)', () => {
     }
   });
 });
+
+/**
+ * REGRESSION: live no-ivr call CAc13b2f2e…70d20235, 2026-08-08 14:02.
+ *
+ * The agent asked "Could you spell out the exact name of the drops, so I can
+ * make sure it's accurate?" and the director answered with
+ * `inject:repeat_after_directive:last name` — "You have asked for the last name
+ * 2 times and do not have it."
+ *
+ * It had the last name. lookup_schedule had returned "Found 20 appointments for
+ * Wayne Fabian" a minute earlier. The read-back regex carried a bare `name`
+ * alternative, so ANY "spell … name" scored as a surname read-back: drug names,
+ * pharmacy names, street names, provider names.
+ */
+describe('REGRESSION: "spell the name of X" is not a surname read-back (2026-08-08)', () => {
+  it('does not classify the drug-name spelling request as a last-name ask', () => {
+    expect(
+      classifyAskOrReadback(
+        "Thanks for your patience. Could you spell out the exact name of the drops, so I can make sure it's accurate?",
+      ),
+    ).not.toBe('last name');
+  });
+
+  it('leaves the other things a call asks people to spell alone', () => {
+    for (const line of [
+      'Could you spell the name of the pharmacy?',
+      'Could you spell out the name of the street?',
+      'Can you spell the name of your doctor?',
+      'Could you spell the name of the medication for me?',
+    ]) {
+      expect(classifyAskOrReadback(line), line).not.toBe('last name');
+    }
+  });
+
+  it('still catches a genuine surname spelling request', () => {
+    // afb1e688's verbatim repetition must keep firing — that is the founding case.
+    for (const line of [
+      'Could you please spell your last name for me, letter by letter?',
+      'Can you spell your surname?',
+      'Could you spell that last name?',
+    ]) {
+      expect(classifyAskOrReadback(line), line).toBe('last name');
+    }
+    // "spell your name" resolves through the DIRECT classifier as 'full name',
+    // which is the more accurate topic — what matters is that a request to spell
+    // a PERSON'S name is still classified as one.
+    expect(classifyAskOrReadback('Could you spell your name?')).toBe('full name');
+  });
+
+  it('so the drug-name request no longer trips the repeat directive', () => {
+    const id = 'drops';
+    d.observeAgent(id, 'no-ivr', 'Could you please spell your last name?');
+    d.observeCaller(id, 'no-ivr', 'Fabian.');
+    // A different question entirely — must not read as a second surname ask.
+    expect(
+      d.observeAgent(id, 'no-ivr', "Could you spell out the exact name of the drops, so I can make sure it's accurate?"),
+    ).toBeNull();
+  });
+});

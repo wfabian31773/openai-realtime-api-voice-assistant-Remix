@@ -117,7 +117,17 @@ const READBACK_TOPICS: Array<[string, RegExp]> = [
     // "the tenth month, the fifth day, 1983" / "October 5th, 1983, is that right"
     /\b(?:(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth)\s+month|\d{1,2}(?:st|nd|rd|th)?\s+month)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b|\b\d{1,2}\s*[\/\-]\s*\d{1,2}\s*[\/\-]\s*\d{2,4}\b/i,
   ],
-  ['last name', /\bspell(?:ing)?\b[^.?!]{0,40}\b(?:last name|surname|name)\b|\b(?:last name|surname)\b[^.?!]{0,30}\bspell/i],
+  // The name must be a PERSON'S name. A bare `name` alternative used to sit in
+  // the first branch, so ANY "spell ... name" scored as a surname read-back —
+  // and on the 2026-08-08 14:02 no-ivr call "Could you spell out the exact name
+  // of the drops, so I can make sure it's accurate?" fired
+  // repeat_after_directive:last name into a call where the agent already HAD the
+  // surname (lookup_schedule had returned Wayne Fabian a minute earlier). Drug
+  // names, pharmacy names, street names and provider names all hit it.
+  [
+    'last name',
+    /\bspell(?:ing)?\b[^.?!]{0,40}\b(?:last name|surname|family name|your name)\b|\b(?:last name|surname|family name)\b[^.?!]{0,30}\bspell/i,
+  ],
 ];
 
 /**
