@@ -65,7 +65,7 @@ describe('gateBeforeExecution — no abrupt endings (PCP)', () => {
     const exec = withToolDirection('pcp', 'g1', 'terminate_call', async () => { executed = true; return 'ended'; });
     const out = (await exec()) as string;
     expect(executed).toBe(false);
-    expect(out).toContain('BLOCKED');
+    expect(out).toContain('NOT DONE YET');
     expect(out).toContain('FAX number');
   });
 
