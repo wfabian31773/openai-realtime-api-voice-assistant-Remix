@@ -273,30 +273,27 @@ function extractResponseTranscript(event: any): string {
 function checkGreetingDelivered(callId: string, event: any): void {
   const pending = pendingGreetings.get(callId);
   if (!pending) return;
+  // Delivery/expiry clears ONLY the guarantee's own state. The ledger, the
+  // direction state, and the ramp live for the WHOLE call and are released
+  // solely at session teardown — releasing them here (as this code did until
+  // 2026-08-08) wiped the call's constants and killed the state machine the
+  // moment its first forced line played, which is why every rail looked
+  // right for one line and then fell apart live while its unit tests passed.
   if (Date.now() > pending.expiresAt) {
     pendingGreetings.delete(callId);
     lastFactsRender.delete(callId);
-    releaseLedger(callId);
-    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
-    releaseRamp(callId);
     return;
   }
   const spoken = normaliseSpoken(extractResponseTranscript(event));
   if (pending.attempts > 0 && pending.prefix && spoken.startsWith(pending.prefix)) {
     pendingGreetings.delete(callId);
-    lastFactsRender.delete(callId);
-    releaseLedger(callId);
-    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
-    releaseRamp(callId); // greeting (or its barged-in start) played
+    lastFactsRender.delete(callId); // forces a fresh KNOWN-FACTS render next turn
     return;
   }
   if (pending.attempts >= 2) {
     console.warn(`[GREETING] Giving up on greeting for ${callId} after ${pending.attempts} attempts (last turn heard: "${spoken.slice(0, 60)}")`);
     pendingGreetings.delete(callId);
     lastFactsRender.delete(callId);
-    releaseLedger(callId);
-    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
-    releaseRamp(callId);
     return;
   }
   console.info(`[GREETING] Turn ended without the scripted greeting on ${callId} (heard: "${spoken.slice(0, 60)}") — resending at turn boundary`);
