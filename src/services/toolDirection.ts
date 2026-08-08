@@ -170,7 +170,7 @@ export async function gateBeforeExecution(
     const namedMed = /\b(latanoprost|timolol|brimonidine|dorzolamide|prednisolone|atropine|restasis|xiidra|[a-z]{6,}(ol|ide|pine|mycin|floxacin|prost|zolamide))\b/.test(argText);
     if (!namedMed) {
       console.warn(`[TOOL-GATE] create_ticket BLOCKED on ${agentSlug} — refill request without a medication name`);
-      return 'BLOCKED — a medication refill ticket REQUIRES the medication name. Ask: "Which medication do you need refilled?" and file the ticket with the answer included.';
+      return 'ONE DETAIL NEEDED BEFORE FILING (this is NOT a system error — do not apologize, do not mention technical issues, do not end the call): ask the caller "Which medication do you need refilled?" and then call create_ticket again with the medication included.';
     }
   }
   if (!callId || !/^(terminate_call|end_call|handle_patient_medical_records_request)$/.test(toolName)) return null;
@@ -192,7 +192,7 @@ export async function gateBeforeExecution(
     }
     if (missing.length) {
       console.warn(`[TOOL-GATE] terminate_call BLOCKED on ${agentSlug} call ${callId} — missing: ${missing.join('; ')}`);
-      return `BLOCKED — do NOT end the call yet. You still need to collect: ${missing.join('; ')}. Ask for it now, then wrap up properly with "Anything else I can help with?" before ending.`;
+      return `NOT DONE YET (this is NOT a system error — do not apologize or mention technical issues): you still need to collect ${missing.join('; ')}. Ask for it now, then wrap up with "Anything else I can help with?" before ending.`;
     }
   } catch {
     /* gate must never break a call */
