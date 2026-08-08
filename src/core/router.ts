@@ -8,6 +8,21 @@
  */
 import type { LineModule, TicketLineServices } from './types';
 import { createAnsweringServiceLine } from './answeringServiceLine';
+import { createPcpLine, type ProfessionalLineServices } from './pcpLine';
+
+/**
+ * Per-call transport bindings for lines whose actions need the live session
+ * (the PCP queue dial). Registered by the transport at session start,
+ * released with the call.
+ */
+export interface PcpTransportBindings {
+  callSid: string;
+  handoff: () => Promise<{ ok: boolean; status?: string; reason?: string; destination?: string }>;
+}
+const pcpBindings = new Map<string, PcpTransportBindings>();
+export function registerPcpBindings(callId: string, b: PcpTransportBindings): void {
+  pcpBindings.set(callId, b);
+}
 
 const NEW_CORE_LINES = new Set(
   (process.env.NEW_CORE_LINES ?? '')
@@ -75,19 +90,90 @@ export function newCoreFor(slug: string): LineModule | null {
   let mod = modules.get(slug);
   if (!mod) {
     if (slug === 'answering-service') mod = createAnsweringServiceLine(buildProdServices());
+    else if (slug === 'pcp') mod = createPcpLine(buildPcpProdServices());
     if (!mod) return null; // named but not yet built — old core keeps it
     modules.set(slug, mod);
   }
   return mod;
 }
 
+const BUILT_LINES = new Set(['answering-service', 'pcp']);
+
 export function newCoreEnabled(slug: string): boolean {
-  return NEW_CORE_LINES.has(slug) && (slug === 'answering-service');
+  return NEW_CORE_LINES.has(slug) && BUILT_LINES.has(slug);
+}
+
+function buildPcpProdServices(): ProfessionalLineServices {
+  const purposeFor = (narrative: string): string => {
+    if (/\b(schedul\w*|appointment\w*|book(ing)?)\b/i.test(narrative)) return 'schedule_appointment';
+    if (/\b(records?|charts?|notes?|results?)\b/i.test(narrative)) return 'patient_medical_records_request';
+    if (/\breferral\b/i.test(narrative)) return 'outside_referral_status';
+    return 'service_inquiry';
+  };
+  const basePayload = async (callId: string, input: { narrative: string; organization?: string; callbackNumber?: string; patientRef?: string }) => {
+    const [first, ...rest] = (input.patientRef ?? '').trim().split(/\s+/).filter(Boolean);
+    return {
+      callSid: pcpBindings.get(callId)?.callSid ?? callId,
+      agentSlug: 'pcp' as const,
+      agentVersion: 'new-core-1',
+      callerName: input.organization ?? 'Professional caller',
+      callerRole: 'healthcare professional',
+      callerOrganization: input.organization ?? 'Unknown organization',
+      callerFacilityType: 'other_healthcare_organization' as const,
+      callerCallbackNumber: input.callbackNumber ?? 'unknown',
+      callPurpose: purposeFor(input.narrative) as never,
+      narrative: input.narrative,
+      ...(first ? { patientFirstName: first, patientLastName: rest.join(' ') || undefined } : {}),
+    };
+  };
+  return {
+    async routeToQueue(callId, input) {
+      const { submitPcpTicket } = await import('../pcp/pcpTicketing');
+      const requestedAt = new Date().toISOString();
+      const base = await basePayload(callId, input);
+      const initial = await submitPcpTicket({
+        ...base,
+        disposition: 'HAND_OFF',
+        urgency: input.urgency,
+        handoff: { requested: true, requestedAt, attempted: false, finalStatus: 'REQUESTED' },
+      } as never);
+      const dial = pcpBindings.get(callId)?.handoff;
+      const outcome = dial ? await dial().catch(() => ({ ok: false })) : { ok: false, reason: 'no transport binding' };
+      const ok = Boolean(outcome && outcome.ok);
+      await submitPcpTicket({
+        ...base,
+        disposition: ok ? 'HAND_OFF' : 'CREATE_TASK',
+        urgency: input.urgency,
+        handoff: {
+          requested: true,
+          requestedAt,
+          attempted: true,
+          attemptedAt: new Date().toISOString(),
+          finalStatus: ok ? 'CONNECTED' : 'FAILED',
+          failureReason: !ok && 'reason' in outcome ? (outcome as { reason?: string }).reason : undefined,
+          fallbackTicketStatus: ok ? undefined : 'OPEN',
+        },
+      } as never).catch(() => undefined);
+      return { connected: ok, ticketNumber: initial.ticketNumber };
+    },
+    async fileTask(callId, input) {
+      const { submitPcpTicket } = await import('../pcp/pcpTicketing');
+      const base = await basePayload(callId, input);
+      const narrative = [
+        input.narrative,
+        input.contactMethod === 'fax' && input.faxNumber ? `FAX RESULTS TO: ${input.faxNumber}` : null,
+        input.contactMethod === 'email' && input.email ? `EMAIL RESULTS TO: ${input.email}` : null,
+      ].filter(Boolean).join(' — ');
+      const r = await submitPcpTicket({ ...base, narrative, disposition: 'CREATE_TASK', urgency: 'normal' } as never);
+      return { ok: Boolean(r.success), ticketNumber: r.ticketNumber };
+    },
+  };
 }
 
 /** Call teardown: release the call in every instantiated line module. */
 export function releaseNewCoreCall(callId: string): void {
   for (const mod of modules.values()) mod.release(callId);
+  pcpBindings.delete(callId);
 }
 
 /** Test hook: inject a module (simulated services) regardless of env. */

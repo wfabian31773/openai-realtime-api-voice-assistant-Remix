@@ -3593,6 +3593,20 @@ async function observeCall(
     // NOT personalized to the confirm-question here — the module captures
     // intent first and asks the identity question itself.
     if (agentSlug && newCoreEnabled(agentSlug) && newCoreFor(agentSlug)) {
+      if (agentSlug === 'pcp') {
+        const { registerPcpBindings } = await import('./core/router');
+        registerPcpBindings(callId, {
+          callSid: callId,
+          handoff: async () => {
+            try {
+              const outcome = await addHumanAgent(callId);
+              return { ok: Boolean((outcome as { ok?: boolean })?.ok ?? true) };
+            } catch (e) {
+              return { ok: false, reason: String(e) };
+            }
+          },
+        });
+      }
       newCoreFor(agentSlug)!.start(callId);
       newCoreCalls.add(callId);
       console.info(`[NEW-CORE] ${agentSlug} line module owns ${callId}`);
