@@ -69,7 +69,7 @@ function expandTwoDigitYear(year: string): string {
   return year;
 }
 
-function parseDateOfBirth(dobString: string): {
+export function parseDateOfBirth(dobString: string): {
   month: string;
   day: string;
   year: string;
