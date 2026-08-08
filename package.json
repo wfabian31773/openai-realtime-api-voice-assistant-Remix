@@ -7,7 +7,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "tsx watch src/server.ts",
-    "build": "tsc -p . && npm --prefix client run build",
+    "build": "node -e \"require('fs').writeFileSync('build-info.json', JSON.stringify({builtAt:new Date().toISOString(),gitSha:require('child_process').execSync('git rev-parse --short HEAD').toString().trim()}))\" && tsc -p . && npm --prefix client run build",
     "start": "npx tsx src/server.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",

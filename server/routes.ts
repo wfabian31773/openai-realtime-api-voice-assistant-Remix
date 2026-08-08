@@ -215,6 +215,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const rampAgents = (process.env.RAMP_AGENTS ?? 'answering-service,pcp,azul-scheduling')
         .split(',').map((x) => x.trim()).filter(Boolean);
+      const { getBuildInfo } = await import('./buildInfo');
+      const build = getBuildInfo();
       const { pool } = await import('./db');
       const r = await pool.query(`
         SELECT a.slug, COUNT(cl.id) FILTER (WHERE cl.caller_name IS NOT NULL)::int AS named,
@@ -224,7 +226,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           AND ((cl.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date
               = (NOW() AT TIME ZONE 'America/Los_Angeles')::date
         WHERE a.status='active' GROUP BY a.slug`);
-      res.json({ rampAgents, today: r.rows });
+      res.json({ rampAgents, build, today: r.rows });
     } catch (error) {
       res.status(500).json({ message: 'Spine status failed', error: error instanceof Error ? error.message : String(error) });
     }
