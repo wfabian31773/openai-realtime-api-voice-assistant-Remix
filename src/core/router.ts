@@ -85,6 +85,11 @@ export function newCoreEnabled(slug: string): boolean {
   return NEW_CORE_LINES.has(slug) && (slug === 'answering-service');
 }
 
+/** Call teardown: release the call in every instantiated line module. */
+export function releaseNewCoreCall(callId: string): void {
+  for (const mod of modules.values()) mod.release(callId);
+}
+
 /** Test hook: inject a module (simulated services) regardless of env. */
 export function _setModuleForTest(slug: string, mod: LineModule | null): void {
   if (mod) modules.set(slug, mod);

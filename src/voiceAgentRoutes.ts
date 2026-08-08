@@ -29,6 +29,7 @@ import { getGreeterOpeningGreeting } from './utils/timeAware';
 import { resolveConfiguredGreeting, scheduleGreetingCacheWarm } from './services/greetingResolver';
 import { seedLedger, renderKnownFacts, releaseLedger, harvestCallerLine } from './services/callFactsLedger';
 import { startRamp, onCallerUtterance, rampActive, releaseRamp } from './services/rampEngine';
+import { newCoreFor, newCoreEnabled, releaseNewCoreCall } from './core/router';
 import { getLedger as getCallFacts } from './services/callFactsLedger';
 import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
@@ -217,6 +218,9 @@ const pendingGreetings = new Map<string, PendingGreeting>();
 
 /** CP-4: lines running the deterministic ramp (env override RAMP_AGENTS). */
 const RAMP_AGENTS = new Set((process.env.RAMP_AGENTS ?? 'answering-service,pcp,azul-scheduling').split(',').map((x) => x.trim()).filter(Boolean));
+
+/** Calls owned by a new-core line module (reconstruction-plan.md §4). */
+const newCoreCalls = new Set<string>();
 
 /** CP-2: last KNOWN-FACTS block injected per call — re-inject only on change. */
 const lastFactsRender = new Map<string, string>();
@@ -2723,6 +2727,58 @@ async function observeCall(
         // regardless of who is driving (operator principle 2026-08-07).
         harvestCallerLine(callId, transcript);
 
+        // Reconstruction cutover: the new-core line module owns EVERY turn of
+        // this call. It returns the exact next line (and executes its own
+        // tools in code); the model's improvised reply is cancelled and the
+        // scripted line rides the same delivery guarantee as greetings.
+        if (newCoreCalls.has(callId)) {
+          void (async () => {
+            try {
+              const mod = newCoreFor(effectiveSlug);
+              if (!mod) return;
+              let action: import('./core/types').CoreAction | null = await mod.onUtterance(callId, transcript);
+              while (action) {
+                if (action.say) {
+                  if (responseInFlight.has(callId)) {
+                    try { (session.transport as any).sendEvent({ type: 'response.cancel' }); } catch { /* fine */ }
+                  }
+                  armGreetingGuarantee(
+                    callId,
+                    action.say,
+                    `Say this to the caller word-for-word, without adding, removing, or rephrasing anything: "${action.say}" - Then stop and wait for their response.`,
+                    session.transport as any,
+                  );
+                  console.info(`[NEW-CORE] ${mod.stateOf(callId)} line forced (guaranteed) for ${callId}`);
+                }
+                if (action.alert) console.error(`[NEW-CORE][ALERT] ${action.alert}`);
+                if (action.endCall) {
+                  // Hang up the CALL (not just our transport) after the wrap
+                  // line has had time to play — same REST call as terminate_call.
+                  setTimeout(() => {
+                    void (async () => {
+                      try {
+                        const apiKey = process.env.OPENAI_API_KEY;
+                        if (apiKey) {
+                          const res = await fetch(
+                            `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
+                            { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` } },
+                          );
+                          console.info(`[NEW-CORE] wrap hangup for ${callId} → ${res.status}`);
+                        }
+                      } catch (e) {
+                        console.warn(`[NEW-CORE] hangup failed for ${callId}:`, e);
+                      }
+                    })();
+                  }, 7000);
+                }
+                action = action.followUp ? await action.followUp() : null;
+              }
+            } catch (newCoreErr) {
+              console.warn(`[NEW-CORE] error for ${callId}:`, newCoreErr);
+            }
+          })();
+        }
+
         // CP-4: the ramp state machine owns the opening — parse the answer,
         // force the operator's next line, preempting any improvised reply
         // (the director's cancel-and-direct plumbing, deterministic here).
@@ -2763,9 +2819,12 @@ async function observeCall(
         }
 
         // Loop guard: a repeated "representative / customer service" demand
-        // trips the escalation directive.
-        const lgCallerDirective = conversationLoopGuard.onCallerLine(callId, effectiveSlug, transcript);
-        if (lgCallerDirective) sendLoopGuardDirective(session, callId, lgCallerDirective);
+        // trips the escalation directive. (New-core calls handle the busy
+        // script inside the line module — a second directive would double-talk.)
+        if (!newCoreCalls.has(callId)) {
+          const lgCallerDirective = conversationLoopGuard.onCallerLine(callId, effectiveSlug, transcript);
+          if (lgCallerDirective) sendLoopGuardDirective(session, callId, lgCallerDirective);
+        }
 
         // Director: bank what the caller just told us, so re-asking it is
         // detectable on the FIRST repeat rather than the third.
@@ -3529,6 +3588,15 @@ async function observeCall(
       console.info(`[AZUL-SCHED] Greeting personalised for recognised caller (${recognisedFirstName})`);
     }
 
+    // Reconstruction cutover: when NEW_CORE_LINES names this line, its
+    // module owns the WHOLE call and the ramp stays out. The greeting is
+    // NOT personalized to the confirm-question here — the module captures
+    // intent first and asks the identity question itself.
+    if (agentSlug && newCoreEnabled(agentSlug) && newCoreFor(agentSlug)) {
+      newCoreFor(agentSlug)!.start(callId);
+      newCoreCalls.add(callId);
+      console.info(`[NEW-CORE] ${agentSlug} line module owns ${callId}`);
+    } else
     // CP-4 (spine S1): on ramp lines, a caller-ID match personalizes the
     // greeting for ANY agent, and the deterministic ramp takes the opening.
     if (agentSlug && RAMP_AGENTS.has(agentSlug)) {
@@ -3917,6 +3985,8 @@ async function observeCall(
     releaseLedger(callId);
     void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
     releaseRamp(callId);
+    releaseNewCoreCall(callId);
+    newCoreCalls.delete(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
     deadAirWatchdog.release(callId);
