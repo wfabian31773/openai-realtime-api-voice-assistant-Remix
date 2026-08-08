@@ -348,7 +348,7 @@ function resetAuthFailures(): void {
   authAlarmRaised = false;
 }
 
-async function callEyecareTool(
+export async function callEyecareTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<string> {
