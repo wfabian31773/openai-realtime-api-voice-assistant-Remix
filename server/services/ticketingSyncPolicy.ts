@@ -23,3 +23,28 @@ export function classifyNoTicketOutcome(
   if (!callEndedAt) return "terminal";
   return now - callEndedAt.getTime() > NO_TICKET_GRACE_MS ? "terminal" : "grace";
 }
+
+/** The subset of reconcileTwilioCallData's result that decides the outcome. */
+export interface TwilioReconcileResult {
+  success: boolean;
+  actualDuration?: number;
+  skipped?: boolean;
+}
+
+/**
+ * Decide what a Twilio reconcile actually did to a call's duration.
+ *
+ * `success: true` on its own does not mean anything changed. reconcileTwilioCallData
+ * has an "already reconciled" early exit that returns the row's *stored* duration
+ * and sets no `skipped` flag, so a caller checking only `success && !skipped`
+ * counts untouched rows as fixes — which is how the duration sweep came to log
+ * `Fixed <id>: 597s → 597s` every cycle and recalculate costs that had not moved.
+ * Comparing against the duration we started with is the only reliable signal.
+ */
+export function classifyDurationReconcile(
+  previousDuration: number | null,
+  result: TwilioReconcileResult
+): "fixed" | "already-correct" | "no-data" {
+  if (!result.success || result.skipped || !result.actualDuration) return "no-data";
+  return result.actualDuration === previousDuration ? "already-correct" : "fixed";
+}

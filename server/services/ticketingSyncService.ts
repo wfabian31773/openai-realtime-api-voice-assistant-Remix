@@ -5,6 +5,7 @@ import { ticketingApiClient } from "./ticketingApiClient";
 import {
   isNoTicketError,
   classifyNoTicketOutcome,
+  classifyDurationReconcile,
   NO_TICKET_TERMINAL_PREFIX,
 } from "./ticketingSyncPolicy";
 import { callCostService } from "../../src/services/callCostService";
@@ -478,16 +479,21 @@ export class TicketingSyncService {
         return; // No suspicious calls
       }
 
-      console.log(`[DURATION FIX] Found ${suspiciousCalls.length} calls with suspicious durations to reconcile`);
-
       let fixedCount = 0;
+      let alreadyCorrectCount = 0;
       for (const call of suspiciousCalls) {
         if (!call.callSid) continue;
-        
+
         try {
           const result = await callCostService.reconcileTwilioCallData(call.id, call.callSid);
-          if (result.success && !result.skipped && result.actualDuration) {
-            // Also recalculate OpenAI cost based on correct duration
+          const outcome = classifyDurationReconcile(call.duration, result);
+
+          if (outcome === "already-correct") {
+            alreadyCorrectCount++;
+          } else if (outcome === "fixed") {
+            // The OpenAI cost is derived from duration, so it only goes stale
+            // when the duration actually moves. Recalculating on a no-op was a
+            // wasted write on every sync cycle.
             await callCostService.recalculateOpenAICostFromDuration(call.id);
             fixedCount++;
             console.info(`[DURATION FIX] Fixed ${call.id}: ${call.duration}s → ${result.actualDuration}s`);
@@ -495,13 +501,13 @@ export class TicketingSyncService {
         } catch (error) {
           console.error(`[DURATION FIX] Error fixing ${call.id}:`, error);
         }
-        
+
         await new Promise(resolve => setTimeout(resolve, 300));
       }
 
-      if (fixedCount > 0) {
-        console.log(`[DURATION FIX] Fixed ${fixedCount}/${suspiciousCalls.length} calls with incorrect durations`);
-      }
+      // One honest summary per cycle, in place of the old "Found N…" opener and
+      // its one-line-per-no-op follow-ups.
+      console.log(`[DURATION FIX] checked=${suspiciousCalls.length} fixed=${fixedCount} alreadyCorrect=${alreadyCorrectCount}`);
     } catch (error) {
       console.error("[DURATION FIX] Error during suspicious duration fix:", error);
     }
