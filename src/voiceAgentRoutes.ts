@@ -3593,7 +3593,7 @@ async function observeCall(
     // NOT personalized to the confirm-question here — the module captures
     // intent first and asks the identity question itself.
     if (agentSlug && newCoreEnabled(agentSlug) && newCoreFor(agentSlug)) {
-      if (agentSlug === 'pcp') {
+      if (agentSlug === 'pcp' || agentSlug === 'azul-scheduling') {
         const { registerPcpBindings } = await import('./core/router');
         registerPcpBindings(callId, {
           callSid: callId,

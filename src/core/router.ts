@@ -9,6 +9,7 @@
 import type { LineModule, TicketLineServices } from './types';
 import { createAnsweringServiceLine } from './answeringServiceLine';
 import { createPcpLine, type ProfessionalLineServices } from './pcpLine';
+import { createSchedulingLine, type SchedulingLineServices, type AvailabilityOffer } from './schedulingLine';
 
 /**
  * Per-call transport bindings for lines whose actions need the live session
@@ -91,6 +92,7 @@ export function newCoreFor(slug: string): LineModule | null {
   if (!mod) {
     if (slug === 'answering-service') mod = createAnsweringServiceLine(buildProdServices());
     else if (slug === 'pcp') mod = createPcpLine(buildPcpProdServices());
+    else if (slug === 'azul-scheduling') mod = createSchedulingLine(buildSchedulingProdServices());
     else if (slug === 'no-ivr' || slug === 'after-hours') {
       // After-hours: the same ticket-only machine with the closed-office
       // deflection script (§5). 911-first stays in the enforced greeting.
@@ -108,7 +110,7 @@ export function newCoreFor(slug: string): LineModule | null {
   return mod;
 }
 
-const BUILT_LINES = new Set(['answering-service', 'pcp', 'no-ivr', 'after-hours']);
+const BUILT_LINES = new Set(['answering-service', 'pcp', 'no-ivr', 'after-hours', 'azul-scheduling']);
 
 export function newCoreEnabled(slug: string): boolean {
   return NEW_CORE_LINES.has(slug) && BUILT_LINES.has(slug);
@@ -177,6 +179,71 @@ function buildPcpProdServices(): ProfessionalLineServices {
       ].filter(Boolean).join(' — ');
       const r = await submitPcpTicket({ ...base, narrative, disposition: 'CREATE_TASK', urgency: 'normal' } as never);
       return { ok: Boolean(r.success), ticketNumber: r.ticketNumber };
+    },
+  };
+}
+
+function buildSchedulingProdServices(): SchedulingLineServices {
+  const call = async (name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const { callEyecareTool } = await import('../agents/azulSchedulingAgent');
+    const raw = await callEyecareTool(name, args);
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return { error: 'unparsable tool response' };
+    }
+  };
+  /** "next tuesday"/"tuesday" → the next such date, YYYY-MM-DD. */
+  const resolveDate = (pref?: string): string | undefined => {
+    if (!pref) return undefined;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(pref)) return pref;
+    const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const idx = days.indexOf(pref.toLowerCase());
+    if (idx < 0) return undefined;
+    const now = new Date();
+    const delta = (idx - now.getDay() + 7) % 7 || 7;
+    const d = new Date(now.getTime() + delta * 86_400_000);
+    return d.toISOString().slice(0, 10);
+  };
+  return {
+    async verifyIdentity(callId, first, last, dob) {
+      const r = await call('verify_patient_identity', { firstName: first, lastName: last, dateOfBirth: dob, callId });
+      return Boolean((r as { verified?: boolean; patientFound?: boolean }).verified ?? (r as { patientFound?: boolean }).patientFound);
+    },
+    async availability(callId, pref): Promise<AvailabilityOffer> {
+      const r = await call('sage_availability', {
+        eventName: 'Eye Exam',
+        preferredDate: resolveDate(pref.preferredDate),
+        timeOfDay: pref.timeOfDay,
+        preferredTime: pref.preferredTime,
+        providerName: pref.providerName,
+        locationName: pref.locationName,
+        callId,
+      });
+      const say = String((r as { say?: string }).say ?? '');
+      if (!say) throw new Error('availability returned no directive');
+      const options = ((r as { options?: Array<{ time?: string; start?: string }> }).options ?? []);
+      const optionTimes = options
+        .map((o) => String(o.time ?? o.start ?? ''))
+        .map((x) => (x.match(/\d{2}:\d{2}/) ?? [''])[0])
+        .filter(Boolean);
+      return { say, optionTimes, empty: optionTimes.length === 0 };
+    },
+    async book(callId, input) {
+      const r = await call('sage_book', { ...input, callId });
+      const status = String((r as { booking_status?: string }).booking_status ?? 'failed');
+      return {
+        status: status === 'confirmed' ? 'confirmed' : status === 'unknown' ? 'unknown' : 'failed',
+        say: (r as { say?: string }).say,
+        patientScript: (r as { patient_script?: string }).patient_script,
+      };
+    },
+    async transfer(callId, reason) {
+      const binding = pcpBindings.get(callId); // same per-call dial binding
+      if (!binding) return { ok: false };
+      const r = await binding.handoff().catch(() => ({ ok: false }));
+      if (!r.ok) console.warn(`[NEW-CORE][sd] transfer failed for ${callId}: ${reason}`);
+      return { ok: Boolean(r.ok) };
     },
   };
 }
