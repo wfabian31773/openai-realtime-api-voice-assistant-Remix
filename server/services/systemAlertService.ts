@@ -12,6 +12,7 @@ import { getTwilioClient, getTwilioFromPhoneNumber } from '../../src/lib/twilioC
 import { getEnvironmentConfig } from '../../src/config/environment';
 import { db } from '../../server/db';
 import { sql } from 'drizzle-orm';
+import { formatLogFields } from '../logFormat';
 
 interface AlertEvent {
   type: 'database_failure' | 'call_log_failure' | 'circuit_breaker_open' | 'system_degraded' | 'recovery' | 'emergency_miss' | 'provider_miss' | 'handoff_failure_spike' | 'high_mismatch_ratio' | 'grader_critical_failure';
@@ -194,12 +195,12 @@ class SystemAlertService {
     }
     
     // Log for now - email integration can be added later
-    console.log(`[ALERT SERVICE] Alert sent:`, {
+    console.log(`[ALERT SERVICE] Alert sent: ${formatLogFields({
       type: event.type,
       severity: event.severity,
       message: event.message,
-      timestamp: event.timestamp.toISOString(),
-    });
+      timestamp: event.timestamp,
+    })}`);
   }
 
   /**

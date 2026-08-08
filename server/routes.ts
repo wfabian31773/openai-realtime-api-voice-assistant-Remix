@@ -9,6 +9,7 @@ import { authRouter, requireRole, requireManager } from "./auth";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { getTwilioClient, getTwilioFromPhoneNumber } from "../src/lib/twilioClient";
+import { formatLogFields, createRepeatLogGate } from "./logFormat";
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -51,6 +52,10 @@ function normalizeCallLog(log: any) {
 
 // Rate limiting map for test calls (in-memory for MVP)
 const testCallRateLimit = new Map<string, { count: number; resetTime: number }>();
+
+// The live-call dashboards poll /api/call-logs every 3s. Log a given query
+// only when its result changes, or once a minute while it holds steady.
+const callLogQueryLogGate = createRepeatLogGate();
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // NOTE: Voice proxy moved to server/index.ts (before body parsers) to preserve raw bodies
@@ -1594,7 +1599,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const maxCostRaw = sanitizeQueryParam(req.query.maxCost);
       const maxCost = maxCostRaw ? parseInt(maxCostRaw) : undefined;
 
-      console.log('[API] Fetching call logs:', { page, limit, status, direction, hasTicket, transferred, agentId, search, callQuality, sortBy });
+      const startedAt = Date.now();
 
       const result = await storage.getCallLogs({
         page,
@@ -1615,7 +1620,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         maxCost,
       });
 
-      console.log('[API] Call logs result:', { dataCount: result.data?.length, pagination: result.pagination });
+      // One line, request and result together: the log collector splits
+      // multi-line output into separate records and reorders same-millisecond
+      // lines, so the old two-object dump arrived shredded and interleaved.
+      // Unset filters are dropped rather than printed as `undefined`.
+      const filters = formatLogFields({
+        page, limit, status, direction, startDate, endDate, hasTicket, transferred,
+        agentId, agentUsed, search, callQuality, sortBy, sortOrder, minCost, maxCost,
+      });
+      const outcome = `rows=${result.data.length} total=${result.pagination.total}`;
+      if (callLogQueryLogGate(filters, outcome, Date.now())) {
+        console.log(`[API] call-logs ${filters} -> ${outcome} in ${Date.now() - startedAt}ms`);
+      }
 
       res.json({
         data: result.data.map(normalizeCallLog),
