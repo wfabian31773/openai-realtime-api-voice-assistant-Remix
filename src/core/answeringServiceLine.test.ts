@@ -288,9 +288,18 @@ describe('answering-service new core — Gate A', () => {
     let a = await line.onUtterance(C, 'something is wrong there is bleeding around my eye');
     expect(a.say).toContain('nine one one');
     a = await line.onUtterance(C, 'my eye is bleeding after the procedure yesterday');
+    // Unknown caller: identity is still collected — a ticket without a name
+    // never gets a callback.
+    expect(a.say).toContain('first and last name');
+    a = await line.onUtterance(C, 'Pat Doe');
+    a = await line.onUtterance(C, 'April 2 1980');
+    expect(a.say).toContain("doesn't match"); // lookup miss → one retry
+    a = await line.onUtterance(C, 'Pat Doe');
+    a = await line.onUtterance(C, 'April 2 1980');
+    expect(a.say).toContain('ending in 1111'); // second miss → forward anyway
     a = await line.onUtterance(C, 'yes');
     const spoken = await speak(a);
-    expect(spoken.lines.length).toBeGreaterThan(0);
+    expect(spoken.lines.join(' ')).toContain("You're all set");
     expect(filed[0]?.priority).toBe('urgent');
   });
 

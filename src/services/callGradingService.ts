@@ -858,12 +858,27 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
   const collectedFields: string[] = [];
   const missingFields: string[] = [];
 
-  const namePatterns = [/my name is/i, /this is \w+/i, /name:\s*\w+/i, /i'm \w+/i];
+  const namePatterns = [
+    /my name is/i,
+    /this is \w+/i,
+    /name:\s*\w+/i,
+    /i'm \w+/i,
+    // The approved collect-name script followed by a bare "First Last" answer.
+    /(first and last name|may i have your name|patient's name)[\s\S]{0,160}\n\s*CALLER:\s*[a-záéíóúñ'-]+ [a-záéíóúñ'-]+/i,
+  ];
   const hasName = namePatterns.some(p => p.test(input.transcript));
   if (hasName) collectedFields.push('name');
   else missingFields.push('name');
 
-  const phonePatterns = [/\d{3}[-.\s]?\d{3}[-.\s]?\d{4}/, /phone.*number/i, /call.*back.*at/i, /reach me at/i];
+  const phonePatterns = [
+    /\d{3}[-.\s]?\d{3}[-.\s]?\d{4}/,
+    /phone.*number/i,
+    /call.*back.*at/i,
+    /reach me at/i,
+    // The approved confirm-once script: caller-ID confirmed by last four,
+    // never read back in full ("number ending in 7471 ... best one to reach you").
+    /number ending in \d{4}/i,
+  ];
   const hasPhone = phonePatterns.some(p => p.test(input.transcript));
   if (hasPhone) collectedFields.push('phone');
   else missingFields.push('phone');

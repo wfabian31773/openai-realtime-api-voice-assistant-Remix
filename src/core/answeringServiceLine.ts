@@ -54,7 +54,7 @@ interface ASStatus {
   ticketsFiled: number;
 }
 
-const YES = /\b(yes|yeah|yep|correct|right|that's me|this is|speaking|sure|si|sí|claro|correcto|así es)\b/i;
+const YES = /\b(yes|yeah|yep|ok|okay|correct|right|perfect|of course|sounds good|that works|that's (me|fine|good)|this is|speaking|sure|si|sí|claro|correcto|está bien|así es)\b/i;
 const NO = /\b(no|nope|not|isn't|wrong|different|nothing|that's (all|it)|nada|eso es todo)\b/i;
 const NEW_PAT = /\b(new|nuevo|nueva)\b/i;
 const EXISTING = /\b(existing|current|already|been (there|seen)|existente|actual)\b/i;
@@ -322,8 +322,15 @@ export function createAnsweringServiceLine(services: TicketLineServices): LineMo
     };
   };
 
-  /** Message captured → classify in code → surgery/optical requirements as scripted states. */
+  /** Message captured → identity if still unknown → classify in code → surgery/optical requirements as scripted states. */
   const afterMessage = async (callId: string, s: ASStatus): Promise<CoreAction> => {
+    const f0 = getLedger(callId);
+    if (!f0?.firstName && !f0?.matchedFirstName) {
+      // The human-request and urgent intercepts arrive here without the
+      // identity chain — a ticket without a name never gets a callback.
+      go(s, 'COLLECT_NAME');
+      return { say: t(s, L.collectName) };
+    }
     const c = await services.classify(s.message ?? '').catch(() => null);
     s.classification = c;
     if (c?.departmentId === 2 && !c.providerId && !s.surgeonAnswer) {
