@@ -168,8 +168,16 @@ const L = {
 
 type Localized = { en: string; es: string };
 
-export function createAnsweringServiceLine(services: TicketLineServices): LineModule {
+/** Ticket-only line variants: same machine, different deflection script. */
+export interface TicketLineConfig {
+  slug?: string;
+  /** The human-request deflection line (after-hours: "Our offices are closed…"). */
+  humanBusy?: Localized;
+}
+
+export function createAnsweringServiceLine(services: TicketLineServices, cfg: TicketLineConfig = {}): LineModule {
   const calls = new Map<string, ASStatus>();
+  const humanBusyLine: Localized = cfg.humanBusy ?? L.humanBusy;
 
   const t = (s: ASStatus, line: Localized): string => line[s.lang];
 
@@ -345,7 +353,7 @@ export function createAnsweringServiceLine(services: TicketLineServices): LineMo
   };
 
   return {
-    slug: 'answering-service',
+    slug: cfg.slug ?? 'answering-service',
 
     start(callId: string): void {
       calls.set(callId, {
@@ -398,7 +406,7 @@ export function createAnsweringServiceLine(services: TicketLineServices): LineMo
         if (HUMAN_RX.test(text)) {
           // Same line, verbatim, EVERY time; then the call resumes where it was.
           const resume = s.state === 'INTENT' ? (go(s, 'TAKE_MESSAGE'), t(s, L.takeMessage)) : question(callId, s);
-          return { say: `${t(s, L.humanBusy)} ${resume}` };
+          return { say: `${t(s, humanBusyLine)} ${resume}` };
         }
         if (s.state === 'INTENT' && SCHEDULE_RX.test(text)) {
           updateLedger(callId, { intent: text.trim().slice(0, 200) });

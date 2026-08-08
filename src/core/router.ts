@@ -91,13 +91,24 @@ export function newCoreFor(slug: string): LineModule | null {
   if (!mod) {
     if (slug === 'answering-service') mod = createAnsweringServiceLine(buildProdServices());
     else if (slug === 'pcp') mod = createPcpLine(buildPcpProdServices());
+    else if (slug === 'no-ivr' || slug === 'after-hours') {
+      // After-hours: the same ticket-only machine with the closed-office
+      // deflection script (§5). 911-first stays in the enforced greeting.
+      mod = createAnsweringServiceLine(buildProdServices(), {
+        slug,
+        humanBusy: {
+          en: "Our offices are closed right now — I'll take your information and make sure the right team member calls you back first thing.",
+          es: 'Nuestras oficinas están cerradas en este momento — tomaré su información y me aseguraré de que el equipo le devuelva la llamada a primera hora.',
+        },
+      });
+    }
     if (!mod) return null; // named but not yet built — old core keeps it
     modules.set(slug, mod);
   }
   return mod;
 }
 
-const BUILT_LINES = new Set(['answering-service', 'pcp']);
+const BUILT_LINES = new Set(['answering-service', 'pcp', 'no-ivr', 'after-hours']);
 
 export function newCoreEnabled(slug: string): boolean {
   return NEW_CORE_LINES.has(slug) && BUILT_LINES.has(slug);
