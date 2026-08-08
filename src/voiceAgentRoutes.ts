@@ -31,7 +31,7 @@ import { registerTicketingSyncRoutes } from './voiceAgent';
 import './services/azulRegressionWatch'; // Phase 7: daily grade-regression check (side-effect timers)
 import { shadowTap } from './shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { resolveAbAssignment } from './services/abCarriage';
-import { director, directorEnabledFor, type DirectorAction } from './director/director';
+import { director, directorEnabledFor, extractAnswers, classifyAskOrReadback, type DirectorAction } from './director/director';
 import { getEnvironmentConfig } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 import { resolveHandoffDestination, resolvePcpDialSequence } from './services/handoffPolicy';
@@ -39,6 +39,7 @@ import { pcpAgentConfig } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
 import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
+import { callStateStore, stateLogLine } from './services/callState';
 
 // Load centralized environment configuration
 let envConfig: ReturnType<typeof getEnvironmentConfig>;
@@ -661,6 +662,46 @@ function sendLoopGuardDirective(session: any, callId: string, directive: LoopGua
 }
 
 /**
+ * CALL STATE per agent turn: classify what the agent just asked, fold it into
+ * the normalized state, and log one snapshot line.
+ *
+ * The ask classification is the SAME one the loop guard and director use, so the
+ * panel's "ask counts" and the director's escalation can never disagree.
+ *
+ * Folding the ask in is also what evaluates the invariants: the reducer records
+ * a named violation when a closed question is asked (identity re-asked after the
+ * Eye Care service verified the caller). A violation is reported, not enforced,
+ * for now — the director's own ladder does the enforcing, and a brand-new rule
+ * that cancels turns is exactly the shape that cost 48 calls on 08-03.
+ */
+function recordAgentTurnState(
+  callId: string,
+  agentSlug: string,
+  line: string,
+  _session: unknown,
+): void {
+  try {
+    const topic = classifyAskOrReadback(line);
+    const state = topic
+      ? callStateStore.apply(callId, agentSlug, { type: 'AGENT_ASKED', topic, line }, line.slice(0, 80))
+      : callStateStore.get(callId);
+    if (!state) return;
+
+    const fresh = state.violations[state.violations.length - 1];
+    if (fresh && fresh.at === state.updatedAt) {
+      console.warn(
+        `[CALL-STATE] VIOLATION ${fresh.invariant} (${fresh.topic}) on ${callId} — ${stateLogLine(state)}`,
+      );
+    } else if (topic) {
+      // Per-turn record. No PHI: stateLogLine carries shapes and counts only.
+      console.info(`[CALL-STATE] ${callId} ask=${topic} ${stateLogLine(state)}`);
+    }
+  } catch (e) {
+    console.error('[CALL-STATE] turn record failed:', e);
+  }
+}
+
+/**
  * Apply a director decision to the live session.
  *
  * 'inject' is the existing loop-guard mechanism: a system message the model
@@ -701,6 +742,13 @@ function applyDirectorAction(session: any, callId: string, agentSlug: string, ac
     console.warn(
       `[DIRECTOR] ${action.enforcement}:${action.code}:${action.topic} applied for ${callId}`,
     );
+
+    callStateStore.apply(callId, agentSlug, {
+      type: 'DIRECTOR_DECISION',
+      code: action.code,
+      topic: action.topic,
+      enforcement: action.enforcement,
+    });
 
     // Durable record. Deliberately AFTER the transport writes: the
     // intervention is the product, the telemetry is the receipt, and a
@@ -2436,6 +2484,13 @@ async function observeCall(
           director.observeCaller(callId, effectiveSlug, transcript);
         }
 
+        // CALL STATE: what the caller just supplied. The director already does
+        // this bookkeeping for its own rules; this is the normalized projection
+        // an operator can read while the call is happening.
+        for (const [field, value] of Object.entries(extractAnswers(transcript))) {
+          callStateStore.apply(callId, effectiveSlug, { type: 'FIELD_SUPPLIED', field, value }, transcript.slice(0, 80));
+        }
+
         // AIRCALL WORKAROUND: Auto-press "1" to accept forwarded calls
         // AirCall plays "Press 1 to answer" when forwarding to external numbers
         // Detect this prompt and automatically send DTMF tone to accept the call
@@ -2523,6 +2578,7 @@ async function observeCall(
           const decision = director.observeAgent(callId, effectiveSlug, transcript);
           if (decision) applyDirectorAction(session, callId, effectiveSlug, decision);
         }
+        recordAgentTurnState(callId, effectiveSlug, transcript, session);
       }
     } else if (eventType === 'response.done') {
       // Also capture from response.done which contains output items
@@ -2557,6 +2613,7 @@ async function observeCall(
                   const doneDecision = director.observeAgent(callId, effectiveSlug, content.transcript);
                   if (doneDecision) applyDirectorAction(session, callId, effectiveSlug, doneDecision);
                 }
+                recordAgentTurnState(callId, effectiveSlug, content.transcript, session);
               }
             });
           }
@@ -3450,6 +3507,7 @@ async function observeCall(
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
     deadAirWatchdog.release(callId);
+    callStateStore.release(callId);
     conversationLoopGuard.releaseCall(callId);
     void import('./services/identityArgGuard').then(({ releaseIdentityGuard }) => releaseIdentityGuard(callId));
     void import('./agents/azulSchedulingAgent').then(({ releaseAzulCallState }) => releaseAzulCallState(callId));

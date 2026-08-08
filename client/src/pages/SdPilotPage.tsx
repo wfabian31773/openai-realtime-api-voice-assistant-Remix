@@ -9,7 +9,7 @@
  *   - full call history with per-call evidence drill-in
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import apiClient from '@/lib/apiClient'
@@ -118,6 +118,171 @@ function ToolTimeline({ events }: { events: NonNullable<NonNullable<CallLog['too
   )
 }
 
+interface CallState {
+  seq: number
+  caller: { phoneMatched: boolean; matchedName: string | null }
+  identity: {
+    nameSupplied: string | null
+    dobSupplied: string | null
+    personVerified: boolean
+    identityVerified: boolean
+    patientType: 'existing' | 'new' | 'unknown'
+    invalidatedAt: string | null
+  }
+  conversation: {
+    intent: string | null
+    pendingAsk: string | null
+    askCounts: Record<string, number>
+    answered: string[]
+  }
+  tools: Record<string, { status: 'pending' | 'success' | 'error'; at: string; detail?: string }>
+  director: {
+    lastDecision: { code: string; topic: string; enforcement: string } | null
+    nextExpectedAction: string | null
+    prohibitedQuestions: string[]
+  }
+  violations: Array<{ invariant: string; topic: string; at: string }>
+}
+
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex gap-2 text-sm">
+      <span className="w-40 shrink-0 text-muted-foreground">{label}</span>
+      <span className="font-mono">{children}</span>
+    </div>
+  )
+}
+
+function YesNo({ v }: { v: boolean }) {
+  return <span className={v ? 'font-medium text-emerald-500' : 'text-muted-foreground'}>{v ? 'YES' : 'NO'}</span>
+}
+
+/**
+ * CALL STATE — the normalized view, beside the transcript.
+ *
+ * Everything here is derived server-side from one state object, not assembled in
+ * the browser from several endpoints. `identityVerified` is the Eye Care
+ * verdict, not an inference: that distinction is the whole point.
+ */
+function CallStatePanel({ callSid }: { callSid?: string | null }) {
+  const { data } = useQuery({
+    queryKey: ['call-state', callSid],
+    queryFn: async () =>
+      (await apiClient.get(`/voice/call-state/${callSid}`)).data as {
+        live: boolean
+        state: CallState | null
+        redacted: boolean
+      },
+    enabled: !!callSid,
+    refetchInterval: 2000,
+    retry: false,
+  })
+
+  const s = data?.state
+  if (!s) {
+    return <p className="text-sm text-muted-foreground">No live state yet…</p>
+  }
+  const asks = Object.entries(s.conversation.askCounts).sort((a, b) => b[1] - a[1])
+  const tools = Object.entries(s.tools)
+
+  return (
+    <div className="space-y-3 rounded-md bg-muted/50 p-3">
+      <Row label="Caller phone matched"><YesNo v={s.caller.phoneMatched} /></Row>
+      <Row label="Matched patient">{s.caller.matchedName ?? '—'}</Row>
+      <Row label="Patient type">
+        <span className={s.identity.patientType === 'unknown' ? 'text-muted-foreground' : 'font-medium text-foreground'}>
+          {s.identity.patientType.toUpperCase()}
+        </span>
+      </Row>
+
+      <div className="border-t border-border pt-2">
+        <p className="mb-1 text-xs font-medium uppercase text-muted-foreground">Identity</p>
+        <Row label="Name supplied">{s.identity.nameSupplied ?? '—'}</Row>
+        <Row label="DOB supplied">{s.identity.dobSupplied ?? '—'}</Row>
+        <Row label="Eye Care personId">
+          <span className={s.identity.personVerified ? 'font-medium text-emerald-500' : 'text-muted-foreground'}>
+            {s.identity.personVerified ? 'VERIFIED' : 'NOT VERIFIED'}
+          </span>
+        </Row>
+        <Row label="identityVerified"><YesNo v={s.identity.identityVerified} /></Row>
+        {s.identity.invalidatedAt && <Row label="invalidated"><span className="text-amber-500">YES</span></Row>}
+      </div>
+
+      <div className="border-t border-border pt-2">
+        <p className="mb-1 text-xs font-medium uppercase text-muted-foreground">Conversation</p>
+        <Row label="intent">{s.conversation.intent ?? '—'}</Row>
+        <Row label="pendingAsk">
+          <span className={s.conversation.pendingAsk ? 'font-medium text-foreground' : 'text-muted-foreground'}>
+            {s.conversation.pendingAsk ?? '—'}
+          </span>
+        </Row>
+        {asks.length > 0 && (
+          <div className="mt-1">
+            <span className="text-sm text-muted-foreground">ask counts:</span>
+            <ul className="ml-4 mt-0.5 space-y-0.5">
+              {asks.map(([topic, n]) => (
+                <li key={topic} className="flex gap-2 text-sm">
+                  <span className="w-36 shrink-0 text-muted-foreground">{topic}</span>
+                  <span className={`font-mono ${n > 1 ? 'font-medium text-amber-500' : ''}`}>{n}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {tools.length > 0 && (
+        <div className="border-t border-border pt-2">
+          <p className="mb-1 text-xs font-medium uppercase text-muted-foreground">Tools</p>
+          {tools.map(([tool, r]) => (
+            <Row key={tool} label={tool}>
+              <span className={r.status === 'error' ? 'font-medium text-destructive' : 'text-emerald-500'}>
+                {r.status.toUpperCase()}
+              </span>
+              {r.detail && <span className="ml-2 text-xs text-muted-foreground">{r.detail}</span>}
+            </Row>
+          ))}
+        </div>
+      )}
+
+      <div className="border-t border-border pt-2">
+        <p className="mb-1 text-xs font-medium uppercase text-muted-foreground">Director</p>
+        <Row label="next expected action">{s.director.nextExpectedAction ?? '—'}</Row>
+        {s.director.lastDecision && (
+          <Row label="last decision">
+            {s.director.lastDecision.enforcement}:{s.director.lastDecision.code}
+          </Row>
+        )}
+        {s.director.prohibitedQuestions.length > 0 && (
+          <div className="mt-1">
+            <span className="text-sm text-muted-foreground">prohibited questions:</span>
+            <ul className="ml-4 mt-0.5 list-disc space-y-0.5">
+              {s.director.prohibitedQuestions.map((q) => (
+                <li key={q} className="text-sm text-muted-foreground">{q}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {s.violations.length > 0 && (
+        <div className="rounded-md border border-destructive/50 bg-destructive/10 p-2">
+          <p className="mb-1 text-xs font-medium uppercase text-destructive">Violations</p>
+          {s.violations.map((v, i) => (
+            <p key={i} className="font-mono text-sm text-destructive">{v.invariant}</p>
+          ))}
+        </div>
+      )}
+
+      {data?.redacted && (
+        <p className="text-xs text-muted-foreground">
+          Values redacted — DISABLE_PHI_LOGGING is on.
+        </p>
+      )}
+    </div>
+  )
+}
+
 function LiveCallCard({ call }: { call: CallLog }) {
   const [, setTick] = useState(0)
   useEffect(() => {
@@ -154,7 +319,7 @@ function LiveCallCard({ call }: { call: CallLog }) {
           <span className="font-mono text-sm text-muted-foreground">{formatDuration(liveSeconds)}</span>
         </div>
       </CardHeader>
-      <CardContent className="grid gap-3 md:grid-cols-2">
+      <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         <div>
           <p className="mb-1 flex items-center gap-1 text-xs font-medium uppercase text-muted-foreground">
             <FileText className="h-3 w-3" /> Live transcript
@@ -175,6 +340,14 @@ function LiveCallCard({ call }: { call: CallLog }) {
           </p>
           <div className="max-h-48 overflow-y-auto rounded-md bg-muted/50 p-2">
             <ToolTimeline events={liveTimeline?.events ?? []} />
+          </div>
+        </div>
+        <div>
+          <p className="mb-1 flex items-center gap-1 text-xs font-medium uppercase text-muted-foreground">
+            <Activity className="h-3 w-3" /> Call state
+          </p>
+          <div className="max-h-96 overflow-y-auto">
+            <CallStatePanel callSid={call.callSid} />
           </div>
         </div>
       </CardContent>

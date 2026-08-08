@@ -33,6 +33,7 @@ import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall, type AzulToolEv
 import { callMetadataForDB } from '../services/callMetadataStore';
 import { callerSpeech, guardIdentityArgs, surnameDisagrees, lastIdentityAttempt } from '../services/identityArgGuard';
 import { checkAppointmentOrdinal, checkHandoffIdentity, handoffIdentity, refusalJson } from '../services/azulToolGuards';
+import { callStateStore } from '../services/callState';
 import { checkIdentityGrounding } from '../services/identityGrounding';
 import { director, directorEnabledFor } from '../director/director';
 
@@ -1207,6 +1208,18 @@ export function createAzulSchedulingAgent(
         // fallback depends on it, and DIRECTOR_AGENTS is a kill switch that must
         // not take unrelated behaviour down with it.
         azulVerifiedCalls.add(callId);
+
+        // ONE normalized identity event into the canonical call state. This is
+        // the authoritative fact — Eye Care holds the personId — and nothing
+        // downstream re-derives it from the transcript. A verified match IS an
+        // existing patient: the lookup routes, not the caller's memory.
+        callStateStore.apply(callId, 'azul-scheduling', {
+          type: 'IDENTITY_VERIFIED',
+          patientType: 'existing',
+          personVerified: true,
+          name: [parsed.firstName, parsed.lastName].filter(Boolean).join(' ').trim() || null,
+          dob: parsed.dateOfBirth ? String(parsed.dateOfBirth) : null,
+        });
         if (!directorEnabledFor('azul-scheduling')) return;
         // The ON-FILE spelling too: the prompt tells the agent to adopt it from
         // then on, and the caller may never have pronounced it.
@@ -1239,6 +1252,26 @@ export function createAzulSchedulingAgent(
       }
     };
 
+    /** Fold a tool outcome into the canonical call state. Non-PHI detail only. */
+    const recordToolState = (name: string, resultJson: string): void => {
+      const callId = metadata?.callId;
+      if (!callId) return;
+      try {
+        let parsed: any = JSON.parse(resultJson);
+        parsed = parsed?.result ?? parsed;
+        const err = parsed?.error ? String(parsed.error) : null;
+        callStateStore.apply(callId, 'azul-scheduling', {
+          type: 'TOOL_RESULT',
+          tool: name,
+          status: err ? 'error' : 'success',
+          // A short outcome word, never the payload.
+          detail: err ?? (parsed?.matchSignal ?? parsed?.decision ?? parsed?.booking_status ?? undefined),
+        });
+      } catch {
+        callStateStore.apply(callId, 'azul-scheduling', { type: 'TOOL_RESULT', tool: name, status: 'success' });
+      }
+    };
+
     const started = Date.now();
     const holdingCb =
       holdingCallbacks.get(String(metadata?.callId ?? '')) ??
@@ -1261,6 +1294,9 @@ export function createAzulSchedulingAgent(
       const result = await callEyecareTool(name, args);
       const ms = Date.now() - started;
       console.log(`[AZUL-SCHED] ${name} completed in ${ms}ms`);
+      // Canonical call state: every tool's outcome, from the single place they
+      // all pass through, so the live panel never misses one.
+      recordToolState(name, result);
       recordAzulToolEvent(metadata?.callId ?? metadata?.callSid ?? '', name, args, result, ms, {
         callSid: metadata?.callSid,
         callLogId: metadata?.callLogId,

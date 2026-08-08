@@ -1294,6 +1294,64 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return str;
   };
   
+  /**
+   * LIVE CALL STATE — the normalized view, next to the transcript.
+   *
+   * One object rather than the ~20 internal Maps that actually drive the call:
+   * identity (with the Eye Care verdict, authoritative), patient type, collected
+   * fields, the pending question, ask counts, tool results, the director's last
+   * decision and what it expects next, the questions currently CLOSED by the
+   * invariants, and any violations.
+   *
+   * `snapshots` is the per-turn record: for every agent response, the state that
+   * produced it and the director decision alongside. That is the timeline that
+   * answers "why did it ask that?" while the call is still up.
+   *
+   * AUTHENTICATED, and PHI-aware: names and dates of birth are returned to a
+   * signed-in reviewer because judging a call requires seeing whether the
+   * surname was heard correctly. Set DISABLE_PHI_LOGGING=true (production
+   * default) to get the redacted shape instead — the same rule SAFE_ARG_KEYS
+   * already applies to the tool timeline. Server logs never carry the values.
+   */
+  app.get('/api/voice/call-state/:idOrSid', isAuthenticated, async (req, res) => {
+    try {
+      const { callStateStore, redactState } = await import('../src/services/callState');
+      const { callMetadataForDB } = await import('../src/services/callMetadataStore');
+      const idOrSid = String(req.params.idOrSid || '');
+      // Accept the OpenAI callId, the Twilio callSid, or the callLogId — the
+      // three ids a reviewer might have in hand. Same resolution the live tool
+      // timeline endpoint uses.
+      const state = callStateStore.find(idOrSid, (id) => {
+        for (const [callId, meta] of callMetadataForDB.entries()) {
+          if (meta.twilioCallSid === id || meta.dbCallLogId === id) return callId;
+        }
+        return undefined;
+      });
+      if (!state) {
+        return res.status(404).json({ live: false, state: null, snapshots: [] });
+      }
+      const redact = process.env.DISABLE_PHI_LOGGING === 'true';
+      const snapshots = callStateStore.snapshots(state.callId).map((s) => ({
+        at: s.at,
+        seq: s.seq,
+        source: s.source,
+        label: s.label,
+        directorDecision: s.directorDecision,
+        violation: s.violation,
+        state: redact ? redactState(s.state) : s.state,
+      }));
+      res.json({
+        live: true,
+        state: redact ? redactState(state) : state,
+        snapshots,
+        redacted: redact,
+      });
+    } catch (error) {
+      console.error('[CALL-STATE] endpoint error:', error);
+      res.status(500).json({ error: 'Failed to get call state' });
+    }
+  });
+
   // Get call logs with pagination and comprehensive filtering
   // SD Pilot command center — aggregate stats for the azul-scheduling agent
   app.get('/api/sd-pilot/stats', isAuthenticated, async (req, res) => {
