@@ -31,6 +31,7 @@ import {
   type TicketPriority,
   type ConfirmationType,
 } from '../config/answeringServiceTicketing';
+import { formatLogFields } from '../../shared/logFormat';
 
 const CONTEXT_LOOKUP_TIMEOUT_MS = 2000;
 
@@ -602,11 +603,11 @@ export async function createAnsweringServiceAgent(
       execute: withToolDirection('answering-service', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
     })) as typeof tool;
 
-  console.log(`[${agentTag}] Creating agent for call:`, {
+  console.log(`[${agentTag}] Creating agent for call:`, formatLogFields({
     callId,
     hasCallerPhone: !!callerPhone,
     phoneLast4: phoneLast4(callerPhone),
-  });
+  }));
 
   let scheduleContext: PatientScheduleContext | undefined;
   let callerMemory: CallerMemory | null = null;
@@ -644,13 +645,13 @@ export async function createAnsweringServiceAgent(
       console.info(`[RAMP] Ledger seeded synchronously for ${callId} (matched=${Boolean(scheduleContext?.patientData?.firstName)})`);
     }
 
-    console.log(`[${agentTag}] Context lookup results:`, {
+    console.log(`[${agentTag}] Context lookup results:`, formatLogFields({
       scheduleFound: scheduleContext?.patientFound || false,
       upcomingCount: scheduleContext?.upcomingAppointments?.length || 0,
       callerMemoryFound: !!callerMemory,
       previousCalls: callerMemory?.totalCalls || 0,
       openTickets: callerMemory?.openTickets?.length || 0,
-    });
+    }));
 
     if (scheduleContext?.patientFound && callLogId) {
       try {
@@ -698,11 +699,11 @@ Use this data to answer appointment questions AND for ticket creation.`,
       date_of_birth: z.string().optional().describe('Date of birth in any format'),
     }),
     execute: async (params) => {
-      console.log(`[${agentTag}] lookup_schedule called:`, {
+      console.log(`[${agentTag}] lookup_schedule called:`, formatLogFields({
         hasPhone: !!params.phone,
         hasName: !!(params.first_name && params.last_name),
         hasDob: !!params.date_of_birth,
-      });
+      }));
       
       const TOOL_TIMEOUT_MS = 5000; // 5 second timeout for tool calls
       const emptyResult: PatientScheduleContext = {
@@ -923,7 +924,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       // Lazy import to avoid module initialization during agent bootstrap
       const { SyncAgentService } = await import('../services/syncAgentService');
       
-      console.log(`[${agentTag}] create_ticket called:`, {
+      console.log(`[${agentTag}] create_ticket called:`, formatLogFields({
         departmentId: params.department_id,
         requestTypeId: params.request_type_id,
         requestReasonId: params.request_reason_id,
@@ -933,7 +934,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
         hasLocationName: !!params.location_name,
         hasProviderId: !!params.provider_id,
         hasProviderName: !!params.provider_name,
-      });
+      }));
 
       if (callerPhone) {
         try {

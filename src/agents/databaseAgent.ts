@@ -2,18 +2,19 @@ import { RealtimeAgent } from '@openai/agents/realtime';
 import { tool } from '@openai/agents';
 import { z } from 'zod';
 import type { Agent } from '../../shared/schema';
+import { formatLogFields } from '../../shared/logFormat';
 
 export function createDatabaseAgent(
   agentConfig: Agent,
   handoffCallback?: () => Promise<void>,
   metadata?: { callerPhone?: string; callSid?: string; dialedNumber?: string }
 ): RealtimeAgent {
-  console.log('[Database Agent] Creating agent from database config:', {
+  console.log('[Database Agent] Creating agent from database config:', formatLogFields({
     slug: agentConfig.slug,
     name: agentConfig.name,
     hasSystemPrompt: !!agentConfig.systemPrompt,
     voice: agentConfig.voice,
-  });
+  }));
 
   const tools: any[] = [];
 
@@ -60,12 +61,12 @@ export function createDatabaseAgent(
     systemPrompt += `\n\nCALLER CONTEXT:\n- Caller's phone number: ${metadata.callerPhone}`;
   }
 
-  console.log('[Database Agent] Configuration applied:', {
+  console.log('[Database Agent] Configuration applied:', formatLogFields({
     name: agentConfig.name,
     voice,
     promptLength: systemPrompt.length,
     toolCount: tools.length,
-  });
+  }));
 
   const agent = new RealtimeAgent({
     name: agentConfig.name,

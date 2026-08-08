@@ -29,6 +29,11 @@ export function formatLogFields(fields: Record<string, unknown>): string {
 
     if (value instanceof Date) {
       parts.push(`${key}=${value.toISOString()}`);
+    } else if (value instanceof Error) {
+      // JSON.stringify(new Error('boom')) is '{}' — the message would vanish.
+      // Stacks don't belong on a one-line record; pass the error itself as a
+      // separate console.error argument when you need one.
+      parts.push(`${key}=${JSON.stringify(`${value.name}: ${value.message}`)}`);
     } else if (typeof value === 'object') {
       parts.push(`${key}=${JSON.stringify(value)}`);
     } else {

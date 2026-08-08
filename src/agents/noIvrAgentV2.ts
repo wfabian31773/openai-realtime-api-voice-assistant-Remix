@@ -21,6 +21,7 @@ import {
   type ConversationSlots,
 } from "../workflows";
 import { buildWorkflowDrivenPrompt, getWorkflowDirectiveForContext } from "../workflows/workflowPromptBuilder";
+import { formatLogFields } from "../../shared/logFormat";
 
 export interface NoIvrAgentV2Metadata {
   callId: string;
@@ -87,12 +88,12 @@ export async function createNoIvrAgentV2(
       scheduleContext = await scheduleLookupService.lookupByPhone(callerPhone);
 
       if (scheduleContext.patientFound) {
-        console.log(`[No-IVR V2] Schedule context loaded:`, {
+        console.log(`[No-IVR V2] Schedule context loaded:`, formatLogFields({
           upcomingCount: scheduleContext.upcomingAppointments.length,
           pastCount: scheduleContext.pastAppointments.length,
           lastLocationSeen: scheduleContext.lastLocationSeen,
           lastProviderSeen: scheduleContext.lastProviderSeen,
-        });
+        }));
 
         if (metadata.callLogId) {
           try {
@@ -120,12 +121,12 @@ export async function createNoIvrAgentV2(
     try {
       callerMemory = await callerMemoryService.getCallerMemory(callerPhone);
       if (callerMemory) {
-        console.log(`[No-IVR V2] ✓ Caller memory loaded:`, {
+        console.log(`[No-IVR V2] ✓ Caller memory loaded:`, formatLogFields({
           totalCalls: callerMemory.totalCalls,
           lastCallDate: callerMemory.lastCallDate,
           patientName: callerMemory.patientName,
           openTickets: callerMemory.openTickets.length,
-        });
+        }));
       }
     } catch (error) {
       console.error("[No-IVR V2] Error fetching caller memory:", error);
@@ -181,7 +182,7 @@ Returns the detected intent, required slots, and whether escalation is required.
       
       const newDirective = getWorkflowDirectiveForContext(workflowContext);
       
-      console.log(`[No-IVR V2] ✓ Intent classified and workflow set:`, {
+      console.log(`[No-IVR V2] ✓ Intent classified and workflow set:`, formatLogFields({
         intent: result.intent,
         confidence: result.confidence,
         requiresEscalation: result.requiresEscalation,
@@ -189,7 +190,7 @@ Returns the detected intent, required slots, and whether escalation is required.
         newState: workflowContext.currentState,
         nextAction: newDirective.action,
         missingSlots: newDirective.missingSlots,
-      });
+      }));
 
       return {
         intent: result.intent,
@@ -382,14 +383,14 @@ Call this when you make key decisions about caller type, urgency, or escalation.
       reason: z.string().optional().describe("Brief explanation"),
     }),
     execute: async (params) => {
-      console.log(`[NO-IVR V2 DECISION] ${params.decision_type}:`, {
+      console.log(`[NO-IVR V2 DECISION] ${params.decision_type}:`, formatLogFields({
         value: params.value,
         reason: params.reason,
         callId: metadata.callId,
         currentIntent: workflowContext.currentIntent,
         currentState: workflowContext.currentState,
         timestamp: new Date().toISOString(),
-      });
+      }));
       return { logged: true };
     },
   });
@@ -432,11 +433,11 @@ Call this ONLY when you have collected ALL required information.`,
         ? params.requires_callback
         : SyncAgentService.requiresCallback(params.request_category as TriageOutcome);
 
-      console.log("[No-IVR V2] create_ticket called:", {
+      console.log("[No-IVR V2] create_ticket called:", formatLogFields({
         name: `${params.first_name} ${params.last_name}`,
         category: params.request_category,
         requiresCallback,
-      });
+      }));
 
       const parsedDOB = parseDateOfBirth(params.date_of_birth);
       if (!parsedDOB.month || !parsedDOB.day || !parsedDOB.year) {

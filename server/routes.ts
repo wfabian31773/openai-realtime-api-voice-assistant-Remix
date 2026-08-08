@@ -9,7 +9,7 @@ import { authRouter, requireRole, requireManager } from "./auth";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { getTwilioClient, getTwilioFromPhoneNumber } from "../src/lib/twilioClient";
-import { formatLogFields, createRepeatLogGate } from "./logFormat";
+import { formatLogFields, createRepeatLogGate } from "../shared/logFormat";
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -4098,13 +4098,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         departmentId,
       } = req.body;
 
-      console.info('[TICKET WEBHOOK] Received ticket resolution:', {
+      console.info('[TICKET WEBHOOK] Received ticket resolution:', formatLogFields({
         ticketId,
         ticketNumber,
         patient: `${patientFirstName} ${patientLastName}`,
         phone: patientPhone,
         contactMethod: preferredContactMethod,
-      });
+      }));
 
       // Validate required fields
       if (!ticketId || !ticketNumber || !patientPhone || !resolutionNotes) {

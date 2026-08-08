@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { workflowManager, type PatientData } from '../../server/services/schedulingWorkflowManager';
 import { PhreesiaComputerUseAgent } from '../../server/services/computerUseAgent';
 import { PHREESIA_CONFIG } from '../config/phreesiaConfig';
+import { formatLogFields } from '../../shared/logFormat';
 
 export interface PhreesiaSchedulingContext {
   callLogId: string;
@@ -40,12 +41,12 @@ export function createPhreesiaSchedulingTool(context: PhreesiaSchedulingContext)
       }).describe('Patient information collected from the voice call'),
     }),
     execute: async ({ patient_type, preferred_location, patient_data }) => {
-      console.info('[PHREESIA TOOL] Starting form automation', {
+      console.info('[PHREESIA TOOL] Starting form automation', formatLogFields({
         patient: `${patient_data.firstName} ${patient_data.lastName}`,
         patientType: patient_type,
         preferredLocation: preferred_location,
         callLogId: context.callLogId,
-      });
+      }));
 
       try {
         const workflow = await workflowManager.createWorkflow({
@@ -118,7 +119,7 @@ export function createSubmitOTPTool(context: PhreesiaSchedulingContext) {
         return `✗ No active scheduling session found. Please start the scheduling process first using schedule_patient_in_phreesia.`;
       }
 
-      console.info('[OTP TOOL] Submitting OTP to workflow', { workflowId, callLogId: context.callLogId, otp: normalizedOTP });
+      console.info('[OTP TOOL] Submitting OTP to workflow', formatLogFields({ workflowId, callLogId: context.callLogId, otp: normalizedOTP }));
 
       try {
         await workflowManager.submitOTP(workflowId, normalizedOTP);

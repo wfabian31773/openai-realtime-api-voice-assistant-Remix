@@ -18,6 +18,7 @@ import { type TriageOutcome } from "../config/afterHoursTicketing";
 import { storage } from "../../server/storage";
 import { escalationDetailsMap } from "../services/escalationStore";
 import { callMetadataForDB } from "../services/callMetadataStore";
+import { formatLogFields } from "../../shared/logFormat";
 
 const CONTEXT_LOOKUP_TIMEOUT_MS = 2000;
 
@@ -853,12 +854,12 @@ export async function createNoIvrAgent(
 
     if (scheduleResult.status === 'fulfilled' && scheduleResult.value?.patientFound) {
       scheduleContext = scheduleResult.value;
-      console.log(`[No-IVR Agent] Schedule context loaded for ${phoneRef}:`, {
+      console.log(`[No-IVR Agent] Schedule context loaded for ${phoneRef}:`, formatLogFields({
         upcomingCount: scheduleContext.upcomingAppointments.length,
         pastCount: scheduleContext.pastAppointments.length,
         hasLocation: !!scheduleContext.lastLocationSeen,
         hasProvider: !!scheduleContext.lastProviderSeen,
-      });
+      }));
       
       if (metadata.callLogId) {
         storage.updateCallLog(metadata.callLogId, {
@@ -874,10 +875,10 @@ export async function createNoIvrAgent(
 
     if (memoryResult.status === 'fulfilled' && memoryResult.value) {
       callerMemory = memoryResult.value;
-      console.log(`[No-IVR Agent] Caller memory loaded for ${phoneRef}:`, {
+      console.log(`[No-IVR Agent] Caller memory loaded for ${phoneRef}:`, formatLogFields({
         totalCalls: callerMemory.totalCalls,
         hasOpenTickets: callerMemory.openTickets.length > 0,
-      });
+      }));
     }
   }
 
@@ -902,13 +903,13 @@ export async function createNoIvrAgent(
   }
   console.log("═══════════════════════════════════════════════════════════════");
   
-  console.log("[No-IVR Agent] Creating agent:", {
+  console.log("[No-IVR Agent] Creating agent:", formatLogFields({
     callId,
     hasCallerPhone: !!callerPhone,
     hasScheduleContext: !!scheduleContext?.patientFound,
     hasCallerMemory: !!callerMemory,
     previousCalls: callerMemory?.totalCalls || 0,
-  });
+  }));
 
   console.log(`[${agentTag}] CHECKPOINT 1: Creating tool definitions...`);
 
@@ -929,11 +930,11 @@ DO NOT USE if schedule context was already loaded and identity was confirmed.`,
       date_of_birth: z.string().optional().describe("Patient date of birth"),
     }),
     execute: async (params) => {
-      console.log("[No-IVR Agent] lookup_schedule called:", {
+      console.log("[No-IVR Agent] lookup_schedule called:", formatLogFields({
         hasPhone: !!params.phone,
         hasName: !!(params.first_name && params.last_name),
         hasDob: !!params.date_of_birth,
-      });
+      }));
 
       try {
         let result: PatientScheduleContext;
@@ -1062,13 +1063,13 @@ This does NOT affect the call - it's purely for internal tracking.`,
         .describe("Specific phrases from caller that influenced decision"),
     }),
     execute: async (params) => {
-      console.log(`[NO-IVR DECISION] ${params.decision_type}:`, {
+      console.log(`[NO-IVR DECISION] ${params.decision_type}:`, formatLogFields({
         value: params.value,
         reason: params.reason,
         keyPhrases: params.key_phrases,
         callId: metadata.callId,
         timestamp: new Date().toISOString(),
-      });
+      }));
       return { logged: true };
     },
   });
@@ -1132,12 +1133,12 @@ The ticket will include schedule context (last appointment info) automatically.`
       
       const callbackNormalized = normalizePhoneNumber(params.callback_number);
       
-      console.log("[No-IVR Agent] create_ticket called:", {
+      console.log("[No-IVR Agent] create_ticket called:", formatLogFields({
         category: params.request_category,
         requiresCallback,
         hasScheduleContext: !!scheduleContext?.patientFound,
         callbackPhone: phoneLast4(callbackNormalized),
-      });
+      }));
 
       // CODE-ENFORCED: Check for open tickets before creating new one
       if (metadata.callerPhone) {
@@ -1419,13 +1420,13 @@ For healthcare provider calls — escalate immediately with whatever info you ha
       provider_info: z.string().optional().describe("Provider name/facility if healthcare provider call"),
     }),
     execute: async (params) => {
-      console.info("[HANDOFF] escalate_to_human tool called:", {
+      console.info("[HANDOFF] escalate_to_human tool called:", formatLogFields({
         callerType: params.caller_type,
         reason: params.reason?.substring(0, 100),
         hasSymptoms: !!params.symptoms_summary,
         hasProviderInfo: !!params.provider_info,
         callId,
-      });
+      }));
 
       const escalationDetails = {
         reason: params.reason,

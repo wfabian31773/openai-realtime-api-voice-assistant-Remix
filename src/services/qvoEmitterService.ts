@@ -10,6 +10,7 @@
 
 import { storage } from '../../server/storage';
 import type { SyncAgentTicketParams } from './syncAgentService';
+import { formatLogFields } from '../../shared/logFormat';
 
 const QVO_INGEST_URL = process.env.QVO_INGEST_URL?.replace(/\/$/, '');
 const QVO_API_KEY   = process.env.QVO_API_KEY;
@@ -30,13 +31,13 @@ function maskPhone(phone?: string | null): string {
 }
 
 // Log configuration status at module load time so it appears in startup logs
-console.info('[QVO EMITTER] Configuration check:', {
+console.info('[QVO EMITTER] Configuration check:', formatLogFields({
   QVO_INGEST_URL: QVO_INGEST_URL ? `✓ set (${QVO_INGEST_URL.substring(0, 30)}...)` : '✗ MISSING',
   QVO_API_KEY:    QVO_API_KEY    ? `✓ set (length: ${QVO_API_KEY.length})`         : '✗ MISSING',
   QVO_TENANT_ID:  QVO_TENANT_ID  ? `✓ set`                                          : '✗ MISSING',
   status: (QVO_INGEST_URL && QVO_API_KEY && QVO_TENANT_ID) ? 'ACTIVE' : 'STANDBY (no-op until vars set)',
   phi_mode: QVO_INCLUDE_PHI ? 'FULL (QVO_INCLUDE_PHI=true — BAA must be on file)' : 'REDACTED (default; no PHI sent to QVO)',
-});
+}));
 
 const MAX_RETRIES      = 3;
 const RETRY_BASE_MS    = 1_000;

@@ -35,6 +35,7 @@ import { callerSpeech, guardIdentityArgs, surnameDisagrees, lastIdentityAttempt 
 import { checkAppointmentOrdinal, checkHandoffIdentity, handoffIdentity, refusalJson } from '../services/azulToolGuards';
 import { checkIdentityGrounding } from '../services/identityGrounding';
 import { director, directorEnabledFor } from '../director/director';
+import { formatLogFields } from '../../shared/logFormat';
 
 const EYECARE_BASE_URL =
   process.env.EYECARE_SCHEDULING_BASE_URL ||
@@ -1182,11 +1183,11 @@ export function createAzulSchedulingAgent(
   handoffCallback?: () => Promise<void>,
   metadata?: AzulSchedulingMetadata,
 ): RealtimeAgent {
-  console.log('[AZUL-SCHED] Creating agent v' + azulSchedulingAgentConfig.version, {
+  console.log('[AZUL-SCHED] Creating agent v' + azulSchedulingAgentConfig.version, formatLogFields({
     callId: metadata?.callId,
     callSid: metadata?.callSid,
     dialedNumber: metadata?.dialedNumber,
-  });
+  }));
 
   /** Calls whose identity the SERVER confirmed. Drives the sage_handoff
    *  fallback below; independent of the director, which can be switched off. */

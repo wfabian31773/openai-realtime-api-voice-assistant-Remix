@@ -1,5 +1,6 @@
 import { getTwilioClient, getTwilioAccountSid } from '../lib/twilioClient';
 import { storage } from '../../server/storage';
+import { formatLogFields } from '../../shared/logFormat';
 
 export interface TwilioCallInsights {
   fromConnectionType?: string;
@@ -158,12 +159,12 @@ export class TwilioInsightsService {
         console.warn(`[TWILIO INSIGHTS] Events API error for ${callSid}: ${eventsError.message || eventsError}`);
       }
 
-      console.log(`[TWILIO INSIGHTS] Fetched insights for ${callSid}:`, {
+      console.log(`[TWILIO INSIGHTS] Fetched insights for ${callSid}:`, formatLogFields({
         cost: insights.twilioCostCents ? `${insights.twilioCostCents}¢` : 'unknown',
         duration: insights.duration ? `${insights.duration}s` : 'unknown',
         carrier: insights.fromCarrier || 'unknown',
         whoHungUp: insights.whoHungUp || 'unknown',
-      });
+      }));
 
       return insights;
     } catch (error: any) {

@@ -2,6 +2,7 @@
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { CampaignAdapter } from '../db/agentAdapters';
+import { formatLogFields } from '../../shared/logFormat';
 
 const SYSTEM_PROMPT_TEMPLATE = `You are an expert Fantasy Football advisor with access to real-time NFL player data via the Sleeper API. It's currently the 2025 NFL season.
 
@@ -150,7 +151,7 @@ export function createFantasyFootballAgent(
   const campaignId = metadata?.campaignId;
   const contactId = metadata?.contactId;
   
-  console.log('[Fantasy Football Agent] Creating agent with metadata:', { campaignId, contactId });
+  console.log('[Fantasy Football Agent] Creating agent with metadata:', formatLogFields({ campaignId, contactId }));
 
   // Default contact name - will be 'there' unless provided via metadata.contactName
   let contactName = metadata?.contactName || 'there';

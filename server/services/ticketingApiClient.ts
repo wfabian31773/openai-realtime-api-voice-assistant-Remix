@@ -2,6 +2,7 @@ import { getEnvironmentConfig } from '../../src/config/environment';
 import { shadowTap } from '../../src/shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { isNoTicketError } from './ticketingSyncPolicy';
 import type { PcpTicketPayload, PcpTicketResponse } from '../../src/pcp/pcpTicketing';
+import { formatLogFields } from '../../shared/logFormat';
 
 interface CallData {
   callSid?: string;
@@ -389,7 +390,7 @@ export class TicketingApiClient {
   }
 
   async createTicket(params: CreateTicketParams): Promise<CreateTicketResponse> {
-    console.info("[TICKETING API] Creating ticket:", {
+    console.info("[TICKETING API] Creating ticket:", formatLogFields({
       patient: maskName(params.patientFirstName, params.patientLastName),
       phone: maskPhone(params.patientPhone),
       departmentId: params.departmentId,
@@ -402,7 +403,7 @@ export class TicketingApiClient {
       hasRecording: !!params.callData?.recordingUrl,
       hasTranscript: !!params.callData?.transcript,
       callDuration: params.callData?.callDurationSeconds,
-    });
+    }));
 
     // Warm up the ticketing service before creating ticket (handles sleeping deployments)
     const warmedUp = await this.warmUpWithRetry(3, 2000);
@@ -427,12 +428,12 @@ export class TicketingApiClient {
 
       // Log lookup results for visibility
       if (response.providerSearched !== undefined || response.locationSearched !== undefined) {
-        console.info(`[TICKETING API] Lookup results:`, {
+        console.info(`[TICKETING API] Lookup results:`, formatLogFields({
           providerSearched: response.providerSearched,
           providerMatched: response.providerMatched,
           locationSearched: response.locationSearched,
           locationMatched: response.locationMatched,
-        });
+        }));
       }
       
       // Log any lookup warnings for staff awareness
@@ -460,7 +461,7 @@ export class TicketingApiClient {
    * This is the preferred method for voice agents - more reliable than the legacy createTicket
    */
   async submitTicket(params: SubmitTicketParams): Promise<SubmitTicketResponse> {
-    console.info("[TICKETING API] Submitting ticket (simplified endpoint):", {
+    console.info("[TICKETING API] Submitting ticket (simplified endpoint):", formatLogFields({
       patientName: maskName(params.patientFullName),
       hasPhone: !!params.patientPhone,
       hasEmail: !!params.patientEmail,
@@ -470,7 +471,7 @@ export class TicketingApiClient {
       hasCallData: !!params.callData,
       callSid: params.callData?.callSid,
       idempotencyKey: params.idempotencyKey,
-    });
+    }));
 
     // Warm up the ticketing service before submitting (handles sleeping deployments)
     const warmedUp = await this.warmUpWithRetry(3, 2000);
@@ -496,10 +497,10 @@ export class TicketingApiClient {
         );
 
         // Log lookup results for visibility
-        console.info(`[TICKETING API] Lookup results:`, {
+        console.info(`[TICKETING API] Lookup results:`, formatLogFields({
           providerMatched: response.providerMatched,
           locationMatched: response.locationMatched,
-        });
+        }));
         
         // Log any lookup warnings for staff awareness
         if (response.lookupWarnings && response.lookupWarnings.length > 0) {
@@ -510,11 +511,11 @@ export class TicketingApiClient {
           console.warn(`[TICKETING API] ⚠️  Used fallback reason for ${response.ticketNumber} - manual review needed`);
         }
       } else {
-        console.error(`[TICKETING API] ✗ Ticket submission failed:`, {
+        console.error(`[TICKETING API] ✗ Ticket submission failed:`, formatLogFields({
           errorCode: response.errorCode,
           error: response.error,
           missingFields: response.missingFields,
-        });
+        }));
       }
 
       return response;
@@ -531,11 +532,11 @@ export class TicketingApiClient {
   async logCallbackCampaign(
     params: LogCallbackCampaignParams
   ): Promise<LogCallbackCampaignResponse> {
-    console.info("[TICKETING API] Logging callback campaign result:", {
+    console.info("[TICKETING API] Logging callback campaign result:", formatLogFields({
       ticketId: params.ticketId,
       status: params.status,
       duration: params.callDuration,
-    });
+    }));
 
     try {
       const response = await this.makeRequest<LogCallbackCampaignResponse>(
@@ -561,14 +562,14 @@ export class TicketingApiClient {
   async updateTicketCallData(
     params: UpdateTicketCallDataParams
   ): Promise<UpdateTicketCallDataResponse> {
-    console.info("[TICKETING API] Updating ticket with call data:", {
+    console.info("[TICKETING API] Updating ticket with call data:", formatLogFields({
       ticketNumber: params.ticketNumber,
       callSid: params.callSid,
       hasRecording: !!params.recordingUrl,
       hasTranscript: !!params.transcript,
       callDuration: params.callDurationSeconds,
       qualityScore: params.qualityScore,
-    });
+    }));
 
     try {
       const response = await this.makeRequest<UpdateTicketCallDataResponse>(
@@ -627,10 +628,10 @@ export class TicketingApiClient {
       return { success: true };
     }
 
-    console.info("[TICKETING API] Looking up provider/location:", {
+    console.info("[TICKETING API] Looking up provider/location:", formatLogFields({
       providerName: params.providerName || '(none)',
       locationName: params.locationName || '(none)',
-    });
+    }));
 
     try {
       this.ensureInitialized();
@@ -641,12 +642,12 @@ export class TicketingApiClient {
         params
       );
 
-      console.info("[TICKETING API] Lookup result:", {
+      console.info("[TICKETING API] Lookup result:", formatLogFields({
         providerId: response.providerId,
         providerMatches: response.providerMatches?.length || 0,
         locationId: response.locationId,
         locationMatches: response.locationMatches?.length || 0,
-      });
+      }));
 
       return response;
     } catch (error) {

@@ -10,6 +10,7 @@ import {
 import { buildPracticeKnowledgePrompt } from '../config/azulVisionKnowledge';
 import { getNextBusinessDayContext } from '../utils/timeAware';
 import { escalationDetailsMap } from '../services/escalationStore';
+import { formatLogFields } from '../../shared/logFormat';
 
 // ── Content-based routing (operator mandate 2026-07-25) ─────────────────
 // Tickets go to the APPROPRIATE department for what the call was about;
@@ -241,10 +242,10 @@ export async function createAfterHoursAgent(
   let lastPatientInfo: any = null;
   
   const callerPhone = metadata?.callerPhone;
-  console.log('[Urgent Triage Agent] Creating agent:', {
+  console.log('[Urgent Triage Agent] Creating agent:', formatLogFields({
     hasCallerPhone: !!callerPhone,
     hasMetadata: !!metadata,
-  });
+  }));
   
   // Auto-fetch patient schedule context using caller phone (async)
   let scheduleContext: PatientScheduleContext | undefined;
@@ -253,11 +254,11 @@ export async function createAfterHoursAgent(
       console.log('[Urgent Triage Agent] Fetching schedule context for:', callerPhone);
       scheduleContext = await scheduleLookupService.lookupByPhone(callerPhone);
       if (scheduleContext?.patientFound) {
-        console.log('[Urgent Triage Agent] Schedule context found:', {
+        console.log('[Urgent Triage Agent] Schedule context found:', formatLogFields({
           upcomingCount: scheduleContext.upcomingAppointments.length,
           lastVisit: scheduleContext.lastVisitDate,
           lastLocationSeen: scheduleContext.lastLocationSeen,
-        });
+        }));
       } else {
         console.log('[Urgent Triage Agent] No schedule context found for phone');
       }
@@ -356,10 +357,10 @@ export async function createAfterHoursAgent(
       medication_name: z.string().nullable().describe('Medication name if relevant'),
     }),
     execute: async (params) => {
-      console.log('[TOOL] create_after_hours_ticket:', {
+      console.log('[TOOL] create_after_hours_ticket:', formatLogFields({
         triage_outcome: params.triage_outcome,
         hasName: !!(params.patient_first_name && params.patient_last_name),
-      });
+      }));
 
       try {
         // Lazy import to avoid module initialization during agent bootstrap

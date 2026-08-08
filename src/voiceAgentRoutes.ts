@@ -931,6 +931,7 @@ const aircallDTMFSent = new Set<string>();
 
 // Import escalation details from shared store (avoids circular dependency with noIvrAgent.ts)
 import { escalationDetailsMap, type EscalationDetails } from './services/escalationStore';
+import { formatLogFields } from '../shared/logFormat';
 
 // Log conversation history (PHI-protected)
 function logHistoryItem(item: RealtimeItem, callId?: string): void {
@@ -1915,10 +1916,10 @@ async function observeCall(
     
     // Only add to callback queue if we have required fields
     if (!patientName || !patientPhone) {
-      console.log('[PatientInfo] Skipping callback queue - missing name or phone:', {
+      console.log('[PatientInfo] Skipping callback queue - missing name or phone:', formatLogFields({
         hasName: !!patientName,
         hasPhone: !!patientPhone,
-      });
+      }));
       return { success: true, message: "Patient information recorded (not queued - incomplete)" };
     }
     
@@ -2135,11 +2136,11 @@ async function observeCall(
           console.info(`[DB-BG] Call log created: ${resolvedCallLogId}, CallSid: ${twilioCallSid}, Agent: ${effectiveSlug} ${agentVersionForLog}, Env: ${environment}`);
         }
       } else {
-        console.warn(`[DB-BG] Skipping call log creation - no caller data:`, {
+        console.warn(`[DB-BG] Skipping call log creation - no caller data:`, formatLogFields({
           from: from || 'N/A',
           callSid: twilioCallSid?.slice(-8) || 'N/A',
           callId: callId.slice(-8),
-        });
+        }));
       }
       
       // Register call with lifecycle coordinator
@@ -2568,11 +2569,11 @@ async function observeCall(
 
   // Log tracing info for OpenAI dashboard visibility
   // Traces viewable at: platform.openai.com → Logs → Traces
-  console.info(`[TRACING] Session created for ${effectiveSlug} v${agentConfig?.version || 'unknown'}`, {
+  console.info(`[TRACING] Session created for ${effectiveSlug} v${agentConfig?.version || 'unknown'}`, formatLogFields({
     callId,
     twilioCallSid,
     agent: effectiveSlug,
-  });
+  }));
   
   // Store session for potential cleanup from conference events
   activeSessions.set(callId, session);
@@ -2639,23 +2640,23 @@ async function observeCall(
 
   // Debug: Track function call events
   session.transport.on('function_call', (event: any) => {
-    console.info(`[TOOL CALL] Received function_call event: ${event.name}`, {
+    console.info(`[TOOL CALL] Received function_call event: ${event.name}`, formatLogFields({
       callId: event.callId,
       arguments: event.arguments ? JSON.parse(event.arguments) : null,
-    });
+    }));
   });
 
   // Debug: Track tool execution
   session.on('agent_tool_start', (_context: any, _agent: any, tool: any, details: any) => {
-    console.info(`[TOOL EXECUTION] Starting tool: ${tool.name}`, {
+    console.info(`[TOOL EXECUTION] Starting tool: ${tool.name}`, formatLogFields({
       toolCall: details.toolCall,
-    });
+    }));
   });
 
   session.on('agent_tool_end', (_context: any, _agent: any, tool: any, result: string, details: any) => {
-    console.info(`[TOOL EXECUTION] Tool completed: ${tool.name}`, {
+    console.info(`[TOOL EXECUTION] Tool completed: ${tool.name}`, formatLogFields({
       resultLength: result?.length,
-    });
+    }));
   });
 
   // CRITICAL: Listen to raw transport events for transcripts

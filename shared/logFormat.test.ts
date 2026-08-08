@@ -42,6 +42,16 @@ describe('formatLogFields', () => {
     expect(formatLogFields({ search: 'jane doe' })).toBe('search="jane doe"');
   });
 
+  it('keeps an Error readable — JSON.stringify would flatten it to {}', () => {
+    expect(JSON.stringify(new Error('boom'))).toBe('{}'); // the trap being avoided
+    expect(formatLogFields({ error: new Error('boom') })).toBe('error="Error: boom"');
+  });
+
+  it('renders arrays inline', () => {
+    expect(formatLogFields({ keyPhrases: ['chest pain', 'now'] }))
+      .toBe('keyPhrases=["chest pain","now"]');
+  });
+
   it('returns a placeholder when every field is unset', () => {
     expect(formatLogFields({ a: undefined, b: undefined })).toBe('(none)');
   });

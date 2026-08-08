@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { storage } from '../storage';
 import type { SchedulingWorkflow, InsertSchedulingWorkflow } from '../../shared/schema';
 import { PHREESIA_CONFIG } from '../../src/config/phreesiaConfig';
+import { formatLogFields } from '../../shared/logFormat';
 
 export interface PatientData {
   firstName: string;
@@ -52,10 +53,10 @@ class SchedulingWorkflowManager extends EventEmitter {
     agentId: string;
     patientData: PatientData;
   }): Promise<SchedulingWorkflow> {
-    console.info('[WORKFLOW MANAGER] Creating new scheduling workflow', {
+    console.info('[WORKFLOW MANAGER] Creating new scheduling workflow', formatLogFields({
       callLogId: data.callLogId,
       campaignId: data.campaignId,
-    });
+    }));
 
     const workflow = await storage.createSchedulingWorkflow({
       callLogId: data.callLogId,

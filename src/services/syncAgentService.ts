@@ -6,6 +6,7 @@ import {
   type TriageOutcome 
 } from '../config/afterHoursTicketing';
 import { getValidatedTicketIds } from '../config/answeringServiceTicketing';
+import { formatLogFields } from '../../shared/logFormat';
 
 // Categories that don't require staff callback (ticket created for records only)
 const NO_CALLBACK_CATEGORIES: TriageOutcome[] = [
@@ -76,7 +77,7 @@ export interface SyncAgentResponse {
  */
 export class SyncAgentService {
   static async createTicket(params: SyncAgentTicketParams): Promise<SyncAgentResponse> {
-    console.info('[SYNC AGENT] Processing ticket creation:', {
+    console.info('[SYNC AGENT] Processing ticket creation:', formatLogFields({
       patient: `${params.patientFirstName} ${params.patientLastName}`,
       phone: params.patientPhone,
       departmentId: params.departmentId,
@@ -89,7 +90,7 @@ export class SyncAgentService {
       hasRecording: !!params.callData?.recordingUrl,
       hasTranscript: !!params.callData?.transcript,
       callDuration: params.callData?.callDurationSeconds,
-    });
+    }));
 
     const callSid = params.callData?.callSid;
     if (callSid) {
@@ -334,12 +335,12 @@ export class SyncAgentService {
     validationErrors?: string[];
     error?: string;
   }> {
-    console.log('[SYNC AGENT] createTicketFromAgentInput called:', {
+    console.log('[SYNC AGENT] createTicketFromAgentInput called:', formatLogFields({
       name: `${params.firstName} ${params.lastName}`,
       dob: `${params.birthMonth}/${params.birthDay}/${params.birthYear}`,
       phone: params.callbackNumber,
       category: params.requestCategory,
-    });
+    }));
 
     // 1. VALIDATE REQUIRED FIELDS
     const errors: string[] = [];
@@ -531,14 +532,14 @@ export class SyncAgentService {
   }): Promise<SyncAgentResponse> {
     const { callSid } = params;
     
-    console.info('[SYNC AGENT] Processing simplified ticket submission:', {
+    console.info('[SYNC AGENT] Processing simplified ticket submission:', formatLogFields({
       patientName: params.patientFullName,
       hasPhone: !!params.patientPhone,
       preferredContact: params.preferredContactMethod,
       lastProvider: params.lastProviderSeen,
       lastLocation: params.locationOfLastVisit,
       callSid,
-    });
+    }));
 
     // DEDUPLICATION: Atomic lock to prevent race conditions
     if (callSid) {

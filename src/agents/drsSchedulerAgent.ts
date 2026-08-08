@@ -7,6 +7,7 @@ import { PhreesiaComputer } from '../utils/computer';
 import { CampaignAdapter } from '../db/agentAdapters';
 import { createPhreesiaSchedulingTool, createSubmitOTPTool } from '../tools/phreesiaSchedulingTool';
 import { PHREESIA_CONFIG } from '../config/phreesiaConfig';
+import { formatLogFields } from '../../shared/logFormat';
 
 const PHREESIA_URL = PHREESIA_CONFIG.schedulingUrl;
 const LOCATIONS_LIST = PHREESIA_CONFIG.locations.join(', ');
@@ -96,7 +97,7 @@ export function createDRSSchedulerAgent(
   const callLogId = metadata?.callLogId;
   const agentId = metadata?.agentId;
   
-  console.log('[DRS AGENT] Creating agent with metadata:', { campaignId, contactId, callLogId, agentId });
+  console.log('[DRS AGENT] Creating agent with metadata:', formatLogFields({ campaignId, contactId, callLogId, agentId }));
   // Use database adapters if callbacks not provided
   const lookupFn = lookupPatientCallback || CampaignAdapter.lookupPatient.bind(CampaignAdapter);
   const markCompletedFn = markCompletedCallback || CampaignAdapter.markContactCompleted.bind(CampaignAdapter);
@@ -109,7 +110,7 @@ export function createDRSSchedulerAgent(
       contact_id: z.string().describe('Contact ID for this patient'),
     }),
     execute: async ({ campaign_id, contact_id }) => {
-      console.log('[TOOL] lookup_patient called:', { campaign_id, contact_id });
+      console.log('[TOOL] lookup_patient called:', formatLogFields({ campaign_id, contact_id }));
       try {
         const patient = await lookupFn(campaign_id, contact_id);
         return `Patient found: ${patient.first_name} ${patient.last_name}, Phone: ${patient.phone}, Email: ${patient.email || 'not provided'}`;
@@ -130,7 +131,7 @@ export function createDRSSchedulerAgent(
       notes: z.string().nullable().default(null).describe('Additional notes about the call'),
     }),
     execute: async ({ contact_id, outcome, appointment_date, notes }) => {
-      console.log('[TOOL] mark_contact_completed:', { contact_id, outcome });
+      console.log('[TOOL] mark_contact_completed:', formatLogFields({ contact_id, outcome }));
       try {
         // Preserve full outcome details in notes for analytics
         const outcomeDetails = `Outcome: ${outcome}`;

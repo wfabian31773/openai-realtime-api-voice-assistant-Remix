@@ -5,6 +5,7 @@ import { getPacificTimeContext } from '../utils/timeAware';
 import { CampaignAdapter } from '../db/agentAdapters';
 import { ScheduleLookupService } from '../services/scheduleLookupService';
 import { storage } from '../../server/storage';
+import { formatLogFields } from '../../shared/logFormat';
 
 interface ContactAppointmentData {
   patientName: string;
@@ -145,13 +146,13 @@ CONTACT ID: ${contact.id}
 Use this information when speaking to the patient. You already have their appointment details - no need to call get_appointment tool.
 ==========================================`;
         
-        console.log('[APPOINTMENT CONFIRMATION AGENT] Contact appointment data loaded:', {
+        console.log('[APPOINTMENT CONFIRMATION AGENT] Contact appointment data loaded:', formatLogFields({
           patientName,
           appointmentDate,
           appointmentTime,
           doctor: contact.appointmentDoctor,
           location: contact.appointmentLocation
-        });
+        }));
       }
     } catch (error) {
       console.error('[APPOINTMENT CONFIRMATION AGENT] Error loading contact data:', error);
@@ -165,11 +166,11 @@ Use this information when speaking to the patient. You already have their appoin
     const context = await scheduleService.lookupByPhone(metadata.callerPhone);
     if (context) {
       scheduleContext = scheduleService.formatContextForAgent(context);
-      console.log('[APPOINTMENT CONFIRMATION AGENT] Schedule context loaded:', {
+      console.log('[APPOINTMENT CONFIRMATION AGENT] Schedule context loaded:', formatLogFields({
         patientName: context.patientName,
         upcomingCount: context.upcomingAppointments.length,
         pastCount: context.pastAppointments.length
-      });
+      }));
     } else {
       console.log('[APPOINTMENT CONFIRMATION AGENT] No schedule context found for phone');
     }
@@ -267,7 +268,7 @@ Use this information when speaking to the patient. You already have their appoin
       notes: z.string().nullable().default(null).describe('Additional notes about the call'),
     }),
     execute: async ({ contact_id, status, notes }) => {
-      console.log('[TOOL] mark_confirmed:', { contact_id, status });
+      console.log('[TOOL] mark_confirmed:', formatLogFields({ contact_id, status }));
       try {
         let outreachStatus: 'confirmed' | 'declined' | 'rescheduled' | 'wrong_number' | 'completed';
         switch (status) {
@@ -310,7 +311,7 @@ Use this information when speaking to the patient. You already have their appoin
       message_left: z.boolean().default(true).describe('Whether you left a voicemail message'),
     }),
     execute: async ({ contact_id, message_left }) => {
-      console.log('[TOOL] mark_voicemail:', { contact_id, message_left });
+      console.log('[TOOL] mark_voicemail:', formatLogFields({ contact_id, message_left }));
       try {
         const status = message_left ? 'voicemail' : 'no_answer';
         await storage.updateCampaignContact(contact_id, {

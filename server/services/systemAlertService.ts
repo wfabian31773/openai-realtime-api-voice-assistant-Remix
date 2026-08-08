@@ -12,7 +12,7 @@ import { getTwilioClient, getTwilioFromPhoneNumber } from '../../src/lib/twilioC
 import { getEnvironmentConfig } from '../../src/config/environment';
 import { db } from '../../server/db';
 import { sql } from 'drizzle-orm';
-import { formatLogFields } from '../logFormat';
+import { formatLogFields } from '../../shared/logFormat';
 
 interface AlertEvent {
   type: 'database_failure' | 'call_log_failure' | 'circuit_breaker_open' | 'system_degraded' | 'recovery' | 'emergency_miss' | 'provider_miss' | 'handoff_failure_spike' | 'high_mismatch_ratio' | 'grader_critical_failure';
