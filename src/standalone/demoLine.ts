@@ -83,6 +83,16 @@ interface DemoCall {
   closing: boolean;
   /** Set while the agent is speaking a line we forced, for barge-in cleanup. */
   speaking: boolean;
+  /**
+   * Did the VAD actually hear the caller since we last accepted a turn?
+   * Transcription models hallucinate words out of silence and line noise, and
+   * those phantom turns drive the state machine: a live call (17:21) processed
+   * an "Okay" the caller never said, then heard him say "I haven't even spoken
+   * a single word yet" — by which point an ask had already been spent. Worse,
+   * hallucinated Spanish fragments trip the language switch, so the agent
+   * starts answering in Spanish to a silent line.
+   */
+  heardSpeech: boolean;
 }
 
 const calls = new Map<WebSocket, DemoCall>();
@@ -180,6 +190,7 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     transcript: [],
     closing: false,
     speaking: false,
+    heardSpeech: false,
   };
   calls.set(twilio, call);
 
@@ -288,6 +299,7 @@ function connectOpenAI(call: DemoCall): void {
       // The caller interrupted: drop the audio Twilio has already buffered,
       // or the agent keeps talking over them for seconds.
       case 'input_audio_buffer.speech_started':
+        call.heardSpeech = true;
         if (call.speaking && call.streamSid && call.twilio.readyState === WebSocket.OPEN) {
           call.twilio.send(JSON.stringify({ event: 'clear', streamSid: call.streamSid }));
         }
@@ -301,7 +313,18 @@ function connectOpenAI(call: DemoCall): void {
       // The caller finished a sentence. This is the only input the agent gets.
       case 'conversation.item.input_audio_transcription.completed': {
         const text = String(evt.transcript ?? '').trim();
-        if (text) void onCallerSaid(call, text);
+        if (!text) break;
+        // No speech was detected since the last turn, so whatever the
+        // transcriber produced came from silence. Dropping it is always right:
+        // the caller cannot have answered a question they never heard, and a
+        // phantom answer is worse than no answer — it spends an ask and can
+        // flip the whole call into another language.
+        if (!call.heardSpeech) {
+          console.info(`[DEMO-LINE] ${call.callId} ignored a transcript with no speech behind it: "${text.slice(0, 60)}"`);
+          break;
+        }
+        call.heardSpeech = false;
+        void onCallerSaid(call, text);
         break;
       }
 
