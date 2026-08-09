@@ -92,6 +92,15 @@ describe('SD shadow — behaviour', () => {
     await say('user_transcript', 'the first one');
     await say('session_completed');
 
+    // The shadow finishes a call asynchronously (the last turn may still be
+    // waiting on availability), so wait for the result rather than for a
+    // fixed number of milliseconds — under full-suite load a fixed wait is a
+    // coin toss, and a flaky guard on "nothing was booked" is worthless.
+    const deadline = Date.now() + 5000;
+    while (sdShadowReport().completed === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
     const report = sdShadowReport();
     expect(report.completed).toBe(1);
     // The evidence Gate B could not produce: it got a LIVE offer and reached
