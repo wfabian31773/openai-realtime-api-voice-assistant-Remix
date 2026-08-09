@@ -222,6 +222,24 @@ const RAMP_AGENTS = new Set((process.env.RAMP_AGENTS ?? 'answering-service,pcp,a
 /** Calls owned by a new-core line module (reconstruction-plan.md §4). */
 const newCoreCalls = new Set<string>();
 
+/**
+ * Wrap-up hangups, pending. A caller can speak AFTER the closing line — most
+ * urgently, to report an emergency ("I can't see") in the seconds before the
+ * hangup fires. If anything new is said, the pending disconnect is cancelled;
+ * it only re-arms if the module ends the call again. Without this the caller
+ * is cut off mid-sentence, and on the emergency path that means cut off
+ * before "dial nine one one" (review 2026-08-09).
+ */
+const pendingHangups = new Map<string, ReturnType<typeof setTimeout>>();
+function cancelPendingHangup(callId: string): void {
+  const t = pendingHangups.get(callId);
+  if (t) {
+    clearTimeout(t);
+    pendingHangups.delete(callId);
+    console.info(`[NEW-CORE] pending hangup cancelled for ${callId} — the caller is still talking`);
+  }
+}
+
 /** CP-2: last KNOWN-FACTS block injected per call — re-inject only on change. */
 const lastFactsRender = new Map<string, string>();
 
@@ -2766,6 +2784,9 @@ async function observeCall(
         // tools in code); the model's improvised reply is cancelled and the
         // scripted line rides the same delivery guarantee as greetings.
         if (newCoreCalls.has(callId)) {
+          // The caller spoke again: whatever we had queued to end the call is
+          // off until the module says so again.
+          cancelPendingHangup(callId);
           void (async () => {
             try {
               const mod = newCoreFor(effectiveSlug);
@@ -2788,7 +2809,11 @@ async function observeCall(
                 if (action.endCall) {
                   // Hang up the CALL (not just our transport) after the wrap
                   // line has had time to play — same REST call as terminate_call.
-                  setTimeout(() => {
+                  // Held in pendingHangups so a caller who speaks again (an
+                  // emergency, a second request) cancels it.
+                  cancelPendingHangup(callId);
+                  pendingHangups.set(callId, setTimeout(() => {
+                    pendingHangups.delete(callId);
                     void (async () => {
                       try {
                         const apiKey = process.env.OPENAI_API_KEY;
@@ -2803,7 +2828,7 @@ async function observeCall(
                         console.warn(`[NEW-CORE] hangup failed for ${callId}:`, e);
                       }
                     })();
-                  }, 7000);
+                  }, 7000));
                 }
                 action = action.followUp ? await action.followUp() : null;
               }
@@ -4034,6 +4059,7 @@ async function observeCall(
     void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
     releaseRamp(callId);
     releaseNewCoreCall(callId);
+    cancelPendingHangup(callId);
     newCoreCalls.delete(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
