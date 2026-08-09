@@ -1069,9 +1069,12 @@ export async function todayOverview(): Promise<TodayOverview> {
 
 /* ── Gate B replay tapes (reconstruction-plan.md §5) ─────────────────────
  * Side-by-side judgment: the old core's actual transcript against what the
- * new core would have said on the SAME call, both scored by the same
- * graders. This is the evidence a line cuts over on — nothing is flipped
- * on numbers alone.
+ * new core would say on the SAME call, both scored by the same graders.
+ *
+ * The tape is rendered ON DEMAND from the stored call — no transcript is
+ * ever copied into a second table. That keeps patient data in one place and
+ * means an opened tape always reflects the code as it stands right now,
+ * not as it stood when some batch job ran.
  */
 export interface ReplaySummaryRow {
   agent: string;
@@ -1086,24 +1089,14 @@ export interface ReplaySummaryRow {
 
 export async function replaySummary(): Promise<ReplaySummaryRow[]> {
   const { rows } = await pool.query(
-    `
-    SELECT agent,
-           COUNT(*)::int AS calls,
-           COUNT(*) FILTER (WHERE old_critical_count > 0)::int AS old_crit,
-           COUNT(*) FILTER (WHERE new_critical_count > 0)::int AS new_crit,
-           COUNT(*) FILTER (WHERE verdict = 'better')::int AS better,
-           COUNT(*) FILTER (WHERE verdict = 'same')::int AS same,
-           COUNT(*) FILTER (WHERE verdict = 'worse')::int AS worse,
-           MAX(replayed_at) AS replayed_at
-    FROM new_core_replays
-    GROUP BY agent ORDER BY agent
-    `,
+    `SELECT agent, calls, old_critical_calls, new_critical_calls, better, same, worse, replayed_at
+     FROM new_core_replay_summary ORDER BY agent`,
   );
   return rows.map((r: any) => ({
     agent: r.agent,
     calls: r.calls,
-    oldCriticalCalls: r.old_crit,
-    newCriticalCalls: r.new_crit,
+    oldCriticalCalls: r.old_critical_calls,
+    newCriticalCalls: r.new_critical_calls,
     better: r.better,
     same: r.same,
     worse: r.worse,
@@ -1111,7 +1104,25 @@ export async function replaySummary(): Promise<ReplaySummaryRow[]> {
   }));
 }
 
-/** One tape: both transcripts and both verdicts for a single real call. */
+/** Worst-first: the case AGAINST the new core goes on top of the list. */
+export async function replayTapeList(agent: string, verdict = 'worse', limit = 40): Promise<Array<{
+  callLogId: string; verdict: string; oldCriticalCount: number; newCriticalCount: number;
+}>> {
+  const { rows } = await pool.query(
+    `SELECT call_log_id, verdict, old_critical_count, new_critical_count
+     FROM new_core_replay_index WHERE agent = $1 AND verdict = $2
+     ORDER BY (new_critical_count - old_critical_count) DESC, call_log_id LIMIT $3`,
+    [agent, verdict, limit],
+  );
+  return rows.map((r: any) => ({
+    callLogId: r.call_log_id,
+    verdict: r.verdict,
+    oldCriticalCount: r.old_critical_count,
+    newCriticalCount: r.new_critical_count,
+  }));
+}
+
+/** Render one tape live: both transcripts, both grader verdicts. */
 export async function replayTape(callLogId: string): Promise<{
   callLogId: string;
   agent: string;
@@ -1124,41 +1135,41 @@ export async function replayTape(callLogId: string): Promise<{
   approximations: string[] | null;
 } | null> {
   const { rows } = await pool.query(
-    `SELECT call_log_id, agent, verdict, new_transcript, new_grader_results,
-            new_critical_count, old_critical_count, approximations
-     FROM new_core_replays WHERE call_log_id = $1 LIMIT 1`,
+    `SELECT id, agent_used, "from", caller_name, patient_name, patient_dob, patient_found,
+            ticket_number, transferred_to_human, total_turns, duration, transcript
+     FROM call_logs WHERE id = $1 LIMIT 1`,
     [callLogId],
   );
-  if (!rows.length) return null;
-  const r = rows[0] as any;
-  const old = await pool.query(`SELECT transcript FROM call_logs WHERE id = $1 LIMIT 1`, [callLogId]);
-  return {
-    callLogId: r.call_log_id,
-    agent: r.agent,
-    verdict: r.verdict,
-    oldTranscript: old.rows[0]?.transcript ?? null,
-    newTranscript: r.new_transcript,
-    newGraders: r.new_grader_results,
-    oldCriticalCount: r.old_critical_count,
-    newCriticalCount: r.new_critical_count,
-    approximations: r.approximations,
-  };
-}
-
-/** The tapes worth a human's time first: regressions, then biggest wins. */
-export async function replayTapeList(agent: string, verdict = 'worse', limit = 25): Promise<Array<{
-  callLogId: string; verdict: string; oldCriticalCount: number; newCriticalCount: number;
-}>> {
-  const { rows } = await pool.query(
-    `SELECT call_log_id, verdict, old_critical_count, new_critical_count
-     FROM new_core_replays WHERE agent = $1 AND verdict = $2
-     ORDER BY (new_critical_count - old_critical_count) DESC LIMIT $3`,
-    [agent, verdict, limit],
+  if (!rows.length || !rows[0].transcript) return null;
+  const row = rows[0] as any;
+  const agent = String(row.agent_used ?? 'answering-service');
+  const { replayStoredCall } = await import('../../src/core/replay/replayCall');
+  const tape = await replayStoredCall(
+    {
+      id: row.id,
+      from: row.from,
+      caller_name: row.caller_name,
+      patient_name: row.patient_name,
+      patient_dob: row.patient_dob,
+      patient_found: row.patient_found,
+      ticket_number: row.ticket_number,
+      transferred_to_human: row.transferred_to_human,
+      total_turns: row.total_turns,
+      duration: row.duration,
+      transcript: row.transcript,
+    },
+    (agent === 'pcp' ? 'pcp' : agent === 'no-ivr' || agent === 'after-hours' ? 'no-ivr' : 'answering-service'),
   );
-  return rows.map((r: any) => ({
-    callLogId: r.call_log_id,
-    verdict: r.verdict,
-    oldCriticalCount: r.old_critical_count,
-    newCriticalCount: r.new_critical_count,
-  }));
+  if (!tape) return null;
+  return {
+    callLogId,
+    agent,
+    verdict: tape.verdict,
+    oldTranscript: row.transcript,
+    newTranscript: tape.new_transcript,
+    newGraders: tape.new_grader_results,
+    oldCriticalCount: tape.old_critical.length,
+    newCriticalCount: tape.new_critical.length,
+    approximations: tape.approximations,
+  };
 }
