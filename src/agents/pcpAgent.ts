@@ -364,7 +364,8 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     parameters: z.object({ narrative: z.string().min(1).max(12000), urgency: z.enum(['normal', 'high', 'urgent']).default('high') }),
     execute: async ({ narrative, urgency }) => {
       const { state, missing } = ticketState(callId);
-      const askedForAPerson = /\b(speak|talk|connect|transfer|put me)\b[^.]{0,30}\b(person|human|someone|somebody|rep|representative|agent)\b|\b(representative|operator|live person|real person)\b/i.test(narrative);
+      const askedForAPerson = /\b(speak|talk|connect|transfer|put me)\b[^.]{0,30}\b(person|human|someone|somebody|rep|representative|agent|front desk|office)\b|\b(representative|operator|live person|real person|front desk)\b/i.test(narrative);
+      if (askedForAPerson) pcpDirector.markCallerRequestedHuman(callId);
       // A professional who asked for a person is not blocked by a missing
       // classification (operator 2026-08-09). The purpose is still recorded
       // on the ticket; it just no longer decides whether the phone rings.

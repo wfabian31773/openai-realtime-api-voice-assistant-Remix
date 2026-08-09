@@ -2858,15 +2858,28 @@ async function observeCall(
                 if (responseInFlight.has(callId)) {
                   try { (session.transport as any).sendEvent({ type: 'response.cancel' }); } catch { /* fine */ }
                 }
-                // Same guarantee as greetings: parked, transcript-verified at
-                // the turn boundary, resent once if it never played.
+                // TWO KINDS OF RAMP STEP, and confusing them put an internal
+                // instruction into a caller's ear on 2026-08-09: a surgery
+                // center heard 'Say: "I'll make sure that gets to the right
+                // team." Then, in this same turn, file this request with the
+                // appropriate ticket tool...' read aloud, verbatim.
+                //
+                // A LINE is spoken word-for-word. A DIRECTIVE (say X, then do
+                // Y in the same turn) is an instruction to the model and must
+                // never be wrapped in "say this word-for-word".
+                const isDirective = /^Say:\s*["“]/.test(step.line);
+                const spokenPrefix = isDirective
+                  ? (step.line.match(/^Say:\s*["“]([^"”]+)["”]/)?.[1] ?? '')
+                  : step.line;
                 armGreetingGuarantee(
                   callId,
-                  step.line,
-                  `Say this to the caller word-for-word, without adding, removing, or rephrasing anything: "${step.line}" - Then stop and wait for their response.`,
+                  spokenPrefix,
+                  isDirective
+                    ? `${step.line}\n\nSpeak ONLY the sentence in quotes to the caller. Everything after it is an instruction for you, not words to say.`
+                    : `Say this to the caller word-for-word, without adding, removing, or rephrasing anything: "${step.line}" - Then stop and wait for their response.`,
                   session.transport as any,
                 );
-                console.info(`[RAMP] ${step.status.state} line forced (guaranteed) for ${callId}`);
+                console.info(`[RAMP] ${step.status.state} ${isDirective ? 'directive' : 'line'} forced (guaranteed) for ${callId}`);
               } else if (!step.status.active) {
                 console.info(`[RAMP] Exited (${step.status.state}) for ${callId} — model proceeds with locked facts`);
               }
