@@ -15,6 +15,7 @@
  */
 import { getLedger, updateLedger, harvestCallerLine, dobMatchesContext } from '../services/callFactsLedger';
 import type { CoreAction, LineModule } from './types';
+import { looksLikeName, DOB_PATTERN, normalizeSpokenDob } from './parsing';
 
 export interface AvailabilityOffer {
   /** The server's speakable offer — spoken WORD-FOR-WORD, never rephrased. */
@@ -54,6 +55,8 @@ interface SdStatus {
   offer: AvailabilityOffer | null;
   chosenOption: number | null;
   retriedAvailability: boolean;
+  /** One "soonest available" attempt before handing a verified patient off. */
+  triedEarliest: boolean;
   pref: { preferredDate?: string; timeOfDay?: 'AM' | 'PM' | 'ALL'; preferredTime?: string; providerName?: string; locationName?: string };
 }
 
@@ -63,7 +66,7 @@ const NEW_PAT = /\b(new|nuevo|nueva|never been|first time)\b/i;
 const EXISTING = /\b(existing|current|already|been (there|seen)|existente)\b/i;
 const URGENT_RX = /\b(emergency|911|chest pain|sudden vision|bleeding|severe pain|emergencia)\b/i;
 const HUMAN_RX = /\b(representative|operator|receptionist|(real|actual|live) (person|human)|(talk|speak|connect me|transfer me).{0,20}\b(human|agent|person|somebody|someone)\b)\b/i;
-const DOB_RX = /\b(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{2,4})\b|\b(january|february|march|april|may|june|july|august|september|october|november|december|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b.*\b(19|20)\d{2}\b/i;
+const DOB_RX = DOB_PATTERN;
 const OPTION_1 = /\b(first|one|1|earlier|primera|primero|uno)\b/i;
 const OPTION_2 = /\b(second|two|2|later|segunda|segundo|dos)\b/i;
 const SPANISH_WORDS = /\b(hola|gracias|necesito|quiero|por favor|buenos|buenas|español|cita|ayuda|doctora?)\b/gi;
@@ -243,13 +246,26 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
     // The scheduling line always has somewhere to send a caller: a human.
     switch (s.state) {
       case 'CONFIRM_ID':
-      case 'CONFIRM_DOB':
       case 'CLASSIFY':
+        // An unclear answer to "new or existing" is NOT a reason to hand a
+        // patient to staff — just ask who they are. 187 replayed calls were
+        // transferred from here (Gate B SD 2026-08-09).
+        go(s, 'COLLECT_NAME');
+        return { say: t(s, L.collectName) };
+      case 'CONFIRM_DOB':
       case 'COLLECT_NAME':
       case 'COLLECT_DOB':
         return transferNow(callId, s, t(s, L.verifyFail2), 'identity not established');
       case 'ASK_PREFERENCE':
       case 'OFFER':
+        // Before giving up on a verified patient who wants an appointment,
+        // ask the server for the soonest opening — a scheduler's move.
+        if (!s.triedEarliest) {
+          s.triedEarliest = true;
+          s.pref = {};
+          s.retriedAvailability = false;
+          return offerNow(callId, s);
+        }
         return transferNow(callId, s, t(s, L.human2), 'preference not captured');
       case 'WRAP_QUERY':
         go(s, 'ENDED');
@@ -265,6 +281,35 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
     return { say: question(callId, s) };
   };
 
+  /** DOB in hand → verify against the pulled record, then the preference ask. */
+  const handleDob = async (callId: string, s: SdStatus, text: string): Promise<CoreAction> => {
+
+            // Verification needs YYYY-MM-DD; the caller said "August
+            // twenty-seven, forty-five". Normalize before comparing, or the
+            // recognised date fails anyway (review 2026-08-09).
+            const spokenDob = normalizeSpokenDob(text) ?? text.trim();
+            updateLedger(callId, { dateOfBirth: spokenDob });
+            const f = getLedger(callId);
+            if (f?.newOrExisting === 'new') {
+              return transferNow(callId, s, t(s, L.newPatient), 'new patient');
+            }
+            const first = f?.firstName ?? f?.matchedFirstName ?? '';
+            const last = f?.lastName ?? f?.matchedLastName ?? '';
+            // Context first: compare to the record already pulled.
+            let ok = dobMatchesContext(callId, spokenDob) === true;
+            if (!ok) {
+              ok = await services.verifyIdentity(callId, first, last, spokenDob).catch(() => false);
+            }
+            if (ok) {
+              updateLedger(callId, { firstName: first, lastName: last, identityVerified: true });
+              return afterVerified(callId, s, `Thanks, ${first}.`);
+            }
+            s.verifyFails += 1;
+            if (s.verifyFails >= 2) return transferNow(callId, s, t(s, L.verifyFail2), 'identity not verified');
+            go(s, 'COLLECT_NAME');
+            return { say: t(s, L.verifyFail1) };
+  };
+
   const afterVerified = (callId: string, s: SdStatus, prefix: string): CoreAction => {
     go(s, 'ASK_PREFERENCE');
     return { say: `${prefix} ${t(s, L.askPreference)}` };
@@ -274,8 +319,13 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
     slug: 'azul-scheduling',
 
     start(callId: string): void {
+      // The SD greeting for a RECOGNIZED caller already asks "Am I speaking
+      // with {first}?" — so the caller's first words answer that question,
+      // not "why are you calling". Starting at INTENT here is what killed
+      // ramp v1 live on 2026-08-07; the replay caught the same shape.
+      const seeded = getLedger(callId);
       calls.set(callId, {
-        state: 'INTENT',
+        state: seeded?.matchedFirstName ? 'CONFIRM_ID' : 'INTENT',
         lang: 'en',
         unparsed: 0,
         verifyFails: 0,
@@ -283,6 +333,7 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
         offer: null,
         chosenOption: null,
         retriedAvailability: false,
+        triedEarliest: false,
         pref: {},
       });
     },
@@ -331,6 +382,12 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
           }
 
           case 'CONFIRM_ID': {
+            // A caller who answers with their date of birth has confirmed
+            // identity and answered the next question at once — take both.
+            if (DOB_RX.test(text) && !NO.test(text)) {
+              go(s, 'CONFIRM_DOB');
+              return handleDob(callId, s, text);
+            }
             if (YES.test(text) && !NO.test(text)) {
               go(s, 'CONFIRM_DOB');
               return { say: t(s, L.confirmDob) };
@@ -345,26 +402,7 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
           case 'CONFIRM_DOB':
           case 'COLLECT_DOB': {
             if (!DOB_RX.test(text)) return unparsable(callId, s);
-            updateLedger(callId, { dateOfBirth: text.trim() });
-            const f = getLedger(callId);
-            if (f?.newOrExisting === 'new') {
-              return transferNow(callId, s, t(s, L.newPatient), 'new patient');
-            }
-            const first = f?.firstName ?? f?.matchedFirstName ?? '';
-            const last = f?.lastName ?? f?.matchedLastName ?? '';
-            // Context first: compare to the record already pulled.
-            let ok = dobMatchesContext(callId, text.trim()) === true;
-            if (!ok) {
-              ok = await services.verifyIdentity(callId, first, last, text.trim()).catch(() => false);
-            }
-            if (ok) {
-              updateLedger(callId, { firstName: first, lastName: last, identityVerified: true });
-              return afterVerified(callId, s, `Thanks, ${first}.`);
-            }
-            s.verifyFails += 1;
-            if (s.verifyFails >= 2) return transferNow(callId, s, t(s, L.verifyFail2), 'identity not verified');
-            go(s, 'COLLECT_NAME');
-            return { say: t(s, L.verifyFail1) };
+            return handleDob(callId, s, text);
           }
 
           case 'CLASSIFY': {
@@ -381,9 +419,9 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
           }
 
           case 'COLLECT_NAME': {
-            const words = text.trim().split(/\s+/).filter((w) => /^[a-záéíóúñ'-]+$/i.test(w));
-            if (words.length < 2) return unparsable(callId, s);
-            updateLedger(callId, { firstName: words[0], lastName: words.slice(1).join(' ') });
+            const name = looksLikeName(text);
+            if (!name) return unparsable(callId, s);
+            updateLedger(callId, { firstName: name.first, lastName: name.last });
             go(s, 'COLLECT_DOB');
             return { say: t(s, L.collectDob) };
           }

@@ -364,7 +364,11 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     parameters: z.object({ narrative: z.string().min(1).max(12000), urgency: z.enum(['normal', 'high', 'urgent']).default('high') }),
     execute: async ({ narrative, urgency }) => {
       const { state, missing } = ticketState(callId);
-      if (!state.callPurpose) return { success: false, error: 'call_purpose_required' };
+      const askedForAPerson = /\b(speak|talk|connect|transfer|put me)\b[^.]{0,30}\b(person|human|someone|somebody|rep|representative|agent)\b|\b(representative|operator|live person|real person)\b/i.test(narrative);
+      // A professional who asked for a person is not blocked by a missing
+      // classification (operator 2026-08-09). The purpose is still recorded
+      // on the ticket; it just no longer decides whether the phone rings.
+      if (!state.callPurpose && !askedForAPerson) return { success: false, error: 'call_purpose_required' };
       // Not eligible to DIAL is not a reason to lose the request. Previously
       // this threw before it even reached the eligibility check, so the caller
       // got neither a transfer nor a ticket. Now the request is filed as a task
@@ -391,6 +395,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
 
       escalationDetailsMap.set(callId, {
         agentSlug: 'pcp',
+        callerRequestedHuman: askedForAPerson,
         callerType: state.callPurpose,
         reason: narrative,
         patientFirstName: state.patientFirstName,

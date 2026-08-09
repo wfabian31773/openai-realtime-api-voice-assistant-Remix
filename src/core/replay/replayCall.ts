@@ -10,11 +10,19 @@
 import { clearAllLedgers, seedLedger } from '../../services/callFactsLedger';
 import { createAnsweringServiceLine } from '../answeringServiceLine';
 import { createPcpLine, type ProfessionalLineServices } from '../pcpLine';
+import { createSchedulingLine, type SchedulingLineServices, type AvailabilityOffer } from '../schedulingLine';
 import { callLogToFixture } from '../../shadow/callLogReplay';
 import { CallGradingService, type GraderResult } from '../../services/callGradingService';
 import type { CoreAction, TicketInput, TicketLineServices, ClassifyResult } from '../types';
 
-export type ReplayAgent = 'answering-service' | 'no-ivr' | 'after-hours' | 'pcp';
+export type ReplayAgent = 'answering-service' | 'no-ivr' | 'after-hours' | 'pcp' | 'azul-scheduling';
+
+/** A tool event as recorded on the real call (call_logs.tool_timeline). */
+export interface RecordedToolEvent {
+  tool?: string;
+  args?: Record<string, unknown>;
+  outcome?: Record<string, unknown>;
+}
 
 export interface CorpusRow {
   id: string;
@@ -29,6 +37,83 @@ export interface CorpusRow {
   duration: number | null;
   grader_results?: { graders?: GraderResult[] } | null;
   transcript: string;
+  /** Filtered tool events from the real call — the SD replay's ground truth. */
+  tool_events?: RecordedToolEvent[] | null;
+}
+
+/** "01:40 PM" / "9 AM" inside the server's offer sentence -> 24h HH:MM. */
+export function parseOfferTimes(say: string): string[] {
+  const out: string[] = [];
+  const rx = /\b(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?[Mm]\.?/g;
+  let m: RegExpExecArray | null;
+  while ((m = rx.exec(say)) !== null) {
+    let h = Number(m[1]);
+    const min = m[2] ?? '00';
+    const pm = m[3].toLowerCase() === 'p';
+    if (pm && h < 12) h += 12;
+    if (!pm && h === 12) h = 0;
+    out.push(`${String(h).padStart(2, '0')}:${min}`);
+  }
+  return out;
+}
+
+/**
+ * SD services built from what the scheduling service ACTUALLY returned on
+ * this call. The new core never invents an offer, so the replay must not
+ * invent one either: it speaks the recorded `say` and books against the
+ * recorded booking_status. Calls with no recorded availability event can
+ * still be judged on identity/intent handling — flagged as such.
+ */
+function simulatedSchedulingServices(
+  row: CorpusRow,
+  used: { availability: number; book: number; confirmed: number; transfers: number; hadRecordedOffer: boolean },
+): SchedulingLineServices {
+  const events = row.tool_events ?? [];
+  const offers = events.filter((e) => e.tool === 'sage_availability');
+  const books = events.filter((e) => e.tool === 'sage_book');
+  const verify = events.find((e) => e.tool === 'verify_patient_identity');
+  return {
+    async verifyIdentity() {
+      if (verify?.outcome && typeof verify.outcome.verified === 'boolean') return Boolean(verify.outcome.verified);
+      return Boolean(row.patient_found);
+    },
+    async availability(): Promise<AvailabilityOffer> {
+      // One recorded offer per recorded lookup. When the new core asks MORE
+      // times than the real call did (e.g. the earliest-opening fallback),
+      // there is no evidence for what the service would have said — so we
+      // return nothing rather than re-serving a stale offer, which would let
+      // the replay book against a slot the service never offered.
+      const rec = used.availability < offers.length ? offers[used.availability] : undefined;
+      used.availability += 1;
+      const say = typeof rec?.outcome?.say === 'string' ? (rec.outcome.say as string) : '';
+      if (!say) {
+        // No recorded offer for this call: the honest answer is "we cannot
+        // know what the service would have said", surfaced as an empty offer
+        // rather than a fabricated one.
+        return { say: "I don't have anything matching that right now.", optionTimes: [], empty: true };
+      }
+      used.hadRecordedOffer = true;
+      return { say, optionTimes: parseOfferTimes(say), empty: parseOfferTimes(say).length === 0 };
+    },
+    async book() {
+      // No recorded sage_book for this attempt = no evidence it would have
+      // succeeded. 'unknown' keeps the caller un-promised and keeps the
+      // replay honest; claiming 'confirmed' invented bookings that never were.
+      const rec = used.book < books.length ? books[used.book] : undefined;
+      used.book += 1;
+      const status = String(rec?.outcome?.booking_status ?? 'unknown');
+      if (status === 'confirmed') used.confirmed += 1;
+      return {
+        status: status === 'confirmed' ? 'confirmed' : status === 'unknown' ? 'unknown' : 'failed',
+        say: typeof rec?.outcome?.say === 'string' ? (rec.outcome.say as string) : undefined,
+        patientScript: typeof rec?.outcome?.patient_script === 'string' ? (rec.outcome.patient_script as string) : undefined,
+      };
+    },
+    async transfer() {
+      used.transfers += 1;
+      return { ok: Boolean(row.transferred_to_human) };
+    },
+  };
 }
 
 const COMPARABLE = new Set([
@@ -137,10 +222,13 @@ export async function replayStoredCall(row: CorpusRow, AGENT: ReplayAgent, grade
   const filed: TicketInput[] = [];
   const pcpRouted: Array<Record<string, unknown>> = [];
   const pcpFiled: Array<Record<string, unknown>> = [];
+  const sdUsed = { availability: 0, book: 0, confirmed: 0, transfers: 0, hadRecordedOffer: false };
   const line =
     AGENT === 'pcp'
       ? createPcpLine(simulatedPcpServices(row, pcpRouted, pcpFiled))
-      : createAnsweringServiceLine(simulatedServices(row, filed), AGENT === 'no-ivr' ? { slug: 'no-ivr', humanBusy: CLOSED_OFFICE } : {});
+      : AGENT === 'azul-scheduling'
+        ? createSchedulingLine(simulatedSchedulingServices(row, sdUsed))
+        : createAnsweringServiceLine(simulatedServices(row, filed), AGENT === 'no-ivr' ? { slug: 'no-ivr', humanBusy: CLOSED_OFFICE } : {});
   line.start(callId);
 
   const newLines: string[] = [];
@@ -188,7 +276,7 @@ export async function replayStoredCall(row: CorpusRow, AGENT: ReplayAgent, grade
     .runDeterministicGraders({
       callLogId: `replay-${row.id}`,
       transcript: newTranscript,
-      transferredToHuman: AGENT === 'pcp' ? pcpRouted.length > 0 : false,
+      transferredToHuman: AGENT === 'pcp' ? pcpRouted.length > 0 : AGENT === 'azul-scheduling' ? sdUsed.transfers > 0 : false,
       ticketNumber: (AGENT === 'pcp' ? pcpRouted.length + pcpFiled.length : filed.length) ? 'SIM-1' : null,
       agentSlug: AGENT,
       totalTurns: newLines.length,
@@ -237,7 +325,10 @@ export async function replayStoredCall(row: CorpusRow, AGENT: ReplayAgent, grade
     new_critical: newCritical,
     old_critical: oldCritical,
     tickets_filed: filed.length + pcpFiled.length,
-    transfers: pcpRouted.length,
+    transfers: pcpRouted.length + sdUsed.transfers,
+    book_attempts: sdUsed.book,
+    booked: sdUsed.confirmed,
+    had_recorded_offer: sdUsed.hadRecordedOffer,
     verdict,
     approximations: parsed.approximations.concat(
       "caller turns answered the old core's questions; replay re-pairs recorded turns to the new core's questions by state (content never invented)",

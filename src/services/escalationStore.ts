@@ -11,6 +11,8 @@ export interface EscalationDetails {
   callbackNumber?: string;
   symptomsSummary?: string;
   providerInfo?: string;
+  /** The caller asked, in words, to speak to a person. */
+  callerRequestedHuman?: boolean;
 }
 
 export const escalationDetailsMap = new Map<string, EscalationDetails>();
