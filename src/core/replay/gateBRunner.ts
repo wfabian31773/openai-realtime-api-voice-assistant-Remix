@@ -26,6 +26,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { clearAllLedgers, seedLedger } from '../../services/callFactsLedger';
 import { createAnsweringServiceLine } from '../answeringServiceLine';
+import { createPcpLine, type ProfessionalLineServices } from '../pcpLine';
 import { callLogToFixture } from '../../shadow/callLogReplay';
 import { CallGradingService, type GraderResult } from '../../services/callGradingService';
 import type { CoreAction, TicketInput, TicketLineServices, ClassifyResult } from '../types';
@@ -106,8 +107,32 @@ async function renderAction(a: CoreAction, out: string[]): Promise<boolean> {
   return ended;
 }
 
+/** Which line module a corpus directory replays (set by AGENT env, default AS). */
+const AGENT = (process.env.REPLAY_AGENT ?? 'answering-service') as
+  'answering-service' | 'no-ivr' | 'pcp';
+
+const CLOSED_OFFICE = {
+  en: "Our offices are closed right now — I'll take your information and make sure the right team member calls you back first thing.",
+  es: 'Nuestras oficinas están cerradas en este momento — tomaré su información y me aseguraré de que el equipo le devuelva la llamada a primera hora.',
+};
+
+/** PCP simulated services: the queue answers as it did on the real call. */
+function simulatedPcpServices(row: CorpusRow, routed: Array<Record<string, unknown>>, filed: Array<Record<string, unknown>>): ProfessionalLineServices {
+  return {
+    async routeToQueue(_callId, input) {
+      routed.push(input as unknown as Record<string, unknown>);
+      // The real call's outcome is the ground truth for whether a human picked up.
+      return { connected: Boolean(row.transferred_to_human), ticketNumber: 'SIM-PCP' };
+    },
+    async fileTask(_callId, input) {
+      filed.push(input as unknown as Record<string, unknown>);
+      return { ok: true, ticketNumber: 'SIM-TASK' };
+    },
+  };
+}
+
 async function replayOne(row: CorpusRow, grader: CallGradingService) {
-  const parsed = callLogToFixture({ id: row.id, agentUsed: 'answering-service', transcript: row.transcript });
+  const parsed = callLogToFixture({ id: row.id, agentUsed: AGENT, transcript: row.transcript });
   if (!parsed) return null;
   const callerTurns = parsed.fixture.turns.filter((t): t is { caller: string } => 'caller' in t).map((t) => t.caller);
   if (!callerTurns.length) return null;
@@ -125,7 +150,12 @@ async function replayOne(row: CorpusRow, grader: CallGradingService) {
   });
 
   const filed: TicketInput[] = [];
-  const line = createAnsweringServiceLine(simulatedServices(row, filed));
+  const pcpRouted: Array<Record<string, unknown>> = [];
+  const pcpFiled: Array<Record<string, unknown>> = [];
+  const line =
+    AGENT === 'pcp'
+      ? createPcpLine(simulatedPcpServices(row, pcpRouted, pcpFiled))
+      : createAnsweringServiceLine(simulatedServices(row, filed), AGENT === 'no-ivr' ? { slug: 'no-ivr', humanBusy: CLOSED_OFFICE } : {});
   line.start(callId);
 
   const newLines: string[] = [];
@@ -173,13 +203,13 @@ async function replayOne(row: CorpusRow, grader: CallGradingService) {
     .runDeterministicGraders({
       callLogId: `replay-${row.id}`,
       transcript: newTranscript,
-      transferredToHuman: false,
-      ticketNumber: filed.length ? 'SIM-1' : null,
-      agentSlug: 'answering-service',
+      transferredToHuman: AGENT === 'pcp' ? pcpRouted.length > 0 : false,
+      ticketNumber: (AGENT === 'pcp' ? pcpRouted.length + pcpFiled.length : filed.length) ? 'SIM-1' : null,
+      agentSlug: AGENT,
       totalTurns: newLines.length,
       interruptionCount: 0,
       truncationCount: 0,
-      toolCallCount: filed.length,
+      toolCallCount: filed.length + pcpRouted.length + pcpFiled.length,
       durationSeconds: null,
       firstTranscriptDelayMs: null,
       postTranscriptTailMs: null,
@@ -199,7 +229,7 @@ async function replayOne(row: CorpusRow, grader: CallGradingService) {
       transcript: row.transcript,
       transferredToHuman: Boolean(row.transferred_to_human),
       ticketNumber: row.ticket_number,
-      agentSlug: 'answering-service',
+      agentSlug: AGENT,
       totalTurns: row.total_turns,
       interruptionCount: null,
       truncationCount: null,
@@ -221,7 +251,8 @@ async function replayOne(row: CorpusRow, grader: CallGradingService) {
     new_grader_results: { graders: newGraders },
     new_critical: newCritical,
     old_critical: oldCritical,
-    tickets_filed: filed.length,
+    tickets_filed: filed.length + pcpFiled.length,
+    transfers: pcpRouted.length,
     verdict,
     approximations: parsed.approximations.concat(
       "caller turns answered the old core's questions; replay re-pairs recorded turns to the new core's questions by state (content never invented)",
