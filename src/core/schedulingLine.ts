@@ -348,7 +348,13 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
 
     async onUtterance(callId: string, text: string): Promise<CoreAction> {
       const s = calls.get(callId);
-      if (!s || s.state === 'ENDED') return { say: null };
+      if (!s) return { say: null };
+      // Safety outranks state here too: urgency after the booking still
+      // gets the 911 line and a human.
+      if (URGENT_RX.test(text) && s.state === 'ENDED') {
+        return { say: t(s, L.urgent) };
+      }
+      if (s.state === 'ENDED') return { say: null };
       try {
         harvestCallerLine(callId, text);
 

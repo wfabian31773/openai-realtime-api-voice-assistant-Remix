@@ -509,7 +509,24 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
 
     async onUtterance(callId: string, text: string): Promise<CoreAction> {
       const s = calls.get(callId);
-      if (!s || s.state === 'ENDED') return { say: null };
+      if (!s) return { say: null };
+      // SAFETY BEFORE STATE. A caller who says "I can't see" after the ticket
+      // is filed — or after the wrap — must still hear the 911 line. Replay
+      // 2026-08-09 found exactly that: the module had ended and answered
+      // nothing while the caller described losing their vision.
+      if (URGENT_RX.test(text)) {
+        const wasUrgent = s.urgent;
+        s.urgent = true;
+        // Said once when urgency appears, and ALWAYS when the call had
+        // already wrapped — otherwise the caller describing symptoms after
+        // the ticket was filed heard nothing at all. Repeating it on every
+        // symptom sentence mid-call would just block taking their message.
+        if (s.state === 'ENDED' || !wasUrgent) {
+          if (s.state !== 'ENDED' && s.message === null) go(s, 'TAKE_MESSAGE');
+          return { say: t(s, L.urgent) };
+        }
+      }
+      if (s.state === 'ENDED') return { say: null };
       try {
         harvestCallerLine(callId, text);
 
@@ -522,14 +539,6 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
         }
 
         // Interceptors — before any state parsing, at every state.
-        if (URGENT_RX.test(text) && !s.urgent) {
-          s.urgent = true;
-          if (s.message === null) {
-            go(s, 'TAKE_MESSAGE');
-            return { say: t(s, L.urgent) };
-          }
-          return { say: t(s, L.urgent) };
-        }
         const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
         if (HUMAN_RX.test(text) || (wordCount <= 5 && SHORT_AGENT_RX.test(text))) {
           // The deflection line is verbatim EVERY time. The pending question
