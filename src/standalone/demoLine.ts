@@ -25,6 +25,7 @@ import type { Express, Request, Response } from 'express';
 import type { Server as HttpServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { newCoreFor } from '../core/router';
+import { buildTranscriptionConfig } from '../config/transcription';
 import { cachedConfig } from '../core/ticketAgentConfig';
 import { seedLedger, releaseLedger } from '../services/callFactsLedger';
 import type { CoreAction } from '../core/types';
@@ -235,7 +236,14 @@ function connectOpenAI(call: DemoCall): void {
           input: {
             format: { type: 'audio/pcmu' },
             noise_reduction: { type: 'far_field' },
-            transcription: { model: 'gpt-4o-transcribe' },
+            // The SAME tuned transcriber the production lines use: the
+            // practice's languages, a prompt describing an eye-care phone
+            // call, and surname keywords. Asking for the bare model here —
+            // which is what this line did at first — is why a live call
+            // transcribed "Wayne Fabian" as "20 Fabian", produced "Not
+            // Dwyane Wade", and once answered in Vietnamese. The state
+            // machine was reading noise and behaving correctly on it.
+            transcription: buildTranscriptionConfig(),
             // create_response FALSE is the whole design. The model never
             // decides to answer; the ticket agent decides, and we forward
             // its words. That is what stops two agents talking at once.

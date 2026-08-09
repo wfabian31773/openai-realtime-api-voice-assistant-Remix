@@ -226,4 +226,70 @@ describe('ticket agent — five steps, nothing else', () => {
     expect(r.filed).toBe(true);
     expect(submitted[0].fields.patient_name).toBe('Wayne Fabian');
   });
+
+  /**
+   * Live 17:01 call: asked for a name, the caller said "March 17th, 1973".
+   * The date was discarded, the agent then asked for the date of birth it had
+   * just been given, and the ticket would have carried neither.
+   */
+  describe('an answer to the wrong question is still an answer', () => {
+    it('keeps a date of birth offered while the name was being asked', async () => {
+      const { svc, submitted } = services();
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      await a.onUtterance(C, "I'd like to get a medication refill");
+      // Asked for the name; answers with the DOB.
+      let r = await a.onUtterance(C, 'March 17th, 1973');
+      // Still wants the name — but the date is banked.
+      expect(r.say?.toLowerCase()).toContain('name');
+      r = await a.onUtterance(C, 'Wayne Fabian');
+      // It must NOT ask for the date of birth it already has — the next
+      // thing a refill needs is the callback number.
+      expect(r.say?.toLowerCase() ?? '').not.toContain('date of birth');
+      r = await a.onUtterance(C, 'yes'); // confirm the caller-ID callback
+      await speak(r);
+
+      const fields = submitted[0]?.fields ?? {};
+      expect(fields.patient_name).toContain('Wayne');
+      expect(fields.patient_dob).toBe('1973-03-17');
+    });
+
+    it('never files a stray sentence as a doctor, a location, or a name', async () => {
+      const { svc, submitted } = services();
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      // surgery needs provider_name — a loose field that must never be
+      // filled from an answer aimed at something else.
+      await a.onUtterance(C, 'I want to schedule my cataract surgery');
+      await a.onUtterance(C, 'uh I am not really sure about that');
+      await a.onUtterance(C, 'sorry can you repeat the question');
+      const r = await a.onUtterance(C, 'Wayne Fabian');
+      await speak(r);
+
+      const fields = submitted[0]?.fields ?? {};
+      expect(fields.provider_name ?? '').not.toMatch(/not really sure|repeat the question/i);
+    });
+
+    it('a phone number is only salvaged when there is one place it can go', async () => {
+      const { svc, submitted } = services();
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      // records_fax needs a fax number and no callback — one phone-shaped
+      // field outstanding, so a number offered early belongs to it.
+      await a.onUtterance(C, 'I need medical records faxed over');
+      await a.onUtterance(C, 'the number is 562 555 0134');
+      await a.onUtterance(C, 'Wayne Fabian');
+      const r = await a.onUtterance(C, 'March 17 1973');
+      await speak(r);
+
+      const fields = submitted[0]?.fields ?? {};
+      expect(fields.fax_number).toBe('5625550134');
+    });
+  });
 });

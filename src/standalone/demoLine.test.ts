@@ -162,5 +162,11 @@ describe('demo line — a call, end to end', () => {
     expect(sessionConfig!.audio.input.turn_detection.create_response).toBe(false);
     expect(sessionConfig!.tools).toEqual([]);
     expect(sessionConfig!.tool_choice).toBe('none');
+    // The tuned transcriber, not the bare model. A live call transcribed
+    // "Wayne Fabian" as "20 Fabian" and answered in Vietnamese because this
+    // line asked for the default.
+    const tr = sessionConfig!.audio.input.transcription;
+    expect(tr.model).toBeTruthy();
+    expect(tr.prompt ?? tr.language ?? tr.languages).toBeTruthy();
   });
 });

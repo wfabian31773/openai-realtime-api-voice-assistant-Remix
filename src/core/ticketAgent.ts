@@ -316,6 +316,49 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
     return null;
   };
 
+  /**
+   * The caller answered a DIFFERENT question than the one asked. Keep what
+   * they said, in the field it can only belong to.
+   *
+   * Eligibility is deliberately narrow: a field qualifies only when its
+   * format identifies it on sight. patient_name, office_location,
+   * provider_name and details all parse almost any string, so admitting them
+   * here would file every stray utterance as a doctor's name. Phone numbers
+   * qualify only when exactly one phone-shaped field is still outstanding,
+   * so a fax number can never be recorded as a callback.
+   *
+   * Returns true when something was salvaged.
+   */
+  const salvageMisdirected = (callId: string, s: CallState, asked: FieldKey, text: string): boolean => {
+    const needs = needsFor(s.intent ?? 'message');
+    const outstanding = needs.filter((k) => k !== asked && !s.values[k] && !FIELDS[k].known?.(callId));
+
+    // Self-identifying formats first.
+    for (const k of outstanding) {
+      if (k !== 'patient_dob' && k !== 'email_address') continue;
+      const v = FIELDS[k].parse(text);
+      if (!v) continue;
+      s.values[k] = v;
+      if (k === 'patient_dob') updateLedger(callId, { dateOfBirth: v });
+      console.info(`[TICKET-AGENT] ${callId.slice(-6)} salvaged ${k} from the answer to ${asked}`);
+      return true;
+    }
+
+    // A phone number, only when there is exactly one place it could go.
+    const phoneFields = outstanding.filter((k) => k === 'callback_number' || k === 'fax_number');
+    if (phoneFields.length === 1) {
+      const k = phoneFields[0];
+      const v = FIELDS[k].parse(text);
+      if (v) {
+        s.values[k] = v;
+        if (k === 'callback_number') updateLedger(callId, { callbackNumber: v, callbackConfirmed: true });
+        console.info(`[TICKET-AGENT] ${callId.slice(-6)} salvaged ${k} from the answer to ${asked}`);
+        return true;
+      }
+    }
+    return false;
+  };
+
   const ask = (callId: string, s: CallState, key: FieldKey): CoreAction => {
     s.step = 'COLLECT';
     s.asking = key;
@@ -562,7 +605,28 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
               s.asking = null;
               return advance(callId, s);
             }
-            // Not an answer. Ask once more, then move on without it.
+            // Not an answer to THIS question — but callers answer the
+            // question they expected, not the one they got. Live 17:01 call:
+            // asked for a name, the caller said "March 17th, 1973", and the
+            // date was thrown away; the agent then asked for the date of
+            // birth it had just been given, and the ticket ended up with no
+            // name AND no DOB.
+            //
+            // Only fields whose format IDENTIFIES them are eligible. A date
+            // and an email can only be one thing. Names, locations, doctors
+            // and free-text details are NOT eligible — their parsers accept
+            // almost any string and would swallow every stray utterance. A
+            // phone number counts only when exactly one phone-shaped field is
+            // still missing, so a fax can never be filed as a callback.
+            const salvaged = salvageMisdirected(callId, s, key, text);
+            if (salvaged && (s.asks.get(key) ?? 0) >= 2) {
+              // We got something real out of the turn; don't keep pushing on
+              // the field they are plainly not answering.
+              s.asking = null;
+              return advance(callId, s);
+            }
+
+            // Ask once more, then move on without it.
             if ((s.asks.get(key) ?? 0) >= 2) {
               s.asking = null;
               return advance(callId, s);
