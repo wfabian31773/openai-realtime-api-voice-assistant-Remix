@@ -364,7 +364,14 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     parameters: z.object({ narrative: z.string().min(1).max(12000), urgency: z.enum(['normal', 'high', 'urgent']).default('high') }),
     execute: async ({ narrative, urgency }) => {
       const { state, missing } = ticketState(callId);
-      const askedForAPerson = /\b(speak|talk|connect|transfer|put me)\b[^.]{0,30}\b(person|human|someone|somebody|rep|representative|agent|front desk|office)\b|\b(representative|operator|live person|real person|front desk)\b/i.test(narrative);
+      // An explicit request to be CONNECTED to a person. Deliberately narrow:
+      // "caller from the front desk asking about a referral" is not a request
+      // to be transferred, and dialing the queue on it would be worse than
+      // the bug being fixed (review 2026-08-09).
+      const askedForAPerson =
+        /\b(speak|talk)\b\s+(?:to|with)\b[^.]{0,25}\b(person|human|someone|somebody|rep|representative|agent|front desk|receptionist)\b/i.test(narrative) ||
+        /\b(connect|transfer|put me through|put me|get me)\b[^.]{0,25}\b(person|human|someone|somebody|rep|representative|agent|front desk|office|team)\b/i.test(narrative) ||
+        /\b(live person|real person|actual person|human being)\b/i.test(narrative);
       if (askedForAPerson) pcpDirector.markCallerRequestedHuman(callId);
       // A professional who asked for a person is not blocked by a missing
       // classification (operator 2026-08-09). The purpose is still recorded
@@ -389,7 +396,15 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         };
       }
       const requestedAt = new Date().toISOString();
-      const initial = await submitPcpTicket(buildPayload(metadata, state, 'HAND_OFF', narrative, urgency, {
+      // The ticket contract requires a purpose. When the caller simply asked
+      // for a person before saying why, record the generic inquiry so the
+      // durable ticket validates — the staffer who picks up learns the rest
+      // from the caller. Without this the payload is rejected and the dial is
+      // never reached (review 2026-08-09).
+      const handoffState = state.callPurpose
+        ? state
+        : { ...state, callPurpose: 'service_inquiry' as const };
+      const initial = await submitPcpTicket(buildPayload(metadata, handoffState, 'HAND_OFF', narrative, urgency, {
         requested: true, requestedAt, attempted: false, finalStatus: 'REQUESTED',
       }, undefined, missing));
       if (!initial.success) return { success: false, error: 'durable_ticket_required_before_handoff' };
@@ -414,7 +429,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // Re-read rather than reuse: the caller may have given more during the
       // transfer narration. Non-throwing — this runs AFTER the dial, so a throw
       // here loses the outcome record on a call that really did connect.
-      const { state: finalState, missing: finalMissing } = ticketState(callId);
+      const { state: rawFinalState, missing: finalMissing } = ticketState(callId);
+      const finalState = rawFinalState.callPurpose
+        ? rawFinalState
+        : { ...rawFinalState, callPurpose: 'service_inquiry' as const };
       const updated = await submitPcpTicket(buildPayload(metadata, finalState, finalDisposition, narrative, urgency, {
         requested: true,
         requestedAt,
