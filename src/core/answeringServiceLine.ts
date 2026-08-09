@@ -510,6 +510,18 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
     async onUtterance(callId: string, text: string): Promise<CoreAction> {
       const s = calls.get(callId);
       if (!s) return { say: null };
+      // Language FIRST — even here. "hola, estoy sangrando" must hear the
+      // emergency instructions in Spanish; answering in English makes the
+      // most important sentence in the system unintelligible (review
+      // 2026-08-09).
+      try {
+        s.spanishHits += (text.match(SPANISH_WORDS) ?? []).length;
+        if (s.lang === 'en' && (s.spanishHits >= 2 || /\b(en español|spanish|habla español)\b/i.test(text))) {
+          s.lang = 'es';
+          updateLedger(callId, { language: 'Spanish' });
+        }
+      } catch { /* never block a call on language detection */ }
+
       // SAFETY BEFORE STATE. A caller who says "I can't see" after the ticket
       // is filed — or after the wrap — must still hear the 911 line. Replay
       // 2026-08-09 found exactly that: the module had ended and answered
@@ -532,12 +544,6 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
 
         // Language follows the caller: two clear Spanish signals switch the
         // scripts (and the ledger) — never a refusal, never a shrug.
-        s.spanishHits += (text.match(SPANISH_WORDS) ?? []).length;
-        if (s.lang === 'en' && (s.spanishHits >= 2 || /\b(en español|spanish|habla español)\b/i.test(text))) {
-          s.lang = 'es';
-          updateLedger(callId, { language: 'Spanish' });
-        }
-
         // Interceptors — before any state parsing, at every state.
         const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
         if (HUMAN_RX.test(text) || (wordCount <= 5 && SHORT_AGENT_RX.test(text))) {

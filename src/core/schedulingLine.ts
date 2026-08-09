@@ -349,10 +349,13 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
     async onUtterance(callId: string, text: string): Promise<CoreAction> {
       const s = calls.get(callId);
       if (!s) return { say: null };
-      // Safety outranks state here too: urgency after the booking still
-      // gets the 911 line and a human.
+      // Safety outranks state here too. And the line PROMISES a human, so
+      // it hands off for real — returning only the script left late
+      // emergency callers promised a person and given none (review
+      // 2026-08-09).
       if (URGENT_RX.test(text) && s.state === 'ENDED') {
-        return { say: t(s, L.urgent) };
+        s.state = 'CONFIRM_TIME'; // leave ENDED so transferNow can run
+        return transferNow(callId, s, t(s, L.urgent), 'urgent symptoms after wrap');
       }
       if (s.state === 'ENDED') return { say: null };
       try {

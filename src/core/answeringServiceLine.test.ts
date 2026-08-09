@@ -398,4 +398,33 @@ describe('answering-service new core — Gate A', () => {
     expect(a.say).not.toContain('new patient or an existing patient');
     expect(getLedger(C)?.intent ?? null).toBeNull();
   });
+
+  it('an emergency AFTER the call has wrapped still gets the 911 line', async () => {
+    const { svc } = fakeServices();
+    const line = createAnsweringServiceLine(svc);
+    seedLedger(C, { matchedFirstName: 'Wayne', matchedLastName: 'Fabian', matchedDob: '1973-03-17', callerPhone: '8455317471' });
+    line.start(C);
+
+    await line.onUtterance(C, 'my contact lens order never arrived');
+    await line.onUtterance(C, 'yes');
+    await line.onUtterance(C, 'March 17 1973');
+    await speak(await line.onUtterance(C, 'yes'));
+    const wrap = await line.onUtterance(C, 'no that is all');
+    expect(wrap.endCall).toBe(true);
+
+    // The caller speaks again, describing an emergency, after the wrap.
+    const late = await line.onUtterance(C, "wait — I can't see out of my right eye");
+    expect(late.say).toContain('nine one one');
+  });
+
+  it('an emergency in Spanish is answered in Spanish, first utterance', async () => {
+    const { svc } = fakeServices();
+    const line = createAnsweringServiceLine(svc);
+    seedLedger(C, { callerPhone: '5552223333' });
+    line.start(C);
+
+    const a = await line.onUtterance(C, 'hola necesito ayuda, estoy sangrando del ojo');
+    expect(a.say).toContain('nueve uno uno');
+    expect(getLedger(C)!.language).toBe('Spanish');
+  });
 });
