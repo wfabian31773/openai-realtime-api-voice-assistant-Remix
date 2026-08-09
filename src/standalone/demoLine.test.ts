@@ -127,6 +127,9 @@ describe('demo line — a call, end to end', () => {
 
     const say = async (text: string, n: number) => {
       const oa = [...fakeOpenAI.clients][0];
+      // A real caller trips the VAD before a transcript exists. The line
+      // requires that, so the test must produce it too.
+      oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
       oa.send(JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', transcript: text }));
       await until(() => forcedLines.length >= n, `reply #${n} to "${text}"`);
     };
@@ -168,5 +171,34 @@ describe('demo line — a call, end to end', () => {
     const tr = sessionConfig!.audio.input.transcription;
     expect(tr.model).toBeTruthy();
     expect(tr.prompt ?? tr.language ?? tr.languages).toBeTruthy();
+  });
+
+  it('ignores a transcript that appeared out of silence', async () => {
+    forcedLines.length = 0;
+    const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+    await new Promise<void>((r) => twilio.on('open', () => r()));
+    twilio.send(
+      JSON.stringify({
+        event: 'start',
+        streamSid: 'MZhallucination',
+        start: { streamSid: 'MZhallucination', callSid: 'CAhallucination', customParameters: { from: '+15625550134', callSid: 'CAhallucination' } },
+      }),
+    );
+    await until(() => forcedLines.length >= 1, 'the greeting');
+    const afterGreeting = forcedLines.length;
+
+    const oa = [...fakeOpenAI.clients].pop()!;
+    // No speech_started: this is the transcriber hallucinating on silence.
+    // A live call (17:21) processed exactly this and spent an ask on it.
+    oa.send(JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', transcript: 'Okay' }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(forcedLines.length).toBe(afterGreeting);
+
+    // With speech behind it, the same words are taken seriously.
+    oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+    oa.send(JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', transcript: 'I need medical records faxed' }));
+    await until(() => forcedLines.length > afterGreeting, 'a real turn to be answered');
+
+    twilio.close();
   });
 });
