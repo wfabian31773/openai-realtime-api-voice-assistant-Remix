@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import apiClient from '@/lib/apiClient'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -2067,6 +2067,7 @@ function ReplaysTab() {
   const [agent, setAgent] = useState('pcp')
   const [verdict, setVerdict] = useState('worse')
   const [openCall, setOpenCall] = useState<string | null>(null)
+  const tapeRef = useRef<HTMLDivElement | null>(null)
 
   const summary = useQuery<{ summary: ReplaySummaryRow[] }>({
     queryKey: ['obs-replays'],
@@ -2083,6 +2084,12 @@ function ReplaysTab() {
   })
 
   const rows = summary.data?.summary ?? []
+
+  useEffect(() => {
+    if (openCall && tape.data && tapeRef.current) {
+      tapeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }, [openCall, tape.data])
 
   return (
     <section className="space-y-6">
@@ -2170,8 +2177,26 @@ function ReplaysTab() {
         )}
       </div>
 
+      {openCall && tape.isLoading && (
+        <p className="rounded border p-4 text-sm text-muted-foreground">
+          Replaying call {openCall.slice(0, 8)} through the new core…
+        </p>
+      )}
+      {openCall && tape.isError && (
+        <div className="rounded border border-red-300 p-4 text-sm">
+          <p className="font-medium text-red-600">Could not render this tape.</p>
+          <p className="mt-1 text-muted-foreground">
+            {(tape.error as any)?.response?.data?.message ??
+              (tape.error as any)?.response?.data?.error ??
+              String(tape.error)}
+          </p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Call {openCall} — most often this means the stored call has no transcript to replay.
+          </p>
+        </div>
+      )}
       {openCall && tape.data && (
-        <div className="space-y-2 rounded border p-4">
+        <div ref={tapeRef} className="space-y-2 rounded border p-4">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h4 className="font-semibold">Call {tape.data.callLogId.slice(0, 8)} — {tape.data.verdict}</h4>
             <span className="text-xs text-muted-foreground">

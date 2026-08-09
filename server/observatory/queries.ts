@@ -1158,7 +1158,13 @@ export async function replayTape(callLogId: string): Promise<{
       duration: row.duration,
       transcript: row.transcript,
     },
-    (agent === 'pcp' ? 'pcp' : agent === 'no-ivr' || agent === 'after-hours' ? 'no-ivr' : 'answering-service'),
+    (agent === 'pcp'
+      ? 'pcp'
+      : agent === 'azul-scheduling'
+        ? 'azul-scheduling'
+        : agent === 'no-ivr' || agent === 'after-hours'
+          ? 'no-ivr'
+          : 'answering-service'),
   );
   if (!tape) return null;
   return {
