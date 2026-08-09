@@ -1904,10 +1904,26 @@ async function observeCall(
     effectiveSlug = 'after-hours';
   }
   
-  // Final validation: reject any unknown slugs
+  // Final validation. An agent that EXISTS AND IS ACTIVE in the database is
+  // not an unknown slug — silently renaming it to 'after-hours' answered a
+  // brand new demo line with the after-hours agent three times in a row
+  // (2026-08-09), and the call records looked normal while doing it. Only a
+  // slug that is neither hardcoded nor a live DB agent gets coerced.
   if (!validAgentSlugs.includes(effectiveSlug)) {
-    console.warn(`[SESSION] ⚠️ Unknown agent slug '${effectiveSlug}' - coercing to 'after-hours' (strict enforcement)`);
-    effectiveSlug = 'after-hours';
+    let dbAgentExists = false;
+    try {
+      const { storage: agentStore } = await import('../server/storage');
+      const dbAgent = await agentStore.getAgentBySlug(effectiveSlug);
+      dbAgentExists = Boolean(dbAgent && dbAgent.status === 'active');
+    } catch (e) {
+      console.warn(`[SESSION] Could not check the agents table for '${effectiveSlug}':`, e);
+    }
+    if (dbAgentExists) {
+      console.info(`[SESSION] '${effectiveSlug}' is an active agent in the database — routing as itself`);
+    } else {
+      console.warn(`[SESSION] ⚠️ Unknown agent slug '${effectiveSlug}' - coercing to 'after-hours' (strict enforcement)`);
+      effectiveSlug = 'after-hours';
+    }
   }
   
   // Check if this slug exists in the hardcoded registry (even if disabled)
