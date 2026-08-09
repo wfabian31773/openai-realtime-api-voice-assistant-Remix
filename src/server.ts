@@ -217,6 +217,14 @@ async function startVoiceServer() {
       dataQualitySloService.startMonitoring(60);
     }).catch(err => console.error('[STARTUP] Failed to start SLO monitoring:', err));
 
+    // Gate C for the SD line: the new scheduling line run silently beside the
+    // old one on real calls. A pure shadowTap subscriber — it adds nothing to
+    // the call path, and book/transfer/fileCallback are recorders, so it
+    // cannot write anywhere. Off unless SD_SHADOW=1.
+    import('./core/shadow/sdShadow').then(({ initSdShadow }) => {
+      try { initSdShadow(); } catch (err) { console.error('[STARTUP] SD shadow init failed (production unaffected):', err); }
+    }).catch(err => console.error('[STARTUP] SD shadow unavailable (production unaffected):', err));
+
     // Shadow observer (SHADOW_MODE_ENABLED, default off — no-op unless configured).
     // Fully async/observational; a shadow failure must never affect calls.
     import('./shadow').then(({ initShadow }) => {
