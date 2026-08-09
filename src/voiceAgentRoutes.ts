@@ -219,8 +219,14 @@ const pendingGreetings = new Map<string, PendingGreeting>();
 /** CP-4: lines running the deterministic ramp (env override RAMP_AGENTS). */
 const RAMP_AGENTS = new Set((process.env.RAMP_AGENTS ?? 'answering-service,pcp,azul-scheduling').split(',').map((x) => x.trim()).filter(Boolean));
 
-/** Calls owned by a new-core line module (reconstruction-plan.md §4). */
-const newCoreCalls = new Set<string>();
+/**
+ * Calls owned by a new-core line module (reconstruction-plan.md §4), keyed by
+ * call id -> the slug the module was REGISTERED under. Looking a module up by
+ * any other name returns nothing and the caller hears dead air, which is
+ * exactly what happened when a 'no-ivr' call was re-labelled 'after-hours'
+ * mid-session (live 2026-08-09).
+ */
+const newCoreCalls = new Map<string, string>();
 
 /**
  * Wrap-up hangups, pending. A caller can speak AFTER the closing line — most
@@ -1882,7 +1888,12 @@ async function observeCall(
   
   // AGENT ROUTING with strict validation
   // Only these agents are allowed (defense in depth - validated at webhook AND here)
-  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
+  // 'demo' is the rapid-test line (operator 2026-08-09): its own number, the
+  // ticket agent behind it, tuned from ticket_agent_config without a deploy.
+  // It MUST be listed here — an unknown slug is silently coerced to
+  // 'after-hours' below, which would have made the demo line quietly answer
+  // as the after-hours agent.
+  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
   const legacyDeletedSlugs = ['greeter', 'non-urgent-ticketing'];
   
   let effectiveSlug = agentSlug || 'no-ivr';
@@ -2795,8 +2806,11 @@ async function observeCall(
           cancelPendingHangup(callId);
           void (async () => {
             try {
-              const mod = newCoreFor(effectiveSlug);
-              if (!mod) return;
+              const mod = newCoreFor(newCoreCalls.get(callId) ?? effectiveSlug);
+              if (!mod) {
+                console.error(`[NEW-CORE] no module for ${callId} (registered=${newCoreCalls.get(callId)}, effective=${effectiveSlug}) — the caller would hear nothing`);
+                return;
+              }
               let action: import('./core/types').CoreAction | null = await mod.onUtterance(callId, transcript);
               while (action) {
                 if (action.say) {
@@ -3686,7 +3700,34 @@ async function observeCall(
         });
       }
       newCoreFor(agentSlug)!.start(callId);
-      newCoreCalls.add(callId);
+      newCoreCalls.set(callId, agentSlug);
+
+      // MOUTHPIECE. The state machine owns the call, so the model must own
+      // nothing: no agent prompt with its own agenda, no tools it can decide
+      // to call. Live 2026-08-09 proved why — with the old prompt still
+      // active, TWO agents talked on the same call, the module asking its
+      // scripted questions while the model invented its own ("which
+      // pharmacy...", "let me check your open tickets"). That is the piling,
+      // inside a single call.
+      try {
+        (session.transport as any).sendEvent({
+          type: 'session.update',
+          session: {
+            instructions:
+              'You are the VOICE of a scripted system, not a decision maker.\n' +
+              '- Say exactly the words you are given, and nothing else.\n' +
+              '- Never ask a question you were not given. Never add a follow-up.\n' +
+              '- Never offer to check, look up, transfer, schedule, or confirm anything.\n' +
+              '- If you were given nothing to say, stay silent and wait.\n' +
+              'Speak naturally and warmly, but the words are not yours to choose.',
+            tools: [],
+            tool_choice: 'none',
+          },
+        });
+        console.info(`[NEW-CORE] ${agentSlug} session stripped to mouthpiece for ${callId}`);
+      } catch (e) {
+        console.warn(`[NEW-CORE] could not strip session for ${callId}:`, e);
+      }
       console.info(`[NEW-CORE] ${agentSlug} line module owns ${callId}`);
     } else
     // CP-4 (spine S1): on ramp lines, a caller-ID match personalizes the
@@ -4080,7 +4121,7 @@ async function observeCall(
     // it runs first and everything else waits for it (review 2026-08-09).
     void (async () => {
       try {
-        const mod = newCoreCalls.has(callId) ? newCoreFor(effectiveSlug) : null;
+        const mod = newCoreCalls.has(callId) ? newCoreFor(newCoreCalls.get(callId) ?? effectiveSlug) : null;
         if (mod?.finalize) {
           const r = await mod.finalize(callId);
           if (r.filed) console.info(`[NEW-CORE] hang-up ticket filed for ${callId}`);
@@ -5264,6 +5305,111 @@ export function setupVoiceAgentRoutes(app: Express): void {
       console.info(`[ANSWERING-SERVICE] ✓ Answering-service agent successfully added to conference: ${conferenceName}`);
     } catch (error) {
       console.error(`[ANSWERING-SERVICE] ✗ Failed to add agent to conference:`, error);
+    }
+  });
+
+  // THE DEMO LINE (+1 626-548-2660). Its own webhook so it can never inherit
+  // another line's agent: the slug is stamped 'demo' on the SIP leg, the
+  // greeting comes from the agents row, and behaviour comes from the ticket
+  // agent with tuning read live from ticket_agent_config. Pointing this number
+  // at another line's webhook would silently run that line's agent instead —
+  // which is what happened on the first attempt (operator, 2026-08-09).
+  app.post("/api/voice/demo", webhookRateLimiter, async (req, res) => {
+    const rawBody = req.body.toString("utf8");
+    const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
+
+    const callSid = parsedBody.CallSid;
+    const callToken = parsedBody.CallToken;
+    const callerIDNumber = parsedBody.From;
+    const dialedNumber = parsedBody.To;
+
+    console.info(`\n[DEMO] ✓ Call received: ${callSid} from ${callerIDNumber} to ${dialedNumber}`);
+
+    if (!callSid || !callerIDNumber) {
+      console.error('[DEMO] ✗ Missing required parameters');
+      res.status(400).send('<Response><Say>Invalid request</Say></Response>');
+      return;
+    }
+
+    const domain = process.env.DOMAIN || req.get('host');
+    const conferenceName = `conf_${callSid}`;
+
+    callIDtoConferenceNameMapping[callSid] = conferenceName;
+    ConferenceNametoCallerIDMapping[conferenceName] = callerIDNumber;
+    ConferenceNametoCalledNumberMapping[conferenceName] = dialedNumber;
+    ConferenceNametoCallTokenMapping[conferenceName] = callToken;
+    conferenceNameToTwilioCallSid[conferenceName] = callSid;
+
+    // The greeting is whatever the agents row says, so it is tunable without
+    // a deploy like everything else on this line.
+    let demoGreeting = 'Thank you for calling Azul Vision. How can I help you today?';
+    try {
+      const agent = await storage.getAgentBySlug('demo');
+      if (agent?.welcomeGreeting) demoGreeting = agent.welcomeGreeting;
+    } catch (e) {
+      console.warn('[DEMO] Could not read the demo greeting from the DB, using the default:', e);
+    }
+
+    callMetadata.set(conferenceName, {
+      agentSlug: 'demo',
+      agentGreeting: demoGreeting,
+      language: 'english',
+      ivrSelection: undefined,
+    } as any);
+    const extendedMeta = callMetadata.get(conferenceName) as any;
+    if (extendedMeta) {
+      extendedMeta.voiceForCall = 'sage';
+      extendedMeta.languageForCall = 'en';
+    }
+
+    const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Pause length="1"/>
+  <Dial>
+    <Conference
+      beep="false"
+      waitUrl=""
+      startConferenceOnEnter="true"
+      endConferenceOnExit="true"
+      participantLabel="customer"
+      record="record-from-start"
+      recordingStatusCallback="https://${domain}/api/voice/recording-status"
+      recordingStatusCallbackMethod="POST"
+      recordingStatusCallbackEvent="completed"
+      statusCallback="https://${domain}/api/voice/conference-events"
+      statusCallbackEvent="start end join leave"
+      statusCallbackMethod="POST"
+    >
+      ${conferenceName}
+    </Conference>
+  </Dial>
+</Response>`;
+
+    res.setHeader("Content-Type", "application/xml");
+    res.send(twimlResponse);
+    console.info(`[DEMO] ✓ Caller joined conference: ${conferenceName}`);
+
+    try {
+      if (!twilioClient) twilioClient = await getTwilioClient();
+    } catch (twilioInitError) {
+      console.error('[DEMO] ✗ Failed to initialize Twilio client:', twilioInitError);
+      return;
+    }
+
+    try {
+      const effectiveToken = ConferenceNametoCallTokenMapping[conferenceName] || '';
+      await twilioClient.conferences(conferenceName).participants.create({
+        from: envConfig.twilio.phoneNumber!,
+        label: 'virtual agent',
+        to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=demo`,
+        earlyMedia: true,
+        callToken: effectiveToken,
+        conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
+        conferenceStatusCallbackEvent: ['join'],
+      });
+      console.info(`[DEMO] ✓ Demo agent added to conference: ${conferenceName}`);
+    } catch (error) {
+      console.error('[DEMO] ✗ Failed to add agent to conference:', error);
     }
   });
 
