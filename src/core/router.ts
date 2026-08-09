@@ -10,6 +10,7 @@ import type { LineModule, TicketLineServices } from './types';
 import { createAnsweringServiceLine } from './answeringServiceLine';
 import { createPcpLine, type ProfessionalLineServices } from './pcpLine';
 import { createSchedulingLine, type SchedulingLineServices, type AvailabilityOffer } from './schedulingLine';
+import { createTicketAgent, type TicketAgentServices } from './ticketAgent';
 
 /**
  * Per-call transport bindings for lines whose actions need the live session
@@ -30,6 +31,11 @@ const NEW_CORE_LINES = new Set(
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean),
+);
+
+/** Lines answered by the five-step ticket agent (operator spec 2026-08-09). */
+const TICKET_AGENT_LINES = new Set(
+  (process.env.TICKET_AGENT_LINES ?? '').split(',').map((x) => x.trim()).filter(Boolean),
 );
 
 const modules = new Map<string, LineModule>();
@@ -87,10 +93,23 @@ function buildProdServices(): TicketLineServices {
 
 /** The line module for a slug, or null when the old core keeps the call. */
 export function newCoreFor(slug: string): LineModule | null {
-  if (!NEW_CORE_LINES.has(slug)) return null;
+  if (!NEW_CORE_LINES.has(slug) && !TICKET_AGENT_LINES.has(slug)) return null;
   let mod = modules.get(slug);
   if (!mod) {
-    if (slug === 'answering-service') mod = createAnsweringServiceLine(buildProdServices());
+    // TICKET_AGENT_LINES puts the five-step ticket agent on a line, ahead of
+    // every other module. One job, one file (src/core/ticketAgent.ts).
+    if (TICKET_AGENT_LINES.has(slug)) {
+      mod = createTicketAgent(buildTicketAgentServices(), {
+        slug,
+        humanLine:
+          slug === 'no-ivr' || slug === 'after-hours'
+            ? {
+                en: "Our offices are closed right now — I'll take your information and make sure the right team member calls you back first thing.",
+                es: 'Nuestras oficinas están cerradas — tomaré su información y me aseguraré de que el equipo le devuelva la llamada a primera hora.',
+              }
+            : undefined,
+      });
+    } else if (slug === 'answering-service') mod = createAnsweringServiceLine(buildProdServices());
     else if (slug === 'pcp') mod = createPcpLine(buildPcpProdServices());
     else if (slug === 'azul-scheduling') mod = createSchedulingLine(buildSchedulingProdServices());
     else if (slug === 'no-ivr' || slug === 'after-hours') {
@@ -113,7 +132,7 @@ export function newCoreFor(slug: string): LineModule | null {
 const BUILT_LINES = new Set(['answering-service', 'pcp', 'no-ivr', 'after-hours', 'azul-scheduling']);
 
 export function newCoreEnabled(slug: string): boolean {
-  return NEW_CORE_LINES.has(slug) && BUILT_LINES.has(slug);
+  return TICKET_AGENT_LINES.has(slug) || (NEW_CORE_LINES.has(slug) && BUILT_LINES.has(slug));
 }
 
 function buildPcpProdServices(): ProfessionalLineServices {
@@ -244,6 +263,50 @@ function buildSchedulingProdServices(): SchedulingLineServices {
       const r = await binding.handoff().catch(() => ({ ok: false }));
       if (!r.ok) console.warn(`[NEW-CORE][sd] transfer failed for ${callId}: ${reason}`);
       return { ok: Boolean(r.ok) };
+    },
+  };
+}
+
+/**
+ * The ticket agent's two hooks: verify, and submit. Nothing else — the whole
+ * point is that this agent cannot reach anything it does not need.
+ */
+function buildTicketAgentServices(): TicketAgentServices {
+  return {
+    async verify(_callId, name, dob) {
+      const [first, ...rest] = name.trim().split(/\s+/);
+      const { scheduleLookupService } = await import('../services/scheduleLookupService');
+      const r = await scheduleLookupService.lookupByNameAndDOB(first ?? '', rest.join(' '), dob);
+      return Boolean((r as { patientFound?: boolean })?.patientFound);
+    },
+    async submit(_callId, ticket) {
+      const { SyncAgentService } = await import('../services/syncAgentService');
+      const { parseDateOfBirth } = await import('../agents/answeringServiceAgent');
+      const f = ticket.fields;
+      const [first, ...rest] = (f.patient_name ?? 'Unknown Caller').split(/\s+/);
+      const dob = parseDateOfBirth(f.patient_dob ?? '');
+      const description = [
+        ticket.label,
+        f.details ? `Request: ${f.details}` : null,
+        f.fax_number ? `FAX TO: ${f.fax_number}` : null,
+        f.email_address ? `EMAIL TO: ${f.email_address}` : null,
+        f.office_location ? `Office: ${f.office_location}` : null,
+        f.provider_name ? `Doctor: ${f.provider_name}` : null,
+      ].filter(Boolean).join(' — ');
+      const r = await SyncAgentService.createTicketFromAgentInput({
+        firstName: first ?? 'Unknown',
+        lastName: rest.join(' ') || 'Caller',
+        birthMonth: String(dob.month ?? ''),
+        birthDay: String(dob.day ?? ''),
+        birthYear: String(dob.year ?? ''),
+        callbackNumber: f.callback_number ?? f.fax_number ?? '',
+        requestCategory: 'general_question',
+        requestSummary: description,
+        departmentId: ticket.department,
+        priority: ticket.urgent ? 'urgent' : 'medium',
+        subject: ticket.label,
+      });
+      return { ok: Boolean(r.success), ticketNumber: r.ticketNumber };
     },
   };
 }
