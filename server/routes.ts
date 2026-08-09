@@ -190,6 +190,42 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Gate B replay tapes: what the new core WOULD have said on real calls,
+  // beside what the old core actually said, both graded by the same
+  // referee. The evidence a line cuts over on.
+  app.get('/api/observatory/replays', isAuthenticated, async (_req, res) => {
+    try {
+      const { replaySummary } = await import('./observatory/queries');
+      res.json({ summary: await replaySummary() });
+    } catch (error) {
+      console.error('[observatory] replays failed:', error);
+      res.status(500).json({ message: 'Replay summary failed', error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get('/api/observatory/replays/:agent/list', isAuthenticated, async (req, res) => {
+    try {
+      const { replayTapeList } = await import('./observatory/queries');
+      const verdict = typeof req.query.verdict === 'string' ? req.query.verdict : 'worse';
+      res.json({ tapes: await replayTapeList(req.params.agent, verdict, 25) });
+    } catch (error) {
+      console.error('[observatory] replay list failed:', error);
+      res.status(500).json({ message: 'Replay list failed', error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get('/api/observatory/replay/:callLogId', isAuthenticated, async (req, res) => {
+    try {
+      const { replayTape } = await import('./observatory/queries');
+      const tape = await replayTape(req.params.callLogId);
+      if (!tape) return res.status(404).json({ message: 'No replay for this call' });
+      res.json(tape);
+    } catch (error) {
+      console.error('[observatory] replay tape failed:', error);
+      res.status(500).json({ message: 'Replay tape failed', error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   // Daily Brief — baseline-tracked morning review: categorized critical
   // fails with proposals, vs yesterday and vs the day-one baseline
   // ("inch by inch we will get to stability", Wayne 2026-08-07).

@@ -147,11 +147,13 @@ describe('pcp new core — Gate A', () => {
     await say('562 555 0134');
     await say('yes');
     expect(filed[0].patientRef).toContain('Maria');
-    // The professional is never interrogated about the patient.
+    // "Silent" means the MATCH is never announced and the professional is
+    // never interrogated about the patient — not that the caller's own
+    // sentence can't be read back to them before filing.
     const all = heard.join(' ').toLowerCase();
-    expect(all).not.toContain('maria');
     expect(all).not.toContain('date of birth');
     expect(all).not.toContain('verify');
+    expect(all).not.toMatch(/is (the |your )?patient|do you have the patient|found (the |a )?(record|chart)|in our system/);
   });
 
   it('a professional asking for a human gets the QUEUE — this line can transfer', async () => {

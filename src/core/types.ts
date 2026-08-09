@@ -80,5 +80,11 @@ export interface LineModule<S = unknown> {
   onUtterance(callId: string, text: string): Promise<CoreAction>;
   /** Current state name, for the turn table / Observatory. */
   stateOf(callId: string): string | null;
+  /**
+   * Called when the call ends (caller hung up, transport closed) BEFORE
+   * release. A caller who states a request and drops must still reach the
+   * team: the module files what it has. Returns an ops alert if it couldn't.
+   */
+  finalize?(callId: string): Promise<{ filed: boolean; alert?: string }>;
   release(callId: string): void;
 }

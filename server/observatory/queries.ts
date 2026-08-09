@@ -1066,3 +1066,110 @@ export async function todayOverview(): Promise<TodayOverview> {
     sage,
   };
 }
+
+/* ── Gate B replay tapes (reconstruction-plan.md §5) ─────────────────────
+ * Side-by-side judgment: the old core's actual transcript against what the
+ * new core would say on the SAME call, both scored by the same graders.
+ *
+ * The tape is rendered ON DEMAND from the stored call — no transcript is
+ * ever copied into a second table. That keeps patient data in one place and
+ * means an opened tape always reflects the code as it stands right now,
+ * not as it stood when some batch job ran.
+ */
+export interface ReplaySummaryRow {
+  agent: string;
+  calls: number;
+  oldCriticalCalls: number;
+  newCriticalCalls: number;
+  better: number;
+  same: number;
+  worse: number;
+  replayedAt: string | null;
+}
+
+export async function replaySummary(): Promise<ReplaySummaryRow[]> {
+  const { rows } = await pool.query(
+    `SELECT agent, calls, old_critical_calls, new_critical_calls, better, same, worse, replayed_at
+     FROM new_core_replay_summary ORDER BY agent`,
+  );
+  return rows.map((r: any) => ({
+    agent: r.agent,
+    calls: r.calls,
+    oldCriticalCalls: r.old_critical_calls,
+    newCriticalCalls: r.new_critical_calls,
+    better: r.better,
+    same: r.same,
+    worse: r.worse,
+    replayedAt: r.replayed_at,
+  }));
+}
+
+/** Worst-first: the case AGAINST the new core goes on top of the list. */
+export async function replayTapeList(agent: string, verdict = 'worse', limit = 40): Promise<Array<{
+  callLogId: string; verdict: string; oldCriticalCount: number; newCriticalCount: number;
+}>> {
+  const { rows } = await pool.query(
+    `SELECT call_log_id, verdict, old_critical_count, new_critical_count
+     FROM new_core_replay_index WHERE agent = $1 AND verdict = $2
+     ORDER BY (new_critical_count - old_critical_count) DESC, call_log_id LIMIT $3`,
+    [agent, verdict, limit],
+  );
+  return rows.map((r: any) => ({
+    callLogId: r.call_log_id,
+    verdict: r.verdict,
+    oldCriticalCount: r.old_critical_count,
+    newCriticalCount: r.new_critical_count,
+  }));
+}
+
+/** Render one tape live: both transcripts, both grader verdicts. */
+export async function replayTape(callLogId: string): Promise<{
+  callLogId: string;
+  agent: string;
+  verdict: string | null;
+  oldTranscript: string | null;
+  newTranscript: string | null;
+  newGraders: unknown;
+  oldCriticalCount: number;
+  newCriticalCount: number;
+  approximations: string[] | null;
+} | null> {
+  const { rows } = await pool.query(
+    `SELECT id, agent_used, "from", caller_name, patient_name, patient_dob, patient_found,
+            ticket_number, transferred_to_human, total_turns, duration, transcript
+     FROM call_logs WHERE id = $1 LIMIT 1`,
+    [callLogId],
+  );
+  if (!rows.length || !rows[0].transcript) return null;
+  const row = rows[0] as any;
+  const agent = String(row.agent_used ?? 'answering-service');
+  const { replayStoredCall } = await import('../../src/core/replay/replayCall');
+  const tape = await replayStoredCall(
+    {
+      id: row.id,
+      from: row.from,
+      caller_name: row.caller_name,
+      patient_name: row.patient_name,
+      patient_dob: row.patient_dob,
+      patient_found: row.patient_found,
+      ticket_number: row.ticket_number,
+      transferred_to_human: row.transferred_to_human,
+      total_turns: row.total_turns,
+      duration: row.duration,
+      transcript: row.transcript,
+    },
+    (agent === 'pcp' ? 'pcp' : agent === 'no-ivr' || agent === 'after-hours' ? 'no-ivr' : 'answering-service'),
+  );
+  if (!tape) return null;
+  return {
+    callLogId,
+    agent,
+    verdict: tape.verdict,
+    oldTranscript: row.transcript,
+    newTranscript: tape.new_transcript,
+    newGraders: tape.new_grader_results,
+    oldCriticalCount: tape.old_critical.length,
+    newCriticalCount: tape.new_critical.length,
+    approximations: tape.approximations,
+  };
+}

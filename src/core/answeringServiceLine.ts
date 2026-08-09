@@ -42,6 +42,8 @@ type ASState =
 interface ASStatus {
   state: ASState;
   lang: 'en' | 'es';
+  /** Times each question has been asked ACROSS the call — a hard cap of 2. */
+  asked: Map<ASState, number>;
   unparsed: number; // per-state; reset on every transition
   verifyFails: number;
   urgent: boolean;
@@ -59,12 +61,42 @@ const NO = /\b(no|nope|not|isn't|wrong|different|nothing|that's (all|it)|nada|es
 const NEW_PAT = /\b(new|nuevo|nueva)\b/i;
 const EXISTING = /\b(existing|current|already|been (there|seen)|existente|actual)\b/i;
 const URGENT_RX = /\b(emergency|911|chest pain|can't see|sudden vision|bleeding|severe pain|emergencia|sangrando)\b/i;
-const HUMAN_RX = /\b(representative|operator|receptionist|(real|actual|live) (person|human)|(talk|speak|connect me|transfer me).{0,20}\b(human|agent|person|somebody|someone)\b|human being)\b/i;
+// Broad on purpose: a bare "agent" or a garbled "up to an agent" IS a human
+// request, and the deflection script is always a safe answer (Gate B 2026-08-08:
+// 135 replayed calls where a human ask went unrecognized and the call looped).
+// Bare nouns that are ONLY ever a human request, plus request-verb proximity
+// for the ambiguous ones. "someone was supposed to call me" is NOT a human
+// request — treating it as one made the deflection line repeat (Gate B run 2).
+const HUMAN_RX = /\b(representative|operator|receptionist|(real|actual|live) (person|human)|human being|persona real)\b|\b(talk|speak|connect|transfer|put me|get me|need|want)\b[^.]{0,25}\b(human|agent|person|persona|somebody|someone|rep)\b/i;
+/** A short utterance that is basically just "agent" — the ASR of a demand. */
+const SHORT_AGENT_RX = /\bagents?\b|\bagente\b/i;
 const SCHEDULE_RX = /\b(schedule|reschedule|cancel|book|appointment|make an? appt|cita|agendar|reagendar|cancelar)\b/i;
 const PHONE_RX = /(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/;
 const DOB_RX = /\b(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{2,4})\b|\b(january|february|march|april|may|june|july|august|september|october|november|december|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b.*\b(19|20)\d{2}\b/i;
 const DONT_KNOW = /\b(don'?t know|not sure|no idea|can'?t remember|no s[eé]|no estoy segur)/i;
 const SPANISH_WORDS = /\b(hola|gracias|necesito|quiero|por favor|buenos|buenas|español|cita|ayuda|hablar|llamo|receta|lentes|doctora?)\b/gi;
+
+/**
+ * A name is not a sentence. "I have seen before" was accepted as a patient
+ * name in replay (Gate B 2026-08-08) because it was simply two-or-more
+ * alphabetic words — and the bad name then failed verification forever.
+ */
+const NOT_NAME_WORDS = new Set([
+  'i', 'im', 'me', 'my', 'you', 'your', 'we', 'he', 'she', 'they', 'it', 'this', 'that', 'the', 'a', 'an',
+  'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'can', 'need', 'want',
+  'call', 'called', 'calling', 'seen', 'see', 'before', 'appointment', 'doctor', 'prescription', 'refill',
+  'yes', 'no', 'not', 'please', 'thanks', 'thank', 'ok', 'okay', 'hello', 'hi', 'about', 'for', 'with',
+  'and', 'but', 'just', 'know', 'think', 'get', 'got', 'like', 'would', 'could', 'should', 'there', 'here',
+  'si', 'no', 'yo', 'mi', 'el', 'la', 'de', 'que', 'por', 'para', 'necesito', 'quiero', 'gracias',
+]);
+
+function looksLikeName(text: string): { first: string; last: string } | null {
+  const raw = text.trim().replace(/^(my name is|this is|it'?s|i'?m|es|soy)\s+/i, '');
+  const words = raw.split(/\s+/).filter((w) => /^[a-záéíóúñ'-]{2,}$/i.test(w));
+  if (words.length < 2 || words.length > 4) return null;
+  if (words.some((w) => NOT_NAME_WORDS.has(w.toLowerCase()))) return null;
+  return { first: words[0], last: words.slice(1).join(' ') };
+}
 
 /** Every line the caller can hear, EN + ES, from the approved listing. */
 const L = {
@@ -144,6 +176,16 @@ const L = {
     en: 'Give me one moment while I get this submitted for you.',
     es: 'Deme un momento mientras envío su solicitud.',
   },
+  /**
+   * Read the request back before filing. Two reasons, both real: the caller
+   * hears what the team will see and can correct it, and the reason is then
+   * ON the call — 253 replayed calls filed a ticket whose reason existed only
+   * in the payload, invisible to anyone reviewing the conversation.
+   */
+  filingWithReadback: (what: string) => ({
+    en: `I have that down as: ${what}. Give me one moment while I get this submitted for you.`,
+    es: `Lo anoté como: ${what}. Deme un momento mientras envío su solicitud.`,
+  }),
   filed: {
     en: "You're all set — I've passed that to the team and they'll contact you as soon as they're available. Is there anything else?",
     es: 'Listo — le pasé su mensaje al equipo y le contactarán tan pronto estén disponibles. ¿Algo más?',
@@ -186,6 +228,35 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
     s.unparsed = 0;
   };
 
+  /**
+   * THE REPETITION CAP. A per-state counter resets on every transition, so a
+   * call that ping-pongs between two states can ask the same question five
+   * times and never trip a ladder — that is exactly what 135 replayed calls
+   * did (Gate B 2026-08-08). This counter is per CALL: no question is ever
+   * asked a third time; the call advances instead.
+   */
+  const askBudgetSpent = (s: ASStatus, state: ASState): boolean => {
+    const n = (s.asked.get(state) ?? 0) + 1;
+    s.asked.set(state, n);
+    return n > 2;
+  };
+
+  /**
+   * TOPIC budget. Several different states ask the same thing in different
+   * words — "may I have the patient's first and last name", "I'll take your
+   * details… name", "could you give me your last name one more time" are one
+   * topic to the caller (and to the grader). A per-state cap missed that
+   * entirely: 520 replayed calls asked for a name three times. Two asks per
+   * TOPIC, per call, whichever states they come from.
+   */
+  type AskTopic = 'name' | 'dob' | 'classify' | 'callback' | 'message';
+  const topicSpent = (s: ASStatus, topic: AskTopic): boolean => {
+    const key = `topic:${topic}` as unknown as ASState;
+    const n = (s.asked.get(key) ?? 0) + 1;
+    s.asked.set(key, n);
+    return n > 2;
+  };
+
   /** The question the current state is waiting on — the re-ask ladder's rung. */
   const question = (callId: string, s: ASStatus): string => {
     const f = getLedger(callId);
@@ -220,6 +291,11 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
       case 'CLASSIFY':
       case 'COLLECT_NAME':
       case 'COLLECT_DOB':
+        // Identity is abandoned — and so is asking for it again. Burn both
+        // budgets so the fall-forward can never route back into the loop.
+        s.asked.set('COLLECT_NAME', 9);
+        s.asked.set('COLLECT_DOB', 9);
+        s.asked.set('CLASSIFY', 9);
         return afterIdentity(callId, s, t(s, L.verifyFail2));
       case 'TAKE_MESSAGE':
         go(s, 'WRAP_QUERY');
@@ -247,9 +323,27 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
     }
   };
 
+  /** Which topic a state's question belongs to, for the shared budget. */
+  const TOPIC_OF: Partial<Record<ASState, AskTopic>> = {
+    CONFIRM_ID: 'name',
+    COLLECT_NAME: 'name',
+    CLASSIFY: 'classify',
+    CONFIRM_DOB: 'dob',
+    COLLECT_DOB: 'dob',
+    CONFIRM_CALLBACK: 'callback',
+    COLLECT_CALLBACK: 'callback',
+    TAKE_MESSAGE: 'message',
+  };
+
   const unparsable = async (callId: string, s: ASStatus): Promise<CoreAction> => {
     s.unparsed += 1;
-    if (s.unparsed >= 2) return fallForward(callId, s);
+    // The re-ask ladder spends the SAME topic budget as the states that ask
+    // first time round — otherwise a re-ask is a third "what's your name?"
+    // that no counter ever saw (Gate B runs 4-5).
+    const topic = TOPIC_OF[s.state];
+    if (s.unparsed >= 2 || askBudgetSpent(s, s.state) || (topic && topicSpent(s, topic))) {
+      return fallForward(callId, s);
+    }
     return { say: question(callId, s) };
   };
 
@@ -260,7 +354,7 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
    * with the identity line prefixed onto the next question.
    */
   const afterIdentity = async (callId: string, s: ASStatus, prefix: string): Promise<CoreAction> => {
-    if (s.message && s.message.trim().split(/\s+/).length >= 3) {
+    if (s.message && s.message.trim().split(/\s+/).length >= 2) {
       const next = await afterMessage(callId, s);
       return { ...next, say: next.say ? `${prefix} ${next.say}` : prefix };
     }
@@ -271,10 +365,12 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
   const proceedToCallback = (callId: string, s: ASStatus): CoreAction => {
     const f = getLedger(callId);
     if (f?.callbackNumber && !f.callbackConfirmed) {
+      if (topicSpent(s, 'callback')) return fileNow(callId, s, 'callback unconfirmed — used caller ID');
       go(s, 'CONFIRM_CALLBACK');
       return { say: t(s, L.confirmCallback(f.callbackNumber.slice(-4))) };
     }
     if (!f?.callbackNumber) {
+      if (topicSpent(s, 'callback')) return fileNow(callId, s, 'no callback captured — caller ID used');
       go(s, 'COLLECT_CALLBACK');
       return { say: t(s, L.collectCallback) };
     }
@@ -289,7 +385,10 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
   const fileNow = (callId: string, s: ASStatus, note?: string): CoreAction => {
     go(s, 'WRAP_QUERY');
     return {
-      say: t(s, L.filing),
+      say: (() => {
+        const what = (s.message ?? getLedger(callId)?.intent ?? '').trim().split(/\s+/).slice(0, 14).join(' ');
+        return what.split(/\s+/).length >= 2 ? t(s, L.filingWithReadback(what)) : t(s, L.filing);
+      })(),
       followUp: async () => {
         const f = getLedger(callId);
         const description = [
@@ -336,8 +435,17 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
     if (!f0?.firstName && !f0?.matchedFirstName) {
       // The human-request and urgent intercepts arrive here without the
       // identity chain — a ticket without a name never gets a callback.
-      go(s, 'COLLECT_NAME');
-      return { say: t(s, L.collectName) };
+      // But this is also where the fall-forward lands, so an unguarded ask
+      // here ping-pongs COLLECT_NAME ↔ fall-forward forever (Gate B run 7:
+      // the same line 2,982 times across 514 calls). Budget applies.
+      if (!topicSpent(s, 'name')) {
+        go(s, 'COLLECT_NAME');
+        return { say: t(s, L.collectName) };
+      }
+      // No name and no budget left: file what we have so the request lives,
+      // flagged for a human to chase the identity.
+      s.unresolvedInfo = 'caller name not captured';
+      return proceedToCallback(callId, s);
     }
     const c = await services.classify(s.message ?? '').catch(() => null);
     s.classification = c;
@@ -359,6 +467,7 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
       calls.set(callId, {
         state: 'INTENT',
         lang: 'en',
+        asked: new Map(),
         unparsed: 0,
         verifyFails: 0,
         urgent: false,
@@ -374,6 +483,34 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
 
     stateOf(callId: string): string | null {
       return calls.get(callId)?.state ?? null;
+    },
+
+    /**
+     * Hang-up safety net (Gate B 2026-08-08: 120 replayed calls stated a real
+     * request and the call ended before a ticket existed). If the caller told
+     * us what they need and no ticket was filed, file it with the caller-ID
+     * callback and flag what's missing — a stated request is never lost
+     * because the caller hung up.
+     */
+    async finalize(callId: string): Promise<{ filed: boolean; alert?: string }> {
+      const s = calls.get(callId);
+      if (!s || s.ticketsFiled > 0) return { filed: false };
+      const f = getLedger(callId);
+      const message = s.message ?? f?.intent ?? null;
+      // Only file what a human can actually act on: a real request, someone
+      // to call, and a number to call them at. A ticket with no name and no
+      // callback is noise that buries the real ones (Gate B run 2 proved it:
+      // filing on anything produced 1,245 unactionable tickets).
+      const name = f?.firstName ?? f?.matchedFirstName;
+      const callback = f?.callbackNumber ?? f?.callerPhone;
+      if (!message || message.trim().split(/\s+/).length < 3) return { filed: false };
+      if (!name || !callback) {
+        return { filed: false, alert: `unfiled request on ${callId} — no ${!name ? 'name' : 'callback'}: ${message.slice(0, 80)}` };
+      }
+      const action = fileNow(callId, s, 'caller ended the call before confirming — filed from what was captured');
+      const done = action.followUp ? await action.followUp() : null;
+      const filed = s.ticketsFiled > 0;
+      return { filed, alert: filed ? undefined : done?.alert ?? `unfiled request lost on ${callId}` };
     },
 
     release(callId: string): void {
@@ -403,10 +540,22 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
           }
           return { say: t(s, L.urgent) };
         }
-        if (HUMAN_RX.test(text)) {
-          // Same line, verbatim, EVERY time; then the call resumes where it was.
-          const resume = s.state === 'INTENT' ? (go(s, 'TAKE_MESSAGE'), t(s, L.takeMessage)) : question(callId, s);
-          return { say: `${t(s, humanBusyLine)} ${resume}` };
+        const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+        if (HUMAN_RX.test(text) || (wordCount <= 5 && SHORT_AGENT_RX.test(text))) {
+          // The deflection line is verbatim EVERY time. The pending question
+          // rides along only while that question still has ask budget —
+          // re-appending it on every deflection is what turned three human
+          // asks into three identical questions (Gate B 2026-08-08).
+          if (s.state === 'INTENT') {
+            go(s, 'TAKE_MESSAGE');
+            return { say: `${t(s, humanBusyLine)} ${t(s, L.takeMessage)}` };
+          }
+          const pending = question(callId, s);
+          const pendingTopic = TOPIC_OF[s.state];
+          if (askBudgetSpent(s, s.state) || (pendingTopic && topicSpent(s, pendingTopic))) {
+            return { say: t(s, humanBusyLine) };
+          }
+          return { say: `${t(s, humanBusyLine)} ${pending}` };
         }
         if (s.state === 'INTENT' && SCHEDULE_RX.test(text)) {
           updateLedger(callId, { intent: text.trim().slice(0, 200) });
@@ -430,12 +579,14 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
               go(s, 'CONFIRM_ID');
               return { say: t(s, L.confirmId(f.matchedFirstName)) };
             }
+            if (topicSpent(s, 'classify')) { go(s, 'TAKE_MESSAGE'); return { say: t(s, L.takeMessage) }; }
             go(s, 'CLASSIFY');
             return { say: t(s, L.classify) };
           }
 
           case 'CONFIRM_ID': {
             if (YES.test(text) && !NO.test(text)) {
+              if (topicSpent(s, 'dob')) return afterIdentity(callId, s, t(s, L.thanks));
               go(s, 'CONFIRM_DOB');
               return { say: t(s, L.confirmDob) };
             }
@@ -443,6 +594,7 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
               // Recognized number, different person: existing-patient family
               // path — collect who the patient is; never the new/existing
               // interview for a recognized household (ledger rule).
+              if (topicSpent(s, 'name')) return afterIdentity(callId, s, t(s, L.verifyFail2));
               go(s, 'COLLECT_NAME');
               return { say: t(s, L.collectName) };
             }
@@ -472,18 +624,30 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
             }
             s.verifyFails += 1;
             if (s.verifyFails >= 2) return afterIdentity(callId, s, t(s, L.verifyFail2));
+            if (topicSpent(s, 'name')) return afterIdentity(callId, s, t(s, L.verifyFail2));
             go(s, 'COLLECT_NAME');
             return { say: t(s, L.verifyFail1) };
           }
 
           case 'CLASSIFY': {
+            // A caller who answers "Maria Diaz" to new-or-existing has told us
+            // something MORE useful than the question asked. Take it and move
+            // on instead of asking again (Gate B 2026-08-08).
+            const volunteered = looksLikeName(text);
+            if (volunteered && !NEW_PAT.test(text) && !EXISTING.test(text)) {
+              updateLedger(callId, { newOrExisting: 'existing', firstName: volunteered.first, lastName: volunteered.last });
+              go(s, 'COLLECT_DOB');
+              return { say: t(s, L.collectDob) };
+            }
             if (NEW_PAT.test(text) && !EXISTING.test(text)) {
               updateLedger(callId, { newOrExisting: 'new' });
+              if (topicSpent(s, 'name')) return afterIdentity(callId, s, t(s, L.thanks));
               go(s, 'COLLECT_NAME');
               return { say: t(s, L.newPatient) };
             }
             if (EXISTING.test(text)) {
               updateLedger(callId, { newOrExisting: 'existing' });
+              if (topicSpent(s, 'name')) return afterIdentity(callId, s, t(s, L.verifyFail2));
               go(s, 'COLLECT_NAME');
               return { say: t(s, L.collectName) };
             }
@@ -491,9 +655,10 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
           }
 
           case 'COLLECT_NAME': {
-            const words = text.trim().split(/\s+/).filter((w) => /^[a-záéíóúñ'-]+$/i.test(w));
-            if (words.length < 2) return unparsable(callId, s);
-            updateLedger(callId, { firstName: words[0], lastName: words.slice(1).join(' ') });
+            const name = looksLikeName(text);
+            if (!name) return unparsable(callId, s);
+            updateLedger(callId, { firstName: name.first, lastName: name.last });
+            if (topicSpent(s, 'dob')) return afterIdentity(callId, s, t(s, L.thanks));
             go(s, 'COLLECT_DOB');
             return { say: t(s, L.collectDob) };
           }
@@ -519,6 +684,7 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
             }
             s.verifyFails += 1;
             if (s.verifyFails >= 2) return afterIdentity(callId, s, t(s, L.verifyFail2));
+            if (topicSpent(s, 'name')) return afterIdentity(callId, s, t(s, L.verifyFail2));
             go(s, 'COLLECT_NAME');
             return { say: t(s, L.verifyFail1) };
           }
