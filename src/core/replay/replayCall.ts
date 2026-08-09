@@ -67,7 +67,7 @@ export function parseOfferTimes(say: string): string[] {
  */
 function simulatedSchedulingServices(
   row: CorpusRow,
-  used: { availability: number; book: number; confirmed: number; transfers: number; hadRecordedOffer: boolean },
+  used: { availability: number; book: number; confirmed: number; transfers: number; hadRecordedOffer: boolean; callbacksFiled: number },
 ): SchedulingLineServices {
   const events = row.tool_events ?? [];
   const offers = events.filter((e) => e.tool === 'sage_availability');
@@ -113,6 +113,13 @@ function simulatedSchedulingServices(
     async transfer() {
       used.transfers += 1;
       return { ok: Boolean(row.transferred_to_human) };
+    },
+    async fileCallback() {
+      // Unlike availability/book there is nothing to fake here: filing is a
+      // local record, not a service the original call had to have exercised.
+      // Counting it is what proves the caller was left with something.
+      used.callbacksFiled += 1;
+      return { ok: true, ticketNumber: `SD-CB-${used.callbacksFiled}` };
     },
   };
 }
@@ -223,7 +230,7 @@ export async function replayStoredCall(row: CorpusRow, AGENT: ReplayAgent, grade
   const filed: TicketInput[] = [];
   const pcpRouted: Array<Record<string, unknown>> = [];
   const pcpFiled: Array<Record<string, unknown>> = [];
-  const sdUsed = { availability: 0, book: 0, confirmed: 0, transfers: 0, hadRecordedOffer: false };
+  const sdUsed = { availability: 0, book: 0, confirmed: 0, transfers: 0, hadRecordedOffer: false, callbacksFiled: 0 };
   const ticketAgentSubmits: Array<Record<string, unknown>> = [];
   const line =
     AGENT === 'ticket-agent'
@@ -349,6 +356,7 @@ export async function replayStoredCall(row: CorpusRow, AGENT: ReplayAgent, grade
     book_attempts: sdUsed.book,
     booked: sdUsed.confirmed,
     had_recorded_offer: sdUsed.hadRecordedOffer,
+    sd_callbacks_filed: sdUsed.callbacksFiled,
     verdict,
     approximations: parsed.approximations.concat(
       "caller turns answered the old core's questions; replay re-pairs recorded turns to the new core's questions by state (content never invented)",

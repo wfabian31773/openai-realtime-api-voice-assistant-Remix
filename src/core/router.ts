@@ -275,6 +275,32 @@ function buildSchedulingProdServices(): SchedulingLineServices {
       if (!r.ok) console.warn(`[NEW-CORE][sd] transfer failed for ${callId}: ${reason}`);
       return { ok: Boolean(r.ok) };
     },
+    /**
+     * Only reachable after a promised transfer failed to connect. Files a
+     * scheduling callback so "someone will call you back" is a fact rather
+     * than a sentence.
+     */
+    async fileCallback(callId, input) {
+      const { SyncAgentService } = await import('../services/syncAgentService');
+      const { parseDateOfBirth } = await import('../agents/answeringServiceAgent');
+      const [first, ...rest] = (input.patientName ?? 'Unknown Caller').trim().split(/\s+/);
+      const dob = parseDateOfBirth(input.patientDob ?? '');
+      const r = await SyncAgentService.createTicketFromAgentInput({
+        firstName: first || 'Unknown',
+        lastName: rest.join(' ') || 'Caller',
+        birthMonth: String(dob.month ?? ''),
+        birthDay: String(dob.day ?? ''),
+        birthYear: String(dob.year ?? ''),
+        callbackNumber: input.callbackNumber ?? '',
+        requestCategory: 'general_question',
+        requestSummary: input.narrative,
+        departmentId: 1, // scheduling
+        priority: 'medium',
+        subject: 'Scheduling callback — transfer did not connect',
+      });
+      if (!r.success) console.error(`[NEW-CORE][sd] callback ticket FAILED for ${callId}: ${r.error ?? 'unknown'}`);
+      return { ok: Boolean(r.success), ticketNumber: r.ticketNumber };
+    },
   };
 }
 
