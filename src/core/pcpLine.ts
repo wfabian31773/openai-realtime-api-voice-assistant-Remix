@@ -113,6 +113,11 @@ const L = {
     en: 'One moment while I get that over to the team.',
     es: 'Un momento mientras se lo paso al equipo.',
   },
+  /** Read the request back before filing — the office hears what the team gets. */
+  filingWithReadback: (what: string) => ({
+    en: `I have that down as: ${what}. One moment while I get that over to the team.`,
+    es: `Lo anoté como: ${what}. Un momento mientras se lo paso al equipo.`,
+  }),
   filed: {
     en: 'Done — the team will follow up with your office. Anything else I can help with?',
     es: 'Listo — el equipo dará seguimiento con su consultorio. ¿Algo más en que pueda ayudar?',
@@ -162,7 +167,10 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
   const fileNow = (callId: string, s: PcpStatus, note?: string): CoreAction => {
     go(s, 'WRAP_QUERY');
     return {
-      say: t(s, L.filing),
+      say: (() => {
+        const what = (s.request ?? getLedger(callId)?.intent ?? '').trim().split(/\s+/).slice(0, 14).join(' ');
+        return what.split(/\s+/).length >= 2 ? t(s, L.filingWithReadback(what)) : t(s, L.filing);
+      })(),
       followUp: async () => {
         const f = getLedger(callId);
         const narrative = [
@@ -210,7 +218,24 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
           go(s, 'ENDED'); // the human queue owns the call now
           return { say: null };
         }
-        return { say: t(s, L.routeFailed) };
+        // "I'll make sure they get your information" is a PROMISE. It gets
+        // filed in the same unit, or it is a lie (Gate B PCP 2026-08-08:
+        // 91 calls promised a callback with nothing behind it).
+        const f2 = getLedger(callId);
+        const task = await services
+          .fileTask(callId, {
+            narrative: `TRANSFER NOT ANSWERED — ${s.request ?? f2?.intent ?? 'scheduling request'}`,
+            contactMethod: 'callback',
+            callbackNumber: f2?.callbackNumber ?? f2?.callerPhone ?? undefined,
+            organization: f2?.medicalGroup ?? undefined,
+            patientRef: f2?.patientReferenced ?? undefined,
+          })
+          .catch(() => ({ ok: false }));
+        go(s, 'WRAP_QUERY');
+        return {
+          say: t(s, L.routeFailed),
+          alert: task.ok ? undefined : `PCP fallback task FAILED for ${callId} — transfer unanswered and nothing filed`,
+        };
       },
     };
   };
@@ -336,8 +361,12 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
           }
 
           case 'COLLECT_CALLER': {
-            if (text.trim().split(/\s+/).length < 2) return unparsable(callId, s);
-            updateLedger(callId, { medicalGroup: text.trim().slice(0, 160) });
+            // "Albert" is an answer. Professionals give a first name, a last
+            // name, an office, or all three — any of them identifies the
+            // caller well enough to route the request (Gate B PCP).
+            const said = text.trim();
+            if (!/[a-záéíóúñ]{2,}/i.test(said)) return unparsable(callId, s);
+            updateLedger(callId, { medicalGroup: said.slice(0, 160) });
             return dispatch(callId, s);
           }
 
@@ -422,8 +451,13 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
               go(s, 'ENDED');
               return { say: t(s, L.wrap), endCall: true };
             }
-            const stripped = text.replace(/\b(actually|yes|yeah|yep|sure|please|also|sí|si|claro)\b/gi, ' ').trim();
-            if (stripped.split(/\s+/).filter(Boolean).length >= 4 || YES.test(text)) {
+            const stripped = text.replace(/\b(actually|yes|yeah|yep|ok|okay|sure|please|also|thanks|thank you|got it|sí|si|claro|gracias)\b/gi, ' ').trim();
+            const substantive = stripped.split(/\s+/).filter(Boolean).length;
+            if (substantive === 0) {
+              go(s, 'ENDED');
+              return { say: t(s, L.wrap), endCall: true };
+            }
+            if (substantive >= 4) {
               s.request = null;
               s.unresolvedInfo = null;
               s.pendingFax = null;

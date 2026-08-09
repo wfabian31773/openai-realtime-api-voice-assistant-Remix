@@ -863,8 +863,11 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
     /this is \w+/i,
     /name:\s*\w+/i,
     /i'm \w+/i,
-    // The approved collect-name script followed by a bare "First Last" answer.
-    /(first and last name|may i have your name|patient's name)[\s\S]{0,160}\n\s*CALLER:\s*[a-záéíóúñ'-]+ [a-záéíóúñ'-]+/i,
+    // An explicit name ask followed by the caller answering it. Applies to
+    // BOTH cores: every line's script asks for a name in one of these forms,
+    // and a professional answering "Albert" has given their name just as
+    // surely as one who says "my name is Albert".
+    /(first and last name|may i have your name|your name and the office|patient's name|who am i speaking)[\s\S]{0,200}\n\s*CALLER:[^\n]*[a-záéíóúñ'-]{2,}/i,
   ];
   const hasName = namePatterns.some(p => p.test(input.transcript));
   if (hasName) collectedFields.push('name');
