@@ -328,4 +328,34 @@ describe('azul-scheduling new core — Gate A', () => {
       expect(callbacks).toHaveLength(0);
     });
   });
+
+  /**
+   * A replayed tape showed the same two slots re-offered after the caller
+   * asked for "Dr. Bach", which reads like the request being ignored. It is
+   * not: the line DOES re-query with the provider — the replay harness can
+   * only serve offers the original call recorded, so it handed back the
+   * stale one. Pinned here so the real behaviour is settled by a test rather
+   * than inferred from a tape the harness shaped.
+   */
+  it('a provider named mid-offer re-queries availability for THAT provider', async () => {
+    const second: AvailabilityOffer = { say: 'I have Thursday at 10:00 AM with Dr. Bach — does that work?', optionTimes: ['10:00'] };
+    const { svc, availabilityCalls } = fakeServices({ offers: [OFFER, second] });
+    const line = createSchedulingLine(svc);
+    seedLedger(C, { matchedFirstName: 'Wayne', matchedLastName: 'Fabian', matchedDob: '1973-03-17', callerPhone: '5622001000' });
+    line.start(C);
+
+    await line.onUtterance(C, 'I need an appointment');
+    await line.onUtterance(C, 'yes');
+    await line.onUtterance(C, 'March 17 1973');
+    await speak(await line.onUtterance(C, 'Thursday morning'));
+    expect(availabilityCalls).toHaveLength(1);
+
+    const spoken = await speak(await line.onUtterance(C, "I'd like to make an appointment with Dr. Bach, please"));
+    // It asked again, and it asked FOR BACH.
+    expect(availabilityCalls).toHaveLength(2);
+    expect(String(availabilityCalls[1].providerName)).toMatch(/bach/i);
+    // And it spoke the new offer, not the old one over again.
+    expect(spoken.lines.join(' ')).toContain('Dr. Bach');
+    expect(spoken.lines.join(' ')).not.toContain('Wednesday the 13th');
+  });
 });
