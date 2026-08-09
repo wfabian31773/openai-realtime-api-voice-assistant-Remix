@@ -3738,26 +3738,52 @@ async function observeCall(
               'Speak naturally and warmly, but the words are not yours to choose.',
             tools: [],
             tool_choice: 'none',
-            // NOT FIXED HERE, DELIBERATELY. Instructions are advice, and a
-            // model handed the turn will take it: with create_response true
-            // the model answers every caller turn on its own and the module's
-            // scripted line cuts it off mid-word. The live 13:43 after-hours
-            // call did exactly that —
-            //   "I can help with that. Could you"
-            //   "May I have the patient's first and last name?"
+            // THE PART THAT ACTUALLY SILENCES THE MODEL. Stripping the tools
+            // and the prompt is not enough: with create_response true the
+            // model is still handed every caller turn, and instructions are
+            // advice, not a gate. The live 13:43 after-hours call proved it —
+            //   "I can help with that. Could you"          (model, cut off)
+            //   "May I have the patient's first and last name?"  (module)
             //   "Actually, let me quickly check if you have any open tickets"
-            // — two agents on one call, on a line that is already cut over.
+            // Two agents, one call, on a line already cut over.
             //
-            // The real fix is create_response: false, but sending it means
-            // sending an `audio` block, and this file carries two CONTRADICTORY
-            // rules about that: line ~720 says a session.update omitting the
-            // format clobbers it back to PCM16, while the accept payload below
-            // says SIP mode must NEVER send a format because the codec is
-            // negotiated in SDP and setting it causes screeching. Guessing
-            // between them on a live line risks silent calls to trade for
-            // overlapping ones. src/standalone/demoLine.ts already runs the
-            // correct architecture end to end (create_response: false, no
-            // prompt, no tools) and is the place to settle this.
+            // Why this block is shaped the way it is. There are two rules in
+            // this file that look contradictory: line ~720 says a
+            // session.update omitting the audio format clobbers it to PCM16,
+            // while the accept payload says SIP must NEVER send a format
+            // because the codec comes from SDP. Both are true of DIFFERENT
+            // things. The clobber warning is about the SDK's update path:
+            // _getMergedSessionConfig merges against
+            // DEFAULT_OPENAI_REALTIME_SESSION_CONFIG — the DEFAULTS, not the
+            // live session — so anything it is not told is sent as PCM16.
+            // This is a raw partial sendEvent, which carries only the keys
+            // named here, and the accept payload deliberately set no input
+            // format at all. So there is no format to preserve, and none is
+            // sent.
+            //
+            // What IS preserved: transcription and noise reduction are
+            // repeated verbatim, and the output voice with them, so that this
+            // update is safe whether the server merges `audio.input`
+            // field-by-field or replaces it wholesale. Under replace, this is
+            // exactly the accept payload's audio minus the format it never
+            // had. Losing transcription here would make the module deaf —
+            // strictly worse than the bug being fixed.
+            audio: {
+              input: {
+                noise_reduction: { type: 'far_field' },
+                transcription: buildTranscriptionConfig({
+                  establishedLanguage: establishedLanguageCode,
+                  callerSurname: resolvedPrecontextSurname,
+                }),
+                turn_detection: {
+                  type: 'semantic_vad',
+                  eagerness: vadEagernessFor(agentSlug),
+                  create_response: false,
+                  interrupt_response: true,
+                },
+              },
+              output: { voice: voiceForCall },
+            },
           },
         });
         console.info(`[NEW-CORE] ${agentSlug} session stripped to mouthpiece for ${callId}`);
