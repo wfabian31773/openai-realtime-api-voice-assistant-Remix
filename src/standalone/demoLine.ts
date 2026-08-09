@@ -52,10 +52,22 @@ function xmlEscape(s: string): string {
   );
 }
 
-/** Twilio posts form-encoded bodies; this server parses everything as raw. */
+/**
+ * Twilio posts form-encoded bodies. Which shape they arrive in depends on
+ * which server mounted us — the API server runs express.urlencoded (object),
+ * the voice server parses everything raw (Buffer). Handle all three rather
+ * than depend on the host's middleware order.
+ */
 function formFields(body: unknown): URLSearchParams {
   if (Buffer.isBuffer(body)) return new URLSearchParams(body.toString('utf8'));
   if (typeof body === 'string') return new URLSearchParams(body);
+  if (body && typeof body === 'object') {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(body as Record<string, unknown>)) {
+      if (typeof v === 'string') p.set(k, v);
+    }
+    return p;
+  }
   return new URLSearchParams();
 }
 

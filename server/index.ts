@@ -438,6 +438,20 @@ async function startServer() {
   // All async initialization (DB warmup, route registration) runs after the
   // server is already accepting connections.
   const earlyServer = http.createServer(app);
+
+  // The standalone demo line lives HERE, on the public server, not on the
+  // voice server behind the /api/voice proxy — that proxy speaks HTTP only
+  // and cannot forward the WebSocket upgrade a media stream needs. Mounted
+  // before listen so the upgrade handler is attached when the first call
+  // lands, and before registerRoutes so nothing can shadow /demo/*.
+  // A failure here must never stop the API server.
+  try {
+    const { mountDemoLine } = await import('../src/standalone/demoLine');
+    mountDemoLine(app, earlyServer);
+  } catch (err) {
+    console.error('[STARTUP] Demo line failed to mount (rest of the server unaffected):', err);
+  }
+
   await new Promise<void>((resolve, reject) => {
     earlyServer.listen(PORT, '0.0.0.0', () => resolve());
     earlyServer.once('error', reject);
