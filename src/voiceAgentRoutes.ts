@@ -4481,7 +4481,11 @@ export function setupVoiceAgentRoutes(app: Express): void {
         // 4. Default to after-hours (IVR-based calls) - no-ivr uses dedicated endpoint
         
         // Valid inbound agents (strict allowlist)
-        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'pcp'];
+        // 'demo' is the rapid-test line (operator 2026-08-09) — it has its own
+        // number and runs the ticket agent. This list is a SECOND allowlist,
+        // separate from validAgentSlugs in observeCall(); both must know a slug
+        // or the call is silently answered by the after-hours agent.
+        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'pcp', 'demo'];
         const validOutboundAgents = ['drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
         const legacyDeletedAgents = ['greeter', 'non-urgent-ticketing'];
         
@@ -4583,11 +4587,27 @@ export function setupVoiceAgentRoutes(app: Express): void {
           conferenceNameFromSIP,
         };
         
-        // FINAL VALIDATION: Ensure only valid agents are used (strict enforcement)
+        // FINAL VALIDATION: Ensure only valid agents are used (strict enforcement).
+        // An agent that EXISTS AND IS ACTIVE in the database is not an unknown
+        // slug. Coercing one to 'after-hours' answers a brand new line with the
+        // wrong agent while the call record still looks normal — exactly how the
+        // demo line took three calls as the after-hours agent (2026-08-09).
         const allValidAgents = [...validInboundAgents, ...validOutboundAgents];
         if (!allValidAgents.includes(agentSlug)) {
-          console.warn(`[WEBHOOK] ⚠️ Invalid agent slug '${agentSlug}' - coercing to 'after-hours' (strict enforcement)`);
-          agentSlug = 'after-hours';
+          let webhookDbAgentExists = false;
+          try {
+            const { storage: webhookAgentStore } = await import('../server/storage');
+            const webhookDbAgent = await webhookAgentStore.getAgentBySlug(agentSlug);
+            webhookDbAgentExists = Boolean(webhookDbAgent && webhookDbAgent.status === 'active');
+          } catch (e) {
+            console.warn(`[WEBHOOK] Could not check the agents table for '${agentSlug}':`, e);
+          }
+          if (webhookDbAgentExists) {
+            console.info(`[WEBHOOK] '${agentSlug}' is an active agent in the database — routing as itself`);
+          } else {
+            console.warn(`[WEBHOOK] ⚠️ Invalid agent slug '${agentSlug}' - coercing to 'after-hours' (strict enforcement)`);
+            agentSlug = 'after-hours';
+          }
         }
         
         console.info(`[WEBHOOK] ✓ Final agent selection: ${agentSlug}`);

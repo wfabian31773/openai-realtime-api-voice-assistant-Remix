@@ -38,6 +38,17 @@ const TICKET_AGENT_LINES = new Set(
   (process.env.TICKET_AGENT_LINES ?? '').split(',').map((x) => x.trim()).filter(Boolean),
 );
 
+/**
+ * The demo line (+1 626-548-2660) exists ONLY to exercise the ticket agent,
+ * so it is a ticket-agent line unconditionally — no secret to set, nothing to
+ * forget. Its wording is tuned live from the ticket_agent_config 'demo' row,
+ * which is the whole point: iterate without a republish.
+ */
+const DEMO_SLUG = 'demo';
+function isTicketAgentLine(slug: string): boolean {
+  return slug === DEMO_SLUG || TICKET_AGENT_LINES.has(slug);
+}
+
 const modules = new Map<string, LineModule>();
 
 function buildProdServices(): TicketLineServices {
@@ -93,12 +104,12 @@ function buildProdServices(): TicketLineServices {
 
 /** The line module for a slug, or null when the old core keeps the call. */
 export function newCoreFor(slug: string): LineModule | null {
-  if (!NEW_CORE_LINES.has(slug) && !TICKET_AGENT_LINES.has(slug)) return null;
+  if (!NEW_CORE_LINES.has(slug) && !isTicketAgentLine(slug)) return null;
   let mod = modules.get(slug);
   if (!mod) {
     // TICKET_AGENT_LINES puts the five-step ticket agent on a line, ahead of
     // every other module. One job, one file (src/core/ticketAgent.ts).
-    if (TICKET_AGENT_LINES.has(slug)) {
+    if (isTicketAgentLine(slug)) {
       mod = createTicketAgent(buildTicketAgentServices(), {
         slug,
         humanLine:
@@ -132,7 +143,7 @@ export function newCoreFor(slug: string): LineModule | null {
 const BUILT_LINES = new Set(['answering-service', 'pcp', 'no-ivr', 'after-hours', 'azul-scheduling']);
 
 export function newCoreEnabled(slug: string): boolean {
-  return TICKET_AGENT_LINES.has(slug) || (NEW_CORE_LINES.has(slug) && BUILT_LINES.has(slug));
+  return isTicketAgentLine(slug) || (NEW_CORE_LINES.has(slug) && BUILT_LINES.has(slug));
 }
 
 function buildPcpProdServices(): ProfessionalLineServices {
