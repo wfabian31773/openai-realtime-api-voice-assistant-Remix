@@ -13,15 +13,10 @@ const OPENAI_REALTIME_PRICING = {
   outputTextPerK: MODEL_PRICING['gpt-realtime'].textOutputPerM / 1000,
 };
 
-/**
- * Duration-based OpenAI estimate, used ONLY when token counts are missing.
- * 0.19 c/sec = 11.4 c/min — the blended gpt-realtime audio rate assuming a
- * 70/30 listen/speak split (the same split the historical backfill used).
- * The previous value (0.027 c/sec = 1.62 c/min) under-reported ~7x, and the
- * admin recalculate endpoint used 19 c/min — a units slip of this same
- * number. ALL duration estimates must use this constant.
- */
-export const OPENAI_COST_CENTS_PER_SECOND = 0.19;
+// Rate lives in callCostRates — a pure module, so cost reporting does not
+// require the OpenAI client this file constructs. Re-exported unchanged.
+import { OPENAI_COST_CENTS_PER_SECOND } from './callCostRates';
+export { OPENAI_COST_CENTS_PER_SECOND };
 
 const OPENAI_AUDIO_INPUT_RATE = 6;
 const OPENAI_AUDIO_OUTPUT_RATE = 24;
