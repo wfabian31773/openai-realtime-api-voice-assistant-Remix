@@ -1,4 +1,5 @@
 import express, { Request, Response } from "express";
+import http from "http";
 import bodyParser from "body-parser";
 import { agentRegistry } from './config/agents';
 import { medicalSafetyGuardrails } from './agents/afterHoursAgent';
@@ -38,6 +39,10 @@ app.use(bodyParser.raw({ type: "*/*" }));
 
 // Setup voice agent routes (Twilio webhooks, OpenAI webhooks, etc.)
 setupVoiceAgentRoutes(app);
+
+// The demo line runs on its OWN http server + WebSocket, sharing nothing with
+// the routes above. It is created here only so both can share the port.
+const httpServer = http.createServer(app);
 
 // Tracking active calls for graceful shutdown
 const activeCallTasks = new Map<string, Promise<void>>();
@@ -159,7 +164,17 @@ async function startVoiceServer() {
     console.log('[SECRET VALIDATION] All required secrets loaded successfully');
   }
   
-  app.listen(PORT, "0.0.0.0", () => {
+  // Standalone demo line (POST /demo/voice + wss /demo/stream). Mounted
+  // before listen so the upgrade handler is attached when the first call
+  // lands. A failure here must never stop the production voice server.
+  try {
+    const { mountDemoLine } = await import('./standalone/demoLine');
+    mountDemoLine(app, httpServer);
+  } catch (err) {
+    console.error('[STARTUP] Demo line failed to mount (production unaffected):', err);
+  }
+
+  httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`\n========================================`);
     console.log(`🚀 Azul Vision AI Operations Hub`);
     console.log(`   Build: ${BUILD_VERSION}`);
