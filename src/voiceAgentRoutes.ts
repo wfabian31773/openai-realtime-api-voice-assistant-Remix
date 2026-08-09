@@ -2727,6 +2727,27 @@ async function observeCall(
         // regardless of who is driving (operator principle 2026-08-07).
         harvestCallerLine(callId, transcript);
 
+        // THE CONSTANTS, ON EVERY TURN. One line per caller utterance showing
+        // exactly what the call knows and where it came from — matched from
+        // caller-ID, stated by the caller, or still empty. Operator request
+        // 2026-08-09: "I want to see in the logs where it's grabbing the
+        // context." An empty slot here IS the bug, visible as it happens.
+        try {
+          const cf = getCallFacts(callId);
+          if (cf) {
+            const src = (stated?: string, matched?: string) =>
+              stated ? `${stated}(said)` : matched ? `${matched}(caller-ID)` : '—';
+            console.info(
+              `[CONTEXT] ${effectiveSlug} ${callId.slice(-6)} | name=${src(cf.firstName, cf.matchedFirstName)} ${src(cf.lastName, cf.matchedLastName)}` +
+                ` | dob=${src(cf.dateOfBirth, cf.matchedDob)} | verified=${cf.identityVerified ? 'YES' : 'no'}` +
+                ` | callback=${cf.callbackNumber ? `${cf.callbackNumber.slice(-4)}${cf.callbackConfirmed ? '(confirmed)' : '(unconfirmed)'}` : '—'}` +
+                ` | reason=${cf.intent ? `"${cf.intent.slice(0, 40)}"` : '—'}` +
+                ` | lang=${cf.language ?? 'en'}${cf.contactMethod && cf.contactMethod !== 'callback' ? ` | via=${cf.contactMethod}` : ''}` +
+                ` | core=${newCoreCalls.has(callId) ? 'NEW' : 'old'}`,
+            );
+          }
+        } catch { /* logging must never affect a call */ }
+
         // Reconstruction cutover: the new-core line module owns EVERY turn of
         // this call. It returns the exact next line (and executes its own
         // tools in code); the model's improvised reply is cancelled and the
