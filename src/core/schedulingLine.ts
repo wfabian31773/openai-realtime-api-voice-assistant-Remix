@@ -31,6 +31,25 @@ export interface SchedulingLineServices {
   book(callId: string, input: { optionNumber: number; confirmedTimeSpoken: string }): Promise<{ status: 'confirmed' | 'unknown' | 'failed'; say?: string; patientScript?: string }>;
   /** Transfer to the office queue; also used for new patients and book failures. */
   transfer(callId: string, reason: string): Promise<{ ok: boolean }>;
+  /**
+   * The ONLY thing this line may file, and only on one path: a transfer we
+   * already promised out loud did not connect. Without it the caller is told
+   * "I'll make sure they get your information and call you back" and no
+   * information exists anywhere — measured on 183 of 348 replayed SD calls
+   * (2026-08-09), every one of them a promise with no record behind it.
+   * Optional so existing wirings keep compiling; when absent, the gap is
+   * still alerted rather than silently accepted.
+   */
+  fileCallback?(
+    callId: string,
+    input: {
+      reason: string;
+      patientName?: string;
+      patientDob?: string;
+      callbackNumber?: string;
+      narrative: string;
+    },
+  ): Promise<{ ok: boolean; ticketNumber?: string }>;
 }
 
 type SdState =
@@ -145,6 +164,18 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
     }
   };
 
+  /** What the caller was after, in the words the office needs to act on it. */
+  const describeRequest = (s: SdStatus): string => {
+    const bits: string[] = [];
+    if (s.pref.providerName) bits.push(`asked for ${s.pref.providerName}`);
+    if (s.pref.locationName) bits.push(`location: ${s.pref.locationName}`);
+    if (s.pref.preferredDate) bits.push(`preferred date: ${s.pref.preferredDate}`);
+    if (s.pref.preferredTime) bits.push(`preferred time: ${s.pref.preferredTime}`);
+    else if (s.pref.timeOfDay && s.pref.timeOfDay !== 'ALL') bits.push(`prefers ${s.pref.timeOfDay}`);
+    if (s.offer?.say) bits.push(`was offered: ${s.offer.say}`);
+    return bits.length ? `Caller ${bits.join('; ')}.` : 'No scheduling preferences were captured before the handoff.';
+  };
+
   /** Any exit that belongs with a human: say the line, then dial, in one unit. */
   const transferNow = (callId: string, s: SdStatus, line: string, reason: string): CoreAction => {
     go(s, 'ENDED');
@@ -153,9 +184,28 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
       followUp: async () => {
         const r = await services.transfer(callId, reason).catch(() => ({ ok: false }));
         if (r.ok) return { say: null };
+        // The promise is about to be made out loud, so the record has to
+        // exist before the caller hangs up on it.
+        const f = getLedger(callId);
+        const name = [f?.firstName, f?.lastName].filter(Boolean).join(' ').trim();
+        const filed = await services
+          .fileCallback?.(callId, {
+            reason,
+            patientName: name || undefined,
+            patientDob: f?.dateOfBirth ?? undefined,
+            callbackNumber: f?.callbackNumber ?? f?.callerPhone ?? undefined,
+            narrative: `Scheduling call — transfer to the office queue did not connect (${reason}). ${describeRequest(s)}`,
+          })
+          .catch(() => ({ ok: false }));
+        if (filed?.ok) {
+          return {
+            say: "The team isn't picking up right now — I've taken your information down and someone will call you back.",
+          };
+        }
         return {
           say: "The team isn't picking up right now — I'll make sure they get your information and call you back.",
-          alert: `SD transfer failed for ${callId} (${reason})`,
+          // A promise with nothing behind it. Loud on purpose.
+          alert: `SD transfer failed AND no callback record for ${callId} (${reason}) — caller was promised a call back`,
         };
       },
     };

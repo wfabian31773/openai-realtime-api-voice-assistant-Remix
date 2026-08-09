@@ -19,10 +19,14 @@ function fakeServices(opts: {
   offers?: (AvailabilityOffer | null)[];
   book?: Array<{ status: 'confirmed' | 'unknown' | 'failed'; say?: string; patientScript?: string }>;
   transferOk?: boolean;
+  /** Omit fileCallback entirely, as an old wiring would. */
+  noCallbackService?: boolean;
+  callbackOk?: boolean;
 } = {}) {
   const availabilityCalls: Array<Record<string, unknown>> = [];
   const bookCalls: Array<{ optionNumber: number; confirmedTimeSpoken: string }> = [];
   const transfers: string[] = [];
+  const callbacks: Array<Record<string, unknown>> = [];
   const offerQueue = [...(opts.offers ?? [])];
   const bookQueue = [...(opts.book ?? [])];
   const svc: SchedulingLineServices = {
@@ -41,8 +45,16 @@ function fakeServices(opts: {
       transfers.push(reason);
       return { ok: opts.transferOk ?? true };
     }),
+    ...(opts.noCallbackService
+      ? {}
+      : {
+          fileCallback: vi.fn(async (_c: string, input: Record<string, unknown>) => {
+            callbacks.push(input);
+            return opts.callbackOk === false ? { ok: false } : { ok: true, ticketNumber: 'SD-CB-1' };
+          }),
+        }),
   };
-  return { svc, availabilityCalls, bookCalls, transfers };
+  return { svc, availabilityCalls, bookCalls, transfers, callbacks };
 }
 
 async function speak(action: CoreAction) {
@@ -255,5 +267,65 @@ describe('azul-scheduling new core — Gate A', () => {
     const a = await line.onUtterance(C, 'hola necesito una cita por favor');
     expect(a.say).toBe('¿Hablo con Luis?');
     expect(getLedger(C)!.language).toBe('Spanish');
+  });
+
+  /**
+   * Measured 2026-08-09: 183 of 348 replayed SD calls ended on "I'll make
+   * sure they get your information and call you back" with nothing filed
+   * anywhere. A promise nobody can keep is worse than a transfer that fails
+   * honestly, so the record is now part of the promise.
+   */
+  describe('a promised call back leaves a record', () => {
+    const startVerified = async (svc: SchedulingLineServices) => {
+      const line = createSchedulingLine(svc);
+      seedLedger(C, { matchedFirstName: 'Wayne', matchedLastName: 'Fabian', matchedDob: '1973-03-17', callerPhone: '5622001000' });
+      line.start(C);
+      await line.onUtterance(C, 'I need to book an appointment');
+      await line.onUtterance(C, 'yes');
+      await line.onUtterance(C, 'March 17 1973');
+      return line;
+    };
+    // Availability down. The line retries once in silence, THEN hands to
+    // the team — so it takes two to reach the transfer.
+    const DOWN = null;
+
+    it('files a scheduling callback with the caller and their preference when the transfer fails', async () => {
+      const { svc, callbacks } = fakeServices({ verify: true, transferOk: false, offers: [DOWN, DOWN] });
+      const line = await startVerified(svc);
+      const spoken = await speak(await line.onUtterance(C, 'Tuesday morning with Dr. Bach'));
+
+      expect(callbacks).toHaveLength(1);
+      expect(String(callbacks[0].callbackNumber)).toBe('5622001000');
+      expect(String(callbacks[0].patientName)).toContain('Wayne');
+      // The office needs to know what the caller actually wanted.
+      expect(String(callbacks[0].narrative).toLowerCase()).toContain('bach');
+      // And the caller is told the truth: it is written down.
+      expect(spoken.lines.join(' ')).toContain("I've taken your information down");
+    });
+
+    it('when nothing can be filed, the caller is still answered - and it alerts', async () => {
+      const { svc } = fakeServices({ verify: true, transferOk: false, callbackOk: false, offers: [DOWN, DOWN] });
+      const line = await startVerified(svc);
+      const spoken = await speak(await line.onUtterance(C, 'Tuesday morning'));
+
+      expect(spoken.lines.join(' ')).toContain('call you back');
+      expect(spoken.alerts.some((a) => a.includes('no callback record'))).toBe(true);
+    });
+
+    it('an old wiring with no fileCallback still answers the caller and alerts', async () => {
+      const { svc } = fakeServices({ verify: true, transferOk: false, noCallbackService: true, offers: [DOWN, DOWN] });
+      const line = await startVerified(svc);
+      const spoken = await speak(await line.onUtterance(C, 'Tuesday morning'));
+
+      expect(spoken.lines.join(' ')).toContain('call you back');
+      expect(spoken.alerts.some((a) => a.includes('no callback record'))).toBe(true);
+    });
+
+    it('a transfer that CONNECTS files nothing - the human has the caller', async () => {
+      const { svc, callbacks } = fakeServices({ verify: true, transferOk: true, offers: [DOWN, DOWN] });
+      const line = await startVerified(svc);
+      await speak(await line.onUtterance(C, 'Tuesday morning'));
+      expect(callbacks).toHaveLength(0);
+    });
   });
 });
