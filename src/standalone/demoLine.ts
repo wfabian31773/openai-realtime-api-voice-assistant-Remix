@@ -47,6 +47,18 @@ const MOUTHPIECE_INSTRUCTIONS = [
 
 const FALLBACK_GREETING = 'Thank you for calling Azul Vision. How can I help you today?';
 
+/**
+ * What this build of the line actually DOES, stamped on every call.
+ *
+ * Half of 2026-08-09 was spent arguing about which build answered a call —
+ * asking the operator to check a deploy number, guessing from behaviour,
+ * being wrong. A version number would need maintaining and would lie the
+ * first time someone forgot. This describes CAPABILITIES instead, so the
+ * call record answers "which build was this?" without anyone remembering
+ * anything. Add a behaviour, add it here.
+ */
+const LINE_CAPABILITIES = ['tuned-transcriber', 'speech-gated-turns', 'no-self-response'].join(',');
+
 function xmlEscape(s: string): string {
   return s.replace(/[<>&'"]/g, (c) =>
     ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[c]!,
@@ -123,7 +135,7 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
 
   // A plain GET so the line can be proved reachable from a browser.
   app.get('/demo/health', (_req: Request, res: Response) => {
-    res.json({ ok: true, line: SLUG, active: calls.size, streamPath: STREAM_PATH });
+    res.json({ ok: true, line: SLUG, active: calls.size, streamPath: STREAM_PATH, capabilities: LINE_CAPABILITIES.split(',') });
   });
 
   // ------------------------------------------------------------- the socket
@@ -171,7 +183,7 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
     twilio.on('error', (e) => console.warn('[DEMO-LINE] twilio socket error:', e));
   });
 
-  console.info(`[DEMO-LINE] ready — POST /demo/voice, stream ${STREAM_PATH}`);
+  console.info(`[DEMO-LINE] ready — POST /demo/voice, stream ${STREAM_PATH} [${LINE_CAPABILITIES}]`);
 }
 
 // --------------------------------------------------------------- call setup
@@ -464,6 +476,7 @@ async function recordCall(call: DemoCall): Promise<void> {
       status: 'completed',
       transcript: call.transcript.join('\n'),
       agentUsed: SLUG,
+      agentVersion: LINE_CAPABILITIES,
       environment: process.env.APP_ENV ?? 'development',
     } as never);
     console.info(`[DEMO-LINE] ${call.callId} written to call_logs`);
