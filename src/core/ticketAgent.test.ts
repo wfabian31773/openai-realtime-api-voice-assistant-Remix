@@ -170,4 +170,60 @@ describe('ticket agent — five steps, nothing else', () => {
       expect(reachable, `${key} has no way to deliver the answer`).toBe(true);
     }
   });
+
+  it('a denied identity is never filed against the matched patient', async () => {
+    const { svc, submitted } = services({ verify: true });
+    const a = createTicketAgent(svc);
+    seedLedger(C, { matchedFirstName: 'Wayne', matchedLastName: 'Fabian', matchedDob: '1973-03-17', callerPhone: '8455317471' });
+    a.start(C);
+
+    let r = await a.onUtterance(C, "no, this isn't Wayne");
+    expect(r.say).toContain('How can I help you today?');
+    r = await a.onUtterance(C, 'I need a refill for my mother');
+    // It must ask WHO — the matched name is not this caller's patient.
+    expect(r.say).toContain("patient's first and last name");
+    await a.onUtterance(C, 'Elena Ruiz');
+    await a.onUtterance(C, 'April 2 1948');
+    await speak(await a.onUtterance(C, 'yes'));
+    expect(submitted[0].fields.patient_name).toBe('Elena Ruiz');
+  });
+
+  it('"schedule my cataract surgery" is surgery, not a generic appointment', async () => {
+    const { svc, submitted } = services();
+    const a = createTicketAgent(svc);
+    seedLedger(C, { callerPhone: '5551112222' });
+    a.start(C);
+    await a.onUtterance(C, 'I need to schedule my cataract surgery');
+    await a.onUtterance(C, 'Wayne Fabian');
+    const r = await a.onUtterance(C, 'March 17 1973');
+    expect(r.say).toContain('Which doctor');       // surgery needs the surgeon
+    await a.onUtterance(C, 'Doctor Logan');
+    await speak(await a.onUtterance(C, 'yes'));
+    expect(submitted[0].intent).toBe('surgery');
+    expect(submitted[0].department).toBe(2);
+  });
+
+  it('an emergency on the first words still keeps the request', async () => {
+    const { svc } = services();
+    const a = createTicketAgent(svc);
+    seedLedger(C, { callerPhone: '5551112222' });
+    a.start(C);
+    const r = await a.onUtterance(C, 'I have sudden vision loss after my surgery');
+    expect(r.say).toContain('nine one one');
+    // and it did not forget why they called
+    expect(a.stateOf(C)).toContain('surgery');
+  });
+
+  it('a hang-up mid-flow still files, once a number is known', async () => {
+    const { svc, submitted } = services();
+    const a = createTicketAgent(svc);
+    seedLedger(C, { callerPhone: '5551112222' });
+    a.start(C);
+    await a.onUtterance(C, 'I need a refill on my eye drops');
+    await a.onUtterance(C, 'Wayne Fabian');
+    // caller drops here
+    const r = await a.finalize!(C);
+    expect(r.filed).toBe(true);
+    expect(submitted[0].fields.patient_name).toBe('Wayne Fabian');
+  });
 });

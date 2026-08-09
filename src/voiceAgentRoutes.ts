@@ -4074,12 +4074,29 @@ async function observeCall(
     responseInFlight.delete(callId);
     pendingGreetings.delete(callId);
     lastFactsRender.delete(callId);
-    releaseLedger(callId);
-    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
-    releaseRamp(callId);
-    releaseNewCoreCall(callId);
-    cancelPendingHangup(callId);
-    newCoreCalls.delete(callId);
+    // HANG-UP SAFETY NET, BEFORE ANYTHING IS CLEARED. A caller who gave us
+    // enough to act on and then dropped must still leave a ticket behind —
+    // and finalize needs both the ledger and the module state to do it, so
+    // it runs first and everything else waits for it (review 2026-08-09).
+    void (async () => {
+      try {
+        const mod = newCoreCalls.has(callId) ? newCoreFor(effectiveSlug) : null;
+        if (mod?.finalize) {
+          const r = await mod.finalize(callId);
+          if (r.filed) console.info(`[NEW-CORE] hang-up ticket filed for ${callId}`);
+          if (r.alert) console.error(`[NEW-CORE][ALERT] ${r.alert}`);
+        }
+      } catch (e) {
+        console.warn(`[NEW-CORE] finalize failed for ${callId}:`, e);
+      } finally {
+        releaseLedger(callId);
+        void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
+        releaseRamp(callId);
+        releaseNewCoreCall(callId);
+        cancelPendingHangup(callId);
+        newCoreCalls.delete(callId);
+      }
+    })();
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
     deadAirWatchdog.release(callId);

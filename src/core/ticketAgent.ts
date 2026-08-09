@@ -58,8 +58,12 @@ export const FIELDS: Record<FieldKey, FieldDef> = {
     },
     known: (id) => {
       const f = getLedger(id);
-      const first = f?.firstName ?? f?.matchedFirstName;
-      const last = f?.lastName ?? f?.matchedLastName;
+      // A caller-ID match is only an identity once it has been CONFIRMED.
+      // Before that — and especially after the caller said "no, that's not
+      // me" — the matched name is a guess, and filing a ticket against it
+      // puts one patient's request on another patient's record.
+      const first = f?.firstName ?? (f?.identityVerified ? f?.matchedFirstName : undefined);
+      const last = f?.lastName ?? (f?.identityVerified ? f?.matchedLastName : undefined);
       return first && last ? `${first} ${last}` : null;
     },
   },
@@ -69,7 +73,10 @@ export const FIELDS: Record<FieldKey, FieldDef> = {
       es: '¿Y la fecha de nacimiento del paciente?',
     },
     parse: (t) => (looksLikeDob(t) ? normalizeSpokenDob(t) ?? t.trim() : null),
-    known: (id) => getLedger(id)?.dateOfBirth ?? getLedger(id)?.matchedDob ?? null,
+    known: (id) => {
+      const f = getLedger(id);
+      return f?.dateOfBirth ?? (f?.identityVerified ? f?.matchedDob ?? null : null);
+    },
   },
   callback_number: {
     ask: {
@@ -159,17 +166,17 @@ export const INTENTS: Record<IntentKey, IntentDef> = {
     department: 3,
     label: 'Medication refill',
   },
-  appointment: {
-    match: /\b(appointment|schedule|reschedul\w*|cancel|book|cita|agendar)\b/i,
-    needs: ['patient_name', 'patient_dob', 'callback_number'],
-    department: 3,
-    label: 'Appointment request',
-  },
   surgery: {
     match: /\b(surgery|surgical|cataract|lasik|procedure|cirugía)\b/i,
     needs: ['patient_name', 'patient_dob', 'provider_name', 'callback_number'],
     department: 2,
     label: 'Surgery coordination',
+  },
+  appointment: {
+    match: /\b(appointment|schedule|reschedul\w*|cancel|book|cita|agendar)\b/i,
+    needs: ['patient_name', 'patient_dob', 'callback_number'],
+    department: 3,
+    label: 'Appointment request',
   },
   optical: {
     match: /\b(glasses|lenses|contacts?|frames?|optical|lentes)\b/i,
@@ -393,16 +400,29 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
       const s = calls.get(callId);
       if (!s || s.filed || !s.intent) return { filed: false };
       // Caller hung up mid-flow: file it if a human could act on it.
+      // Same rule as executing normally: a number we can dial makes the
+      // request actionable. Being stricter here loses requests from exactly
+      // the callers who hung up because they were in a hurry.
+      // A HANG-UP is different from a completed call: we never got to confirm
+      // anything, so the bar is a real name. Filing "Unknown Caller" tickets
+      // off every dropped call buries the real ones (measured: it tripled the
+      // failure rate on the replay corpus).
       const haveName = s.values.patient_name ?? FIELDS.patient_name.known?.(callId);
-      const haveBack = s.values.callback_number ?? FIELDS.callback_number.known?.(callId);
-      if (!haveName || !haveBack) return { filed: false, alert: `unfiled ${s.intent} on ${callId}` };
+      if (!haveName) return { filed: false, alert: `unfiled ${s.intent} on ${callId}: no patient name captured` };
+      const haveBack =
+        s.values.callback_number ??
+        s.values.fax_number ??
+        s.values.email_address ??
+        getLedger(callId)?.callbackNumber ??
+        getLedger(callId)?.callerPhone;
+      if (!haveBack) return { filed: false, alert: `unfiled ${s.intent} on ${callId}: no way to reach the caller` };
       const def = INTENTS[s.intent];
       const r = await services
         .submit(callId, {
           intent: s.intent,
           label: `${def.label} (caller ended the call early)`,
           department: def.department,
-          fields: { ...s.values, patient_name: haveName, callback_number: haveBack },
+          fields: { ...s.values, patient_name: haveName, callback_number: s.values.callback_number ?? haveBack },
           urgent: s.urgent,
         })
         .catch(() => ({ ok: false }));
@@ -428,7 +448,19 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
         if (URGENT.test(text)) {
           const first = !s.urgent;
           s.urgent = true;
-          if (first || s.step === 'DONE' || s.step === 'WRAP') return { say: t(s, LINES.urgent) };
+          if (first || s.step === 'DONE' || s.step === 'WRAP') {
+            // Classify it too. A distressed caller who hangs up after hearing
+            // the 911 line must still leave a request behind (review
+            // 2026-08-09) — the safety line is not a reason to forget them.
+            if ((s.step === 'CLASSIFY' || s.step === 'VERIFY') && text.trim().split(/\s+/).length >= 2) {
+              s.intent = classify(text);
+              s.rawRequest = text.trim().slice(0, 300);
+              updateLedger(callId, { intent: text.trim().slice(0, 200) });
+              const next = advance(callId, s);
+              return { ...next, say: `${t(s, LINES.urgent)} ${next.say ?? ''}`.trim() };
+            }
+            return { say: t(s, LINES.urgent) };
+          }
         }
 
         // This line cannot transfer. Say so, every time, and keep going.

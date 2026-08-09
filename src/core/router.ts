@@ -279,7 +279,7 @@ function buildTicketAgentServices(): TicketAgentServices {
       const r = await scheduleLookupService.lookupByNameAndDOB(first ?? '', rest.join(' '), dob);
       return Boolean((r as { patientFound?: boolean })?.patientFound);
     },
-    async submit(_callId, ticket) {
+    async submit(_callId: string, ticket) {
       const { SyncAgentService } = await import('../services/syncAgentService');
       const { parseDateOfBirth } = await import('../agents/answeringServiceAgent');
       const f = ticket.fields;
@@ -293,13 +293,22 @@ function buildTicketAgentServices(): TicketAgentServices {
         f.office_location ? `Office: ${f.office_location}` : null,
         f.provider_name ? `Doctor: ${f.provider_name}` : null,
       ].filter(Boolean).join(' — ');
+      // The phone field is a PHONE. A fax line recorded there sends staff to
+      // a fax machine; an email request has no phone at all and the ticket is
+      // rejected outright (review 2026-08-09). Fax and email are delivery
+      // addresses for the ANSWER — they belong in their own fields, and the
+      // caller's own number stays the callback.
+      const { getLedger } = await import('../services/callFactsLedger');
+      const callerPhone = getLedger(_callId)?.callbackNumber ?? getLedger(_callId)?.callerPhone;
       const r = await SyncAgentService.createTicketFromAgentInput({
         firstName: first ?? 'Unknown',
         lastName: rest.join(' ') || 'Caller',
         birthMonth: String(dob.month ?? ''),
         birthDay: String(dob.day ?? ''),
         birthYear: String(dob.year ?? ''),
-        callbackNumber: f.callback_number ?? f.fax_number ?? '',
+        callbackNumber: f.callback_number ?? callerPhone ?? '',
+        email: f.email_address ?? null,
+        preferredContact: f.email_address ? 'email' : 'phone',
         requestCategory: 'general_question',
         requestSummary: description,
         departmentId: ticket.department,
