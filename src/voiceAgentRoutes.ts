@@ -1066,6 +1066,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
   const policy = resolveHandoffDestination({
     agentSlug: escalationDetails?.agentSlug,
     callerType,
+    callerRequestedHuman: escalationDetails?.callerRequestedHuman,
     clinicalNumber: HUMAN_AGENT_NUMBER,
     pcpNumber: envConfig.twilio.pcpHumanAgentNumber,
   });
@@ -2728,20 +2729,32 @@ async function observeCall(
         harvestCallerLine(callId, transcript);
 
         // THE CONSTANTS, ON EVERY TURN. One line per caller utterance showing
-        // exactly what the call knows and where it came from — matched from
-        // caller-ID, stated by the caller, or still empty. Operator request
-        // 2026-08-09: "I want to see in the logs where it's grabbing the
-        // context." An empty slot here IS the bug, visible as it happens.
+        // WHERE each fact came from — matched from caller-ID, stated by the
+        // caller, or still empty. Operator request 2026-08-09: "I want to see
+        // in the logs where it's grabbing the context." An empty slot here IS
+        // the bug, visible as it happens.
+        //
+        // PHI: under DISABLE_PHI_LOGGING the SHAPE still prints (present /
+        // absent / source) but never the values — that is what diagnoses a
+        // lost constant, and it costs no patient data to see it.
         try {
           const cf = getCallFacts(callId);
           if (cf) {
+            const show = (v?: string) => (DISABLE_PHI_LOGGING ? (v ? 'set' : '—') : (v ?? '—'));
             const src = (stated?: string, matched?: string) =>
-              stated ? `${stated}(said)` : matched ? `${matched}(caller-ID)` : '—';
+              stated ? `${show(stated)}(said)` : matched ? `${show(matched)}(caller-ID)` : '—';
+            const last4 = cf.callbackNumber
+              ? `${DISABLE_PHI_LOGGING ? '••••' : cf.callbackNumber.slice(-4)}${cf.callbackConfirmed ? '(confirmed)' : '(unconfirmed)'}`
+              : '—';
+            const reason = cf.intent
+              ? DISABLE_PHI_LOGGING
+                ? `set(${cf.intent.trim().split(/\s+/).length}w)`
+                : `"${cf.intent.slice(0, 40)}"`
+              : '—';
             console.info(
               `[CONTEXT] ${effectiveSlug} ${callId.slice(-6)} | name=${src(cf.firstName, cf.matchedFirstName)} ${src(cf.lastName, cf.matchedLastName)}` +
                 ` | dob=${src(cf.dateOfBirth, cf.matchedDob)} | verified=${cf.identityVerified ? 'YES' : 'no'}` +
-                ` | callback=${cf.callbackNumber ? `${cf.callbackNumber.slice(-4)}${cf.callbackConfirmed ? '(confirmed)' : '(unconfirmed)'}` : '—'}` +
-                ` | reason=${cf.intent ? `"${cf.intent.slice(0, 40)}"` : '—'}` +
+                ` | callback=${last4} | reason=${reason}` +
                 ` | lang=${cf.language ?? 'en'}${cf.contactMethod && cf.contactMethod !== 'callback' ? ` | via=${cf.contactMethod}` : ''}` +
                 ` | core=${newCoreCalls.has(callId) ? 'NEW' : 'old'}`,
             );

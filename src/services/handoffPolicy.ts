@@ -33,6 +33,15 @@ type Params = {
   callerType?: string;
   clinicalNumber?: string;
   pcpNumber?: string;
+  /**
+   * The caller explicitly asked to speak to a person. On the PCP line this
+   * always reaches the office queue during business hours, whatever the call
+   * is about — operator directive 2026-08-09 after surgery centers were
+   * refused: 355 of 457 PCP calls were promised something and 11 transferred,
+   * because purposes like service_inquiry and provider_information are not in
+   * the HAND_OFF set. An explicit ask outranks the classification.
+   */
+  callerRequestedHuman?: boolean;
   /** Injected by tests; production reads the Pacific clock. */
   lunchClosure?: boolean;
 };
@@ -95,7 +104,8 @@ export function resolvePcpDialSequence(params: {
 
 export function resolveHandoffDestination(params: Params): HandoffPolicyResult {
   if (params.agentSlug === 'pcp') {
-    if (!params.callerType || !PCP_CALLER_TYPES.has(params.callerType)) {
+    const askedForAPerson = params.callerRequestedHuman === true;
+    if (!askedForAPerson && (!params.callerType || !PCP_CALLER_TYPES.has(params.callerType))) {
       return { allowed: false, reason: 'pcp_reason_not_allowed' };
     }
     // LUNCH CLOSURE, 12:00-13:00 Pacific (operator directive 2026-08-06).

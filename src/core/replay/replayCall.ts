@@ -66,7 +66,7 @@ export function parseOfferTimes(say: string): string[] {
  */
 function simulatedSchedulingServices(
   row: CorpusRow,
-  used: { availability: number; book: number; transfers: number; hadRecordedOffer: boolean },
+  used: { availability: number; book: number; confirmed: number; transfers: number; hadRecordedOffer: boolean },
 ): SchedulingLineServices {
   const events = row.tool_events ?? [];
   const offers = events.filter((e) => e.tool === 'sage_availability');
@@ -78,7 +78,12 @@ function simulatedSchedulingServices(
       return Boolean(row.patient_found);
     },
     async availability(): Promise<AvailabilityOffer> {
-      const rec = offers[Math.min(used.availability, offers.length - 1)];
+      // One recorded offer per recorded lookup. When the new core asks MORE
+      // times than the real call did (e.g. the earliest-opening fallback),
+      // there is no evidence for what the service would have said — so we
+      // return nothing rather than re-serving a stale offer, which would let
+      // the replay book against a slot the service never offered.
+      const rec = used.availability < offers.length ? offers[used.availability] : undefined;
       used.availability += 1;
       const say = typeof rec?.outcome?.say === 'string' ? (rec.outcome.say as string) : '';
       if (!say) {
@@ -91,9 +96,13 @@ function simulatedSchedulingServices(
       return { say, optionTimes: parseOfferTimes(say), empty: parseOfferTimes(say).length === 0 };
     },
     async book() {
-      const rec = books[Math.min(used.book, Math.max(books.length - 1, 0))];
+      // No recorded sage_book for this attempt = no evidence it would have
+      // succeeded. 'unknown' keeps the caller un-promised and keeps the
+      // replay honest; claiming 'confirmed' invented bookings that never were.
+      const rec = used.book < books.length ? books[used.book] : undefined;
       used.book += 1;
-      const status = String(rec?.outcome?.booking_status ?? (books.length ? 'unknown' : 'confirmed'));
+      const status = String(rec?.outcome?.booking_status ?? 'unknown');
+      if (status === 'confirmed') used.confirmed += 1;
       return {
         status: status === 'confirmed' ? 'confirmed' : status === 'unknown' ? 'unknown' : 'failed',
         say: typeof rec?.outcome?.say === 'string' ? (rec.outcome.say as string) : undefined,
@@ -213,7 +222,7 @@ export async function replayStoredCall(row: CorpusRow, AGENT: ReplayAgent, grade
   const filed: TicketInput[] = [];
   const pcpRouted: Array<Record<string, unknown>> = [];
   const pcpFiled: Array<Record<string, unknown>> = [];
-  const sdUsed = { availability: 0, book: 0, transfers: 0, hadRecordedOffer: false };
+  const sdUsed = { availability: 0, book: 0, confirmed: 0, transfers: 0, hadRecordedOffer: false };
   const line =
     AGENT === 'pcp'
       ? createPcpLine(simulatedPcpServices(row, pcpRouted, pcpFiled))
@@ -317,7 +326,8 @@ export async function replayStoredCall(row: CorpusRow, AGENT: ReplayAgent, grade
     old_critical: oldCritical,
     tickets_filed: filed.length + pcpFiled.length,
     transfers: pcpRouted.length + sdUsed.transfers,
-    booked: sdUsed.book,
+    book_attempts: sdUsed.book,
+    booked: sdUsed.confirmed,
     had_recorded_offer: sdUsed.hadRecordedOffer,
     verdict,
     approximations: parsed.approximations.concat(

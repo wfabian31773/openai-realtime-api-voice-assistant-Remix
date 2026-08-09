@@ -23,7 +23,7 @@ import {
   dobMatchesContext,
 } from '../services/callFactsLedger';
 import type { CoreAction, LineModule, TicketLineServices, ClassifyResult } from './types';
-import { looksLikeName, DOB_PATTERN } from './parsing';
+import { looksLikeName, DOB_PATTERN, normalizeSpokenDob } from './parsing';
 
 type ASState =
   | 'INTENT'
@@ -600,15 +600,16 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
 
           case 'CONFIRM_DOB': {
             if (!DOB_RX.test(text)) return unparsable(callId, s);
-            updateLedger(callId, { dateOfBirth: text.trim() });
+            const spokenDob = normalizeSpokenDob(text) ?? text.trim();
+            updateLedger(callId, { dateOfBirth: spokenDob });
             // Compare against the record we ALREADY pulled — no fresh lookup
             // for an ASR spelling to miss (operator 2026-08-07). Lookup only
             // when the matched record carries no DOB to compare against.
-            let match = dobMatchesContext(callId, text.trim());
+            let match = dobMatchesContext(callId, spokenDob);
             const f = getLedger(callId);
             if (match === null) {
               match = await services
-                .verifyByLookup(f?.matchedFirstName ?? '', f?.matchedLastName ?? '', text.trim())
+                .verifyByLookup(f?.matchedFirstName ?? '', f?.matchedLastName ?? '', spokenDob)
                 .catch(() => false);
             }
             if (match === true) {
@@ -662,17 +663,18 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
 
           case 'COLLECT_DOB': {
             if (!DOB_RX.test(text)) return unparsable(callId, s);
-            updateLedger(callId, { dateOfBirth: text.trim() });
+            const dob = normalizeSpokenDob(text) ?? text.trim();
+            updateLedger(callId, { dateOfBirth: dob });
             const f = getLedger(callId);
             if (f?.newOrExisting === 'new') {
               // New patients don't verify — straight on with the request.
               return afterIdentity(callId, s, t(s, L.thanks));
             }
-            const ctx = dobMatchesContext(callId, text.trim());
+            const ctx = dobMatchesContext(callId, dob);
             let ok = ctx === true;
             if (ctx === null) {
               ok = await services
-                .verifyByLookup(f?.firstName ?? '', f?.lastName ?? '', text.trim())
+                .verifyByLookup(f?.firstName ?? '', f?.lastName ?? '', dob)
                 .catch(() => false);
             }
             if (ok) {

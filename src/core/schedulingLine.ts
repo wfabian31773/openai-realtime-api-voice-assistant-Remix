@@ -15,7 +15,7 @@
  */
 import { getLedger, updateLedger, harvestCallerLine, dobMatchesContext } from '../services/callFactsLedger';
 import type { CoreAction, LineModule } from './types';
-import { looksLikeName, DOB_PATTERN } from './parsing';
+import { looksLikeName, DOB_PATTERN, normalizeSpokenDob } from './parsing';
 
 export interface AvailabilityOffer {
   /** The server's speakable offer — spoken WORD-FOR-WORD, never rephrased. */
@@ -284,7 +284,11 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
   /** DOB in hand → verify against the pulled record, then the preference ask. */
   const handleDob = async (callId: string, s: SdStatus, text: string): Promise<CoreAction> => {
 
-            updateLedger(callId, { dateOfBirth: text.trim() });
+            // Verification needs YYYY-MM-DD; the caller said "August
+            // twenty-seven, forty-five". Normalize before comparing, or the
+            // recognised date fails anyway (review 2026-08-09).
+            const spokenDob = normalizeSpokenDob(text) ?? text.trim();
+            updateLedger(callId, { dateOfBirth: spokenDob });
             const f = getLedger(callId);
             if (f?.newOrExisting === 'new') {
               return transferNow(callId, s, t(s, L.newPatient), 'new patient');
@@ -292,9 +296,9 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
             const first = f?.firstName ?? f?.matchedFirstName ?? '';
             const last = f?.lastName ?? f?.matchedLastName ?? '';
             // Context first: compare to the record already pulled.
-            let ok = dobMatchesContext(callId, text.trim()) === true;
+            let ok = dobMatchesContext(callId, spokenDob) === true;
             if (!ok) {
-              ok = await services.verifyIdentity(callId, first, last, text.trim()).catch(() => false);
+              ok = await services.verifyIdentity(callId, first, last, spokenDob).catch(() => false);
             }
             if (ok) {
               updateLedger(callId, { firstName: first, lastName: last, identityVerified: true });
