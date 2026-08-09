@@ -60,7 +60,11 @@ beforeAll(async () => {
   // ---- the demo line itself --------------------------------------------
   const { mountDemoLine } = await import('./demoLine');
   const app = express();
-  app.use(bodyParser.raw({ type: '*/*' })); // same parser as the real server
+  // The API server that actually mounts this uses express.urlencoded, and the
+  // voice server uses a raw parser — the route must survive either, so the
+  // test runs BOTH parsers ahead of it (urlencoded wins, giving an object).
+  app.use(express.urlencoded({ extended: true }));
+  app.use(bodyParser.raw({ type: '*/*' }));
   server = http.createServer(app);
   mountDemoLine(app, server);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
