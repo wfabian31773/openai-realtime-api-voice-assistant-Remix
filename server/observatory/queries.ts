@@ -1066,3 +1066,99 @@ export async function todayOverview(): Promise<TodayOverview> {
     sage,
   };
 }
+
+/* ── Gate B replay tapes (reconstruction-plan.md §5) ─────────────────────
+ * Side-by-side judgment: the old core's actual transcript against what the
+ * new core would have said on the SAME call, both scored by the same
+ * graders. This is the evidence a line cuts over on — nothing is flipped
+ * on numbers alone.
+ */
+export interface ReplaySummaryRow {
+  agent: string;
+  calls: number;
+  oldCriticalCalls: number;
+  newCriticalCalls: number;
+  better: number;
+  same: number;
+  worse: number;
+  replayedAt: string | null;
+}
+
+export async function replaySummary(): Promise<ReplaySummaryRow[]> {
+  const { rows } = await pool.query(
+    `
+    SELECT agent,
+           COUNT(*)::int AS calls,
+           COUNT(*) FILTER (WHERE old_critical_count > 0)::int AS old_crit,
+           COUNT(*) FILTER (WHERE new_critical_count > 0)::int AS new_crit,
+           COUNT(*) FILTER (WHERE verdict = 'better')::int AS better,
+           COUNT(*) FILTER (WHERE verdict = 'same')::int AS same,
+           COUNT(*) FILTER (WHERE verdict = 'worse')::int AS worse,
+           MAX(replayed_at) AS replayed_at
+    FROM new_core_replays
+    GROUP BY agent ORDER BY agent
+    `,
+  );
+  return rows.map((r: any) => ({
+    agent: r.agent,
+    calls: r.calls,
+    oldCriticalCalls: r.old_crit,
+    newCriticalCalls: r.new_crit,
+    better: r.better,
+    same: r.same,
+    worse: r.worse,
+    replayedAt: r.replayed_at,
+  }));
+}
+
+/** One tape: both transcripts and both verdicts for a single real call. */
+export async function replayTape(callLogId: string): Promise<{
+  callLogId: string;
+  agent: string;
+  verdict: string | null;
+  oldTranscript: string | null;
+  newTranscript: string | null;
+  newGraders: unknown;
+  oldCriticalCount: number;
+  newCriticalCount: number;
+  approximations: string[] | null;
+} | null> {
+  const { rows } = await pool.query(
+    `SELECT call_log_id, agent, verdict, new_transcript, new_grader_results,
+            new_critical_count, old_critical_count, approximations
+     FROM new_core_replays WHERE call_log_id = $1 LIMIT 1`,
+    [callLogId],
+  );
+  if (!rows.length) return null;
+  const r = rows[0] as any;
+  const old = await pool.query(`SELECT transcript FROM call_logs WHERE id = $1 LIMIT 1`, [callLogId]);
+  return {
+    callLogId: r.call_log_id,
+    agent: r.agent,
+    verdict: r.verdict,
+    oldTranscript: old.rows[0]?.transcript ?? null,
+    newTranscript: r.new_transcript,
+    newGraders: r.new_grader_results,
+    oldCriticalCount: r.old_critical_count,
+    newCriticalCount: r.new_critical_count,
+    approximations: r.approximations,
+  };
+}
+
+/** The tapes worth a human's time first: regressions, then biggest wins. */
+export async function replayTapeList(agent: string, verdict = 'worse', limit = 25): Promise<Array<{
+  callLogId: string; verdict: string; oldCriticalCount: number; newCriticalCount: number;
+}>> {
+  const { rows } = await pool.query(
+    `SELECT call_log_id, verdict, old_critical_count, new_critical_count
+     FROM new_core_replays WHERE agent = $1 AND verdict = $2
+     ORDER BY (new_critical_count - old_critical_count) DESC LIMIT $3`,
+    [agent, verdict, limit],
+  );
+  return rows.map((r: any) => ({
+    callLogId: r.call_log_id,
+    verdict: r.verdict,
+    oldCriticalCount: r.old_critical_count,
+    newCriticalCount: r.new_critical_count,
+  }));
+}
