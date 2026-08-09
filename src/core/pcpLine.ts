@@ -47,6 +47,8 @@ type PcpState =
 interface PcpStatus {
   state: PcpState;
   lang: 'en' | 'es';
+  /** Two asks per topic, per call — several states ask the same thing. */
+  asked: Map<string, number>;
   unparsed: number;
   urgent: boolean;
   spanishHits: number;
@@ -146,6 +148,22 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
     s.unparsed = 0;
   };
 
+  type PcpTopic = 'caller' | 'callback' | 'fax' | 'email';
+  const TOPIC_OF: Partial<Record<PcpState, PcpTopic>> = {
+    COLLECT_CALLER: 'caller',
+    CONFIRM_CALLBACK: 'callback',
+    COLLECT_CALLBACK: 'callback',
+    COLLECT_FAX: 'fax',
+    CONFIRM_FAX: 'fax',
+    COLLECT_EMAIL: 'email',
+    CONFIRM_EMAIL: 'email',
+  };
+  const topicSpent = (s: PcpStatus, topic: PcpTopic): boolean => {
+    const n = (s.asked.get(topic) ?? 0) + 1;
+    s.asked.set(topic, n);
+    return n > 2;
+  };
+
   const question = (callId: string, s: PcpStatus): string => {
     switch (s.state) {
       case 'COLLECT_CALLER': return t(s, L.collectCaller);
@@ -218,24 +236,26 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
           go(s, 'ENDED'); // the human queue owns the call now
           return { say: null };
         }
-        // "I'll make sure they get your information" is a PROMISE. It gets
-        // filed in the same unit, or it is a lie (Gate B PCP 2026-08-08:
-        // 91 calls promised a callback with nothing behind it).
+        // "I'll make sure they get your information" is a PROMISE — so we
+        // then ASK for the information rather than filing a task with only a
+        // caller ID on it (Gate B PCP 2026-08-08: all 47 regressions were
+        // exactly this). The task is filed once we have who to call back.
         const f2 = getLedger(callId);
-        const task = await services
-          .fileTask(callId, {
-            narrative: `TRANSFER NOT ANSWERED — ${s.request ?? f2?.intent ?? 'scheduling request'}`,
-            contactMethod: 'callback',
-            callbackNumber: f2?.callbackNumber ?? f2?.callerPhone ?? undefined,
-            organization: f2?.medicalGroup ?? undefined,
-            patientRef: f2?.patientReferenced ?? undefined,
-          })
-          .catch(() => ({ ok: false }));
-        go(s, 'WRAP_QUERY');
-        return {
-          say: t(s, L.routeFailed),
-          alert: task.ok ? undefined : `PCP fallback task FAILED for ${callId} — transfer unanswered and nothing filed`,
-        };
+        s.unresolvedInfo = 'transfer not answered — callback required';
+        if (!f2?.medicalGroup && !topicSpent(s, 'caller')) {
+          go(s, 'COLLECT_CALLER');
+          return { say: `${t(s, L.routeFailed)} ${t(s, L.collectCaller)}` };
+        }
+        if (f2?.callbackNumber && !f2.callbackConfirmed && !topicSpent(s, 'callback')) {
+          go(s, 'CONFIRM_CALLBACK');
+          return { say: `${t(s, L.routeFailed)} ${t(s, L.confirmCallback(f2.callbackNumber.slice(-4)))}` };
+        }
+        if (!f2?.callbackNumber && !topicSpent(s, 'callback')) {
+          go(s, 'COLLECT_CALLBACK');
+          return { say: `${t(s, L.routeFailed)} ${t(s, L.collectCallback)}` };
+        }
+        const done = fileNow(callId, s, 'transfer not answered');
+        return { ...done, say: `${t(s, L.routeFailed)} ${done.say ?? ''}`.trim() };
       },
     };
   };
@@ -260,10 +280,12 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
     updateLedger(callId, { contactMethod: 'callback' });
     const cb = f?.callbackNumber;
     if (cb && !f?.callbackConfirmed) {
+      if (topicSpent(s, 'callback')) return fileNow(callId, s, 'callback unconfirmed — used caller ID');
       go(s, 'CONFIRM_CALLBACK');
       return { say: t(s, L.confirmCallback(cb.slice(-4))) };
     }
     if (!cb) {
+      if (topicSpent(s, 'callback')) return fileNow(callId, s, 'no callback captured');
       go(s, 'COLLECT_CALLBACK');
       return { say: t(s, L.collectCallback) };
     }
@@ -297,7 +319,8 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
 
   const unparsable = (callId: string, s: PcpStatus): CoreAction => {
     s.unparsed += 1;
-    if (s.unparsed >= 2) return fallForward(callId, s);
+    const topic = TOPIC_OF[s.state];
+    if (s.unparsed >= 2 || (topic && topicSpent(s, topic))) return fallForward(callId, s);
     return { say: question(callId, s) };
   };
 
@@ -308,6 +331,7 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
       calls.set(callId, {
         state: 'INTENT',
         lang: 'en',
+        asked: new Map(),
         unparsed: 0,
         urgent: false,
         spanishHits: 0,
@@ -321,6 +345,27 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
 
     stateOf(callId: string): string | null {
       return calls.get(callId)?.state ?? null;
+    },
+
+    async finalize(callId: string): Promise<{ filed: boolean; alert?: string }> {
+      const s = calls.get(callId);
+      if (!s || s.state === 'ENDED') return { filed: false };
+      const f = getLedger(callId);
+      const request = s.request ?? f?.intent ?? null;
+      const callback = f?.callbackNumber ?? f?.callerPhone;
+      if (!request || !callback) return { filed: false };
+      const r = await services
+        .fileTask(callId, {
+          narrative: `CALL ENDED BEFORE CONFIRMATION — ${request}`,
+          contactMethod: (f?.contactMethod ?? 'callback') as 'callback' | 'fax' | 'email',
+          faxNumber: f?.faxNumber ?? undefined,
+          email: f?.email ?? undefined,
+          callbackNumber: callback,
+          organization: f?.medicalGroup ?? undefined,
+          patientRef: f?.patientReferenced ?? undefined,
+        })
+        .catch(() => ({ ok: false }));
+      return { filed: Boolean(r.ok), alert: r.ok ? undefined : `PCP hang-up task lost for ${callId}` };
     },
 
     release(callId: string): void {
@@ -433,6 +478,7 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
                 updateLedger(callId, { callbackNumber: num[0].replace(/[^\d+]/g, ''), callbackConfirmed: true });
                 return fileNow(callId, s);
               }
+              if (topicSpent(s, 'callback')) return fileNow(callId, s, 'callback not re-captured — used caller ID');
               go(s, 'COLLECT_CALLBACK');
               return { say: t(s, L.collectCallback) };
             }
