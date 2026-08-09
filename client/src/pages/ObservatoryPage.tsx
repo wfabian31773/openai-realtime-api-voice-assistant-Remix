@@ -392,11 +392,12 @@ function StatusDot({ tone }: { tone: Tone }) {
 // 2026-08-07). Overview answers "is anything red"; every red opens into
 // the tab that explains WHY.
 
-type ObsTab = 'overview' | 'brief' | 'health' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'syncs' | 'changes'
+type ObsTab = 'overview' | 'brief' | 'replays' | 'health' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'syncs' | 'changes'
 
 const TABS: Array<{ key: ObsTab; label: string }> = [
   { key: 'overview', label: 'Overview' },
   { key: 'brief', label: 'Daily Brief' },
+  { key: 'replays', label: 'New Core Replays' },
   { key: 'health', label: 'Health' },
   { key: 'guards', label: 'Guards & Failures' },
   { key: 'director', label: 'Director' },
@@ -554,6 +555,7 @@ export default function ObservatoryPage() {
 
       {tab === 'overview' && <CommandCenterTab onOpenGuards={openGuardsFor} onOpenDirector={() => setTab('director')} />}
       {tab === 'brief' && <DailyBriefTab />}
+      {tab === 'replays' && <ReplaysTab />}
       {tab === 'health' && (
         <HealthTab scorecards={scorecards} onOpenGuards={openGuardsFor} onOpenDirector={() => setTab('director')} />
       )}
@@ -2013,5 +2015,184 @@ function SpineStrip() {
         )
       })}
     </div>
+  )
+}
+
+// ─── New Core Replays (reconstruction-plan.md §5, Gate B) ────────────────
+// The cutover evidence: what the new core WOULD have said on a real call,
+// beside what the old core actually said, both scored by the same graders.
+// Regressions are listed first on purpose — the case against goes on top.
+
+interface ReplaySummaryRow {
+  agent: string
+  calls: number
+  oldCriticalCalls: number
+  newCriticalCalls: number
+  better: number
+  same: number
+  worse: number
+  replayedAt: string | null
+}
+
+interface ReplayTape {
+  callLogId: string
+  agent: string
+  verdict: string | null
+  oldTranscript: string | null
+  newTranscript: string | null
+  oldCriticalCount: number
+  newCriticalCount: number
+  approximations: string[] | null
+}
+
+function pct(n: number, d: number) {
+  return d ? `${((100 * n) / d).toFixed(1)}%` : '—'
+}
+
+function TranscriptPane({ title, text, tone }: { title: string; text: string | null; tone: 'old' | 'new' }) {
+  return (
+    <div className="flex-1 min-w-0">
+      <h4 className={`mb-1 text-xs font-semibold uppercase tracking-wide ${tone === 'old' ? 'text-muted-foreground' : 'text-emerald-700'}`}>
+        {title}
+      </h4>
+      <pre className="max-h-[28rem] overflow-auto whitespace-pre-wrap rounded border bg-muted/30 p-3 text-xs leading-relaxed">
+        {text ?? '(not stored)'}
+      </pre>
+    </div>
+  )
+}
+
+function ReplaysTab() {
+  const [agent, setAgent] = useState('pcp')
+  const [verdict, setVerdict] = useState('worse')
+  const [openCall, setOpenCall] = useState<string | null>(null)
+
+  const summary = useQuery<{ summary: ReplaySummaryRow[] }>({
+    queryKey: ['obs-replays'],
+    queryFn: async () => (await apiClient.get('/observatory/replays')).data,
+  })
+  const list = useQuery<{ tapes: Array<{ callLogId: string; verdict: string; oldCriticalCount: number; newCriticalCount: number }> }>({
+    queryKey: ['obs-replay-list', agent, verdict],
+    queryFn: async () => (await apiClient.get(`/observatory/replays/${agent}/list?verdict=${verdict}`)).data,
+  })
+  const tape = useQuery<ReplayTape>({
+    queryKey: ['obs-replay-tape', openCall],
+    queryFn: async () => (await apiClient.get(`/observatory/replay/${openCall}`)).data,
+    enabled: Boolean(openCall),
+  })
+
+  const rows = summary.data?.summary ?? []
+
+  return (
+    <section className="space-y-6">
+      <div>
+        <h3 className="text-lg font-semibold">New core vs old core, on real calls</h3>
+        <p className="text-sm text-muted-foreground">
+          Every call below actually happened. The new core was fed the same caller turns and scored by the same
+          graders. Nothing cuts over on these numbers alone — read the tapes.
+        </p>
+      </div>
+
+      {summary.isLoading && <p className="text-sm text-muted-foreground">Loading replay results…</p>}
+      {rows.length === 0 && !summary.isLoading && (
+        <p className="text-sm text-muted-foreground">No replays loaded yet.</p>
+      )}
+
+      {rows.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-left text-xs uppercase text-muted-foreground">
+              <tr>
+                <th className="py-2">Line</th>
+                <th>Calls</th>
+                <th>Old critical</th>
+                <th>New critical</th>
+                <th>Better</th>
+                <th>Same</th>
+                <th>Worse</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.agent} className="border-t">
+                  <td className="py-2 font-medium">{r.agent}</td>
+                  <td>{r.calls}</td>
+                  <td className="text-red-600">{pct(r.oldCriticalCalls, r.calls)}</td>
+                  <td className="font-semibold text-emerald-700">{pct(r.newCriticalCalls, r.calls)}</td>
+                  <td>{r.better}</td>
+                  <td>{r.same}</td>
+                  <td className={r.worse ? 'text-amber-600' : ''}>{r.worse}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        {rows.map((r) => (
+          <button
+            key={r.agent}
+            onClick={() => { setAgent(r.agent); setOpenCall(null) }}
+            className={`rounded border px-3 py-1 text-sm ${agent === r.agent ? 'bg-foreground text-background' : ''}`}
+          >
+            {r.agent}
+          </button>
+        ))}
+        <span className="mx-2 text-muted-foreground">|</span>
+        {['worse', 'better', 'same'].map((v) => (
+          <button
+            key={v}
+            onClick={() => { setVerdict(v); setOpenCall(null) }}
+            className={`rounded border px-3 py-1 text-sm ${verdict === v ? 'bg-foreground text-background' : ''}`}
+          >
+            {v}
+          </button>
+        ))}
+      </div>
+
+      <div className="grid gap-2">
+        {(list.data?.tapes ?? []).map((t) => (
+          <button
+            key={t.callLogId}
+            onClick={() => setOpenCall(t.callLogId === openCall ? null : t.callLogId)}
+            className="flex items-center justify-between rounded border px-3 py-2 text-left text-sm hover:bg-muted/40"
+          >
+            <span className="font-mono text-xs">{t.callLogId.slice(0, 8)}</span>
+            <span className="text-xs text-muted-foreground">
+              old {t.oldCriticalCount} critical → new {t.newCriticalCount}
+            </span>
+          </button>
+        ))}
+        {list.data && list.data.tapes.length === 0 && (
+          <p className="text-sm text-muted-foreground">No {verdict} tapes for {agent}.</p>
+        )}
+      </div>
+
+      {openCall && tape.data && (
+        <div className="space-y-2 rounded border p-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h4 className="font-semibold">Call {tape.data.callLogId.slice(0, 8)} — {tape.data.verdict}</h4>
+            <span className="text-xs text-muted-foreground">
+              old {tape.data.oldCriticalCount} critical → new {tape.data.newCriticalCount}
+            </span>
+          </div>
+          <div className="flex flex-col gap-4 md:flex-row">
+            <TranscriptPane title="Old core (what actually happened)" text={tape.data.oldTranscript} tone="old" />
+            <TranscriptPane title="New core (what it would have said)" text={tape.data.newTranscript} tone="new" />
+          </div>
+          {tape.data.approximations && tape.data.approximations.length > 0 && (
+            <details className="text-xs text-muted-foreground">
+              <summary className="cursor-pointer">Replay caveats ({tape.data.approximations.length})</summary>
+              <ul className="ml-4 list-disc">
+                {tape.data.approximations.map((a, i) => (
+                  <li key={i}>{a}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+    </section>
   )
 }
