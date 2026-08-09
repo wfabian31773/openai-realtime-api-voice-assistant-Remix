@@ -398,6 +398,7 @@ async function endCall(twilio: WebSocket, reason: string): Promise<void> {
   }
 
   console.info(`[DEMO-LINE] ===== transcript ${call.callId} =====\n${call.transcript.join('\n')}\n=====`);
+  void recordCall(call);
 
   try {
     call.openai?.close();
@@ -408,6 +409,35 @@ async function endCall(twilio: WebSocket, reason: string): Promise<void> {
     if (twilio.readyState === WebSocket.OPEN) twilio.close();
   } catch {
     /* already gone */
+  }
+}
+
+/**
+ * Write the call to call_logs so a demo call can be READ, not recited.
+ * Every round of "paste me the logs" costs the operator a call and me a turn;
+ * the transcript belongs somewhere both of us can query. Best effort by
+ * design — a logging failure must never affect the call, which by this point
+ * has already ended anyway.
+ */
+async function recordCall(call: DemoCall): Promise<void> {
+  try {
+    const { storage } = await import('../../server/storage');
+    const agent = await storage.getAgentBySlug(SLUG);
+    await storage.createCallLog({
+      callSid: call.callId,
+      agentId: agent?.id,
+      direction: 'inbound',
+      from: call.callerPhone ? `+1${call.callerPhone}` : 'unknown',
+      to: '+16265482660',
+      dialedNumber: '+16265482660',
+      status: 'completed',
+      transcript: call.transcript.join('\n'),
+      agentUsed: SLUG,
+      environment: process.env.APP_ENV ?? 'development',
+    } as never);
+    console.info(`[DEMO-LINE] ${call.callId} written to call_logs`);
+  } catch (e) {
+    console.warn(`[DEMO-LINE] could not write call_logs for ${call.callId}:`, e);
   }
 }
 
