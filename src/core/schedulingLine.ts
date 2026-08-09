@@ -265,6 +265,31 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
     return { say: question(callId, s) };
   };
 
+  /** DOB in hand → verify against the pulled record, then the preference ask. */
+  const handleDob = async (callId: string, s: SdStatus, text: string): Promise<CoreAction> => {
+
+            updateLedger(callId, { dateOfBirth: text.trim() });
+            const f = getLedger(callId);
+            if (f?.newOrExisting === 'new') {
+              return transferNow(callId, s, t(s, L.newPatient), 'new patient');
+            }
+            const first = f?.firstName ?? f?.matchedFirstName ?? '';
+            const last = f?.lastName ?? f?.matchedLastName ?? '';
+            // Context first: compare to the record already pulled.
+            let ok = dobMatchesContext(callId, text.trim()) === true;
+            if (!ok) {
+              ok = await services.verifyIdentity(callId, first, last, text.trim()).catch(() => false);
+            }
+            if (ok) {
+              updateLedger(callId, { firstName: first, lastName: last, identityVerified: true });
+              return afterVerified(callId, s, `Thanks, ${first}.`);
+            }
+            s.verifyFails += 1;
+            if (s.verifyFails >= 2) return transferNow(callId, s, t(s, L.verifyFail2), 'identity not verified');
+            go(s, 'COLLECT_NAME');
+            return { say: t(s, L.verifyFail1) };
+  };
+
   const afterVerified = (callId: string, s: SdStatus, prefix: string): CoreAction => {
     go(s, 'ASK_PREFERENCE');
     return { say: `${prefix} ${t(s, L.askPreference)}` };
@@ -274,8 +299,13 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
     slug: 'azul-scheduling',
 
     start(callId: string): void {
+      // The SD greeting for a RECOGNIZED caller already asks "Am I speaking
+      // with {first}?" — so the caller's first words answer that question,
+      // not "why are you calling". Starting at INTENT here is what killed
+      // ramp v1 live on 2026-08-07; the replay caught the same shape.
+      const seeded = getLedger(callId);
       calls.set(callId, {
-        state: 'INTENT',
+        state: seeded?.matchedFirstName ? 'CONFIRM_ID' : 'INTENT',
         lang: 'en',
         unparsed: 0,
         verifyFails: 0,
@@ -331,6 +361,12 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
           }
 
           case 'CONFIRM_ID': {
+            // A caller who answers with their date of birth has confirmed
+            // identity and answered the next question at once — take both.
+            if (DOB_RX.test(text) && !NO.test(text)) {
+              go(s, 'CONFIRM_DOB');
+              return handleDob(callId, s, text);
+            }
             if (YES.test(text) && !NO.test(text)) {
               go(s, 'CONFIRM_DOB');
               return { say: t(s, L.confirmDob) };
@@ -345,26 +381,7 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
           case 'CONFIRM_DOB':
           case 'COLLECT_DOB': {
             if (!DOB_RX.test(text)) return unparsable(callId, s);
-            updateLedger(callId, { dateOfBirth: text.trim() });
-            const f = getLedger(callId);
-            if (f?.newOrExisting === 'new') {
-              return transferNow(callId, s, t(s, L.newPatient), 'new patient');
-            }
-            const first = f?.firstName ?? f?.matchedFirstName ?? '';
-            const last = f?.lastName ?? f?.matchedLastName ?? '';
-            // Context first: compare to the record already pulled.
-            let ok = dobMatchesContext(callId, text.trim()) === true;
-            if (!ok) {
-              ok = await services.verifyIdentity(callId, first, last, text.trim()).catch(() => false);
-            }
-            if (ok) {
-              updateLedger(callId, { firstName: first, lastName: last, identityVerified: true });
-              return afterVerified(callId, s, `Thanks, ${first}.`);
-            }
-            s.verifyFails += 1;
-            if (s.verifyFails >= 2) return transferNow(callId, s, t(s, L.verifyFail2), 'identity not verified');
-            go(s, 'COLLECT_NAME');
-            return { say: t(s, L.verifyFail1) };
+            return handleDob(callId, s, text);
           }
 
           case 'CLASSIFY': {
