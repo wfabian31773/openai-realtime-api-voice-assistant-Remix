@@ -15,6 +15,7 @@
  */
 import { getLedger, updateLedger, harvestCallerLine, dobMatchesContext } from '../services/callFactsLedger';
 import type { CoreAction, LineModule } from './types';
+import { looksLikeName, DOB_PATTERN } from './parsing';
 
 export interface AvailabilityOffer {
   /** The server's speakable offer — spoken WORD-FOR-WORD, never rephrased. */
@@ -54,6 +55,8 @@ interface SdStatus {
   offer: AvailabilityOffer | null;
   chosenOption: number | null;
   retriedAvailability: boolean;
+  /** One "soonest available" attempt before handing a verified patient off. */
+  triedEarliest: boolean;
   pref: { preferredDate?: string; timeOfDay?: 'AM' | 'PM' | 'ALL'; preferredTime?: string; providerName?: string; locationName?: string };
 }
 
@@ -63,7 +66,7 @@ const NEW_PAT = /\b(new|nuevo|nueva|never been|first time)\b/i;
 const EXISTING = /\b(existing|current|already|been (there|seen)|existente)\b/i;
 const URGENT_RX = /\b(emergency|911|chest pain|sudden vision|bleeding|severe pain|emergencia)\b/i;
 const HUMAN_RX = /\b(representative|operator|receptionist|(real|actual|live) (person|human)|(talk|speak|connect me|transfer me).{0,20}\b(human|agent|person|somebody|someone)\b)\b/i;
-const DOB_RX = /\b(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{2,4})\b|\b(january|february|march|april|may|june|july|august|september|october|november|december|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b.*\b(19|20)\d{2}\b/i;
+const DOB_RX = DOB_PATTERN;
 const OPTION_1 = /\b(first|one|1|earlier|primera|primero|uno)\b/i;
 const OPTION_2 = /\b(second|two|2|later|segunda|segundo|dos)\b/i;
 const SPANISH_WORDS = /\b(hola|gracias|necesito|quiero|por favor|buenos|buenas|español|cita|ayuda|doctora?)\b/gi;
@@ -243,13 +246,26 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
     // The scheduling line always has somewhere to send a caller: a human.
     switch (s.state) {
       case 'CONFIRM_ID':
-      case 'CONFIRM_DOB':
       case 'CLASSIFY':
+        // An unclear answer to "new or existing" is NOT a reason to hand a
+        // patient to staff — just ask who they are. 187 replayed calls were
+        // transferred from here (Gate B SD 2026-08-09).
+        go(s, 'COLLECT_NAME');
+        return { say: t(s, L.collectName) };
+      case 'CONFIRM_DOB':
       case 'COLLECT_NAME':
       case 'COLLECT_DOB':
         return transferNow(callId, s, t(s, L.verifyFail2), 'identity not established');
       case 'ASK_PREFERENCE':
       case 'OFFER':
+        // Before giving up on a verified patient who wants an appointment,
+        // ask the server for the soonest opening — a scheduler's move.
+        if (!s.triedEarliest) {
+          s.triedEarliest = true;
+          s.pref = {};
+          s.retriedAvailability = false;
+          return offerNow(callId, s);
+        }
         return transferNow(callId, s, t(s, L.human2), 'preference not captured');
       case 'WRAP_QUERY':
         go(s, 'ENDED');
@@ -313,6 +329,7 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
         offer: null,
         chosenOption: null,
         retriedAvailability: false,
+        triedEarliest: false,
         pref: {},
       });
     },
@@ -398,9 +415,9 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
           }
 
           case 'COLLECT_NAME': {
-            const words = text.trim().split(/\s+/).filter((w) => /^[a-záéíóúñ'-]+$/i.test(w));
-            if (words.length < 2) return unparsable(callId, s);
-            updateLedger(callId, { firstName: words[0], lastName: words.slice(1).join(' ') });
+            const name = looksLikeName(text);
+            if (!name) return unparsable(callId, s);
+            updateLedger(callId, { firstName: name.first, lastName: name.last });
             go(s, 'COLLECT_DOB');
             return { say: t(s, L.collectDob) };
           }

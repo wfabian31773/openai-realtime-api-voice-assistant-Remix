@@ -23,6 +23,7 @@ import {
   dobMatchesContext,
 } from '../services/callFactsLedger';
 import type { CoreAction, LineModule, TicketLineServices, ClassifyResult } from './types';
+import { looksLikeName, DOB_PATTERN } from './parsing';
 
 type ASState =
   | 'INTENT'
@@ -72,7 +73,7 @@ const HUMAN_RX = /\b(representative|operator|receptionist|(real|actual|live) (pe
 const SHORT_AGENT_RX = /\bagents?\b|\bagente\b/i;
 const SCHEDULE_RX = /\b(schedule|reschedule|cancel|book|appointment|make an? appt|cita|agendar|reagendar|cancelar)\b/i;
 const PHONE_RX = /(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/;
-const DOB_RX = /\b(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{2,4})\b|\b(january|february|march|april|may|june|july|august|september|october|november|december|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b.*\b(19|20)\d{2}\b/i;
+const DOB_RX = DOB_PATTERN;
 const DONT_KNOW = /\b(don'?t know|not sure|no idea|can'?t remember|no s[eé]|no estoy segur)/i;
 const SPANISH_WORDS = /\b(hola|gracias|necesito|quiero|por favor|buenos|buenas|español|cita|ayuda|hablar|llamo|receta|lentes|doctora?)\b/gi;
 
@@ -86,27 +87,6 @@ function substantiveWords(text: string): number {
   return text.replace(FILLER_RX, ' ').replace(/[^\p{L}\p{N}\s]/gu, ' ').trim().split(/\s+/).filter(Boolean).length;
 }
 
-/**
- * A name is not a sentence. "I have seen before" was accepted as a patient
- * name in replay (Gate B 2026-08-08) because it was simply two-or-more
- * alphabetic words — and the bad name then failed verification forever.
- */
-const NOT_NAME_WORDS = new Set([
-  'i', 'im', 'me', 'my', 'you', 'your', 'we', 'he', 'she', 'they', 'it', 'this', 'that', 'the', 'a', 'an',
-  'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'can', 'need', 'want',
-  'call', 'called', 'calling', 'seen', 'see', 'before', 'appointment', 'doctor', 'prescription', 'refill',
-  'yes', 'no', 'not', 'please', 'thanks', 'thank', 'ok', 'okay', 'hello', 'hi', 'about', 'for', 'with',
-  'and', 'but', 'just', 'know', 'think', 'get', 'got', 'like', 'would', 'could', 'should', 'there', 'here',
-  'si', 'no', 'yo', 'mi', 'el', 'la', 'de', 'que', 'por', 'para', 'necesito', 'quiero', 'gracias',
-]);
-
-function looksLikeName(text: string): { first: string; last: string } | null {
-  const raw = text.trim().replace(/^(my name is|this is|it'?s|i'?m|es|soy)\s+/i, '');
-  const words = raw.split(/\s+/).filter((w) => /^[a-záéíóúñ'-]{2,}$/i.test(w));
-  if (words.length < 2 || words.length > 4) return null;
-  if (words.some((w) => NOT_NAME_WORDS.has(w.toLowerCase()))) return null;
-  return { first: words[0], last: words.slice(1).join(' ') };
-}
 
 /** Every line the caller can hear, EN + ES, from the approved listing. */
 const L = {
