@@ -5308,6 +5308,111 @@ export function setupVoiceAgentRoutes(app: Express): void {
     }
   });
 
+  // THE DEMO LINE (+1 626-548-2660). Its own webhook so it can never inherit
+  // another line's agent: the slug is stamped 'demo' on the SIP leg, the
+  // greeting comes from the agents row, and behaviour comes from the ticket
+  // agent with tuning read live from ticket_agent_config. Pointing this number
+  // at another line's webhook would silently run that line's agent instead —
+  // which is what happened on the first attempt (operator, 2026-08-09).
+  app.post("/api/voice/demo", webhookRateLimiter, async (req, res) => {
+    const rawBody = req.body.toString("utf8");
+    const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
+
+    const callSid = parsedBody.CallSid;
+    const callToken = parsedBody.CallToken;
+    const callerIDNumber = parsedBody.From;
+    const dialedNumber = parsedBody.To;
+
+    console.info(`\n[DEMO] ✓ Call received: ${callSid} from ${callerIDNumber} to ${dialedNumber}`);
+
+    if (!callSid || !callerIDNumber) {
+      console.error('[DEMO] ✗ Missing required parameters');
+      res.status(400).send('<Response><Say>Invalid request</Say></Response>');
+      return;
+    }
+
+    const domain = process.env.DOMAIN || req.get('host');
+    const conferenceName = `conf_${callSid}`;
+
+    callIDtoConferenceNameMapping[callSid] = conferenceName;
+    ConferenceNametoCallerIDMapping[conferenceName] = callerIDNumber;
+    ConferenceNametoCalledNumberMapping[conferenceName] = dialedNumber;
+    ConferenceNametoCallTokenMapping[conferenceName] = callToken;
+    conferenceNameToTwilioCallSid[conferenceName] = callSid;
+
+    // The greeting is whatever the agents row says, so it is tunable without
+    // a deploy like everything else on this line.
+    let demoGreeting = 'Thank you for calling Azul Vision. How can I help you today?';
+    try {
+      const agent = await storage.getAgentBySlug('demo');
+      if (agent?.welcomeGreeting) demoGreeting = agent.welcomeGreeting;
+    } catch (e) {
+      console.warn('[DEMO] Could not read the demo greeting from the DB, using the default:', e);
+    }
+
+    callMetadata.set(conferenceName, {
+      agentSlug: 'demo',
+      agentGreeting: demoGreeting,
+      language: 'english',
+      ivrSelection: undefined,
+    } as any);
+    const extendedMeta = callMetadata.get(conferenceName) as any;
+    if (extendedMeta) {
+      extendedMeta.voiceForCall = 'sage';
+      extendedMeta.languageForCall = 'en';
+    }
+
+    const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Pause length="1"/>
+  <Dial>
+    <Conference
+      beep="false"
+      waitUrl=""
+      startConferenceOnEnter="true"
+      endConferenceOnExit="true"
+      participantLabel="customer"
+      record="record-from-start"
+      recordingStatusCallback="https://${domain}/api/voice/recording-status"
+      recordingStatusCallbackMethod="POST"
+      recordingStatusCallbackEvent="completed"
+      statusCallback="https://${domain}/api/voice/conference-events"
+      statusCallbackEvent="start end join leave"
+      statusCallbackMethod="POST"
+    >
+      ${conferenceName}
+    </Conference>
+  </Dial>
+</Response>`;
+
+    res.setHeader("Content-Type", "application/xml");
+    res.send(twimlResponse);
+    console.info(`[DEMO] ✓ Caller joined conference: ${conferenceName}`);
+
+    try {
+      if (!twilioClient) twilioClient = await getTwilioClient();
+    } catch (twilioInitError) {
+      console.error('[DEMO] ✗ Failed to initialize Twilio client:', twilioInitError);
+      return;
+    }
+
+    try {
+      const effectiveToken = ConferenceNametoCallTokenMapping[conferenceName] || '';
+      await twilioClient.conferences(conferenceName).participants.create({
+        from: envConfig.twilio.phoneNumber!,
+        label: 'virtual agent',
+        to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=demo`,
+        earlyMedia: true,
+        callToken: effectiveToken,
+        conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
+        conferenceStatusCallbackEvent: ['join'],
+      });
+      console.info(`[DEMO] ✓ Demo agent added to conference: ${conferenceName}`);
+    } catch (error) {
+      console.error('[DEMO] ✗ Failed to add agent to conference:', error);
+    }
+  });
+
   // Dedicated professional-caller line. This route always stamps X-agentSlug=pcp;
   // it never inherits the after-hours default or patient-facing agent metadata.
   app.post('/api/voice/pcp', webhookRateLimiter, async (req, res) => {
