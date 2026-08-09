@@ -10,6 +10,7 @@
  * the professional is never blocked or interrogated about it.
  */
 import { getLedger, updateLedger, harvestCallerLine } from '../services/callFactsLedger';
+import { looksLikeName, normalizeSpokenDob } from './parsing';
 import type { CoreAction, LineModule } from './types';
 
 export interface ProfessionalLineServices {
@@ -35,6 +36,7 @@ export interface ProfessionalLineServices {
 type PcpState =
   | 'INTENT'
   | 'COLLECT_CALLER'
+  | 'COLLECT_PATIENT'
   | 'COLLECT_FAX'
   | 'CONFIRM_FAX'
   | 'COLLECT_EMAIL'
@@ -86,6 +88,10 @@ const L = {
   routeFailed: {
     en: "The team isn't picking up right now — I'll make sure they get your information and call your office back.",
     es: 'El equipo no contesta en este momento — me aseguraré de que reciban su información y llamen a su consultorio.',
+  },
+  collectPatient: {
+    en: "Which patient is this for — first and last name, and their date of birth?",
+    es: '¿Para qué paciente es — nombre y apellido, y su fecha de nacimiento?',
   },
   collectFax: {
     en: "What's the best fax number to send that to?",
@@ -148,9 +154,10 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
     s.unparsed = 0;
   };
 
-  type PcpTopic = 'caller' | 'callback' | 'fax' | 'email';
+  type PcpTopic = 'caller' | 'callback' | 'fax' | 'email' | 'patient';
   const TOPIC_OF: Partial<Record<PcpState, PcpTopic>> = {
     COLLECT_CALLER: 'caller',
+    COLLECT_PATIENT: 'patient',
     CONFIRM_CALLBACK: 'callback',
     COLLECT_CALLBACK: 'callback',
     COLLECT_FAX: 'fax',
@@ -167,6 +174,7 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
   const question = (callId: string, s: PcpStatus): string => {
     switch (s.state) {
       case 'COLLECT_CALLER': return t(s, L.collectCaller);
+      case 'COLLECT_PATIENT': return t(s, L.collectPatient);
       case 'COLLECT_FAX': return t(s, L.collectFax);
       case 'CONFIRM_FAX': return s.pendingFax ? t(s, L.confirmFax(s.pendingFax)) : t(s, L.collectFax);
       case 'COLLECT_EMAIL': return t(s, L.collectEmail);
@@ -267,6 +275,13 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
     if (SCHEDULE_RX.test(req)) return routeNow(callId, s);
     if (RECORDS_RX.test(req) && !EMAIL_REQ_RX.test(req)) {
       updateLedger(callId, { contactMethod: 'fax' });
+      // Records for WHOM? A fax number with no patient is an unfillable
+      // request, and saying "our team will handle it" over one is a promise
+      // with nothing behind it (live call 2026-08-09).
+      if (!f?.patientReferenced && !topicSpent(s, 'patient')) {
+        go(s, 'COLLECT_PATIENT');
+        return { say: t(s, L.collectPatient) };
+      }
       if (f?.faxNumber) return fileNow(callId, s); // harvested already
       go(s, 'COLLECT_FAX');
       return { say: t(s, L.collectFax) };
@@ -403,6 +418,19 @@ export function createPcpLine(services: ProfessionalLineServices): LineModule {
             updateLedger(callId, { intent: text.trim().slice(0, 200) });
             go(s, 'COLLECT_CALLER');
             return { say: t(s, L.collectCaller) };
+          }
+
+          case 'COLLECT_PATIENT': {
+            // Take the name (and the date of birth if it came with it) in one
+            // answer — piecemealing first name, then last name, is what makes
+            // this line feel like an interrogation.
+            const nm = looksLikeName(text);
+            const dob = normalizeSpokenDob(text);
+            if (!nm && !dob) return unparsable(callId, s);
+            updateLedger(callId, {
+              patientReferenced: [nm ? `${nm.first} ${nm.last}` : null, dob].filter(Boolean).join(' — ') || text.trim().slice(0, 80),
+            });
+            return dispatch(callId, s);
           }
 
           case 'COLLECT_CALLER': {

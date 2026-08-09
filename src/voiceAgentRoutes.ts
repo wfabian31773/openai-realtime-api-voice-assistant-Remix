@@ -1327,7 +1327,12 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
           endConferenceOnExit: true,
           statusCallback: statusCallbackUrl,
           statusCallbackEvent: ['answered', 'completed'],
-          timeout: 45, // Ring for 45 seconds max
+          // RING WINDOW. 45 seconds is an eternity to a professional caller:
+          // on 2026-08-09 a surgery-center nurse held while the agent
+          // improvised "still connecting" four times and then the call died.
+          // The PCP queue gets 20 seconds, then the caller is told the truth
+          // and gets a callback. Clinical/urgent keeps the longer window.
+          timeout: policy.policy === 'pcp' ? 20 : 45,
         }),
         twilioCircuitBreaker,
         TWILIO_RETRY_CONFIG,
@@ -1343,11 +1348,12 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       console.log(`[HANDOFF] ✓ Dialing human agent, CallSid: ${humanCallSid} (${handoffResult.attempts} attempts, ${handoffResult.totalTimeMs}ms)`);
       
       // Set up timeout now that we have the callSid
+      const ringWindowMs = policy.policy === 'pcp' ? 20_000 : 45_000;
       timeoutId = setTimeout(() => {
-        console.warn('[HANDOFF] ⚠️ Timeout waiting for human to answer');
+        console.warn(`[HANDOFF] ⚠️ Timeout waiting for human to answer (${ringWindowMs / 1000}s)`);
         handoffReadyResolvers.delete(humanCallSid!);
-        rejectHumanAnswered(new Error('Human agent did not answer within 45 seconds'));
-      }, 45000);
+        rejectHumanAnswered(new Error(`Human agent did not answer within ${ringWindowMs / 1000} seconds`));
+      }, ringWindowMs);
       
       // Register the resolver with the callSid
       handoffReadyResolvers.set(humanCallSid, {
