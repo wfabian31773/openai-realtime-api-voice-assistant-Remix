@@ -11,11 +11,12 @@ import { clearAllLedgers, seedLedger } from '../../services/callFactsLedger';
 import { createAnsweringServiceLine } from '../answeringServiceLine';
 import { createPcpLine, type ProfessionalLineServices } from '../pcpLine';
 import { createSchedulingLine, type SchedulingLineServices, type AvailabilityOffer } from '../schedulingLine';
+import { createTicketAgent } from '../ticketAgent';
 import { callLogToFixture } from '../../shadow/callLogReplay';
 import { CallGradingService, type GraderResult } from '../../services/callGradingService';
 import type { CoreAction, TicketInput, TicketLineServices, ClassifyResult } from '../types';
 
-export type ReplayAgent = 'answering-service' | 'no-ivr' | 'after-hours' | 'pcp' | 'azul-scheduling';
+export type ReplayAgent = 'answering-service' | 'no-ivr' | 'after-hours' | 'pcp' | 'azul-scheduling' | 'ticket-agent';
 
 /** A tool event as recorded on the real call (call_logs.tool_timeline). */
 export interface RecordedToolEvent {
@@ -223,8 +224,19 @@ export async function replayStoredCall(row: CorpusRow, AGENT: ReplayAgent, grade
   const pcpRouted: Array<Record<string, unknown>> = [];
   const pcpFiled: Array<Record<string, unknown>> = [];
   const sdUsed = { availability: 0, book: 0, confirmed: 0, transfers: 0, hadRecordedOffer: false };
+  const ticketAgentSubmits: Array<Record<string, unknown>> = [];
   const line =
-    AGENT === 'pcp'
+    AGENT === 'ticket-agent'
+      ? createTicketAgent({
+          async verify() {
+            return Boolean(row.patient_found);
+          },
+          async submit(_c, t) {
+            ticketAgentSubmits.push(t as unknown as Record<string, unknown>);
+            return { ok: true, ticketNumber: 'SIM-T' };
+          },
+        })
+      : AGENT === 'pcp'
       ? createPcpLine(simulatedPcpServices(row, pcpRouted, pcpFiled))
       : AGENT === 'azul-scheduling'
         ? createSchedulingLine(simulatedSchedulingServices(row, sdUsed))
@@ -277,8 +289,15 @@ export async function replayStoredCall(row: CorpusRow, AGENT: ReplayAgent, grade
       callLogId: `replay-${row.id}`,
       transcript: newTranscript,
       transferredToHuman: AGENT === 'pcp' ? pcpRouted.length > 0 : AGENT === 'azul-scheduling' ? sdUsed.transfers > 0 : false,
-      ticketNumber: (AGENT === 'pcp' ? pcpRouted.length + pcpFiled.length : filed.length) ? 'SIM-1' : null,
-      agentSlug: AGENT,
+      ticketNumber:
+        (AGENT === 'pcp'
+          ? pcpRouted.length + pcpFiled.length
+          : AGENT === 'ticket-agent'
+            ? ticketAgentSubmits.length
+            : filed.length)
+          ? 'SIM-1'
+          : null,
+      agentSlug: AGENT === 'ticket-agent' ? (process.env.REPLAY_AS_SLUG ?? 'answering-service') : AGENT,
       totalTurns: newLines.length,
       interruptionCount: 0,
       truncationCount: 0,
@@ -302,7 +321,7 @@ export async function replayStoredCall(row: CorpusRow, AGENT: ReplayAgent, grade
       transcript: row.transcript,
       transferredToHuman: Boolean(row.transferred_to_human),
       ticketNumber: row.ticket_number,
-      agentSlug: AGENT,
+      agentSlug: AGENT === 'ticket-agent' ? (process.env.REPLAY_AS_SLUG ?? 'answering-service') : AGENT,
       totalTurns: row.total_turns,
       interruptionCount: null,
       truncationCount: null,
@@ -324,7 +343,8 @@ export async function replayStoredCall(row: CorpusRow, AGENT: ReplayAgent, grade
     new_grader_results: { graders: newGraders },
     new_critical: newCritical,
     old_critical: oldCritical,
-    tickets_filed: filed.length + pcpFiled.length,
+    tickets_filed: filed.length + pcpFiled.length + ticketAgentSubmits.length,
+    ticket_intents: ticketAgentSubmits.map((t) => String((t as { intent?: string }).intent ?? '')),
     transfers: pcpRouted.length + sdUsed.transfers,
     book_attempts: sdUsed.book,
     booked: sdUsed.confirmed,

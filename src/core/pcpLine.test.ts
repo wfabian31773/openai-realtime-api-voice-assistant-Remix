@@ -84,6 +84,9 @@ describe('pcp new core — Gate A', () => {
 
     await line.onUtterance(C, 'we need medical records faxed over for a referral');
     let a = await line.onUtterance(C, 'Priya from Coastal Family Medicine');
+    // Records for WHOM — asked before any promise is made.
+    expect(a.say).toContain('Which patient is this for');
+    a = await line.onUtterance(C, 'Wayne Fabian, March 17 1973');
     expect(a.say).toContain('best fax number');
     a = await line.onUtterance(C, 'it is 562 555 0134');
     expect(a.say).toContain('correct?');
@@ -176,6 +179,7 @@ describe('pcp new core — Gate A', () => {
 
     await line.onUtterance(C, 'requesting chart notes to be faxed for a referral');
     let a = await line.onUtterance(C, 'Casey from Northside Medical');
+    a = await line.onUtterance(C, 'Wayne Fabian, March 17 1973');
     a = await line.onUtterance(C, 'uh let me look it up');
     expect(a.say).toContain('best fax number'); // re-asked once
     a = await line.onUtterance(C, 'I will have to find it');
