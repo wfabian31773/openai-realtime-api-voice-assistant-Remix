@@ -31,6 +31,14 @@ export interface PcpConversationState {
   dispositionRecorded?: PcpDisposition;
   handoffStatus?: 'HANDOFF_UNAVAILABLE' | 'NO_ANSWER' | 'FAILED' | 'CONNECTED';
   handoffFailureReason?: string;
+  /**
+   * The caller asked, in words, for a person. Operator directive 2026-08-09:
+   * on this line that reaches the office queue during business hours, whatever
+   * the call is about and whatever intake is still missing — the staffer who
+   * picks up collects what they need. Interviewing a surgery-center nurse
+   * before connecting her is the behavior being removed.
+   */
+  callerRequestedHuman?: boolean;
 }
 
 export interface PcpDirectorDecision {
@@ -100,6 +108,11 @@ export class PcpDirector {
     state.handoffFailureReason = result.reason;
   }
 
+  /** Record that the caller explicitly asked to speak to a person. */
+  markCallerRequestedHuman(callId: string): void {
+    this.get(callId).callerRequestedHuman = true;
+  }
+
   clear(callId: string): void {
     this.states.delete(callId);
   }
@@ -145,7 +158,14 @@ export class PcpDirector {
 
     const phiDisclosureAllowed = Boolean(purpose && (!purpose.containsPhi || state.verificationStatus !== 'failed'));
     const authoritativeToolAllowed = Boolean(source && !retryExhausted && (!purpose?.containsPhi || state.verificationStatus !== 'failed'));
-    const handoffEligible = Boolean(purpose && disposition === 'HAND_OFF' && !missing && !handoffFailed);
+    // An explicit ask for a person is eligible on its own: no purpose
+    // required, no completed intake required. Lunch closure and a previously
+    // failed handoff still apply — those are about whether anyone can pick up.
+    const askedForAPerson = Boolean(state.callerRequestedHuman);
+    const eligibleByAsk = askedForAPerson && !handoffFailed && !(lunchClosure);
+    if (eligibleByAsk && disposition !== 'HAND_OFF' && !handoffFailed && !lunchClosure) disposition = 'HAND_OFF';
+    const handoffEligible =
+      eligibleByAsk || Boolean(purpose && disposition === 'HAND_OFF' && !missing && !handoffFailed);
 
     return {
       nextQuestion: missing ? { field: missing, prompt: PROMPTS[missing] ?? `Please provide ${String(missing)}.` } : undefined,
