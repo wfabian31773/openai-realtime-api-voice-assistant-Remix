@@ -164,6 +164,9 @@ async function replayOne(row: CorpusRow, grader: CallGradingService) {
     ended = await renderAction(action, newLines);
   }
   const newTranscript = newLines.join('\n');
+  // End of call = the caller stopped talking. The hang-up safety net runs
+  // here exactly as it does in production teardown.
+  if (line.finalize) await line.finalize(callId).catch(() => undefined);
   line.release(callId);
 
   const newGraders = grader
