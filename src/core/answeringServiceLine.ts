@@ -77,6 +77,16 @@ const DONT_KNOW = /\b(don'?t know|not sure|no idea|can'?t remember|no s[eé]|no 
 const SPANISH_WORDS = /\b(hola|gracias|necesito|quiero|por favor|buenos|buenas|español|cita|ayuda|hablar|llamo|receta|lentes|doctora?)\b/gi;
 
 /**
+ * Openers and acknowledgements are not a reason for calling. Taking "Okay."
+ * as the request produced tickets whose reason field said "Okay" (Gate B
+ * 2026-08-08) — filed, counted, and useless to the person calling back.
+ */
+const FILLER_RX = /\b(okay|ok|hello|hi|hey|yes|yeah|yep|no|nope|um+|uh+|so|well|please|thanks|thank you|sorry|good (morning|afternoon|evening)|hola|bueno|gracias|sí|si)\b/gi;
+function substantiveWords(text: string): number {
+  return text.replace(FILLER_RX, ' ').replace(/[^\p{L}\p{N}\s]/gu, ' ').trim().split(/\s+/).filter(Boolean).length;
+}
+
+/**
  * A name is not a sentence. "I have seen before" was accepted as a patient
  * name in replay (Gate B 2026-08-08) because it was simply two-or-more
  * alphabetic words — and the bad name then failed verification forever.
@@ -571,7 +581,14 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
 
         switch (s.state) {
           case 'INTENT': {
-            if (text.trim().split(/\s+/).length < 2) return unparsable(callId, s);
+            // The reason for calling must carry actual content — a greeting
+            // is not a request, and a ticket built from one helps no one.
+            // But "refill please" and "hola, receta" ARE requests: keep the
+            // original two-token bar and require only that ONE token be
+            // substantive (review 2026-08-09).
+            if (text.trim().split(/\s+/).filter(Boolean).length < 2 || substantiveWords(text) < 1) {
+              return unparsable(callId, s);
+            }
             updateLedger(callId, { intent: text.trim().slice(0, 200) });
             s.message = text.trim().slice(0, 300);
             const f = getLedger(callId);
