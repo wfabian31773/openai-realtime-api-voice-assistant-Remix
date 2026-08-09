@@ -219,8 +219,14 @@ const pendingGreetings = new Map<string, PendingGreeting>();
 /** CP-4: lines running the deterministic ramp (env override RAMP_AGENTS). */
 const RAMP_AGENTS = new Set((process.env.RAMP_AGENTS ?? 'answering-service,pcp,azul-scheduling').split(',').map((x) => x.trim()).filter(Boolean));
 
-/** Calls owned by a new-core line module (reconstruction-plan.md §4). */
-const newCoreCalls = new Set<string>();
+/**
+ * Calls owned by a new-core line module (reconstruction-plan.md §4), keyed by
+ * call id -> the slug the module was REGISTERED under. Looking a module up by
+ * any other name returns nothing and the caller hears dead air, which is
+ * exactly what happened when a 'no-ivr' call was re-labelled 'after-hours'
+ * mid-session (live 2026-08-09).
+ */
+const newCoreCalls = new Map<string, string>();
 
 /**
  * Wrap-up hangups, pending. A caller can speak AFTER the closing line — most
@@ -2795,8 +2801,11 @@ async function observeCall(
           cancelPendingHangup(callId);
           void (async () => {
             try {
-              const mod = newCoreFor(effectiveSlug);
-              if (!mod) return;
+              const mod = newCoreFor(newCoreCalls.get(callId) ?? effectiveSlug);
+              if (!mod) {
+                console.error(`[NEW-CORE] no module for ${callId} (registered=${newCoreCalls.get(callId)}, effective=${effectiveSlug}) — the caller would hear nothing`);
+                return;
+              }
               let action: import('./core/types').CoreAction | null = await mod.onUtterance(callId, transcript);
               while (action) {
                 if (action.say) {
@@ -3686,7 +3695,34 @@ async function observeCall(
         });
       }
       newCoreFor(agentSlug)!.start(callId);
-      newCoreCalls.add(callId);
+      newCoreCalls.set(callId, agentSlug);
+
+      // MOUTHPIECE. The state machine owns the call, so the model must own
+      // nothing: no agent prompt with its own agenda, no tools it can decide
+      // to call. Live 2026-08-09 proved why — with the old prompt still
+      // active, TWO agents talked on the same call, the module asking its
+      // scripted questions while the model invented its own ("which
+      // pharmacy...", "let me check your open tickets"). That is the piling,
+      // inside a single call.
+      try {
+        (session.transport as any).sendEvent({
+          type: 'session.update',
+          session: {
+            instructions:
+              'You are the VOICE of a scripted system, not a decision maker.\n' +
+              '- Say exactly the words you are given, and nothing else.\n' +
+              '- Never ask a question you were not given. Never add a follow-up.\n' +
+              '- Never offer to check, look up, transfer, schedule, or confirm anything.\n' +
+              '- If you were given nothing to say, stay silent and wait.\n' +
+              'Speak naturally and warmly, but the words are not yours to choose.',
+            tools: [],
+            tool_choice: 'none',
+          },
+        });
+        console.info(`[NEW-CORE] ${agentSlug} session stripped to mouthpiece for ${callId}`);
+      } catch (e) {
+        console.warn(`[NEW-CORE] could not strip session for ${callId}:`, e);
+      }
       console.info(`[NEW-CORE] ${agentSlug} line module owns ${callId}`);
     } else
     // CP-4 (spine S1): on ramp lines, a caller-ID match personalizes the
@@ -4080,7 +4116,7 @@ async function observeCall(
     // it runs first and everything else waits for it (review 2026-08-09).
     void (async () => {
       try {
-        const mod = newCoreCalls.has(callId) ? newCoreFor(effectiveSlug) : null;
+        const mod = newCoreCalls.has(callId) ? newCoreFor(newCoreCalls.get(callId) ?? effectiveSlug) : null;
         if (mod?.finalize) {
           const r = await mod.finalize(callId);
           if (r.filed) console.info(`[NEW-CORE] hang-up ticket filed for ${callId}`);

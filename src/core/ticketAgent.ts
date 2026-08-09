@@ -21,6 +21,7 @@
  */
 import { getLedger, updateLedger } from '../services/callFactsLedger';
 import { looksLikeName, normalizeSpokenDob, looksLikeDob } from './parsing';
+import { cachedConfig, refreshConfig } from './ticketAgentConfig';
 import type { CoreAction, LineModule } from './types';
 
 /* ── What the agent can need ─────────────────────────────────────────── */
@@ -289,9 +290,19 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
     return 'message';
   };
 
+  const liveSlug = cfg.slug ?? 'ticket-agent';
+
+  /** The needs list for an intent, with any live override applied. */
+  const needsFor = (intent: IntentKey): FieldKey[] => {
+    const override = cachedConfig(liveSlug).intents?.[intent]?.needs;
+    if (!override?.length) return INTENTS[intent].needs;
+    const valid = override.filter((k): k is FieldKey => k in FIELDS);
+    return valid.length ? valid : INTENTS[intent].needs;
+  };
+
   /** Step 3+4: the next field this intent needs that we do not already have. */
   const nextMissing = (callId: string, s: CallState): FieldKey | null => {
-    const needs = INTENTS[s.intent ?? 'message'].needs;
+    const needs = needsFor(s.intent ?? 'message');
     for (const key of needs) {
       if (s.values[key]) continue;
       const known = FIELDS[key].known?.(callId);
@@ -314,7 +325,8 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
       const known = getLedger(callId)?.callbackNumber ?? getLedger(callId)?.callerPhone;
       if (known) return { say: t(s, LINES.confirmCallback(known.slice(-4))) };
     }
-    return { say: t(s, FIELDS[key].ask) };
+    const over = cachedConfig(liveSlug).lines?.[`field_${key}`];
+    return { say: over?.[s.lang] ?? t(s, FIELDS[key].ask) };
   };
 
   /** Step 5. */
@@ -373,6 +385,7 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
     slug: cfg.slug ?? 'ticket-agent',
 
     start(callId: string): void {
+      refreshConfig(liveSlug); // next call picks up any edit, no deploy
       const f = getLedger(callId);
       calls.set(callId, {
         // Step 1 only exists when we think we know who this is; otherwise the
