@@ -369,4 +369,33 @@ describe('answering-service new core — Gate A', () => {
     expect(filed[0].description).toContain('callback unconfirmed');
     expect(spoken.lines.join(' ')).toContain("You're all set");
   });
+
+  it('a courtesy word does not disqualify a real request ("refill please")', async () => {
+    const { svc, filed } = fakeServices();
+    const line = createAnsweringServiceLine(svc);
+    seedLedger(C, { matchedFirstName: 'Wayne', matchedLastName: 'Fabian', matchedDob: '1973-03-17', callerPhone: '8455317471' });
+    line.start(C);
+
+    // Two tokens, one of them courtesy — this IS the reason for calling.
+    let a = await line.onUtterance(C, 'refill please');
+    expect(a.say).toBe('Am I speaking with Wayne?');
+    a = await line.onUtterance(C, 'yes');
+    a = await line.onUtterance(C, 'March 17 1973');
+    a = await line.onUtterance(C, 'yes');
+    const spoken = await speak(a);
+    expect(filed).toHaveLength(1);
+    expect(filed[0].description.toLowerCase()).toContain('refill');
+    expect(spoken.lines.join(' ')).toContain("You're all set");
+  });
+
+  it('a bare greeting is still not a request', async () => {
+    const { svc } = fakeServices();
+    const line = createAnsweringServiceLine(svc);
+    seedLedger(C, { callerPhone: '5551239999' });
+    line.start(C);
+
+    const a = await line.onUtterance(C, 'okay hello');
+    expect(a.say).not.toContain('new patient or an existing patient');
+    expect(getLedger(C)?.intent ?? null).toBeNull();
+  });
 });

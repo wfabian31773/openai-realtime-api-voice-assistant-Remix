@@ -583,7 +583,12 @@ export function createAnsweringServiceLine(services: TicketLineServices, cfg: Ti
           case 'INTENT': {
             // The reason for calling must carry actual content — a greeting
             // is not a request, and a ticket built from one helps no one.
-            if (substantiveWords(text) < 2) return unparsable(callId, s);
+            // But "refill please" and "hola, receta" ARE requests: keep the
+            // original two-token bar and require only that ONE token be
+            // substantive (review 2026-08-09).
+            if (text.trim().split(/\s+/).filter(Boolean).length < 2 || substantiveWords(text) < 1) {
+              return unparsable(callId, s);
+            }
             updateLedger(callId, { intent: text.trim().slice(0, 200) });
             s.message = text.trim().slice(0, 300);
             const f = getLedger(callId);
