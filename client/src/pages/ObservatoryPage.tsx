@@ -2045,7 +2045,8 @@ interface ReplayTape {
   approximations: string[] | null
 }
 
-function pct(n: number, d: number) {
+/** Share of calls, as a percentage of a count (distinct from the ratio-based `pct`). */
+function share(n: number, d: number) {
   return d ? `${((100 * n) / d).toFixed(1)}%` : '—'
 }
 
@@ -2117,8 +2118,8 @@ function ReplaysTab() {
                 <tr key={r.agent} className="border-t">
                   <td className="py-2 font-medium">{r.agent}</td>
                   <td>{r.calls}</td>
-                  <td className="text-red-600">{pct(r.oldCriticalCalls, r.calls)}</td>
-                  <td className="font-semibold text-emerald-700">{pct(r.newCriticalCalls, r.calls)}</td>
+                  <td className="text-red-600">{share(r.oldCriticalCalls, r.calls)}</td>
+                  <td className="font-semibold text-emerald-700">{share(r.newCriticalCalls, r.calls)}</td>
                   <td>{r.better}</td>
                   <td>{r.same}</td>
                   <td className={r.worse ? 'text-amber-600' : ''}>{r.worse}</td>
