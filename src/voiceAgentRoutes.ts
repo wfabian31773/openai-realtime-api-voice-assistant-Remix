@@ -3738,6 +3738,26 @@ async function observeCall(
               'Speak naturally and warmly, but the words are not yours to choose.',
             tools: [],
             tool_choice: 'none',
+            // NOT FIXED HERE, DELIBERATELY. Instructions are advice, and a
+            // model handed the turn will take it: with create_response true
+            // the model answers every caller turn on its own and the module's
+            // scripted line cuts it off mid-word. The live 13:43 after-hours
+            // call did exactly that —
+            //   "I can help with that. Could you"
+            //   "May I have the patient's first and last name?"
+            //   "Actually, let me quickly check if you have any open tickets"
+            // — two agents on one call, on a line that is already cut over.
+            //
+            // The real fix is create_response: false, but sending it means
+            // sending an `audio` block, and this file carries two CONTRADICTORY
+            // rules about that: line ~720 says a session.update omitting the
+            // format clobbers it back to PCM16, while the accept payload below
+            // says SIP mode must NEVER send a format because the codec is
+            // negotiated in SDP and setting it causes screeching. Guessing
+            // between them on a live line risks silent calls to trade for
+            // overlapping ones. src/standalone/demoLine.ts already runs the
+            // correct architecture end to end (create_response: false, no
+            // prompt, no tools) and is the place to settle this.
           },
         });
         console.info(`[NEW-CORE] ${agentSlug} session stripped to mouthpiece for ${callId}`);
