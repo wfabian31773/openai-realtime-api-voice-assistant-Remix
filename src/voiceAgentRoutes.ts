@@ -1888,7 +1888,12 @@ async function observeCall(
   
   // AGENT ROUTING with strict validation
   // Only these agents are allowed (defense in depth - validated at webhook AND here)
-  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
+  // 'demo' is the rapid-test line (operator 2026-08-09): its own number, the
+  // ticket agent behind it, tuned from ticket_agent_config without a deploy.
+  // It MUST be listed here — an unknown slug is silently coerced to
+  // 'after-hours' below, which would have made the demo line quietly answer
+  // as the after-hours agent.
+  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
   const legacyDeletedSlugs = ['greeter', 'non-urgent-ticketing'];
   
   let effectiveSlug = agentSlug || 'no-ivr';
