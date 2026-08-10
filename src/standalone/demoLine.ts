@@ -82,6 +82,18 @@ const PCMU_CHUNK_BYTES = 800;
 const PRIMARY_GRACE_MS = 1200;
 
 /**
+ * Lines whose brain is the REAL answering-service agent on a Claude tool loop
+ * rather than the five-step state machine.
+ *
+ * Named explicitly, defaulting to one slug nothing points at yet, so this can
+ * be tested on the demo number without altering a single existing line. Point
+ * +1 626-548-2660 at /line/claude-as/voice to try it; point it back to undo.
+ */
+const BRAIN_LINES = new Set(
+  (process.env.BRAIN_LINES ?? 'claude-as').split(',').map((x) => x.trim()).filter(Boolean),
+);
+
+/**
  * What this build of the line actually DOES, stamped on every call.
  *
  * Half of 2026-08-09 was spent arguing about which build answered a call —
@@ -232,6 +244,13 @@ interface DemoCall {
   responseAudioBytes: number;
   /** No transcriber started: the line cannot hear a word the caller says. */
   deaf: boolean;
+  /**
+   * The REAL answering-service agent on a Claude tool loop, when this line is
+   * one of BRAIN_LINES. Null everywhere else, so the state machine still runs
+   * every existing line untouched — the operator asked for this "on the side
+   * without touching the real agents", and that cuts both ways.
+   */
+  brain: import('./claudeBrain').Brain | null;
 }
 
 const calls = new Map<WebSocket, DemoCall>();
@@ -536,6 +555,7 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     pendingMarks: new Map(),
     playedLines: new Set(),
     deaf: false,
+    brain: null,
     speakingSince: null,
     finalMark: null,
     finalMarkTimer: null,
@@ -571,10 +591,26 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
   // ordinary flow.
   void recognizeCaller(callId, callerPhone);
 
-  const mod = ticketAgentFor(call.slug);
-  mod.start(callId);
+  if (BRAIN_LINES.has(call.slug)) {
+    // Built before the greeting because building it IS the pre-context lookup:
+    // the real agent reads the caller's schedule and memory on creation, and
+    // its greeting should already know who it is talking to.
+    void import('./claudeBrain')
+      .then(({ createClaudeBrain }) =>
+        createClaudeBrain({ callId, callerPhone: callerPhone || undefined, callSid: callId }),
+      )
+      .then((brain) => {
+        call.brain = brain;
+        if (!brain) console.error(`[DEMO-LINE] ${callId} brain unavailable — falling back to the state machine`);
+      })
+      .catch((e) => console.error(`[DEMO-LINE] ${callId} brain build failed:`, e));
+  } else {
+    const mod = ticketAgentFor(call.slug);
+    mod.start(callId);
+  }
   console.info(
     `[DEMO-LINE] ${callId} started (caller ${callerPhone || 'unknown'}) ` +
+      `brain=${BRAIN_LINES.has(call.slug) ? 'claude' : 'state-machine'} ` +
       `engines=${configuredEngines().join('+')} primary=${call.primary}`,
   );
 
@@ -631,7 +667,7 @@ function connectOpenAI(call: DemoCall): void {
       speak(call, DEAF_LINE);
       return;
     }
-    const greeting = greetingFor(call.slug);
+    const greeting = call.brain?.greeting ?? greetingFor(call.slug);
     speak(call, greeting);
     console.info(`[DEMO-LINE] ${call.callId} greeting sent`);
   });
@@ -863,6 +899,25 @@ async function acceptTurn(call: DemoCall, text: string, engine: string): Promise
 
 async function onCallerSaid(call: DemoCall, text: string): Promise<void> {
   call.transcript.push(`CALLER: ${text}`);
+
+  // A Claude line has no state machine to consult. The caller's sentence goes
+  // to the real agent, and whatever it says comes back as sentences that are
+  // spoken as they finish — which is the entire reason for measuring first
+  // token instead of total completion.
+  if (call.brain) {
+    const turn = await call.brain.respond(text, (sentence) => speak(call, sentence));
+    console.info(
+      `[DEMO-LINE] ${call.callId} brain turn ${turn.ms}ms (first token ${turn.ttftMs ?? '—'}ms)` +
+        `${turn.toolsUsed.length ? ` tools=${turn.toolsUsed.join(',')}` : ''}` +
+        `${turn.error ? ` ERROR=${turn.error}` : ''}`,
+    );
+    if (turn.error && !turn.sentences.length) {
+      // Never leave a caller in silence because a vendor failed.
+      speak(call, "I'm sorry — I'm having trouble on my end. Let me have someone call you back.");
+    }
+    return;
+  }
+
   const mod = ticketAgentFor(call.slug);
 
   let action: CoreAction | null;
@@ -1143,6 +1198,7 @@ async function endCall(twilio: WebSocket, reason: string): Promise<void> {
     console.warn(`[DEMO-LINE] finalize failed for ${call.callId}:`, e);
   }
   try {
+    call.brain?.release();
     mod?.release(call.callId);
     releaseLedger(call.callId);
   } catch {
