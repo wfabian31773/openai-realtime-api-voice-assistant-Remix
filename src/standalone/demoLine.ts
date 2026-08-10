@@ -50,6 +50,14 @@ const MOUTHPIECE_INSTRUCTIONS = [
 const FALLBACK_GREETING = 'Thank you for calling Azul Vision. How can I help you today?';
 
 /**
+ * Said once when the caller keeps talking after the line has finished, then
+ * the call is closed. Anything is better than the open, silent line a caller
+ * experiences as a dropped call.
+ */
+const WRAP_AFTER_END =
+  "I've got everything I need and someone will follow up with you. Thanks for calling Azul Vision — take care.";
+
+/**
  * ~100ms of 8kHz G.711 mu-law (1 byte per sample). Twilio streams 20ms
  * frames; AssemblyAI requires 50-1000ms and closes the socket with 3007
  * outside that range. 100ms sits comfortably inside every vendor's window.
@@ -604,6 +612,14 @@ async function acceptTurn(call: DemoCall, text: string, engine: string): Promise
   // A NON-primary engine heard something. Give the primary a moment, then act
   // on this rather than leaving the caller in silence. A vendor being slow or
   // broken must degrade the experiment, never the call.
+  //
+  // But ONLY if this speech has not already been answered. heardSpeech is set
+  // by the VAD and cleared the moment any engine's words are acted on, so a
+  // slower engine reporting the SAME utterance finds it false and stops here.
+  // Without this the agent answered every turn twice — the live 13:34
+  // scheduling call was asked "new patient or existing patient?" and "may I
+  // have the patient's name?" twice each, from one sentence.
+  if (!call.heardSpeech) return;
   if (call.primaryGrace) return; // already waiting
   call.primaryGrace = setTimeout(() => {
     call.primaryGrace = null;
@@ -639,9 +655,20 @@ async function onCallerSaid(call: DemoCall, text: string): Promise<void> {
   }
 
   if (!lines.length) {
+    const state = mod.stateOf(call.callId);
+    // A FINISHED machine that keeps being spoken to is the "dropped call" the
+    // operator reported: the line is still open, the caller says "Hello?
+    // Hello? Hello?", and nothing answers. Silence while COLLECTING is the
+    // agent waiting its turn; silence at the END is an abandoned caller.
+    if (state === null || /ENDED|DONE/.test(state)) {
+      console.warn(`[DEMO-LINE] ${call.callId} caller still talking after the line finished (${state}) — closing the call`);
+      call.closing = true;
+      speak(call, WRAP_AFTER_END);
+      return;
+    }
     // Silence is a real answer here (the agent is waiting), but it is also
     // how a stuck state machine looks — so it is never silent in the log.
-    console.info(`[DEMO-LINE] ${call.callId} state=${mod.stateOf(call.callId)} — nothing to say`);
+    console.info(`[DEMO-LINE] ${call.callId} state=${state} — nothing to say`);
     return;
   }
 

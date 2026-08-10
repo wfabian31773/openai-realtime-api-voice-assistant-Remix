@@ -15,6 +15,10 @@ const NOT_NAME_WORDS = new Set([
   'yes', 'no', 'not', 'please', 'thanks', 'thank', 'ok', 'okay', 'hello', 'hi', 'about', 'for', 'with',
   'and', 'but', 'just', 'know', 'think', 'get', 'got', 'like', 'would', 'could', 'should', 'there', 'here',
   'so', 'well', 'right', 'sure', 'sorry', 'again', 'now', 'then', 'one', 'two', 'first', 'last', 'name',
+  // A split utterance ("It's Wayne Fabian. Date of" / "birth is 03/17/1973")
+  // put "Date of" in the surname and searched the records for "Wayne Date
+  // of" — a patient with 43 appointments came back not found.
+  'date', 'dates', 'birth', 'born', 'dob', 'of',
   'si', 'yo', 'mi', 'el', 'la', 'de', 'que', 'por', 'para', 'necesito', 'quiero', 'gracias', 'es', 'soy',
 ]);
 
@@ -52,7 +56,9 @@ export function findNameIn(text: string): { first: string; last: string } | null
 
   // Cut at the point a DIFFERENT field starts, so "and the date of birth is
   // March 17th" can never become part of the surname.
-  const trimmed = text.split(/\b(?:date of birth|d\.?o\.?b\.?|born|birthday|fecha de nacimiento)\b/i)[0];
+  // "date of" without "birth" is the same clause, split across turns by the
+  // transcriber. Cutting only on the complete phrase let the fragment through.
+  const trimmed = text.split(/\b(?:date of(?:\s+birth)?|d\.?o\.?b\.?|born|birthday|fecha de nacimiento)\b/i)[0];
 
   // Branch 1 — the caller SIGNPOSTED it: "...the patient's name is X".
   // Only here do we scan for the name, because the caller told us one is
@@ -80,7 +86,9 @@ export function findNameIn(text: string): { first: string; last: string } | null
   // is left to the SAME strict checker, which still rejects anything
   // sentence-shaped.
   const stripped = trimmed
-    .replace(/^(?:\s*(?:yes|yeah|yep|sure|ok|okay|so|well|um+|uh+|er+|hi|hello|it'?s|its|that'?s|this is|my|his|her|their|for|si|s[ií]|claro|bueno)\b[,'\s]*)+/i, '')
+    // The separator class must include the FULL STOP: "Sure. It's Wayne
+    // Fabian" stopped stripping at "Sure." and filed "It's" as the first name.
+    .replace(/^(?:\s*(?:yes|yeah|yep|sure|ok|okay|so|well|um+|uh+|er+|hi|hello|it'?s|its|that'?s|this is|my|his|her|their|for|si|s[ií]|claro|bueno)\b[,.'\s]*)+/i, '')
     .replace(/[.,;!?]+\s*$/, '')
     .trim();
   return stripped ? looksLikeName(stripped) : null;

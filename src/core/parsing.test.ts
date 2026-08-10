@@ -79,4 +79,28 @@ describe('shared caller-answer parsing', () => {
       expect(spokenDigitsToNumber('the first one')).toBeNull();
     });
   });
+
+  /**
+   * The live 13:34 scheduling call. Wayne Fabian has 43 appointments in the
+   * record and the agent told him "I'm not finding a match on my end", because
+   * these two utterances produced "It's Wayne Fabian" and "Wayne Date of".
+   */
+  describe('the names that failed a real patient lookup', () => {
+    it('strips a lead-in that ends in a full stop', () => {
+      expect(findNameIn("Sure. It's Wayne Fabian. Date of birth is 03/17/1973."))
+        .toEqual({ first: 'Wayne', last: 'Fabian' });
+    });
+
+    it('never lets a split "date of" fragment become the surname', () => {
+      // The transcriber cut the sentence here mid-phrase.
+      expect(findNameIn("It's Wayne Fabian. Date of")).toEqual({ first: 'Wayne', last: 'Fabian' });
+      expect(findNameIn('the name is Elena Ruiz, date of')).toEqual({ first: 'Elena', last: 'Ruiz' });
+    });
+
+    it('still refuses the things that are not names', () => {
+      expect(findNameIn('birth is 03/17/1973.')).toBeNull();
+      expect(findNameIn('uh let me look it up')).toBeNull();
+      expect(findNameIn('sorry can you repeat the question')).toBeNull();
+    });
+  });
 });
