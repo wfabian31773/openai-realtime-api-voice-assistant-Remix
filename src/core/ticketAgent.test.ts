@@ -728,3 +728,66 @@ describe('"when was my last appointment?" — answered, not filed', () => {
     expect(submitted).toHaveLength(1);
   });
 });
+
+describe('the model reads the answers, the parser is the floor', () => {
+  // Operator, 2026-08-10: "Why are you trying to determine what a first name
+  // is? The code is not catching. It doesn't know Wayne Fabian is a name. It
+  // records 'It's'."
+  beforeEach(() => clearAllLedgers());
+
+  it('takes the name the model read, even where the parser fails', async () => {
+    const seen: Array<[string, string]> = [];
+    const { svc } = services();
+    svc.classifyIntent = vi.fn(async () => ({ intent: 'medication_refill' as const, source: 'llm' as const }));
+    svc.readField = vi.fn(async (field: string, _q: string, said: string) => {
+      seen.push([field, said]);
+      return field === 'patient_name' && /wayne/i.test(said) ? 'Wayne Fabian' : null;
+    });
+    const a = createTicketAgent(svc);
+    a.start(C);
+    await speak(await a.onUtterance(C, 'I need a refill'));
+    // A phrasing the regex parser gets wrong on its own.
+    await speak(await a.onUtterance(C, 'Yeah, so it would be under Wayne Fabian I think'));
+    expect(getLedger(C)?.firstName).toBe('Wayne');
+    expect(getLedger(C)?.lastName).toBe('Fabian');
+    // And it was given the question it asked, not just the words.
+    expect(seen[0][0]).toBe('patient_name');
+  });
+
+  it('falls back to the parser when the model returns nothing', async () => {
+    const { svc } = services();
+    svc.classifyIntent = vi.fn(async () => ({ intent: 'medication_refill' as const, source: 'llm' as const }));
+    svc.readField = vi.fn(async () => null); // slow, down, or unsure
+    const a = createTicketAgent(svc);
+    a.start(C);
+    await speak(await a.onUtterance(C, 'I need a refill'));
+    await speak(await a.onUtterance(C, 'Wayne Fabian'));
+    expect(getLedger(C)?.firstName).toBe('Wayne');
+  });
+
+  it('survives the model throwing mid-call', async () => {
+    const { svc } = services();
+    svc.classifyIntent = vi.fn(async () => ({ intent: 'medication_refill' as const, source: 'llm' as const }));
+    svc.readField = vi.fn(async () => { throw new Error('vendor down'); });
+    const a = createTicketAgent(svc);
+    a.start(C);
+    await speak(await a.onUtterance(C, 'I need a refill'));
+    const r = await speak(await a.onUtterance(C, 'Wayne Fabian'));
+    expect(getLedger(C)?.firstName).toBe('Wayne');
+    expect(r.lines.join(' ').toLowerCase()).toMatch(/date of birth/);
+  });
+
+  it('does not accept a value the model invented from a non-answer', async () => {
+    // The model is told to return null rather than guess. If it obeys, the
+    // parser also refuses, and the agent asks again — which is correct.
+    const { svc } = services();
+    svc.classifyIntent = vi.fn(async () => ({ intent: 'medication_refill' as const, source: 'llm' as const }));
+    svc.readField = vi.fn(async () => null);
+    const a = createTicketAgent(svc);
+    a.start(C);
+    await speak(await a.onUtterance(C, 'I need a refill'));
+    const r = await speak(await a.onUtterance(C, 'wait, who is this?'));
+    expect(getLedger(C)?.firstName).toBeUndefined();
+    expect(r.lines.join(' ').toLowerCase()).toMatch(/name/);
+  });
+});

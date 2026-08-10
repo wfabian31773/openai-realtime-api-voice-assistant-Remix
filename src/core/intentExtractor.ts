@@ -183,3 +183,93 @@ export function deliveryMethodIn(text: string): 'fax' | 'email' | 'phone' | null
   if (/\b(call|phone|text) (me|us|him|her|them) (back|at)\b/i.test(text)) return 'phone';
   return null;
 }
+
+/* ── Reading the ANSWER, not just the request ───────────────────────────── */
+
+/**
+ * What the caller just said, in answer to the question we just asked.
+ *
+ * Operator, 2026-08-10: "Why are you trying to determine what a first name is?
+ * Why are you parsing… The code is not catching. It doesn't know Wayne Fabian
+ * is a name. It records 'It's'."
+ *
+ * He is right, and this function is the answer to it. Intent came here from
+ * the start; every field after it was read by regular expressions, so the
+ * model decided what the call was ABOUT and a pattern read every actual
+ * ANSWER. There is no pattern that accepts "Yeah. It's Wayne Fabian" and
+ * rejects "uh let me look it up" — four separate special cases were shipped in
+ * one evening proving it, and the last one searched the patient mirror for a
+ * surname of "Wayne".
+ *
+ * The model is given the question it asked and the words it heard, and returns
+ * the value or null. It is told to return null rather than guess, because a
+ * wrong name on a chart is worse than one more question. The regex parsers
+ * stay as the floor for when this is slow, down, or unset — the same contract
+ * intent has always had.
+ */
+const FIELD_BRIEF: Record<string, string> = {
+  patient_name: "the patient's full name, first and last. Return it Capitalised, with no titles and no lead-in words. \"Yeah. It's Wayne Fabian.\" -> \"Wayne Fabian\". \"uh let me look it up\" -> null.",
+  patient_dob: 'the date of birth as yyyy-mm-dd. "March 17th, 1973" -> "1973-03-17". "03/17/1973" -> "1973-03-17". A date with no year -> null.',
+  callback_number: 'a phone number, digits only, 10 or 11 digits. Spoken digits count: "seven six zero, eight six zero, one four three four" -> "7608601434". A yes/no answer -> null.',
+  fax_number: 'a FAX number, digits only, 10 or 11 digits. A yes/no answer -> null.',
+  email_address: 'an email address, exactly as spoken. "wayne at azulvision dot com" -> "wayne@azulvision.com".',
+  medication: 'the medication name, as spoken. "It\'s prednisolone acetate" -> "prednisolone acetate".',
+  office_location: 'which office or city. "Santa Ana" -> "Santa Ana".',
+  provider_name: 'the doctor\'s name. "Dr. Choi" -> "Dr. Choi".',
+  delivery_method: 'one of exactly "fax", "email", or "phone" — how they want the answer sent. Anything else -> null.',
+  details: 'a one-sentence summary of what they want the team to know, in their own words.',
+};
+
+export async function extractField(
+  field: string,
+  question: string,
+  said: string,
+): Promise<string | null> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  const brief = FIELD_BRIEF[field];
+  if (!apiKey || !brief || !said.trim()) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: MODEL,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You read ONE answer from a caller to a Southern California eye-care practice and return JSON only: {"value": string|null}.\n' +
+              `The question they were asked: ${question}\n` +
+              `Extract: ${brief}\n` +
+              'Rules: return ONLY the value, never the sentence around it. If the answer does not contain it — they asked a question back, refused, said something unrelated, or were cut off mid-word — return null. NEVER invent or complete a partial value. A wrong value on a patient record is worse than asking again.',
+          },
+          { role: 'user', content: said.slice(0, 400) },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      console.warn(`[FIELD] ${MODEL} returned ${res.status} for ${field} — falling back to the parser`);
+      return null;
+    }
+    const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const content = body.choices?.[0]?.message?.content;
+    if (!content) return null;
+    const value = (JSON.parse(content) as { value?: unknown }).value;
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    // A model that echoes the whole utterance back has not extracted anything.
+    return trimmed && trimmed.length <= 200 ? trimmed : null;
+  } catch (e) {
+    const aborted = (e as Error)?.name === 'AbortError';
+    console.warn(`[FIELD] ${aborted ? `timed out after ${TIMEOUT_MS}ms` : 'failed'} for ${field} — falling back to the parser`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}

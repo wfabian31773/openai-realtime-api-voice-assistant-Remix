@@ -401,6 +401,12 @@ export interface TicketAgentServices {
   appointmentsFor?(
     personId: string,
   ): Promise<import('../services/appointmentAnswers').AppointmentAnswer | null>;
+  /**
+   * Read ONE answer with the model: the field wanted, the question asked, the
+   * words heard. Returns null when it cannot tell, and the regex parser
+   * decides instead. Absent means every field is parsed, as before.
+   */
+  readField?(field: FieldKey, question: string, said: string): Promise<string | null>;
   /** Step 5. Everything collected, in one call. */
   submit(callId: string, ticket: {
     intent: IntentKey;
@@ -698,6 +704,21 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
     return parts.join(' ');
   };
 
+  /**
+   * One field, read by the model, with the parser underneath.
+   *
+   * Never throws and never blocks the call: extractField is time-boxed and
+   * returns null on any problem, and null here simply means the parser
+   * decides — exactly the contract intent has always had.
+   */
+  const readField = async (key: FieldKey, question: string, said: string): Promise<string | null> => {
+    if (!services.readField) return null;
+    const got = await services.readField(key, question, said).catch(() => null);
+    if (!got) return null;
+    console.info(`[TICKET-AGENT] ${key} read by model: "${got.slice(0, 60)}"`);
+    return got;
+  };
+
   const advance = (callId: string, s: CallState): CoreAction => {
     const missing = nextMissing(callId, s);
     const action = missing ? ask(callId, s, missing) : execute(callId, s);
@@ -939,12 +960,29 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
                 return advance(callId, s);
               }
             }
-            const value = FIELDS[key].parse(text);
+            // THE MODEL READS THE ANSWER. The parser is the floor under it,
+            // not the thing in front of it.
+            //
+            // Operator, 2026-08-10: "Why are you trying to determine what a
+            // first name is? The code is not catching. It doesn't know Wayne
+            // Fabian is a name. It records 'It's'." He is right. A regex
+            // cannot tell a name from a sentence, and every attempt to teach
+            // it one more special case shipped another bug the same evening —
+            // the last one searched the patient mirror for a surname of
+            // "Wayne". Reading an answer is a judgement, so it goes to the
+            // thing that can make one, and the parser catches the call when
+            // that is slow, down, or unset.
+            const value = (await readField(key, t(s, FIELDS[key].ask), text)) ?? FIELDS[key].parse(text);
             if (value) {
               s.values[key] = value;
               if (key === 'patient_name') {
-                const n = findNameIn(text);
-                if (n) updateLedger(callId, { firstName: n.first, lastName: n.last });
+                // Split what we ACCEPTED, not the raw utterance — otherwise
+                // the ledger gets the parser's reading of a sentence the model
+                // already read correctly.
+                const parts = value.trim().split(/\s+/).filter(Boolean);
+                if (parts.length >= 2) {
+                  updateLedger(callId, { firstName: parts[0], lastName: parts.slice(1).join(' ') });
+                }
               }
               if (key === 'patient_dob') updateLedger(callId, { dateOfBirth: value });
               if (key === 'callback_number') updateLedger(callId, { callbackNumber: value, callbackConfirmed: true });
