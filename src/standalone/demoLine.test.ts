@@ -245,4 +245,53 @@ describe('demo line — a call, end to end', () => {
     delete process.env.STT_ENGINES;
     delete process.env.STT_PRIMARY;
   });
+
+  it('serves ANY line from its own URL — the webhook is the switch', async () => {
+    // Operator, 2026-08-10: put the morning's wins into production without a
+    // cutover we cannot undo. Pointing a number at /line/<slug>/voice does
+    // that, and pointing it back is an instant, deploy-free rollback.
+    const res = await fetch(`http://${baseUrl}/line/answering-service/voice`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'From=%2B15625550134&CallSid=CAans1',
+    });
+    const xml = await res.text();
+    expect(xml).toContain('name="slug" value="answering-service"');
+    expect(xml).toContain(`wss://${baseUrl}/demo/stream`);
+
+    // And the call actually runs as that line.
+    forcedLines.length = 0;
+    const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+    await new Promise<void>((r) => twilio.on('open', () => r()));
+    twilio.send(JSON.stringify({
+      event: 'start',
+      streamSid: 'MZans',
+      start: {
+        streamSid: 'MZans',
+        callSid: 'CAans1',
+        customParameters: { slug: 'answering-service', from: '+15625550134', callSid: 'CAans1' },
+      },
+    }));
+    await until(() => forcedLines.length >= 1, 'the greeting on the answering-service line');
+
+    const oa = [...fakeOpenAI.clients].pop()!;
+    oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+    oa.send(JSON.stringify({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'I need to get some medical records faxed over',
+    }));
+    await until(() => forcedLines.length >= 2, 'the ticket agent to answer on that line');
+    expect(forcedLines[1].toLowerCase()).toMatch(/name/);
+
+    twilio.close();
+  });
+
+  it('refuses a malformed line rather than answering as something unknown', async () => {
+    const res = await fetch(`http://${baseUrl}/line/..%2Fetc/voice`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'From=%2B15625550134&CallSid=CAbad',
+    });
+    expect(res.status).toBe(400);
+  });
 });

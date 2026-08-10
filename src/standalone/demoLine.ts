@@ -24,14 +24,15 @@
 import type { Express, Request, Response } from 'express';
 import type { Server as HttpServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { newCoreFor } from '../core/router';
+import { ticketAgentFor } from '../core/router';
 import { buildTranscriptionConfig, activeKeywords, TRANSCRIPTION_PROMPT } from '../config/transcription';
 import { buildSideTranscribers, configuredEngines, primaryEngine, type Transcriber } from './transcribers';
 import { cachedConfig } from '../core/ticketAgentConfig';
 import { seedLedger, releaseLedger } from '../services/callFactsLedger';
 import type { CoreAction } from '../core/types';
 
-const SLUG = 'demo';
+/** The line this call is for. Any slug: the URL a number points at decides. */
+const DEFAULT_SLUG = 'demo';
 const STREAM_PATH = '/demo/stream';
 const MODEL = 'gpt-realtime';
 const VOICE = 'sage';
@@ -103,6 +104,8 @@ function formFields(body: unknown): URLSearchParams {
 /** One live call. Everything about it lives here and dies with it. */
 interface DemoCall {
   callId: string;
+  /** Which line answered — demo, answering-service, whatever points here. */
+  slug: string;
   streamSid: string | null;
   callerPhone: string;
   twilio: WebSocket;
@@ -156,29 +159,47 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
   // ---------------------------------------------------------------- webhook
   // Twilio asks what to do with the call. The answer is always the same:
   // stream the audio to us. No IVR, no conference, no lookup, no branching.
-  app.post('/demo/voice', (req: Request, res: Response) => {
+  /**
+   * Answer a call and stream its audio here. The URL a phone number points at
+   * chooses the line — that IS the switch, and changing it back in Twilio is
+   * an instant, deploy-free rollback to whatever answered before.
+   */
+  const answer = (slug: string) => (req: Request, res: Response) => {
     const f = formFields(req.body);
     const from = f.get('From') ?? '';
     const callSid = f.get('CallSid') ?? '';
     const host = (req.headers['x-forwarded-host'] as string) || req.get('host') || '';
-    console.info(`[DEMO-LINE] call ${callSid} from ${from} → streaming to wss://${host}${STREAM_PATH}`);
+    console.info(`[LINE:${slug}] call ${callSid} from ${from} → streaming to wss://${host}${STREAM_PATH}`);
 
     res.set('Content-Type', 'text/xml').send(
       `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="wss://${xmlEscape(host)}${STREAM_PATH}">
+      <Parameter name="slug" value="${xmlEscape(slug)}"/>
       <Parameter name="from" value="${xmlEscape(from)}"/>
       <Parameter name="callSid" value="${xmlEscape(callSid)}"/>
     </Stream>
   </Connect>
 </Response>`,
     );
+  };
+
+  app.post('/demo/voice', answer(DEFAULT_SLUG));
+  // Any line: /line/answering-service/voice, /line/no-ivr/voice, ...
+  app.post('/line/:slug/voice', (req: Request, res: Response) => {
+    const slug = String(req.params.slug ?? '').trim().toLowerCase();
+    if (!/^[a-z0-9-]{2,40}$/.test(slug)) {
+      console.warn(`[LINE] refusing a malformed slug "${req.params.slug}"`);
+      res.status(400).send('bad line');
+      return;
+    }
+    answer(slug)(req, res);
   });
 
   // A plain GET so the line can be proved reachable from a browser.
   app.get('/demo/health', (_req: Request, res: Response) => {
-    res.json({ ok: true, line: SLUG, active: calls.size, streamPath: STREAM_PATH, capabilities: LINE_CAPABILITIES.split(',') });
+    res.json({ ok: true, line: DEFAULT_SLUG, active: calls.size, streamPath: STREAM_PATH, capabilities: LINE_CAPABILITIES.split(',') });
   });
 
   /**
@@ -328,6 +349,7 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
 
   const call: DemoCall = {
     callId,
+    slug: String(params.slug ?? msg.start?.slug ?? DEFAULT_SLUG),
     streamSid: msg.start?.streamSid ?? msg.streamSid ?? null,
     callerPhone,
     twilio,
@@ -354,12 +376,7 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     console.warn(`[DEMO-LINE] ledger seed failed for ${callId}:`, e);
   }
 
-  const mod = newCoreFor(SLUG);
-  if (!mod) {
-    console.error('[DEMO-LINE] FATAL: no ticket agent module for the demo line');
-    void endCall(twilio, 'no module');
-    return;
-  }
+  const mod = ticketAgentFor(call.slug);
   mod.start(callId);
   console.info(
     `[DEMO-LINE] ${callId} started (caller ${callerPhone || 'unknown'}) ` +
@@ -428,7 +445,7 @@ function connectOpenAI(call: DemoCall): void {
       },
     });
 
-    const greeting = greetingFor();
+    const greeting = greetingFor(call.slug);
     call.transcript.push(`AGENT: ${greeting}`);
     speak(call, greeting);
     console.info(`[DEMO-LINE] ${call.callId} greeting sent`);
@@ -534,9 +551,9 @@ function startSideEars(call: DemoCall): void {
 }
 
 /** The greeting is config, not code — edit ticket_agent_config.greeting. */
-function greetingFor(): string {
+function greetingFor(slug: string): string {
   try {
-    return cachedConfig(SLUG).greeting?.trim() || FALLBACK_GREETING;
+    return cachedConfig(slug).greeting?.trim() || FALLBACK_GREETING;
   } catch {
     return FALLBACK_GREETING;
   }
@@ -602,8 +619,7 @@ async function acceptTurn(call: DemoCall, text: string, engine: string): Promise
 
 async function onCallerSaid(call: DemoCall, text: string): Promise<void> {
   call.transcript.push(`CALLER: ${text}`);
-  const mod = newCoreFor(SLUG);
-  if (!mod) return;
+  const mod = ticketAgentFor(call.slug);
 
   let action: CoreAction | null;
   try {
@@ -661,7 +677,7 @@ async function endCall(twilio: WebSocket, reason: string): Promise<void> {
   calls.delete(twilio);
   console.info(`[DEMO-LINE] ${call.callId} ending (${reason})`);
 
-  const mod = newCoreFor(SLUG);
+  const mod = ticketAgentFor(call.slug);
   try {
     // A caller who hangs up mid-flow still gets their ticket filed, if we
     // learned enough to act on it. That rule lives in the agent.
@@ -714,7 +730,7 @@ async function endCall(twilio: WebSocket, reason: string): Promise<void> {
 async function recordCall(call: DemoCall): Promise<void> {
   try {
     const { storage } = await import('../../server/storage');
-    const agent = await storage.getAgentBySlug(SLUG);
+    const agent = await storage.getAgentBySlug(call.slug);
     await storage.createCallLog({
       callSid: call.callId,
       agentId: agent?.id,
@@ -724,7 +740,7 @@ async function recordCall(call: DemoCall): Promise<void> {
       dialedNumber: '+16265482660',
       status: 'completed',
       transcript: call.transcript.join('\n'),
-      agentUsed: SLUG,
+      agentUsed: call.slug,
       agentVersion: LINE_CAPABILITIES,
       environment: process.env.APP_ENV ?? 'development',
     } as never);

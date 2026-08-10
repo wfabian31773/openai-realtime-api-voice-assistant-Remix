@@ -51,6 +51,33 @@ function isTicketAgentLine(slug: string): boolean {
 
 const modules = new Map<string, LineModule>();
 
+/**
+ * The five-step ticket agent for ANY line, regardless of the cutover secrets.
+ *
+ * The standalone media-stream transport (src/standalone/line.ts) is opted
+ * into by pointing a phone number at its URL — that IS the switch, and it is
+ * reversible in seconds without a deploy. So a line served there always gets
+ * the ticket agent; there is no second lever to forget.
+ */
+export function ticketAgentFor(slug: string): LineModule {
+  const key = `standalone:${slug}`;
+  let mod = modules.get(key);
+  if (!mod) {
+    mod = createTicketAgent(buildTicketAgentServices(), {
+      slug,
+      humanLine:
+        slug === 'no-ivr' || slug === 'after-hours'
+          ? {
+              en: "Our offices are closed right now — I'll take your information and make sure the right team member calls you back first thing.",
+              es: 'Nuestras oficinas están cerradas — tomaré su información y me aseguraré de que el equipo le devuelva la llamada a primera hora.',
+            }
+          : undefined,
+    });
+    modules.set(key, mod);
+  }
+  return mod;
+}
+
 function buildProdServices(): TicketLineServices {
   return {
     async verifyByLookup(first, last, dob) {
