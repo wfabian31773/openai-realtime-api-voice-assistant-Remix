@@ -149,7 +149,9 @@ describe('ticket agent — five steps, nothing else', () => {
     seedLedger(C, { callerPhone: '5551112222' });
     a.start(C);
     const r = await a.onUtterance(C, 'let me talk to a real person');
-    expect(r.say).toContain('All of our agents are currently busy');
+    // The boundary is the capability, not the queue depth: "our agents are
+    // busy" invites a caller to hold for a transfer that does not exist.
+    expect(r.say).toContain('not able to transfer calls');
     expect(r.say).toContain('How can I help you today?');
   });
 
@@ -510,5 +512,70 @@ describe('ticket agent — five steps, nothing else', () => {
 
       expect(submitted[0]?.fields.medication).toContain('prednisolone');
     });
+  });
+});
+
+describe('the capability boundary, said out loud', () => {
+  // Operator, 2026-08-10: "the only thing that the answering service cannot do
+  // is transfer calls or schedule appointments… it has to make sure to let the
+  // patient know that it doesn't have the capability, but since everyone's
+  // busy, it's going to [take it down] and someone will follow up."
+  beforeEach(() => clearAllLedgers());
+
+  it('tells a caller it cannot transfer, instead of implying a queue', async () => {
+    const { svc } = services();
+    const a = createTicketAgent(svc);
+    a.start(C);
+    const { lines } = await speak(await a.onUtterance(C, 'I want to talk to a real person'));
+    const said = lines.join(' ').toLowerCase();
+    expect(said).toMatch(/not able to transfer|can'?t (transfer|connect)/);
+    // "Everyone is busy" on its own invites the caller to wait, and on the
+    // live 15:18 call they did — four times.
+    expect(said).toMatch(/call(s)? you back|callback/);
+  });
+
+  it('does not repeat the same sentence at a caller who asks twice', async () => {
+    const { svc } = services();
+    const a = createTicketAgent(svc);
+    a.start(C);
+    const first = await speak(await a.onUtterance(C, 'connect me to a human'));
+    const second = await speak(await a.onUtterance(C, 'no, get me a live person'));
+    expect(second.lines.join(' ')).not.toBe(first.lines.join(' '));
+    expect(second.lines.join(' ').toLowerCase()).toMatch(/can'?t connect you/);
+  });
+
+  it('says it cannot book BEFORE the caller describes the appointment they want', async () => {
+    // A caller who names a day and time and then hears only "I've passed that
+    // to the team" hangs up believing they are booked, and finds out
+    // otherwise when they arrive.
+    const { svc } = services();
+    const a = createTicketAgent(svc);
+    a.start(C);
+    const { lines } = await speak(await a.onUtterance(C, 'I need to schedule an appointment'));
+    const said = lines.join(' ').toLowerCase();
+    expect(said).toMatch(/can'?t (book|schedule)/);
+    expect(said).toMatch(/call you back/);
+  });
+
+  it('says it once, not on every turn of the appointment', async () => {
+    const { svc } = services();
+    const a = createTicketAgent(svc);
+    a.start(C);
+    await speak(await a.onUtterance(C, 'I need to reschedule my appointment'));
+    const next = await speak(await a.onUtterance(C, 'Wayne Fabian'));
+    expect(next.lines.join(' ').toLowerCase()).not.toMatch(/can'?t (book|schedule)/);
+  });
+
+  it('still files the ticket — the boundary is not a refusal', async () => {
+    const { svc, submitted } = services();
+    const a = createTicketAgent(svc);
+    a.start(C);
+    seedLedger(C, { callerPhone: '5625550134' });
+    await speak(await a.onUtterance(C, 'I need to schedule an appointment'));
+    await speak(await a.onUtterance(C, 'Wayne Fabian'));
+    await speak(await a.onUtterance(C, 'March 17th 1973'));
+    await speak(await a.onUtterance(C, 'yes'));
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].intent).toBe('appointment');
   });
 });

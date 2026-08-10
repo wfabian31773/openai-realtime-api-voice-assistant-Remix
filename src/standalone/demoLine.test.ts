@@ -547,6 +547,65 @@ describe('demo line — a call, end to end', () => {
     }
   });
 
+  it('stays on the line until Twilio says the goodbye finished playing', async () => {
+    // Live 18:23 and 18:24: "Thanks for calling Azul Vision — take care" is
+    // stamped NOT HEARD in both. <Connect><Stream> binds the call to this
+    // socket, so we were hanging up on our own sign-off the moment the model
+    // finished GENERATING it.
+    forcedLines.length = 0;
+    const logged: string[] = [];
+    const info = vi.spyOn(console, 'info').mockImplementation((...a) => { logged.push(a.join(' ')); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...a) => { logged.push(a.join(' ')); });
+    try {
+      const earsBefore = dgOpened;
+      let closedAt = 0;
+      let lastMarkAt = 0;
+      const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+      twilio.on('close', () => { closedAt = Date.now(); });
+      // A phone that plays audio takes time to do it. Confirm the mark late,
+      // so ending on generation and ending on playback are distinguishable.
+      twilio.on('message', (d) => {
+        const f = JSON.parse(d.toString());
+        if (f.event === 'mark') {
+          setTimeout(() => {
+            lastMarkAt = Date.now();
+            try { twilio.send(JSON.stringify({ event: 'mark', mark: f.mark })); } catch { /* closed */ }
+          }, 120);
+        }
+      });
+      await new Promise<void>((r) => twilio.on('open', () => r()));
+      twilio.send(JSON.stringify({
+        event: 'start',
+        streamSid: 'MZbye',
+        start: { streamSid: 'MZbye', callSid: 'CAbye', customParameters: { from: '+15625550134', callSid: 'CAbye' } },
+      }));
+      await until(() => forcedLines.length >= 1, 'the greeting');
+      await earReady(earsBefore);
+
+      // Drive the call to its end so the agent reaches its sign-off.
+      for (const said of [
+        'I need medical records faxed', 'Wayne Fabian', 'March 17th 1973', '562 555 0134',
+      ]) {
+        const before = forcedLines.length;
+        callerSays(said);
+        await until(() => forcedLines.length > before, `a reply to "${said}"`, 8000);
+      }
+      // Whatever ends the call, it must not be us closing the socket early.
+      callerSays('No, that is everything');
+      await until(() => closedAt > 0, 'the call to end', 10_000);
+
+      expect(lastMarkAt).toBeGreaterThan(0);
+      // The socket closed AFTER Twilio confirmed playback, not before it.
+      expect(closedAt).toBeGreaterThanOrEqual(lastMarkAt);
+      const block = logged.find((l) => l.includes('transcript CAbye'));
+      expect(block).toBeTruthy();
+      expect(block!).not.toContain('NOT HEARD');
+    } finally {
+      info.mockRestore();
+      warn.mockRestore();
+    }
+  }, 20_000);
+
   it('records what the caller HEARD, not what we asked the model to say', async () => {
     // "There are things the agent is saying that are not in the transcripts —
     // I'm hearing something but the transcripts show something else." The

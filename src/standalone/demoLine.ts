@@ -208,6 +208,21 @@ interface DemoCall {
   agentLines: number[];
   pendingMarks: Map<string, number>;
   playedLines: Set<number>;
+  /**
+   * The mark we are holding the call open for, and the belt-and-braces timer
+   * behind it.
+   *
+   * <Connect><Stream> binds the call to this socket, so closing it hangs up
+   * INSTANTLY — including on however many seconds of goodbye Twilio has
+   * buffered but not yet played. Ending on response.done ended the call when
+   * the model finished GENERATING, which is why every sign-off in the 18:23
+   * and 18:24 calls is stamped NOT HEARD. We wait for Twilio to say it
+   * played.
+   */
+  finalMark: string | null;
+  finalMarkTimer: ReturnType<typeof setTimeout> | null;
+  /** μ-law bytes forwarded for the line currently playing (8000 = 1 second). */
+  responseAudioBytes: number;
   /** No transcriber started: the line cannot hear a word the caller says. */
   deaf: boolean;
 }
@@ -389,6 +404,14 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
             call.pendingMarks.delete(name);
             call.playedLines.add(idx);
           }
+          // The caller has now heard the last thing we had to say. THIS is
+          // the moment it is safe to hang up.
+          if (call && call.finalMark && call.finalMark === name) {
+            if (call.finalMarkTimer) clearTimeout(call.finalMarkTimer);
+            call.finalMarkTimer = null;
+            call.finalMark = null;
+            void endCall(twilio, 'wrap complete (heard)');
+          }
           break;
         }
         case 'stop':
@@ -445,6 +468,9 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     pendingMarks: new Map(),
     playedLines: new Set(),
     deaf: false,
+    finalMark: null,
+    finalMarkTimer: null,
+    responseAudioBytes: 0,
   };
   calls.set(twilio, call);
 
@@ -533,6 +559,10 @@ function connectOpenAI(call: DemoCall): void {
       case 'response.output_audio.delta':
       case 'response.audio.delta':
         if (call.streamSid && call.twilio.readyState === WebSocket.OPEN) {
+          // Count what we hand over: μ-law at 8kHz is one byte per sample, so
+          // these bytes ARE the playback time. That is how long the caller
+          // still needs before a hang-up is safe.
+          call.responseAudioBytes += base64Bytes(String(evt.delta ?? ''));
           call.twilio.send(
             JSON.stringify({ event: 'media', streamSid: call.streamSid, media: { payload: evt.delta } }),
           );
@@ -569,6 +599,10 @@ function connectOpenAI(call: DemoCall): void {
           const name = `line-${call.requestedIndex}`;
           call.pendingMarks.set(name, call.requestedIndex);
           call.twilio.send(JSON.stringify({ event: 'mark', streamSid: call.streamSid, mark: { name } }));
+          // If this was the last thing we intend to say, the call must stay up
+          // until Twilio confirms it PLAYED — not until the model finished
+          // writing it.
+          if (call.closing && !call.pendingSpeech.length) call.finalMark = name;
         }
         call.requestedIndex = null;
         call.requestedLine = null;
@@ -576,7 +610,7 @@ function connectOpenAI(call: DemoCall): void {
           drainSpeech(call);
           break; // the wrap waits until everything queued has been heard
         }
-        if (call.closing) void endCall(call.twilio, 'wrap complete');
+        if (call.closing) waitForPlaybackThenEnd(call);
         break;
 
       // A transcript from THIS session can no longer exist — we send it no
@@ -810,6 +844,7 @@ function emitSpeech(call: DemoCall, words: string): void {
   call.requestedIndex = call.transcript.length - 1;
   call.agentLines.push(call.requestedIndex);
   call.spokenHeard = false;
+  call.responseAudioBytes = 0; // this line's playback time, measured fresh
   send(call.openai, {
     type: 'response.create',
     response: {
@@ -879,6 +914,38 @@ function sameWords(a: string, b: string): boolean {
   return norm(a) === norm(b);
 }
 
+/** Byte length of base64 without allocating a Buffer for every 20ms frame. */
+function base64Bytes(b64: string): number {
+  if (!b64) return 0;
+  const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((b64.length * 3) / 4) - pad);
+}
+
+/**
+ * Hold the call open until the caller has actually heard the last line.
+ *
+ * The mark is the real signal. The timer behind it is only for the case where
+ * the mark never comes back — a caller who hangs up mid-goodbye, a socket that
+ * dies — and it is sized from the audio we sent rather than guessed: μ-law at
+ * 8kHz is one byte per sample, so the bytes forwarded ARE the playback
+ * milliseconds, times an eighth. A second of slack covers Twilio's own buffer.
+ */
+function waitForPlaybackThenEnd(call: DemoCall): void {
+  if (!call.finalMark || call.twilio.readyState !== WebSocket.OPEN) {
+    void endCall(call.twilio, 'wrap complete');
+    return;
+  }
+  const playMs = Math.ceil(call.responseAudioBytes / 8) + 1000;
+  console.info(
+    `[DEMO-LINE] ${call.callId} holding the line ~${playMs}ms for the last line to finish playing`,
+  );
+  call.finalMarkTimer = setTimeout(() => {
+    call.finalMarkTimer = null;
+    console.warn(`[DEMO-LINE] ${call.callId} no playback mark came back — ending anyway`);
+    void endCall(call.twilio, 'wrap complete (no mark)');
+  }, playMs);
+}
+
 /** The next queued line, once the one before it has finished playing. */
 function drainSpeech(call: DemoCall): void {
   const next = call.pendingSpeech.shift();
@@ -933,6 +1000,10 @@ async function endCall(twilio: WebSocket, reason: string): Promise<void> {
   if (call.primaryGrace) {
     clearTimeout(call.primaryGrace);
     call.primaryGrace = null;
+  }
+  if (call.finalMarkTimer) {
+    clearTimeout(call.finalMarkTimer);
+    call.finalMarkTimer = null;
   }
   for (const ear of call.sideEars) {
     // Never awaited: an unresponsive vendor must not hold the call open, and

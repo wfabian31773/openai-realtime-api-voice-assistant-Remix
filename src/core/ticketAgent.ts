@@ -274,9 +274,42 @@ const LINES = {
     en: `Is this number ending in ${last4} the best one to reach you?`,
     es: `¿Este número que termina en ${last4} es el mejor para contactarle?`,
   }),
+  /**
+   * THE capability boundary, said plainly.
+   *
+   * Operator, 2026-08-10: "the only thing that the answering service cannot
+   * do is transfer calls or schedule appointments… it has to make sure to let
+   * the patient know that it doesn't have the capability, but since everyone's
+   * busy, it's going to [take it down] and someone will follow up."
+   *
+   * "All of our agents are busy" alone is not that. It implies a queue the
+   * caller can wait in, so they wait — the live 15:18 call carries that line
+   * four times in a row while the caller answers "I'll wait" each time. What
+   * a caller cannot infer is that no transfer exists on this line at all.
+   */
   human: {
-    en: 'All of our agents are currently busy at the moment — I can take a message and have the team contact you as soon as they become available.',
-    es: 'Todos nuestros agentes están ocupados en este momento — puedo tomar un mensaje para que el equipo le contacte tan pronto estén disponibles.',
+    en: "I'm not able to transfer calls — I'm the answering service, and everyone is with other patients right now. What I can do is take this down and make sure the right person calls you back.",
+    es: 'No puedo transferir llamadas — soy el servicio de mensajes, y todos están atendiendo a otros pacientes. Lo que sí puedo hacer es tomar su información y asegurarme de que la persona indicada le devuelva la llamada.',
+  },
+  /**
+   * Asked again. Repeating the first line word for word is what made the
+   * caller repeat themselves, so this says the same thing without restating
+   * the whole boundary and gets straight back to the request.
+   */
+  humanAgain: {
+    en: "I understand — I really can't connect you, but a callback is the fastest way to reach the right person.",
+    es: 'Entiendo — de verdad no puedo comunicarle, pero una devolución de llamada es la forma más rápida de llegar a la persona correcta.',
+  },
+  /**
+   * Said ONCE, the moment we know this is an appointment request. Without it
+   * a caller names the day and time they want, hears "I've passed that to the
+   * team", and hangs up believing they are booked. That is the most damaging
+   * thing this line could imply, because the patient does not find out until
+   * they arrive.
+   */
+  cannotSchedule: {
+    en: "I can't book or change appointments myself, but I'll pass this to the scheduling team and someone will call you back to set it up.",
+    es: 'No puedo agendar ni cambiar citas directamente, pero le paso esto al equipo de citas y alguien le llamará para coordinarla.',
   },
   urgent: {
     en: 'If this is a medical emergency, please hang up and dial nine one one right away. Otherwise I\'ll take your information and flag it urgent.',
@@ -348,6 +381,11 @@ interface CallState {
   asks: Map<FieldKey, number>;
   verifyTries: number;
   filed: boolean;
+  /** How many times they have asked for a person. Repeating one line at them
+   * is what kept a caller saying "I'll wait" four times. */
+  humanAsks: number;
+  /** The "I can't book appointments" boundary is said once, not every turn. */
+  toldCannotSchedule: boolean;
 }
 
 export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: string; humanLine?: Localized } = {}): LineModule {
@@ -516,8 +554,20 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
   /** Collect done? Execute. Otherwise ask the next thing. */
   const advance = (callId: string, s: CallState): CoreAction => {
     const missing = nextMissing(callId, s);
-    if (missing) return ask(callId, s, missing);
-    return execute(callId, s);
+    const action = missing ? ask(callId, s, missing) : execute(callId, s);
+
+    // The scheduling boundary rides on the FIRST line after we know this is
+    // an appointment request, so the caller hears it before they describe the
+    // day and time they want — not after, and never instead of a ticket. A
+    // caller who is told "I've passed that to the team" and nothing else
+    // hangs up believing they are booked, and only finds out otherwise when
+    // they turn up at an office that is not expecting them.
+    if (s.intent === 'appointment' && !s.toldCannotSchedule) {
+      s.toldCannotSchedule = true;
+      const notice = t(s, LINES.cannotSchedule);
+      return { ...action, say: action.say ? `${notice} ${action.say}` : notice };
+    }
+    return action;
   };
 
   return {
@@ -540,6 +590,8 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
         asks: new Map(),
         verifyTries: 0,
         filed: false,
+        humanAsks: 0,
+        toldCannotSchedule: false,
       });
     },
 
@@ -615,9 +667,13 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
           }
         }
 
-        // This line cannot transfer. Say so, every time, and keep going.
+        // This line cannot transfer. Say so plainly the first time, and
+        // differently the second — the same sentence repeated is what left a
+        // caller answering "I'll wait" to it four times in a row.
         if (HUMAN.test(text)) {
-          const line = t(s, cfg.humanLine ?? LINES.human);
+          s.humanAsks += 1;
+          const line =
+            s.humanAsks === 1 ? t(s, cfg.humanLine ?? LINES.human) : t(s, LINES.humanAgain);
           if (s.step === 'CLASSIFY' || s.step === 'VERIFY') {
             s.step = 'CLASSIFY';
             return { say: `${line} ${t(s, LINES.askIntent)}` };
