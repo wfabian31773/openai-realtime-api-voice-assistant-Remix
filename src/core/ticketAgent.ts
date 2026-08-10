@@ -552,6 +552,26 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
   };
 
   /** Collect done? Execute. Otherwise ask the next thing. */
+  /**
+   * ONE way to decide what a caller wants: the model reads the sentence, and
+   * the keyword table is the floor under it.
+   *
+   * Operator, 2026-08-10: "you pass the transcribed over into the LLM and then
+   * have LLM extract the intent and pass that back… the intent drives the
+   * conversation the rest of the way." That was built for the first statement
+   * of a request, but two other paths reached the table directly and skipped
+   * the model entirely — a caller who leads with something urgent, and the
+   * very common second request after "is there anything else?". Both got a
+   * regex, and the second one is where "actually, can you also have my
+   * records emailed" lands. Everything goes through here now.
+   */
+  const readIntent = async (
+    text: string,
+  ): Promise<{ intent: IntentKey; via: string; fields?: Partial<Record<FieldKey, string>> }> => {
+    const read = await services.classifyIntent?.(text).catch(() => null);
+    return { intent: read?.intent ?? classify(text), via: read?.source ?? 'rules', fields: read?.fields };
+  };
+
   const advance = (callId: string, s: CallState): CoreAction => {
     const missing = nextMissing(callId, s);
     const action = missing ? ask(callId, s, missing) : execute(callId, s);
@@ -657,7 +677,9 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
             // the 911 line must still leave a request behind (review
             // 2026-08-09) — the safety line is not a reason to forget them.
             if ((s.step === 'CLASSIFY' || s.step === 'VERIFY') && text.trim().split(/\s+/).length >= 2) {
-              s.intent = classify(text);
+              const urgentRead = await readIntent(text);
+              s.intent = urgentRead.intent;
+              console.info(`[TICKET-AGENT] ${callId.slice(-6)} urgent intent=${s.intent} via=${urgentRead.via}`);
               s.rawRequest = text.trim().slice(0, 300);
               updateLedger(callId, { intent: text.trim().slice(0, 200) });
               const next = advance(callId, s);
@@ -758,9 +780,10 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
 
             // The model reads the sentence; the TABLE is the floor. A model
             // that is slow, down, or confused costs us nothing but accuracy.
-            const read = await services.classifyIntent?.(text).catch(() => null);
-            s.intent = read?.intent ?? classify(text);
-            if (read?.fields) {
+            const modelRead = await services.classifyIntent?.(text).catch(() => null);
+            const read = modelRead ?? { intent: classify(text), source: 'rules' as const, fields: undefined };
+            s.intent = read.intent;
+            if (read.fields) {
               // Anything they volunteered in the same breath, kept — but only
               // after our own parsers agree it is what the model says it is.
               for (const [k, v] of Object.entries(read.fields) as Array<[FieldKey, string]>) {
@@ -769,8 +792,8 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
               }
             }
             console.info(
-              `[TICKET-AGENT] ${callId.slice(-6)} intent=${s.intent} via=${read?.source ?? 'rules'}` +
-                `${read?.callerIsProfessional ? ' professional' : ''}` +
+              `[TICKET-AGENT] ${callId.slice(-6)} intent=${s.intent} via=${read.source}` +
+                `${modelRead?.callerIsProfessional ? ' professional' : ''}` +
                 ` needs=${needsFor(s.intent).join(',')}` +
                 `${Object.keys(s.values).length ? ` already=${Object.keys(s.values).join(',')}` : ''}`,
             );
@@ -846,8 +869,27 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
             }
             const stripped = text.replace(/\b(yes|yeah|sure|also|please|and|sí|si)\b/gi, ' ').trim();
             if (stripped.split(/\s+/).filter(Boolean).length >= 3) {
-              s.intent = classify(text);
-              s.values = { patient_name: s.values.patient_name, patient_dob: s.values.patient_dob, callback_number: s.values.callback_number };
+              // The SECOND request of a call deserves the same reading as the
+              // first. This is where "actually, can you also have my records
+              // emailed" arrives, and a regex on it is how a records request
+              // once got filed as surgery coordination.
+              const again = await readIntent(text);
+              s.intent = again.intent;
+              console.info(`[TICKET-AGENT] ${callId.slice(-6)} second request intent=${s.intent} via=${again.via}`);
+              // Identity and callback carry over; everything the FIRST request
+              // needed is dropped, or a fax number from request one would be
+              // filed against request two.
+              s.values = {
+                patient_name: s.values.patient_name,
+                patient_dob: s.values.patient_dob,
+                callback_number: s.values.callback_number,
+              };
+              // Then whatever they volunteered in this new sentence, once our
+              // own parsers agree it is what the model says it is.
+              for (const [k, v] of Object.entries(again.fields ?? {}) as Array<[FieldKey, string]>) {
+                const parsed = FIELDS[k].parse(v);
+                if (parsed) s.values[k] = parsed;
+              }
               s.rawRequest = text.trim().slice(0, 300);
               s.filed = false;
               return advance(callId, s);

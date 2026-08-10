@@ -579,3 +579,60 @@ describe('the capability boundary, said out loud', () => {
     expect(submitted[0].intent).toBe('appointment');
   });
 });
+
+describe('the reasoning layer reads EVERY request, not just the first', () => {
+  // Operator, 2026-08-10: "sounds to me like you are trying to classify intent
+  // by code rather than an LLM." Two paths did exactly that.
+  beforeEach(() => clearAllLedgers());
+
+  it('reads the second request with the model, not the keyword table', async () => {
+    // "Can you also have them emailed" after the first ticket is filed. The
+    // keyword table needs the word "email" within 40 characters of "records";
+    // the model just reads the sentence.
+    const asked: string[] = [];
+    const { svc } = services();
+    svc.classifyIntent = vi.fn(async (t: string) => {
+      asked.push(t);
+      return /e-?mail/i.test(t)
+        ? { intent: 'records_email' as const, source: 'llm' as const }
+        : { intent: 'medication_refill' as const, source: 'llm' as const };
+    });
+    const a = createTicketAgent(svc);
+    a.start(C);
+    seedLedger(C, { callerPhone: '5625550134' });
+    await speak(await a.onUtterance(C, 'I need a refill please'));
+    await speak(await a.onUtterance(C, 'Wayne Fabian'));
+    await speak(await a.onUtterance(C, 'March 17th 1973'));
+    await speak(await a.onUtterance(C, 'latanoprost'));
+    await speak(await a.onUtterance(C, 'yes'));
+    // "Anything else?" — a NEW request, in a sentence the table would miss.
+    await speak(await a.onUtterance(C, 'yes, could you also send my chart notes over by e-mail'));
+    expect(asked).toHaveLength(2);
+    expect(asked[1]).toMatch(/e-mail/);
+    expect(a.stateOf(C)).toContain('records_email');
+  });
+
+  it('reads an urgent caller\'s request with the model too', async () => {
+    const asked: string[] = [];
+    const { svc } = services();
+    svc.classifyIntent = vi.fn(async (t: string) => {
+      asked.push(t);
+      return { intent: 'surgery' as const, source: 'llm' as const };
+    });
+    const a = createTicketAgent(svc);
+    a.start(C);
+    await speak(await a.onUtterance(C, 'this is an emergency about my surgery tomorrow'));
+    expect(asked).toHaveLength(1);
+    expect(a.stateOf(C)).toContain('surgery');
+  });
+
+  it('still works when the model is down — the table is the floor, not the driver', async () => {
+    const { svc } = services();
+    svc.classifyIntent = vi.fn(async () => { throw new Error('model down'); });
+    const a = createTicketAgent(svc);
+    a.start(C);
+    const { lines } = await speak(await a.onUtterance(C, 'I need my records faxed over'));
+    expect(a.stateOf(C)).toContain('records_fax');
+    expect(lines.join(' ')).toMatch(/name/i);
+  });
+});
