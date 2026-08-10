@@ -33,6 +33,8 @@ export type FieldKey =
   | 'callback_number'
   | 'fax_number'
   | 'email_address'
+  | 'delivery_method'
+  | 'medication'
   | 'office_location'
   | 'provider_name'
   | 'details';
@@ -116,6 +118,35 @@ export const FIELDS: Record<FieldKey, FieldDef> = {
     },
     parse: (t) => t.match(EMAIL)?.[0] ?? null,
   },
+  /**
+   * How the caller wants the records sent. Asked ONLY when they did not say.
+   * A live call (12:36) said "I'm calling for medical records" and was
+   * immediately asked for a fax number it never mentioned wanting — then
+   * tried to say "Email:" at the end and was hung up on.
+   */
+  delivery_method: {
+    ask: {
+      en: 'Would you like those faxed or emailed?',
+      es: '¿Los quiere por fax o por correo electrónico?',
+    },
+    parse: (t) => {
+      if (/\be-?mail/i.test(t)) return 'email';
+      if (/\bfax/i.test(t)) return 'fax';
+      return null;
+    },
+  },
+  /**
+   * Which drug. A refill ticket without it is a phone call back to the
+   * patient — and the caller said "prednisolone acetate" twice on the live
+   * 12:38 call with nowhere for it to go.
+   */
+  medication: {
+    ask: {
+      en: 'Which medication needs refilling?',
+      es: '¿Qué medicamento necesita resurtir?',
+    },
+    parse: (t) => (t.trim().length >= 3 ? t.trim().slice(0, 80) : null),
+  },
   office_location: {
     ask: {
       en: 'Which Azul Vision office is this for?',
@@ -142,6 +173,7 @@ export const FIELDS: Record<FieldKey, FieldDef> = {
 /* ── Step 3, as data: what each request needs ────────────────────────── */
 
 export type IntentKey =
+  | 'records'
   | 'records_fax'
   | 'records_email'
   | 'medication_refill'
@@ -173,9 +205,26 @@ export const INTENTS: Record<IntentKey, IntentDef> = {
     department: 3,
     label: 'Medical records — email',
   },
+  /**
+   * Records, method not stated. We ASK rather than assume — answering it
+   * re-points this to records_fax or records_email, which is where the
+   * destination gets collected.
+   */
+  records: {
+    match: /\b(medical )?(records?|charts?|notes?|results?)\b/i,
+    // callback_number is the floor: if the caller never tells us HOW to send
+    // the records, a human has to ring them and ask. Filing a records request
+    // with no destination at all — which a live call did — is a ticket nobody
+    // can act on. Answering the method re-points this to records_fax or
+    // records_email, whose needs replace these, so the callback is only ever
+    // asked of someone who would not say.
+    needs: ['patient_name', 'patient_dob', 'delivery_method', 'callback_number'],
+    department: 3,
+    label: 'Medical records',
+  },
   medication_refill: {
     match: /\b(refill|prescription|medication|eye ?drops?|receta|medicamento)\b/i,
-    needs: ['patient_name', 'patient_dob', 'callback_number'],
+    needs: ['patient_name', 'patient_dob', 'medication', 'callback_number'],
     department: 3,
     label: 'Medication refill',
   },
@@ -582,17 +631,25 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
         // ignored both times, then the ticket was filed as something else.
         // A records request follows the method the caller names, whenever
         // they name it.
-        if (s.intent === 'records_fax' || s.intent === 'records_email') {
-          const method = deliveryMethodIn(text);
+        if (s.intent === 'records' || s.intent === 'records_fax' || s.intent === 'records_email') {
+          const method = deliveryMethodIn(text) ?? FIELDS.delivery_method.parse(text);
           const wanted = method === 'email' ? 'records_email' : method === 'fax' ? 'records_fax' : null;
           if (wanted && wanted !== s.intent) {
             const dropped = wanted === 'records_email' ? 'fax_number' : 'email_address';
             delete s.values[dropped];
             s.asks.delete(dropped);
+            s.values.delivery_method = method as string;
             s.intent = wanted;
-            if (s.asking === dropped) s.asking = null;
+            if (s.asking === dropped || s.asking === 'delivery_method') s.asking = null;
             console.info(`[TICKET-AGENT] ${callId.slice(-6)} caller asked for ${method} — intent now ${wanted}`);
-            if (s.step === 'COLLECT' || s.step === 'EXECUTE') return advance(callId, s);
+            // ANY step except a finished call: a caller who says "Email:" as
+            // we are wrapping up is correcting us, not saying goodbye. The
+            // live 12:36 call said exactly that and was thanked and hung up
+            // on with a fax ticket already filed.
+            if (s.step !== 'DONE') {
+              s.filed = false;
+              return advance(callId, s);
+            }
           }
         }
 

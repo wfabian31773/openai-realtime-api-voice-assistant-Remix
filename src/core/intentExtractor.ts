@@ -49,6 +49,7 @@ export interface ExtractedIntent {
 }
 
 const VALID_INTENTS: IntentKey[] = [
+  'records',
   'records_fax',
   'records_email',
   'medication_refill',
@@ -69,8 +70,9 @@ Return this shape:
  "patient_name": string|null, "patient_dob": string|null, "provider_name": string|null, "office_location": string|null}
 
 intent must be exactly one of:
-- records_fax        medical records / charts / notes / results, to be FAXED
-- records_email      medical records / charts / notes / results, to be EMAILED
+- records            medical records / charts / notes / results, WITHOUT saying how to send them
+- records_fax        medical records / charts / notes / results, explicitly to be FAXED
+- records_email      medical records / charts / notes / results, explicitly to be EMAILED
 - medication_refill  a prescription or eye drops refilled
 - appointment        book, reschedule, cancel, or confirm an appointment
 - billing            a bill, invoice, insurance, copay, or statement
@@ -80,7 +82,7 @@ intent must be exactly one of:
 
 Rules that matter:
 - Judge the REQUEST, never the caller's employer. "Loma Linda Surgery Center" is where someone works; it does not make the call about surgery. "Vision Center", "Eye Institute", "Medical Group" are likewise names, not requests.
-- If they want records but did NOT say how to send them, use records_fax and set delivery_method to null. Downstream will ask.
+- If they want records but did NOT say how to send them, use "records" and set delivery_method to null. Do NOT guess fax — downstream asks them which.
 - caller_is_professional is true when they identify as staff, a doctor, or another practice calling about a mutual patient.
 - Only fill patient_name / patient_dob / provider_name if the caller actually said them in THIS sentence. Never guess. A caller giving their own name as a professional is not the patient.
 - Output JSON and nothing else.`;

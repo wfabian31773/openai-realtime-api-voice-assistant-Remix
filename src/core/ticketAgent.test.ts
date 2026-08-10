@@ -84,8 +84,10 @@ describe('ticket agent — five steps, nothing else', () => {
     expect(r.say).toContain('How can I help you today?');       // step 2
 
     r = await a.onUtterance(C, 'I need a refill on my eye drops');
-    // Name and DOB are known, so the only thing left is the callback — and
-    // it is CONFIRMED by last four, not collected.
+    // Name and DOB are known, so the only things left are WHICH drug and the
+    // callback — and the callback is CONFIRMED by last four, not collected.
+    expect(r.say).toContain('Which medication');
+    r = await a.onUtterance(C, 'prednisolone acetate');
     expect(r.say).toContain('ending in 7471');
     r = await a.onUtterance(C, 'yes');
     await speak(r);
@@ -159,6 +161,7 @@ describe('ticket agent — five steps, nothing else', () => {
     await a.onUtterance(C, 'I need a refill on my prescription');
     await a.onUtterance(C, 'Wayne Fabian');
     await a.onUtterance(C, 'March 17 1973');
+    await a.onUtterance(C, 'prednisolone acetate');
     const spoken = await speak(await a.onUtterance(C, 'yes'));
     const all = spoken.lines.join(' ').toLowerCase();
     expect(all).toContain("i've noted everything");
@@ -187,6 +190,7 @@ describe('ticket agent — five steps, nothing else', () => {
     expect(r.say).toContain("patient's first and last name");
     await a.onUtterance(C, 'Elena Ruiz');
     await a.onUtterance(C, 'April 2 1948');
+    await a.onUtterance(C, 'prednisolone acetate');
     await speak(await a.onUtterance(C, 'yes'));
     expect(submitted[0].fields.patient_name).toBe('Elena Ruiz');
   });
@@ -248,9 +252,9 @@ describe('ticket agent — five steps, nothing else', () => {
       // Still wants the name — but the date is banked.
       expect(r.say?.toLowerCase()).toContain('name');
       r = await a.onUtterance(C, 'Wayne Fabian');
-      // It must NOT ask for the date of birth it already has — the next
-      // thing a refill needs is the callback number.
+      // It must NOT ask for the date of birth it already has.
       expect(r.say?.toLowerCase() ?? '').not.toContain('date of birth');
+      await a.onUtterance(C, 'prednisolone acetate');
       r = await a.onUtterance(C, 'yes'); // confirm the caller-ID callback
       await speak(r);
 
@@ -374,6 +378,7 @@ describe('ticket agent — five steps, nothing else', () => {
       await a.onUtterance(C, 'I need a refill on my eye drops');
       await a.onUtterance(C, 'Wayne Fabian');
       await a.onUtterance(C, 'March 17 1973');
+      await a.onUtterance(C, 'prednisolone acetate');
       await speak(await a.onUtterance(C, 'yes'));
 
       expect(submitted[0]?.intent).toBe('medication_refill');
@@ -390,6 +395,7 @@ describe('ticket agent — five steps, nothing else', () => {
       await a.onUtterance(C, 'I need a refill on my eye drops');
       await a.onUtterance(C, 'Wayne Fabian');
       await a.onUtterance(C, 'March 17 1973');
+      await a.onUtterance(C, 'prednisolone acetate');
       await speak(await a.onUtterance(C, 'yes'));
 
       expect(svc.verify).toHaveBeenCalledWith(C, 'Wayne Fabian', '1973-03-17');
@@ -405,6 +411,7 @@ describe('ticket agent — five steps, nothing else', () => {
       await a.onUtterance(C, 'I need a refill on my eye drops');
       await a.onUtterance(C, 'Nobody Whatsoever');
       await a.onUtterance(C, 'March 17 1973');
+      await a.onUtterance(C, 'prednisolone acetate');
       await speak(await a.onUtterance(C, 'yes'));
 
       expect(submitted).toHaveLength(1);
@@ -421,10 +428,87 @@ describe('ticket agent — five steps, nothing else', () => {
       await a.onUtterance(C, 'I need a refill on my eye drops');
       await a.onUtterance(C, 'Wayne Fabian');
       await a.onUtterance(C, 'March 17 1973');
+      await a.onUtterance(C, 'prednisolone acetate');
       await speak(await a.onUtterance(C, 'yes'));
 
       expect(submitted).toHaveLength(1);
       expect(submitted[0]?.identityVerified).toBeUndefined();
+    });
+  });
+
+  /** The 12:36 live call, which filed a records ticket with no destination. */
+  describe('records with no method stated: ask, never assume', () => {
+    const CALL = 'Good morning, I\'m calling for medical records.';
+
+    it('asks HOW to send them instead of demanding a fax number', async () => {
+      const { svc } = services({ reads: { [CALL]: { intent: 'records', source: 'llm' } } });
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      await a.onUtterance(C, CALL);
+      await a.onUtterance(C, 'the patient is Joseph Perez');
+      const r = await a.onUtterance(C, 'December 3rd, 1971');
+      // The live call asked "What's the best fax number?" of someone who
+      // never said fax.
+      expect(r.say?.toLowerCase()).not.toContain('fax number');
+      expect(r.say?.toLowerCase()).toMatch(/faxed or emailed/);
+    });
+
+    it('answering "email" re-points it and then collects the address', async () => {
+      const { svc, submitted } = services({ reads: { [CALL]: { intent: 'records', source: 'llm' } } });
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      await a.onUtterance(C, CALL);
+      await a.onUtterance(C, 'the patient is Joseph Perez');
+      await a.onUtterance(C, 'December 3rd, 1971');
+      const r = await a.onUtterance(C, 'email please');
+      expect(r.say?.toLowerCase()).toContain('email address');
+      await speak(await a.onUtterance(C, "it's medicalrecords@azulvision.com"));
+
+      expect(submitted[0]?.intent).toBe('records_email');
+      expect(submitted[0]?.fields.email_address).toBe('medicalrecords@azulvision.com');
+    });
+
+    it('"Email:" said at the WRAP re-opens the request instead of hanging up', async () => {
+      // Live 12:36: the caller said "Email:" after the fax ticket was filed
+      // and was thanked and disconnected.
+      const { svc, submitted } = services({
+        reads: { 'I need those records faxed': { intent: 'records_fax', source: 'llm' } },
+      });
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      await a.onUtterance(C, 'I need those records faxed');
+      await a.onUtterance(C, 'Joseph Perez');
+      await a.onUtterance(C, 'December 3 1971');
+      await speak(await a.onUtterance(C, '760 860 1734'));
+      expect(submitted[0]?.intent).toBe('records_fax');
+
+      // Now, at the wrap, they correct us.
+      const r = await a.onUtterance(C, 'Email:');
+      expect(r.say?.toLowerCase()).toContain('email address');
+      expect(r.endCall).not.toBe(true);
+      await speak(await a.onUtterance(C, 'medicalrecords@azulvision.com'));
+      expect(submitted[1]?.intent).toBe('records_email');
+    });
+
+    it('a refill ticket carries the drug the caller named', async () => {
+      const { svc, submitted } = services();
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      await a.onUtterance(C, "I'm calling for a medication refill");
+      await a.onUtterance(C, 'Wayne Fabian');
+      await a.onUtterance(C, 'March 17 1973');
+      await a.onUtterance(C, "it's prednisolone acetate");
+      await speak(await a.onUtterance(C, 'yes'));
+
+      expect(submitted[0]?.fields.medication).toContain('prednisolone');
     });
   });
 });
