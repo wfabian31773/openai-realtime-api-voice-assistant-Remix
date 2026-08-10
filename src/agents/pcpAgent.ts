@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { buildPcpPublicKnowledgePrompt } from '../config/azulVisionKnowledge';
 import { pcpSafetyGuardrails } from '../guardrails/pcpSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
+import { markCallConcluded } from '../services/callConclusion';
 import { recordingExecute } from '../services/toolTimeline';
 import { withToolDirection } from '../services/toolDirection';
 import { scheduleLookupService } from '../services/scheduleLookupService';
@@ -482,7 +483,12 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const response = await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`, {
         method: 'POST', headers: { Authorization: `Bearer ${apiKey}` },
       });
-      if (response.ok) pcpDirector.clear(callId);
+      if (response.ok) {
+        pcpDirector.clear(callId);
+        // Deliberate, successful hangup — SIP recovery must not transfer
+        // this finished call.
+        markCallConcluded(callId, `terminate_call:${reason}`);
+      }
       return { success: response.ok, reason, status: response.status };
     },
   });

@@ -963,6 +963,7 @@ const aircallDTMFSent = new Set<string>();
 
 // Import escalation details from shared store (avoids circular dependency with noIvrAgent.ts)
 import { escalationDetailsMap, type EscalationDetails } from './services/escalationStore';
+import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
 
 // Log conversation history (PHI-protected)
 function logHistoryItem(item: RealtimeItem, callId?: string): void {
@@ -1633,13 +1634,34 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
       return;
     }
 
+    const recoveredCallId = getCallIdByConference(conferenceName) ?? callIdForConference(conferenceName);
+
+    // A terminated SIP leg is NOT automatically a failure. When WE ended the
+    // session on purpose (terminate_call after a goodbye, dead-air watchdog),
+    // the caller lingering on the line is a finished call whose owner hasn't
+    // hung up — the right move is to hang their leg up, not to warm-transfer
+    // them to the on-call number. Before this check (2026-08-10), finished
+    // ghost calls and post-goodbye lingerers were ringing the operator's phone
+    // as "TECH FALLBACK" transfers several times a day.
+    const conclusion = getCallConclusion(recoveredCallId);
+    if (conclusion) {
+      console.info(`[SIP-RECOVERY] ${conferenceName}: session concluded deliberately (${conclusion.reason}) — hanging up lingering caller leg ${callerCallSid}`);
+      await client.calls(callerCallSid).update({
+        twiml: `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Thank you for calling Azul Vision. Goodbye.</Say>
+  <Hangup/>
+</Response>`,
+      });
+      return;
+    }
+
     const fallbackNumber = HUMAN_AGENT_NUMBER || '+18186021567';
     const callerIdAttribute = envConfig.twilio.phoneNumber
       ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
       : '';
     // Heads-up SMS BEFORE the operator's phone rings. This path fires when the
     // assistant leg died mid-call, so escalation details may or may not exist.
-    const recoveredCallId = getCallIdByConference(conferenceName);
     sendUrgentTransferSms({
       callerNumber: getCallerNumber(conferenceName) || callerCall.from,
       escalationDetails: recoveredCallId ? escalationDetailsMap.get(recoveredCallId) : undefined,
@@ -2692,6 +2714,11 @@ async function observeCall(
             { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` } },
           );
           console.warn(`[DEAD-AIR] hangup for ${callId} → ${res.status}`);
+          // Deliberate, successful hangup: a dead line must be hung up by SIP
+          // recovery, not "rescued" — transferring it would ring the on-call
+          // number with silence. Marked only on hangup success so a genuine
+          // failure still gets the human fallback.
+          if (res.ok) markCallConcluded(callId, 'dead_air_watchdog');
         } else {
           console.error('[DEAD-AIR] OPENAI_API_KEY missing — cannot hang up');
         }
@@ -2708,6 +2735,9 @@ async function observeCall(
   const confName = getConferenceName(callId); // Uses wrapper with fallback to service cache
   if (confName) {
     conferenceNameToCallID[confName] = callId;
+    // Durable alias for SIP recovery: the live maps above are deleted during
+    // teardown, before recovery's delayed check runs. See callConclusion.ts.
+    linkConferenceToCall(confName, callId);
     // Note: caller-ready promise is created EARLIER in the incoming-call handler
     // to avoid race condition where customer joins before this code runs
     console.info(`[SESSION] Mapped conference ${confName} to callId ${callId}`);
@@ -2895,6 +2925,9 @@ async function observeCall(
                             { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` } },
                           );
                           console.info(`[NEW-CORE] wrap hangup for ${callId} → ${res.status}`);
+                          // Deliberate, successful wrap hangup — SIP recovery
+                          // must hang up the lingering caller, not transfer.
+                          if (res.ok) markCallConcluded(callId, 'new_core_wrap');
                         }
                       } catch (e) {
                         console.warn(`[NEW-CORE] hangup failed for ${callId}:`, e);

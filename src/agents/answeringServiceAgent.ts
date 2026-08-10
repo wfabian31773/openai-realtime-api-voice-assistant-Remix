@@ -9,6 +9,7 @@ import { CallerMemoryService, CallerMemory } from '../services/callerMemoryServi
 import { storage } from '../../server/storage';
 import { callMetadataForDB } from '../services/callMetadataStore';
 import { recordingExecute } from '../services/toolTimeline';
+import { markCallConcluded } from '../services/callConclusion';
 import { buildCompactLocationReference } from '../config/azulVisionKnowledge';
 import {
   ANSWERING_SERVICE_DEPARTMENTS,
@@ -1217,6 +1218,9 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
         );
         if (response.ok) {
           console.log(`[${agentTag}] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
+          // Deliberate, successful hangup — SIP recovery must not transfer
+          // this finished call; marked only on hangup success.
+          markCallConcluded(callId, `terminate_call:${params.reason}`);
           return { success: true, reason: params.reason };
         } else {
           const text = await response.text().catch(() => "");

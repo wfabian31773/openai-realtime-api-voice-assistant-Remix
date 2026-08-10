@@ -17,6 +17,7 @@ import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
 import { storage } from "../../server/storage";
 import { escalationDetailsMap } from "../services/escalationStore";
+import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
 
 const CONTEXT_LOOKUP_TIMEOUT_MS = 2000;
@@ -1342,6 +1343,12 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
         );
         if (response.ok) {
           console.log(`[TOOL] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
+          // Deliberate, successful hangup — SIP recovery must hang up the
+          // lingering caller leg, not "rescue" a finished call by transferring
+          // it to a human. Marked only after the guard above and only on a
+          // successful hangup, so escalations-in-flight and failed hangups
+          // still get the transfer safety net.
+          markCallConcluded(callId, `terminate_call:${params.reason}`);
           return { success: true, reason: params.reason };
         } else {
           const text = await response.text().catch(() => "");

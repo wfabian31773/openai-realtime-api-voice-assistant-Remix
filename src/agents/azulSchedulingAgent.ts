@@ -29,6 +29,7 @@ import { z } from 'zod';
 import { getPacificTimeContext } from '../utils/timeAware';
 import { medicalSafetyGuardrails } from '../guardrails/medicalSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
+import { markCallConcluded } from '../services/callConclusion';
 import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall, type AzulToolEvent } from '../services/toolTimeline';
 import { callMetadataForDB } from '../services/callMetadataStore';
 import { callerSpeech, guardIdentityArgs, surnameDisagrees, lastIdentityAttempt } from '../services/identityArgGuard';
@@ -1920,6 +1921,9 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
           },
         );
         if (response.ok) {
+          // Deliberate, successful hangup — SIP recovery must not transfer
+          // this finished call; marked only on hangup success.
+          markCallConcluded(callId, `terminate_call:${params.reason}`);
           return { success: true, reason: params.reason };
         }
         return { success: false, status: response.status };
