@@ -25,7 +25,8 @@ import type { Express, Request, Response } from 'express';
 import type { Server as HttpServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { newCoreFor } from '../core/router';
-import { buildTranscriptionConfig } from '../config/transcription';
+import { buildTranscriptionConfig, activeKeywords, TRANSCRIPTION_PROMPT } from '../config/transcription';
+import { buildSideTranscribers, configuredEngines, primaryEngine, type Transcriber } from './transcribers';
 import { cachedConfig } from '../core/ticketAgentConfig';
 import { seedLedger, releaseLedger } from '../services/callFactsLedger';
 import type { CoreAction } from '../core/types';
@@ -46,6 +47,18 @@ const MOUTHPIECE_INSTRUCTIONS = [
 ].join('\n');
 
 const FALLBACK_GREETING = 'Thank you for calling Azul Vision. How can I help you today?';
+
+/**
+ * What this build of the line actually DOES, stamped on every call.
+ *
+ * Half of 2026-08-09 was spent arguing about which build answered a call —
+ * asking the operator to check a deploy number, guessing from behaviour,
+ * being wrong. A version number would need maintaining and would lie the
+ * first time someone forgot. This describes CAPABILITIES instead, so the
+ * call record answers "which build was this?" without anyone remembering
+ * anything. Add a behaviour, add it here.
+ */
+const LINE_CAPABILITIES = ['tuned-transcriber', 'speech-gated-turns', 'no-self-response', 'stt-bench'].join(',');
 
 function xmlEscape(s: string): string {
   return s.replace(/[<>&'"]/g, (c) =>
@@ -93,6 +106,12 @@ interface DemoCall {
    * starts answering in Spanish to a silent line.
    */
   heardSpeech: boolean;
+  /** Extra engines listening to the same audio (the bench). */
+  sideEars: Transcriber[];
+  /** Whose words the agent acts on. */
+  primary: string;
+  /** Every engine's final text for the current turn, for the comparison log. */
+  heard: Map<string, string>;
 }
 
 const calls = new Map<WebSocket, DemoCall>();
@@ -123,7 +142,7 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
 
   // A plain GET so the line can be proved reachable from a browser.
   app.get('/demo/health', (_req: Request, res: Response) => {
-    res.json({ ok: true, line: SLUG, active: calls.size, streamPath: STREAM_PATH });
+    res.json({ ok: true, line: SLUG, active: calls.size, streamPath: STREAM_PATH, capabilities: LINE_CAPABILITIES.split(',') });
   });
 
   // ------------------------------------------------------------- the socket
@@ -154,6 +173,14 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
           break;
         case 'media': {
           const call = calls.get(twilio);
+          if (call && msg.media?.payload) {
+            // The SAME bytes to every engine — that is what makes the
+            // comparison fair. Decoded once, μ-law, never resampled.
+            if (call.sideEars.length) {
+              const pcmu = Buffer.from(msg.media.payload, 'base64');
+              for (const ear of call.sideEars) ear.sendAudio(pcmu);
+            }
+          }
           if (call?.openai?.readyState === WebSocket.OPEN && msg.media?.payload) {
             send(call.openai, { type: 'input_audio_buffer.append', audio: msg.media.payload });
           }
@@ -171,7 +198,7 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
     twilio.on('error', (e) => console.warn('[DEMO-LINE] twilio socket error:', e));
   });
 
-  console.info(`[DEMO-LINE] ready — POST /demo/voice, stream ${STREAM_PATH}`);
+  console.info(`[DEMO-LINE] ready — POST /demo/voice, stream ${STREAM_PATH} [${LINE_CAPABILITIES}]`);
 }
 
 // --------------------------------------------------------------- call setup
@@ -191,6 +218,9 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     closing: false,
     speaking: false,
     heardSpeech: false,
+    sideEars: [],
+    primary: primaryEngine(),
+    heard: new Map(),
   };
   calls.set(twilio, call);
 
@@ -209,8 +239,12 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     return;
   }
   mod.start(callId);
-  console.info(`[DEMO-LINE] ${callId} started (caller ${callerPhone || 'unknown'})`);
+  console.info(
+    `[DEMO-LINE] ${callId} started (caller ${callerPhone || 'unknown'}) ` +
+      `engines=${configuredEngines().join('+')} primary=${call.primary}`,
+  );
 
+  startSideEars(call);
   connectOpenAI(call);
 }
 
@@ -323,8 +357,8 @@ function connectOpenAI(call: DemoCall): void {
           console.info(`[DEMO-LINE] ${call.callId} ignored a transcript with no speech behind it: "${text.slice(0, 60)}"`);
           break;
         }
-        call.heardSpeech = false;
-        void onCallerSaid(call, text);
+        call.heard.set('openai', text);
+        void acceptTurn(call, text, 'openai');
         break;
       }
 
@@ -343,6 +377,40 @@ function connectOpenAI(call: DemoCall): void {
   });
 }
 
+/**
+ * Open the extra engines. Each one is independent: a failure to connect costs
+ * us that engine's opinion and nothing else, which is exactly the property a
+ * bench needs — a broken vendor must not look like a bad transcript.
+ */
+function startSideEars(call: DemoCall): void {
+  const ears = buildSideTranscribers();
+  if (!ears.length) return;
+  const keyterms = activeKeywords();
+  for (const ear of ears) {
+    ear
+      .start({
+        keyterms,
+        prompt: TRANSCRIPTION_PROMPT,
+        onSpeechStarted: () => {
+          call.heardSpeech = true;
+        },
+        onTurn: (turn) => {
+          if (!turn.isFinal) return; // partials are noise in a comparison
+          call.heard.set(turn.engine, turn.text);
+          if (turn.engine === call.primary) void acceptTurn(call, turn.text, turn.engine);
+        },
+        onError: (e) => console.warn(`[STT] ${ear.name} error on ${call.callId}:`, e),
+      })
+      .then(() => {
+        call.sideEars.push(ear);
+        console.info(`[STT] ${ear.name} listening on ${call.callId}`);
+      })
+      .catch((e) => {
+        console.error(`[STT] ${ear.name} could NOT start on ${call.callId} — its column will be blank:`, e);
+      });
+  }
+}
+
 /** The greeting is config, not code — edit ticket_agent_config.greeting. */
 function greetingFor(): string {
   try {
@@ -353,6 +421,36 @@ function greetingFor(): string {
 }
 
 // ------------------------------------------------------------- the dialogue
+
+/**
+ * One turn, every engine's answer, side by side — then the agent acts on the
+ * primary's version only.
+ *
+ * The log line is the deliverable of the whole bench:
+ *
+ *   [STT-BENCH] ...  openai="20 Fabian" | assemblyai="Wayne Fabian" | deepgram="Wayne Fabian"
+ *
+ * A short settle window lets the slower engines land before we print, so the
+ * row is complete. The AGENT is never delayed by it — if the primary is ready,
+ * it acts immediately; the comparison print is what waits.
+ */
+async function acceptTurn(call: DemoCall, text: string, engine: string): Promise<void> {
+  if (engine !== call.primary) return; // a side engine's turn is data, not input
+  call.heardSpeech = false;
+
+  const expected = configuredEngines().length;
+  const settleMs = expected > 1 ? 400 : 0;
+  setTimeout(() => {
+    const row = configuredEngines()
+      .map((e) => `${e}="${call.heard.get(e) ?? '—'}"`)
+      .join(' | ');
+    console.info(`[STT-BENCH] ${call.callId} ${row}`);
+    call.transcript.push(`BENCH: ${row}`);
+    call.heard.clear();
+  }, settleMs);
+
+  await onCallerSaid(call, text);
+}
 
 async function onCallerSaid(call: DemoCall, text: string): Promise<void> {
   call.transcript.push(`CALLER: ${text}`);
@@ -385,6 +483,10 @@ async function onCallerSaid(call: DemoCall, text: string): Promise<void> {
 
   const said = lines.join(' ');
   call.transcript.push(`AGENT: ${said}`);
+  // Tell the ears what we just asked. Right after "and the patient's date of
+  // birth?", a transcriber that knows this is expecting a date — which is
+  // precisely where today's calls fell apart.
+  for (const ear of call.sideEars) ear.setAgentContext?.(said);
   console.info(`[DEMO-LINE] ${call.callId} state=${mod.stateOf(call.callId)} say="${said.slice(0, 120)}"`);
   speak(call, said);
   if (hangUp) call.closing = true; // hang up once this line finishes playing
@@ -431,6 +533,13 @@ async function endCall(twilio: WebSocket, reason: string): Promise<void> {
   console.info(`[DEMO-LINE] ===== transcript ${call.callId} =====\n${call.transcript.join('\n')}\n=====`);
   void recordCall(call);
 
+  for (const ear of call.sideEars) {
+    // Never awaited: an unresponsive vendor must not hold the call open, and
+    // an unterminated session bills until their cap.
+    void ear.stop().catch(() => undefined);
+  }
+  call.sideEars = [];
+
   try {
     call.openai?.close();
   } catch {
@@ -464,6 +573,7 @@ async function recordCall(call: DemoCall): Promise<void> {
       status: 'completed',
       transcript: call.transcript.join('\n'),
       agentUsed: SLUG,
+      agentVersion: LINE_CAPABILITIES,
       environment: process.env.APP_ENV ?? 'development',
     } as never);
     console.info(`[DEMO-LINE] ${call.callId} written to call_logs`);
