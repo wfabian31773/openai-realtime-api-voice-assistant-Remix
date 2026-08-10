@@ -49,6 +49,21 @@ const MOUTHPIECE_INSTRUCTIONS = [
 const FALLBACK_GREETING = 'Thank you for calling Azul Vision. How can I help you today?';
 
 /**
+ * ~100ms of 8kHz G.711 mu-law (1 byte per sample). Twilio streams 20ms
+ * frames; AssemblyAI requires 50-1000ms and closes the socket with 3007
+ * outside that range. 100ms sits comfortably inside every vendor's window.
+ */
+const PCMU_CHUNK_BYTES = 800;
+
+/**
+ * How long the agent will wait for the PRIMARY engine before acting on
+ * whatever another engine heard. A vendor experiment must never be able to
+ * mute the line: on 2026-08-10 the primary produced nothing and the caller
+ * talked to silence for a whole call.
+ */
+const PRIMARY_GRACE_MS = 1200;
+
+/**
  * What this build of the line actually DOES, stamped on every call.
  *
  * Half of 2026-08-09 was spent arguing about which build answered a call —
@@ -112,6 +127,19 @@ interface DemoCall {
   primary: string;
   /** Every engine's final text for the current turn, for the comparison log. */
   heard: Map<string, string>;
+  /**
+   * Twilio sends 20ms frames (160 bytes of 8kHz mu-law). AssemblyAI requires
+   * 50-1000ms per chunk and closes with 3007 outside that, so forwarding
+   * Twilio's frames unchanged produced a connected socket that never emitted
+   * a single turn — and, because the agent only acts on the primary engine, a
+   * caller who talked to total silence. Frames are accumulated to ~100ms.
+   */
+  pcmuBuffer: Buffer[];
+  pcmuBytes: number;
+  /** Set when a bench row is already scheduled, so it prints once per turn. */
+  benchPending: boolean;
+  /** Waiting on the primary engine before falling back to another. */
+  primaryGrace: ReturnType<typeof setTimeout> | null;
 }
 
 const calls = new Map<WebSocket, DemoCall>();
@@ -311,6 +339,10 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     sideEars: [],
     primary: primaryEngine(),
     heard: new Map(),
+    pcmuBuffer: [],
+    pcmuBytes: 0,
+    benchPending: false,
+    primaryGrace: null,
   };
   calls.set(twilio, call);
 
@@ -525,21 +557,47 @@ function greetingFor(): string {
  * it acts immediately; the comparison print is what waits.
  */
 async function acceptTurn(call: DemoCall, text: string, engine: string): Promise<void> {
-  if (engine !== call.primary) return; // a side engine's turn is data, not input
-  call.heardSpeech = false;
+  // Record every engine's answer, whoever produced it, and print the row
+  // ONCE per turn. Gating the row on the primary meant that when the primary
+  // went quiet we lost the comparison too — precisely when it was needed.
+  call.heard.set(engine, text);
+  if (!call.benchPending) {
+    call.benchPending = true;
+    setTimeout(() => {
+      call.benchPending = false;
+      const row = configuredEngines()
+        .map((e) => `${e}="${call.heard.get(e) ?? '—'}"`)
+        .join(' | ');
+      console.info(`[STT-BENCH] ${call.callId} ${row}`);
+      call.transcript.push(`BENCH: ${row}`);
+      call.heard.clear();
+    }, configuredEngines().length > 1 ? 400 : 0);
+  }
 
-  const expected = configuredEngines().length;
-  const settleMs = expected > 1 ? 400 : 0;
-  setTimeout(() => {
-    const row = configuredEngines()
-      .map((e) => `${e}="${call.heard.get(e) ?? '—'}"`)
-      .join(' | ');
-    console.info(`[STT-BENCH] ${call.callId} ${row}`);
-    call.transcript.push(`BENCH: ${row}`);
-    call.heard.clear();
-  }, settleMs);
+  if (engine === call.primary) {
+    call.heardSpeech = false;
+    if (call.primaryGrace) {
+      clearTimeout(call.primaryGrace);
+      call.primaryGrace = null;
+    }
+    await onCallerSaid(call, text);
+    return;
+  }
 
-  await onCallerSaid(call, text);
+  // A NON-primary engine heard something. Give the primary a moment, then act
+  // on this rather than leaving the caller in silence. A vendor being slow or
+  // broken must degrade the experiment, never the call.
+  if (call.primaryGrace) return; // already waiting
+  call.primaryGrace = setTimeout(() => {
+    call.primaryGrace = null;
+    const fallback = call.heard.get(engine) ?? text;
+    console.warn(
+      `[STT-BENCH] ${call.callId} primary "${call.primary}" produced nothing for this turn — ` +
+        `falling back to "${engine}" so the caller is not left in silence`,
+    );
+    call.heardSpeech = false;
+    void onCallerSaid(call, fallback);
+  }, PRIMARY_GRACE_MS);
 }
 
 async function onCallerSaid(call: DemoCall, text: string): Promise<void> {
@@ -623,6 +681,10 @@ async function endCall(twilio: WebSocket, reason: string): Promise<void> {
   console.info(`[DEMO-LINE] ===== transcript ${call.callId} =====\n${call.transcript.join('\n')}\n=====`);
   void recordCall(call);
 
+  if (call.primaryGrace) {
+    clearTimeout(call.primaryGrace);
+    call.primaryGrace = null;
+  }
   for (const ear of call.sideEars) {
     // Never awaited: an unresponsive vendor must not hold the call open, and
     // an unterminated session bills until their cap.

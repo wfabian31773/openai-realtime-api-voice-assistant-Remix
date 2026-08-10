@@ -201,4 +201,48 @@ describe('demo line — a call, end to end', () => {
 
     twilio.close();
   });
+
+  it('a silent primary engine can never mute the line', async () => {
+    // 2026-08-10: STT_PRIMARY was assemblyai, assemblyai produced no turns
+    // because the audio chunks were too small, and the caller talked to
+    // silence for an entire call. The experiment must degrade, not the call.
+    forcedLines.length = 0;
+    process.env.STT_ENGINES = 'openai,assemblyai';
+    process.env.STT_PRIMARY = 'assemblyai';
+    vi.resetModules();
+    const { mountDemoLine: mount } = await import('./demoLine');
+    const app2 = express();
+    app2.use(express.urlencoded({ extended: true }));
+    const srv2 = http.createServer(app2);
+    mount(app2, srv2);
+    await new Promise<void>((r) => srv2.listen(0, '127.0.0.1', () => r()));
+    const url2 = `127.0.0.1:${(srv2.address() as AddressInfo).port}`;
+
+    const twilio = new WebSocket(`ws://${url2}/demo/stream`);
+    await new Promise<void>((r) => twilio.on('open', () => r()));
+    twilio.send(JSON.stringify({
+      event: 'start',
+      streamSid: 'MZmute',
+      start: { streamSid: 'MZmute', callSid: 'CAmute', customParameters: { from: '+15625550134', callSid: 'CAmute' } },
+    }));
+    await until(() => forcedLines.length >= 1, 'the greeting');
+    const afterGreeting = forcedLines.length;
+
+    // OpenAI (NOT the primary) hears the caller. AssemblyAI never will.
+    const oa = [...fakeOpenAI.clients].pop()!;
+    oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+    oa.send(JSON.stringify({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'I need medical records faxed',
+    }));
+
+    // The agent must still answer, using what it did hear.
+    await until(() => forcedLines.length > afterGreeting, 'a reply despite the silent primary', 5000);
+
+    twilio.close();
+    srv2.closeAllConnections?.();
+    await new Promise<void>((r) => srv2.close(() => r()));
+    delete process.env.STT_ENGINES;
+    delete process.env.STT_PRIMARY;
+  });
 });
