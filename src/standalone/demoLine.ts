@@ -195,12 +195,31 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
       }
     }
 
+    // The keyterms are part of the test: if the roster query failed, every
+    // engine is running on seed words instead of this practice's real
+    // provider surnames and offices, and the comparison is skewed for all of
+    // them equally but for no good reason. A boot-time [ROSTER] failure is
+    // one line in a wall of deploy noise; here it is unmissable.
+    const { rosterStatus } = await import('../services/providerRoster');
+    const roster = rosterStatus();
+    const keyterms = activeKeywords();
+
     const allOk = results.every((r) => r.ok);
     console.info(`[STT-CHECK] ${results.map((r) => `${r.engine}=${r.ok ? 'ok' : 'FAIL'}`).join(' ')}`);
     res.status(allOk ? 200 : 503).json({
       ok: allOk,
       primary: primaryEngine(),
       engines: results,
+      keyterms: {
+        count: keyterms.length,
+        rosterLoaded: roster.loaded,
+        providers: roster.providers,
+        offices: roster.offices,
+        note: roster.loaded
+          ? 'real provider and office names are boosted on every engine'
+          : 'ROSTER NOT LOADED — engines are running on the seed word list only',
+        sample: keyterms.slice(0, 8),
+      },
       hint: allOk ? 'all engines connected — make the call' : 'fix the failing engine before spending a call',
     });
   });
@@ -258,7 +277,10 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
     twilio.on('error', (e) => console.warn('[DEMO-LINE] twilio socket error:', e));
   });
 
-  console.info(`[DEMO-LINE] ready — POST /demo/voice, stream ${STREAM_PATH} [${LINE_CAPABILITIES}]`);
+  console.info(
+    `[DEMO-LINE] ready — POST /demo/voice, stream ${STREAM_PATH} [${LINE_CAPABILITIES}] ` +
+      `engines=${configuredEngines().join('+')} primary=${primaryEngine()}`,
+  );
 }
 
 // --------------------------------------------------------------- call setup

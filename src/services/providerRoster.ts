@@ -111,7 +111,7 @@ export async function refreshProviderRoster(): Promise<void> {
     const rows: any = await db.execute(sql`
       select "ProviderFromAppt" as provider, "OfficeLocation" as office, count(*) as n
       from "Schedule"
-      where "AppointmentDate" >= current_date - ${LOOKBACK_DAYS}
+      where "AppointmentDate" >= current_date - ${LOOKBACK_DAYS}::int
       group by 1, 2
       order by n desc
     `);
