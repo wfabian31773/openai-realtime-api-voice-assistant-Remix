@@ -58,18 +58,36 @@ let dgOpened = 0;
 /** How the adapter connected — URL and auth header — for one call each. */
 const deepgramConnections: Array<{ url: string; auth: string }> = [];
 
-/** The caller says something. This is the ONLY way words enter the agent. */
-function callerSays(text: string, opts: { speechStarted?: boolean } = {}): void {
+/**
+ * The caller says something. This is the ONLY way words enter the agent.
+ *
+ * Pass an array to speak one sentence in several settled segments, which is
+ * what Deepgram actually sends when a caller pauses mid-sentence. Only the
+ * last one carries speech_final — the flag that means they stopped talking.
+ */
+function callerSays(text: string | string[], opts: { speechStarted?: boolean; speechFinal?: boolean } = {}): void {
   const dg = dgSockets[dgSockets.length - 1];
   if (!dg) throw new Error('no ear is listening — the line never opened a transcriber socket');
   if (opts.speechStarted !== false) dg.send(JSON.stringify({ type: 'SpeechStarted' }));
-  dg.send(
-    JSON.stringify({
-      type: 'Results',
-      is_final: true,
-      channel: { alternatives: [{ transcript: text, confidence: 0.98 }] },
-    }),
-  );
+  const segments = Array.isArray(text) ? text : [text];
+  segments.forEach((seg, i) => {
+    const last = i === segments.length - 1;
+    dg.send(
+      JSON.stringify({
+        type: 'Results',
+        is_final: true,
+        speech_final: last && opts.speechFinal !== false,
+        channel: { alternatives: [{ transcript: seg, confidence: 0.98 }] },
+      }),
+    );
+  });
+}
+
+/** Deepgram's end-of-utterance backstop, when speech_final never arrives. */
+function callerStoppedTalking(): void {
+  const dg = dgSockets[dgSockets.length - 1];
+  if (!dg) throw new Error('no ear is listening');
+  dg.send(JSON.stringify({ type: 'UtteranceEnd', last_word_end: 1.0 }));
 }
 
 /**
@@ -605,6 +623,59 @@ describe('demo line — a call, end to end', () => {
       warn.mockRestore();
     }
   }, 20_000);
+
+  it('treats a sentence split across pauses as ONE turn, not several', async () => {
+    // Live 19:11. "Yes. I'm calling to see if" arrived as a settled segment,
+    // the agent asked for a name, then "you could tell me when my last
+    // appointment was, please" arrived and it asked for the name AGAIN.
+    // The caller: "What are you doing? You're repeating everything twice."
+    forcedLines.length = 0;
+    const earsBefore = dgOpened;
+    const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+    await new Promise<void>((r) => twilio.on('open', () => r()));
+    twilio.send(JSON.stringify({
+      event: 'start',
+      streamSid: 'MZsplit',
+      start: { streamSid: 'MZsplit', callSid: 'CAsplit', customParameters: { from: '+15625550134', callSid: 'CAsplit' } },
+    }));
+    await until(() => forcedLines.length >= 1, 'the greeting');
+    await earReady(earsBefore);
+
+    callerSays(["Yes. I'm calling to see if", 'you could tell me when my last appointment was, please']);
+    await until(() => forcedLines.length >= 2, 'one reply to the whole sentence');
+    await new Promise((r) => setTimeout(r, 400));
+    // ONE reply, not one per fragment.
+    expect(forcedLines).toHaveLength(2);
+    // And it heard the whole sentence, so it knows this is about appointments.
+    expect(forcedLines[1].toLowerCase()).toMatch(/book|schedule|appointment/);
+
+    twilio.close();
+  }, 15_000);
+
+  it('still delivers the sentence when speech_final never comes', async () => {
+    // Deepgram can miss speech_final on a caller who runs straight on.
+    // UtteranceEnd is the backstop; without it the words sit in the buffer
+    // and the caller talks to a line that never answers.
+    forcedLines.length = 0;
+    const earsBefore = dgOpened;
+    const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+    await new Promise<void>((r) => twilio.on('open', () => r()));
+    twilio.send(JSON.stringify({
+      event: 'start',
+      streamSid: 'MZnofinal',
+      start: { streamSid: 'MZnofinal', callSid: 'CAnofinal', customParameters: { from: '+15625550134', callSid: 'CAnofinal' } },
+    }));
+    await until(() => forcedLines.length >= 1, 'the greeting');
+    await earReady(earsBefore);
+
+    callerSays('I need medical records faxed', { speechFinal: false });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(forcedLines).toHaveLength(1); // nothing acted on yet — correct
+    callerStoppedTalking();
+    await until(() => forcedLines.length >= 2, 'the turn to land on UtteranceEnd');
+
+    twilio.close();
+  }, 15_000);
 
   it('records what the caller HEARD, not what we asked the model to say', async () => {
     // "There are things the agent is saying that are not in the transcripts —

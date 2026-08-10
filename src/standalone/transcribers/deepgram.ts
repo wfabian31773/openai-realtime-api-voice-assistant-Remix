@@ -31,6 +31,16 @@ function host(): string {
 export function createDeepgramTranscriber(): Transcriber {
   let ws: WebSocket | null = null;
   let opts: TranscriberOptions | null = null;
+  /** Settled segments of the utterance in progress, awaiting its end. */
+  let pending: string[] = [];
+
+  /** Hand the accumulated sentence over as ONE turn, and start the next. */
+  function flush(confidence?: number): void {
+    const text = pending.join(' ').trim();
+    pending = [];
+    if (!text) return;
+    opts?.onTurn({ engine: 'deepgram', text, isFinal: true, confidence });
+  }
 
   return {
     name: 'deepgram',
@@ -54,6 +64,11 @@ export function createDeepgramTranscriber(): Transcriber {
         // (10) is tuned for dictation and finalises far too eagerly for a
         // caller who pauses while reading a date off a bottle.
         endpointing: process.env.DEEPGRAM_ENDPOINTING ?? '500',
+        // Backstop for the end of an utterance. speech_final is the primary
+        // signal, but Deepgram documents that it can be missed when a caller
+        // runs straight on without the trailing silence endpointing needs;
+        // UtteranceEnd fires on the gap instead, so a turn is never stranded.
+        utterance_end_ms: process.env.DEEPGRAM_UTTERANCE_END_MS ?? '1000',
       });
       // keyterm repeats, one per term (Nova-3's term boosting).
       for (const term of o.keyterms.slice(0, 100)) qs.append('keyterm', term);
@@ -80,14 +95,41 @@ export function createDeepgramTranscriber(): Transcriber {
             opts?.onSpeechStarted?.();
             return;
           }
+          // The caller stopped talking. Whatever we have accumulated is the
+          // whole utterance, even if speech_final never came.
+          if (msg.type === 'UtteranceEnd') {
+            flush();
+            return;
+          }
           if (msg.type !== 'Results') return;
           const alt = msg.channel?.alternatives?.[0];
           const text = String(alt?.transcript ?? '').trim();
           if (!text) return; // Deepgram emits empty transcripts during silence
+
+          // is_final and speech_final are NOT the same thing, and treating
+          // them as one is what made the agent repeat itself.
+          //
+          // is_final means "these words are settled" — Deepgram will not
+          // revise them. It does NOT mean the caller finished. A sentence
+          // spoken with any internal pause arrives as several is_final
+          // segments, and firing a turn on each one hands the agent a
+          // fragment. Live 19:11: "Yes. I'm calling to see if" became a turn,
+          // the agent asked for a name, then "you could tell me when my last
+          // appointment was, please" became a second turn and it asked for
+          // the name again. The caller: "You're repeating everything twice."
+          //
+          // speech_final is the one that means the caller stopped. Segments
+          // accumulate until then, and the agent sees one sentence.
+          if (msg.is_final) {
+            pending.push(text);
+            if (msg.speech_final) flush(typeof alt?.confidence === 'number' ? alt.confidence : undefined);
+            return;
+          }
+          // An interim hypothesis: useful for a live display, never a turn.
           opts?.onTurn({
             engine: 'deepgram',
-            text,
-            isFinal: Boolean(msg.is_final),
+            text: [...pending, text].join(' '),
+            isFinal: false,
             confidence: typeof alt?.confidence === 'number' ? alt.confidence : undefined,
           });
         } catch (e) {
@@ -117,6 +159,10 @@ export function createDeepgramTranscriber(): Transcriber {
     async stop() {
       const socket = ws;
       ws = null;
+      // A caller who hangs up mid-sentence still said something, and the
+      // agent files on hang-up. Stranding those words in the buffer would
+      // lose the last thing they told us.
+      flush();
       if (!socket) return;
       try {
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'CloseStream' }));
