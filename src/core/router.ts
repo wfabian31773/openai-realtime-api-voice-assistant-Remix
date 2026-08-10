@@ -286,7 +286,32 @@ function buildSchedulingProdServices(): SchedulingLineServices {
   return {
     async verifyIdentity(callId, first, last, dob) {
       const r = await call('verify_patient_identity', { firstName: first, lastName: last, dateOfBirth: dob, callId });
-      return Boolean((r as { verified?: boolean; patientFound?: boolean }).verified ?? (r as { patientFound?: boolean }).patientFound);
+      const viaTool = Boolean(
+        (r as { verified?: boolean; patientFound?: boolean }).verified ??
+          (r as { patientFound?: boolean }).patientFound,
+      );
+      if (viaTool) return true;
+
+      // The vendor tool said no. Before telling a patient we cannot find
+      // them, check OUR OWN schedule — the same lookup the ticket agent uses,
+      // and the one that finds Wayne Fabian / 1973-03-17 with 43 appointments
+      // while this tool returned not-verified on four consecutive live calls.
+      // Two verification paths existed and only one of them worked; a patient
+      // hears "I'm not finding a match on my end" either way.
+      try {
+        const { scheduleLookupService } = await import('../services/scheduleLookupService');
+        const ctx = await scheduleLookupService.lookupByNameAndDOB(first, last, dob);
+        const viaSchedule = Boolean((ctx as { patientFound?: boolean })?.patientFound);
+        if (viaSchedule) {
+          console.warn(
+            `[NEW-CORE][sd] verify_patient_identity said NO but our schedule found them — trusting the schedule (${callId})`,
+          );
+        }
+        return viaSchedule;
+      } catch (e) {
+        console.error(`[NEW-CORE][sd] schedule fallback lookup failed for ${callId}:`, e);
+        return false;
+      }
     },
     async availability(callId, pref): Promise<AvailabilityOffer> {
       const r = await call('sage_availability', {

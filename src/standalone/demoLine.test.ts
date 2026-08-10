@@ -46,9 +46,13 @@ beforeAll(async () => {
           evt.response?.instructions ?? '',
         );
         forcedLines.push(m ? m[1] : (evt.response?.instructions ?? ''));
-        // Speak it: one audio frame, then done.
+        // Speak it: one audio frame, then done — with a real gap, so a line
+        // sent while this one is still playing would be lost exactly as it is
+        // on a live call.
         ws.send(JSON.stringify({ type: 'response.output_audio.delta', delta: Buffer.from('audio').toString('base64') }));
-        ws.send(JSON.stringify({ type: 'response.done' }));
+        setTimeout(() => {
+          try { ws.send(JSON.stringify({ type: 'response.done' })); } catch { /* closed */ }
+        }, 60);
       }
     });
     (ws as any)._isFakeOpenAI = true;
@@ -293,5 +297,35 @@ describe('demo line — a call, end to end', () => {
       body: 'From=%2B15625550134&CallSid=CAbad',
     });
     expect(res.status).toBe(400);
+  });
+
+  it('never loses a line to one that is still playing', async () => {
+    // Live 14:22: the operator never heard "I'm not finding a match on my
+    // end" or "someone will call you back" — both were sent while an earlier
+    // response was still active, and the Realtime API refuses a second one.
+    forcedLines.length = 0;
+    const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+    await new Promise<void>((r) => twilio.on('open', () => r()));
+    twilio.send(JSON.stringify({
+      event: 'start',
+      streamSid: 'MZqueue',
+      start: { streamSid: 'MZqueue', callSid: 'CAqueue', customParameters: { from: '+15625550134', callSid: 'CAqueue' } },
+    }));
+    await until(() => forcedLines.length >= 1, 'the greeting');
+
+    const oa = [...fakeOpenAI.clients].pop()!;
+    // Two turns back to back, faster than the first line can finish playing.
+    for (const text of ['I need medical records faxed', 'Wayne Fabian']) {
+      oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+      oa.send(JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', transcript: text }));
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // BOTH answers must reach the caller — the second queued behind the first.
+    await until(() => forcedLines.length >= 3, 'both replies to be spoken', 5000);
+    expect(forcedLines[1].toLowerCase()).toMatch(/name/);
+    expect(forcedLines[2].toLowerCase()).toMatch(/date of birth|birth/);
+
+    twilio.close();
   });
 });

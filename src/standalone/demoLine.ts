@@ -160,6 +160,16 @@ interface DemoCall {
    */
   endReason: string | null;
   openaiClose: string | null;
+  /**
+   * ONE response at a time. The Realtime API refuses a response.create while
+   * another is active, so firing a line per turn without waiting silently
+   * DROPPED lines — the operator never heard "I'm not finding a match" or
+   * "someone will call you back", both of which are in the transcript — and
+   * whatever did queue played in a burst afterwards ("the next thing I heard
+   * was the agent offering several appointments at once").
+   */
+  responseActive: boolean;
+  pendingSpeech: string[];
 }
 
 const calls = new Map<WebSocket, DemoCall>();
@@ -384,6 +394,8 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     primaryGrace: null,
     endReason: null,
     openaiClose: null,
+    responseActive: false,
+    pendingSpeech: [],
   };
   calls.set(twilio, call);
 
@@ -465,7 +477,6 @@ function connectOpenAI(call: DemoCall): void {
     });
 
     const greeting = greetingFor(call.slug);
-    call.transcript.push(`AGENT: ${greeting}`);
     speak(call, greeting);
     console.info(`[DEMO-LINE] ${call.callId} greeting sent`);
   });
@@ -499,6 +510,11 @@ function connectOpenAI(call: DemoCall): void {
 
       case 'response.done':
         call.speaking = false;
+        call.responseActive = false;
+        if (call.pendingSpeech.length) {
+          drainSpeech(call);
+          break; // the wrap waits until everything queued has been heard
+        }
         if (call.closing) void endCall(call.twilio, 'wrap complete');
         break;
 
@@ -694,7 +710,6 @@ async function onCallerSaid(call: DemoCall, text: string): Promise<void> {
   }
 
   const said = lines.join(' ');
-  call.transcript.push(`AGENT: ${said}`);
   // Tell the ears what we just asked. Right after "and the patient's date of
   // birth?", a transcriber that knows this is expecting a date — which is
   // precisely where today's calls fell apart.
@@ -707,7 +722,23 @@ async function onCallerSaid(call: DemoCall, text: string): Promise<void> {
 /** Force exact words. The model is told to read, not to compose. */
 function speak(call: DemoCall, words: string): void {
   if (call.openai?.readyState !== WebSocket.OPEN) return;
+  if (call.responseActive) {
+    // Queued, not dropped. This is the line the caller would otherwise never
+    // have heard.
+    call.pendingSpeech.push(words);
+    console.info(`[DEMO-LINE] ${call.callId} queued behind the line still playing: "${words.slice(0, 60)}"`);
+    return;
+  }
+  emitSpeech(call, words);
+}
+
+function emitSpeech(call: DemoCall, words: string): void {
+  if (call.openai?.readyState !== WebSocket.OPEN) return;
   call.speaking = true;
+  call.responseActive = true;
+  // Only NOW is it true that the caller will hear this, so only now does it
+  // belong in the record.
+  call.transcript.push(`AGENT: ${words}`);
   send(call.openai, {
     type: 'response.create',
     response: {
@@ -715,6 +746,12 @@ function speak(call: DemoCall, words: string): void {
       instructions: `Say exactly this, word for word, and nothing else: "${words}"`,
     },
   });
+}
+
+/** The next queued line, once the one before it has finished playing. */
+function drainSpeech(call: DemoCall): void {
+  const next = call.pendingSpeech.shift();
+  if (next !== undefined) emitSpeech(call, next);
 }
 
 // ---------------------------------------------------------------- teardown
