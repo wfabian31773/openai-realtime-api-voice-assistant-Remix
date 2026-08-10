@@ -15,7 +15,7 @@
  */
 import { getLedger, updateLedger, harvestCallerLine, dobMatchesContext } from '../services/callFactsLedger';
 import type { CoreAction, LineModule } from './types';
-import { looksLikeName, DOB_PATTERN, normalizeSpokenDob } from './parsing';
+import { looksLikeName, findNameIn, DOB_PATTERN, normalizeSpokenDob } from './parsing';
 
 export interface AvailabilityOffer {
   /** The server's speakable offer — spoken WORD-FOR-WORD, never rephrased. */
@@ -478,10 +478,22 @@ export function createSchedulingLine(services: SchedulingLineServices): LineModu
           }
 
           case 'COLLECT_NAME': {
-            const name = looksLikeName(text);
+            // findNameIn, not looksLikeName: callers answer in sentences.
+            // "Sure. My name is Wayne Fabian, and my date of birth is
+            // 03/17/1973." was rejected outright as a 12-word sentence, so
+            // the name was never captured and the record search ran with
+            // nothing — a patient with 43 appointments was told "I'm not
+            // finding a match on my end" (live call 13:59).
+            const name = findNameIn(text);
             if (!name) return unparsable(callId, s);
             updateLedger(callId, { firstName: name.first, lastName: name.last });
             go(s, 'COLLECT_DOB');
+            // ONE BREATH, TWO ANSWERS. "My name is Wayne Fabian, and my date
+            // of birth is 03/17/1973" answers both questions, and asking the
+            // second one back made the caller repeat himself on the live
+            // 13:59 call before the lookup ever ran. If the date is already
+            // in front of us, verify now.
+            if (DOB_RX.test(text)) return handleDob(callId, s, text);
             return { say: t(s, L.collectDob) };
           }
 

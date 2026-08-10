@@ -358,4 +358,28 @@ describe('azul-scheduling new core — Gate A', () => {
     expect(spoken.lines.join(' ')).toContain('Dr. Bach');
     expect(spoken.lines.join(' ')).not.toContain('Wednesday the 13th');
   });
+
+  /**
+   * Live 13:59 call. Wayne Fabian has 43 appointments in the record and was
+   * told "I'm not finding a match on my end" — because this line still used
+   * the STRICT name parser, which rejects a twelve-word sentence outright.
+   * The name was never captured, so the lookup ran with nothing.
+   */
+  it('finds the patient when the name arrives inside a sentence', async () => {
+    const { svc } = fakeServices({ verify: true });
+    const line = createSchedulingLine(svc);
+    seedLedger(C, { callerPhone: '5622001000' });
+    line.start(C);
+
+    await line.onUtterance(C, "Hi. I'd like to schedule an appointment.");
+    await line.onUtterance(C, "I'm an existing patient.");
+    const r = await line.onUtterance(C, 'Sure. My name is Wayne Fabian, and my date of birth is 03/17/1973.');
+
+    // It must NOT say it cannot find them.
+    expect(r.say?.toLowerCase() ?? '').not.toContain('not finding a match');
+    expect(svc.verifyIdentity).toHaveBeenCalled();
+    const [, first, last] = (svc.verifyIdentity as any).mock.calls[0];
+    expect(first).toBe('Wayne');
+    expect(last).toBe('Fabian');
+  });
 });
