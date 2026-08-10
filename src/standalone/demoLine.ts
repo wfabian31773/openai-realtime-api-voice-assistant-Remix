@@ -535,6 +535,26 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     console.warn(`[DEMO-LINE] ledger seed failed for ${callId}:`, e);
   }
 
+  // WHO IS CALLING, before they say a word.
+  //
+  // Operator, 2026-08-10: "I don't know how we went from the agent knowing who
+  // was on the phone before it even answered the call to now not even being
+  // able to match it to anything."
+  //
+  // He is describing a real thing the old core does and this line never did.
+  // On every production call it looks the number up first — "[ScheduleLookup]
+  // Found 18 appointments for phone ending in 1695", ledger seeded matched=true
+  // — and the agent opens by CONFIRMING a name rather than asking for one.
+  // That is why identity works there: for a recognised caller nothing ever
+  // has to be pulled out of a sentence. All of tonight's failures were on the
+  // path that only exists for callers we do not recognise, and this line put
+  // every caller on it.
+  //
+  // Not awaited: recognition is a head start, not a gate. A slow lookup must
+  // never delay the greeting, and a caller we do not recognise simply gets the
+  // ordinary flow.
+  void recognizeCaller(callId, callerPhone);
+
   const mod = ticketAgentFor(call.slug);
   mod.start(callId);
   console.info(
@@ -1006,6 +1026,46 @@ function drainSpeech(call: DemoCall): void {
 }
 
 // ---------------------------------------------------------------- teardown
+
+/**
+ * Look the caller up by the number they are calling from, and put what we
+ * find into the ledger as a CANDIDATE.
+ *
+ * A hint, never an identity. This number resolves to eight different records
+ * in the mirror — the operator's own, plus "Wayne Test", "John Doe", "Test
+ * Ph" — so a phone match names someone to confirm, and confirmation still
+ * comes from the caller. matchedFirstName is exactly that contract: the ticket
+ * agent asks "Am I speaking with X?" and treats a yes plus a date of birth as
+ * verification. The old core has done this on every production call for
+ * months; this line never did, which is why every caller here was treated as
+ * a stranger whose name had to be extracted from a sentence.
+ */
+async function recognizeCaller(callId: string, phone: string): Promise<void> {
+  if (!phone || phone.replace(/\D/g, '').length < 10) return;
+  try {
+    const { scheduleLookupService } = await import('../services/scheduleLookupService');
+    const r = (await scheduleLookupService.lookupByPhone(phone)) as {
+      patientFound?: boolean;
+      patientFirstName?: string;
+      patientLastName?: string;
+      patientDateOfBirth?: string;
+    };
+    if (!r?.patientFound || !r.patientFirstName || !r.patientLastName) {
+      console.info(`[DEMO-LINE] ${callId} caller not recognised from their number — ordinary flow`);
+      return;
+    }
+    const { updateLedger } = await import('../services/callFactsLedger');
+    updateLedger(callId, {
+      matchedFirstName: r.patientFirstName,
+      matchedLastName: r.patientLastName,
+      matchedDob: r.patientDateOfBirth ?? undefined,
+    });
+    // No name in the log. The fact of a match is the useful part.
+    console.info(`[DEMO-LINE] ${callId} caller RECOGNISED from their number — confirming, not asking`);
+  } catch (e) {
+    console.warn(`[DEMO-LINE] ${callId} caller lookup failed (ordinary flow):`, e);
+  }
+}
 
 async function endCall(twilio: WebSocket, reason: string): Promise<void> {
   const call = calls.get(twilio);
