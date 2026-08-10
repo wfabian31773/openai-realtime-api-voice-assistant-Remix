@@ -99,12 +99,64 @@ export function ticketAgentFor(slug: string): LineModule {
   return mod;
 }
 
+/**
+ * THE verification for every line. One source of truth, on purpose.
+ *
+ * Until now there were three: the scheduling line called the eyecare tool
+ * verify_patient_identity, the ticket agent called
+ * scheduleLookupService.lookupByNameAndDOB, and the old answering service had
+ * its own. Three lines meant three different meanings of "verified", and two
+ * of the three were searching the APPOINTMENT book — so a patient with a
+ * chart but no upcoming visit could not be verified at all. That is the whole
+ * of "verification was always the toughest one".
+ *
+ * A match is also context: the caller's number, the person id and the person
+ * number go into the ledger so the agent stops re-asking and the ticket lands
+ * against the right chart, which is what the staff actually work from.
+ */
+async function verifyAgainstMirror(callId: string, name: string, dob: string): Promise<boolean> {
+  const { verifyPatient, describeForLog } = await import('../services/patientVerification');
+  const { getLedger, updateLedger } = await import('../services/callFactsLedger');
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  // Everything after the first token is the surname: "Maria de la Cruz" is a
+  // surname of "de la Cruz", and taking only the last token would lose it.
+  const first = parts[0] ?? '';
+  const last = parts.slice(1).join(' ');
+
+  const r = await verifyPatient({
+    firstName: first,
+    lastName: last || first, // a single spoken token is more often a surname
+    dob,
+    callerPhone: callId ? getLedger(callId)?.callerPhone : undefined,
+  });
+  if (callId) console.info(describeForLog(callId, r));
+
+  if (r.verified && r.patient && callId) {
+    updateLedger(callId, {
+      identityVerified: true,
+      personId: r.patient.personId,
+      personNbr: r.patient.personNbr ?? undefined,
+      hasMedicalRecord: r.patient.hasMedicalRecord,
+      // The mirror's spelling, not the transcriber's. "Fabian" beats whatever
+      // came off the phone line, and it is what staff will read.
+      firstName: r.patient.firstName || undefined,
+      lastName: r.patient.lastName || undefined,
+      matchedFirstName: r.patient.firstName || undefined,
+      matchedLastName: r.patient.lastName || undefined,
+      matchedDob: r.patient.dob,
+      // A hint for whoever picks up the ticket. NOT wired to the voice: the
+      // operator's own record reads "Spanish", and driving the agent from it
+      // would flip a call mid-verification.
+      chartLanguage: r.patient.language ?? undefined,
+    });
+  }
+  return r.verified;
+}
+
 function buildProdServices(): TicketLineServices {
   return {
     async verifyByLookup(first, last, dob) {
-      const { scheduleLookupService } = await import('../services/scheduleLookupService');
-      const r = await scheduleLookupService.lookupByNameAndDOB(first, last, dob);
-      return Boolean((r as { patientFound?: boolean })?.patientFound);
+      return verifyAgainstMirror('', `${first} ${last}`, dob);
     },
     async classify(description) {
       const cfg = await import('../config/answeringServiceTicketing');
@@ -387,11 +439,8 @@ function buildTicketAgentServices(): TicketAgentServices {
       const { extractIntent } = await import('./intentExtractor');
       return extractIntent(text);
     },
-    async verify(_callId, name, dob) {
-      const [first, ...rest] = name.trim().split(/\s+/);
-      const { scheduleLookupService } = await import('../services/scheduleLookupService');
-      const r = await scheduleLookupService.lookupByNameAndDOB(first ?? '', rest.join(' '), dob);
-      return Boolean((r as { patientFound?: boolean })?.patientFound);
+    async verify(callId, name, dob) {
+      return verifyAgainstMirror(callId, name, dob);
     },
     async submit(_callId: string, ticket) {
       const { SyncAgentService } = await import('../services/syncAgentService');
@@ -413,10 +462,15 @@ function buildTicketAgentServices(): TicketAgentServices {
       // addresses for the ANSWER — they belong in their own fields, and the
       // caller's own number stays the callback.
       const { getLedger } = await import('../services/callFactsLedger');
-      const callerPhone = getLedger(_callId)?.callbackNumber ?? getLedger(_callId)?.callerPhone;
+      const facts = getLedger(_callId);
+      const callerPhone = facts?.callbackNumber ?? facts?.callerPhone;
+      // The association the staff work from. When verification matched a
+      // person in the mirror we use THAT spelling and carry the person number
+      // onto the ticket, so it opens the right chart instead of being a note
+      // about a name someone tried to spell over a phone line.
       const r = await SyncAgentService.createTicketFromAgentInput({
-        firstName: first ?? 'Unknown',
-        lastName: rest.join(' ') || 'Caller',
+        firstName: facts?.personId ? (facts.firstName ?? first ?? 'Unknown') : (first ?? 'Unknown'),
+        lastName: facts?.personId ? (facts.lastName ?? rest.join(' ')) : (rest.join(' ') || 'Caller'),
         birthMonth: String(dob.month ?? ''),
         birthDay: String(dob.day ?? ''),
         birthYear: String(dob.year ?? ''),
@@ -426,9 +480,15 @@ function buildTicketAgentServices(): TicketAgentServices {
         requestCategory: 'general_question',
         requestSummary:
           ticket.identityVerified === true
-            ? `${description} — IDENTITY VERIFIED against patient records`
+            ? [
+                description,
+                '— IDENTITY VERIFIED against the patient mirror',
+                facts?.personNbr ? `(patient #${facts.personNbr})` : null,
+                facts?.hasMedicalRecord === false ? '(no chart on file)' : null,
+                facts?.chartLanguage ? `(chart language: ${facts.chartLanguage})` : null,
+              ].filter(Boolean).join(' ')
             : ticket.identityVerified === false
-              ? `${description} — CALLER'S NAME/DOB NOT FOUND in patient records`
+              ? `${description} — CALLER'S NAME/DOB NOT FOUND in the patient mirror`
               : description,
         departmentId: ticket.department,
         priority: ticket.urgent ? 'urgent' : 'medium',

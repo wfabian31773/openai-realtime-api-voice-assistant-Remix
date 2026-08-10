@@ -28,6 +28,19 @@ export interface CallFacts {
   lastName?: string;
   dateOfBirth?: string;
   identityVerified: boolean;
+  /**
+   * The association, straight from patients_master once verification passes.
+   *
+   * Operator, 2026-08-10: "when you create the ticket, there's an association
+   * that's made with the patient indirectly in the ticket for the staff to
+   * work with. So that's very important." Without it a ticket is a note about
+   * somebody; with it, it opens the right chart.
+   */
+  personId?: string;
+  personNbr?: string;
+  hasMedicalRecord?: boolean;
+  /** The chart's language — a hint for staff, never an instruction to the voice. */
+  chartLanguage?: string;
   callbackNumber?: string;
   callbackConfirmed: boolean;
   language?: string;
