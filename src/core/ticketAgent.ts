@@ -686,7 +686,11 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
     s: CallState,
     a: import('../services/appointmentAnswers').AppointmentAnswer | null,
   ): string => {
-    if (!a || (!a.last && !a.next)) return t(s, LINES.noAppointmentsFound);
+    // null means the lookup itself failed. Saying "I don't see any
+    // appointments" to a patient with a full history because a query errored
+    // is worse than admitting we could not check.
+    if (!a) return t(s, LINES.cannotLookUp);
+    if (!a.last && !a.next) return t(s, LINES.noAppointmentsFound);
     const parts: string[] = [];
     if (a.last) parts.push(`Your last appointment was ${describeAppointment(a.last)}.`);
     if (a.next) parts.push(`Your next one is ${describeAppointment(a.next)}.`);

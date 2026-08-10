@@ -20,8 +20,17 @@
  * question is asked once, against the person base, and everything downstream
  * keys off the answer.
  */
-import { and, desc, asc, eq, gte, lt, ne } from 'drizzle-orm';
+import { and, desc, asc, gte, lt, ne, sql } from 'drizzle-orm';
 import { schedule } from '../../shared/schema';
+
+/**
+ * PersonID is a uuid COLUMN and the id we hold is a string, so the comparison
+ * needs an explicit cast: Postgres refuses `uuid = text` outright with
+ * "operator does not exist", and the failure lands inside the catch below —
+ * meaning a caller would verify perfectly and then be told they have no
+ * appointments at all. Cast, and it returns their 43.
+ */
+const byPerson = (personId: string) => sql`${schedule.personId} = ${personId}::uuid`;
 
 // server/db is imported LAZILY, inside the lookup. At module scope it runs
 // environment validation on import, which would make every file that merely
@@ -85,10 +94,13 @@ function toFact(r: Record<string, any>): AppointmentFact {
 /**
  * The caller's last completed and next upcoming appointment.
  *
- * Never throws: a caller is on the line, and a failed lookup must fall back to
- * taking a message, not to an error.
+ * Never throws — a caller is on the line. But NULL and an empty answer are
+ * different things and must stay different: null means the lookup failed and
+ * we do not know, empty means we looked and they genuinely have none.
+ * Collapsing the two tells a patient with a full history that we have no
+ * record of them.
  */
-export async function appointmentsForPerson(personId: string): Promise<AppointmentAnswer> {
+export async function appointmentsForPerson(personId: string): Promise<AppointmentAnswer | null> {
   const today = new Date().toISOString().slice(0, 10);
   try {
     const { db } = await import('../../server/db');
@@ -98,7 +110,7 @@ export async function appointmentsForPerson(personId: string): Promise<Appointme
         .from(schedule)
         .where(
           and(
-            eq(schedule.personId, personId),
+            byPerson(personId),
             ne(schedule.appointmentStatus, REMOVED),
             lt(schedule.appointmentDate, today),
           ),
@@ -110,7 +122,7 @@ export async function appointmentsForPerson(personId: string): Promise<Appointme
         .from(schedule)
         .where(
           and(
-            eq(schedule.personId, personId),
+            byPerson(personId),
             ne(schedule.appointmentStatus, REMOVED),
             gte(schedule.appointmentDate, today),
           ),
@@ -123,8 +135,8 @@ export async function appointmentsForPerson(personId: string): Promise<Appointme
       next: upcoming[0] ? toFact(upcoming[0] as Record<string, any>) : null,
     };
   } catch (e) {
-    console.error('[APPTS] lookup failed — the caller gets a message taken instead:', e);
-    return { last: null, next: null };
+    console.error('[APPTS] lookup FAILED — not the same as having no appointments:', e);
+    return null;
   }
 }
 
