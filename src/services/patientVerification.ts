@@ -67,6 +67,8 @@ export interface VerificationResult {
   patient?: VerifiedPatient;
   /** How many people matched surname + date of birth. */
   candidates: number;
+  /** Which table answered. 'schedule' means the mirror was unreachable. */
+  source?: 'mirror' | 'schedule';
 }
 
 /**
@@ -182,8 +184,11 @@ export async function verifyPatient(input: VerifyInput): Promise<VerificationRes
   const dob = normalizeDob(input.dob);
   if (!last || !dob) return { verified: false, reason: 'bad_input', candidates: 0 };
   if (!isVerificationConfigured()) {
-    console.error('[VERIFY] OBS_CONSOLE_DATABASE_URL is not set — nobody can be verified');
-    return { verified: false, reason: 'unavailable', candidates: 0 };
+    console.error(
+      '[VERIFY] OBS_CONSOLE_DATABASE_URL is NOT SET in this process — falling back to the ' +
+        'appointment book, which only knows patients who have appointments. FIX THE SECRET.',
+    );
+    return verifyAgainstSchedule(last, first, dob, input.callerPhone);
   }
 
   let rows: Row[];
@@ -211,8 +216,10 @@ export async function verifyPatient(input: VerifyInput): Promise<VerificationRes
       ])
     ).rows;
   } catch (e) {
-    console.error(`[VERIFY] mirror lookup failed (${(e as Error).message}) — proceeding unverified`);
-    return { verified: false, reason: 'unavailable', candidates: 0 };
+    console.error(
+      `[VERIFY] mirror lookup FAILED (${(e as Error).message}) — falling back to the appointment book`,
+    );
+    return verifyAgainstSchedule(last, first, dob, input.callerPhone);
   }
 
   const candidates = rows.length;
@@ -220,11 +227,63 @@ export async function verifyPatient(input: VerifyInput): Promise<VerificationRes
 
   const narrowed = narrow(rows, first, input.callerPhone);
   if (narrowed.length === 1) {
-    return { verified: true, reason: 'match', candidates, patient: toPatient(narrowed[0]) };
+    return { verified: true, reason: 'match', candidates, patient: toPatient(narrowed[0]), source: 'mirror' };
   }
   // Two real people, same surname, same birthday. Guessing here attaches a
   // ticket to the wrong chart, so it stays unverified and a human decides.
   return { verified: false, reason: 'ambiguous', candidates };
+}
+
+/**
+ * Second best, when the person mirror cannot be reached.
+ *
+ * The appointment book carries the SAME PersonID as patients_master, so a
+ * caller found here is identified just as precisely and everything downstream
+ * still works. What it cannot do is find a patient who has no appointments —
+ * which is exactly the gap the mirror exists to close, and exactly the failure
+ * that made verification look random for weeks.
+ *
+ * So this is a degraded mode, not an alternative. It keeps a caller moving
+ * when a secret is missing instead of telling them we cannot look them up,
+ * and it says so loudly in the log every single time.
+ */
+async function verifyAgainstSchedule(
+  last: string,
+  first: string,
+  dob: string,
+  callerPhone: string | null | undefined,
+): Promise<VerificationResult> {
+  try {
+    const { pool } = await import('../../server/db');
+    const { rows } = await pool.query<Row>(
+      `SELECT DISTINCT ON ("PersonID")
+              "PersonID"::text                     AS person_id,
+              NULL::text                           AS person_nbr,
+              "PatientFirstName"                   AS first_name,
+              "PatientLastName"                    AS last_name,
+              to_char("PatientDateOfBirth", 'YYYY-MM-DD') AS date_of_birth,
+              TRUE                                 AS has_medical_record,
+              "PatientLanguage"                    AS language,
+              ARRAY["PatientCellPhone", "PatientHomePhone"] AS phones
+         FROM public."Schedule"
+        WHERE lower("PatientLastName") = lower($1)
+          AND "PatientDateOfBirth" = $2::date
+          AND "PersonID" IS NOT NULL
+        LIMIT 50`,
+      [last, dob],
+    );
+    const candidates = rows.length;
+    if (!candidates) return { verified: false, reason: 'no_match', candidates: 0, source: 'schedule' };
+    const narrowed = narrow(rows, first, callerPhone);
+    if (narrowed.length === 1) {
+      console.warn('[VERIFY] verified from the APPOINTMENT BOOK, not the person mirror — degraded');
+      return { verified: true, reason: 'match', candidates, patient: toPatient(narrowed[0]), source: 'schedule' };
+    }
+    return { verified: false, reason: 'ambiguous', candidates, source: 'schedule' };
+  } catch (e) {
+    console.error(`[VERIFY] the appointment book failed too (${(e as Error).message})`);
+    return { verified: false, reason: 'unavailable', candidates: 0 };
+  }
 }
 
 /** Exact first name, then a prefix, then the caller's own number. */

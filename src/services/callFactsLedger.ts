@@ -41,6 +41,13 @@ export interface CallFacts {
   hasMedicalRecord?: boolean;
   /** The chart's language — a hint for staff, never an instruction to the voice. */
   chartLanguage?: string;
+  /**
+   * WHY verification landed where it did — match, no_match, ambiguous,
+   * bad_input, unavailable. Onto the call record, because "not verified" on a
+   * transcript is indistinguishable from a missing secret, a misheard name,
+   * and a patient we genuinely do not have.
+   */
+  verifyReason?: string;
   callbackNumber?: string;
   callbackConfirmed: boolean;
   language?: string;

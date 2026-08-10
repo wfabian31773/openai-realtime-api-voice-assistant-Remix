@@ -129,7 +129,13 @@ async function verifyAgainstMirror(callId: string, name: string, dob: string): P
     dob,
     callerPhone: callId ? getLedger(callId)?.callerPhone : undefined,
   });
-  if (callId) console.info(describeForLog(callId, r));
+  if (callId) {
+    console.info(describeForLog(callId, r));
+    // Onto the call record too. The reason lives in a log the operator cannot
+    // read, so "not verified" on a transcript was indistinguishable from a
+    // missing secret, a misheard name, and a patient we genuinely do not have.
+    updateLedger(callId, { verifyReason: r.reason });
+  }
 
   if (r.verified && r.patient && callId) {
     updateLedger(callId, {

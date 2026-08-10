@@ -293,6 +293,59 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
    * transcript: the engine's column just reads "—". That would make a vendor
    * look terrible in a comparison it was never part of.
    */
+  /**
+   * Why did verification fail? Answer it from a browser, not from a phone.
+   *
+   * A live call reports "not verified" and nothing else the operator can see;
+   * the reason lives in a server log he has no easy access to, so the only
+   * way to learn anything was to place another call and ask me to read the
+   * transcript. Every distinct cause has a distinct reason code, and the one
+   * that matters most — the console secret not reaching THIS process — looks
+   * identical from the caller's seat to "we do not have you on file".
+   *
+   * Deliberately returns no patient data. A reason code and a count.
+   *   /demo/verify-check?last=Fabian&dob=1973-03-17&first=Wayne
+   */
+  app.get('/demo/verify-check', async (req: Request, res: Response) => {
+    const { verifyPatient, isVerificationConfigured, normalizeDob } = await import(
+      '../services/patientVerification'
+    );
+    const last = String(req.query.last ?? '');
+    const first = String(req.query.first ?? '');
+    const dob = String(req.query.dob ?? '');
+    const configured = isVerificationConfigured();
+    if (!last || !dob) {
+      res.json({
+        consoleSecretPresent: configured,
+        hint: configured
+          ? 'Pass ?last=&dob=&first= to try a real lookup.'
+          : 'OBS_CONSOLE_DATABASE_URL is NOT set in this process — nobody can ever be verified.',
+      });
+      return;
+    }
+    const started = Date.now();
+    const r = await verifyPatient({ firstName: first, lastName: last, dob });
+    res.json({
+      consoleSecretPresent: configured,
+      dobUnderstoodAs: normalizeDob(dob) || null,
+      verified: r.verified,
+      reason: r.reason,
+      candidates: r.candidates,
+      // 'schedule' means the console secret is not reaching this process and
+      // we fell back to the appointment book — which cannot see a patient who
+      // has no appointments.
+      answeredBy: r.source ?? null,
+      ms: Date.now() - started,
+      meaning: {
+        match: 'one person matched — verification works end to end',
+        no_match: 'the mirror is reachable and has nobody with that surname and date of birth',
+        ambiguous: 'more than one person shares that surname and birthday',
+        bad_input: 'the surname or the date was unusable — see dobUnderstoodAs',
+        unavailable: 'the mirror could not be reached; this is OUR problem, not the caller\'s',
+      }[r.reason],
+    });
+  });
+
   app.get('/demo/stt-check', async (_req: Request, res: Response) => {
     const engines = configuredEngines();
     const results: Array<Record<string, unknown>> = [];
