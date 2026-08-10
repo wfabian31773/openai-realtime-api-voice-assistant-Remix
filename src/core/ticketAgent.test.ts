@@ -7,10 +7,13 @@ import { clearAllLedgers, seedLedger, getLedger } from '../services/callFactsLed
 import { createTicketAgent, INTENTS, type TicketAgentServices } from './ticketAgent';
 import type { CoreAction } from './types';
 
-function services(opts: { verify?: boolean; ok?: boolean } = {}) {
+function services(opts: { verify?: boolean; ok?: boolean; reads?: Record<string, any> } = {}) {
   const submitted: Array<Record<string, any>> = [];
   const svc: TicketAgentServices = {
     verify: vi.fn(async () => opts.verify ?? true),
+    // The model's reading, stubbed. Absent entries fall through to the
+    // keyword table, which is exactly the production failure path.
+    classifyIntent: vi.fn(async (text: string) => opts.reads?.[text] ?? null),
     submit: vi.fn(async (_c: string, t: any) => {
       submitted.push(t);
       return opts.ok === false ? { ok: false } : { ok: true, ticketNumber: 'T-1' };
@@ -290,6 +293,90 @@ describe('ticket agent — five steps, nothing else', () => {
 
       const fields = submitted[0]?.fields ?? {};
       expect(fields.fax_number).toBe('5625550134');
+    });
+  });
+
+  /**
+   * The three live calls of 2026-08-10 that the keyword table got wrong.
+   * Operator: "the conversation is great — if we can keep that conversation
+   * with appropriate tool calling, that's it."
+   */
+  describe('the intent comes from the sentence, not from keywords in it', () => {
+    it("an employer's name never chooses the intent", async () => {
+      const sentence = "Hi, my name is Jasmine and I'm calling from the Loma Linda Surgery Center for the medical records of a mutual patient.";
+      // The table matched "Surgery" — in her EMPLOYER's name — and filed a
+      // records request as surgery coordination.
+      expect(INTENTS.surgery.match.test(sentence)).toBe(true);
+
+      const { svc, submitted } = services({
+        reads: { [sentence]: { intent: 'records_fax', callerIsProfessional: true, source: 'llm' } },
+      });
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      await a.onUtterance(C, sentence);
+      await a.onUtterance(C, 'Wayne Fabian');
+      await a.onUtterance(C, 'March 17 1973');
+      await speak(await a.onUtterance(C, '760 860 1434'));
+
+      expect(submitted[0]?.intent).toBe('records_fax');
+      expect(submitted[0]?.fields.fax_number).toBe('7608601434');
+    });
+
+    it('"medical records" with no method stated is still a records request', async () => {
+      const sentence = "Hi, my name is Dr. Joseph Perez and I'm calling for the medical records of a mutual patient.";
+      // The table required "fax" or "email" within 40 chars of "records", so
+      // this fell to the catch-all and asked "what would you like the team to
+      // know?" — of a doctor requesting records.
+      expect(INTENTS.records_fax.match.test(sentence)).toBe(false);
+      expect(INTENTS.records_email.match.test(sentence)).toBe(false);
+
+      const { svc } = services({
+        reads: { [sentence]: { intent: 'records_fax', callerIsProfessional: true, source: 'llm' } },
+      });
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      const r = await a.onUtterance(C, sentence);
+      expect(r.say?.toLowerCase()).toContain('name');
+    });
+
+    it('a method named LATER re-points the request and drops the wrong field', async () => {
+      const sentence = 'I need the medical records for a mutual patient';
+      const { svc, submitted } = services({
+        reads: { [sentence]: { intent: 'records_fax', source: 'llm' } },
+      });
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      await a.onUtterance(C, sentence);
+      await a.onUtterance(C, 'Wayne Fabian');
+      await a.onUtterance(C, 'March 17 1973');
+      // It is asking for a fax number; the caller wants email instead.
+      const r = await a.onUtterance(C, 'Can you have them emailed, please?');
+      expect(r.say?.toLowerCase()).toContain('email');
+      await speak(await a.onUtterance(C, "it's medicalrecords@azulvision.com"));
+
+      expect(submitted[0]?.intent).toBe('records_email');
+      expect(submitted[0]?.fields.email_address).toBe('medicalrecords@azulvision.com');
+      expect(submitted[0]?.fields.fax_number).toBeUndefined();
+    });
+
+    it('falls back to the keyword table when the model gives nothing', async () => {
+      const { svc, submitted } = services(); // classifyIntent returns null
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      await a.onUtterance(C, 'I need a refill on my eye drops');
+      await a.onUtterance(C, 'Wayne Fabian');
+      await a.onUtterance(C, 'March 17 1973');
+      await speak(await a.onUtterance(C, 'yes'));
+
+      expect(submitted[0]?.intent).toBe('medication_refill');
     });
   });
 });

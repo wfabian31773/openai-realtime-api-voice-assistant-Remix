@@ -84,6 +84,9 @@ export function createDeepgramTranscriber(): Transcriber {
       });
 
       socket.on('error', (e) => opts?.onError?.(e));
+      socket.on('close', (code, reason) => {
+        console.info(`[STT][deepgram] closed code=${code} reason=${reason?.toString() || '(none)'}`);
+      });
     },
 
     sendAudio(mulaw) {

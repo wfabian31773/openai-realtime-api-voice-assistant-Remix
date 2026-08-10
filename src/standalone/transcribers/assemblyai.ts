@@ -14,9 +14,18 @@
 import { WebSocket } from 'ws';
 import type { Transcriber, TranscriberOptions } from './types';
 
-const HOST = process.env.ASSEMBLYAI_REGION === 'eu'
-  ? 'wss://streaming.eu.assemblyai.com/v3/ws'
-  : 'wss://streaming.us.assemblyai.com/v3/ws';
+/**
+ * The canonical host is the edge-routed one; the region-pinned variants exist
+ * for data residency. I defaulted to the US-pinned host and the engine
+ * produced no turns at all, so the default is now the host every example in
+ * their docs uses, and pinning is opt-in via ASSEMBLYAI_REGION.
+ */
+const HOST =
+  process.env.ASSEMBLYAI_REGION === 'eu'
+    ? 'wss://streaming.eu.assemblyai.com/v3/ws'
+    : process.env.ASSEMBLYAI_REGION === 'us'
+      ? 'wss://streaming.us.assemblyai.com/v3/ws'
+      : 'wss://streaming.assemblyai.com/v3/ws';
 
 const MAX_KEYTERMS = 100;
 const MAX_PROMPT = 1750;
@@ -42,7 +51,6 @@ export function createAssemblyAiTranscriber(): Transcriber {
         mode: process.env.ASSEMBLYAI_MODE ?? 'balanced',
         // Speakerphones, cars and waiting rooms.
         voice_focus: 'far-field',
-        format_turns: 'true',
       });
       qs.set('prompt', o.prompt.slice(0, MAX_PROMPT));
       if (o.keyterms.length) {
@@ -67,6 +75,12 @@ export function createAssemblyAiTranscriber(): Transcriber {
           return;
         }
         try {
+          // Everything that is NOT a transcript, said out loud. Without this
+          // the only observable fact was "no words", which is indistinguishable
+          // from a bad key, a rejected parameter, and a silent caller.
+          if (msg.type && msg.type !== 'Turn') {
+            console.info(`[STT][assemblyai] ${msg.type}${msg.error ? ` error=${JSON.stringify(msg.error)}` : ''}`);
+          }
           if (msg.type === 'SpeechStarted') opts?.onSpeechStarted?.();
           else if (msg.type === 'Turn') {
             const text = String(msg.transcript ?? '').trim();
@@ -85,6 +99,12 @@ export function createAssemblyAiTranscriber(): Transcriber {
       });
 
       socket.on('error', (e) => opts?.onError?.(e));
+      socket.on('close', (code, reason) => {
+        // 3007 is "audio chunk outside 50-1000ms or sent faster than real
+        // time" — the exact failure that produced a connected socket and a
+        // silent call. Never leave it to be inferred again.
+        console.info(`[STT][assemblyai] closed code=${code} reason=${reason?.toString() || '(none)'}`);
+      });
     },
 
     sendAudio(mulaw) {

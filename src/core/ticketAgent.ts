@@ -21,6 +21,7 @@
  */
 import { getLedger, updateLedger } from '../services/callFactsLedger';
 import { looksLikeName, findNameIn, spokenDigitsToNumber, normalizeSpokenDob, looksLikeDob, DOB_PATTERN } from './parsing';
+import { deliveryMethodIn } from './intentExtractor';
 import { cachedConfig, refreshConfig } from './ticketAgentConfig';
 import type { CoreAction, LineModule } from './types';
 
@@ -262,6 +263,11 @@ type Step = 'VERIFY' | 'CLASSIFY' | 'COLLECT' | 'EXECUTE' | 'WRAP' | 'DONE';
 export interface TicketAgentServices {
   /** Step 1. True when this really is the person the record says. */
   verify(callId: string, name: string, dob: string): Promise<boolean>;
+  /**
+   * Step 2. Read the caller's own sentence and say what they want.
+   * Optional: without it the keyword table decides, exactly as before.
+   */
+  classifyIntent?(text: string): Promise<import('./intentExtractor').ExtractedIntent | null>;
   /** Step 5. Everything collected, in one call. */
   submit(callId: string, ticket: {
     intent: IntentKey;
@@ -540,6 +546,26 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
           return { say: line };
         }
 
+        // "Actually, can you have them emailed?" — said on turn five, after
+        // the intent was already set. The old table decided once and never
+        // listened again: a caller asked twice to have records emailed and was
+        // ignored both times, then the ticket was filed as something else.
+        // A records request follows the method the caller names, whenever
+        // they name it.
+        if (s.intent === 'records_fax' || s.intent === 'records_email') {
+          const method = deliveryMethodIn(text);
+          const wanted = method === 'email' ? 'records_email' : method === 'fax' ? 'records_fax' : null;
+          if (wanted && wanted !== s.intent) {
+            const dropped = wanted === 'records_email' ? 'fax_number' : 'email_address';
+            delete s.values[dropped];
+            s.asks.delete(dropped);
+            s.intent = wanted;
+            if (s.asking === dropped) s.asking = null;
+            console.info(`[TICKET-AGENT] ${callId.slice(-6)} caller asked for ${method} — intent now ${wanted}`);
+            if (s.step === 'COLLECT' || s.step === 'EXECUTE') return advance(callId, s);
+          }
+        }
+
         switch (s.step) {
           /* STEP 1 — verify the patient we think we recognise. */
           case 'VERIFY': {
@@ -584,10 +610,27 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
           /* STEP 2 — classify the intent. */
           case 'CLASSIFY': {
             if (text.trim().split(/\s+/).length < 2) return { say: t(s, LINES.askIntent) };
-            s.intent = classify(text);
             s.rawRequest = text.trim().slice(0, 300);
             updateLedger(callId, { intent: text.trim().slice(0, 200) });
-            console.info(`[TICKET-AGENT] ${callId.slice(-6)} intent=${s.intent} needs=${INTENTS[s.intent].needs.join(',')}`);
+
+            // The model reads the sentence; the TABLE is the floor. A model
+            // that is slow, down, or confused costs us nothing but accuracy.
+            const read = await services.classifyIntent?.(text).catch(() => null);
+            s.intent = read?.intent ?? classify(text);
+            if (read?.fields) {
+              // Anything they volunteered in the same breath, kept — but only
+              // after our own parsers agree it is what the model says it is.
+              for (const [k, v] of Object.entries(read.fields) as Array<[FieldKey, string]>) {
+                const parsed = FIELDS[k].parse(v);
+                if (parsed) s.values[k] = parsed;
+              }
+            }
+            console.info(
+              `[TICKET-AGENT] ${callId.slice(-6)} intent=${s.intent} via=${read?.source ?? 'rules'}` +
+                `${read?.callerIsProfessional ? ' professional' : ''}` +
+                ` needs=${needsFor(s.intent).join(',')}` +
+                `${Object.keys(s.values).length ? ` already=${Object.keys(s.values).join(',')}` : ''}`,
+            );
             return advance(callId, s);
           }
 

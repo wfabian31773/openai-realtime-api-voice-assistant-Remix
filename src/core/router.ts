@@ -310,6 +310,10 @@ function buildSchedulingProdServices(): SchedulingLineServices {
  */
 function buildTicketAgentServices(): TicketAgentServices {
   return {
+    async classifyIntent(text) {
+      const { extractIntent } = await import('./intentExtractor');
+      return extractIntent(text);
+    },
     async verify(_callId, name, dob) {
       const [first, ...rest] = name.trim().split(/\s+/);
       const { scheduleLookupService } = await import('../services/scheduleLookupService');
