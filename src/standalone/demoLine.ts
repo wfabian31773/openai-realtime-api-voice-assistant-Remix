@@ -186,6 +186,19 @@ interface DemoCall {
   requestedLine: string | null;
   requestedIndex: number | null;
   spokenHeard: boolean;
+  /**
+   * Playback, from Twilio — the ONLY thing that means the caller heard it.
+   *
+   * Everything else in this file is upstream of the caller's ear: the words
+   * we chose, the words the model generated, the audio we handed to Twilio.
+   * All three can be complete and correct while the caller hears silence, and
+   * for a whole afternoon they were. A `mark` sent after a line comes back
+   * only once Twilio has finished playing everything queued before it, so an
+   * agent line with no returning mark is a line nobody heard.
+   */
+  agentLines: number[];
+  pendingMarks: Map<string, number>;
+  playedLines: Set<number>;
 }
 
 const calls = new Map<WebSocket, DemoCall>();
@@ -365,11 +378,22 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
           }
           break;
         }
+        case 'mark': {
+          // Twilio finished playing everything queued before this mark.
+          const call = calls.get(twilio);
+          const name = String(msg.mark?.name ?? '');
+          const idx = call?.pendingMarks.get(name);
+          if (call && idx !== undefined) {
+            call.pendingMarks.delete(name);
+            call.playedLines.add(idx);
+          }
+          break;
+        }
         case 'stop':
           void endCall(twilio, 'twilio stop');
           break;
         default:
-          break; // 'connected', 'mark' — nothing to do
+          break; // 'connected' — nothing to do
       }
     });
 
@@ -415,6 +439,9 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     requestedLine: null,
     requestedIndex: null,
     spokenHeard: false,
+    agentLines: [],
+    pendingMarks: new Map(),
+    playedLines: new Set(),
   };
   calls.set(twilio, call);
 
@@ -485,7 +512,12 @@ function connectOpenAI(call: DemoCall): void {
               type: 'semantic_vad',
               eagerness: 'low',
               create_response: false,
-              interrupt_response: true,
+              // A caller talking over a scripted question must not DELETE the
+              // question. interrupt_response let OpenAI's VAD cancel our line
+              // mid-word, which is where "Hey, it sounds like" and "I've got
+              // everything" came from — both are truncated lines, not lines
+              // the model chose to end.
+              interrupt_response: false,
             },
           },
           output: { format: { type: 'audio/pcmu' }, voice: VOICE },
@@ -518,12 +550,23 @@ function connectOpenAI(call: DemoCall): void {
         }
         break;
 
-      // The caller interrupted: drop the audio Twilio has already buffered,
-      // or the agent keeps talking over them for seconds.
+      // The caller spoke. We no longer reach for Twilio's `clear` here.
+      //
+      // `clear` discards the agent audio Twilio has buffered but not yet
+      // played, and the Realtime API delivers a ten-second line in about a
+      // second while Twilio plays it in ten. So any sound from the caller
+      // during those nine seconds deleted the rest of the line. That is how
+      // "I'm not finding a match on my end" was generated in full, recorded
+      // in full, and never heard: the caller was talking over it, and we
+      // threw it away. It is also a large part of what a caller experiences
+      // as the line going dead.
+      //
+      // Barge-in is a decision this agent can make deliberately later. It is
+      // not a reflex that deletes the question it just asked.
       case 'input_audio_buffer.speech_started':
         call.heardSpeech = true;
-        if (call.speaking && call.streamSid && call.twilio.readyState === WebSocket.OPEN) {
-          call.twilio.send(JSON.stringify({ event: 'clear', streamSid: call.streamSid }));
+        if (call.speaking) {
+          console.info(`[DEMO-LINE] ${call.callId} caller spoke over a line that is still playing`);
         }
         break;
 
@@ -548,6 +591,15 @@ function connectOpenAI(call: DemoCall): void {
             `[DEMO-LINE] ${call.callId} played a line the model never transcribed (${why}): ` +
               `"${(call.requestedLine ?? '').slice(0, 60)}"`,
           );
+        }
+        // All of this line's audio is now queued at Twilio. A mark behind it
+        // comes back when Twilio has finished PLAYING it — the moment the
+        // caller has actually heard the line, and the only such moment we
+        // ever get.
+        if (call.requestedIndex !== null && call.streamSid && call.twilio.readyState === WebSocket.OPEN) {
+          const name = `line-${call.requestedIndex}`;
+          call.pendingMarks.set(name, call.requestedIndex);
+          call.twilio.send(JSON.stringify({ event: 'mark', streamSid: call.streamSid, mark: { name } }));
         }
         call.requestedIndex = null;
         call.requestedLine = null;
@@ -782,10 +834,25 @@ function emitSpeech(call: DemoCall, words: string): void {
   call.transcript.push(`AGENT: ${words}`);
   call.requestedLine = words;
   call.requestedIndex = call.transcript.length - 1;
+  call.agentLines.push(call.requestedIndex);
   call.spokenHeard = false;
   send(call.openai, {
     type: 'response.create',
     response: {
+      // THE root fix. Without these two fields this is an IN-CONVERSATION
+      // response: the caller's audio is in the session, so every utterance is
+      // a user turn, and response.create means "produce the next assistant
+      // turn in this conversation" — with our words demoted to a suggestion.
+      // That is why a caller complaining about hiccups got a paragraph of
+      // hiccup remedies instead of "are you calling for a new patient or an
+      // existing patient?". The model was not disobeying an instruction; it
+      // was answering the conversation we handed it. No wording fixes that.
+      //
+      // Out-of-band (conversation 'none') with an EMPTY input gives the model
+      // no conversation at all. The line is then the only content that
+      // exists, and there is nothing to answer, agree with, or improvise on.
+      conversation: 'none',
+      input: [],
       output_modalities: ['audio'],
       // The session's instructions do NOT apply here: instructions on a
       // response REPLACE the session default for that response. So every
@@ -874,6 +941,16 @@ async function endCall(twilio: WebSocket, reason: string): Promise<void> {
   // was heard — the caller may have hung up in the middle of it.
   if (call.requestedIndex !== null && !call.spokenHeard) {
     call.transcript[call.requestedIndex] += '   [unconfirmed: the call ended while this was playing]';
+  }
+  // Now the part that matters: which lines did Twilio actually PLAY. Anything
+  // the caller never heard is said so in the record, instead of sitting there
+  // looking like it was heard.
+  const unheard = call.agentLines.filter((i) => !call.playedLines.has(i));
+  for (const i of unheard) call.transcript[i] += '   [NOT HEARD — Twilio never finished playing this]';
+  if (unheard.length) {
+    console.warn(
+      `[DEMO-LINE] ${call.callId} ${unheard.length} of ${call.agentLines.length} agent lines never finished playing`,
+    );
   }
   call.transcript.push(`END: ${call.endReason ?? 'unknown'} | openai socket: ${call.openaiClose ?? 'still open'}`);
   console.info(`[DEMO-LINE] ===== transcript ${call.callId} =====\n${call.transcript.join('\n')}\n=====`);

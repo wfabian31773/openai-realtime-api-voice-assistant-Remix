@@ -28,6 +28,8 @@ let fakeOpenAI: WebSocketServer;
 let fakeUrl: string;
 /** Everything the "model" was told to say, in order. */
 const forcedLines: string[] = [];
+/** The full response.create payload for each of those lines. */
+const responseCreates: Record<string, any>[] = [];
 let sessionConfig: Record<string, any> | null = null;
 /**
  * What the "model" actually speaks, given the line it was handed. null means
@@ -51,6 +53,7 @@ beforeAll(async () => {
           evt.response?.instructions ?? '',
         );
         forcedLines.push(m ? m[1] : (evt.response?.instructions ?? ''));
+        responseCreates.push(evt.response ?? {});
         // Speak it: one audio frame, then done — with a real gap, so a line
         // sent while this one is still playing would be lost exactly as it is
         // on a live call.
@@ -181,6 +184,10 @@ describe('demo line — a call, end to end', () => {
     expect(sessionConfig!.audio.output.format).toEqual({ type: 'audio/pcmu' });
     // The model must not decide to respond — the ticket agent decides.
     expect(sessionConfig!.audio.input.turn_detection.create_response).toBe(false);
+    // A caller talking over a scripted question must not cancel it. This is
+    // where the truncated "Hey, it sounds like" and "I've got everything"
+    // came from on the live 15:0x call.
+    expect(sessionConfig!.audio.input.turn_detection.interrupt_response).toBe(false);
     expect(sessionConfig!.tools).toEqual([]);
     expect(sessionConfig!.tool_choice).toBe('none');
     // The tuned transcriber, not the bare model. A live call transcribed
@@ -341,6 +348,106 @@ describe('demo line — a call, end to end', () => {
     expect(forcedLines[2].toLowerCase()).toMatch(/date of birth|birth/);
 
     twilio.close();
+  });
+
+  it('generates every line out of band, so there is no conversation to answer', async () => {
+    // The root cause of the hiccups paragraph. The caller's audio is in the
+    // session, so an in-conversation response.create asks the model to
+    // produce the next turn of a REAL conversation and demotes our line to a
+    // suggestion. An out-of-band response with empty input has no
+    // conversation at all — the line is the only content in existence.
+    forcedLines.length = 0;
+    responseCreates.length = 0;
+    const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+    await new Promise<void>((r) => twilio.on('open', () => r()));
+    twilio.send(JSON.stringify({
+      event: 'start',
+      streamSid: 'MZoob',
+      start: { streamSid: 'MZoob', callSid: 'CAoob', customParameters: { from: '+15625550134', callSid: 'CAoob' } },
+    }));
+    await until(() => forcedLines.length >= 1, 'the greeting');
+
+    expect(responseCreates.length).toBeGreaterThan(0);
+    for (const r of responseCreates) {
+      expect(r.conversation).toBe('none');
+      expect(r.input).toEqual([]);
+    }
+    twilio.close();
+  });
+
+  it('never deletes audio Twilio has already been handed', async () => {
+    // `clear` discards buffered agent audio. The model generated "I'm not
+    // finding a match on my end" in full and the caller never heard a word of
+    // it, because he was talking while it played and we cleared the buffer.
+    forcedLines.length = 0;
+    const frames: Record<string, any>[] = [];
+    const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+    twilio.on('message', (d) => frames.push(JSON.parse(d.toString())));
+    await new Promise<void>((r) => twilio.on('open', () => r()));
+    twilio.send(JSON.stringify({
+      event: 'start',
+      streamSid: 'MZnoclear',
+      start: { streamSid: 'MZnoclear', callSid: 'CAnoclear', customParameters: { from: '+15625550134', callSid: 'CAnoclear' } },
+    }));
+    await until(() => forcedLines.length >= 1, 'the greeting');
+
+    const oa = [...fakeOpenAI.clients].pop()!;
+    // The caller talks straight over the greeting, repeatedly.
+    for (let i = 0; i < 3; i++) {
+      oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(frames.some((f) => f.event === 'clear')).toBe(false);
+    twilio.close();
+  });
+
+  it('knows which lines the caller actually heard, and which he did not', async () => {
+    // Twilio's mark is the only signal that means "played out to the caller".
+    // Everything else — our words, the model's words, the audio we handed
+    // over — can be perfect while the caller hears silence.
+    forcedLines.length = 0;
+    const logged: string[] = [];
+    const info = vi.spyOn(console, 'info').mockImplementation((...a) => { logged.push(a.join(' ')); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...a) => { logged.push(a.join(' ')); });
+    try {
+      // ---- a line Twilio confirms playing --------------------------------
+      const played = new WebSocket(`ws://${baseUrl}/demo/stream`);
+      // Stand in for a phone that plays what it is given: echo marks back.
+      played.on('message', (d) => {
+        const f = JSON.parse(d.toString());
+        if (f.event === 'mark') played.send(JSON.stringify({ event: 'mark', mark: f.mark }));
+      });
+      await new Promise<void>((r) => played.on('open', () => r()));
+      played.send(JSON.stringify({
+        event: 'start',
+        streamSid: 'MZheardit',
+        start: { streamSid: 'MZheardit', callSid: 'CAheardit', customParameters: { from: '+15625550134', callSid: 'CAheardit' } },
+      }));
+      await until(() => logged.some((l) => l.includes('CAheardit greeting sent')), 'the greeting');
+      await until(() => forcedLines.length >= 1, 'the line to be sent');
+      // Give the mark its round trip before hanging up.
+      await new Promise((r) => setTimeout(r, 200));
+      played.close();
+      await until(() => logged.some((l) => l.includes('transcript CAheardit')), 'the transcript');
+      expect(logged.find((l) => l.includes('transcript CAheardit'))!).not.toContain('NOT HEARD');
+
+      // ---- a line Twilio never plays -------------------------------------
+      const silent = new WebSocket(`ws://${baseUrl}/demo/stream`); // marks ignored
+      await new Promise<void>((r) => silent.on('open', () => r()));
+      silent.send(JSON.stringify({
+        event: 'start',
+        streamSid: 'MZsilent',
+        start: { streamSid: 'MZsilent', callSid: 'CAsilent', customParameters: { from: '+15625550134', callSid: 'CAsilent' } },
+      }));
+      await until(() => logged.some((l) => l.includes('CAsilent greeting sent')), 'the greeting');
+      await new Promise((r) => setTimeout(r, 200));
+      silent.close();
+      await until(() => logged.some((l) => l.includes('transcript CAsilent')), 'the transcript');
+      expect(logged.find((l) => l.includes('transcript CAsilent'))!).toContain('NOT HEARD');
+    } finally {
+      info.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it('records what the caller HEARD, not what we asked the model to say', async () => {
