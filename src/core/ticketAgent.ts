@@ -20,7 +20,7 @@
  * happen, because nothing else is here.
  */
 import { getLedger, updateLedger } from '../services/callFactsLedger';
-import { looksLikeName, normalizeSpokenDob, looksLikeDob } from './parsing';
+import { looksLikeName, findNameIn, spokenDigitsToNumber, normalizeSpokenDob, looksLikeDob, DOB_PATTERN } from './parsing';
 import { cachedConfig, refreshConfig } from './ticketAgentConfig';
 import type { CoreAction, LineModule } from './types';
 
@@ -54,7 +54,7 @@ export const FIELDS: Record<FieldKey, FieldDef> = {
       es: '¿Me da el nombre y apellido del paciente?',
     },
     parse: (t) => {
-      const n = looksLikeName(t);
+      const n = findNameIn(t);
       return n ? `${n.first} ${n.last}` : null;
     },
     known: (id) => {
@@ -73,7 +73,18 @@ export const FIELDS: Record<FieldKey, FieldDef> = {
       en: "And the patient's date of birth?",
       es: '¿Y la fecha de nacimiento del paciente?',
     },
-    parse: (t) => (looksLikeDob(t) ? normalizeSpokenDob(t) ?? t.trim() : null),
+    // Extract the DATE, never the sentence around it. Falling back to the
+    // whole utterance put "Sure, the patient's first and last name is Wayne
+    // Fabian and the date of birth is March 17th, 1973." into the DOB field
+    // of a real ticket — staff would have had to re-read the call to find a
+    // date the agent already had.
+    parse: (t) => {
+      if (!looksLikeDob(t)) return null;
+      const normalized = normalizeSpokenDob(t);
+      if (normalized) return normalized;
+      const matched = t.match(DOB_PATTERN)?.[0]?.trim();
+      return matched || null;
+    },
     known: (id) => {
       const f = getLedger(id);
       return f?.dateOfBirth ?? (f?.identityVerified ? f?.matchedDob ?? null : null);
@@ -84,7 +95,7 @@ export const FIELDS: Record<FieldKey, FieldDef> = {
       en: "What's the best number for the team to reach you?",
       es: '¿Cuál es el mejor número para que el equipo le contacte?',
     },
-    parse: (t) => t.match(PHONE)?.[0].replace(/[^\d+]/g, '') ?? null,
+    parse: (t) => t.match(PHONE)?.[0].replace(/[^\d+]/g, '') ?? spokenDigitsToNumber(t),
     // Caller ID is a CANDIDATE, not an answer: it counts as known only once
     // the caller has confirmed it. Otherwise we would file a ticket against a
     // number nobody agreed to.
@@ -95,7 +106,7 @@ export const FIELDS: Record<FieldKey, FieldDef> = {
       en: "What's the best fax number to send that to?",
       es: '¿Cuál es el mejor número de fax para enviarlo?',
     },
-    parse: (t) => t.match(PHONE)?.[0].replace(/[^\d+]/g, '') ?? null,
+    parse: (t) => t.match(PHONE)?.[0].replace(/[^\d+]/g, '') ?? spokenDigitsToNumber(t),
   },
   email_address: {
     ask: {
@@ -597,12 +608,18 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
             if (value) {
               s.values[key] = value;
               if (key === 'patient_name') {
-                const n = looksLikeName(text);
+                const n = findNameIn(text);
                 if (n) updateLedger(callId, { firstName: n.first, lastName: n.last });
               }
               if (key === 'patient_dob') updateLedger(callId, { dateOfBirth: value });
               if (key === 'callback_number') updateLedger(callId, { callbackNumber: value, callbackConfirmed: true });
               s.asking = null;
+              // One breath, several answers. "The name is Wayne Fabian and the
+              // date of birth is March 17th, 1973" answers TWO fields, and
+              // asking for the second one back is what made a caller repeat
+              // himself on the live 10:48 call. Salvage runs on success too,
+              // not only when the parse failed.
+              salvageMisdirected(callId, s, key, text);
               return advance(callId, s);
             }
             // Not an answer to THIS question — but callers answer the

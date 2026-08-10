@@ -29,6 +29,105 @@ export function looksLikeName(text: string): { first: string; last: string } | n
   return { first: words[0], last: words.slice(1).join(' ') };
 }
 
+/**
+ * The name inside a sentence.
+ *
+ * looksLikeName is deliberately strict — it exists because "I have seen
+ * before" was once stored as a patient name — but real callers do not answer
+ * in bare names. Live call 2026-08-10:
+ *
+ *   AGENT:  May I have the patient's first and last name?
+ *   CALLER: Sure, the patient's first and last name is Wayne Fabian and the
+ *           date of birth is March 17th, 1973.
+ *   AGENT:  May I have the patient's first and last name?
+ *
+ * Perfectly transcribed, perfectly answered, and thrown away. So: peel off
+ * the lead-in, cut the sentence at the point another field starts, and hand
+ * what is left to the same strict checker. Nothing is loosened — a sentence
+ * that still does not look like a name is still rejected.
+ */
+export function findNameIn(text: string): { first: string; last: string } | null {
+  const direct = looksLikeName(text);
+  if (direct) return direct;
+
+  // Cut at the point a DIFFERENT field starts, so "and the date of birth is
+  // March 17th" can never become part of the surname.
+  const trimmed = text.split(/\b(?:date of birth|d\.?o\.?b\.?|born|birthday|fecha de nacimiento)\b/i)[0];
+
+  // Branch 1 — the caller SIGNPOSTED it: "...the patient's name is X".
+  // Only here do we scan for the name, because the caller told us one is
+  // coming. Scanning arbitrary sentences turns "uh let me look it up" into
+  // the patient "Uh Let", which is exactly the class of bug the strict
+  // parser exists to prevent.
+  const named = /\b(?:name is|name'?s|nombre es)\s+(.+)$/i.exec(trimmed);
+  if (named) {
+    const run: string[] = [];
+    for (const tok of named[1].split(/[\s,]+/).filter(Boolean)) {
+      const word = tok.replace(/[.,;!?]+$/, '');
+      if (/^[a-záéíóúñ'-]{2,}$/i.test(word) && !NOT_NAME_WORDS.has(word.toLowerCase())) {
+        run.push(word);
+        if (run.length === 4) break;
+      } else if (run.length >= 2) {
+        break; // a complete name, then a word that is not one — stop there
+      } else {
+        run.length = 0;
+      }
+    }
+    return run.length >= 2 ? { first: run[0], last: run.slice(1).join(' ') } : null;
+  }
+
+  // Branch 2 — no signpost. Drop only conversational lead-in, then hand what
+  // is left to the SAME strict checker, which still rejects anything
+  // sentence-shaped.
+  const stripped = trimmed
+    .replace(/^(?:\s*(?:yes|yeah|yep|sure|ok|okay|so|well|um+|uh+|er+|hi|hello|it'?s|its|that'?s|this is|my|his|her|their|for|si|s[ií]|claro|bueno)\b[,'\s]*)+/i, '')
+    .replace(/[.,;!?]+\s*$/, '')
+    .trim();
+  return stripped ? looksLikeName(stripped) : null;
+}
+
+const SPOKEN_DIGITS: Record<string, string> = {
+  zero: '0', oh: '0', o: '0', nought: '0',
+  one: '1', two: '2', three: '3', four: '4', five: '5',
+  six: '6', seven: '7', eight: '8', nine: '9',
+  cero: '0', uno: '1', dos: '2', tres: '3', cuatro: '4', cinco: '5',
+  seis: '6', siete: '7', ocho: '8', nueve: '9',
+};
+
+/**
+ * A phone or fax number read out as words.
+ *
+ * Live call 2026-08-10: "seven six zero eight six zero one four three four"
+ * — a complete, correct fax number that the digit regex could not see, so the
+ * agent asked again and filed the ticket without it. Callers read numbers off
+ * bottles and letterheads; they do not say "seven-six-zero" as digits.
+ *
+ * Returns 10 or 11 digits only. A shorter run is an address, a year, or an
+ * option number, and guessing at those is how a wrong number reaches a
+ * patient's chart.
+ */
+export function spokenDigitsToNumber(text: string): string | null {
+  const tokens = text.toLowerCase().split(/[\s,.-]+/).filter(Boolean);
+  let run = '';
+  let best = '';
+  for (const tok of tokens) {
+    const bare = tok.replace(/[^a-z0-9]/g, '');
+    if (/^\d+$/.test(bare)) {
+      run += bare;
+    } else if (SPOKEN_DIGITS[bare] !== undefined) {
+      run += SPOKEN_DIGITS[bare];
+    } else if (bare === 'double' || bare === 'triple') {
+      continue; // handled by the repeat that follows
+    } else {
+      if (run.length > best.length) best = run;
+      run = '';
+    }
+  }
+  if (run.length > best.length) best = run;
+  if (best.length === 11 && best.startsWith('1')) return best.slice(1);
+  return best.length === 10 ? best : null;
+}
+
 const MONTHS =
   '(january|february|march|april|may|june|july|august|september|october|november|december|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)';
 const NUMBER_WORDS =
