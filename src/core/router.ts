@@ -351,7 +351,12 @@ function buildTicketAgentServices(): TicketAgentServices {
         email: f.email_address ?? null,
         preferredContact: f.email_address ? 'email' : 'phone',
         requestCategory: 'general_question',
-        requestSummary: description,
+        requestSummary:
+          ticket.identityVerified === true
+            ? `${description} — IDENTITY VERIFIED against patient records`
+            : ticket.identityVerified === false
+              ? `${description} — CALLER'S NAME/DOB NOT FOUND in patient records`
+              : description,
         departmentId: ticket.department,
         priority: ticket.urgent ? 'urgent' : 'medium',
         subject: ticket.label,

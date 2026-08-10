@@ -275,6 +275,12 @@ export interface TicketAgentServices {
     department: 1 | 2 | 3;
     fields: Partial<Record<FieldKey, string>>;
     urgent: boolean;
+    /**
+     * Did the name and date of birth match a real patient record?
+     * undefined = we never got both and could not check. Staff need the
+     * difference between "checked and not found" and "never checked".
+     */
+    identityVerified?: boolean;
   }): Promise<{ ok: boolean; ticketNumber?: string }>;
 }
 
@@ -411,6 +417,29 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
         if (!s.values.callback_number && reachable === getLedger(callId)?.callerPhone) {
           s.values.callback_number = reachable;
         }
+        // STEP 1, finally reached. verify() has always been wired to the real
+        // patient lookup, but it was only called when caller ID had already
+        // matched someone — so a caller from an unknown number gave a perfect
+        // name and date of birth and was never checked against anything.
+        // Now: if we have both, we check. It NEVER blocks and never changes
+        // what the caller hears; it only tells staff what the ticket is worth.
+        let identityVerified: boolean | undefined;
+        const nameForCheck = s.values.patient_name;
+        const dobForCheck = s.values.patient_dob;
+        if (nameForCheck && dobForCheck) {
+          identityVerified = await Promise.race([
+            services.verify(callId, nameForCheck, dobForCheck).catch(() => undefined),
+            new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2500)),
+          ]);
+          if (identityVerified !== undefined) {
+            updateLedger(callId, { identityVerified });
+          }
+          console.info(
+            `[TICKET-AGENT] ${callId.slice(-6)} identity ` +
+              `${identityVerified === undefined ? 'UNCHECKED (lookup unavailable)' : identityVerified ? 'VERIFIED' : 'NOT FOUND in records'}`,
+          );
+        }
+
         if (!s.values.patient_name) s.values.patient_name = 'Unknown Caller';
         const r = await services
           .submit(callId, {
@@ -419,6 +448,7 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
             department: def.department,
             fields: { ...s.values, details: s.values.details ?? s.rawRequest ?? undefined },
             urgent: s.urgent,
+            identityVerified,
           })
           .catch(() => ({ ok: false }));
         s.step = 'WRAP';

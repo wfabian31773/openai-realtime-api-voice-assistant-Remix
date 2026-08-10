@@ -379,4 +379,52 @@ describe('ticket agent — five steps, nothing else', () => {
       expect(submitted[0]?.intent).toBe('medication_refill');
     });
   });
+
+  describe('step 1, finally reached: the patient is actually checked', () => {
+    it('verifies the name and date of birth against the record before filing', async () => {
+      const { svc, submitted } = services({ verify: true });
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      await a.onUtterance(C, 'I need a refill on my eye drops');
+      await a.onUtterance(C, 'Wayne Fabian');
+      await a.onUtterance(C, 'March 17 1973');
+      await speak(await a.onUtterance(C, 'yes'));
+
+      expect(svc.verify).toHaveBeenCalledWith(C, 'Wayne Fabian', '1973-03-17');
+      expect(submitted[0]?.identityVerified).toBe(true);
+    });
+
+    it('files anyway when the record says no — staff need the request AND the doubt', async () => {
+      const { svc, submitted } = services({ verify: false });
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      await a.onUtterance(C, 'I need a refill on my eye drops');
+      await a.onUtterance(C, 'Nobody Whatsoever');
+      await a.onUtterance(C, 'March 17 1973');
+      await speak(await a.onUtterance(C, 'yes'));
+
+      expect(submitted).toHaveLength(1);
+      expect(submitted[0]?.identityVerified).toBe(false);
+    });
+
+    it('a broken lookup never blocks the call — unchecked is not the same as failed', async () => {
+      const { svc, submitted } = services();
+      (svc.verify as any).mockRejectedValue(new Error('NextGen down'));
+      const a = createTicketAgent(svc);
+      seedLedger(C, { callerPhone: '5622001000' });
+      a.start(C);
+
+      await a.onUtterance(C, 'I need a refill on my eye drops');
+      await a.onUtterance(C, 'Wayne Fabian');
+      await a.onUtterance(C, 'March 17 1973');
+      await speak(await a.onUtterance(C, 'yes'));
+
+      expect(submitted).toHaveLength(1);
+      expect(submitted[0]?.identityVerified).toBeUndefined();
+    });
+  });
 });
