@@ -2,11 +2,17 @@
  * The demo line, end to end, with no phone call.
  *
  * A real Express server, a real WebSocket upgrade, a real Twilio media-stream
- * client, and a fake OpenAI Realtime server standing in for the model. Every
- * layer this file owns is exercised: the TwiML the number answers with, the
- * socket handshake, the session config, the greeting, the caller's words
- * reaching the ticket agent, and the agent's forced lines coming back as
- * audio the caller would hear.
+ * client, a fake Deepgram standing in for the ear and a fake OpenAI Realtime
+ * standing in for the mouth. Every layer this file owns is exercised: the
+ * TwiML the number answers with, the socket handshake, the session config,
+ * the greeting, the caller's words reaching the ticket agent, and the agent's
+ * forced lines coming back as audio the caller would hear.
+ *
+ * The caller speaks through DEEPGRAM, not through the model. That is the
+ * point: OpenAI's speech-to-text fabricated whole passages of fiction out of
+ * silence and the agent answered them on live patient calls, so its session
+ * receives no audio at all now. A test that fed words in through the model
+ * would be testing a door that no longer exists.
  *
  * This exists because the demo line was tested by dialing it three times and
  * three times it was the wrong agent. That is not testing.
@@ -39,6 +45,46 @@ let speaks: ((asked: string) => string | null) | null = null;
 
 let server: http.Server;
 let baseUrl: string;
+
+let fakeDeepgram: WebSocketServer;
+/** Every ear socket the line has opened, newest last. */
+const dgSockets: WebSocket[] = [];
+/**
+ * Ears opened since the process started. Monotonic on purpose: dgSockets
+ * SHRINKS when a previous call's ear closes, so waiting on its length races
+ * with that teardown and can be satisfied by a socket that is already dead.
+ */
+let dgOpened = 0;
+/** How the adapter connected — URL and auth header — for one call each. */
+const deepgramConnections: Array<{ url: string; auth: string }> = [];
+
+/** The caller says something. This is the ONLY way words enter the agent. */
+function callerSays(text: string, opts: { speechStarted?: boolean } = {}): void {
+  const dg = dgSockets[dgSockets.length - 1];
+  if (!dg) throw new Error('no ear is listening — the line never opened a transcriber socket');
+  if (opts.speechStarted !== false) dg.send(JSON.stringify({ type: 'SpeechStarted' }));
+  dg.send(
+    JSON.stringify({
+      type: 'Results',
+      is_final: true,
+      channel: { alternatives: [{ transcript: text, confidence: 0.98 }] },
+    }),
+  );
+}
+
+/**
+ * Wait for THIS call's ear. Pass the socket count taken before the call was
+ * opened — sockets accumulate across tests, so an absolute count would pass
+ * on a previous call's ear and speak into a dead socket.
+ */
+async function earReady(before: number): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < 3000) {
+    if (dgOpened > before) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error('timed out waiting for this call to open a transcriber socket');
+}
 
 beforeAll(async () => {
   // ---- fake OpenAI Realtime -------------------------------------------
@@ -77,6 +123,26 @@ beforeAll(async () => {
   await new Promise<void>((r) => oaServer.listen(0, '127.0.0.1', () => r()));
   fakeUrl = `ws://127.0.0.1:${(oaServer.address() as AddressInfo).port}`;
   process.env.DEMO_OPENAI_URL = fakeUrl;
+
+  // ---- fake Deepgram: the ear ------------------------------------------
+  // The real adapter connects to this — same query string, same auth header,
+  // same message parsing — so the caller's words travel the exact path a
+  // real caller's words travel.
+  const dgServer = http.createServer();
+  fakeDeepgram = new WebSocketServer({ server: dgServer });
+  fakeDeepgram.on('connection', (ws, req) => {
+    deepgramConnections.push({ url: req.url ?? '', auth: String(req.headers.authorization ?? '') });
+    dgOpened += 1;
+    dgSockets.push(ws);
+    ws.on('close', () => {
+      const i = dgSockets.indexOf(ws);
+      if (i >= 0) dgSockets.splice(i, 1);
+    });
+  });
+  await new Promise<void>((r) => dgServer.listen(0, '127.0.0.1', () => r()));
+  process.env.DEEPGRAM_URL = `ws://127.0.0.1:${(dgServer.address() as AddressInfo).port}`;
+  process.env.STT_ENGINES = 'deepgram';
+  process.env.STT_PRIMARY = 'deepgram';
 
   // ---- the demo line itself --------------------------------------------
   const { mountDemoLine } = await import('./demoLine');
@@ -126,6 +192,7 @@ describe('demo line — a call, end to end', () => {
 
   it('carries a fax-records request through name, DOB and fax number — and nothing else', async () => {
     forcedLines.length = 0;
+    const earsBefore = dgOpened;
     const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
     const framesToCaller: unknown[] = [];
     twilio.on('message', (raw) => framesToCaller.push(JSON.parse(raw.toString())));
@@ -146,12 +213,9 @@ describe('demo line — a call, end to end', () => {
     // Audio actually reaches the caller.
     await until(() => framesToCaller.some((f: any) => f.event === 'media'), 'audio to the caller');
 
+    await earReady(earsBefore);
     const say = async (text: string, n: number) => {
-      const oa = [...fakeOpenAI.clients][0];
-      // A real caller trips the VAD before a transcript exists. The line
-      // requires that, so the test must produce it too.
-      oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
-      oa.send(JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', transcript: text }));
+      callerSays(text);
       await until(() => forcedLines.length >= n, `reply #${n} to "${text}"`);
     };
 
@@ -178,28 +242,54 @@ describe('demo line — a call, end to end', () => {
     twilio.close();
   });
 
-  it('configures μ-law both ways and never lets the model answer on its own', () => {
+  it('gives the model a mouth and no ears at all', () => {
     expect(sessionConfig).toBeTruthy();
-    expect(sessionConfig!.audio.input.format).toEqual({ type: 'audio/pcmu' });
     expect(sessionConfig!.audio.output.format).toEqual({ type: 'audio/pcmu' });
-    // The model must not decide to respond — the ticket agent decides.
-    expect(sessionConfig!.audio.input.turn_detection.create_response).toBe(false);
-    // A caller talking over a scripted question must not cancel it. This is
-    // where the truncated "Hey, it sounds like" and "I've got everything"
-    // came from on the live 15:0x call.
-    expect(sessionConfig!.audio.input.turn_detection.interrupt_response).toBe(false);
+    // No input configuration whatsoever: nothing to transcribe with, nothing
+    // to detect turns with. The session cannot hear, so it cannot invent a
+    // caller — which is what it did on live patient calls.
+    expect(sessionConfig!.audio.input).toBeUndefined();
     expect(sessionConfig!.tools).toEqual([]);
     expect(sessionConfig!.tool_choice).toBe('none');
-    // The tuned transcriber, not the bare model. A live call transcribed
-    // "Wayne Fabian" as "20 Fabian" and answered in Vietnamese because this
-    // line asked for the default.
-    const tr = sessionConfig!.audio.input.transcription;
-    expect(tr.model).toBeTruthy();
-    expect(tr.prompt ?? tr.language ?? tr.languages).toBeTruthy();
   });
 
-  it('ignores a transcript that appeared out of silence', async () => {
+  it('sends the caller\'s audio to the transcriber and NOT to the model', async () => {
     forcedLines.length = 0;
+    const earsBefore = dgOpened;
+    const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+    await new Promise<void>((r) => twilio.on('open', () => r()));
+    twilio.send(JSON.stringify({
+      event: 'start',
+      streamSid: 'MZaudio',
+      start: { streamSid: 'MZaudio', callSid: 'CAaudio', customParameters: { from: '+15625550134', callSid: 'CAaudio' } },
+    }));
+    await until(() => forcedLines.length >= 1, 'the greeting');
+    await earReady(earsBefore);
+
+    // Watch what the model's socket receives from here on. clients is a Set
+    // that drops closed sockets, so take the newest rather than an index.
+    const toModel: string[] = [];
+    const oa = [...fakeOpenAI.clients].pop()!;
+    oa.on('message', (d) => toModel.push(JSON.parse(d.toString()).type));
+
+    // 20 frames of caller audio, exactly as Twilio sends them.
+    const frame = Buffer.alloc(160, 0x7f).toString('base64');
+    for (let i = 0; i < 20; i++) {
+      twilio.send(JSON.stringify({ event: 'media', streamSid: 'MZaudio', media: { payload: frame } }));
+    }
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(toModel).not.toContain('input_audio_buffer.append');
+    twilio.close();
+  });
+
+  it('refuses a transcript from the model even if one arrives', async () => {
+    // Belt and braces. We send that session no audio, so a transcript from it
+    // can only be fabricated — which is exactly what happened to patients:
+    // "I sensed you were my fated master…" recorded as the caller, and the
+    // agent answering it. It must never reach the agent again.
+    forcedLines.length = 0;
+    const earsBefore = dgOpened;
     const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
     await new Promise<void>((r) => twilio.on('open', () => r()));
     twilio.send(
@@ -210,30 +300,36 @@ describe('demo line — a call, end to end', () => {
       }),
     );
     await until(() => forcedLines.length >= 1, 'the greeting');
+    await earReady(earsBefore);
     const afterGreeting = forcedLines.length;
 
     const oa = [...fakeOpenAI.clients].pop()!;
-    // No speech_started: this is the transcriber hallucinating on silence.
-    // A live call (17:21) processed exactly this and spent an ask on it.
-    oa.send(JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', transcript: 'Okay' }));
+    oa.send(JSON.stringify({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'I sensed you were my fated master, so I traveled all this way.',
+    }));
     await new Promise((r) => setTimeout(r, 150));
     expect(forcedLines.length).toBe(afterGreeting);
 
-    // With speech behind it, the same words are taken seriously.
-    oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
-    oa.send(JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', transcript: 'I need medical records faxed' }));
+    // The real ear still drives the call.
+    callerSays('I need medical records faxed');
     await until(() => forcedLines.length > afterGreeting, 'a real turn to be answered');
 
     twilio.close();
   });
 
-  it('a silent primary engine can never mute the line', async () => {
+  it('a silent primary engine can never mute the line', { timeout: 15_000 }, async () => {
     // 2026-08-10: STT_PRIMARY was assemblyai, assemblyai produced no turns
     // because the audio chunks were too small, and the caller talked to
     // silence for an entire call. The experiment must degrade, not the call.
     forcedLines.length = 0;
-    process.env.STT_ENGINES = 'openai,assemblyai';
+    // Restored in a finally below: when this test failed without restoring,
+    // every later test silently ran with a primary that never speaks.
+    const savedEngines = process.env.STT_ENGINES;
+    const savedPrimary = process.env.STT_PRIMARY;
+    process.env.STT_ENGINES = 'deepgram,assemblyai';
     process.env.STT_PRIMARY = 'assemblyai';
+    try {
     vi.resetModules();
     const { mountDemoLine: mount } = await import('./demoLine');
     const app2 = express();
@@ -243,6 +339,7 @@ describe('demo line — a call, end to end', () => {
     await new Promise<void>((r) => srv2.listen(0, '127.0.0.1', () => r()));
     const url2 = `127.0.0.1:${(srv2.address() as AddressInfo).port}`;
 
+    const earsBefore = dgOpened;
     const twilio = new WebSocket(`ws://${url2}/demo/stream`);
     await new Promise<void>((r) => twilio.on('open', () => r()));
     twilio.send(JSON.stringify({
@@ -253,13 +350,11 @@ describe('demo line — a call, end to end', () => {
     await until(() => forcedLines.length >= 1, 'the greeting');
     const afterGreeting = forcedLines.length;
 
-    // OpenAI (NOT the primary) hears the caller. AssemblyAI never will.
-    const oa = [...fakeOpenAI.clients].pop()!;
-    oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
-    oa.send(JSON.stringify({
-      type: 'conversation.item.input_audio_transcription.completed',
-      transcript: 'I need medical records faxed',
-    }));
+    // Deepgram (NOT the primary) hears the caller. AssemblyAI never will —
+    // it has no key here, so its socket never opens, exactly as on the live
+    // call where it produced no turns at all.
+    await earReady(earsBefore);
+    callerSays('I need medical records faxed');
 
     // The agent must still answer, using what it did hear.
     await until(() => forcedLines.length > afterGreeting, 'a reply despite the silent primary', 5000);
@@ -267,8 +362,11 @@ describe('demo line — a call, end to end', () => {
     twilio.close();
     srv2.closeAllConnections?.();
     await new Promise<void>((r) => srv2.close(() => r()));
-    delete process.env.STT_ENGINES;
-    delete process.env.STT_PRIMARY;
+    } finally {
+      process.env.STT_ENGINES = savedEngines;
+      process.env.STT_PRIMARY = savedPrimary;
+      vi.resetModules();
+    }
   });
 
   it('serves ANY line from its own URL — the webhook is the switch', async () => {
@@ -286,6 +384,7 @@ describe('demo line — a call, end to end', () => {
 
     // And the call actually runs as that line.
     forcedLines.length = 0;
+    const earsBefore = dgOpened;
     const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
     await new Promise<void>((r) => twilio.on('open', () => r()));
     twilio.send(JSON.stringify({
@@ -299,12 +398,8 @@ describe('demo line — a call, end to end', () => {
     }));
     await until(() => forcedLines.length >= 1, 'the greeting on the answering-service line');
 
-    const oa = [...fakeOpenAI.clients].pop()!;
-    oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
-    oa.send(JSON.stringify({
-      type: 'conversation.item.input_audio_transcription.completed',
-      transcript: 'I need to get some medical records faxed over',
-    }));
+    await earReady(earsBefore);
+    callerSays('I need to get some medical records faxed over');
     await until(() => forcedLines.length >= 2, 'the ticket agent to answer on that line');
     expect(forcedLines[1].toLowerCase()).toMatch(/name/);
 
@@ -320,11 +415,12 @@ describe('demo line — a call, end to end', () => {
     expect(res.status).toBe(400);
   });
 
-  it('never loses a line to one that is still playing', async () => {
+  it('never loses a line to one that is still playing', { timeout: 15_000 }, async () => {
     // Live 14:22: the operator never heard "I'm not finding a match on my
     // end" or "someone will call you back" — both were sent while an earlier
     // response was still active, and the Realtime API refuses a second one.
     forcedLines.length = 0;
+    const earsBefore = dgOpened;
     const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
     await new Promise<void>((r) => twilio.on('open', () => r()));
     twilio.send(JSON.stringify({
@@ -334,11 +430,10 @@ describe('demo line — a call, end to end', () => {
     }));
     await until(() => forcedLines.length >= 1, 'the greeting');
 
-    const oa = [...fakeOpenAI.clients].pop()!;
+    await earReady(earsBefore);
     // Two turns back to back, faster than the first line can finish playing.
     for (const text of ['I need medical records faxed', 'Wayne Fabian']) {
-      oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
-      oa.send(JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', transcript: text }));
+      callerSays(text);
       await new Promise((r) => setTimeout(r, 10));
     }
 
@@ -358,6 +453,7 @@ describe('demo line — a call, end to end', () => {
     // conversation at all — the line is the only content in existence.
     forcedLines.length = 0;
     responseCreates.length = 0;
+    const earsBefore = dgOpened;
     const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
     await new Promise<void>((r) => twilio.on('open', () => r()));
     twilio.send(JSON.stringify({
@@ -381,6 +477,7 @@ describe('demo line — a call, end to end', () => {
     // it, because he was talking while it played and we cleared the buffer.
     forcedLines.length = 0;
     const frames: Record<string, any>[] = [];
+    const earsBefore = dgOpened;
     const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
     twilio.on('message', (d) => frames.push(JSON.parse(d.toString())));
     await new Promise<void>((r) => twilio.on('open', () => r()));
@@ -391,10 +488,10 @@ describe('demo line — a call, end to end', () => {
     }));
     await until(() => forcedLines.length >= 1, 'the greeting');
 
-    const oa = [...fakeOpenAI.clients].pop()!;
+    await earReady(earsBefore);
     // The caller talks straight over the greeting, repeatedly.
     for (let i = 0; i < 3; i++) {
-      oa.send(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+      dgSockets[dgSockets.length - 1].send(JSON.stringify({ type: 'SpeechStarted' }));
       await new Promise((r) => setTimeout(r, 10));
     }
     expect(frames.some((f) => f.event === 'clear')).toBe(false);
@@ -461,7 +558,8 @@ describe('demo line — a call, end to end', () => {
     const info = vi.spyOn(console, 'info').mockImplementation((...a) => { logged.push(a.join(' ')); });
     const warn = vi.spyOn(console, 'warn').mockImplementation((...a) => { logged.push(a.join(' ')); });
     try {
-      const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+      const earsBefore = dgOpened;
+    const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
       await new Promise<void>((r) => twilio.on('open', () => r()));
       twilio.send(JSON.stringify({
         event: 'start',
@@ -496,7 +594,8 @@ describe('demo line — a call, end to end', () => {
     const info = vi.spyOn(console, 'info').mockImplementation((...a) => { logged.push(a.join(' ')); });
     const warn = vi.spyOn(console, 'warn').mockImplementation((...a) => { logged.push(a.join(' ')); });
     try {
-      const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+      const earsBefore = dgOpened;
+    const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
       await new Promise<void>((r) => twilio.on('open', () => r()));
       twilio.send(JSON.stringify({
         event: 'start',

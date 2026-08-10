@@ -16,6 +16,18 @@ import type { Transcriber, TranscriberOptions } from './types';
 
 const HOST = 'wss://api.deepgram.com/v1/listen';
 
+/**
+ * A local stand-in, so a test can drive a whole call through the REAL adapter
+ * — query string, auth header, message parsing and all — without the network.
+ * Unset in production, where it is Deepgram itself. This exists because the
+ * caller's words used to enter through the OpenAI session, which every test
+ * leaned on; now that the ear is a separate socket, the tests have to speak
+ * through the same door a real caller does.
+ */
+function host(): string {
+  return process.env.DEEPGRAM_URL || HOST;
+}
+
 export function createDeepgramTranscriber(): Transcriber {
   let ws: WebSocket | null = null;
   let opts: TranscriberOptions | null = null;
@@ -26,7 +38,7 @@ export function createDeepgramTranscriber(): Transcriber {
     async start(o) {
       opts = o;
       const key = process.env.DEEPGRAM_API_KEY;
-      if (!key) throw new Error('DEEPGRAM_API_KEY is not set');
+      if (!key && !process.env.DEEPGRAM_URL) throw new Error('DEEPGRAM_API_KEY is not set');
 
       const qs = new URLSearchParams({
         model: process.env.DEEPGRAM_MODEL ?? 'nova-3',
@@ -46,7 +58,7 @@ export function createDeepgramTranscriber(): Transcriber {
       // keyterm repeats, one per term (Nova-3's term boosting).
       for (const term of o.keyterms.slice(0, 100)) qs.append('keyterm', term);
 
-      const socket = new WebSocket(`${HOST}?${qs.toString()}`, {
+      const socket = new WebSocket(`${host()}?${qs.toString()}`, {
         headers: { Authorization: `Token ${key}` }, // Token — not Bearer, not raw
       });
       ws = socket;

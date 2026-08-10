@@ -8,27 +8,38 @@ import { join } from 'path';
 import { configuredEngines, primaryEngine } from './index';
 
 describe('engine selection', () => {
-  it('defaults to openai alone — today’s behaviour, until someone opts in', () => {
-    expect(configuredEngines({} as NodeJS.ProcessEnv)).toEqual(['openai']);
-    expect(primaryEngine({} as NodeJS.ProcessEnv)).toBe('openai');
+  it('defaults to deepgram alone', () => {
+    expect(configuredEngines({} as NodeJS.ProcessEnv)).toEqual(['deepgram']);
+    expect(primaryEngine({} as NodeJS.ProcessEnv)).toBe('deepgram');
   });
 
   it('runs every named engine and lets the primary be any of them', () => {
-    const env = { STT_ENGINES: 'openai, assemblyai ,deepgram', STT_PRIMARY: 'assemblyai' } as NodeJS.ProcessEnv;
-    expect(configuredEngines(env)).toEqual(['openai', 'assemblyai', 'deepgram']);
+    const env = { STT_ENGINES: ' deepgram , assemblyai ', STT_PRIMARY: 'assemblyai' } as NodeJS.ProcessEnv;
+    expect(configuredEngines(env)).toEqual(['deepgram', 'assemblyai']);
     expect(primaryEngine(env)).toBe('assemblyai');
+  });
+
+  it('refuses openai as a transcriber, however it is named', () => {
+    // It fabricates speech out of silence and the agent answered it on live
+    // patient calls ("I just got promoted at work today", 2026-04-22). Being
+    // quietly demoted to a fallback is not enough: the failover in demoLine
+    // acts on a secondary engine exactly when the primary is silent, which is
+    // exactly when this one invents a caller.
+    expect(configuredEngines({ STT_ENGINES: 'openai' } as NodeJS.ProcessEnv)).toEqual([]);
+    expect(configuredEngines({ STT_ENGINES: 'openai,deepgram' } as NodeJS.ProcessEnv)).toEqual(['deepgram']);
+    expect(primaryEngine({ STT_ENGINES: 'openai', STT_PRIMARY: 'openai' } as NodeJS.ProcessEnv)).toBeNull();
   });
 
   it('never leaves the agent deaf when the primary was not switched on', () => {
     // Naming a primary you forgot to enable is the obvious operator slip, and
     // silently having NO input is far worse than using the wrong engine.
-    const env = { STT_ENGINES: 'openai', STT_PRIMARY: 'deepgram' } as NodeJS.ProcessEnv;
-    expect(primaryEngine(env)).toBe('openai');
+    const env = { STT_ENGINES: 'deepgram', STT_PRIMARY: 'assemblyai' } as NodeJS.ProcessEnv;
+    expect(primaryEngine(env)).toBe('deepgram');
   });
 
   it('ignores a typo instead of failing the call', () => {
-    const env = { STT_ENGINES: 'openai,assemblyia' } as NodeJS.ProcessEnv;
-    expect(configuredEngines(env)).toEqual(['openai']);
+    const env = { STT_ENGINES: 'deepgram,assemblyia' } as NodeJS.ProcessEnv;
+    expect(configuredEngines(env)).toEqual(['deepgram']);
   });
 });
 

@@ -54,6 +54,15 @@ const FALLBACK_GREETING = 'Thank you for calling Azul Vision. How can I help you
  * the call is closed. Anything is better than the open, silent line a caller
  * experiences as a dropped call.
  */
+/**
+ * Said when no transcriber came up, then the call ends. A caller who is told
+ * straight away has lost ten seconds; a caller left talking to a line that
+ * cannot hear has lost their whole call and still needs to ring back.
+ */
+const DEAF_LINE =
+  "I'm sorry — we're having a technical problem with this line and I can't hear you. " +
+  'Please call our office directly and someone will help you right away.';
+
 const WRAP_AFTER_END =
   "I've got everything I need and someone will follow up with you. Thanks for calling Azul Vision — take care.";
 
@@ -199,6 +208,8 @@ interface DemoCall {
   agentLines: number[];
   pendingMarks: Map<string, number>;
   playedLines: Set<number>;
+  /** No transcriber started: the line cannot hear a word the caller says. */
+  deaf: boolean;
 }
 
 const calls = new Map<WebSocket, DemoCall>();
@@ -272,14 +283,6 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
     const results: Array<Record<string, unknown>> = [];
 
     for (const name of engines) {
-      if (name === 'openai') {
-        results.push({
-          engine: 'openai',
-          ok: Boolean(process.env.OPENAI_API_KEY),
-          note: 'transcribes inside the realtime session; no separate socket',
-        });
-        continue;
-      }
       const ear = buildSideTranscribers({ ...process.env, STT_ENGINES: name } as NodeJS.ProcessEnv)[0];
       if (!ear) {
         results.push({ engine: name, ok: false, error: 'no adapter built' });
@@ -373,9 +376,8 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
               for (const ear of call.sideEars) ear.sendAudio(pcmu);
             }
           }
-          if (call?.openai?.readyState === WebSocket.OPEN && msg.media?.payload) {
-            send(call.openai, { type: 'input_audio_buffer.append', audio: msg.media.payload });
-          }
+          // The caller's audio does NOT go to OpenAI. That session is a
+          // speaker and nothing else now. See MOUTHPIECE_INSTRUCTIONS.
           break;
         }
         case 'mark': {
@@ -426,7 +428,7 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     speaking: false,
     heardSpeech: false,
     sideEars: [],
-    primary: primaryEngine(),
+    primary: primaryEngine() ?? '',
     heard: new Map(),
     pcmuBuffer: [],
     pcmuBytes: 0,
@@ -442,6 +444,7 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     agentLines: [],
     pendingMarks: new Map(),
     playedLines: new Set(),
+    deaf: false,
   };
   calls.set(twilio, call);
 
@@ -494,32 +497,10 @@ function connectOpenAI(call: DemoCall): void {
         instructions: MOUTHPIECE_INSTRUCTIONS,
         output_modalities: ['audio'],
         audio: {
-          input: {
-            format: { type: 'audio/pcmu' },
-            noise_reduction: { type: 'far_field' },
-            // The SAME tuned transcriber the production lines use: the
-            // practice's languages, a prompt describing an eye-care phone
-            // call, and surname keywords. Asking for the bare model here —
-            // which is what this line did at first — is why a live call
-            // transcribed "Wayne Fabian" as "20 Fabian", produced "Not
-            // Dwyane Wade", and once answered in Vietnamese. The state
-            // machine was reading noise and behaving correctly on it.
-            transcription: buildTranscriptionConfig(),
-            // create_response FALSE is the whole design. The model never
-            // decides to answer; the ticket agent decides, and we forward
-            // its words. That is what stops two agents talking at once.
-            turn_detection: {
-              type: 'semantic_vad',
-              eagerness: 'low',
-              create_response: false,
-              // A caller talking over a scripted question must not DELETE the
-              // question. interrupt_response let OpenAI's VAD cancel our line
-              // mid-word, which is where "Hey, it sounds like" and "I've got
-              // everything" came from — both are truncated lines, not lines
-              // the model chose to end.
-              interrupt_response: false,
-            },
-          },
+          // NO input configuration at all: no format, no transcription, no
+          // turn detection. This session never receives a byte of the
+          // caller's audio, so there is nothing for it to transcribe and
+          // nothing for a VAD to detect. Deepgram is the ear.
           output: { format: { type: 'audio/pcmu' }, voice: VOICE },
         },
         tools: [],
@@ -527,6 +508,14 @@ function connectOpenAI(call: DemoCall): void {
       },
     });
 
+    if (call.deaf) {
+      // Never greet a caller warmly on a line that cannot hear them. They
+      // will talk for a minute before realising, and that minute is worse
+      // than being told immediately.
+      call.closing = true;
+      speak(call, DEAF_LINE);
+      return;
+    }
     const greeting = greetingFor(call.slug);
     speak(call, greeting);
     console.info(`[DEMO-LINE] ${call.callId} greeting sent`);
@@ -547,26 +536,6 @@ function connectOpenAI(call: DemoCall): void {
           call.twilio.send(
             JSON.stringify({ event: 'media', streamSid: call.streamSid, media: { payload: evt.delta } }),
           );
-        }
-        break;
-
-      // The caller spoke. We no longer reach for Twilio's `clear` here.
-      //
-      // `clear` discards the agent audio Twilio has buffered but not yet
-      // played, and the Realtime API delivers a ten-second line in about a
-      // second while Twilio plays it in ten. So any sound from the caller
-      // during those nine seconds deleted the rest of the line. That is how
-      // "I'm not finding a match on my end" was generated in full, recorded
-      // in full, and never heard: the caller was talking over it, and we
-      // threw it away. It is also a large part of what a caller experiences
-      // as the line going dead.
-      //
-      // Barge-in is a decision this agent can make deliberately later. It is
-      // not a reflex that deletes the question it just asked.
-      case 'input_audio_buffer.speech_started':
-        call.heardSpeech = true;
-        if (call.speaking) {
-          console.info(`[DEMO-LINE] ${call.callId} caller spoke over a line that is still playing`);
         }
         break;
 
@@ -610,23 +579,15 @@ function connectOpenAI(call: DemoCall): void {
         if (call.closing) void endCall(call.twilio, 'wrap complete');
         break;
 
-      // The caller finished a sentence. This is the only input the agent gets.
-      case 'conversation.item.input_audio_transcription.completed': {
-        const text = String(evt.transcript ?? '').trim();
-        if (!text) break;
-        // No speech was detected since the last turn, so whatever the
-        // transcriber produced came from silence. Dropping it is always right:
-        // the caller cannot have answered a question they never heard, and a
-        // phantom answer is worse than no answer — it spends an ask and can
-        // flip the whole call into another language.
-        if (!call.heardSpeech) {
-          console.info(`[DEMO-LINE] ${call.callId} ignored a transcript with no speech behind it: "${text.slice(0, 60)}"`);
-          break;
-        }
-        call.heard.set('openai', text);
-        void acceptTurn(call, text, 'openai');
+      // A transcript from THIS session can no longer exist — we send it no
+      // audio and ask it for no transcription. If one ever appears it is not
+      // the caller, so it must never reach the agent.
+      case 'conversation.item.input_audio_transcription.completed':
+        console.error(
+          `[DEMO-LINE][ALERT] ${call.callId} the model produced a transcript from a session ` +
+            `we send no audio to — IGNORED: "${String(evt.transcript ?? '').slice(0, 120)}"`,
+        );
         break;
-      }
 
       case 'error':
         console.error(`[DEMO-LINE] openai error on ${call.callId}:`, JSON.stringify(evt.error ?? evt));
@@ -657,7 +618,15 @@ function connectOpenAI(call: DemoCall): void {
  */
 function startSideEars(call: DemoCall): void {
   const ears = buildSideTranscribers();
-  if (!ears.length) return;
+  // Nothing is listening. Since OpenAI stopped being an ear this is a real
+  // possibility — a bad STT_ENGINES, a missing key — and the failure mode is
+  // the worst one there is: a caller talking to a line that answers warmly
+  // and hears nothing. Say so and hand them to a human path.
+  if (!ears.length) {
+    console.error(`[DEMO-LINE][ALERT] ${call.callId} NO TRANSCRIBER — the line cannot hear the caller`);
+    call.deaf = true;
+    return;
+  }
   const keyterms = activeKeywords();
   for (const ear of ears) {
     ear
@@ -669,8 +638,13 @@ function startSideEars(call: DemoCall): void {
         },
         onTurn: (turn) => {
           if (!turn.isFinal) return; // partials are noise in a comparison
-          call.heard.set(turn.engine, turn.text);
-          if (turn.engine === call.primary) void acceptTurn(call, turn.text, turn.engine);
+          // EVERY final turn goes to acceptTurn, which decides what to do
+          // with it. Filtering on the primary here left the failover inside
+          // acceptTurn unreachable by any side ear — it was only ever entered
+          // from the OpenAI path, and that path is gone. A slow or broken
+          // primary would then have left the caller talking to silence with
+          // a working engine sitting right there.
+          void acceptTurn(call, turn.text, turn.engine);
         },
         onError: (e) => console.warn(`[STT] ${ear.name} error on ${call.callId}:`, e),
       })
