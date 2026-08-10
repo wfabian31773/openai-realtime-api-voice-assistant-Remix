@@ -641,15 +641,25 @@ describe('demo line — a call, end to end', () => {
     await until(() => forcedLines.length >= 1, 'the greeting');
     await earReady(earsBefore);
 
-    callerSays(["Yes. I'm calling to see if", 'you could tell me when my last appointment was, please']);
-    await until(() => forcedLines.length >= 2, 'one reply to the whole sentence');
-    await new Promise((r) => setTimeout(r, 400));
-    // ONE reply, not one per fragment.
-    expect(forcedLines).toHaveLength(2);
-    // And it heard the whole sentence, so it knows this is about appointments.
-    expect(forcedLines[1].toLowerCase()).toMatch(/book|schedule|appointment/);
+    const logged: string[] = [];
+    const info = vi.spyOn(console, 'info').mockImplementation((...a) => { logged.push(a.join(' ')); });
+    try {
+      callerSays(["Yes. I'm calling to see if", 'you could tell me when my last appointment was, please']);
+      await until(() => forcedLines.length >= 2, 'one reply to the whole sentence');
+      await new Promise((r) => setTimeout(r, 400));
+      // ONE reply, not one per fragment. This is the regression.
+      expect(forcedLines).toHaveLength(2);
 
-    twilio.close();
+      twilio.close();
+      await until(() => logged.some((l) => l.includes('transcript CAsplit')), 'the transcript');
+      const block = logged.find((l) => l.includes('transcript CAsplit'))!;
+      // The agent was handed the WHOLE sentence, not the opening fragment —
+      // which is what let it know the call was about an appointment at all.
+      expect(block).toContain("CALLER: Yes. I'm calling to see if you could tell me when my last appointment was, please");
+      expect(block).not.toContain("CALLER: Yes. I'm calling to see if\n");
+    } finally {
+      info.mockRestore();
+    }
   }, 15_000);
 
   it('still delivers the sentence when speech_final never comes', async () => {

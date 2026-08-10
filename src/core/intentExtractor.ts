@@ -53,6 +53,7 @@ const VALID_INTENTS: IntentKey[] = [
   'records_fax',
   'records_email',
   'medication_refill',
+  'appointment_info',
   'appointment',
   'billing',
   'surgery',
@@ -74,13 +75,15 @@ intent must be exactly one of:
 - records_fax        medical records / charts / notes / results, explicitly to be FAXED
 - records_email      medical records / charts / notes / results, explicitly to be EMAILED
 - medication_refill  a prescription or eye drops refilled
-- appointment        book, reschedule, cancel, or confirm an appointment
+- appointment_info   ASKING about an existing appointment: when was my last one, when is my next one, what time, which office, which doctor. A QUESTION, not a change.
+- appointment        ASKING TO CHANGE something: book, reschedule, cancel, or confirm an appointment
 - billing            a bill, invoice, insurance, copay, or statement
 - surgery            cataract/LASIK/procedure scheduling or surgical coordination FOR THIS PATIENT
 - optical            glasses, frames, lenses, contacts
 - message            anything else, or too vague to tell
 
 Rules that matter:
+- appointment_info versus appointment is the difference between a question and an instruction. "When was my last appointment?" is appointment_info. "I need to move my appointment" is appointment. If they ask when it is AND want to change it, that is appointment.
 - Judge the REQUEST, never the caller's employer. "Loma Linda Surgery Center" is where someone works; it does not make the call about surgery. "Vision Center", "Eye Institute", "Medical Group" are likewise names, not requests.
 - If they want records but did NOT say how to send them, use "records" and set delivery_method to null. Do NOT guess fax — downstream asks them which.
 - caller_is_professional is true when they identify as staff, a doctor, or another practice calling about a mutual patient.

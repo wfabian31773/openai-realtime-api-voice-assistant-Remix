@@ -3,7 +3,7 @@
  * verify -> classify -> what does THIS intent need -> collect -> execute.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { clearAllLedgers, seedLedger, getLedger } from '../services/callFactsLedger';
+import { clearAllLedgers, seedLedger, getLedger, updateLedger } from '../services/callFactsLedger';
 import { createTicketAgent, INTENTS, type TicketAgentServices } from './ticketAgent';
 import type { CoreAction } from './types';
 
@@ -171,9 +171,15 @@ describe('ticket agent — five steps, nothing else', () => {
     expect(spoken.alerts.length).toBe(1);
   });
 
-  it('every intent in the table needs at least a name and a way to reach back', () => {
+  it('every intent that FILES has a name and a way to reach back', () => {
     for (const [key, def] of Object.entries(INTENTS)) {
       expect(def.needs, key).toContain('patient_name');
+      // appointment_info is answered on the call, so asking for a callback
+      // number would mean asking a caller how to reach them about a question
+      // we are about to answer. When it CANNOT be answered it becomes
+      // `message`, which does need one — so the rule still holds for
+      // everything that ends up as a ticket.
+      if (key === 'appointment_info') continue;
       const reachable = def.needs.some((f) => ['callback_number', 'fax_number', 'email_address'].includes(f));
       expect(reachable, `${key} has no way to deliver the answer`).toBe(true);
     }
@@ -634,5 +640,91 @@ describe('the reasoning layer reads EVERY request, not just the first', () => {
     const { lines } = await speak(await a.onUtterance(C, 'I need my records faxed over'));
     expect(a.stateOf(C)).toContain('records_fax');
     expect(lines.join(' ')).toMatch(/name/i);
+  });
+});
+
+describe('"when was my last appointment?" — answered, not filed', () => {
+  // Operator, 2026-08-10: "That should be the easiest thing. That's the
+  // lowest hanging fruit." The old answering service answered it out of the
+  // record; this line was filing an appointment REQUEST instead, so a caller
+  // asking a question was told someone would ring them about booking.
+  beforeEach(() => clearAllLedgers());
+
+  const APPTS = {
+    last: { date: '2026-07-13', time: '3:30 PM', provider: 'Dwayne Logan, MD', office: 'Redlands' },
+    next: { date: '2026-09-02', time: '9:00 AM', provider: 'Angela Wernow, OD', office: 'Encinitas' },
+  };
+
+  function answering(opts: { verify?: boolean; appts?: any } = {}) {
+    const { svc, submitted } = services({ verify: opts.verify ?? true });
+    svc.classifyIntent = vi.fn(async () => ({ intent: 'appointment_info' as const, source: 'llm' as const }));
+    // verify() is what populates person_id in the real router.
+    svc.verify = vi.fn(async (callId: string) => {
+      if (opts.verify === false) return false;
+      updateLedger(callId, { identityVerified: true, personId: 'person-uuid-1' });
+      return true;
+    });
+    svc.appointmentsFor = vi.fn(async () => opts.appts ?? APPTS);
+    return { svc, submitted };
+  }
+
+  it('reads the last and next appointment back once the caller is verified', async () => {
+    const { svc, submitted } = answering();
+    const a = createTicketAgent(svc);
+    a.start(C);
+    seedLedger(C, { callerPhone: '5625550134' });
+    await speak(await a.onUtterance(C, 'when was my last appointment?'));
+    await speak(await a.onUtterance(C, 'Wayne Fabian'));
+    const { lines } = await speak(await a.onUtterance(C, 'March 17th 1973'));
+    const said = lines.join(' ');
+    expect(said).toMatch(/last appointment was Monday, July 13 at 3:30 PM/);
+    expect(said).toMatch(/next one is Wednesday, September 2/);
+    // A question is not a ticket.
+    expect(submitted).toHaveLength(0);
+    // And it looked them up by person_id, never by name.
+    expect(svc.appointmentsFor).toHaveBeenCalledWith('person-uuid-1');
+  });
+
+  it('never reads a record to someone we could not verify', async () => {
+    // Reading appointment dates to an unverified caller hands one patient's
+    // history to whoever is on the phone.
+    const { svc } = answering({ verify: false });
+    const a = createTicketAgent(svc);
+    a.start(C);
+    seedLedger(C, { callerPhone: '5625550134' });
+    await speak(await a.onUtterance(C, 'when was my last appointment?'));
+    await speak(await a.onUtterance(C, 'Wayne Fabian'));
+    const { lines } = await speak(await a.onUtterance(C, 'March 17th 1973'));
+    const said = lines.join(' ');
+    expect(svc.appointmentsFor).not.toHaveBeenCalled();
+    expect(said).not.toMatch(/July 13|September/);
+    // It does not accuse them of not existing, and it does not abandon them.
+    expect(said).not.toMatch(/not (found|in our)/i);
+    expect(said.toLowerCase()).toMatch(/take a message|call you back/);
+  });
+
+  it('takes a message when the record has no appointments at all', async () => {
+    const { svc } = answering({ appts: { last: null, next: null } });
+    const a = createTicketAgent(svc);
+    a.start(C);
+    seedLedger(C, { callerPhone: '5625550134' });
+    await speak(await a.onUtterance(C, 'do I have an appointment coming up?'));
+    await speak(await a.onUtterance(C, 'Wayne Fabian'));
+    const { lines } = await speak(await a.onUtterance(C, 'March 17th 1973'));
+    expect(lines.join(' ')).toMatch(/don't see any appointments/i);
+  });
+
+  it('still treats an actual booking request as a request, not a question', async () => {
+    const { svc, submitted } = services();
+    svc.classifyIntent = vi.fn(async () => ({ intent: 'appointment' as const, source: 'llm' as const }));
+    const a = createTicketAgent(svc);
+    a.start(C);
+    seedLedger(C, { callerPhone: '5625550134' });
+    const first = await speak(await a.onUtterance(C, 'I need to reschedule my appointment'));
+    expect(first.lines.join(' ').toLowerCase()).toMatch(/can'?t (book|schedule)/);
+    await speak(await a.onUtterance(C, 'Wayne Fabian'));
+    await speak(await a.onUtterance(C, 'March 17th 1973'));
+    await speak(await a.onUtterance(C, 'yes'));
+    expect(submitted).toHaveLength(1);
   });
 });

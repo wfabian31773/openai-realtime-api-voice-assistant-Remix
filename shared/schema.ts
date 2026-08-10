@@ -991,6 +991,14 @@ export const schedule = pgTable("Schedule", {
   confirmInd: text("ConfirmInd"), // "Y" or "N" (varchar, not boolean)
   
   // Patient identifiers
+  /**
+   * The SAME person_id as patients_master in the Patient Console. This column
+   * has always existed in the table and was simply never mapped, so every
+   * appointment lookup had to match on spelled-out names and dates. Once a
+   * caller is verified against the person mirror we hold their person_id, and
+   * their appointments come back on this exact key — no name matching at all.
+   */
+  personId: text("PersonID"),
   patientPartialKey: text("PatientPartialKey"),
   patientPartialKey5Version: text("PatientPartialKey_5Version"),
   patientVisitKey: text("PatientVisitKey"),

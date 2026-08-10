@@ -442,6 +442,10 @@ function buildTicketAgentServices(): TicketAgentServices {
     async verify(callId, name, dob) {
       return verifyAgainstMirror(callId, name, dob);
     },
+    async appointmentsFor(personId) {
+      const { appointmentsForPerson } = await import('../services/appointmentAnswers');
+      return appointmentsForPerson(personId);
+    },
     async submit(_callId: string, ticket) {
       const { SyncAgentService } = await import('../services/syncAgentService');
       const { parseDateOfBirth } = await import('../agents/answeringServiceAgent');

@@ -22,6 +22,7 @@
 import { getLedger, updateLedger } from '../services/callFactsLedger';
 import { looksLikeName, findNameIn, spokenDigitsToNumber, normalizeSpokenDob, looksLikeDob, DOB_PATTERN } from './parsing';
 import { deliveryMethodIn } from './intentExtractor';
+import { describeAppointment } from '../services/appointmentAnswers';
 import { cachedConfig, refreshConfig } from './ticketAgentConfig';
 import type { CoreAction, LineModule } from './types';
 
@@ -177,6 +178,8 @@ export type IntentKey =
   | 'records_fax'
   | 'records_email'
   | 'medication_refill'
+  /** A QUESTION about an existing appointment. Answered, not filed. */
+  | 'appointment_info'
   | 'appointment'
   | 'billing'
   | 'surgery'
@@ -233,6 +236,26 @@ export const INTENTS: Record<IntentKey, IntentDef> = {
     needs: ['patient_name', 'patient_dob', 'provider_name', 'callback_number'],
     department: 2,
     label: 'Surgery coordination',
+  },
+  /**
+   * ASKING about an appointment is not asking to change one, and answering it
+   * needs nothing but an identity.
+   *
+   * Operator, 2026-08-10: "when there's something as simple as when was my
+   * last appointment? That should be the easiest thing. That's the lowest
+   * hanging fruit." The old answering service answered it out of the record.
+   * This line filed an appointment REQUEST — so a caller who asked a question
+   * was told a team would ring them back about booking something.
+   *
+   * Ordered BEFORE `appointment` because both match on the word, and the
+   * question is the more specific reading.
+   */
+  appointment_info: {
+    match:
+      /\b(when|what time|which day|remind me|do i have|did i have|is there)\b[^.]{0,60}\b(appointment|appt|visit|seen|cita)\b|\b(last|next|upcoming|previous)\b[^.]{0,20}\b(appointment|visit|cita)\b/i,
+    needs: ['patient_name', 'patient_dob'],
+    department: 3,
+    label: 'Appointment question',
   },
   appointment: {
     match: /\b(appointment|schedule|reschedul\w*|cancel|book|cita|agendar)\b/i,
@@ -311,6 +334,26 @@ const LINES = {
     en: "I can't book or change appointments myself, but I'll pass this to the scheduling team and someone will call you back to set it up.",
     es: 'No puedo agendar ni cambiar citas directamente, pero le paso esto al equipo de citas y alguien le llamará para coordinarla.',
   },
+  /** Said while the record is being read. A silent pause reads as a dead line. */
+  lookingUp: {
+    en: 'Let me check that for you — one moment.',
+    es: 'Déjeme revisarlo — un momento.',
+  },
+  /**
+   * We could not confirm who this is, so we are not reading appointment dates
+   * out loud. Never says "you are not in our system": most of the time it
+   * means we misheard a name, and telling a real patient they do not exist is
+   * both wrong and alarming.
+   */
+  cannotLookUp: {
+    en: "I'm not able to pull that up from here — let me take a message and have someone check it and call you back.",
+    es: 'No puedo consultarlo desde aquí — déjeme tomar un mensaje para que alguien lo revise y le llame.',
+  },
+  anythingElse: { en: 'Is there anything else I can help with?', es: '¿Hay algo más en que pueda ayudarle?' },
+  noAppointmentsFound: {
+    en: "I don't see any appointments on your record. Let me take a message so someone can look into it and call you back.",
+    es: 'No veo citas en su expediente. Déjeme tomar un mensaje para que alguien lo revise y le llame.',
+  },
   urgent: {
     en: 'If this is a medical emergency, please hang up and dial nine one one right away. Otherwise I\'ll take your information and flag it urgent.',
     es: 'Si es una emergencia médica, cuelgue y marque nueve uno uno de inmediato. Si no, tomaré su información y la marcaré urgente.',
@@ -350,6 +393,14 @@ export interface TicketAgentServices {
    * Optional: without it the keyword table decides, exactly as before.
    */
   classifyIntent?(text: string): Promise<import('./intentExtractor').ExtractedIntent | null>;
+  /**
+   * Read-only. Their last and next appointment, keyed on the person_id that
+   * verification returned — never on a name. Absent means the line answers no
+   * appointment questions and takes a message instead.
+   */
+  appointmentsFor?(
+    personId: string,
+  ): Promise<import('../services/appointmentAnswers').AppointmentAnswer | null>;
   /** Step 5. Everything collected, in one call. */
   submit(callId: string, ticket: {
     intent: IntentKey;
@@ -483,9 +534,64 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
   };
 
   /** Step 5. */
+  /**
+   * "When was my last appointment?" — verify, then read it back.
+   *
+   * Verification is not a formality here, it is the whole mechanism: it is
+   * what turns a spoken name into a person_id, and the appointments come back
+   * on that id rather than on any name matching. If we cannot verify, we do
+   * NOT read a stranger's appointment out loud — we take a message.
+   */
+  const answerAppointment = (callId: string, s: CallState): CoreAction => {
+    s.step = 'EXECUTE';
+    return {
+      say: t(s, LINES.lookingUp),
+      followUp: async () => {
+        const name = s.values.patient_name;
+        const dob = s.values.patient_dob;
+        let verified = false;
+        if (name && dob) {
+          verified = Boolean(
+            await Promise.race([
+              services.verify(callId, name, dob).catch(() => false),
+              new Promise<boolean>((r) => setTimeout(() => r(false), 3000)),
+            ]),
+          );
+        }
+        const personId = getLedger(callId)?.personId;
+        if (!verified || !personId || !services.appointmentsFor) {
+          // Not verified, or the lookup is unavailable. Never guess, and never
+          // leave them with nothing: this becomes an ordinary message.
+          console.info(
+            `[TICKET-AGENT] ${callId.slice(-6)} appointment question NOT answered ` +
+              `(verified=${verified} personId=${personId ? 'yes' : 'no'}) — taking a message`,
+          );
+          s.intent = 'message';
+          s.step = 'COLLECT';
+          s.asking = null;
+          return { say: t(s, LINES.cannotLookUp), followUp: async () => advance(callId, s) };
+        }
+        const appts = await services.appointmentsFor(personId).catch(() => null);
+        s.step = 'WRAP';
+        const said = appointmentSentence(s, appts);
+        console.info(
+          `[TICKET-AGENT] ${callId.slice(-6)} appointment question ANSWERED ` +
+            `last=${appts?.last?.date ?? 'none'} next=${appts?.next?.date ?? 'none'}`,
+        );
+        return { say: `${said} ${t(s, LINES.anythingElse)}`.trim() };
+      },
+    };
+  };
+
   const execute = (callId: string, s: CallState): CoreAction => {
     const def = INTENTS[s.intent ?? 'message'];
     s.step = 'EXECUTE';
+
+    // A QUESTION about an existing appointment is answered, not filed. This
+    // is the one intent where the caller wants information back rather than
+    // a callback, and we hold the information.
+    if (s.intent === 'appointment_info') return answerAppointment(callId, s);
+
     return {
       say: t(s, LINES.filing(def.label.toLowerCase())),
       followUp: async () => {
@@ -570,6 +676,22 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
   ): Promise<{ intent: IntentKey; via: string; fields?: Partial<Record<FieldKey, string>> }> => {
     const read = await services.classifyIntent?.(text).catch(() => null);
     return { intent: read?.intent ?? classify(text), via: read?.source ?? 'rules', fields: read?.fields };
+  };
+
+  /**
+   * What we actually say back. Both halves are optional: a patient can have a
+   * history and nothing booked, or be brand new with a first visit coming up.
+   */
+  const appointmentSentence = (
+    s: CallState,
+    a: import('../services/appointmentAnswers').AppointmentAnswer | null,
+  ): string => {
+    if (!a || (!a.last && !a.next)) return t(s, LINES.noAppointmentsFound);
+    const parts: string[] = [];
+    if (a.last) parts.push(`Your last appointment was ${describeAppointment(a.last)}.`);
+    if (a.next) parts.push(`Your next one is ${describeAppointment(a.next)}.`);
+    else if (a.last) parts.push("I don't see another one scheduled.");
+    return parts.join(' ');
   };
 
   const advance = (callId: string, s: CallState): CoreAction => {
