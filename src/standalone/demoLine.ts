@@ -145,6 +145,66 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
     res.json({ ok: true, line: SLUG, active: calls.size, streamPath: STREAM_PATH, capabilities: LINE_CAPABILITIES.split(',') });
   });
 
+  /**
+   * Prove each transcriber actually connects — BEFORE a call is spent finding
+   * out. Opens a real socket to every configured engine with the real key and
+   * the real parameters, then closes it, and reports exactly what failed.
+   *
+   * A wrong key gives a silent failure that looks identical to a bad
+   * transcript: the engine's column just reads "—". That would make a vendor
+   * look terrible in a comparison it was never part of.
+   */
+  app.get('/demo/stt-check', async (_req: Request, res: Response) => {
+    const engines = configuredEngines();
+    const results: Array<Record<string, unknown>> = [];
+
+    for (const name of engines) {
+      if (name === 'openai') {
+        results.push({
+          engine: 'openai',
+          ok: Boolean(process.env.OPENAI_API_KEY),
+          note: 'transcribes inside the realtime session; no separate socket',
+        });
+        continue;
+      }
+      const ear = buildSideTranscribers({ ...process.env, STT_ENGINES: name } as NodeJS.ProcessEnv)[0];
+      if (!ear) {
+        results.push({ engine: name, ok: false, error: 'no adapter built' });
+        continue;
+      }
+      const started = Date.now();
+      try {
+        await Promise.race([
+          ear.start({
+            keyterms: activeKeywords(),
+            prompt: TRANSCRIPTION_PROMPT,
+            onTurn: () => undefined,
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timed out after 8s')), 8000)),
+        ]);
+        results.push({ engine: name, ok: true, connectMs: Date.now() - started });
+      } catch (e) {
+        results.push({
+          engine: name,
+          ok: false,
+          connectMs: Date.now() - started,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        await ear.stop().catch(() => undefined);
+      }
+    }
+
+    const allOk = results.every((r) => r.ok);
+    console.info(`[STT-CHECK] ${results.map((r) => `${r.engine}=${r.ok ? 'ok' : 'FAIL'}`).join(' ')}`);
+    res.status(allOk ? 200 : 503).json({
+      ok: allOk,
+      primary: primaryEngine(),
+      engines: results,
+      hint: allOk ? 'all engines connected — make the call' : 'fix the failing engine before spending a call',
+    });
+  });
+
   // ------------------------------------------------------------- the socket
   const wss = new WebSocketServer({ noServer: true });
 
