@@ -13,7 +13,13 @@ const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
 /** The invoke() of the real tool, so we can assert it was actually called. */
-const lookupInvoke = vi.fn(async () => JSON.stringify({ patientFound: true, lastAppointment: '2026-07-13' }));
+// Typed with its real parameters, so mock.calls is a tuple the compiler knows
+// about. Declaring it argument-free typechecks locally but breaks the deploy
+// build, which compiles tests too.
+const lookupInvoke = vi.fn(
+  async (_ctx: unknown, _input: string): Promise<string> =>
+    JSON.stringify({ patientFound: true, lastAppointment: '2026-07-13' }),
+);
 
 vi.mock('../agents/answeringServiceAgent', () => ({
   answeringServiceAgentConfig: { version: '3.7.0', greeting: 'Thank you for calling Azul Vision.' },
@@ -98,7 +104,7 @@ describe('the tool loop', () => {
 
     // The real tool ran, with the model's arguments.
     expect(lookupInvoke).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(lookupInvoke.mock.calls[0][1] as string)).toMatchObject({ first_name: 'Wayne' });
+    expect(JSON.parse(lookupInvoke.mock.calls[0][1])).toMatchObject({ first_name: 'Wayne' });
     expect(turn.toolsUsed).toEqual(['lookup_schedule']);
     expect(said.join(' ')).toContain('Monday, July 13');
 
