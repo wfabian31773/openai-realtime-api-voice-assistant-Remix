@@ -449,6 +449,10 @@ function buildTicketAgentServices(): TicketAgentServices {
       const { extractField } = await import('./intentExtractor');
       return extractField(field, question, said);
     },
+    async readConversation(callId) {
+      const { readConversation } = await import('./conversationReader');
+      return readConversation(callId);
+    },
     async verify(callId, name, dob) {
       return verifyAgainstMirror(callId, name, dob);
     },

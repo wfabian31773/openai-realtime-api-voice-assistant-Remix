@@ -791,3 +791,89 @@ describe('the model reads the answers, the parser is the floor', () => {
     expect(r.lines.join(' ').toLowerCase()).toMatch(/name/);
   });
 });
+
+describe('the tool fills the slots, wherever the caller said them', () => {
+  beforeEach(() => clearAllLedgers());
+
+  it('never asks for what the caller already volunteered', async () => {
+    const { svc, submitted } = services();
+    svc.classifyIntent = vi.fn(async () => ({ intent: 'records_fax' as const, source: 'llm' as const }));
+    // The model read the whole opening sentence and filled three arguments.
+    svc.readConversation = vi.fn(async () => ({
+      values: {
+        patient_name: 'Wayne Fabian',
+        patient_dob: '1973-03-17',
+        fax_number: '7608701200',
+      } as Record<string, string>,
+      refused: [],
+    }));
+    const a = createTicketAgent(svc);
+    a.start(C);
+    seedLedger(C, { callerPhone: '8455317471' });
+
+    const { lines } = await speak(
+      await a.onUtterance(C, 'Wayne Fabian, March 17th 1973, please fax my records to 760 870 1200'),
+    );
+    // Straight to filing. It asked NOTHING.
+    const said = lines.join(' ').toLowerCase();
+    expect(said).not.toMatch(/first and last name|date of birth|fax number/);
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].fields).toMatchObject({
+      patient_name: 'Wayne Fabian',
+      patient_dob: '1973-03-17',
+      fax_number: '7608701200',
+    });
+  });
+
+  it('picks up a name dropped mid-ramble, without re-asking a third time', async () => {
+    // The operator's own example.
+    let seen = 0;
+    const { svc } = services();
+    svc.classifyIntent = vi.fn(async () => ({ intent: 'medication_refill' as const, source: 'llm' as const }));
+    svc.readConversation = vi.fn(async () => {
+      seen += 1;
+      // Nothing on the ramble; the name only once it is actually said.
+      return seen >= 3
+        ? { values: { patient_name: 'Wayne Fabian' } as Record<string, string>, refused: [] }
+        : { values: {}, refused: [] };
+    });
+    const a = createTicketAgent(svc);
+    a.start(C);
+    await speak(await a.onUtterance(C, 'I need a refill'));
+    await speak(await a.onUtterance(C, 'Well I was thinking, and you know what happened, and then—'));
+    const r = await speak(await a.onUtterance(C, 'oh, my… yeah. My name is Wayne Fabian.'));
+    expect(getLedger(C)?.firstName).toBe('Wayne');
+    expect(getLedger(C)?.lastName).toBe('Fabian');
+    // Moved on to the next field instead of asking for the name again.
+    expect(r.lines.join(' ').toLowerCase()).not.toMatch(/first and last name/);
+  });
+
+  it('never overwrites a value the caller already settled', async () => {
+    const { svc } = services();
+    svc.classifyIntent = vi.fn(async () => ({ intent: 'medication_refill' as const, source: 'llm' as const }));
+    svc.readConversation = vi.fn(async () => ({
+      values: { patient_name: 'Someone Else' } as Record<string, string>,
+      refused: [],
+    }));
+    const a = createTicketAgent(svc);
+    a.start(C);
+    await speak(await a.onUtterance(C, 'I need a refill'));
+    await speak(await a.onUtterance(C, 'Wayne Fabian'));
+    const before = getLedger(C)?.lastName;
+    await speak(await a.onUtterance(C, 'March 17th 1973'));
+    expect(getLedger(C)?.lastName).toBe(before);
+  });
+
+  it('carries on normally when the reader is absent', async () => {
+    const { svc, submitted } = services();
+    const a = createTicketAgent(svc); // no readConversation at all
+    a.start(C);
+    seedLedger(C, { callerPhone: '5625550134' });
+    await speak(await a.onUtterance(C, 'I need a refill on my eye drops'));
+    await speak(await a.onUtterance(C, 'Wayne Fabian'));
+    await speak(await a.onUtterance(C, 'March 17th 1973'));
+    await speak(await a.onUtterance(C, 'prednisolone acetate'));
+    await speak(await a.onUtterance(C, 'yes'));
+    expect(submitted).toHaveLength(1);
+  });
+});

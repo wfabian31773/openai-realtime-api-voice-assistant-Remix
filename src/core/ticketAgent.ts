@@ -22,6 +22,7 @@
 import { getLedger, updateLedger } from '../services/callFactsLedger';
 import { looksLikeName, findNameIn, spokenDigitsToNumber, normalizeSpokenDob, looksLikeDob, DOB_PATTERN } from './parsing';
 import { deliveryMethodIn } from './intentExtractor';
+import { noteAgent, noteCaller, forgetConversation } from './conversationReader';
 import { describeAppointment } from '../services/appointmentAnswers';
 import { cachedConfig, refreshConfig } from './ticketAgentConfig';
 import type { CoreAction, LineModule } from './types';
@@ -407,6 +408,16 @@ export interface TicketAgentServices {
    * decides instead. Absent means every field is parsed, as before.
    */
   readField?(field: FieldKey, question: string, said: string): Promise<string | null>;
+  /**
+   * Read the WHOLE conversation with a tool-calling model and return every
+   * fact the caller has stated, wherever they stated it. This is the working
+   * agent's mechanism: the model fills typed arguments, nothing parses a
+   * sentence. Absent means the per-field reader and the parsers decide.
+   */
+  readConversation?(callId: string): Promise<{
+    values: Partial<Record<FieldKey, string>>;
+    refused: FieldKey[];
+  }>;
   /** Step 5. Everything collected, in one call. */
   submit(callId: string, ticket: {
     intent: IntentKey;
@@ -536,7 +547,11 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
       if (known) return { say: t(s, LINES.confirmCallback(known.slice(-4))) };
     }
     const over = cachedConfig(liveSlug).lines?.[`field_${key}`];
-    return { say: over?.[s.lang] ?? t(s, FIELDS[key].ask) };
+    const line = over?.[s.lang] ?? t(s, FIELDS[key].ask);
+    // The reader needs to know what was ASKED, or it cannot tell an answer
+    // from a passing remark.
+    noteAgent(callId, line);
+    return { say: line };
   };
 
   /** Step 5. */
@@ -719,6 +734,42 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
     return got;
   };
 
+  /**
+   * Take everything the caller has already said, from anywhere in the call.
+   *
+   * Operator, 2026-08-10: "someone can say, well, I was thinking and… oh, my…
+   * yeah. My name is Wayne Fabian. How would you be able to parse that?" You
+   * do not parse it. The model reads the conversation and fills the arguments,
+   * which is what azulSchedulingAgent has always done.
+   *
+   * Only EMPTY slots are filled. A value the caller already gave and confirmed
+   * is never overwritten by a later reading — re-deciding a settled fact from
+   * a longer transcript is how a confirmed callback number turns into a fax
+   * number three turns later.
+   */
+  const absorbConversation = async (callId: string, s: CallState): Promise<void> => {
+    if (!services.readConversation) return;
+    const read = await services.readConversation(callId).catch(() => null);
+    if (!read) return;
+    const taken: string[] = [];
+    for (const [k, v] of Object.entries(read.values) as Array<[FieldKey, string]>) {
+      if (s.values[k]) continue;
+      s.values[k] = v;
+      taken.push(k);
+      if (k === 'patient_name') {
+        const parts = v.trim().split(/\s+/).filter(Boolean);
+        if (parts.length >= 2) updateLedger(callId, { firstName: parts[0], lastName: parts.slice(1).join(' ') });
+      }
+      if (k === 'patient_dob') updateLedger(callId, { dateOfBirth: v });
+      if (k === 'callback_number') updateLedger(callId, { callbackNumber: v, callbackConfirmed: true });
+    }
+    if (taken.length) {
+      console.info(`[TICKET-AGENT] ${callId.slice(-6)} model read from the conversation: ${taken.join(',')}`);
+      // Anything we are mid-way through asking for and now HAVE, we stop asking.
+      if (s.asking && s.values[s.asking]) s.asking = null;
+    }
+  };
+
   const advance = (callId: string, s: CallState): CoreAction => {
     const missing = nextMissing(callId, s);
     const action = missing ? ask(callId, s, missing) : execute(callId, s);
@@ -802,12 +853,17 @@ export function createTicketAgent(services: TicketAgentServices, cfg: { slug?: s
 
     release(callId: string): void {
       calls.delete(callId);
+      forgetConversation(callId);
     },
 
     async onUtterance(callId: string, text: string): Promise<CoreAction> {
       const s = calls.get(callId);
       if (!s) return { say: null };
       try {
+        // The conversation is read BEFORE anything is decided, so a fact the
+        // caller dropped in passing three turns ago counts now.
+        noteCaller(callId, text);
+        await absorbConversation(callId, s);
         // Language, always first — the emergency line must be understandable.
         s.spanishHits += (text.match(SPANISH) ?? []).length;
         if (s.lang === 'en' && (s.spanishHits >= 2 || /\b(en español|habla español)\b/i.test(text))) {
