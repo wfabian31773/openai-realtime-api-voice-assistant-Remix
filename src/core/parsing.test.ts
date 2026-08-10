@@ -104,3 +104,42 @@ describe('shared caller-answer parsing', () => {
     });
   });
 });
+
+describe('the answers that reached the mirror as nonsense', () => {
+  // Live 20:48. "Yeah. It's Wayne Fabian." was stored as first name "It's",
+  // surname "Wayne" — so verification searched patients_master for a patient
+  // surnamed Wayne and returned no_match, on a record with 43 appointments.
+  it("keeps the name and drops the lead-in, straight or curly apostrophe", () => {
+    for (const said of [
+      "Yeah. It's Wayne Fabian.",
+      "Yeah. It’s Wayne Fabian.",
+      "Yes. It's Wayne Fabian.",
+      "Sure. It’s Wayne Fabian",
+    ]) {
+      expect(findNameIn(said), said).toEqual({ first: 'Wayne', last: 'Fabian' });
+    }
+  });
+
+  it('never lets sentence punctuation delete a real name', () => {
+    // "Fabian." failed the token test on its full stop while "It's" passed,
+    // because names legitimately contain apostrophes.
+    expect(findNameIn('Wayne Fabian.')).toEqual({ first: 'Wayne', last: 'Fabian' });
+    expect(findNameIn('Maria Gonzalez!')).toEqual({ first: 'Maria', last: 'Gonzalez' });
+  });
+
+  it('keeps a compound surname intact', () => {
+    expect(findNameIn('Maria de la Cruz')).toEqual({ first: 'Maria', last: 'de la Cruz' });
+  });
+
+  it('still refuses everything that is not a name', () => {
+    for (const said of [
+      'uh let me look it up',
+      'I have been seen before',
+      'Are you kidding me?',
+      "That's not what I asked",
+      'Yeah',
+    ]) {
+      expect(findNameIn(said), said).toBeNull();
+    }
+  });
+});

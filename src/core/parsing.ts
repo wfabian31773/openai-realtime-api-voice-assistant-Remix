@@ -13,23 +13,59 @@ const NOT_NAME_WORDS = new Set([
   'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'can', 'need', 'want',
   'call', 'called', 'calling', 'seen', 'see', 'before', 'appointment', 'doctor', 'prescription', 'refill',
   'yes', 'no', 'not', 'please', 'thanks', 'thank', 'ok', 'okay', 'hello', 'hi', 'about', 'for', 'with',
+  // "Yeah" was missing while "yes" was present, so "Yeah. It’s Wayne Fabian."
+  // parsed as first name "Yeah", surname "Wayne Fabian". Callers say all of
+  // these; none of them is a name.
+  'yeah', 'yep', 'yup', 'nope', 'nah', 'alright', 'um', 'uh', 'er', 'mm', 'mhm', 'hey',
   'and', 'but', 'just', 'know', 'think', 'get', 'got', 'like', 'would', 'could', 'should', 'there', 'here',
   'so', 'well', 'right', 'sure', 'sorry', 'again', 'now', 'then', 'one', 'two', 'first', 'last', 'name',
   // A split utterance ("It's Wayne Fabian. Date of" / "birth is 03/17/1973")
   // put "Date of" in the surname and searched the records for "Wayne Date
   // of" — a patient with 43 appointments came back not found.
   'date', 'dates', 'birth', 'born', 'dob', 'of',
+  // Contractions. An apostrophe is legitimate in a surname (O'Brien,
+  // D'Angelo), so the token test cannot simply reject one — which is how
+  // "It's" came to be filed as a patient's first name. These are listed
+  // instead. Deepgram's smart formatting emits the curly apostrophe, so both
+  // forms are here; a lookup against the mirror is not the place to discover
+  // that U+2019 and U+0027 are different characters.
+  "it's", 'it’s', "that's", 'that’s', "he's", 'he’s', "she's", 'she’s',
+  "there's", 'there’s', "let's", 'let’s', "we're", 'we’re', "i'm", 'i’m',
+  "what's", 'what’s', "who's", 'who’s', "here's", 'here’s', "they're", 'they’re',
+  "you're", 'you’re', "don't", 'don’t', "can't", 'can’t', "i've", 'i’ve',
   'si', 'yo', 'mi', 'el', 'la', 'de', 'que', 'por', 'para', 'necesito', 'quiero', 'gracias', 'es', 'soy',
 ]);
 
+/** Legitimate inside a surname, filler at the start of a sentence. */
+const SURNAME_PARTICLES = new Set(['de', 'la', 'las', 'los', 'del', 'van', 'von', 'di', 'da', 'el', 'san', 'santa']);
+
 /** A name is not a sentence: 2-4 real words, none of them filler. */
 export function looksLikeName(text: string): { first: string; last: string } | null {
-  const raw = text.trim().replace(/^(my name is|this is|it'?s|i'?m|es|soy)\s+/i, '');
+  const raw = text.trim().replace(/^(my name is|this is|it['’]?s|i['’]?m|es|soy)\s+/i, '');
   // "Lemaire, L-E-M-A-I-R-E" — drop the spelled-out echo, keep the word.
   const deSpelled = raw.replace(/\b(?:[a-záéíóúñ]-){2,}[a-záéíóúñ]\b/gi, ' ');
-  const words = deSpelled.split(/[\s,]+/).filter((w) => /^[a-záéíóúñ'-]{2,}$/i.test(w));
+  const words = deSpelled
+    .split(/[\s,]+/)
+    // Sentence punctuation is not part of a name, and leaving it attached is
+    // not harmless: "Yeah. It's Wayne Fabian." lost BOTH real names —
+    // "Yeah." and "Fabian." failed the token test on their full stops, while
+    // "It's" passed it, because names legitimately contain apostrophes. Two
+    // tokens survived, so the check succeeded and returned first name "It's",
+    // surname "Wayne". The mirror was then searched for a patient surnamed
+    // Wayne, and the live 20:48 call came back no_match with 43 appointments
+    // sitting in the record.
+    // PUNCTUATION only — not "everything that is not a letter". Stripping
+    // digits too turned "17th" into "th", so "March 17th, 1973" answered as a
+    // name became first "March", surname "th".
+    .map((w) => w.replace(/^[.,;:!?"“”'’()[\]]+|[.,;:!?"“”()[\]]+$/g, ''))
+    .filter((w) => /^[a-záéíóúñ'-]{2,}$/i.test(w));
   if (words.length < 2 || words.length > 4) return null;
-  if (words.some((w) => NOT_NAME_WORDS.has(w.toLowerCase()))) return null;
+  // Filler words are rejected anywhere EXCEPT the particles inside a compound
+  // surname. "de", "la", "van" and the rest are Spanish and Dutch fillers at
+  // the start of a sentence and part of the name in the middle of one, and
+  // this practice has a lot of "de la Cruz". Position decides.
+  if (words.some((w, i) => NOT_NAME_WORDS.has(w.toLowerCase()) && !(i > 0 && SURNAME_PARTICLES.has(w.toLowerCase()))))
+    return null;
   return { first: words[0], last: words.slice(1).join(' ') };
 }
 
@@ -88,7 +124,11 @@ export function findNameIn(text: string): { first: string; last: string } | null
   const stripped = trimmed
     // The separator class must include the FULL STOP: "Sure. It's Wayne
     // Fabian" stopped stripping at "Sure." and filed "It's" as the first name.
-    .replace(/^(?:\s*(?:yes|yeah|yep|sure|ok|okay|so|well|um+|uh+|er+|hi|hello|it'?s|its|that'?s|this is|my|his|her|their|for|si|s[ií]|claro|bueno)\b[,.'\s]*)+/i, '')
+    // ['’]? everywhere, and the FULL STOP in the separator class. Deepgram's
+    // smart formatting returns "It’s" with a curly apostrophe, which a
+    // straight-quote pattern silently fails to match — and then the lead-in
+    // survives into the name.
+    .replace(/^(?:\s*(?:yes|yeah|yep|sure|ok|okay|so|well|um+|uh+|er+|hi|hello|it['’]?s|its|that['’]?s|this is|my|his|her|their|for|si|s[ií]|claro|bueno)\b[,.'’\s]*)+/i, '')
     .replace(/[.,;!?]+\s*$/, '')
     .trim();
   return stripped ? looksLikeName(stripped) : null;

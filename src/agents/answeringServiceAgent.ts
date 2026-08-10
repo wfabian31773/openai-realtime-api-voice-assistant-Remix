@@ -107,6 +107,21 @@ export function parseDateOfBirth(dobString: string): {
     }
   }
   
+  // ISO yyyy-mm-dd FIRST, because the m/d/y pattern below is NOT anchored and
+  // matches the tail of one: "1973-03-17" matched as 73 / 03 / 17 and a live
+  // ticket was filed with month 73, day 03, year 2017. ISO is also the shape
+  // most likely to arrive here, because it is how we store a date ourselves.
+  const isoDob = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoDob) {
+    const month = isoDob[2].padStart(2, '0');
+    const day = isoDob[3].padStart(2, '0');
+    const m = parseInt(month, 10);
+    const d = parseInt(day, 10);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return { month, day, year: isoDob[1], iso: `${isoDob[1]}-${month}-${day}` };
+    }
+  }
+
   // Standard m/d/yyyy or m-d-yyyy or m.d.yyyy separators
   const mmddyyyy = normalized.match(/(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/);
   if (mmddyyyy) {
