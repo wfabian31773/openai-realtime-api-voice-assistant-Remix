@@ -63,6 +63,27 @@ export function ticketAgentFor(slug: string): LineModule {
   const key = `standalone:${slug}`;
   let mod = modules.get(key);
   if (!mod) {
+    // The SCHEDULING line is its own machine: it offers real openings from
+    // sage_availability and books them by option number through sage_book.
+    // Running it here is the only way to answer the question replay could not
+    // — does it actually book? — with a real call instead of an inference.
+    //
+    // transfer() reports false rather than dialling, because this transport
+    // has no conference to hand a caller into. That is not a downgrade: the
+    // line now files a scheduling callback on exactly that path, so a caller
+    // it cannot hand off still leaves a record a human can act on.
+    if (slug === 'azul-scheduling') {
+      const sd = buildSchedulingProdServices();
+      mod = createSchedulingLine({
+        ...sd,
+        async transfer(callId, reason) {
+          console.warn(`[LINE:${slug}] transfer requested (${reason}) — no queue on this transport, filing a callback`);
+          return { ok: false };
+        },
+      });
+      modules.set(key, mod);
+      return mod;
+    }
     mod = createTicketAgent(buildTicketAgentServices(), {
       slug,
       humanLine:
