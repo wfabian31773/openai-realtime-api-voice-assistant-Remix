@@ -355,7 +355,10 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
 
   // The Claude latency probe, mounted here so it shares this line's URL space.
   void import('./claudeProbe')
-    .then(({ mountClaudeProbe }) => mountClaudeProbe(app))
+    .then(({ mountClaudeProbe, mountToolCheck }) => {
+      mountClaudeProbe(app);
+      mountToolCheck(app);
+    })
     .catch((e) => console.warn('[DEMO-LINE] claude probe unavailable:', e));
 
   app.get('/demo/stt-check', async (_req: Request, res: Response) => {

@@ -245,3 +245,172 @@ export function mountClaudeProbe(app: Express): void {
     });
   });
 }
+
+/* ── TOOL CHOICE — does it actually DO the thing? ───────────────────────── */
+
+/**
+ * Speed decided Sonnet is out. This decides whether Haiku is in.
+ *
+ * The first probe showed Haiku answering "when was my last appointment" with
+ * 33 tokens of conversation and calling no tool at all, three times out of
+ * three, while Sonnet reached for lookup_schedule. Faster and wrong is not an
+ * improvement — talking without doing the lookup is the exact failure we spent
+ * today on.
+ *
+ * So this replays REAL caller turns from tonight's calls, as short
+ * conversations rather than isolated sentences, because tool choice depends on
+ * what has already been said: "03/17/1973" means nothing on its own and means
+ * "verify me" after a name.
+ *
+ * It reports the tool AND its arguments, because the arguments are the whole
+ * point of moving to tool calling. "Yeah. It's Wayne Fabian." has to arrive as
+ * first_name "Wayne", last_name "Fabian" — not the "It's Wayne" that a regex
+ * produced and that searched the patient mirror for a surname of Wayne.
+ */
+interface Scenario {
+  name: string;
+  /** Real words, from call_logs. The last entry is the turn under test. */
+  turns: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Only set where the prompt makes it unambiguous. Otherwise judged by eye. */
+  mustCallTool?: string;
+  note?: string;
+}
+
+const SCENARIOS: Scenario[] = [
+  {
+    name: 'opening: asks about last appointment',
+    turns: [{ role: 'user', content: "Yeah. I'm calling to find out when my last appointment was." }],
+    note: 'Either look it up or ask who is calling — both are defensible.',
+  },
+  {
+    name: 'gives their name, in the way people actually do',
+    turns: [
+      { role: 'user', content: "Yeah. I'm calling to find out when my last appointment was." },
+      { role: 'assistant', content: "I can help with that. May I have the patient's first and last name?" },
+      { role: 'user', content: "Yeah. It's Wayne Fabian." },
+    ],
+    note: 'THE test. Any tool call must carry first_name Wayne, last_name Fabian — never "It\'s".',
+  },
+  {
+    name: 'gives date of birth after the name',
+    turns: [
+      { role: 'user', content: "Yeah. I'm calling to find out when my last appointment was." },
+      { role: 'assistant', content: "May I have the patient's first and last name?" },
+      { role: 'user', content: "Yeah. It's Wayne Fabian." },
+      { role: 'assistant', content: "And the patient's date of birth?" },
+      { role: 'user', content: '03/17/1973.' },
+    ],
+    mustCallTool: 'lookup_schedule',
+    note: 'It now has everything. Not looking it up here is the failure we are testing for.',
+  },
+  {
+    name: 'name and date of birth in one breath',
+    turns: [
+      { role: 'user', content: "I'd like to put in for a medication refill, please." },
+      { role: 'assistant', content: "May I have the patient's first and last name?" },
+      { role: 'user', content: "Yes. Patient's name is Wayne Fabian. Date of birth is 03/17/1973." },
+    ],
+    note: 'Both facts in one sentence — the case the parser split in half.',
+  },
+  {
+    name: 'the name arrives mid-ramble',
+    turns: [
+      { role: 'user', content: 'I need a refill' },
+      { role: 'assistant', content: "May I have the patient's first and last name?" },
+      { role: 'user', content: 'Well I was thinking, and you know what happened, and then — oh, my… yeah. My name is Wayne Fabian.' },
+    ],
+    note: "The operator's own example of what a regex can never do.",
+  },
+  {
+    name: 'asks for a human',
+    turns: [{ role: 'user', content: 'I want to talk to a real person.' }],
+    note: 'Should explain the boundary, not reach for a tool.',
+  },
+];
+
+async function runScenario(
+  apiKey: string,
+  system: string,
+  model: string,
+  sc: Scenario,
+): Promise<Record<string, unknown>> {
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': ANTHROPIC_VERSION,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 400,
+        system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+        tools: TOOLS,
+        messages: sc.turns,
+      }),
+    });
+    if (!res.ok) return { model, error: `${res.status} ${(await res.text()).slice(0, 160)}` };
+    const body = (await res.json()) as {
+      content?: Array<{ type: string; name?: string; input?: unknown; text?: string }>;
+    };
+    const call = body.content?.find((c) => c.type === 'tool_use');
+    const said = body.content?.find((c) => c.type === 'text')?.text ?? '';
+    const pass = sc.mustCallTool ? call?.name === sc.mustCallTool : undefined;
+    return {
+      model,
+      toolCalled: call?.name ?? null,
+      toolArgs: call?.input ?? null,
+      said: said.slice(0, 220),
+      ...(sc.mustCallTool ? { required: sc.mustCallTool, pass } : {}),
+    };
+  } catch (e) {
+    return { model, error: (e as Error).message };
+  }
+}
+
+export function mountToolCheck(app: Express): void {
+  app.get('/demo/tool-check', async (_req: Request, res: Response) => {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      res.json({ ok: false, problem: 'ANTHROPIC_API_KEY is not set in this process.' });
+      return;
+    }
+    let system: string;
+    try {
+      const { buildSystemPrompt } = await import('../agents/answeringServiceAgent');
+      system = buildSystemPrompt({ callerPhone: '8455317471' });
+    } catch (e) {
+      res.json({ ok: false, problem: `could not load the real prompt: ${(e as Error).message}` });
+      return;
+    }
+
+    const SONNET = process.env.CLAUDE_MODEL ?? 'claude-sonnet-5';
+    const HAIKU = process.env.CLAUDE_FAST_MODEL ?? 'claude-haiku-4-5-20251001';
+
+    const results = [];
+    for (const sc of SCENARIOS) {
+      const [sonnet, haiku] = await Promise.all([
+        runScenario(apiKey, system, SONNET, sc),
+        runScenario(apiKey, system, HAIKU, sc),
+      ]);
+      results.push({ scenario: sc.name, note: sc.note, sonnet, haiku });
+    }
+
+    // The only mechanical verdict available: did the required tool get called.
+    const required = results.filter((r) => 'required' in (r.haiku as object));
+    const score = (side: 'sonnet' | 'haiku') =>
+      `${required.filter((r) => (r[side] as Record<string, unknown>).pass).length}/${required.length}`;
+
+    res.json({
+      ok: true,
+      models: { sonnet: SONNET, haiku: HAIKU },
+      requiredToolCalls: { sonnet: score('sonnet'), haiku: score('haiku') },
+      results,
+      readMe:
+        'Look at toolArgs on the name scenarios. first_name must be "Wayne" and last_name "Fabian". ' +
+        'If either model returns "It\'s" as a first name, tool calling has the same disease the parser had. ' +
+        'Everything else is a judgement call and is printed rather than graded.',
+    });
+  });
+}
