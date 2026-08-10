@@ -132,6 +132,13 @@ interface DemoCall {
   /** Set while the agent is speaking a line we forced, for barge-in cleanup. */
   speaking: boolean;
   /**
+   * When the line currently playing started. Barge-in is only allowed after
+   * BARGE_IN_AFTER_MS of it, so a cough or a "mm-hm" at word one cannot
+   * delete the question — which is exactly what OpenAI's VAD did when it
+   * drove this, and why `clear` was removed in the first place.
+   */
+  speakingSince: number | null;
+  /**
    * Did the VAD actually hear the caller since we last accepted a turn?
    * Transcription models hallucinate words out of silence and line noise, and
    * those phantom turns drive the state machine: a live call (17:21) processed
@@ -346,6 +353,11 @@ export function mountDemoLine(app: Express, server: HttpServer): void {
     });
   });
 
+  // The Claude latency probe, mounted here so it shares this line's URL space.
+  void import('./claudeProbe')
+    .then(({ mountClaudeProbe }) => mountClaudeProbe(app))
+    .catch((e) => console.warn('[DEMO-LINE] claude probe unavailable:', e));
+
   app.get('/demo/stt-check', async (_req: Request, res: Response) => {
     const engines = configuredEngines();
     const results: Array<Record<string, unknown>> = [];
@@ -521,6 +533,7 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     pendingMarks: new Map(),
     playedLines: new Set(),
     deaf: false,
+    speakingSince: null,
     finalMark: null,
     finalMarkTimer: null,
     responseAudioBytes: 0,
@@ -651,6 +664,7 @@ function connectOpenAI(call: DemoCall): void {
 
       case 'response.done':
         call.speaking = false;
+        call.speakingSince = null;
         call.responseActive = false;
         // The line played and the model never told us what came out of it, so
         // the transcript is holding a line nobody can confirm was spoken.
@@ -742,6 +756,7 @@ function startSideEars(call: DemoCall): void {
         prompt: TRANSCRIPTION_PROMPT,
         onSpeechStarted: () => {
           call.heardSpeech = true;
+          bargeIn(call);
         },
         onTurn: (turn) => {
           if (!turn.isFinal) return; // partials are noise in a comparison
@@ -908,6 +923,7 @@ function speak(call: DemoCall, words: string): void {
 function emitSpeech(call: DemoCall, words: string): void {
   if (call.openai?.readyState !== WebSocket.OPEN) return;
   call.speaking = true;
+  call.speakingSince = Date.now();
   call.responseActive = true;
   // Only NOW is it true that the caller will hear this, so only now does it
   // belong in the record — provisionally. What the model actually says
@@ -985,6 +1001,45 @@ function sameWords(a: string, b: string): boolean {
       .replace(/[^a-z0-9]+/g, ' ')
       .trim();
   return norm(a) === norm(b);
+}
+
+/**
+ * How long a line must have been playing before the caller can talk over it.
+ *
+ * Barge-in with no floor is how a line gets deleted at word one by a cough,
+ * an echo, or a caller saying "mm-hm". That is what OpenAI's VAD did when it
+ * drove this, and it is why Twilio's `clear` was taken out entirely. Deepgram
+ * is a better trigger — it listens to the caller's inbound leg and gates on
+ * its own VAD — but a floor still costs nothing and prevents the same class of
+ * failure.
+ */
+const BARGE_IN_AFTER_MS = Number(process.env.BARGE_IN_AFTER_MS ?? 400);
+
+/**
+ * The caller started talking over us. Stop.
+ *
+ * Two things have to happen or the caller keeps hearing us: Twilio has to
+ * DROP what it has buffered (the model delivers a ten-second line in about a
+ * second, so most of it is sitting in Twilio when the caller interrupts), and
+ * the model has to stop generating the rest.
+ */
+function bargeIn(call: DemoCall): void {
+  if (!call.speaking || call.speakingSince === null) return;
+  const playedFor = Date.now() - call.speakingSince;
+  if (playedFor < BARGE_IN_AFTER_MS) return; // too early to be a real interruption
+
+  if (call.streamSid && call.twilio.readyState === WebSocket.OPEN) {
+    call.twilio.send(JSON.stringify({ event: 'clear', streamSid: call.streamSid }));
+  }
+  if (call.openai?.readyState === WebSocket.OPEN) {
+    send(call.openai, { type: 'response.cancel' });
+  }
+  // The caller heard only part of that line. Say so in the record, or the
+  // transcript claims we said something they never finished hearing.
+  if (call.requestedIndex !== null && call.transcript[call.requestedIndex]?.startsWith('AGENT: ')) {
+    call.transcript[call.requestedIndex] += `   [cut off — caller spoke over it after ${playedFor}ms]`;
+  }
+  console.info(`[DEMO-LINE] ${call.callId} BARGE-IN after ${playedFor}ms of playback`);
 }
 
 /** Byte length of base64 without allocating a Buffer for every 20ms frame. */

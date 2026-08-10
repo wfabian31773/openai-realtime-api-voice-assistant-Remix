@@ -197,7 +197,7 @@ export const answeringServiceAgentConfig = {
   language: "en",
 };
 
-function buildSystemPrompt(
+export function buildSystemPrompt(
   metadata: AnsweringServiceMetadata,
   scheduleContext?: PatientScheduleContext,
   callerMemory?: CallerMemory | null
