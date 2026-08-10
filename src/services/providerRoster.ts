@@ -158,8 +158,21 @@ export async function refreshProviderRoster(): Promise<void> {
   }
 }
 
-/** Boot once, then daily. unref so the timers never hold the process open. */
+let refreshStarted = false;
+
+/**
+ * Boot once, then daily. unref so the timers never hold the process open.
+ *
+ * Idempotent per PROCESS, and it has to be: this roster is module state, so
+ * every process that reads the keyterms must start it, and more than one of
+ * them may. Until now only voiceAgentRoutes started it — so the API server,
+ * where the demo line lives, always reported an empty roster and quietly
+ * handed every transcriber the seed word list instead of this practice's
+ * actual doctors.
+ */
 export function startProviderRosterRefresh(): void {
+  if (refreshStarted) return;
+  refreshStarted = true;
   void refreshProviderRoster();
   setInterval(() => { void refreshProviderRoster(); }, REFRESH_MS).unref?.();
 }

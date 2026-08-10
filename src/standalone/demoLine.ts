@@ -117,6 +117,14 @@ interface DemoCall {
 const calls = new Map<WebSocket, DemoCall>();
 
 export function mountDemoLine(app: Express, server: HttpServer): void {
+  // The keyterms every transcriber gets come from this roster, and it is
+  // per-process module state. This process is not the voice server, so
+  // nothing here had ever started it: rosterLoaded was false forever and all
+  // three engines ran on seed words. Starting it is idempotent.
+  void import('../services/providerRoster')
+    .then(({ startProviderRosterRefresh }) => startProviderRosterRefresh())
+    .catch((e) => console.warn('[DEMO-LINE] roster refresh unavailable (seed keyterms only):', e));
+
   // ---------------------------------------------------------------- webhook
   // Twilio asks what to do with the call. The answer is always the same:
   // stream the audio to us. No IVR, no conference, no lookup, no branching.
