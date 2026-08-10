@@ -151,6 +151,15 @@ interface DemoCall {
   benchPending: boolean;
   /** Waiting on the primary engine before falling back to another. */
   primaryGrace: ReturnType<typeof setTimeout> | null;
+  /**
+   * WHY the call ended, and what the model socket did. "The calls are
+   * dropping" has two completely different causes that feel identical to a
+   * caller — our socket closing (Twilio ends the call instantly, because
+   * <Connect><Stream> is bound to it) versus the agent going mute on an open
+   * line — and neither is visible in a transcript. Both are recorded now.
+   */
+  endReason: string | null;
+  openaiClose: string | null;
 }
 
 const calls = new Map<WebSocket, DemoCall>();
@@ -373,6 +382,8 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     pcmuBytes: 0,
     benchPending: false,
     primaryGrace: null,
+    endReason: null,
+    openaiClose: null,
   };
   calls.set(twilio, call);
 
@@ -519,8 +530,15 @@ function connectOpenAI(call: DemoCall): void {
   });
 
   ws.on('error', (e) => console.error(`[DEMO-LINE] openai socket error on ${call.callId}:`, e));
-  ws.on('close', () => {
-    if (!call.closing) console.warn(`[DEMO-LINE] openai socket closed early on ${call.callId}`);
+  ws.on('close', (code, reason) => {
+    call.openaiClose = `${code}${reason?.toString() ? ` ${reason.toString()}` : ''}`;
+    if (call.closing) return;
+    // The model socket died mid-call. Nothing can speak any more, so holding
+    // the line open just gives the caller silence they will describe as a
+    // dropped call. End it deliberately and say so in the record.
+    console.error(`[DEMO-LINE] openai socket closed MID-CALL on ${call.callId}: ${call.openaiClose}`);
+    call.endReason = `openai socket closed mid-call (${call.openaiClose})`;
+    void endCall(call.twilio, call.endReason);
   });
 }
 
@@ -701,6 +719,7 @@ function speak(call: DemoCall, words: string): void {
 async function endCall(twilio: WebSocket, reason: string): Promise<void> {
   const call = calls.get(twilio);
   if (!call) return;
+  call.endReason = call.endReason ?? reason;
   calls.delete(twilio);
   console.info(`[DEMO-LINE] ${call.callId} ending (${reason})`);
 
@@ -721,6 +740,7 @@ async function endCall(twilio: WebSocket, reason: string): Promise<void> {
     /* teardown is best effort */
   }
 
+  call.transcript.push(`END: ${call.endReason ?? 'unknown'} | openai socket: ${call.openaiClose ?? 'still open'}`);
   console.info(`[DEMO-LINE] ===== transcript ${call.callId} =====\n${call.transcript.join('\n')}\n=====`);
   void recordCall(call);
 
@@ -769,6 +789,7 @@ async function recordCall(call: DemoCall): Promise<void> {
       transcript: call.transcript.join('\n'),
       agentUsed: call.slug,
       agentVersion: LINE_CAPABILITIES,
+      callDisposition: `end=${call.endReason ?? 'unknown'}; openai=${call.openaiClose ?? 'open'}`,
       environment: process.env.APP_ENV ?? 'development',
     } as never);
     console.info(`[DEMO-LINE] ${call.callId} written to call_logs`);
