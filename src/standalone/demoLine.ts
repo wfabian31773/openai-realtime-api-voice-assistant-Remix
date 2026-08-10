@@ -170,6 +170,22 @@ interface DemoCall {
    */
   responseActive: boolean;
   pendingSpeech: string[];
+  /**
+   * The words we asked for, and where that line sits in the transcript.
+   *
+   * The model is a mouthpiece, but it is still a model: told to "say exactly
+   * this", it sometimes warms the line up, reorders it, or adds a sentence of
+   * its own — and a line the caller interrupts is cut off partway. Recording
+   * the REQUEST as though it were the RECORD is exactly the complaint that
+   * found this: "there are things the agent is saying that are not in the
+   * transcripts — I'm hearing something but the transcripts show something
+   * else." The model reports what it actually spoke. That is what the
+   * transcript holds now; the line as written is kept beside it whenever the
+   * two differ, so the gap is visible instead of invisible.
+   */
+  requestedLine: string | null;
+  requestedIndex: number | null;
+  spokenHeard: boolean;
 }
 
 const calls = new Map<WebSocket, DemoCall>();
@@ -396,6 +412,9 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     openaiClose: null,
     responseActive: false,
     pendingSpeech: [],
+    requestedLine: null,
+    requestedIndex: null,
+    spokenHeard: false,
   };
   calls.set(twilio, call);
 
@@ -508,9 +527,30 @@ function connectOpenAI(call: DemoCall): void {
         }
         break;
 
+      // What the model ACTUALLY said. The GA event and the older beta name
+      // both appear in the wild, so both are honoured.
+      case 'response.output_audio_transcript.done':
+      case 'response.audio_transcript.done':
+        recordWhatWasSpoken(call, String(evt.transcript ?? ''));
+        break;
+
       case 'response.done':
         call.speaking = false;
         call.responseActive = false;
+        // The line played and the model never told us what came out of it, so
+        // the transcript is holding a line nobody can confirm was spoken.
+        // Say so rather than let it read as fact.
+        if (call.requestedIndex !== null && !call.spokenHeard) {
+          const status = String(evt.response?.status ?? '');
+          const why = status && status !== 'completed' ? status : 'no transcript from the model';
+          call.transcript[call.requestedIndex] += `   [unconfirmed: ${why}]`;
+          console.warn(
+            `[DEMO-LINE] ${call.callId} played a line the model never transcribed (${why}): ` +
+              `"${(call.requestedLine ?? '').slice(0, 60)}"`,
+          );
+        }
+        call.requestedIndex = null;
+        call.requestedLine = null;
         if (call.pendingSpeech.length) {
           drainSpeech(call);
           break; // the wrap waits until everything queued has been heard
@@ -737,15 +777,65 @@ function emitSpeech(call: DemoCall, words: string): void {
   call.speaking = true;
   call.responseActive = true;
   // Only NOW is it true that the caller will hear this, so only now does it
-  // belong in the record.
+  // belong in the record — provisionally. What the model actually says
+  // replaces this the moment it reports it back.
   call.transcript.push(`AGENT: ${words}`);
+  call.requestedLine = words;
+  call.requestedIndex = call.transcript.length - 1;
+  call.spokenHeard = false;
   send(call.openai, {
     type: 'response.create',
     response: {
       output_modalities: ['audio'],
-      instructions: `Say exactly this, word for word, and nothing else: "${words}"`,
+      // The session's instructions do NOT apply here: instructions on a
+      // response REPLACE the session default for that response. So every
+      // line the agent has ever spoken was generated with the mouthpiece
+      // rules switched off, leaving one sentence and a model free to warm it
+      // up, and that is why words reached the caller that were never in the
+      // script. The rules ride along with every line now.
+      instructions: `${MOUTHPIECE_INSTRUCTIONS}\nSay exactly this, word for word, and nothing else: "${words}"`,
     },
   });
+}
+
+/**
+ * Replace the line we ASKED for with the line the caller actually HEARD.
+ *
+ * Two ways they differ, and both matter: the model rewrites or embellishes
+ * what it was told to read, or the caller barges in and cuts it off partway.
+ * Either way the written line is a guess about the call and the spoken line
+ * is the call, so the spoken line wins and the guess is kept beside it.
+ */
+function recordWhatWasSpoken(call: DemoCall, spokenRaw: string): void {
+  const spoken = spokenRaw.trim();
+  if (!spoken) return;
+  const idx = call.requestedIndex;
+  const asked = call.requestedLine ?? '';
+  call.spokenHeard = true;
+  if (idx === null || !call.transcript[idx]?.startsWith('AGENT: ')) {
+    // Speech we never asked for — nothing of ours is waiting on a report.
+    // That is the mouthpiece rule broken, so it is loud in both records.
+    call.transcript.push(`AGENT: ${spoken}   [UNPROMPTED — the model spoke on its own]`);
+    console.error(`[DEMO-LINE] ${call.callId} the model spoke UNPROMPTED: "${spoken.slice(0, 120)}"`);
+    return;
+  }
+  call.transcript[idx] = `AGENT: ${spoken}`;
+  if (sameWords(spoken, asked)) return;
+  call.transcript[idx] += `\n  ^ not what we wrote: "${asked}"`;
+  console.warn(
+    `[DEMO-LINE] ${call.callId} the model did not read the line as written.\n` +
+      `  wrote: ${asked}\n  spoke: ${spoken}`,
+  );
+}
+
+/** Same words, ignoring punctuation, casing and spacing. */
+function sameWords(a: string, b: string): boolean {
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  return norm(a) === norm(b);
 }
 
 /** The next queued line, once the one before it has finished playing. */
@@ -780,6 +870,11 @@ async function endCall(twilio: WebSocket, reason: string): Promise<void> {
     /* teardown is best effort */
   }
 
+  // A line still in flight when the call ended is a line nobody can promise
+  // was heard — the caller may have hung up in the middle of it.
+  if (call.requestedIndex !== null && !call.spokenHeard) {
+    call.transcript[call.requestedIndex] += '   [unconfirmed: the call ended while this was playing]';
+  }
   call.transcript.push(`END: ${call.endReason ?? 'unknown'} | openai socket: ${call.openaiClose ?? 'still open'}`);
   console.info(`[DEMO-LINE] ===== transcript ${call.callId} =====\n${call.transcript.join('\n')}\n=====`);
   void recordCall(call);

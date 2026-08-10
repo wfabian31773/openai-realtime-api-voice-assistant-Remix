@@ -29,6 +29,11 @@ let fakeUrl: string;
 /** Everything the "model" was told to say, in order. */
 const forcedLines: string[] = [];
 let sessionConfig: Record<string, any> | null = null;
+/**
+ * What the "model" actually speaks, given the line it was handed. null means
+ * it reports nothing back. Default (unset) is a faithful reading.
+ */
+let speaks: ((asked: string) => string | null) | null = null;
 
 let server: http.Server;
 let baseUrl: string;
@@ -50,8 +55,17 @@ beforeAll(async () => {
         // sent while this one is still playing would be lost exactly as it is
         // on a live call.
         ws.send(JSON.stringify({ type: 'response.output_audio.delta', delta: Buffer.from('audio').toString('base64') }));
+        // A real model reports what came out of its mouth, and it is not
+        // always what it was handed. speaks() lets a test make it deviate.
+        const asked = forcedLines[forcedLines.length - 1];
+        const spoken = speaks ? speaks(asked) : asked;
         setTimeout(() => {
-          try { ws.send(JSON.stringify({ type: 'response.done' })); } catch { /* closed */ }
+          try {
+            if (spoken !== null) {
+              ws.send(JSON.stringify({ type: 'response.output_audio_transcript.done', transcript: spoken }));
+            }
+            ws.send(JSON.stringify({ type: 'response.done', response: { status: 'completed' } }));
+          } catch { /* closed */ }
         }, 60);
       }
     });
@@ -327,5 +341,72 @@ describe('demo line — a call, end to end', () => {
     expect(forcedLines[2].toLowerCase()).toMatch(/date of birth|birth/);
 
     twilio.close();
+  });
+
+  it('records what the caller HEARD, not what we asked the model to say', async () => {
+    // "There are things the agent is saying that are not in the transcripts —
+    // I'm hearing something but the transcripts show something else." The
+    // model is a mouthpiece that still writes; the record has to be the
+    // audio, or every transcript we read afterwards is fiction.
+    forcedLines.length = 0;
+    speaks = (asked) => `Sure! ${asked} Is there anything else I can help with?`;
+    const logged: string[] = [];
+    const info = vi.spyOn(console, 'info').mockImplementation((...a) => { logged.push(a.join(' ')); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...a) => { logged.push(a.join(' ')); });
+    try {
+      const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+      await new Promise<void>((r) => twilio.on('open', () => r()));
+      twilio.send(JSON.stringify({
+        event: 'start',
+        streamSid: 'MZheard',
+        start: { streamSid: 'MZheard', callSid: 'CAheard', customParameters: { from: '+15625550134', callSid: 'CAheard' } },
+      }));
+      await until(() => forcedLines.length >= 1, 'the greeting');
+      const greeting = forcedLines[0];
+      await until(() => logged.some((l) => l.includes('did not read the line as written')), 'the model to report back');
+      twilio.close();
+      await until(() => logged.some((l) => l.includes('transcript CAheard')), 'the end-of-call transcript');
+
+      const block = logged.find((l) => l.includes('transcript CAheard'))!;
+      // The improvised words are in the record...
+      expect(block).toContain(`AGENT: Sure! ${greeting} Is there anything else I can help with?`);
+      // ...and the line we actually wrote is right beside them, so the gap
+      // between script and call is readable instead of invisible.
+      expect(block).toContain(`^ not what we wrote: "${greeting}"`);
+      expect(logged.some((l) => l.includes('did not read the line as written'))).toBe(true);
+    } finally {
+      speaks = null;
+      info.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('marks a line the model never confirmed speaking', async () => {
+    // Silence from the model about what it played is not proof it played.
+    forcedLines.length = 0;
+    speaks = () => null; // audio went out; no transcript ever came back
+    const logged: string[] = [];
+    const info = vi.spyOn(console, 'info').mockImplementation((...a) => { logged.push(a.join(' ')); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...a) => { logged.push(a.join(' ')); });
+    try {
+      const twilio = new WebSocket(`ws://${baseUrl}/demo/stream`);
+      await new Promise<void>((r) => twilio.on('open', () => r()));
+      twilio.send(JSON.stringify({
+        event: 'start',
+        streamSid: 'MZunconf',
+        start: { streamSid: 'MZunconf', callSid: 'CAunconf', customParameters: { from: '+15625550134', callSid: 'CAunconf' } },
+      }));
+      await until(() => forcedLines.length >= 1, 'the greeting');
+      await until(() => logged.some((l) => l.includes('never transcribed')), 'the line to finish playing');
+      twilio.close();
+      await until(() => logged.some((l) => l.includes('transcript CAunconf')), 'the end-of-call transcript');
+
+      const block = logged.find((l) => l.includes('transcript CAunconf'))!;
+      expect(block).toContain('[unconfirmed:');
+    } finally {
+      speaks = null;
+      info.mockRestore();
+      warn.mockRestore();
+    }
   });
 });
