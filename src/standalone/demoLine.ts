@@ -611,8 +611,11 @@ async function acceptTurn(call: DemoCall, text: string, engine: string): Promise
       const row = configuredEngines()
         .map((e) => `${e}="${call.heard.get(e) ?? '—'}"`)
         .join(' | ');
+      // The bench belongs in the LOG, not in the transcript. That transcript
+      // is a patient record; vendor diagnostics interleaved with what the
+      // caller said made it unreadable, and the operator had to ask what
+      // "BENCH" even was. Keep the comparison, keep it out of the record.
       console.info(`[STT-BENCH] ${call.callId} ${row}`);
-      call.transcript.push(`BENCH: ${row}`);
       call.heard.clear();
     }, configuredEngines().length > 1 ? 400 : 0);
   }
