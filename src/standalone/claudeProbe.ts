@@ -81,6 +81,14 @@ const TURNS = [
 
 interface Timing {
   label: string;
+  model?: string;
+  /**
+   * TIME TO FIRST TOKEN — the number that decides whether a call feels alive.
+   * A voice pipeline streams and starts speaking at the first clause; it never
+   * waits for the whole answer. The first probe measured total completion,
+   * which is the wrong metric and made this look worse than it is.
+   */
+  ttftMs?: number;
   ms: number;
   stopReason?: string;
   toolCalled?: string | null;
@@ -96,8 +104,10 @@ async function timeOne(
   system: string,
   label: string,
   cache: boolean,
+  model: string,
 ): Promise<Timing> {
   const started = Date.now();
+  let ttftMs: number | undefined;
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -107,10 +117,9 @@ async function timeOne(
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        model: MODEL,
+        model,
         max_tokens: 300,
-        // The system prompt as a cacheable block. Without the marker the whole
-        // preamble is re-read on every single turn of every single call.
+        stream: true,
         system: cache
           ? [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }]
           : system,
@@ -118,32 +127,57 @@ async function timeOne(
         messages: TURNS,
       }),
     });
-    const ms = Date.now() - started;
-    if (!res.ok) {
-      return { label, ms, error: `${res.status} ${(await res.text()).slice(0, 200)}` };
+    if (!res.ok || !res.body) {
+      return { label, model, ms: Date.now() - started, error: `${res.status} ${(await res.text()).slice(0, 200)}` };
     }
-    const body = (await res.json()) as {
-      stop_reason?: string;
-      content?: Array<{ type: string; name?: string }>;
-      usage?: {
-        input_tokens?: number;
-        output_tokens?: number;
-        cache_read_input_tokens?: number;
-        cache_creation_input_tokens?: number;
-      };
-    };
+
+    // Read the SSE stream and stop the clock the moment the FIRST piece of
+    // content arrives — text or the start of a tool call. That is the instant
+    // a real pipeline could begin speaking.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let usage: Record<string, number> = {};
+    let stopReason: string | undefined;
+    let toolCalled: string | null = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        let evt: Record<string, any>;
+        try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+        if (ttftMs === undefined && (evt.type === 'content_block_delta' || evt.type === 'content_block_start')) {
+          ttftMs = Date.now() - started;
+        }
+        if (evt.type === 'content_block_start' && evt.content_block?.type === 'tool_use') {
+          toolCalled = evt.content_block.name ?? null;
+        }
+        if (evt.type === 'message_start' && evt.message?.usage) usage = { ...usage, ...evt.message.usage };
+        if (evt.type === 'message_delta') {
+          if (evt.usage) usage = { ...usage, ...evt.usage };
+          if (evt.delta?.stop_reason) stopReason = evt.delta.stop_reason;
+        }
+      }
+    }
     return {
       label,
-      ms,
-      stopReason: body.stop_reason,
-      toolCalled: body.content?.find((c) => c.type === 'tool_use')?.name ?? null,
-      inputTokens: body.usage?.input_tokens,
-      cachedRead: body.usage?.cache_read_input_tokens,
-      cachedWrite: body.usage?.cache_creation_input_tokens,
-      outputTokens: body.usage?.output_tokens,
+      model,
+      ttftMs,
+      ms: Date.now() - started,
+      stopReason,
+      toolCalled,
+      inputTokens: usage.input_tokens,
+      cachedRead: usage.cache_read_input_tokens,
+      cachedWrite: usage.cache_creation_input_tokens,
+      outputTokens: usage.output_tokens,
     };
   } catch (e) {
-    return { label, ms: Date.now() - started, error: (e as Error).message };
+    return { label, model, ms: Date.now() - started, ttftMs, error: (e as Error).message };
   }
 }
 
@@ -177,13 +211,21 @@ export function mountClaudeProbe(app: Express): void {
       return;
     }
 
+    // Sonnet and Haiku side by side. Haiku is the obvious lever if Sonnet's
+    // first token is too slow, and asking for both in one hit costs one page
+    // refresh instead of two.
+    const FAST = process.env.CLAUDE_FAST_MODEL ?? 'claude-haiku-4-5-20251001';
     const runs: Timing[] = [];
-    runs.push(await timeOne(apiKey, system, 'cold (no cache)', false));
-    runs.push(await timeOne(apiKey, system, 'cache write', true));
-    runs.push(await timeOne(apiKey, system, 'cache read #1', true));
-    runs.push(await timeOne(apiKey, system, 'cache read #2', true));
+    runs.push(await timeOne(apiKey, system, 'sonnet cache write', true, MODEL));
+    runs.push(await timeOne(apiKey, system, 'sonnet cached #1', true, MODEL));
+    runs.push(await timeOne(apiKey, system, 'sonnet cached #2', true, MODEL));
+    runs.push(await timeOne(apiKey, system, 'haiku cache write', true, FAST));
+    runs.push(await timeOne(apiKey, system, 'haiku cached #1', true, FAST));
+    runs.push(await timeOne(apiKey, system, 'haiku cached #2', true, FAST));
 
-    const cached = runs.filter((r) => r.label.startsWith('cache read') && !r.error).map((r) => r.ms);
+    const ttfts = (m: string) =>
+      runs.filter((r) => r.label.startsWith(m) && r.label.includes('cached') && r.ttftMs).map((r) => r.ttftMs!);
+    const avg = (a: number[]) => (a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null);
     res.json({
       ok: runs.every((r) => !r.error),
       model: MODEL,
@@ -191,12 +233,14 @@ export function mountClaudeProbe(app: Express): void {
       approxPromptTokens: Math.round(system.length / 4),
       runs,
       verdict: {
-        coldMs: runs[0]?.ms ?? null,
-        warmMs: cached.length ? Math.round(cached.reduce((a, b) => a + b, 0) / cached.length) : null,
+        sonnetFirstTokenMs: avg(ttfts('sonnet')),
+        haikuFirstTokenMs: avg(ttfts('haiku')),
         note:
-          'This is the LLM box only. A full turn adds Deepgram endpointing (~300ms), ' +
-          'the transcriber (~300-450ms) and the voice starting to speak (~500-900ms). ' +
-          'Vapi measured 2,753ms end to end on a 629-token prompt.',
+          'FIRST TOKEN is the number that matters — a voice pipeline starts speaking at the ' +
+          'first clause and never waits for the whole answer. Add Deepgram endpointing (~300ms), ' +
+          'the transcriber (~300-450ms), and the voice beginning (~200-400ms once streaming) ' +
+          'to estimate what the caller actually experiences. Under about 1,500ms total feels ' +
+          'normal; over about 2,500ms feels broken.',
       },
     });
   });
