@@ -90,6 +90,28 @@ describe('speaking before the answer is finished', () => {
   it('does not split a date or an abbreviation into pieces', () => {
     expect(splitForSpeech('Your last visit was 03/17/1973 at our Redlands office.')).toHaveLength(1);
   });
+
+  // The first live call really did say "…at 8:00 AM with Dr." and then, as a
+  // separate utterance, "Dwayne Logan at Loma Linda Surgery Center LLC."
+  it('keeps a title attached to the name that follows it', () => {
+    expect(
+      splitForSpeech('Your last appointment was on Wednesday at 8:00 AM with Dr. Dwayne Logan.'),
+    ).toEqual(['Your last appointment was on Wednesday at 8:00 AM with Dr. Dwayne Logan.']);
+  });
+
+  it('keeps an initial attached to the surname that follows it', () => {
+    expect(splitForSpeech('You saw Dr. J. Tran last time. Would you like to see them again?')).toEqual([
+      'You saw Dr. J. Tran last time.',
+      'Would you like to see them again?',
+    ]);
+  });
+
+  it('still splits a real sentence end that follows a title', () => {
+    expect(splitForSpeech('That was with Dr. Logan. Anything else today?')).toEqual([
+      'That was with Dr. Logan.',
+      'Anything else today?',
+    ]);
+  });
 });
 
 describe('the tool loop', () => {

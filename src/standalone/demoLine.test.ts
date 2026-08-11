@@ -455,10 +455,18 @@ describe('demo line — a call, end to end', () => {
       await new Promise((r) => setTimeout(r, 10));
     }
 
-    // BOTH answers must reach the caller — the second queued behind the first.
-    await until(() => forcedLines.length >= 3, 'both replies to be spoken', 5000);
-    expect(forcedLines[1].toLowerCase()).toMatch(/name/);
-    expect(forcedLines[2].toLowerCase()).toMatch(/date of birth|birth/);
+    // BOTH answers must reach the caller, in order. Whether the queue drains
+    // as one utterance or several is a delivery detail — draining it one line
+    // per round trip is what made every reply lag behind the caller — so this
+    // asserts what the caller actually hears, not how many times we asked for
+    // it.
+    const heardSoFar = () => forcedLines.slice(1).join(' ').toLowerCase();
+    await until(() => /date of birth|birth/.test(heardSoFar()), 'both replies to be spoken', 5000);
+    const heard = heardSoFar();
+    expect(heard).toMatch(/name/);
+    expect(heard).toMatch(/date of birth|birth/);
+    // The name question was asked first, and stays first.
+    expect(heard.indexOf('name')).toBeLessThan(heard.search(/date of birth|birth/));
 
     twilio.close();
   });

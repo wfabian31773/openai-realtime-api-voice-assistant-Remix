@@ -88,11 +88,26 @@ interface LiveTool {
  * caller while the rest is still being written; waiting for the full response
  * throws that away and puts us back at three seconds.
  */
+const NOT_A_SENTENCE_END =
+  /(?:^|\s)(?:Dr|Mr|Mrs|Ms|Prof|Sr|Jr|St|Ave|Blvd|Rd|Ste|Inc|Ltd|Co|Corp|Dept|Approx|vs|etc|a\.m|p\.m|[A-Z])\.$/;
+
 export function splitForSpeech(text: string): string[] {
-  return text
-    .split(/(?<=[.!?])\s+(?=[A-Z0-9"'“])/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const out: string[] = [];
+  for (const piece of text.split(/(?<=[.!?])\s+(?=[A-Z0-9"'“])/)) {
+    const trimmed = piece.trim();
+    if (!trimmed) continue;
+    // A title or an initial ends in a period but does not end a sentence.
+    // Without this, "with Dr. Dwayne Logan" reaches the caller as two separate
+    // utterances — the doctor's title, then their name. That is what happened
+    // on the first live call.
+    const prev = out[out.length - 1];
+    if (prev !== undefined && NOT_A_SENTENCE_END.test(prev)) {
+      out[out.length - 1] = `${prev} ${trimmed}`;
+      continue;
+    }
+    out.push(trimmed);
+  }
+  return out;
 }
 
 function toAnthropicTools(tools: LiveTool[]): AnthropicTool[] {
