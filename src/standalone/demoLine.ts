@@ -199,6 +199,15 @@ interface DemoCall {
   responseActive: boolean;
   pendingSpeech: string[];
   /**
+   * Bumped every time the caller talks over us. A turn's sentences carry the
+   * epoch they were composed under, so anything still arriving from a turn the
+   * caller has already interrupted is dropped instead of played. Without this,
+   * clearing Twilio's buffer only silences what was already sent — the rest of
+   * the abandoned answer plays straight afterwards, which is what the caller
+   * heard when they asked "what was your response?" and got a fragment.
+   */
+  speechEpoch: number;
+  /**
    * The words we asked for, and where that line sits in the transcript.
    *
    * The model is a mouthpiece, but it is still a model: told to "say exactly
@@ -548,6 +557,7 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
     openaiClose: null,
     responseActive: false,
     pendingSpeech: [],
+    speechEpoch: 0,
     requestedLine: null,
     requestedIndex: null,
     spokenHeard: false,
@@ -905,13 +915,17 @@ async function onCallerSaid(call: DemoCall, text: string): Promise<void> {
   // spoken as they finish — which is the entire reason for measuring first
   // token instead of total completion.
   if (call.brain) {
-    const turn = await call.brain.respond(text, (sentence) => speak(call, sentence));
+    const epoch = call.speechEpoch;
+    const turn = await call.brain.respond(text, (sentence) => {
+      if (call.speechEpoch !== epoch) return; // caller talked over this answer
+      speak(call, sentence);
+    });
     console.info(
       `[DEMO-LINE] ${call.callId} brain turn ${turn.ms}ms (first token ${turn.ttftMs ?? '—'}ms)` +
         `${turn.toolsUsed.length ? ` tools=${turn.toolsUsed.join(',')}` : ''}` +
         `${turn.error ? ` ERROR=${turn.error}` : ''}`,
     );
-    if (turn.error && !turn.sentences.length) {
+    if (turn.error && !turn.sentences.length && call.speechEpoch === epoch) {
       // Never leave a caller in silence because a vendor failed.
       speak(call, "I'm sorry — I'm having trouble on my end. Let me have someone call you back.");
     }
@@ -1092,6 +1106,15 @@ function bargeIn(call: DemoCall): void {
   if (call.openai?.readyState === WebSocket.OPEN) {
     send(call.openai, { type: 'response.cancel' });
   }
+  // Twilio's buffer is only what we already SENT. Everything still queued
+  // behind it, and every sentence the brain is still writing for this turn,
+  // belongs to an answer the caller has just told us they don't want.
+  const abandoned = call.pendingSpeech.length;
+  call.pendingSpeech.length = 0;
+  call.speechEpoch += 1;
+  if (abandoned) {
+    console.info(`[DEMO-LINE] ${call.callId} dropped ${abandoned} queued line(s) on barge-in`);
+  }
   // The caller heard only part of that line. Say so in the record, or the
   // transcript claims we said something they never finished hearing.
   if (call.requestedIndex !== null && call.transcript[call.requestedIndex]?.startsWith('AGENT: ')) {
@@ -1132,10 +1155,22 @@ function waitForPlaybackThenEnd(call: DemoCall): void {
   }, playMs);
 }
 
-/** The next queued line, once the one before it has finished playing. */
+/**
+ * Everything queued, once the line before it has finished playing.
+ *
+ * Draining ONE sentence per response.done made the mouth strictly serial: a
+ * five-sentence answer cost five sequential round trips to the TTS session,
+ * and every line after the first logged "queued behind the line still
+ * playing". Splitting still buys the early start — the first sentence goes out
+ * the moment it is written — but there is nothing to gain by paying that
+ * round trip again for each remaining sentence when they are all already in
+ * hand. Speak them as one utterance.
+ */
 function drainSpeech(call: DemoCall): void {
-  const next = call.pendingSpeech.shift();
-  if (next !== undefined) emitSpeech(call, next);
+  if (!call.pendingSpeech.length) return;
+  const rest = call.pendingSpeech.join(' ');
+  call.pendingSpeech.length = 0;
+  emitSpeech(call, rest);
 }
 
 // ---------------------------------------------------------------- teardown

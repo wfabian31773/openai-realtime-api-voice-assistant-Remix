@@ -6,6 +6,7 @@ import {
   type TriageOutcome 
 } from '../config/afterHoursTicketing';
 import { getValidatedTicketIds } from '../config/answeringServiceTicketing';
+import { sanitizeTicketLookupFields, resolveTicketLookupFields } from './ticketFieldSanitizers';
 
 // Categories that don't require staff callback (ticket created for records only)
 const NO_CALLBACK_CATEGORIES: TriageOutcome[] = [
@@ -194,10 +195,14 @@ export class SyncAgentService {
       let resolvedProviderId: number | undefined = undefined;
       let resolvedLocationId: number | undefined = undefined;
       
-      if (params.lastProviderSeen || params.locationOfLastVisit) {
+      // Same cleaning as the simplified path — this one also pays for a bad
+      // name twice, once in /lookup and again in the app's own resolution.
+      const lookupFields = await resolveTicketLookupFields(params, params.callData?.callSid);
+
+      if (lookupFields.lastProviderSeen || lookupFields.locationOfLastVisit) {
         const lookupResult = await ticketingApiClient.lookupProviderAndLocation({
-          providerName: params.lastProviderSeen || undefined,
-          locationName: params.locationOfLastVisit || undefined,
+          providerName: lookupFields.lastProviderSeen,
+          locationName: lookupFields.locationOfLastVisit,
         });
         
         if (lookupResult.success) {
@@ -215,8 +220,8 @@ export class SyncAgentService {
         patientPhone: params.patientPhone,
         patientEmail: params.patientEmail ?? undefined,
         preferredContactMethod: params.preferredContactMethod ?? undefined,
-        lastProviderSeen: params.lastProviderSeen ?? undefined,
-        locationOfLastVisit: params.locationOfLastVisit ?? undefined,
+        lastProviderSeen: lookupFields.lastProviderSeen,
+        locationOfLastVisit: lookupFields.locationOfLastVisit,
         patientBirthMonth: params.patientBirthMonth ?? undefined,
         patientBirthDay: params.patientBirthDay ?? undefined,
         patientBirthYear: params.patientBirthYear ?? undefined,
@@ -610,6 +615,12 @@ export class SyncAgentService {
       console.info(`[SYNC AGENT] ✓ Using callerPhone as patientPhone not provided`);
     }
 
+    // A provider name the ticketing app cannot resolve costs the CALLER a
+    // Schedule-DB fallback — measured at roughly double the round trip, and
+    // 48% of every wait over 15 seconds. Sending "A-Scan" as a doctor buys
+    // that wait for a lookup which cannot possibly succeed.
+    const lookupFields = await resolveTicketLookupFields(params, callSid);
+
     try {
       // Use the new simplified endpoint
       const response = await ticketingApiClient.submitTicket({
@@ -619,8 +630,8 @@ export class SyncAgentService {
         preferredContactMethod: params.preferredContactMethod,
         patientPhone: validatedPhone,
         patientEmail: params.patientEmail,
-        lastProviderSeen: params.lastProviderSeen,
-        locationOfLastVisit: params.locationOfLastVisit,
+        lastProviderSeen: lookupFields.lastProviderSeen,
+        locationOfLastVisit: lookupFields.locationOfLastVisit,
         additionalDetails: params.additionalDetails,
         priority: params.priority,
         callData: callSid ? {

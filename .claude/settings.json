@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '=== MANDATORY CONTEXT — read before proposing anything ==='; cat CLAUDE.md; echo; echo '=== RUNNING STATE ==='; cat docs/observatory/STATE-OF-PLAY.md"
+          }
+        ]
+      }
+    ]
+  }
+}

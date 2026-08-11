@@ -418,16 +418,39 @@ export class ScheduleLookupService {
         category: apt.serviceCategory1, // Using serviceCategory1 instead of removed appointmentCategory
       };
 
-      const isUpcoming = aptDateStr >= todayStr && apt.appointmentStatus === 'Active';
-      if (isUpcoming) {
-        upcoming.push(summary);
-      } else {
-        past.push(summary);
+      const status = String(apt.appointmentStatus ?? '');
+
+      // A future appointment that was cancelled is not upcoming — and it is
+      // not a visit that happened either, so it belongs in neither list.
+      //
+      // Sorting on "not upcoming" alone is what put a REMOVED appointment
+      // dated 2026-12-30 at the top of the past list and had the agent tell a
+      // caller on 2026-08-10 that their last appointment was four months in
+      // the future, in the same breath as "you have no upcoming
+      // appointments". Both sentences came from that one row.
+      if (aptDateStr >= todayStr) {
+        if (status === 'Active') upcoming.push(summary);
+        continue;
       }
+
+      // Only a visit the patient actually had is reported as one. Cancelled
+      // (Removed) and NoShow rows are history, not appointments they attended.
+      if (status === 'Active') past.push(summary);
     }
 
     upcoming.sort((a, b) => a.isoDate.localeCompare(b.isoDate));
     past.sort((a, b) => b.isoDate.localeCompare(a.isoDate));
+
+    // What this lookup actually decided, in one line. A caller was told their
+    // last appointment was a cancelled one four months in the future, and
+    // afterwards there was no way to tell from the log whether the corrected
+    // code was even running. Now there is.
+    console.log(
+      `[ScheduleLookup] ${appointments.length} row(s) as of ${todayStr} -> ` +
+        `${past.length} past visit(s), ${upcoming.length} upcoming; ` +
+        `last visit ${past[0]?.isoDate ?? 'none'}; ` +
+        `${appointments.length - past.length - upcoming.length} not counted (cancelled, no-show, or cancelled-future)`,
+    );
 
     const lastProviderSeen = past[0]?.provider !== 'Unknown' ? past[0]?.provider : undefined;
     const lastLocationSeen = past[0]?.location !== 'Unknown' ? past[0]?.location : undefined;

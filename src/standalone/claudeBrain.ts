@@ -41,8 +41,16 @@ import type { AnsweringServiceMetadata } from '../agents/answeringServiceAgent';
 
 const MODEL = process.env.CLAUDE_BRAIN_MODEL ?? 'claude-haiku-4-5-20251001';
 const ANTHROPIC_VERSION = '2023-06-01';
-/** A caller is on the line. Past this we stop waiting and say something. */
-const TURN_TIMEOUT_MS = Number(process.env.CLAUDE_BRAIN_TIMEOUT_MS ?? 8000);
+/**
+ * A caller is on the line. Past this we stop waiting and say something.
+ *
+ * This is the budget for the WHOLE turn, tool rounds included — it used to be
+ * per round, which meant four rounds could hold a caller for 32 seconds and
+ * once did. 8s was the right number for one round and is too tight for a turn:
+ * a real lookup-then-answer turn measured 8.8s. 15s is the ceiling on how long
+ * a caller waits before we give them words instead of silence.
+ */
+const TURN_TIMEOUT_MS = Number(process.env.CLAUDE_BRAIN_TIMEOUT_MS ?? 15_000);
 /** Tool -> model -> tool. Enough for a lookup then a file; not an infinite loop. */
 const MAX_TOOL_ROUNDS = 4;
 
@@ -88,11 +96,108 @@ interface LiveTool {
  * caller while the rest is still being written; waiting for the full response
  * throws that away and puts us back at three seconds.
  */
-export function splitForSpeech(text: string): string[] {
+/**
+ * The model writes for a screen; the caller has a phone.
+ *
+ * A live call spoke "Your last appointment was on **Wednesday, December 30,
+ * 2026 at 8:00 AM** with **Dr. Dwayne Logan** at **Loma Linda Surgery Center
+ * LLC**." Asterisks are not sound, and they also broke the sentence splitter:
+ * "**Dr." is not preceded by whitespace, so the title guard did not match and
+ * the doctor's name was cut in half again.
+ *
+ * The agent's own instructions are not ours to change, so markdown is removed
+ * here — in the pipeline, where the difference between text and speech lives.
+ */
+export function stripMarkdown(text: string): string {
   return text
-    .split(/(?<=[.!?])\s+(?=[A-Z0-9"'“])/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1') // links and images -> their words
+    .replace(/(\*\*\*|\*\*|\*|__|_|`+)/g, '') // bold, italic, code
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '') // headings
+    .replace(/^\s{0,3}[-*+]\s+/gm, '') // bullets
+    .replace(/[ \t]{2,}/g, ' ');
+}
+
+const NOT_A_SENTENCE_END =
+  /(?:^|\s)(?:Dr|Mr|Mrs|Ms|Prof|Sr|Jr|St|Ave|Blvd|Rd|Ste|Inc|Ltd|Co|Corp|Dept|Approx|vs|etc|a\.m|p\.m|[A-Z])\.$/;
+
+export function splitForSpeech(raw: string): string[] {
+  const text = stripMarkdown(raw);
+  const out: string[] = [];
+  for (const piece of text.split(/(?<=[.!?])\s+(?=[A-Z0-9"'“])/)) {
+    const trimmed = piece.trim();
+    if (!trimmed) continue;
+    // A title or an initial ends in a period but does not end a sentence.
+    // Without this, "with Dr. Dwayne Logan" reaches the caller as two separate
+    // utterances — the doctor's title, then their name. That is what happened
+    // on the first live call.
+    const prev = out[out.length - 1];
+    if (prev !== undefined && NOT_A_SENTENCE_END.test(prev)) {
+      out[out.length - 1] = `${prev} ${trimmed}`;
+      continue;
+    }
+    out.push(trimmed);
+  }
+  return out;
+}
+
+/**
+ * Every tool_use MUST be answered by a tool_result in the very next message.
+ * If it is not, the API rejects the WHOLE history — not just the offending
+ * turn — so one malformed turn kills every later turn of the same call:
+ *
+ *   400 messages.20: `tool_use` ids were found without `tool_result` blocks
+ *
+ * On a live call that is the caller holding a silent phone for 31 seconds.
+ * The loop is built so this cannot happen; this is the last line of defence
+ * if it ever does. It repairs the history rather than letting it 400, and it
+ * names what was wrong so the path that produced it is identified from the
+ * log instead of guessed at.
+ */
+export function repairHistory(msgs: Message[]): number {
+  let repaired = 0;
+  for (let i = 0; i < msgs.length; i++) {
+    const content = msgs[i].content;
+    if (!Array.isArray(content)) continue;
+    const uses = content.filter(
+      (c) => typeof c === 'object' && c !== null && c.type === 'tool_use',
+    ) as Array<Content & { id?: string; name?: string }>;
+    if (!uses.length) continue;
+
+    const next = msgs[i + 1]?.content;
+    const answered = new Set(
+      (Array.isArray(next) ? next : [])
+        .filter((c) => typeof c === 'object' && c !== null && c.type === 'tool_result')
+        .map((c) => (c as { tool_use_id?: string }).tool_use_id),
+    );
+    const orphans = uses.filter((u) => !answered.has(u.id));
+    if (!orphans.length) continue;
+
+    console.error(
+      `[BRAIN] history malformed at messages.${i}: ${orphans.length} tool_use block(s) with ` +
+        `no tool_result (${orphans.map((o) => o.name ?? '?').join(', ')}) — repairing`,
+    );
+    const repair = orphans.map((o) => ({
+      type: 'tool_result' as const,
+      tool_use_id: o.id as string,
+      content: JSON.stringify({ success: false, error: 'tool did not run' }),
+    })) as unknown as Content[];
+    // The results have to land in the message IMMEDIATELY after the tool_use,
+    // so they are folded into whatever is already there rather than inserted
+    // as a message of their own — an extra user message would leave two of
+    // them back to back.
+    if (Array.isArray(next)) {
+      (msgs[i + 1].content as Content[]).unshift(...repair);
+    } else if (msgs[i + 1] !== undefined) {
+      msgs[i + 1] = {
+        role: 'user',
+        content: [...repair, { type: 'text', text: String(next) } as unknown as Content],
+      };
+    } else {
+      msgs.push({ role: 'user', content: repair });
+    }
+    repaired += orphans.length;
+  }
+  return repaired;
 }
 
 function toAnthropicTools(tools: LiveTool[]): AnthropicTool[] {
@@ -197,6 +302,8 @@ export async function createClaudeBrain(
   async function once(
     onSentence: ((s: string) => void) | undefined,
     speak: boolean,
+    /** Last round: answer in words. Another tool call would just burn the turn. */
+    noMoreTools = false,
   ): Promise<{ text: string; toolUses: Array<{ id: string; name: string; input: unknown }>; ttftMs: number | null }> {
     const started = Date.now();
     let ttftMs: number | null = null;
@@ -204,6 +311,8 @@ export async function createClaudeBrain(
     let spokenUpTo = 0;
     const toolUses: Array<{ id: string; name: string; input: unknown }> = [];
     const partials = new Map<number, { id: string; name: string; json: string }>();
+
+    repairHistory(messages);
 
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -220,6 +329,7 @@ export async function createClaudeBrain(
         // of every call is pure waste. Measured at 99% of input tokens saved.
         system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
         tools,
+        ...(noMoreTools ? { tool_choice: { type: 'none' } } : {}),
         messages,
       }),
     });
@@ -297,15 +407,28 @@ export async function createClaudeBrain(
       onSentence?.(s);
     };
 
+    // Where this turn began. A turn that fails rewinds to here, so a caller
+    // who says something that trips us up loses that ONE reply — not the rest
+    // of the call. A live call spent 31 seconds in silence because a malformed
+    // history stayed in the conversation and every later turn 400'd on it.
+    const rewindTo = messages.length;
+
     messages.push({ role: 'user', content: said });
     let ttftMs: number | null = null;
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        // The budget is the whole turn, not each round of it. Four rounds at
+        // eight seconds apiece is a caller holding a silent phone for half a
+        // minute, which is what happened.
+        const left = TURN_TIMEOUT_MS - (Date.now() - started);
+        if (left <= 0) throw new Error('turn timeout');
+        const lastRound = round === MAX_TOOL_ROUNDS - 1;
+
         // Only the LAST round speaks. A tool round's text is usually "let me
         // check" filler, and saying it before the answer doubles the wait.
         const turn = await Promise.race([
-          once(collect, true),
-          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('turn timeout')), TURN_TIMEOUT_MS)),
+          once(collect, true, lastRound),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('turn timeout')), left)),
         ]);
         if (ttftMs === null) ttftMs = turn.ttftMs;
 
@@ -319,21 +442,30 @@ export async function createClaudeBrain(
         for (const u of turn.toolUses) {
           assistantContent.push({ type: 'tool_use', id: u.id, name: u.name, input: u.input });
         }
-        messages.push({ role: 'assistant', content: assistantContent });
 
+        // Run the tools FIRST, then push the pair together. A tool_use that
+        // reaches the history without its tool_result poisons every later turn
+        // of the call, so the two must never be separable — not by a throw,
+        // not by a timeout, not by a future edit to this loop.
         const results: Content[] = [];
         for (const u of turn.toolUses) {
           toolsUsed.push(u.name);
           console.info(`[BRAIN] tool ${u.name} ${JSON.stringify(u.input).slice(0, 120)}`);
           results.push({ type: 'tool_result', tool_use_id: u.id, content: await runTool(u.name, u.input) });
         }
+        messages.push({ role: 'assistant', content: assistantContent });
         messages.push({ role: 'user', content: results });
       }
-      // Ran out of rounds with tools still pending. Say something true.
+      // Unreachable: the last round is asked for words, so it cannot come back
+      // holding tools. Kept as a real failure rather than a silent one.
       console.warn('[BRAIN] hit the tool-round limit');
+      messages.length = rewindTo;
       return { sentences, toolsUsed, ms: Date.now() - started, ttftMs, error: 'tool loop did not settle' };
     } catch (e) {
       console.error('[BRAIN] turn failed:', e);
+      // Rewind. Whatever this turn added is not trustworthy, and leaving it in
+      // place is what turns one bad turn into a dead call.
+      messages.length = rewindTo;
       return {
         sentences,
         toolsUsed,
