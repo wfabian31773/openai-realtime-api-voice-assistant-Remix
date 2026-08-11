@@ -640,28 +640,19 @@ async function addSIPParticipantWithWatchdog(
     }
     sipWatchdogs.delete(conf);
 
-    // Heads-up SMS BEFORE the operator's phone rings — assistant never
-    // connected, so there are no escalation details to include.
-    sendUrgentTransferSms({
-      callerNumber: getCallerNumber(conf) || callerIDNumber,
-      note: 'TECH FALLBACK — assistant never connected; caller transferred directly (no AI summary)',
-    });
-
+    // ONLY TRUE URGENT CALLS reach the on-call phone (operator instruction,
+    // 2026-08-11). The assistant never connected, so no urgency was ever
+    // established — apologize and ask the caller to call back instead of
+    // ringing the operator's personal phone. No SMS either.
     try {
-      // Update the caller's leg with a fallback TwiML
       await client.calls(callSid).update({
         twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">We apologize, but we are experiencing technical difficulties connecting you to our assistant. Please hold while we transfer you to our answering service.</Say>
-  <Pause length="2"/>
-  <Dial callerId="${callerIDNumber}">
-    <Number>${process.env.HUMAN_AGENT_NUMBER || '+18186021567'}</Number>
-  </Dial>
-  <Say voice="Polly.Joanna">We were unable to complete your call. Please try again later or call back during regular business hours. Goodbye.</Say>
+  <Say voice="Polly.Joanna">We apologize, but we are experiencing technical difficulties connecting your call. Please try calling back in a few minutes. If this is a medical emergency, hang up and dial nine one one. Thank you, goodbye.</Say>
   <Hangup/>
 </Response>`
       });
-      console.info(`[WATCHDOG] ✓ Fallback message sent and transfer initiated for ${callSid}`);
+      console.info(`[WATCHDOG] ✓ Fallback apology played for ${callSid} (no operator transfer — assistant never connected, no urgency established)`);
     } catch (fallbackError) {
       console.error(`[WATCHDOG] ✗ Failed to play fallback:`, fallbackError);
     }
@@ -1656,16 +1647,40 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
       return;
     }
 
+    // ONLY TRUE URGENT CALLS reach the on-call phone (operator instruction,
+    // 2026-08-10, repeated 2026-08-11). A mid-call drop on a routine call —
+    // e.g. the assistant's connection dying seconds after a callback ticket
+    // was filed — used to warm-transfer the caller to the operator's personal
+    // phone at all hours. Now: transfer ONLY when the agent had already
+    // escalated (escalate_to_human fired → escalationDetailsMap has details,
+    // i.e. genuine urgency). Otherwise apologize, tell the caller how to get
+    // help, and hang up — no SMS, no call to the operator.
+    const escalation = recoveredCallId ? escalationDetailsMap.get(recoveredCallId) : undefined;
+    if (!escalation) {
+      console.warn(
+        `[SIP-RECOVERY] ${conferenceName}: assistant leg ${status} mid-call with NO urgent escalation — ` +
+          `apologizing and ending caller leg ${callerCallSid} (no operator transfer)`,
+      );
+      await client.calls(callerCallSid).update({
+        twiml: `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">We apologize, our assistant was disconnected. If you already left your information, our team will follow up with you. If you still need assistance, or your call is urgent, please call us back. Thank you, goodbye.</Say>
+  <Hangup/>
+</Response>`,
+      });
+      return;
+    }
+
     const fallbackNumber = HUMAN_AGENT_NUMBER || '+18186021567';
     const callerIdAttribute = envConfig.twilio.phoneNumber
       ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
       : '';
-    // Heads-up SMS BEFORE the operator's phone rings. This path fires when the
-    // assistant leg died mid-call, so escalation details may or may not exist.
+    // Heads-up SMS BEFORE the operator's phone rings. This path fires only for
+    // a mid-call drop on an already-escalated (urgent) call.
     sendUrgentTransferSms({
       callerNumber: getCallerNumber(conferenceName) || callerCall.from,
-      escalationDetails: recoveredCallId ? escalationDetailsMap.get(recoveredCallId) : undefined,
-      note: 'TECH FALLBACK — assistant disconnected mid-call; caller transferred directly (no AI summary)',
+      escalationDetails: escalation,
+      note: 'TECH FALLBACK — assistant disconnected during an URGENT call; caller transferred directly',
     });
     await client.calls(callerCallSid).update({
       twiml: `<?xml version="1.0" encoding="UTF-8"?>
@@ -3404,35 +3419,26 @@ async function observeCall(
                                '+16263821543';
           const humanNumber = process.env.HUMAN_AGENT_NUMBER || '+18186021567';
 
-          // Heads-up SMS BEFORE the operator's phone rings — the assistant
-          // never accepted the call, so no escalation details exist.
-          sendUrgentTransferSms({
-            callerNumber: getCallerNumber(confName) || (from && from !== 'Unknown' ? from : undefined),
-            note: 'TECH FALLBACK — assistant failed to answer; caller transferred directly (no AI summary)',
-          });
-
+          // ONLY TRUE URGENT CALLS reach the on-call phone (operator
+          // instruction, 2026-08-11). The assistant never accepted the call,
+          // so no urgency was ever established — apologize and ask the caller
+          // to call back instead of dialing the operator. No SMS either.
           await client.calls(twilioCallSid!).update({
             twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">We apologize, but we are experiencing technical difficulties connecting you to our assistant. Please hold while we transfer you to our answering service.</Say>
-  <Pause length="2"/>
-  <Dial callerId="${callerNumber}" timeout="30" action="https://${domain}/api/voice/fallback-complete">
-    <Number>${humanNumber}</Number>
-  </Dial>
-  <Say voice="Polly.Joanna">We were unable to complete your call. Please try again later or call back during regular business hours. Goodbye.</Say>
+  <Say voice="Polly.Joanna">We apologize, but we are experiencing technical difficulties connecting your call. Please try calling back in a few minutes. If this is a medical emergency, hang up and dial nine one one. Thank you, goodbye.</Say>
   <Hangup/>
 </Response>`
           });
-          console.info(`[SESSION] ✓ Fallback to human agent initiated for ${twilioCallSid}`);
-          CallDiagnostics.recordStage(callId, 'fallback_to_human', true, { twilioCallSid });
-          CallDiagnostics.completeTrace(callId, 'handoff', 'Accept failed - transferred to human');
+          console.info(`[SESSION] ✓ Accept-failure apology played for ${twilioCallSid} (no operator transfer — no urgency established)`);
+          CallDiagnostics.recordStage(callId, 'fallback_to_human', true, { twilioCallSid, transferred: false });
+          CallDiagnostics.completeTrace(callId, 'handoff', 'Accept failed - apologized and ended call');
           
           if (callLogId) {
             try {
               await storage.updateCallLog(callLogId, {
-                status: 'transferred',
-                transferredToHuman: true,
-                summary: `Accept failed after ${MAX_ACCEPT_RETRIES} attempts - transferred to human. Error: ${lastError.substring(0, 200)}`,
+                status: 'failed',
+                summary: `Accept failed after ${MAX_ACCEPT_RETRIES} attempts - apologized and ended call (no operator transfer). Error: ${lastError.substring(0, 200)}`,
               });
             } catch (logError) {
               console.error(`[SESSION] Failed to update call log for fallback:`, logError);

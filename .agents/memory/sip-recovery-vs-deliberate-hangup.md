@@ -10,3 +10,5 @@ The OpenAI realtime `/hangup` endpoint ends only the AI's SIP leg. The Twilio ca
 **Why the alias:** recovery runs ~750ms after the SIP status callback, by which time teardown may have deleted the live conference→callId maps, so `linkConferenceToCall` records a durable alias at session creation.
 
 **How to apply:** any new code path that ends an OpenAI session on purpose must mark conclusion on success; never mark on generic transport close (that would swallow real crashes). State is process-local — revisit if the voice server ever runs multiple instances.
+
+**Operator policy (2026-08-11, explicit and repeated):** ONLY truly urgent calls may ring the on-call personal phone. All tech-fallback paths (mid-call SIP loss, never-connected watchdog, accept failure) transfer + SMS only when `escalationDetailsMap` has an entry for the call (escalate_to_human fired); otherwise apologize + hang up, no SMS, no dial. Do not add new paths that dial HUMAN_AGENT_NUMBER without an established escalation.
