@@ -1192,21 +1192,29 @@ async function recognizeCaller(callId: string, phone: string): Promise<void> {
   if (!phone || phone.replace(/\D/g, '').length < 10) return;
   try {
     const { scheduleLookupService } = await import('../services/scheduleLookupService');
-    const r = (await scheduleLookupService.lookupByPhone(phone)) as {
-      patientFound?: boolean;
-      patientFirstName?: string;
-      patientLastName?: string;
-      patientDateOfBirth?: string;
-    };
-    if (!r?.patientFound || !r.patientFirstName || !r.patientLastName) {
+    const r = await scheduleLookupService.lookupByPhone(phone);
+
+    // The names live on `patientData`, not on the context root.
+    //
+    // This read used to be `r.patientFirstName` / `r.patientLastName`, which
+    // `PatientScheduleContext` has never had. Both were always undefined, so
+    // the guard below rejected every caller and this whole function was dead —
+    // the exact regression the comment above says it exists to prevent. Seen on
+    // a live call 2026-08-11 22:46: the line asked a recognised patient to
+    // spell his name, the STT heard "Sabian", and only the phone fallback
+    // inside lookupPatient saved the answer.
+    const first = r.patientData?.firstName?.trim();
+    const last = r.patientData?.lastName?.trim();
+
+    if (!r?.patientFound || !first || !last) {
       console.info(`[DEMO-LINE] ${callId} caller not recognised from their number — ordinary flow`);
       return;
     }
     const { updateLedger } = await import('../services/callFactsLedger');
     updateLedger(callId, {
-      matchedFirstName: r.patientFirstName,
-      matchedLastName: r.patientLastName,
-      matchedDob: r.patientDateOfBirth ?? undefined,
+      matchedFirstName: first,
+      matchedLastName: last,
+      matchedDob: r.patientData?.dateOfBirth ?? undefined,
     });
     // No name in the log. The fact of a match is the useful part.
     console.info(`[DEMO-LINE] ${callId} caller RECOGNISED from their number — confirming, not asking`);
