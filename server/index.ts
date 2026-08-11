@@ -452,6 +452,16 @@ async function startServer() {
     console.error('[STARTUP] Demo line failed to mount (rest of the server unaffected):', err);
   }
 
+  // The tool library's HTTP surface. Mounted here, before registerRoutes, for
+  // the same reason as the demo line: nothing should be able to shadow
+  // /api/tools/*, and a failure here must never stop the API server.
+  try {
+    const { mountToolServer } = await import('../src/tools/server');
+    mountToolServer(app);
+  } catch (err) {
+    console.error('[STARTUP] Tool server failed to mount (rest of the server unaffected):', err);
+  }
+
   await new Promise<void>((resolve, reject) => {
     earlyServer.listen(PORT, '0.0.0.0', () => resolve());
     earlyServer.once('error', reject);
