@@ -279,6 +279,69 @@ This is the single highest-value item in the rebuild.
 
 ---
 
+## 4d. Contract compliance — measured against `ticket-workflow/MASTER.md` §9
+
+The operator-dictated Department Ticket Contracts (§9, marked **FINAL**,
+2026-06-11) are the routing spec. Measured against 90 days of voice-attributed
+tickets:
+
+| Dept | §9 contract | Voice tickets | Missing location | Missing provider | Verdict |
+|---|---|---|---|---|---|
+| 1 Optical | **hard-require Location** | 1,685 | **1.9%** | 12.3% | ✅ holding |
+| 2 Surgery | **hard-require Surgeon** | 3,531 | 13.8% | **0.4%** | ✅ holding |
+| 3 Technicians | all medication | 8,288 | 10.5% | 16.7% | ✅ |
+| 4 Billing | C2 — reactivated | 49 | 16.3% | 8.2% | ✅ |
+| 6 Facilities | physical office only | 4 | 0% | 25% | ✅ (was 3 misroutes) |
+| 8 After Hours | review queue only | 988 | 22.4% | 35.8% | — |
+| 9 HVA Hub | all appointments but surgery | 1,563 | 24.6% | 34.7% | — |
+| **15 OCS Hub** | **"voice agent never routes here"** | **591** | 10.8% | 20.1% | ❌ **violation** |
+| **16 Medical Records** | **C3 — no voice routing** | **425** | 24.9% | 32.9% | ❌ **violation** |
+| 17 Locations | *not in §9* | 168 | 0% | 94.0% | ⚠️ undocumented |
+| 18 PCP Support | later spec | 174 | 100% | 100% | — |
+| 7 Marketing | *not in §9* | 10 | 30% | 50% | ⚠️ undocumented |
+
+### The hard-requires work — this is the pattern to keep
+
+**Surgery tickets missing a provider: 0.4% (15 of 3,531). Optical missing a
+location: 1.9% (32 of 1,685).** C5's enforcement architecture — *the app
+refuses with `missingFields`, the agent re-asks conversationally* — is doing
+exactly what it was designed to do.
+
+That is the single most important thing to carry into the rebuild. **Server-side
+refusal beats prompt instruction.** The prompt alone never achieved 0.4%.
+
+### Two live contract violations — 1,016 tickets in 90 days
+
+- **OCS Hub (15) took 591 voice tickets** despite *"Voice agent never routes
+  here (leave blank)."*
+- **Medical Records (16) took 425 voice tickets** despite ruling **C3 — no
+  voice-agent routing**, records being "an entirely new process."
+
+Both are the classifier routing into departments the operator explicitly
+excluded. Neither is enforced anywhere: the department guard shipped in Batch 2a
+allows depts 1/2/3/4/8/9 — **15 and 16 are not on that allow-list**, so either
+the guard is not on this path or it was widened later. Worth confirming in the
+app.
+
+Plus **two undocumented departments taking voice traffic**: Locations (17) with
+168, Marketing (7) with 10. Neither appears in §9.
+
+### Correction to §4c
+
+§4c concluded a failed provider match means *"the ticket does not reach the
+right surgery coordinator."* **That overstated it.** Provider-name matching
+fails 19.7% of the time, but Surgery tickets that end up with **no** provider
+are only 0.4% — so the Schedule-DB fallback described in the skill doc is
+**rescuing the routing almost every time.**
+
+The accurate statement: **the fallback saves the assignment and costs the
+caller the wait.** ~4.8 hours of dead air per 90 days buys a lookup that
+usually succeeds. Still the highest-value fix — resolving the name up front
+removes the wait *and* the fallback — but it is a latency defect, not a
+misrouting defect.
+
+---
+
 ## 5. What the answering service actually does
 
 Department 3 "Technicians Support" is the biggest bucket, but it is **not a
