@@ -441,6 +441,17 @@ export class ScheduleLookupService {
     upcoming.sort((a, b) => a.isoDate.localeCompare(b.isoDate));
     past.sort((a, b) => b.isoDate.localeCompare(a.isoDate));
 
+    // What this lookup actually decided, in one line. A caller was told their
+    // last appointment was a cancelled one four months in the future, and
+    // afterwards there was no way to tell from the log whether the corrected
+    // code was even running. Now there is.
+    console.log(
+      `[ScheduleLookup] ${appointments.length} row(s) as of ${todayStr} -> ` +
+        `${past.length} past visit(s), ${upcoming.length} upcoming; ` +
+        `last visit ${past[0]?.isoDate ?? 'none'}; ` +
+        `${appointments.length - past.length - upcoming.length} not counted (cancelled, no-show, or cancelled-future)`,
+    );
+
     const lastProviderSeen = past[0]?.provider !== 'Unknown' ? past[0]?.provider : undefined;
     const lastLocationSeen = past[0]?.location !== 'Unknown' ? past[0]?.location : undefined;
 

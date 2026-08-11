@@ -194,6 +194,29 @@ describe('speaking before the answer is finished', () => {
     ]);
   });
 
+  // Live call 00:37. The model wrote for a screen: "**Wednesday, December 30,
+  // 2026 at 8:00 AM** with **Dr. Dwayne Logan**". Asterisks are not sound, and
+  // "**Dr." is not preceded by whitespace, so the title guard missed it and
+  // the name was cut in half a second time.
+  it('never sends markdown to the mouth', () => {
+    expect(splitForSpeech('Your visit was **Wednesday** at **8:00 AM**.')).toEqual([
+      'Your visit was Wednesday at 8:00 AM.',
+    ]);
+    expect(splitForSpeech('See `lookup` and _the_ notes.').join(' ')).not.toMatch(/[*_`]/);
+  });
+
+  it('keeps a bolded title attached to the name inside the same bold run', () => {
+    expect(
+      splitForSpeech('That was with **Dr. Dwayne Logan** at **Loma Linda Surgery Center LLC**.'),
+    ).toEqual(['That was with Dr. Dwayne Logan at Loma Linda Surgery Center LLC.']);
+  });
+
+  it('speaks a link as its words, not its url', () => {
+    expect(splitForSpeech('Visit [our site](https://azulvision.com) for details.')).toEqual([
+      'Visit our site for details.',
+    ]);
+  });
+
   it('does not split a date or an abbreviation into pieces', () => {
     expect(splitForSpeech('Your last visit was 03/17/1973 at our Redlands office.')).toHaveLength(1);
   });

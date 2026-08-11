@@ -96,10 +96,32 @@ interface LiveTool {
  * caller while the rest is still being written; waiting for the full response
  * throws that away and puts us back at three seconds.
  */
+/**
+ * The model writes for a screen; the caller has a phone.
+ *
+ * A live call spoke "Your last appointment was on **Wednesday, December 30,
+ * 2026 at 8:00 AM** with **Dr. Dwayne Logan** at **Loma Linda Surgery Center
+ * LLC**." Asterisks are not sound, and they also broke the sentence splitter:
+ * "**Dr." is not preceded by whitespace, so the title guard did not match and
+ * the doctor's name was cut in half again.
+ *
+ * The agent's own instructions are not ours to change, so markdown is removed
+ * here — in the pipeline, where the difference between text and speech lives.
+ */
+export function stripMarkdown(text: string): string {
+  return text
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1') // links and images -> their words
+    .replace(/(\*\*\*|\*\*|\*|__|_|`+)/g, '') // bold, italic, code
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '') // headings
+    .replace(/^\s{0,3}[-*+]\s+/gm, '') // bullets
+    .replace(/[ \t]{2,}/g, ' ');
+}
+
 const NOT_A_SENTENCE_END =
   /(?:^|\s)(?:Dr|Mr|Mrs|Ms|Prof|Sr|Jr|St|Ave|Blvd|Rd|Ste|Inc|Ltd|Co|Corp|Dept|Approx|vs|etc|a\.m|p\.m|[A-Z])\.$/;
 
-export function splitForSpeech(text: string): string[] {
+export function splitForSpeech(raw: string): string[] {
+  const text = stripMarkdown(raw);
   const out: string[] = [];
   for (const piece of text.split(/(?<=[.!?])\s+(?=[A-Z0-9"'“])/)) {
     const trimmed = piece.trim();
