@@ -100,3 +100,34 @@ describe('what counts as the last appointment', () => {
     expect(ctx.upcomingAppointments).toHaveLength(0);
   });
 });
+
+/**
+ * Where the caller's name lives.
+ *
+ * The demo line's caller recognition read `context.patientFirstName` and
+ * `context.patientLastName`. Neither has ever existed on this type — the names
+ * are on `patientData` — so both were always undefined, the guard rejected
+ * every caller, and the whole function was dead code behind an `as {...}` cast
+ * that silenced the compiler. On a live call at 2026-08-11 22:46 the line asked
+ * a recognised patient to spell his name, the STT heard "Sabian" instead of
+ * "Fabian", and only the phone fallback inside lookupPatient saved the answer.
+ *
+ * Pinned from both sides: the names ARE on patientData, and they are NOT at the
+ * root. A reader that goes back to the root fails here rather than on the air.
+ */
+describe('where the caller name lives, for anyone reading this context', () => {
+  it('carries the first and last name on patientData', () => {
+    const ctx = build([JUL_13_ACTIVE]);
+    expect(ctx.patientData?.firstName).toBe('Wayne');
+    expect(ctx.patientData?.lastName).toBe('Fabian');
+  });
+
+  it('does not carry them at the root, whatever a caller might assume', () => {
+    const ctx = build([JUL_13_ACTIVE]) as unknown as Record<string, unknown>;
+    expect(ctx.patientFirstName).toBeUndefined();
+    expect(ctx.patientLastName).toBeUndefined();
+    // `patientName` is the one root-level name field, and it is a display
+    // string — not the first/last pair a ledger or a ticket needs.
+    expect(ctx.patientName).toBe('Wayne Fabian');
+  });
+});
