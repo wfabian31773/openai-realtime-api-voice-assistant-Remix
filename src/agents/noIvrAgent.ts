@@ -1236,9 +1236,19 @@ The ticket will include schedule context (last appointment info) automatically.`
         dialedNumber: metadata.dialedNumber,
         agentUsed: 'no-ivr',
         callStartTime: new Date().toISOString(),
-        // Transcript at filing → the app generates the staff-facing summary
-        // immediately instead of waiting for post-call enrichment.
-        transcript: metadata.getTranscript?.() || undefined,
+        // Transcript deliberately NOT sent at filing.
+        //
+        // The intent was to get the staff-facing summary written immediately.
+        // Measured across 14 days it costs the CALLER instead: the ticketing
+        // app generates that summary inline, before it responds, so the 304
+        // calls (10%) carrying one averaged 7,806ms against 4,245ms for those
+        // that did not — roughly 3.5 seconds of extra silence, mid-call.
+        //
+        // It also buys a worse summary. At filing the call is still going, so
+        // the transcript is partial; those tickets average 269 characters of
+        // summary against 302 for the rest. The post-call update sends the
+        // COMPLETE transcript, and all 2,249 tickets that sent nothing here
+        // still ended up with a summary — 100%. Nothing is lost by waiting.
       });
 
       if (result.error?.includes('Missing required information')) {
@@ -1479,7 +1489,8 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               dialedNumber: metadata.dialedNumber,
               agentUsed: 'no-ivr',
               callStartTime: new Date().toISOString(),
-              transcript: metadata.getTranscript?.() || undefined,
+              // No transcript at filing — same reason as the primary create
+              // path above. The post-call update carries the complete one.
             });
             if (result.success) {
               console.info(`[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}`);
