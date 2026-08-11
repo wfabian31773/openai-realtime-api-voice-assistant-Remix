@@ -600,8 +600,22 @@ export async function createAnsweringServiceAgent(
   handoffToHuman: () => Promise<void>,
   metadata: AnsweringServiceMetadata,
 ): Promise<RealtimeAgent> {
-  const { callId, callerPhone, callLogId, callSid } = metadata;
+  const { callId, callerPhone, callSid } = metadata;
   const agentTag = 'Answering-Service';
+
+  // `callLogId` is deliberately NOT destructured.
+  //
+  // The transport passes it as a getter (`get callLogId() { return
+  // liveCallLogId(); }`) because the call-log row does not exist yet when this
+  // factory runs — it is backfilled after `session.connect()`. Destructuring
+  // evaluates a getter ONCE, right here, and freezes `undefined` for the whole
+  // call. That is the same bug the transport's own comment records having
+  // already fixed for `stampVerifiedIdentity`; it was still live at this second
+  // site, and it is why `patient_found` was false on every answering-service
+  // call in the log while the agent was plainly recognising callers on the air.
+  //
+  // Read it through the metadata object, at the moment it is needed.
+  const currentCallLogId = () => metadata.callLogId;
 
   // D11 (2026-08-01): record every tool call on this line. Until now only azul
   // did, which is why "60 calls promised a callback and no ticket exists"
@@ -610,7 +624,14 @@ export async function createAnsweringServiceAgent(
   // execute wrapped; recording never alters the return value and never throws
   // into the tool. Arguments are allow-listed inside the timeline module, so
   // no name, DOB, phone, or free-text description is persisted.
-  const timelineCtx = { callId, callSid, callLogId, agentSlug: 'answering-service' };
+  const timelineCtx = {
+    callId,
+    callSid,
+    // Same reason as above — a getter, so the flush reads the real id rather
+    // than falling back to callSid.
+    get callLogId() { return currentCallLogId(); },
+    agentSlug: 'answering-service',
+  };
   const recordedTool: typeof tool = ((def: any) =>
     tool({
       ...def,
@@ -668,23 +689,42 @@ export async function createAnsweringServiceAgent(
       openTickets: callerMemory?.openTickets?.length || 0,
     });
 
-    if (scheduleContext?.patientFound && callLogId) {
-      try {
-        // CRITICAL: Update patientName for call log display
-        const patientName = scheduleContext.patientData 
-          ? `${scheduleContext.patientData.firstName || ''} ${scheduleContext.patientData.lastName || ''}`.trim()
-          : scheduleContext.patientName || undefined;
-        
-        await storage.updateCallLog(callLogId, {
-          patientFound: true,
-          patientName: patientName || undefined,
-          lastLocationSeen: scheduleContext.lastLocationSeen || undefined,
-          lastProviderSeen: scheduleContext.lastProviderSeen || undefined,
-        });
-        console.log(`[${agentTag}] Updated call log with patient context: ${patientName || 'unknown'}`);
-      } catch (updateError) {
-        console.error(`[${agentTag}] Failed to update call log:`, updateError);
-      }
+    if (scheduleContext?.patientFound) {
+      // CRITICAL: Update patientName for call log display
+      const patientName = scheduleContext.patientData
+        ? `${scheduleContext.patientData.firstName || ''} ${scheduleContext.patientData.lastName || ''}`.trim()
+        : scheduleContext.patientName || undefined;
+      const found = scheduleContext;
+
+      // The row this wants to update does not exist yet — it is created by the
+      // transport and backfilled after `session.connect()`, which happens after
+      // this factory returns. The old code read `callLogId` here, got
+      // undefined, and skipped the write silently, so `patient_found` was false
+      // on every call in the log whatever the agent actually knew.
+      //
+      // Wait for the id instead of guessing, and do it off the critical path so
+      // nothing here can hold the SIP accept open.
+      void (async () => {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          const id = currentCallLogId();
+          if (id) {
+            try {
+              await storage.updateCallLog(id, {
+                patientFound: true,
+                patientName: patientName || undefined,
+                lastLocationSeen: found.lastLocationSeen || undefined,
+                lastProviderSeen: found.lastProviderSeen || undefined,
+              });
+              console.log(`[${agentTag}] Updated call log with patient context: ${patientName || 'unknown'}`);
+            } catch (updateError) {
+              console.error(`[${agentTag}] Failed to update call log:`, updateError);
+            }
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        console.warn(`[${agentTag}] No callLogId after 5s — patient context not recorded for ${callId}`);
+      })();
     }
   }
 

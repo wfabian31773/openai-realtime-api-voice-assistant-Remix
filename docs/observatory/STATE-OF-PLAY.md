@@ -117,6 +117,45 @@ Honest ledger, because Wayne asked for one.
   also defeated the `Dr.` guard because `**Dr.` has no whitespace before it.
   Markdown is now stripped in the pipeline (the agent's prompt is off-limits).
 
+**Patient lookup was a sequential scan — the whole time (2026-08-11)**
+
+Found while checking why Wayne still heard "December 30". The filter fix was
+correct and deployed; the log that proved it also showed `patient_found = false`
+on every one of his twelve calls. That was the real defect:
+
+| lookup | plan before | after |
+|---|---|---|
+| by phone | Parallel Seq Scan, **7,038 ms** | BitmapOr index scan, **3.5 ms** |
+| by name + DOB | Parallel Seq Scan, **2,235 ms** | Index Scan, **8.5 ms** |
+
+`Schedule` is 965,838 rows / 1,747 MB. `CONTEXT_LOOKUP_TIMEOUT_MS` is 2,000 ms,
+so the by-phone lookup lost that race on essentially every call and silently
+returned "patient not found". **0 of 1,054 inbound calls were identified by
+phone on 2026-08-10 and 08-11**; even the good days before that were 4–5%.
+
+Three causes, all now closed:
+
+1. **The name lookups never used the indexes they were written for.**
+   `Schedule_PatientLastName_lower_idx` and `..._PatientFirstName_lower_idx` are
+   on `lower(col) text_pattern_ops`. The code used Drizzle's `ilike`, which
+   emits `col ILIKE 'x%'` — Postgres cannot answer that from a `lower()`
+   expression index, so **neither index had ever been used, once**. Fixed by
+   writing the predicate the way the index is built (`nameStartsWith()`).
+2. **The 20-row window was taken before cancelled rows were discarded**, so a
+   run of cancellations could push a patient's last real visit out of it.
+   2,315 patients have >20 rows. Raised to 60 (`LOOKUP_ROW_LIMIT`).
+3. **No index existed on `PatientCellPhone` / `PatientHomePhone`.** Added
+   `idx_schedule_cellphone` and `idx_schedule_homephone`, both
+   `CREATE INDEX CONCURRENTLY`, on Wayne's go, 2026-08-11. Both valid, 13 MB each.
+
+Shipped in PR **#164** (`e663d3c`).
+
+**The lesson — the fourth measurement trap.** A `false` in a log column can mean
+"never written", not "measured false". `patient_found` is only written when the
+*phone* stage succeeds; a later name+DOB match never updates it. The zero was
+still real, but the two facts had to be separated before it meant anything.
+Companions to snapshot-vs-history, zero-means-not-instrumented, floor-vs-total.
+
 ---
 
 ## 4. Deploy verification — a failed pull looks exactly like a failed fix
@@ -196,10 +235,11 @@ pipeline work. **Open question for Wayne (§7).**
 
 ## 7. Open items
 
-**Blocked / waiting**
-- 4 commits on `claude/adoring-cori-svpb5r` not yet deployed
-  (`634f47d`, `184b2e7`, `5820798`, `751e51d`). Draft PR **#161**.
-- GitHub rate limit — retry the pull after ~01:34 UTC. **One pull**, not a loop.
+**Waiting on a Replit republish** (merged to `main`, not yet live)
+- **#164** `e663d3c` — the lookup fix above. The two database indexes are
+  already live and helping; the code half needs the deploy.
+- Everything earlier on this branch is merged: #161 `6cf0a69`, #162 `58090cf`,
+  #163 `f898345`.
 
 **Decisions Wayne owes (do not guess these)**
 - What is the real deadline now that Monday has passed?
@@ -218,6 +258,13 @@ pipeline work. **Open question for Wayne (§7).**
   (VA-50433) and the ticketing service warned `Location "Loma Linda Surgery
   Center LLC" not found in system`. That is `classify_request` inside the real
   agent — **do not change it without Wayne's say-so.**
+- **One phone number can carry two different patients, and the lookup blends
+  them.** `lookupByPhone` hands every matching row to `buildContext` without
+  grouping by person; `patientName` comes from `appointments[0]`, so whoever
+  owns the newest row decides whose name the agent uses. Wayne's own number
+  carries him (1973-03-17, 43 rows) and a `John Doe` test record
+  (1980-01-01, 1 row). Needs a group-by-person step and, when more than one
+  person matches, a refusal that asks for a date of birth rather than a guess.
 - `p0Hardening.test.ts` fails to import without `DATABASE_URL` (pre-existing).
 - Task #9: SD Gate B replay — export corpus, replay, fix, report.
 
