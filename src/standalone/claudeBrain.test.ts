@@ -36,7 +36,7 @@ vi.mock('../agents/answeringServiceAgent', () => ({
   })),
 }));
 
-import { createClaudeBrain, splitForSpeech } from './claudeBrain';
+import { createClaudeBrain, splitForSpeech, repairHistory } from './claudeBrain';
 
 /** An Anthropic SSE stream, as the real API sends one. */
 function stream(events: Array<Record<string, unknown>>) {
@@ -76,6 +76,113 @@ beforeEach(() => {
   fetchMock.mockReset();
   lookupInvoke.mockClear();
   process.env.ANTHROPIC_API_KEY = 'test-key';
+});
+
+/**
+ * Live call 2026-08-11 00:15. A turn came back with
+ *   400 messages.20: `tool_use` ids were found without `tool_result` blocks
+ * and the caller sat in silence for 31 seconds. The API rejects the WHOLE
+ * history, not the bad turn, so once one turn leaves the conversation
+ * malformed every later turn of that call is dead too.
+ */
+describe('one bad turn must not kill the call', () => {
+  const bodyOf = (call: number) => JSON.parse(fetchMock.mock.calls[call][1].body as string);
+
+  it('rewinds a failed turn so the next one starts from clean history', async () => {
+    const brain = await createClaudeBrain({ callId: 'c-rewind' });
+    fetchMock.mockResolvedValueOnce(textReply('Thank you for calling.'));
+    await brain!.respond('hello');
+
+    // A turn that blows up mid-flight.
+    fetchMock.mockRejectedValueOnce(new Error('connection reset'));
+    const bad = await brain!.respond('I need my records faxed');
+    expect(bad.error).toBeTruthy();
+
+    fetchMock.mockResolvedValueOnce(textReply('Of course.'));
+    await brain!.respond('are you still there?');
+
+    const sent = bodyOf(2).messages;
+    // The turn that failed left nothing behind — not its user message, and
+    // certainly not half a tool exchange.
+    expect(JSON.stringify(sent)).not.toContain('records faxed');
+    expect(sent[sent.length - 1]).toEqual({ role: 'user', content: 'are you still there?' });
+  });
+
+  it('never sends a tool_use without the tool_result that answers it', async () => {
+    const brain = await createClaudeBrain({ callId: 'c-pairs' });
+    fetchMock
+      .mockResolvedValueOnce(toolReply('lookup_schedule', { first_name: 'Wayne' }))
+      .mockResolvedValueOnce(textReply('Your last visit was July 13th.'));
+    await brain!.respond('when was my last appointment?');
+
+    const sent = bodyOf(1).messages;
+    for (let i = 0; i < sent.length; i++) {
+      const uses = (Array.isArray(sent[i].content) ? sent[i].content : []).filter(
+        (c: { type: string }) => c.type === 'tool_use',
+      );
+      if (!uses.length) continue;
+      const answers = (Array.isArray(sent[i + 1]?.content) ? sent[i + 1].content : []).filter(
+        (c: { type: string }) => c.type === 'tool_result',
+      );
+      expect(answers.map((a: { tool_use_id: string }) => a.tool_use_id).sort()).toEqual(
+        uses.map((u: { id: string }) => u.id).sort(),
+      );
+    }
+  });
+
+  it('repairs a history that is already malformed instead of 400ing on it', () => {
+    // Exactly the shape the live call died on: a tool_use with nothing
+    // answering it, followed by more conversation.
+    const broken = [
+      { role: 'user', content: 'when was my last appointment?' },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'toolu_orphan', name: 'lookup_schedule', input: {} }],
+      },
+      { role: 'user', content: 'hello? are you there?' },
+    ] as Parameters<typeof repairHistory>[0];
+
+    expect(repairHistory(broken)).toBe(1);
+
+    const answers = (broken[2].content as Array<{ type: string; tool_use_id?: string }>).filter(
+      (c) => c.type === 'tool_result',
+    );
+    expect(answers).toHaveLength(1);
+    expect(answers[0].tool_use_id).toBe('toolu_orphan');
+    // Folded into the message immediately after the tool_use — anywhere else
+    // is still a 400, and a message of its own would leave two user messages
+    // back to back.
+    expect(broken).toHaveLength(3);
+    expect((broken[2].content as Array<{ type: string }>)[0].type).toBe('tool_result');
+    // The caller's words are not thrown away to make room for the repair.
+    expect(JSON.stringify(broken[2].content)).toContain('are you there?');
+  });
+
+  it('leaves a well-formed history alone', () => {
+    const fine = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_1', name: 'lookup_schedule', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: '{}' }] },
+    ] as Parameters<typeof repairHistory>[0];
+    const before = JSON.stringify(fine);
+    expect(repairHistory(fine)).toBe(0);
+    expect(JSON.stringify(fine)).toBe(before);
+  });
+
+  it('gives the caller words rather than silence when the loop runs long', async () => {
+    const brain = await createClaudeBrain({ callId: 'c-rounds' });
+    // Every round wants another tool. The last round is asked for words, so
+    // this must still end in something the caller can hear.
+    fetchMock.mockResolvedValue(toolReply('lookup_schedule', { first_name: 'Wayne' }));
+    const spoken: string[] = [];
+    const turn = await brain!.respond('when was my last appointment?', (s) => spoken.push(s));
+
+    // tool_choice: none on the final round — the model is told it cannot ask
+    // for another tool.
+    const last = JSON.parse(fetchMock.mock.calls[fetchMock.mock.calls.length - 1][1].body as string);
+    expect(last.tool_choice).toEqual({ type: 'none' });
+    expect(turn.ms).toBeLessThan(20_000);
+  });
 });
 
 describe('speaking before the answer is finished', () => {
