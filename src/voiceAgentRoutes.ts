@@ -676,22 +676,20 @@ async function addSIPParticipantWithWatchdog(
       clearTimeout(existingWatchdog.maxDurationTimer);
     }
     sipWatchdogs.delete(conf);
-    
+
+    // ONLY TRUE URGENT CALLS reach the on-call phone (operator instruction,
+    // 2026-08-11). The assistant never connected, so no urgency was ever
+    // established — apologize and ask the caller to call back instead of
+    // ringing the operator's personal phone. No SMS either.
     try {
-      // Update the caller's leg with a fallback TwiML
       await client.calls(callSid).update({
         twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">We apologize, but we are experiencing technical difficulties connecting you to our assistant. Please hold while we transfer you to our answering service.</Say>
-  <Pause length="2"/>
-  <Dial callerId="${callerIDNumber}">
-    <Number>${process.env.HUMAN_AGENT_NUMBER || '+18186021567'}</Number>
-  </Dial>
-  <Say voice="Polly.Joanna">We were unable to complete your call. Please try again later or call back during regular business hours. Goodbye.</Say>
+  <Say voice="Polly.Joanna">We apologize, but we are experiencing technical difficulties connecting your call. Please try calling back in a few minutes. If this is a medical emergency, hang up and dial nine one one. Thank you, goodbye.</Say>
   <Hangup/>
 </Response>`
       });
-      console.info(`[WATCHDOG] ✓ Fallback message sent and transfer initiated for ${callSid}`);
+      console.info(`[WATCHDOG] ✓ Fallback apology played for ${callSid} (no operator transfer — assistant never connected, no urgency established)`);
     } catch (fallbackError) {
       console.error(`[WATCHDOG] ✗ Failed to play fallback:`, fallbackError);
     }
@@ -993,6 +991,7 @@ const aircallDTMFSent = new Set<string>();
 
 // Import escalation details from shared store (avoids circular dependency with noIvrAgent.ts)
 import { escalationDetailsMap, type EscalationDetails } from './services/escalationStore';
+import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
 
 // Log conversation history (PHI-protected)
 function logHistoryItem(item: RealtimeItem, callId?: string): void {
@@ -1109,6 +1108,66 @@ async function fileUrgentHandoffFallbackTicket(
   }
 }
 
+/**
+ * URGENT-TRANSFER SMS — the operator's heads-up before their phone rings.
+ *
+ * Until 2026-08-06 only the normal escalation path (addHumanAgent) sent the
+ * "📞 INCOMING TRANSFER" SMS. The three TECHNICAL FALLBACK paths — SIP
+ * watchdog, accept-failure, and SIP-recovery — all dial HUMAN_AGENT_NUMBER
+ * directly with <Dial> TwiML and sent NOTHING, so the operator's phone rang
+ * with zero context (and a missed one looked like a random number). Observed
+ * 2026-08-05 17:54 PT: a 224s no-ivr call lost its assistant leg, the caller
+ * was auto-transferred, and the operator missed it because no SMS arrived.
+ *
+ * Fire-and-forget by design: SMS failure must never delay or block the dial.
+ * Callers pass whatever context they have; escalation details are included
+ * when the call got far enough to record them.
+ */
+function sendUrgentTransferSms(opts: {
+  callerNumber?: string;
+  escalationDetails?: EscalationDetails;
+  /** Extra context line for fallback paths, e.g. why this is a direct dial. */
+  note?: string;
+}): void {
+  const to = envConfig.twilio.urgentNotificationNumber;
+  const from = envConfig.twilio.phoneNumber;
+  if (!to || !from) {
+    console.log('[HANDOFF] ℹ️ SMS notification skipped - URGENT_NOTIFICATION_NUMBER or TWILIO_PHONE_NUMBER not configured');
+    return;
+  }
+  (async () => {
+    try {
+      const client = twilioClient ?? (twilioClient = await getTwilioClient());
+      const callTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/Los_Angeles' });
+      const d = opts.escalationDetails;
+
+      let smsBody = `📞 INCOMING TRANSFER - ${callTime}\n`;
+      smsBody += `From: ${opts.callerNumber || 'Unknown'}\n`;
+      if (opts.note) {
+        smsBody += `\n⚠️ ${opts.note}\n`;
+      }
+      if (d) {
+        if (d.callerType === 'healthcare_provider' && d.providerInfo) {
+          smsBody += `\n👨‍⚕️ PROVIDER CALL\nProvider: ${d.providerInfo}\n`;
+        } else if (d.callerType === 'patient_urgent') {
+          smsBody += `\n🚨 URGENT PATIENT\n`;
+        }
+        if (d.patientFirstName) smsBody += `Patient: ${d.patientFirstName} ${d.patientLastName || ''}\n`;
+        if (d.patientDob) smsBody += `DOB: ${d.patientDob}\n`;
+        if (d.callbackNumber) smsBody += `Callback: ${d.callbackNumber}\n`;
+        if (d.reason) smsBody += `\nReason: ${d.reason}\n`;
+        if (d.symptomsSummary) smsBody += `Symptoms: ${d.symptomsSummary}\n`;
+      }
+      smsBody += `\n📱 Connecting patient to you now...`;
+
+      await client.messages.create({ body: smsBody, from, to });
+      console.log('[HANDOFF] ✓ SMS notification sent to', to);
+    } catch (smsError) {
+      console.error('[HANDOFF] ⚠️ SMS notification failed:', smsError);
+    }
+  })();
+}
+
 // Handle human agent handoff
 type HandoffOutcome = { ok: true; destination: string } | { ok: false; status: string; reason: string };
 
@@ -1222,56 +1281,8 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     
     // STEP 1: Send SMS notification immediately (fire and forget)
     // Provider gets heads-up while we're dialing them
-    // Use centralized config for production compatibility
-    const URGENT_NOTIFICATION_NUMBER = envConfig.twilio.urgentNotificationNumber;
-    if (URGENT_NOTIFICATION_NUMBER && policy.policy !== 'pcp') {
-      (async () => {
-        try {
-          const callerNumber = callerID || 'Unknown';
-          const callTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/Los_Angeles' });
-          
-          let smsBody = `📞 INCOMING TRANSFER - ${callTime}\n`;
-          smsBody += `From: ${callerNumber}\n`;
-          
-          if (escalationDetails) {
-            if (escalationDetails.callerType === 'healthcare_provider' && escalationDetails.providerInfo) {
-              smsBody += `\n👨‍⚕️ PROVIDER CALL\n`;
-              smsBody += `Provider: ${escalationDetails.providerInfo}\n`;
-            } else if (escalationDetails.callerType === 'patient_urgent') {
-              smsBody += `\n🚨 URGENT PATIENT\n`;
-            }
-            
-            if (escalationDetails.patientFirstName) {
-              smsBody += `Patient: ${escalationDetails.patientFirstName} ${escalationDetails.patientLastName || ''}\n`;
-            }
-            if (escalationDetails.patientDob) {
-              smsBody += `DOB: ${escalationDetails.patientDob}\n`;
-            }
-            if (escalationDetails.callbackNumber) {
-              smsBody += `Callback: ${escalationDetails.callbackNumber}\n`;
-            }
-            if (escalationDetails.reason) {
-              smsBody += `\nReason: ${escalationDetails.reason}\n`;
-            }
-            if (escalationDetails.symptomsSummary) {
-              smsBody += `Symptoms: ${escalationDetails.symptomsSummary}\n`;
-            }
-          }
-          
-          smsBody += `\n📱 Connecting patient to you now...`;
-          
-          await twilioClient!.messages.create({
-            body: smsBody,
-            from: twilioPhoneNumber,
-            to: URGENT_NOTIFICATION_NUMBER,
-          });
-          console.log('[HANDOFF] ✓ SMS notification sent to', URGENT_NOTIFICATION_NUMBER);
-        } catch (smsError) {
-          console.error('[HANDOFF] ⚠️ SMS notification failed:', smsError);
-        }
-      })();
-    } else {
-      console.log('[HANDOFF] ℹ️ SMS notification skipped - URGENT_NOTIFICATION_NUMBER not configured');
+    if (policy.policy !== 'pcp') {
+      sendUrgentTransferSms({ callerNumber: callerID, escalationDetails });
     }
     
     let sequentialPcpAnswered = false;
@@ -1651,10 +1662,63 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
       return;
     }
 
+    const recoveredCallId = getCallIdByConference(conferenceName) ?? callIdForConference(conferenceName);
+
+    // A terminated SIP leg is NOT automatically a failure. When WE ended the
+    // session on purpose (terminate_call after a goodbye, dead-air watchdog),
+    // the caller lingering on the line is a finished call whose owner hasn't
+    // hung up — the right move is to hang their leg up, not to warm-transfer
+    // them to the on-call number. Before this check (2026-08-10), finished
+    // ghost calls and post-goodbye lingerers were ringing the operator's phone
+    // as "TECH FALLBACK" transfers several times a day.
+    const conclusion = getCallConclusion(recoveredCallId);
+    if (conclusion) {
+      console.info(`[SIP-RECOVERY] ${conferenceName}: session concluded deliberately (${conclusion.reason}) — hanging up lingering caller leg ${callerCallSid}`);
+      await client.calls(callerCallSid).update({
+        twiml: `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Thank you for calling Azul Vision. Goodbye.</Say>
+  <Hangup/>
+</Response>`,
+      });
+      return;
+    }
+
+    // ONLY TRUE URGENT CALLS reach the on-call phone (operator instruction,
+    // 2026-08-10, repeated 2026-08-11). A mid-call drop on a routine call —
+    // e.g. the assistant's connection dying seconds after a callback ticket
+    // was filed — used to warm-transfer the caller to the operator's personal
+    // phone at all hours. Now: transfer ONLY when the agent had already
+    // escalated (escalate_to_human fired → escalationDetailsMap has details,
+    // i.e. genuine urgency). Otherwise apologize, tell the caller how to get
+    // help, and hang up — no SMS, no call to the operator.
+    const escalation = recoveredCallId ? escalationDetailsMap.get(recoveredCallId) : undefined;
+    if (!escalation) {
+      console.warn(
+        `[SIP-RECOVERY] ${conferenceName}: assistant leg ${status} mid-call with NO urgent escalation — ` +
+          `apologizing and ending caller leg ${callerCallSid} (no operator transfer)`,
+      );
+      await client.calls(callerCallSid).update({
+        twiml: `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">We apologize, our assistant was disconnected. If you already left your information, our team will follow up with you. If you still need assistance, or your call is urgent, please call us back. Thank you, goodbye.</Say>
+  <Hangup/>
+</Response>`,
+      });
+      return;
+    }
+
     const fallbackNumber = HUMAN_AGENT_NUMBER || '+18186021567';
     const callerIdAttribute = envConfig.twilio.phoneNumber
       ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
       : '';
+    // Heads-up SMS BEFORE the operator's phone rings. This path fires only for
+    // a mid-call drop on an already-escalated (urgent) call.
+    sendUrgentTransferSms({
+      callerNumber: getCallerNumber(conferenceName) || callerCall.from,
+      escalationDetails: escalation,
+      note: 'TECH FALLBACK — assistant disconnected during an URGENT call; caller transferred directly',
+    });
     await client.calls(callerCallSid).update({
       twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -1992,7 +2056,16 @@ async function observeCall(
   
   // Handoff callback for all agents
   const handoffCallback = async () => {
-    await addHumanAgent(callId);
+    const outcome = await addHumanAgent(callId);
+    if (!outcome.ok) {
+      // A blocked/failed handoff must surface as a tool failure — otherwise
+      // the agent tells the caller "transferring you now" while nobody is
+      // dialed and no urgent SMS goes out (observed 2026-08-04 03:55 UTC).
+      // Only the fixed status code goes to the model/tool trace; the detailed
+      // reason (which may contain raw provider error text) stays server-side.
+      console.error(`[HANDOFF] callback failed for ${callId}: ${outcome.status} (${outcome.reason})`);
+      throw new Error(`handoff_failed:${outcome.status}`);
+    }
   };
   
   // Patient info callback for after-hours and no-ivr agents
@@ -2693,6 +2766,11 @@ async function observeCall(
             { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` } },
           );
           console.warn(`[DEAD-AIR] hangup for ${callId} → ${res.status}`);
+          // Deliberate, successful hangup: a dead line must be hung up by SIP
+          // recovery, not "rescued" — transferring it would ring the on-call
+          // number with silence. Marked only on hangup success so a genuine
+          // failure still gets the human fallback.
+          if (res.ok) markCallConcluded(callId, 'dead_air_watchdog');
         } else {
           console.error('[DEAD-AIR] OPENAI_API_KEY missing — cannot hang up');
         }
@@ -2709,6 +2787,9 @@ async function observeCall(
   const confName = getConferenceName(callId); // Uses wrapper with fallback to service cache
   if (confName) {
     conferenceNameToCallID[confName] = callId;
+    // Durable alias for SIP recovery: the live maps above are deleted during
+    // teardown, before recovery's delayed check runs. See callConclusion.ts.
+    linkConferenceToCall(confName, callId);
     // Note: caller-ready promise is created EARLIER in the incoming-call handler
     // to avoid race condition where customer joins before this code runs
     console.info(`[SESSION] Mapped conference ${confName} to callId ${callId}`);
@@ -2896,6 +2977,9 @@ async function observeCall(
                             { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` } },
                           );
                           console.info(`[NEW-CORE] wrap hangup for ${callId} → ${res.status}`);
+                          // Deliberate, successful wrap hangup — SIP recovery
+                          // must hang up the lingering caller, not transfer.
+                          if (res.ok) markCallConcluded(callId, 'new_core_wrap');
                         }
                       } catch (e) {
                         console.warn(`[NEW-CORE] hangup failed for ${callId}:`, e);
@@ -3371,29 +3455,27 @@ async function observeCall(
                                (from && from !== 'Unknown' ? from : undefined) || 
                                '+16263821543';
           const humanNumber = process.env.HUMAN_AGENT_NUMBER || '+18186021567';
-          
+
+          // ONLY TRUE URGENT CALLS reach the on-call phone (operator
+          // instruction, 2026-08-11). The assistant never accepted the call,
+          // so no urgency was ever established — apologize and ask the caller
+          // to call back instead of dialing the operator. No SMS either.
           await client.calls(twilioCallSid!).update({
             twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">We apologize, but we are experiencing technical difficulties connecting you to our assistant. Please hold while we transfer you to our answering service.</Say>
-  <Pause length="2"/>
-  <Dial callerId="${callerNumber}" timeout="30" action="https://${domain}/api/voice/fallback-complete">
-    <Number>${humanNumber}</Number>
-  </Dial>
-  <Say voice="Polly.Joanna">We were unable to complete your call. Please try again later or call back during regular business hours. Goodbye.</Say>
+  <Say voice="Polly.Joanna">We apologize, but we are experiencing technical difficulties connecting your call. Please try calling back in a few minutes. If this is a medical emergency, hang up and dial nine one one. Thank you, goodbye.</Say>
   <Hangup/>
 </Response>`
           });
-          console.info(`[SESSION] ✓ Fallback to human agent initiated for ${twilioCallSid}`);
-          CallDiagnostics.recordStage(callId, 'fallback_to_human', true, { twilioCallSid });
-          CallDiagnostics.completeTrace(callId, 'handoff', 'Accept failed - transferred to human');
+          console.info(`[SESSION] ✓ Accept-failure apology played for ${twilioCallSid} (no operator transfer — no urgency established)`);
+          CallDiagnostics.recordStage(callId, 'fallback_to_human', true, { twilioCallSid, transferred: false });
+          CallDiagnostics.completeTrace(callId, 'handoff', 'Accept failed - apologized and ended call');
           
           if (callLogId) {
             try {
               await storage.updateCallLog(callLogId, {
-                status: 'transferred',
-                transferredToHuman: true,
-                summary: `Accept failed after ${MAX_ACCEPT_RETRIES} attempts - transferred to human. Error: ${lastError.substring(0, 200)}`,
+                status: 'failed',
+                summary: `Accept failed after ${MAX_ACCEPT_RETRIES} attempts - apologized and ended call (no operator transfer). Error: ${lastError.substring(0, 200)}`,
               });
             } catch (logError) {
               console.error(`[SESSION] Failed to update call log for fallback:`, logError);

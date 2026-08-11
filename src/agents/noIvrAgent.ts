@@ -17,6 +17,7 @@ import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
 import { storage } from "../../server/storage";
 import { escalationDetailsMap } from "../services/escalationStore";
+import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
 
 const CONTEXT_LOOKUP_TIMEOUT_MS = 2000;
@@ -1342,6 +1343,12 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
         );
         if (response.ok) {
           console.log(`[TOOL] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
+          // Deliberate, successful hangup — SIP recovery must hang up the
+          // lingering caller leg, not "rescue" a finished call by transferring
+          // it to a human. Marked only after the guard above and only on a
+          // successful hangup, so escalations-in-flight and failed hangups
+          // still get the transfer safety net.
+          markCallConcluded(callId, `terminate_call:${params.reason}`);
           return { success: true, reason: params.reason };
         } else {
           const text = await response.text().catch(() => "");
@@ -1407,7 +1414,7 @@ A ticket is for something a human must DO.
 PREREQUISITE: For medical emergencies — collect caller info BEFORE calling this tool.
 For healthcare provider calls — escalate immediately with whatever info you have.`,
     parameters: z.object({
-      reason: z.string().describe("Specific urgent symptoms or provider details - NOT general frustration"),
+      reason: z.string().describe("Specific urgent symptoms or provider details - NOT general frustration. ALWAYS write in English, even if the caller speaks another language (this goes to English-speaking staff via SMS)."),
       caller_type: z
         .enum(["patient_urgent_medical", "healthcare_provider", "patient_unresponsive"])
         .describe("patient_urgent_medical=true emergency, healthcare_provider=Dr/nurse/hospital, patient_unresponsive=cannot communicate after 3 attempts"),
@@ -1415,8 +1422,8 @@ For healthcare provider calls — escalate immediately with whatever info you ha
       patient_last_name: z.string().optional().describe("Patient last name if collected"),
       patient_dob: z.string().optional().describe("Patient date of birth if collected"),
       callback_number: z.string().optional().describe("Callback number if collected"),
-      symptoms_summary: z.string().optional().describe("Summary of urgent symptoms if applicable"),
-      provider_info: z.string().optional().describe("Provider name/facility if healthcare provider call"),
+      symptoms_summary: z.string().optional().describe("Summary of urgent symptoms if applicable. ALWAYS write in English regardless of the caller's language."),
+      provider_info: z.string().optional().describe("Provider name/facility if healthcare provider call. ALWAYS write in English regardless of the caller's language."),
     }),
     execute: async (params) => {
       console.info("[HANDOFF] escalate_to_human tool called:", {
