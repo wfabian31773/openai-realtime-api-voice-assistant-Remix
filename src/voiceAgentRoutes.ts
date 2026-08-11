@@ -461,15 +461,52 @@ interface SIPWatchdog {
 const sipWatchdogs = new Map<string, SIPWatchdog>();
 const sipConferenceLifecycle = new SipConferenceLifecycle();
 
-// Cancel watchdog when webhook arrives (also clears max-duration timer)
+/**
+ * The OpenAI webhook arrived: the SIP leg connected, so the CONNECT watchdog
+ * has done its job and stops. The max-duration ceiling does NOT stop.
+ *
+ * It used to. Both timers were cleared here, so once a call connected the only
+ * thing that could still end a long one was the DB reconciler — and that only
+ * inspects rows marked in_progress/ringing/initiated. A call whose row reads
+ * 'completed' while the leg is still up was caught by nothing at all.
+ *
+ * Measured over 11 days: 112 answering-service calls ran past ten minutes,
+ * averaging 22, and one ran FOUR HOURS — roughly $30 of OpenAI on a single
+ * call. 36 escaped past 16 minutes, which the 15-minute cap should have
+ * caught. The 41 that did stop around 15 minutes are the ones where the
+ * ceiling happened to still be armed by another path.
+ *
+ * Keeping it armed is the whole fix. If the call ends normally first, the
+ * timer fires afterwards against a finished call and Twilio answers 20404 —
+ * which terminateOrphanedSIPCall already treats as success.
+ */
 function cancelSIPWatchdog(conferenceName: string) {
   const watchdog = sipWatchdogs.get(conferenceName);
   if (watchdog) {
     clearTimeout(watchdog.timer);
-    clearTimeout(watchdog.maxDurationTimer);
-    sipWatchdogs.delete(conferenceName);
-    console.info(`[WATCHDOG] ✓ Cancelled for ${conferenceName} - webhook received`);
+    // Deliberately NOT maxDurationTimer — that is the ceiling, and it has to
+    // outlive connect. The entry stays in the map so the ceiling can still
+    // find sipCallSid when it fires.
+    console.info(
+      `[WATCHDOG] ✓ Connect watchdog cancelled for ${conferenceName} — webhook received; ` +
+        `max-duration ceiling stays armed`,
+    );
   }
+}
+
+/**
+ * The call really ended. Release the ceiling and forget the conference.
+ *
+ * Every terminal path calls this so the timer map cannot grow without bound.
+ * Safe to call twice, and safe for a conference that was never tracked.
+ */
+function releaseSIPWatchdog(conferenceName: string, reason: string): void {
+  const watchdog = sipWatchdogs.get(conferenceName);
+  if (!watchdog) return;
+  clearTimeout(watchdog.timer);
+  clearTimeout(watchdog.maxDurationTimer);
+  sipWatchdogs.delete(conferenceName);
+  console.info(`[WATCHDOG] released ${conferenceName} (${reason})`);
 }
 
 // CRITICAL: Terminate orphaned SIP call when caller disconnects before call is registered
@@ -6610,9 +6647,14 @@ export function setupVoiceAgentRoutes(app: Express): void {
     // Handle session cleanup when call ends
     // Trigger on participant-leave (caller hangs up) or conference-end (conference terminates)
     if ((event === 'participant-leave' && label === 'customer') || event === 'conference-end') {
+      // The call is over, so the max-duration ceiling is no longer needed.
+      // It now survives connect (see cancelSIPWatchdog), which means SOMETHING
+      // has to release it or the timer map grows for the life of the process.
+      if (friendlyName) releaseSIPWatchdog(friendlyName, event);
+
       // Notify lifecycle coordinator of termination event
       // Try multiple ID resolution strategies since mappings may be pending
-      const resolvedCallLogId = conferenceSidToCallLogId[conferenceSid] 
+      const resolvedCallLogId = conferenceSidToCallLogId[conferenceSid]
         || (callId ? callMetadataForDB.get(callId)?.dbCallLogId : undefined)
         || (callId ? callLifecycleCoordinator.getCallByAnyId(callId)?.callLogId : undefined);
       
