@@ -47,6 +47,14 @@ reconcile.** One canonical `create_ticket`, snake_case on the wire, numeric IDs.
 | 12 | CEC Networking | CEC Networking | — |
 | **16** | **absent** | **Medical Records** | — |
 
+> **⚠️ SUPERSEDED — read `TICKETING-ANALYSIS.md` §0 first.**
+> The two "live defects" below were written before I queried the Support Center
+> database. **Both claims about misrouting are wrong.** After Hours (dept 8)
+> received 999 tickets in 90 days and Medical Records (16) received 467 — both
+> route fine, because the endpoint carrying 97% of the volume classifies
+> server-side and never reads these constants. The constants are stale dead
+> code, not a routing bug. Corrected analysis is in Part 3.
+
 Two live defects fall out of this:
 
 - **After-hours is department 3 in `afterHoursTicketing.ts`, but 3 is Tech
