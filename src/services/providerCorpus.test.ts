@@ -86,12 +86,35 @@ describe('the measured improvement', () => {
     expect(pct).toBeGreaterThanOrEqual(83);
   });
 
-  it('never invents a match for someone genuinely absent', () => {
-    // Evelyn Perez is not in the providers table. 131 failures, and cleaning
-    // the name cannot fix that — it is a data gap, and must stay visible.
+  it('never invents a match for someone the ticketing app has not got', () => {
+    // Evelyn Perez, 131 failures. Cleaning the name cannot fix this and must
+    // not disguise it.
+    //
+    // CORRECTION: this was first recorded as "genuinely absent". That was
+    // wrong. `si_providers` in the Eye Care Patient Console — the
+    // authoritative NextGen mirror, synced daily — carries "Evelyn Perez, OD"
+    // with 1,076 appointments in 90 days. She is missing from the TICKETING
+    // APP's copy only. The gap is synchronisation, not data.
     const perez = sanitizeProviderName('Evelyn Perez, OD');
     expect(perez.value).toBe('Evelyn Perez');
     expect(resolvesInProvidersTable(perez.value!)).toBe(false);
+  });
+
+  it('cannot fix the drift class — that needs the mirror, not a string rule', () => {
+    // Seven providers carrying 11,296 appointments in 90 days are unreachable
+    // by ANY cleaning, because the two systems hold different names for the
+    // same person. Recorded so nobody expects the sanitizer to solve it.
+    const unreachable = [
+      ['Timothy Hammill, OD', 'timothy hammil'],       // spelling: one L vs two
+      ['Talin Khachatoor Sarkissian, O.D.', 'talin khachatoor'], // truncated
+      ['Claudia Montana Collins, O.D.', 'claudia collins'],      // middle name
+      ['Chris Ciampa, O.D.', 'christopher ciampa'],    // short form
+    ] as const;
+    for (const [canonical, inTicketing] of unreachable) {
+      const out = sanitizeProviderName(canonical);
+      expect(out.dropped).toBe(false);
+      expect(out.value!.toLowerCase()).not.toBe(inTicketing);
+    }
   });
 });
 

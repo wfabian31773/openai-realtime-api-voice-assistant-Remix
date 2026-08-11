@@ -52,7 +52,12 @@ export const PROVIDER_FAILURE_CORPUS: CorpusEntry[] = [
 
   // ---- Real people whose credential suffix broke the match. ----
   { raw: 'Todd Mishima, OD', n: 132, expect: 'clean', inTable: true },
-  { raw: 'Evelyn Perez, OD', n: 131, expect: 'clean', inTable: false }, // genuinely absent
+  // CORRECTION (2026-08-11): first recorded as "genuinely absent". Wrong.
+  // `si_providers` in the Eye Care Patient Console — the authoritative NextGen
+  // mirror, synced daily — has "Evelyn Perez, OD" with 1,076 appointments in
+  // 90 days. She is absent only from the ticketing app's stale copy. See
+  // docs/rebuild/IDENTITY-DRIFT.md.
+  { raw: 'Evelyn Perez, OD', n: 131, expect: 'clean', inTable: false }, // absent from TICKETING only
   { raw: 'Amir Shama, OD', n: 81, expect: 'clean', inTable: true },
   { raw: 'Guadalupe Rocha, OD', n: 18, expect: 'clean', inTable: true },
   { raw: 'Dennis Sugiyama, OD', n: 12, expect: 'clean', inTable: true },
