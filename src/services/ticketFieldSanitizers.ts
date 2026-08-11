@@ -173,3 +173,72 @@ export function sanitizeTicketLookupFields(
     locationOfLastVisit: location.value,
   };
 }
+
+/**
+ * The same two fields, checked against the one source of truth.
+ *
+ * The string rules above are guesses about what a provider name looks like.
+ * This asks the NextGen mirror instead. Where the two disagree, the mirror
+ * wins — that is the whole point of having one source of truth.
+ *
+ * What it adds over the string rules alone:
+ *
+ *   - A name the mirror has never heard of is not sent. No hardcoded list of
+ *     test codes can keep up with what the schedule invents; the mirror simply
+ *     knows who exists.
+ *   - A provider who exists but has seen nobody in 90 days is flagged, because
+ *     routing a ticket to someone who has left is worse than not routing it.
+ *   - The drift class becomes VISIBLE. When the Console knows a provider and
+ *     we can predict the ticketing app will still miss them, that is logged
+ *     rather than silently costing the caller five seconds.
+ *
+ * Never throws and never blocks: if the Console is unreachable this degrades
+ * to exactly the string-rule behaviour.
+ */
+export async function resolveTicketLookupFields(
+  input: { lastProviderSeen?: string | null; locationOfLastVisit?: string | null },
+  callSid?: string,
+): Promise<{ lastProviderSeen?: string; locationOfLastVisit?: string }> {
+  const base = sanitizeTicketLookupFields(input, callSid);
+
+  // Lazily imported so the pure string path stays dependency-free and the
+  // sanitizer remains testable without a database.
+  const { lookupProvider, lookupLocation, isDirectoryConfigured } = await import('./consoleDirectory');
+  if (!isDirectoryConfigured()) return base;
+
+  const notes: string[] = [];
+  const out = { ...base };
+
+  if (base.lastProviderSeen) {
+    try {
+      const hit = await lookupProvider(base.lastProviderSeen);
+      if (!hit) {
+        notes.push(`provider-unknown-to-nextgen:${base.lastProviderSeen}`);
+        out.lastProviderSeen = undefined;
+      } else if (hit.volume90d === 0) {
+        notes.push(`provider-inactive-90d:${hit.canonical}`);
+      }
+    } catch {
+      /* directory unavailable — keep the string-rule answer */
+    }
+  }
+
+  if (base.locationOfLastVisit) {
+    try {
+      const hit = await lookupLocation(base.locationOfLastVisit);
+      if (hit && hit.facilityKind && hit.facilityKind !== 'clinic') {
+        // The ticketing app's `locations` table holds clinics only, so a
+        // surgery center or screening site cannot resolve there no matter how
+        // it is spelled. Say so once, here, instead of losing it silently.
+        notes.push(`location-not-a-clinic:${hit.canonical} (${hit.facilityKind})`);
+      } else if (!hit) {
+        notes.push(`location-unknown-to-nextgen:${base.locationOfLastVisit}`);
+      }
+    } catch {
+      /* keep the string-rule answer */
+    }
+  }
+
+  if (notes.length) console.info(`[DIRECTORY] ${callSid ?? ''} ${notes.join(' | ')}`);
+  return out;
+}

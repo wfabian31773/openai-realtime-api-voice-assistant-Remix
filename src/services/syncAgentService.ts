@@ -6,7 +6,7 @@ import {
   type TriageOutcome 
 } from '../config/afterHoursTicketing';
 import { getValidatedTicketIds } from '../config/answeringServiceTicketing';
-import { sanitizeTicketLookupFields } from './ticketFieldSanitizers';
+import { sanitizeTicketLookupFields, resolveTicketLookupFields } from './ticketFieldSanitizers';
 
 // Categories that don't require staff callback (ticket created for records only)
 const NO_CALLBACK_CATEGORIES: TriageOutcome[] = [
@@ -197,7 +197,7 @@ export class SyncAgentService {
       
       // Same cleaning as the simplified path — this one also pays for a bad
       // name twice, once in /lookup and again in the app's own resolution.
-      const lookupFields = sanitizeTicketLookupFields(params, params.callData?.callSid);
+      const lookupFields = await resolveTicketLookupFields(params, params.callData?.callSid);
 
       if (lookupFields.lastProviderSeen || lookupFields.locationOfLastVisit) {
         const lookupResult = await ticketingApiClient.lookupProviderAndLocation({
@@ -619,7 +619,7 @@ export class SyncAgentService {
     // Schedule-DB fallback — measured at roughly double the round trip, and
     // 48% of every wait over 15 seconds. Sending "A-Scan" as a doctor buys
     // that wait for a lookup which cannot possibly succeed.
-    const lookupFields = sanitizeTicketLookupFields(params, callSid);
+    const lookupFields = await resolveTicketLookupFields(params, callSid);
 
     try {
       // Use the new simplified endpoint
