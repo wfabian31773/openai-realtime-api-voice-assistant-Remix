@@ -228,6 +228,57 @@ records. This is a **data problem, not a code problem.**
 
 ---
 
+## 4c. CONFIRMED: the failed provider lookup *is* the latency
+
+The ticketing app's own skill doc (`.agents/skills/voice-agent-ticket-intake/
+departments.md`, read via GitHub code search) states:
+
+> **`lastProviderSeen` ← THE MOST CRITICAL FIELD** — drives auto-assignment to
+> the correct coordinator
+>
+> **Fallback:** If surgeon not found, system auto-looks up from Schedule DB
+> using patient DOB + name
+
+That predicts a failed provider match should cost a cross-database round trip.
+Measured across 90 days of `submit-ticket`:
+
+| `providerMatched` | Calls | Avg | p50 | p95 | over 15s |
+|---|---|---|---|---|---|
+| **true** | 14,028 | 5,184ms | 3,534ms | 11,632ms | **4.1%** |
+| **false** | **3,088** | **10,741ms** | 5,954ms | **25,268ms** | **21.5%** |
+| not attempted | 1,147 | 7,359ms | 3,416ms | 24,191ms | 11.7% |
+
+**A failed provider match doubles average latency and makes a 15-second-plus
+wait five times more likely.** 665 of the 1,379 worst waits — **48%** — are
+provider-match failures.
+
+Total caller wait attributable to it: **3,088 × 5.6s ≈ 4.8 hours of dead air
+per 90 days.**
+
+### One fix, two payoffs
+
+The chain is now complete and every link is evidenced:
+
+1. The agent sends `lastProviderSeen` taken from schedule history.
+2. That value is frequently a **diagnostic code** (`OCT-VF` 217, `A-Scan` 123,
+   `DRS` 108) or a name carrying a **credential suffix** (`Todd Mishima, OD` —
+   present in `providers`, but the comma-OD breaks the match).
+3. The lookup fails — 19.7% of the time.
+4. The server falls back to a Schedule DB lookup by DOB + name → **the caller
+   waits**.
+5. And the ticket **does not reach the right surgery coordinator**, because
+   that field is what routes it.
+
+So the provider resolver is not a tidiness exercise. **It is simultaneously the
+largest dead-air source and the surgery-coordination misrouting fix.** Roughly
+650 of the 3,088 failures (~21%) are trivially fixable at the tool layer:
+reject the three test codes as *not a provider*, and strip `, OD` / `, MD`
+before matching.
+
+This is the single highest-value item in the rebuild.
+
+---
+
 ## 5. What the answering service actually does
 
 Department 3 "Technicians Support" is the biggest bucket, but it is **not a
