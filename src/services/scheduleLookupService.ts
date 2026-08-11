@@ -1,6 +1,7 @@
 import { db } from '../../server/db';
 import { schedule } from '../../shared/schema';
-import { eq, or, desc, gte, ilike, and, sql } from 'drizzle-orm';
+import { eq, or, desc, gte, and, sql } from 'drizzle-orm';
+import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 
 export interface PatientScheduleContext {
   patientFound: boolean;
@@ -259,8 +260,49 @@ function isValidDate(year: number, month: number, day: number): boolean {
   return true;
 }
 
+/**
+ * How many rows one lookup pulls back.
+ *
+ * It used to be 20, and 20 is not enough: the window is taken BEFORE cancelled
+ * rows are discarded, so a patient with a run of cancellations can have their
+ * last real visit pushed out of it and be told they have never been seen.
+ * Wayne has 43 rows, 34 of them cancelled.
+ *
+ * Measured on the live table (965,838 rows): 2,315 patients have more than 20
+ * rows, 29 have more than 60. Sixty covers 99.99% of patients and, once the
+ * lookup is an index scan rather than a sequential scan, costs nothing.
+ */
+const LOOKUP_ROW_LIMIT = 60;
+
+/**
+ * A case-insensitive prefix match that Postgres can actually answer from an
+ * index.
+ *
+ * `Schedule` carries these two indexes, and has for a long time:
+ *
+ *   Schedule_PatientLastName_lower_idx  ON (lower("PatientLastName")  text_pattern_ops)
+ *   Schedule_PatientFirstName_lower_idx ON (lower("PatientFirstName") text_pattern_ops)
+ *
+ * The name lookups were written with Drizzle's `ilike`, which emits `col ILIKE
+ * 'x%'`. Postgres cannot use a `lower(col)` expression index for that — the
+ * indexed expression and the queried expression are not the same thing — so
+ * every name lookup was a parallel sequential scan of 965,838 rows, and the two
+ * indexes had never once been used.
+ *
+ * Writing the predicate the way the index is built turns it into an index scan.
+ * Measured on production, same row, same result set:
+ *
+ *   ILIKE                  Parallel Seq Scan   2,235 ms
+ *   lower(col) LIKE        Index Scan              8.5 ms
+ *
+ * `value` must already be lower-cased — both callers do that.
+ */
+function nameStartsWith(column: AnyPgColumn, value: string) {
+  return sql`lower(${column}) like ${`${value}%`}`;
+}
+
 export class ScheduleLookupService {
-  
+
   async lookupByPhone(phone: string): Promise<PatientScheduleContext> {
     const normalizedPhone = normalizePhone(phone);
     
@@ -278,8 +320,8 @@ export class ScheduleLookupService {
           )
         )
         .orderBy(desc(schedule.appointmentDate))
-        .limit(20);
-      
+        .limit(LOOKUP_ROW_LIMIT);
+
       if (appointments.length === 0) {
         console.log(`[ScheduleLookup] No appointments found for phone: ${normalizedPhone.slice(-4)}`);
         return this.emptyContext();
@@ -303,12 +345,12 @@ export class ScheduleLookupService {
         .from(schedule)
         .where(
           and(
-            ilike(schedule.patientLastName, `${normalizedLast}%`),
-            ilike(schedule.patientFirstName, `${normalizedFirst.substring(0, 3)}%`)
+            nameStartsWith(schedule.patientLastName, normalizedLast),
+            nameStartsWith(schedule.patientFirstName, normalizedFirst.substring(0, 3)),
           )
         )
         .orderBy(desc(schedule.appointmentDate))
-        .limit(20);
+        .limit(LOOKUP_ROW_LIMIT);
 
       if (appointments.length === 0) {
         return this.emptyContext();
@@ -343,13 +385,13 @@ export class ScheduleLookupService {
         .from(schedule)
         .where(
           and(
-            ilike(schedule.patientLastName, `${normalizedLast}%`),
-            ilike(schedule.patientFirstName, `${normalizedFirst.substring(0, 3)}%`),
+            nameStartsWith(schedule.patientLastName, normalizedLast),
+            nameStartsWith(schedule.patientFirstName, normalizedFirst.substring(0, 3)),
             eq(schedule.patientDateOfBirth, normalizedDOB)
           )
         )
         .orderBy(desc(schedule.appointmentDate))
-        .limit(20);
+        .limit(LOOKUP_ROW_LIMIT);
       
       if (appointments.length === 0) {
         return this.emptyContext();

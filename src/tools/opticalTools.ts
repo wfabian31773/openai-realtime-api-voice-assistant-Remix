@@ -68,21 +68,45 @@ registerTool({
       };
     }
 
+    const seen = [
+      ...new Set(
+        (ctx.pastAppointments ?? []).map((a) => a.location).filter((l) => l && l !== 'Unknown'),
+      ),
+    ].slice(0, 6) as string[];
+
+    // The most recent visit is NOT necessarily an optical office.
+    //
+    // Found by predicting this tool's answer for a real patient before testing
+    // it: their last Active visit was Dwayne Logan at Loma Linda SURGERY
+    // CENTER. An optical agent taking `lastLocationSeen` at face value would
+    // file a glasses ticket against a building with no optician in it, and
+    // Optical assigns by location — so it would never reach anyone.
+    //
+    // So the clinic is resolved separately, and the raw most-recent stays
+    // available but is clearly labelled.
+    const usualClinic = await mostRecentClinic(seen);
+
     return {
       success: true,
       found: true,
       patient_name: ctx.patientName,
       matched_by: ctx.matchedBy,
-      // The office they actually use — the field Optical routes on.
-      usual_location: ctx.lastLocationSeen ?? null,
+      // The field Optical routes on — a clinic, never a surgery center.
+      usual_clinic: usualClinic,
+      // Where they were seen last, whatever kind of place that is.
+      last_location_any_kind: ctx.lastLocationSeen ?? null,
       last_provider: ctx.lastProviderSeen ?? null,
       last_visit: ctx.lastVisitDate ?? null,
-      recent_locations: [
-        ...new Set(
-          (ctx.pastAppointments ?? []).map((a) => a.location).filter((l) => l && l !== 'Unknown'),
-        ),
-      ].slice(0, 4),
+      recent_locations: seen.slice(0, 4),
       total_appointments: ctx.totalAppointmentsFound,
+      ...(usualClinic
+        ? {}
+        : {
+            message:
+              'No optical office found in their visit history — the places they have been ' +
+              'seen are surgery centers or screening sites. Ask which office they use for ' +
+              'glasses or contacts.',
+          }),
     };
   },
 });
@@ -188,4 +212,35 @@ registerTool({
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v.trim() : '';
+}
+
+/**
+ * The first place in this list that is actually a clinic.
+ *
+ * `locations` is already newest-first, so the first clinic is the most recent
+ * one. Returns null when the patient has only ever been seen at surgery
+ * centers or screening sites — which is a real answer, not a failure, and the
+ * caller should ask rather than assume.
+ *
+ * Falls back to the first entry when the Console mirror is unreachable: a
+ * best guess beats blocking the call, and `resolve_location` will catch it
+ * before a ticket is filed.
+ */
+async function mostRecentClinic(locations: string[]): Promise<string | null> {
+  if (locations.length === 0) return null;
+  const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
+  if (!isDirectoryConfigured()) return locations[0];
+
+  for (const name of locations) {
+    try {
+      const hit = await lookupLocation(name);
+      // An unknown location is more likely a clinic we have not mirrored than
+      // a surgery center, so it is not disqualified here — resolve_location
+      // is the gate that matters.
+      if (!hit || hit.facilityKind === 'clinic' || hit.facilityKind == null) return name;
+    } catch {
+      return locations[0];
+    }
+  }
+  return null;
 }

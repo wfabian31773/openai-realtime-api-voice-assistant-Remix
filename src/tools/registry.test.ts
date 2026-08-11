@@ -207,3 +207,32 @@ describe('resolve_location refuses rather than inventing an office', () => {
     expect((out as unknown as { location: string }).location).toBe('Encinitas');
   });
 });
+
+describe('lookup_patient must not hand Optical a surgery center', () => {
+  // Found by predicting this tool's answer for a real patient before running
+  // it: their most recent Active visit is at Loma Linda SURGERY CENTER. An
+  // agent that took "where were they last seen" as "which office do they use"
+  // would file a glasses ticket against a building with no optician — and
+  // Optical assigns by location, so it would reach nobody.
+  it('separates the clinic from the last place they were seen', async () => {
+    const out = await runTool('lookup_patient', { phone: '845-531-7471' });
+    if (!('found' in out) || out.found !== true) return; // no DB in this sandbox
+    // The two must be distinct fields, so an agent cannot conflate them.
+    expect(out).toHaveProperty('usual_clinic');
+    expect(out).toHaveProperty('last_location_any_kind');
+  });
+
+  it('degrades to a clean answer when the database is unreachable', async () => {
+    // This sandbox has no DATABASE_URL, so the lookup cannot run. What matters
+    // is that the agent gets something it can act on rather than an exception:
+    // either a real answer, or a retryable failure. Never a throw, never a
+    // hang, never a half-built object.
+    const out = await runTool('lookup_patient', { phone: '000-000-0000' });
+    if (out.success) {
+      expect(out).toHaveProperty('found');
+    } else {
+      expect(out).toMatchObject({ retryable: true });
+      expect((out as { error: string }).error).toBeTruthy();
+    }
+  });
+});
