@@ -151,6 +151,83 @@ that normalises the prefix, matches case-insensitively, and returns a clean
 
 ---
 
+## 4b. CORRECTION — the real location/provider failure rate, from 18,263 calls
+
+§4 above was drawn from the 19 `create-ticket` validation failures and
+concluded the brand prefix was the problem. **That sample was too small and the
+conclusion was wrong.** `submit-ticket`'s `response_body` records
+`locationSearched` / `locationMatched` / `providerSearched` / `providerMatched`
+on every call. Over 90 days:
+
+| Lookup | Attempted | Failed | Rate |
+|---|---|---|---|
+| **Location** | 15,411 | **2,385** | **15.5%** |
+| **Provider** | 15,663 | **3,088** | **19.7%** |
+
+*(Also checked: `usedFallbackReason` is a **boolean**, true on only **88 of
+17,116** — 0.5%. Server-side classification is healthy. It is the lookups that
+fail.)*
+
+### Locations — the table is incomplete, not misnamed
+
+| Failed search | Count |
+|---|---|
+| Magan | 113 |
+| Downtown LA | 112 |
+| Chevy Chase Surgery Center | 98 |
+| Barranca Surgery Center | 59 |
+| Ontario Adv Surgery Center | 53 |
+| Glenwood Surgery Center | 50 |
+| Loma Linda Surgery Center LLC | 49 |
+| Aurora Surgery Center | 33 |
+| Mobile DRS | 29 |
+| H Jones Surgery Center | 27 |
+| Beaumont | 23 |
+
+**`select count(*) from locations where name ilike '%surgery%'` returns 0.**
+The 33-row table holds clinics only. Surgery centers — where the surgery
+coordinators' patients actually go — do not exist in it at all. Neither do
+Magan, Beaumont, or the Mobile DRS unit.
+
+`Downtown LA` fails against an existing row named `Los Angeles`: an alias
+problem, not a missing one.
+
+**The brand prefix is real but marginal.** The dominant cause is missing
+records. This is a **data problem, not a code problem.**
+
+### Providers — three separate causes
+
+| Failed search | Count | Cause |
+|---|---|---|
+| OCT-VF | 217 | **a test, not a provider** |
+| A-Scan | 123 | **a test, not a provider** |
+| DRS | 108 | **a screening, not a provider** |
+| Todd Mishima, OD | 132 | **exists in `providers` — the `, OD` suffix breaks the match** |
+| Evelyn Perez, OD | 131 | genuinely missing from `providers` |
+| Amir Shama, OD | 81 | **exists — same suffix problem** |
+| Unknown / Dr. Lee | 34 | unresolvable input |
+
+1. **~448 failures are diagnostic codes being passed as a provider.** This is
+   the exact hazard the answering-service prompt already warns about — *"the
+   schedule's last provider seen may be a scan, test, or technician (e.g.
+   'A-Scan'), not the caller's doctor."* The warning is in the prompt; nothing
+   enforces it in the tool.
+2. **Credential suffixes break matching.** `Mishima` and `Shama` are both in the
+   92-row `providers` table, but `"Todd Mishima, OD"` does not match. Stripping
+   `, OD` / `, MD` before comparison fixes ~200 failures on its own.
+3. A genuine gap: some optometrists are not in the table.
+
+### What the library owes
+
+- **One provider resolver** that strips credential suffixes, rejects the known
+  test codes (`OCT-VF`, `A-Scan`, `DRS`, `Unknown`) as *not a provider* rather
+  than searching for them, and returns "unresolved" without failing the ticket.
+- **One location resolver** per Part 4 §3 — but the bigger fix is **loading the
+  surgery centers and satellites into `locations`.** No amount of string
+  matching finds a row that isn't there.
+
+---
+
 ## 5. What the answering service actually does
 
 Department 3 "Technicians Support" is the biggest bucket, but it is **not a
