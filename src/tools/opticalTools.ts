@@ -316,9 +316,11 @@ registerTool({
       location: { type: 'string', description: 'The office, as returned by resolve_location.', askAs: 'Which of our offices do you usually visit?' },
       request_description: { type: 'string', description: "What they need, in their words.", askAs: 'What can we help you with?' },
       request_reason_id: { type: 'string', description: 'From classify_optical_request. Omit if it could not classify.' },
-      provider: { type: 'string', description: 'Their doctor, if it came up. Optional.' },
-      email: { type: 'string', description: 'Optional.' },
+      provider: { type: 'string', description: 'Their doctor, if it came up. Optional — looked up if omitted.' },
+      email: { type: 'string', description: 'Optional — looked up if omitted.' },
       call_sid: { type: 'string', description: 'The call id, so a retry cannot double-file.' },
+      caller_phone: { type: 'string', description: 'The number they called from, if different from the callback number.' },
+      dialed_number: { type: 'string', description: 'The number they dialled.' },
     },
     required: ['first_name', 'last_name', 'date_of_birth', 'callback_number', 'location', 'request_description'],
   },
@@ -348,6 +350,19 @@ registerTool({
     const cls =
       (Number.isFinite(named) ? classificationByReasonId(named) : null) ??
       classifyOptical(description);
+
+    // Free text we send becomes the body of a patient-facing SMS on the other
+    // side. One character outside GSM-7 turns the whole message from one
+    // segment into three (160 chars → 70) and, worse, multi-segment long-code
+    // traffic is far more exposed to US carrier A2P filtering. Measured on the
+    // Support Center 2026-08-12: 1,700 of 17,446 voice tickets in 90 days
+    // (9.7%) carry smart punctuation in the description. This is ours to fix
+    // before it leaves.
+    const { sanitizeForSms } = await import('../services/gsm7');
+    const cleanDescription = sanitizeForSms(description);
+    if (cleanDescription.changed) {
+      console.info('[Optical] description normalised to GSM-7 before filing');
+    }
 
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
@@ -425,7 +440,7 @@ registerTool({
       locationOfLastVisit: cleanLocation,
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       lastProviderSeen: cleanProvider || undefined,
-      description,
+      description: cleanDescription.value,
       priority: 'medium',
       callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
     });

@@ -623,16 +623,27 @@ export class SyncAgentService {
 
     try {
       // Use the new simplified endpoint
+      // Free text we send becomes the body of a patient-facing SMS on the other
+      // side, and ONE character outside GSM-7 turns that message from a single
+      // segment into three (160 chars -> 70). Worse than the cost: multi-segment
+      // long-code traffic is far more exposed to US carrier A2P filtering, so a
+      // message can be accepted, billed, marked `sent`, and silently dropped.
+      // Measured 2026-08-12: 1,700 of 17,446 voice tickets in 90 days (9.7%)
+      // carried smart punctuation in the description. Found by the ticketing
+      // agent on one curly apostrophe in "we've".
+      const { sanitizeForSms } = await import('./gsm7');
+      const smsSafe = (t?: string) => (t ? sanitizeForSms(t).value : t);
+
       const response = await ticketingApiClient.submitTicket({
         patientFullName: params.patientFullName,
         patientDOB: params.patientDOB,
-        reasonForCalling: params.reasonForCalling,
+        reasonForCalling: smsSafe(params.reasonForCalling)!,
         preferredContactMethod: params.preferredContactMethod,
         patientPhone: validatedPhone,
         patientEmail: params.patientEmail,
         lastProviderSeen: lookupFields.lastProviderSeen,
         locationOfLastVisit: lookupFields.locationOfLastVisit,
-        additionalDetails: params.additionalDetails,
+        additionalDetails: smsSafe(params.additionalDetails),
         priority: params.priority,
         callData: callSid ? {
           callSid,
