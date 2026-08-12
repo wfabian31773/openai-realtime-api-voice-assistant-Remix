@@ -224,6 +224,13 @@ export class TicketingSyncService {
               .set({
                 ticketingSynced: true,
                 ticketingSyncedAt: new Date(),
+                // Terminal means terminal under the flag the sweeper actually
+                // reads. Setting only ticketingSynced here left these rows
+                // eligible under the new predicate, so a call that will NEVER
+                // have a ticket was retried until retries hit 3 — burning the
+                // 20-row batch on deterministic 404s and contradicting this
+                // branch's own promise not to retry.
+                callDataSynced: true,
                 ticketingSyncError: `${NO_TICKET_TERMINAL_PREFIX}: ${errorMsg}`,
                 ticketingSyncRetries: currentRetries + 1,
               })
@@ -330,10 +337,10 @@ export class TicketingSyncService {
       .where(
         and(
           eq(callLogs.status, "completed"),
-          or(
-            eq(callLogs.ticketingSynced, false),
-            isNull(callLogs.ticketingSynced)
-          ),
+          // The same predicate the sweeper uses. Counting ticketingSynced here
+          // would report a call whose ticket exists but whose transcript never
+          // arrived as SYNCED — hiding the exact backlog this endpoint is for.
+          eq(callLogs.callDataSynced, false),
           isNotNull(callLogs.transcript),
           sql`LENGTH(${callLogs.transcript}) > 50`
         )
@@ -342,17 +349,18 @@ export class TicketingSyncService {
     const [syncedResult] = await db
       .select({ count: sql<number>`count(*)` })
       .from(callLogs)
-      .where(eq(callLogs.ticketingSynced, true));
+      .where(eq(callLogs.callDataSynced, true));
 
     const [failedResult] = await db
       .select({ count: sql<number>`count(*)` })
       .from(callLogs)
       .where(
         and(
-          or(
-            eq(callLogs.ticketingSynced, false),
-            isNull(callLogs.ticketingSynced)
-          ),
+          // Failed = the data never landed AND something went wrong. Terminal
+          // no-ticket rows carry an error string but are now callDataSynced,
+          // so they correctly drop out of this count — a ticketless call is an
+          // expected outcome, not a failure anyone should chase.
+          eq(callLogs.callDataSynced, false),
           isNotNull(callLogs.ticketingSyncError)
         )
       );

@@ -104,9 +104,60 @@ describe('the sweeper selects on data delivery, not on ticket existence', () => 
     expect(successBranch).toContain('callDataSynced: true');
   });
 
+  it('marks a terminal no-ticket call under the flag the sweeper reads', () => {
+    // Codex review, PR #172: setting only ticketingSynced here left these rows
+    // eligible under the new predicate, so a call that will NEVER have a ticket
+    // was retried until retries hit 3 — burning the 20-row batch on
+    // deterministic 404s and contradicting the branch's own "will not retry".
+    const terminal = SRC.slice(
+      SRC.indexOf('=== "terminal"'),
+      SRC.indexOf('marked terminal, will not retry'),
+    );
+    expect(terminal).toContain('callDataSynced: true');
+  });
+
+  it('reports the backlog the sweeper actually has', () => {
+    // getSyncStatus counted ticketingSynced, so a call whose ticket exists but
+    // whose transcript never arrived was reported SYNCED — hiding the exact
+    // backlog the endpoint is for.
+    const status = SRC.slice(SRC.indexOf('async getSyncStatus'));
+    expect(status).toContain('callLogs.callDataSynced');
+    expect(status).not.toContain('callLogs.ticketingSynced');
+  });
+
   it('leaves ticketingSynced doing its original job', () => {
     // Nothing else should change meaning. It still marks "a ticket exists",
     // and other code reads it for that.
     expect(SRC).toContain('ticketingSynced: true');
+  });
+});
+
+describe('a successful primary push must record itself as delivered', () => {
+  // Codex review, PR #172, and the most consequential of the four: only the
+  // sweeper's success branch wrote callDataSynced. The three primary post-call
+  // pushes in voiceAgentRoutes logged success and wrote nothing, so every
+  // healthy call stayed eligible and the sweeper re-pushed it five minutes
+  // later. With a hard .limit(20) per cycle and ~600 calls a day, normal
+  // traffic would have saturated the sweeper re-sending calls that already
+  // landed — crowding out the failures it exists to recover, which is the exact
+  // opposite of this change's purpose.
+  const ROUTES = readFileSync(
+    join(__dirname, '..', '..', 'src', 'voiceAgentRoutes.ts'),
+    'utf8',
+  );
+
+  it('every updateTicketCallData success branch marks the call delivered', () => {
+    const sites = [...ROUTES.matchAll(/updateTicketCallData\(/g)].map((m) => m.index!);
+    expect(sites.length, 'expected the three known push sites').toBeGreaterThanOrEqual(3);
+
+    for (const idx of sites) {
+      // Look at the window following the call — the success branch and its body.
+      const window = ROUTES.slice(idx, idx + 2600);
+      expect(
+        window.includes('callDataSynced: true'),
+        `an updateTicketCallData site near offset ${idx} does not record delivery — ` +
+          `the sweeper will re-push every call it succeeds on`,
+      ).toBe(true);
+    }
   });
 });

@@ -4275,6 +4275,14 @@ async function observeCall(
               
               if (ticketResult.success) {
                 console.info(`[POST-CALL] ✓ Ticketing API updated for ${twilioCallSid} (${ticketResult.attempts} attempts, ${ticketResult.totalTimeMs}ms)`);
+                // Same reason as the other two push sites: delivered means
+                // delivered, and the sweeper must not chase it again.
+                try {
+                  const delivered = await storage.getCallLogByCallSid(twilioCallSid);
+                  if (delivered) await storage.updateCallLog(delivered.id, { callDataSynced: true });
+                } catch (markErr) {
+                  console.warn(`[POST-CALL] could not mark call data delivered:`, markErr);
+                }
               } else {
                 console.error(`[POST-CALL] ✗ Ticketing API failed after ${ticketResult.attempts} attempts for ${twilioCallSid}`);
               }
@@ -7005,6 +7013,12 @@ export function setupVoiceAgentRoutes(app: Express): void {
               });
               if (result.success) {
                 console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}`);
+                // Record the delivery, or the sweeper re-pushes this call five
+                // minutes from now. With a hard .limit(20) per cycle, normal
+                // traffic would saturate the sweeper re-sending calls that
+                // already landed and crowd out the failures it exists to
+                // recover.
+                await storage.updateCallLog(callLog.id, { callDataSynced: true });
               } else {
                 console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
               }
@@ -7409,6 +7423,15 @@ export function setupVoiceAgentRoutes(app: Express): void {
           
           if (ticketUpdateResult.success) {
             console.info(`[COORDINATOR EVENT] ✓ Ticketing API updated for ${effectiveTwilioCallSid}`);
+            // See [RECORDING] above: a successful primary push must mark itself
+            // delivered, or the sweeper treats every healthy call as a failure
+            // to retry.
+            try {
+              const delivered = await storage.getCallLogByCallSid(effectiveTwilioCallSid);
+              if (delivered) await storage.updateCallLog(delivered.id, { callDataSynced: true });
+            } catch (markErr) {
+              console.warn(`[COORDINATOR EVENT] could not mark call data delivered:`, markErr);
+            }
           } else {
             console.warn(`[COORDINATOR EVENT] Ticketing API failed: ${ticketUpdateResult.error}`);
           }
