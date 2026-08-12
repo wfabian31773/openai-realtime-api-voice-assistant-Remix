@@ -341,19 +341,32 @@ describe.each(QUEUE_LINES)('the %s line personalises its greeting when it recogn
   });
 });
 
-describe('the personalised greeting keeps what the queue greeting is for', () => {
-  it('does not discard the cannot-transfer framing on a queue line', () => {
-    // These lines cannot transfer. Their greeting says so up front, which is
-    // the whole reason it is worded the way it is. A personalisation that
-    // replaced it wholesale would drop that promise to save a sentence.
+describe('the personalised greeting is not reimplemented inline', () => {
+  it('delegates to the tested module rather than doing it with a regex here', () => {
+    // The first version of this was an inline regex keyed on the exact phrase
+    // "How can I help you today?". `welcome_greeting` is admin-editable and
+    // outranks the configured string, so editing the greeting turned the
+    // personalisation into a no-op and put the configured question and the
+    // confirm question back to back — the exact defect it existed to remove.
+    // Codex caught it on #178.
+    //
+    // The behaviour is covered properly in
+    // services/greetingPersonalisation.test.ts. What this guards is that the
+    // route keeps using it, because a regex inline in a 7,000-line file is
+    // reachable only by a test that reads source as text.
     const start = ROUTES.indexOf('const recognisedFirstName');
     expect(start, 'the greeting personalisation block has moved').toBeGreaterThan(-1);
     const block = ROUTES.slice(start, start + 1600);
 
-    expect(block, 'the queue lines are no longer distinguished here').toMatch(/isQueueLine/);
+    expect(block, 'the route no longer calls personaliseGreeting').toMatch(
+      /personaliseGreeting\(/,
+    );
+    expect(block, 'the route no longer asks which style the line uses').toMatch(
+      /greetingStyleFor\(/,
+    );
     expect(
       block,
-      'the queue branch must build on the configured greeting rather than replace it',
-    ).toMatch(/agentGreeting\.replace/);
+      'the greeting is being rewritten inline again — put it in the module where it can be tested',
+    ).not.toMatch(/agentGreeting\.replace\(/);
   });
 });

@@ -3892,22 +3892,26 @@ async function observeCall(
       ? String(azulMetadataRef.precontext.firstName ?? '').trim()
       : '';
     if (recognisedFirstName && agentGreeting) {
-      // The QUEUE lines keep their own opening and only swap the closing
-      // question. Their greeting is operator-dictated and does a second job
-      // besides saying hello: "All of our coordinators are currently assisting
-      // other patients, but I can take a message" pre-empts the ask for a human
-      // on a line that cannot transfer. Replacing it wholesale would throw that
-      // away to save one sentence.
+      // The QUEUE lines keep their own opening and swap only its closing
+      // question. Their greeting does a second job besides saying hello: "All
+      // of our coordinators are currently assisting other patients, but I can
+      // take a message" pre-empts the ask for a human on a line that cannot
+      // transfer. azul-scheduling keeps the wholesale replacement it has always
+      // had — a working line whose greeting carries no such promise.
       //
-      // azul-scheduling keeps the wholesale replacement it has always had. It
-      // is a working line and its greeting carries no such promise.
-      const isQueueLine = agentSlug === 'optical' || agentSlug === 'surgery';
-      if (isQueueLine) {
-        const base = agentGreeting.replace(/\s*How can I help you today\?\s*$/i, '').trim();
-        agentGreeting = `${base} Am I speaking with ${recognisedFirstName}?`;
-      } else {
-        agentGreeting = `Hello, thank you for calling Azul Vision. Am I speaking with ${recognisedFirstName}?`;
-      }
+      // The logic lives in `services/greetingPersonalisation` because the first
+      // version was a regex inline here, keyed on one hardcoded phrase, and
+      // `welcome_greeting` is admin-editable — so editing the greeting silently
+      // disabled it and put two questions back to back. That is testable now,
+      // and tested.
+      const { personaliseGreeting, greetingStyleFor } = await import(
+        './services/greetingPersonalisation'
+      );
+      agentGreeting = personaliseGreeting(
+        agentGreeting,
+        recognisedFirstName,
+        greetingStyleFor(agentSlug),
+      );
       console.info(`[GREETING] Personalised for recognised caller (${recognisedFirstName}) on ${agentSlug}`);
     }
 
