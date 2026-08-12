@@ -62,6 +62,25 @@ export function mountToolServer(app: Express): void {
 
     const started = Date.now();
     const body = (req.body ?? {}) as Record<string, unknown>;
+
+    // `queue` tells the three shared patient tools what kind of place this
+    // caller can be sent to — a surgery centre is the wrong answer for an
+    // optician and the right one for a surgery coordinator. It is call context,
+    // not a model argument, so it is in no tool's schema: agents get it
+    // injected by `realtimeToolsFor`, HTTP callers pass it in the body.
+    //
+    // Defaulted to 'optical' HERE, and only here. These tools were Optical's
+    // until Surgery needed them, so every caller that predates this line is an
+    // optical caller, and quietly widening what they accept would hand one of
+    // them a surgery centre as the office to file against — which is exactly
+    // how VA-50803 came to be filed unassigned. The compatibility shim stays at
+    // the boundary rather than inside the tool, and it logs when it fires, so
+    // we can see whether anything actually relies on it before removing it.
+    if (body.queue === undefined && (name === 'lookup_patient' || name === 'resolve_location')) {
+      body.queue = 'optical';
+      console.info(`[TOOLS] ${name} called with no queue — defaulted to 'optical'`);
+    }
+
     const result = await runTool(name, body);
     const ms = Date.now() - started;
 

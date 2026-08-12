@@ -198,6 +198,12 @@ export async function createOpticalAgent(
       call_sid: metadata.callSid ?? metadata.callId,
       caller_phone: metadata.callerPhone,
       dialed_number: metadata.dialedNumber,
+      // The three shared patient tools serve both queues now. This is what
+      // tells them a surgery centre is the WRONG kind of place for this call —
+      // behaviour that was hardcoded while they lived in opticalTools.ts.
+      // Injected as context, so it is not a schema field and the model can
+      // neither set it nor blank it.
+      queue: 'optical',
     }),
   });
 

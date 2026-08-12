@@ -115,7 +115,7 @@ beforeEach(() => {
 
 describe('lookup_patient, on a real patient, resolved against the real roster', () => {
   it('does not hand Optical a surgery center', async () => {
-    const out = await runTool('lookup_patient', { phone: '845-531-7471' });
+    const out = await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' });
     expect(out.success).toBe(true);
 
     const r = out as Record<string, unknown>;
@@ -129,7 +129,7 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
   });
 
   it('still reports the last visit truthfully — July 13, not December 30', async () => {
-    const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
+    const r = (await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' })) as Record<string, unknown>;
     expect(r.last_visit).toBe('Monday, July 13, 2026');
     expect(r.last_provider).toBe('Dwayne Logan, MD');
     expect(String(r.last_visit)).not.toMatch(/December/);
@@ -139,7 +139,7 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     // Support Center `locations` holds brand-stripped names — `Eastvale`,
     // `Upland`, `Long Beach` — while the Console roster is brand-prefixed.
     // We must emit the form the receiver stores, or the ticket lands unassigned.
-    const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
+    const r = (await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' })) as Record<string, unknown>;
     expect(String(r.usual_clinic)).not.toMatch(/^(Azul Vision|Atlantis Eyecare)\s/i);
   });
 
@@ -161,14 +161,14 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       },
     } as never);
 
-    const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
+    const r = (await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' })) as Record<string, unknown>;
     expect(r.identity_is_certain).toBe(false);
     expect(String(r.identity_warning)).toMatch(/2 different people/);
     expect(String(r.identity_warning)).toMatch(/do not read their history back/i);
   });
 
   it('says the identity is certain when only one person matched', async () => {
-    const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
+    const r = (await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' })) as Record<string, unknown>;
     expect(r.identity_is_certain).toBe(true);
     expect(r.identity_warning).toBeUndefined();
   });
@@ -361,7 +361,7 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       ],
     } as never);
 
-    const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
+    const r = (await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' })) as Record<string, unknown>;
     expect(r.usual_clinic).toBeNull();
     // A real answer, not a failure — and one the agent can act on out loud.
     expect(String(r.message)).toMatch(/ask which office/i);
