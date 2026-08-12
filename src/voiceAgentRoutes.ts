@@ -4667,7 +4667,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         // number and runs the ticket agent. This list is a SECOND allowlist,
         // separate from validAgentSlugs in observeCall(); both must know a slug
         // or the call is silently answered by the after-hours agent.
-        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'pcp', 'demo'];
+        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'optical', 'azul-scheduling', 'pcp', 'demo'];
         const validOutboundAgents = ['drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
         const legacyDeletedAgents = ['greeter', 'non-urgent-ticketing'];
         
