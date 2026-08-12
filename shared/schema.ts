@@ -482,7 +482,26 @@ export const callLogs = pgTable("call_logs", {
   // Ticketing system sync tracking
   ticketNumber: varchar("ticket_number"), // External ticketing system ticket number (e.g., VA-1764200415200-229)
   ticketCreationPending: timestamp("ticket_creation_pending"), // Atomic lock to prevent duplicate ticket creation
-  ticketingSynced: boolean("ticketing_synced").default(false), // Whether call data has been synced to ticketing system
+  // "A ticket exists for this call." Set when the ticket is CREATED, which is
+  // during the call — long before the transcript exists.
+  ticketingSynced: boolean("ticketing_synced").default(false),
+  /**
+   * "This call's data actually reached its ticket."
+   *
+   * A separate flag because one cannot mean both. `ticketingSynced` is set at
+   * ticket creation, mid-call; the transcript, recording and duration only
+   * exist after the call ends. The sweeper selected on `ticketingSynced`, so
+   * every call that filed a ticket was excluded from sweeping before its data
+   * existed, and the post-call push had no retry.
+   *
+   * Measured 2026-08-12 over 30 consecutive calls: we held a transcript for
+   * 30/30 and the ticket had one for 19/30. On 37% of calls the optician saw no
+   * call details while we held the whole conversation.
+   *
+   * Backfilled true for everything older than 48 hours at migration time —
+   * 72,842 rows would otherwise have qualified for sweeping at once.
+   */
+  callDataSynced: boolean("call_data_synced").notNull().default(false),
   ticketingSyncedAt: timestamp("ticketing_synced_at"), // When the sync was completed
   ticketingSyncError: text("ticketing_sync_error"), // Last sync error message if failed
   ticketingSyncRetries: integer("ticketing_sync_retries").default(0), // Number of sync attempts made

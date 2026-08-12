@@ -90,6 +90,7 @@ export class TicketingSyncService {
           qualityScore: callLogs.qualityScore,
           agentOutcome: callLogs.agentOutcome,
           ticketingSynced: callLogs.ticketingSynced,
+          callDataSynced: callLogs.callDataSynced,
           ticketingSyncError: callLogs.ticketingSyncError,
           ticketingSyncRetries: callLogs.ticketingSyncRetries,
         })
@@ -97,10 +98,15 @@ export class TicketingSyncService {
         .where(
           and(
             eq(callLogs.status, "completed"),
-            or(
-              eq(callLogs.ticketingSynced, false),
-              isNull(callLogs.ticketingSynced)
-            ),
+            // callDataSynced, NOT ticketingSynced.
+            //
+            // ticketingSynced is set when the TICKET is created, which happens
+            // during the call. The transcript only exists after it ends. So
+            // selecting on it excluded every call that filed a ticket from ever
+            // being swept — the exact population that needs sweeping — and the
+            // one post-call push has no retry. 37% of tickets had no call data
+            // while we held the full transcript.
+            eq(callLogs.callDataSynced, false),
             isNotNull(callLogs.transcript),
             sql`LENGTH(${callLogs.transcript}) > 50`,
             or(
@@ -187,6 +193,8 @@ export class TicketingSyncService {
           .set({
             ticketingSynced: true,
             ticketingSyncedAt: new Date(),
+            // The whole point: only a SUCCESSFUL updateTicketCallData sets this.
+            callDataSynced: true,
             ticketingSyncError: null,
             ticketNumber: response.ticketNumber || call.ticketNumber,
             ticketingSyncRetries: currentRetries + 1,
