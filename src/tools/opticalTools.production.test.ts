@@ -152,6 +152,54 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     expect(r.identity_warning).toBeUndefined();
   });
 
+  it('classifies a real optical request into Optical\'s own categories', async () => {
+    const r = (await runTool('classify_optical_request', {
+      request_description: 'I need to pick up my glasses if they are ready',
+    })) as Record<string, unknown>;
+    expect(r.classified).toBe(true);
+    expect(r.department_id).toBe(1);
+    expect(r.request_reason_id).toBe(20); // Glasses Ready - Pickup
+    // The value 953 real tickets carry, which belongs to Technicians Support.
+    expect(r.request_reason_id).not.toBe(153);
+  });
+
+  it('says so rather than forcing a category that nearly fits', async () => {
+    const r = (await runTool('classify_optical_request', {
+      request_description: 'I have a question about my bill',
+    })) as Record<string, unknown>;
+    expect(r.classified).toBe(false);
+    expect(String(r.message)).toMatch(/Do not pick a category/i);
+  });
+
+  it('refuses to file without the office that decides who gets the ticket', async () => {
+    const out = await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471',
+      request_description: 'glasses broke',
+      // location deliberately absent
+    });
+    expect(out.success).toBe(false);
+    expect((out as { missingFields: string[] }).missingFields).toContain('location');
+    // Spoken to a patient, so it has to read like a sentence a person would say.
+    expect((out as { message: string }).message).toMatch(/which of our offices/i);
+  });
+
+  it('refuses a half-heard callback number instead of filing it', async () => {
+    const out = await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531',
+      location: 'Eastvale',
+      request_description: 'glasses broke',
+    });
+    expect(out.success).toBe(false);
+    expect((out as { missingFields: string[] }).missingFields).toContain('callback_number');
+    expect((out as { message: string }).message).toMatch(/ten digits/i);
+  });
+
   it('asks rather than guesses when every visit is at a surgery center', async () => {
     const { scheduleLookupService } = await import('../services/scheduleLookupService');
     vi.spyOn(scheduleLookupService, 'lookupPatient').mockResolvedValueOnce({
