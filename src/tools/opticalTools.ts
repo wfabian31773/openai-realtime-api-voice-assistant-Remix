@@ -86,11 +86,29 @@ registerTool({
     // available but is clearly labelled.
     const usualClinic = await mostRecentClinic(seen);
 
+    // A phone number can carry more than one person, and a surname carries
+    // whole families. The service reports which case this was, and the agent
+    // needs it because it changes what may be SAID: an uncertain match is one
+    // real person's record, but it is a guess among several, so the name must
+    // be confirmed and the history must not be read back.
+    const certain = ctx.identity?.unique !== false;
+
     return {
       success: true,
       found: true,
       patient_name: ctx.patientName,
       matched_by: ctx.matchedBy,
+      identity_is_certain: certain,
+      ...(certain
+        ? {}
+        : {
+            identity_warning:
+              `This ${phone && !first ? 'phone number' : 'name'} matches ` +
+              `${ctx.identity?.candidateCount} different people on file, and what follows ` +
+              `is only the most recently seen of them. Ask for their full name and date of ` +
+              `birth before using any of it, and do not read their history back until they ` +
+              `confirm who they are.`,
+          }),
       // The field Optical routes on — a clinic, never a surgery center.
       usual_clinic: usualClinic,
       // Where they were seen last, whatever kind of place that is.

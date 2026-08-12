@@ -68,7 +68,17 @@ const REAL_CONTEXT = {
   lastLocationSeen: 'Loma Linda Surgery Center LLC',
   lastProviderSeen: 'Dwayne Logan, MD',
   lastVisitDate: 'Monday, July 13, 2026',
-  totalAppointmentsFound: 44,
+  // What buildContext reports once it has grouped the rows by person. 43 of the
+  // 44 rows on this number are Wayne's; the 44th belongs to a John Doe test
+  // record and is excluded from the history rather than merged into it.
+  identity: {
+    unique: true,
+    candidateCount: 1,
+    candidates: [
+      { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17', appointmentCount: 43 },
+    ],
+  },
+  totalAppointmentsFound: 43,
 };
 
 vi.mock('../services/scheduleLookupService', () => ({
@@ -110,6 +120,36 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     // We must emit the form the receiver stores, or the ticket lands unassigned.
     const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
     expect(String(r.usual_clinic)).not.toMatch(/^(Azul Vision|Atlantis Eyecare)\s/i);
+  });
+
+  it('tells the agent when the number could be more than one person', async () => {
+    // +1 845 531 7471 really does carry two records in production: Wayne Fabian
+    // (43 rows) and a John Doe test record (1 row). The service now hands back
+    // one person's history and says so; the tool has to pass that on, because
+    // an agent that reads a history back to the wrong person has disclosed it.
+    const { scheduleLookupService } = await import('../services/scheduleLookupService');
+    vi.spyOn(scheduleLookupService, 'lookupPatient').mockResolvedValueOnce({
+      ...REAL_CONTEXT,
+      identity: {
+        unique: false,
+        candidateCount: 2,
+        candidates: [
+          { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17', appointmentCount: 43 },
+          { firstName: 'John', lastName: 'Doe', dateOfBirth: '1980-01-01', appointmentCount: 1 },
+        ],
+      },
+    } as never);
+
+    const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
+    expect(r.identity_is_certain).toBe(false);
+    expect(String(r.identity_warning)).toMatch(/2 different people/);
+    expect(String(r.identity_warning)).toMatch(/do not read their history back/i);
+  });
+
+  it('says the identity is certain when only one person matched', async () => {
+    const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
+    expect(r.identity_is_certain).toBe(true);
+    expect(r.identity_warning).toBeUndefined();
   });
 
   it('asks rather than guesses when every visit is at a surgery center', async () => {

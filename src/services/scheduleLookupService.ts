@@ -3,6 +3,33 @@ import { schedule } from '../../shared/schema';
 import { eq, or, desc, gte, and, sql } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 
+/**
+ * Who this lookup could have meant.
+ *
+ * A phone number is not an identity and neither is a surname, so a lookup can
+ * legitimately land on more than one person. Every context reports which case
+ * it is, because the answer changes what a caller is allowed to SAY:
+ *
+ *   unique: true   — safe to open by confirming a name ("Am I speaking with X?")
+ *   unique: false  — the context is still one real person's, but it is a guess
+ *                    among `candidateCount`. Ask, do not assert.
+ *
+ * This is the same refusal contract the tool library runs on: when the data
+ * cannot settle something, say so in a form the caller can act on rather than
+ * picking and sounding certain.
+ */
+export interface PatientIdentity {
+  unique: boolean;
+  candidateCount: number;
+  /** Newest-seen first. The first entry is the one this context describes. */
+  candidates: Array<{
+    firstName?: string;
+    lastName?: string;
+    dateOfBirth?: string;
+    appointmentCount: number;
+  }>;
+}
+
 export interface PatientScheduleContext {
   patientFound: boolean;
   patientName?: string;
@@ -12,6 +39,11 @@ export interface PatientScheduleContext {
   lastProviderSeen?: string;
   lastLocationSeen?: string;
   lastVisitDate?: string;
+  /**
+   * Always present when a patient was found. Callers that speak a name aloud
+   * MUST check `identity.unique` first.
+   */
+  identity?: PatientIdentity;
   totalAppointmentsFound: number;
   patientData?: PatientData;
 }
@@ -301,6 +333,55 @@ function nameStartsWith(column: AnyPgColumn, value: string) {
   return sql`lower(${column}) like ${`${value}%`}`;
 }
 
+/**
+ * Split a result set into the one person it describes, and who else it hit.
+ *
+ * A person is first name + last name + date of birth. DOB is what makes this
+ * safe — two Maria Garcias at one household number are two people, and merging
+ * their histories would tell one of them about the other's appointments.
+ *
+ * The primary is whoever has the most recent row, which is what the previous
+ * code effectively picked by sort order. The difference is that it now picks
+ * that person's rows ONLY, instead of everyone's, and says how many others
+ * there were.
+ */
+function splitByPerson(rows: any[]): { primary: any[]; identity: PatientIdentity } {
+  const groups = new Map<string, { rows: any[]; newest: string }>();
+
+  for (const r of rows) {
+    const key = [
+      String(r.patientFirstName ?? '').trim().toLowerCase(),
+      String(r.patientLastName ?? '').trim().toLowerCase(),
+      String(r.patientDateOfBirth ?? '').trim(),
+    ].join('|');
+    const date = String(r.appointmentDate ?? '');
+    const g = groups.get(key);
+    if (g) {
+      g.rows.push(r);
+      if (date > g.newest) g.newest = date;
+    } else {
+      groups.set(key, { rows: [r], newest: date });
+    }
+  }
+
+  const ordered = [...groups.values()].sort((a, b) => b.newest.localeCompare(a.newest));
+  const primary = ordered[0]?.rows ?? [];
+
+  return {
+    primary,
+    identity: {
+      unique: ordered.length <= 1,
+      candidateCount: ordered.length,
+      candidates: ordered.map((g) => ({
+        firstName: g.rows[0]?.patientFirstName || undefined,
+        lastName: g.rows[0]?.patientLastName || undefined,
+        dateOfBirth: g.rows[0]?.patientDateOfBirth || undefined,
+        appointmentCount: g.rows.length,
+      })),
+    },
+  };
+}
+
 export class ScheduleLookupService {
 
   async lookupByPhone(phone: string): Promise<PatientScheduleContext> {
@@ -436,8 +517,24 @@ export class ScheduleLookupService {
     return this.emptyContext();
   }
 
-  private buildContext(appointments: any[], matchedBy: 'phone' | 'name' | 'dob' | 'name_and_dob'): PatientScheduleContext {
+  private buildContext(rows: any[], matchedBy: 'phone' | 'name' | 'dob' | 'name_and_dob'): PatientScheduleContext {
     const todayStr = getPacificDateString();
+
+    // ONE PERSON PER CONTEXT.
+    //
+    // A phone number is not an identity, and neither is a surname. This method
+    // used to take every row the query returned and build a single history out
+    // of them, which silently merged people: +1 845 531 7471 carries Wayne
+    // Fabian (43 rows) and a John Doe test record (1 row), and John Doe's visit
+    // was appearing in Wayne's recent visits. A name-only lookup does the same
+    // thing to every family that shares a surname.
+    //
+    // So: group first, then build from ONE person's rows. Who the others are is
+    // reported rather than discarded, because a caller that intends to say a
+    // name out loud needs to know whether it is the only one this lookup could
+    // have meant.
+    const { primary, identity } = splitByPerson(rows);
+    const appointments = primary;
 
     const upcoming: AppointmentSummary[] = [];
     const past: AppointmentSummary[] = [];
@@ -491,7 +588,11 @@ export class ScheduleLookupService {
       `[ScheduleLookup] ${appointments.length} row(s) as of ${todayStr} -> ` +
         `${past.length} past visit(s), ${upcoming.length} upcoming; ` +
         `last visit ${past[0]?.isoDate ?? 'none'}; ` +
-        `${appointments.length - past.length - upcoming.length} not counted (cancelled, no-show, or cancelled-future)`,
+        `${appointments.length - past.length - upcoming.length} not counted (cancelled, no-show, or cancelled-future)` +
+        (identity.unique
+          ? ''
+          : `; AMBIGUOUS — ${identity.candidateCount} people on this lookup, ` +
+            `${rows.length - appointments.length} row(s) belonging to someone else were excluded`),
     );
 
     const lastProviderSeen = past[0]?.provider !== 'Unknown' ? past[0]?.provider : undefined;
@@ -520,6 +621,7 @@ export class ScheduleLookupService {
       lastProviderSeen,
       lastLocationSeen,
       lastVisitDate: past[0]?.date,
+      identity,
       totalAppointmentsFound: appointments.length,
       patientData,
     };

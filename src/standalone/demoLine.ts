@@ -599,15 +599,31 @@ function onStart(twilio: WebSocket, msg: Record<string, any>): void {
   // Not awaited: recognition is a head start, not a gate. A slow lookup must
   // never delay the greeting, and a caller we do not recognise simply gets the
   // ordinary flow.
-  void recognizeCaller(callId, callerPhone);
+  const recognition = recognizeCaller(callId, callerPhone);
 
   if (BRAIN_LINES.has(call.slug)) {
     // Built before the greeting because building it IS the pre-context lookup:
     // the real agent reads the caller's schedule and memory on creation, and
     // its greeting should already know who it is talking to.
-    void import('./claudeBrain')
-      .then(({ createClaudeBrain }) =>
-        createClaudeBrain({ callId, callerPhone: callerPhone || undefined, callSid: callId }),
+    //
+    // The precontext has to be IN the metadata, because that is the only thing
+    // that produces the "Am I speaking with X?" opening — the whole block in
+    // answeringServiceAgent is gated on `metadata.precontext`. Passing the
+    // phone alone gives the agent the patient's record but no instruction to
+    // open by confirming, which is why this line interrogated a caller it had
+    // already matched. Awaiting is affordable now that the lookup is an index
+    // scan; it was a 7-second sequential scan this morning and would not have
+    // been.
+    void recognition
+      .then((precontext) =>
+        import('./claudeBrain').then(({ createClaudeBrain }) =>
+          createClaudeBrain({
+            callId,
+            callerPhone: callerPhone || undefined,
+            callSid: callId,
+            precontext: precontext ?? undefined,
+          }),
+        ),
       )
       .then((brain) => {
         call.brain = brain;
@@ -1188,8 +1204,11 @@ function drainSpeech(call: DemoCall): void {
  * months; this line never did, which is why every caller here was treated as
  * a stranger whose name had to be extracted from a sentence.
  */
-async function recognizeCaller(callId: string, phone: string): Promise<void> {
-  if (!phone || phone.replace(/\D/g, '').length < 10) return;
+async function recognizeCaller(
+  callId: string,
+  phone: string,
+): Promise<import('../agents/azulSchedulingAgent').AzulPrecontext | null> {
+  if (!phone || phone.replace(/\D/g, '').length < 10) return null;
   try {
     const { scheduleLookupService } = await import('../services/scheduleLookupService');
     const r = await scheduleLookupService.lookupByPhone(phone);
@@ -1208,8 +1227,26 @@ async function recognizeCaller(callId: string, phone: string): Promise<void> {
 
     if (!r?.patientFound || !first || !last) {
       console.info(`[DEMO-LINE] ${callId} caller not recognised from their number — ordinary flow`);
-      return;
+      return null;
     }
+
+    // ONE person, or nobody. The precontext block tells the agent "this phone
+    // number matches ONE person on file" and has it open by saying that name
+    // out loud. If the number carries two people we would be asserting
+    // something false to a patient and possibly naming the wrong one, so the
+    // honest move is to hand back nothing and let the agent ask.
+    //
+    // The service now reports this rather than silently picking: +1 845 531
+    // 7471 carries Wayne Fabian and a John Doe test record, and before the
+    // grouping fix their two histories were being merged into one.
+    if (!r.identity?.unique) {
+      console.info(
+        `[DEMO-LINE] ${callId} number matches ${r.identity?.candidateCount ?? '?'} people — ` +
+          `no pre-context, the agent asks rather than guesses`,
+      );
+      return null;
+    }
+
     const { updateLedger } = await import('../services/callFactsLedger');
     updateLedger(callId, {
       matchedFirstName: first,
@@ -1218,8 +1255,18 @@ async function recognizeCaller(callId: string, phone: string): Promise<void> {
     });
     // No name in the log. The fact of a match is the useful part.
     console.info(`[DEMO-LINE] ${callId} caller RECOGNISED from their number — confirming, not asking`);
+
+    return {
+      matched: true,
+      firstName: first,
+      // On file, never spoken first — the agent asks for the surname in the
+      // caller's own words and discards this block if it disagrees.
+      lastNameOnFile: last,
+      dobOnFile: r.patientData?.dateOfBirth ?? null,
+    };
   } catch (e) {
     console.warn(`[DEMO-LINE] ${callId} caller lookup failed (ordinary flow):`, e);
+    return null;
   }
 }
 
