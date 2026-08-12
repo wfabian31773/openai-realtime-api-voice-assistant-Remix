@@ -184,66 +184,65 @@ registerTool({
       };
     }
 
-    // TWO ENDPOINTS, chosen by whether we have a classification.
+    // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
     //
-    // create-ticket takes an explicit (departmentId, requestTypeId,
-    // requestReasonId) triple, which is the whole point of routing by queue: an
-    // agent that arrived on the optical line already knows the department and
-    // has just classified the request, and submit-ticket would discard that and
-    // re-derive it from free text — which is how 42% of optical tickets ended
-    // up with no request type and 953 with a Technicians-Support reason.
+    // This used to fall back to submit-ticket when nothing classified. Proving
+    // the Surgery build against production killed that: VA-50811 was filed by
+    // THIS agent through that fallback, its description said in plain words "a
+    // question about my account that fits no optical category", and it landed
+    // in department 8 — After Hours Call Service — with assigned_to_id NULL and
+    // a subject reading "Wayne Fabian - After Hours Call". Nothing in the text
+    // said after hours. submit-ticket re-derives the DEPARTMENT server-side,
+    // not merely the reason, and defaults to 8 when it cannot derive one.
     //
-    // But create-ticket REQUIRES the triple. Measured against production on
-    // 2026-08-12, twice: `requestTypeId: 0` is rejected ("Validation failed"),
-    // and OMITTING the fields is rejected identically. So there is no way to
-    // express "no category" through it, and a request that genuinely fits none
-    // of Optical's eighteen pairs — a billing question that reached this line —
-    // would be unfileable.
+    // The old comment here reasoned that a filed ticket with a weak category
+    // beats telling a caller we cannot help. That was right. What it got wrong
+    // was believing the fallback produced a weak CATEGORY, when it produced a
+    // weak DEPARTMENT — a ticket no optician will ever open.
     //
-    // submit-ticket accepts free text and derives its own taxonomy. That is
-    // exactly the wrong tool when we KNOW the answer and the right one when we
-    // do not: the ticket exists, the location resolves server-side, the
-    // optician sees it, and the description carries the truth. Better a
-    // filed ticket with a weak category than a caller told we cannot help.
+    // create-ticket REQUIRES the triple: measured 2026-08-12, `requestTypeId: 0`
+    // and omitting the fields are both rejected. So a request fitting none of
+    // the eighteen pairs is filed under a placeholder reason, in department 1,
+    // with the description leading "UNCATEGORISED" so the first words an
+    // optician reads are true. Style Consultation is the placeholder because it
+    // is the only optical reason that asserts nothing clinical — it does not
+    // claim a new prescription, a broken frame or a failed lens.
     //
-    // The proper fix is nullable columns on create-ticket; raised with the
-    // ticketing app. Until then this is the honest fallback rather than
-    // inventing a category that nearly fits.
-    const res = cls
-      ? await ticketingApiClient.createTicket({
-          departmentId: OPTICAL_DEPARTMENT_ID,
-          requestTypeId: cls.requestTypeId,
-          requestReasonId: cls.requestReasonId,
-          patientFirstName: first,
-          patientLastName: last,
-          patientPhone: phone,
-          patientEmail: str(input.email) || undefined,
-          preferredContactMethod: 'phone',
-          patientBirthMonth: parts.month,
-          patientBirthDay: parts.day,
-          patientBirthYear: parts.year,
-          // The id is what sets the foreign key; the name is what staff read.
-          locationId: lookup.locationId,
-          locationOfLastVisit: cleanLocation,
-          ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
-          lastProviderSeen: cleanProvider || undefined,
-          description: cleanDescription.value,
-          priority: 'medium',
-          callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
-        })
-      : await ticketingApiClient.submitTicket({
-          patientFullName: `${first} ${last}`,
-          patientDOB: `${parts.month}/${parts.day}/${parts.year}`,
-          reasonForCalling: cleanDescription.value,
-          preferredContactMethod: 'phone',
-          patientPhone: phone,
-          patientEmail: str(input.email) || undefined,
-          locationOfLastVisit: cleanLocation,
-          lastProviderSeen: cleanProvider || undefined,
-          priority: 'medium',
-          callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
-          ...(callSid ? { idempotencyKey: `call-${callSid}` } : {}),
-        });
+    // The proper fix is a nullable reason on create-ticket, or an
+    // uncategorised reason per department. Both are raised with the ticketing
+    // app; neither is ours to apply unilaterally.
+    const OPTICAL_PLACEHOLDER = { requestTypeId: 1, requestReasonId: 4, requestReason: 'Style Consultation' };
+    const filing = cls ?? OPTICAL_PLACEHOLDER;
+    // Prefixed from the SANITIZED text, with a plain hyphen. Prefixing after
+    // sanitising would put an em dash back into a string that had just been
+    // cleared for GSM-7 — one character outside it turns a 160-character SMS
+    // segment into 70 and makes the message far more exposed to US carrier
+    // A2P filtering.
+    const filedDescription = cls
+      ? cleanDescription.value
+      : `UNCATEGORISED - ${cleanDescription.value}`;
+
+    const res = await ticketingApiClient.createTicket({
+      departmentId: OPTICAL_DEPARTMENT_ID,
+      requestTypeId: filing.requestTypeId,
+      requestReasonId: filing.requestReasonId,
+      patientFirstName: first,
+      patientLastName: last,
+      patientPhone: phone,
+      patientEmail: str(input.email) || undefined,
+      preferredContactMethod: 'phone',
+      patientBirthMonth: parts.month,
+      patientBirthDay: parts.day,
+      patientBirthYear: parts.year,
+      // The id is what sets the foreign key; the name is what staff read.
+      locationId: lookup.locationId,
+      locationOfLastVisit: cleanLocation,
+      ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
+      lastProviderSeen: cleanProvider || undefined,
+      description: filedDescription,
+      priority: 'medium',
+      callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
+    });
 
     if (!res.success || !res.ticketNumber) {
       return {
@@ -258,6 +257,9 @@ registerTool({
       ticket_number: res.ticketNumber,
       classified: Boolean(cls),
       request_reason: cls?.requestReason ?? null,
+      // Say so out loud, so a caller can tell a reason the request earned from
+      // one supplied to satisfy a required field.
+      reason_is_placeholder: !cls,
       // The id we actually attached, so a caller can tell a real assignment
       // from a ticket that merely mentions an office in its text.
       location_id: lookup.locationId,

@@ -214,6 +214,46 @@ export const SURGERY_LOGISTICS: SurgeryLogisticsBucket[] = [
 ];
 
 /**
+ * The pair used when nothing fits — and why it is not "none".
+ *
+ * "No category" cannot be expressed. create-ticket REQUIRES a
+ * (departmentId, requestTypeId, requestReasonId) triple; measured against
+ * production 2026-08-12, `requestTypeId: 0` and omitting the fields are both
+ * rejected. And submit-ticket, the free-text endpoint, re-derives the
+ * DEPARTMENT server-side and defaults to 8 when it cannot: VA-50811 was filed
+ * by the Optical agent, said in its own description "a question about my
+ * account that fits no optical category", and landed in After Hours Call
+ * Service with assigned_to_id NULL. For Optical that path is the rare tail.
+ * For Surgery it would be the majority of calls.
+ *
+ * So the choice is not between a true reason and no reason. It is between a
+ * placeholder reason on a ticket that reaches the surgery coordinator, and an
+ * honest one on a ticket that reaches nobody. This is the first.
+ *
+ * 43 "Surgery Scheduling" rather than 42 "New Cataract Consult", deliberately.
+ * 42 is a CLINICAL claim — it asserts this person needs evaluating for
+ * cataracts — and it is the assertion currently sitting on 1,710 tickets that
+ * never earned it. 43 asserts only that the call concerns a surgery being
+ * arranged, which is true of every logistics bucket below. Type 10 comes with
+ * it because 43 belongs to it and Surgery Coordination has no non-procedure
+ * type at all; that is the gap the Support Center needs to close, and it is
+ * written up rather than papered over.
+ *
+ * Every ticket filed this way leads its description with the bucket label, so
+ * a coordinator reads what it actually is in the first three words and the
+ * practice can count these later without a reason id to group by.
+ */
+export const SURGERY_PLACEHOLDER = {
+  requestTypeId: 10,
+  requestType: 'Cataract Surgery',
+  requestReasonId: 43,
+  requestReason: 'Surgery Scheduling',
+} as const;
+
+/** Prefix for a request that matched no bucket either. Still countable. */
+export const SURGERY_UNCATEGORISED_LABEL = 'UNCATEGORISED';
+
+/**
  * Which logistics bucket this is, when the taxonomy has no reason for it.
  *
  * Checked AFTER `classifySurgery` returns null, never instead of it — a caller

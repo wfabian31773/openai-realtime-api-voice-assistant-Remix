@@ -259,25 +259,35 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     });
   });
 
-  it('falls back to submit-ticket when it cannot classify, rather than failing', async () => {
-    // create-ticket REQUIRES the (type, reason) pair. Measured against
-    // production twice on 2026-08-12: requestTypeId 0 is rejected, and omitting
-    // the fields is rejected identically. So a request that fits none of
-    // Optical's eighteen pairs — a billing question that reached this line —
-    // has no route through that endpoint at all.
+  it('never uses submit-ticket, even when it cannot classify', async () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and it was wrong in production.
     //
-    // submit-ticket derives its own taxonomy from free text. Wrong tool when we
-    // know the answer; right tool when we do not. The alternative is telling a
-    // caller we cannot take their request.
+    // The reasoning it encoded: create-ticket REQUIRES the (type, reason) pair
+    // — measured twice on 2026-08-12, requestTypeId 0 is rejected and omitting
+    // the fields is rejected identically — so a request fitting none of the
+    // eighteen pairs has no route through it, and submit-ticket derives its own
+    // taxonomy from free text. Wrong tool when we know the answer, right tool
+    // when we do not.
+    //
+    // What that missed is WHICH field submit-ticket derives. VA-50811 was filed
+    // by this exact path, said in its own description "a question about my
+    // account that fits no optical category", and landed in department 8 —
+    // After Hours Call Service — with assigned_to_id NULL. It re-derives the
+    // DEPARTMENT, and defaults to 8 when it cannot. The fallback did not
+    // produce a weak category; it produced a ticket no optician would ever see.
+    //
+    // So: always create-ticket, always department 1, placeholder reason when
+    // nothing fits, and the description leads with UNCATEGORISED so the first
+    // words a human reads are true.
     const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
     vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation').mockResolvedValueOnce({
       success: true,
       locationId: 8,
     });
-    const create = vi.spyOn(ticketingApiClient, 'createTicket');
-    const submit = vi
-      .spyOn(ticketingApiClient, 'submitTicket')
-      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-FALLBACK' });
+    const create = vi
+      .spyOn(ticketingApiClient, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-PLACEHOLDER' });
+    const submit = vi.spyOn(ticketingApiClient, 'submitTicket');
 
     const out = await runTool('file_optical_ticket', {
       first_name: 'Wayne',
@@ -288,11 +298,22 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       request_description: 'a question about my account that fits no optical category',
     });
 
-    expect(create).not.toHaveBeenCalled();
-    expect(submit).toHaveBeenCalledOnce();
-    expect(out).toMatchObject({ success: true, ticket_number: 'VA-FALLBACK', classified: false });
-    // The truth still travels, in the one field that carries free text.
-    expect(submit.mock.calls[0][0].reasonForCalling).toMatch(/no optical category/);
+    expect(submit, 'submit-ticket re-derives the department and defaults to 8').not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledOnce();
+
+    const sent = create.mock.calls[0][0];
+    expect(sent.departmentId, 'the department is never guessed').toBe(1);
+    // The truth leads the description — the placeholder reason must never be
+    // the only thing describing this ticket.
+    expect(sent.description).toMatch(/^UNCATEGORISED - /);
+    expect(sent.description).toMatch(/no optical category/);
+
+    expect(out).toMatchObject({
+      success: true,
+      ticket_number: 'VA-PLACEHOLDER',
+      classified: false,
+      reason_is_placeholder: true,
+    });
   });
 
   it('uses create-ticket, not the fallback, when it CAN classify', async () => {

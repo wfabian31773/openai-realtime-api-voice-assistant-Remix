@@ -171,10 +171,18 @@ registerTool({
 
     // Lead with the bucket when there is no reason id to carry the meaning.
     // A coordinator scanning a queue reads the first three words.
+    // When there is no true reason, the description carries the meaning — so it
+    // is prefixed ALWAYS, not only when the agent remembered to pass a bucket.
+    // A coordinator reads the first three words; the placeholder reason id must
+    // never be the only thing describing this ticket.
     const prefix = str(input.description_prefix);
     const surgeryDate = str(input.surgery_date);
+    // Plain hyphen, not an em dash: an em dash is outside GSM-7, so
+    // sanitizeForSms would rewrite it and log a normalisation on every single
+    // unclassified ticket — which is most of them on this queue.
+    const leader = cls ? '' : `${prefix || 'UNCATEGORISED'} - `;
     const body = [
-      prefix && !cls ? `${prefix} — ` : '',
+      leader,
       description,
       surgeryDate ? `\n\nSurgery date given by caller: ${surgeryDate}` : '',
     ].join('');
@@ -223,7 +231,30 @@ registerTool({
     const urgent = str(input.urgent).toLowerCase() === 'true' || cls?.urgent === true;
     const priority = urgent ? 'urgent' : 'medium';
 
-    // TWO ENDPOINTS, chosen by whether we have a classification.
+    // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
+    //
+    // This used to fall back to submit-ticket when nothing classified, copying
+    // Optical. Proving it against production killed that: VA-50811 was filed by
+    // the OPTICAL agent through submit-ticket, its description said "a question
+    // about my account that fits no optical category", and it landed in
+    // department 8 — After Hours Call Service — with assigned_to_id NULL and a
+    // subject reading "Wayne Fabian - After Hours Call". Nothing in the text
+    // said after hours. submit-ticket re-derives the DEPARTMENT, not just the
+    // reason, and defaults to 8 when it cannot.
+    //
+    // For Optical that is the rare tail. For Surgery the unclassifiable case is
+    // the MAJORITY — drops, clearance forms, arrival times, reschedules,
+    // deposits and status chases are roughly 55% of the queue and none of them
+    // match a reason. Routing those through submit-ticket would have sent more
+    // than half of this queue to After Hours, unassigned: worse than the defect
+    // this agent exists to fix, which at least reaches department 2.
+    //
+    // So the reason is a placeholder when nothing fits, the department never
+    // is, and the description leads with what the request actually is. See
+    // SURGERY_PLACEHOLDER for why 43 and not 42.
+    const { SURGERY_PLACEHOLDER } = await import('./surgeryTaxonomy');
+    const filing = cls ?? SURGERY_PLACEHOLDER;
+
     //
     // create-ticket takes an explicit (departmentId, requestTypeId,
     // requestReasonId) triple, which is the whole point of routing by queue: an
@@ -247,40 +278,26 @@ registerTool({
     // The proper fix is nullable taxonomy columns on create-ticket, or the six
     // missing reasons added to department 2. Both are raised with the ticketing
     // app; neither is ours to apply unilaterally.
-    const res = cls
-      ? await ticketingApiClient.createTicket({
-          departmentId: SURGERY_DEPARTMENT_ID,
-          requestTypeId: cls.requestTypeId,
-          requestReasonId: cls.requestReasonId,
-          patientFirstName: first,
-          patientLastName: last,
-          patientPhone: phone,
-          patientEmail: str(input.email) || undefined,
-          preferredContactMethod: 'phone',
-          patientBirthMonth: parts.month,
-          patientBirthDay: parts.day,
-          patientBirthYear: parts.year,
-          ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
-          ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
-          ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
-          lastProviderSeen: cleanSurgeon || undefined,
-          description: cleanDescription.value,
-          priority,
-          callData: { agentUsed: 'surgery', ...(callSid ? { callSid } : {}) },
-        })
-      : await ticketingApiClient.submitTicket({
-          patientFullName: `${first} ${last}`,
-          patientDOB: `${parts.month}/${parts.day}/${parts.year}`,
-          reasonForCalling: cleanDescription.value,
-          preferredContactMethod: 'phone',
-          patientPhone: phone,
-          patientEmail: str(input.email) || undefined,
-          ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
-          lastProviderSeen: cleanSurgeon || undefined,
-          priority,
-          callData: { agentUsed: 'surgery', ...(callSid ? { callSid } : {}) },
-          ...(callSid ? { idempotencyKey: `call-${callSid}` } : {}),
-        });
+    const res = await ticketingApiClient.createTicket({
+      departmentId: SURGERY_DEPARTMENT_ID,
+      requestTypeId: filing.requestTypeId,
+      requestReasonId: filing.requestReasonId,
+      patientFirstName: first,
+      patientLastName: last,
+      patientPhone: phone,
+      patientEmail: str(input.email) || undefined,
+      preferredContactMethod: 'phone',
+      patientBirthMonth: parts.month,
+      patientBirthDay: parts.day,
+      patientBirthYear: parts.year,
+      ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
+      ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
+      ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
+      lastProviderSeen: cleanSurgeon || undefined,
+      description: cleanDescription.value,
+      priority,
+      callData: { agentUsed: 'surgery', ...(callSid ? { callSid } : {}) },
+    });
 
     if (!res.success || !res.ticketNumber) {
       return {
@@ -295,6 +312,11 @@ registerTool({
       ticket_number: res.ticketNumber,
       classified: Boolean(cls),
       request_reason: cls?.requestReason ?? null,
+      // Say so out loud. A caller reading this result must be able to tell a
+      // reason the request earned from one it was given to satisfy a required
+      // field — otherwise this becomes the next 1,710-ticket statistic.
+      reason_is_placeholder: !cls,
+      ...(cls ? {} : { filed_under: SURGERY_PLACEHOLDER.requestReason, description_leads_with: leader.replace(' — ', '') }),
       priority,
       location_id: lookup.locationId ?? null,
       provider_id: lookup.providerId ?? null,
