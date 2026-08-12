@@ -118,8 +118,129 @@ describe('what it tells the caller about themselves', () => {
   });
 });
 
+describe('the greeting sets expectations before the caller asks for a human', () => {
+  // Operator-dictated, 2026-08-12: "all of our opticians are currently
+  // assisting other customers. I can take a message, and they will follow up
+  // with you... so you can preempt the 'pass me to a human'."
+  it('says why nobody is answering and what will happen instead', () => {
+    const g = opticalAgentConfig.greeting;
+    expect(g).toMatch(/opticians are currently\s*assisting other customers/i);
+    expect(g).toMatch(/take a message/i);
+    expect(g).toMatch(/follow up with you/i);
+  });
+
+  it('never implies a person is on the line', () => {
+    // Also the honest framing if this line is ever looked at for disclosure.
+    expect(opticalAgentConfig.greeting).not.toMatch(/speaking with a representative|one of our team members will be right/i);
+  });
+});
+
+describe('caller recognition — credibility, not cosmetics', () => {
+  // Operator, 2026-08-12: "it lets the person know that, hey, I have your
+  // information in my hand so I'm able to help... if they know my name, they
+  // might know when my next appointment is." Opening cold tells them the
+  // opposite.
+  const matched = buildOpticalPrompt({
+    callerPhone: '8455317471',
+    precontext: { matched: true, firstName: 'Wayne', lastNameOnFile: 'Fabian', dobOnFile: '1973-03-17' },
+  });
+
+  it('opens by confirming the name rather than asking for it', () => {
+    expect(matched).toMatch(/Am I speaking with Wayne\?/);
+    expect(matched).toMatch(/NEVER open with "can I get your name and date of birth"/i);
+  });
+
+  it('still treats the match as a hint, not as verification', () => {
+    expect(matched).toMatch(/A first name is not verification/i);
+    expect(matched).toMatch(/still collect the date of birth/i);
+    expect(matched).toMatch(/matched the WRONG person/i);
+  });
+
+  it('says nothing about recognition when the number matches nobody', () => {
+    const cold = buildOpticalPrompt({ callerPhone: '8455317471' });
+    expect(cold).not.toMatch(/Am I speaking with/);
+    expect(cold).not.toMatch(/YOU ALREADY KNOW WHO THIS PROBABLY IS/);
+  });
+
+  it('does not claim a match when precontext came back unmatched', () => {
+    const unmatched = buildOpticalPrompt({
+      callerPhone: '8455317471',
+      precontext: { matched: false },
+    });
+    expect(unmatched).not.toMatch(/Am I speaking with/);
+  });
+});
+
+describe('the callback number is confirmed BEFORE the ticket is filed', () => {
+  // VA-50813 said "Your request has been filed... Now, is this number ending in
+  // 7471 the best one to reach you?" Operator: correcting it afterwards "would
+  // have required another ticket".
+  const p = buildOpticalPrompt({ callerPhone: '8455317471' });
+
+  it('is instructed to confirm first, and told why', () => {
+    expect(p).toMatch(/CONFIRM THE CALLBACK NUMBER BEFORE YOU FILE, not after/);
+    expect(p).toMatch(/means a second\s*\n?\s*ticket/i);
+  });
+
+  it('puts confirming ahead of filing in the numbered steps', () => {
+    expect(p.indexOf('CONFIRM THE CALLBACK NUMBER')).toBeLessThan(
+      p.indexOf('File it with file_optical_ticket'),
+    );
+  });
+});
+
 describe('config', () => {
   it('is slug "optical" so the webhook and the registry agree', () => {
     expect(opticalAgentConfig.slug).toBe('optical');
+  });
+});
+
+describe('the call id must not depend on the model remembering it', () => {
+  // VA-50813 — the Optical line's first working call — filed with
+  // `call_sid: null`. The tool accepts it as an input and the model simply
+  // never passed it. Without it `update-call-data` can never match the ticket
+  // to the call, so the recording, transcript and summary are not late, they
+  // are unattachable forever.
+  it('injects call_sid, caller_phone and dialed_number into every tool', async () => {
+    const { runTool } = await import('../tools/registry');
+    const spy = vi.spyOn(await import('../tools/registry'), 'runTool');
+
+    const agent = await createOpticalAgent(undefined, {
+      callId: 'call-1',
+      callSid: 'CAreal123',
+      callerPhone: '8455317471',
+      dialedNumber: '8186193692',
+    });
+    const file = ((agent as { tools?: Array<{ name: string; invoke?: Function }> }).tools ?? []).find(
+      (t) => t.name === 'file_optical_ticket',
+    );
+    expect(file, 'file_optical_ticket must be on the agent').toBeTruthy();
+
+    // Invoke with the arguments a model actually sends: everything present,
+    // the ones it does not know set to null.
+    await file!.invoke?.({} as never, JSON.stringify({
+      first_name: 'Wayne', last_name: 'Fabian', date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471', location: 'Eastvale',
+      request_description: 'hinge broke', request_reason_id: null,
+      provider: null, email: null, call_sid: null, caller_phone: null, dialed_number: null,
+    }));
+
+    const calls = spy.mock.calls;
+    const passed = calls[calls.length - 1][1] as Record<string, unknown>;
+    expect(passed.call_sid, 'a null from the model must not blank the injected id').toBe('CAreal123');
+    expect(passed.caller_phone).toBe('8455317471');
+    expect(passed.dialed_number).toBe('8186193692');
+    void runTool;
+  });
+
+  it('falls back to callId when there is no callSid', async () => {
+    const spy = vi.spyOn(await import('../tools/registry'), 'runTool');
+    const agent = await createOpticalAgent(undefined, { callId: 'call-only' });
+    const t = ((agent as { tools?: Array<{ name: string; invoke?: Function }> }).tools ?? []).find(
+      (x) => x.name === 'check_open_tickets',
+    );
+    await t!.invoke?.({} as never, JSON.stringify({ phone: '845-531-7471' }));
+    const calls = spy.mock.calls;
+    expect((calls[calls.length - 1][1] as Record<string, unknown>).call_sid).toBe('call-only');
   });
 });

@@ -22,7 +22,25 @@ import { getTool, runTool } from './registry';
  * deployment mistake and it should surface when the agent is built, not
  * silently on the one call that needed it.
  */
-export function realtimeToolsFor(names: string[]): ReturnType<typeof tool>[] {
+export function realtimeToolsFor(
+  names: string[],
+  /**
+   * Values the CALL knows and the model must not be asked for.
+   *
+   * `call_sid` is the case that forced this. VA-50813 — the Optical line's
+   * first working call — filed with `call_sid: null`, because the tool accepts
+   * it as an input and the model simply never passed it. Without it,
+   * `update-call-data` can never match the ticket to the call, so the
+   * recording, transcript and summary are not merely late, they are
+   * unattachable forever. No prompt instruction should be load-bearing for a
+   * value the process already holds.
+   *
+   * Merged UNDER the model's arguments, and the model cannot blank one: strict
+   * mode makes every field present-and-nullable, so an unset argument arrives
+   * as null and would otherwise overwrite what we injected.
+   */
+  context: Record<string, unknown> = {},
+): ReturnType<typeof tool>[] {
   return names.map((name) => {
     const def = getTool(name);
     if (!def) {
@@ -52,7 +70,12 @@ export function realtimeToolsFor(names: string[]): ReturnType<typeof tool>[] {
       // fails returns something the model can read and act on rather than
       // ending the turn. The string is what the model sees.
       execute: async (input: unknown) => {
-        const result = await runTool(def.name, (input ?? {}) as Record<string, unknown>);
+        const supplied = Object.fromEntries(
+          Object.entries((input ?? {}) as Record<string, unknown>).filter(
+            ([, v]) => v !== null && v !== undefined,
+          ),
+        );
+        const result = await runTool(def.name, { ...context, ...supplied });
         return JSON.stringify(result);
       },
     } as unknown as Parameters<typeof tool>[0];

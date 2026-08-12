@@ -46,6 +46,17 @@ export interface OpticalAgentMetadata {
   callerPhone?: string;
   dialedNumber?: string;
   callLogId?: string;
+  /**
+   * Caller-ID pre-context — who this number matches, before the caller says
+   * anything.
+   *
+   * Operator, 2026-08-12, on why this is not cosmetic: "it lets the person know
+   * that, hey, I have your information in my hand so I'm able to help... if
+   * they know my name, they might know when my next appointment is." Opening
+   * cold with "can I get your name and date of birth" tells a patient the
+   * opposite — that they are starting from nothing.
+   */
+  precontext?: import('./azulSchedulingAgent').AzulPrecontext;
 }
 
 export const opticalAgentConfig = {
@@ -55,8 +66,15 @@ export const opticalAgentConfig = {
     'Answers the Optical queue. Takes optical requests — glasses, lenses, contacts, ' +
     'pickups — and files them for the optician at the caller\'s office.',
   version: '1.0.0',
+  // Operator-dictated, 2026-08-12. Two jobs in one sentence: say why a person
+  // is not answering, and say what WILL happen — so the caller does not spend
+  // the call trying to reach a human this line has no way to reach. Also the
+  // honest framing for compliance later: nobody is told they are talking to a
+  // person.
   greeting:
-    'Thank you for calling Azul Vision optical. How can I help you today?',
+    'Thank you for calling Azul Vision optical. All of our opticians are currently ' +
+    'assisting other customers, but I can take a message and they will follow up with you. ' +
+    'How can I help you today?',
   voice: 'sage',
   language: 'en',
 };
@@ -74,6 +92,30 @@ export function buildOpticalPrompt(metadata: OpticalAgentMetadata): string {
   const time = getPacificTimeContext();
   const phone = metadata.callerPhone || '';
 
+  // Caller-ID recognition. Only when the number resolves to ONE person — the
+  // block asserts "this number matches one person on file", and saying that
+  // when it is false would name the wrong patient out loud.
+  const pc = metadata.precontext;
+  const recognitionSection =
+    pc?.matched && pc.firstName
+      ? `
+# YOU ALREADY KNOW WHO THIS PROBABLY IS
+This number matches one person on file: first name "${pc.firstName}".
+
+- Your greeting has already played. Do NOT greet again. Go straight to
+  confirming: "Am I speaking with ${pc.firstName}?"
+- NEVER open with "can I get your name and date of birth" when you have a
+  match. Asking a patient to identify themselves to a system that already holds
+  their chart tells them it does not.
+- A first name is not verification. Ask for the last name in their own words,
+  and still collect the date of birth. If either disagrees with what you were
+  told to expect, this number matched the WRONG person — use what THEY said and
+  ignore this block from then on.
+- Do not say we recognised their number, and do not speak a last name first.
+- Disclose nothing from anyone's record on the strength of this match.
+`
+      : '';
+
   const callbackLine = phone
     ? `Their number is ${formatPhoneForSpeech(phone)} (ending ${formatPhoneLast4(phone)}). ` +
       `Use it as the callback number without asking. Confirm it once, at the end, and do not ask "is that correct?".`
@@ -84,7 +126,7 @@ export function buildOpticalPrompt(metadata: OpticalAgentMetadata): string {
 Every call that reaches you is an optical matter — glasses, lenses, contacts, a
 pickup, a repair. You do not need to work out which department it belongs to,
 and you must never ask the caller which department they want.
-
+${recognitionSection}
 # WHAT YOU DO
 Take the request and file it for the optician at their office. That is the job.
 
@@ -118,7 +160,12 @@ that it is an appointment request. Do not attempt to schedule anything.
 4. Work out what kind of request it is with classify_optical_request. If it
    cannot place it, that is fine — say nothing about it and file with a clear
    description.
-5. File it with file_optical_ticket, then read the ticket number back.
+5. CONFIRM THE CALLBACK NUMBER BEFORE YOU FILE, not after. A ticket is a
+   record the optician acts on; correcting a number after filing means a second
+   ticket and a patient who was told the wrong thing. Ask once — "is the number
+   ending ${phone ? formatPhoneLast4(phone) : 'you are calling from'} the best
+   one to reach you?" — and only then file.
+6. File it with file_optical_ticket, then read the ticket number back.
 
 # HOW YOU SPEAK
 ${callbackLine}
@@ -143,7 +190,15 @@ export async function createOpticalAgent(
     name: opticalAgentConfig.name,
     voice: opticalAgentConfig.voice,
     instructions: buildOpticalPrompt(metadata),
-    tools: realtimeToolsFor(OPTICAL_TOOLS),
+    // The call knows its own id. Passing it here rather than asking the model
+    // for it is what makes the recording and transcript attachable later —
+    // VA-50813 filed with call_sid null because the prompt was the only thing
+    // carrying it.
+    tools: realtimeToolsFor(OPTICAL_TOOLS, {
+      call_sid: metadata.callSid ?? metadata.callId,
+      caller_phone: metadata.callerPhone,
+      dialed_number: metadata.dialedNumber,
+    }),
   });
 
   console.info(

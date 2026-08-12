@@ -2189,7 +2189,7 @@ async function observeCall(
   // persons incl. chartless) and is NOT pilot-fenced — verified in the
   // service's sage-tools.ts — so it is correct for the practice-wide
   // answering-service and no-ivr lines, not just the SD pilot.
-  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'no-ivr', 'dev-no-ivr']);
+  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'optical', 'no-ivr', 'dev-no-ivr']);
   if (PRECONTEXT_SLUGS.has(effectiveSlug) && from) {
     azulPrecontextPromise = import('./agents/azulSchedulingAgent')
       .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
@@ -2452,11 +2452,22 @@ async function observeCall(
         // NO handoff callback, deliberately: operator ruling 2026-08-12, only
         // PCP and Scheduling transfer. The factory accepts and ignores the
         // first argument so the registry's shared AgentFactory shape still fits.
+        //
+        // precontext is what lets it open with "Am I speaking with Wayne?"
+        // instead of asking a patient to identify themselves to a system that
+        // already holds their chart. Its first live call asked cold because
+        // this was not passed.
+        const opticalPrecontext = await racePrecontext();
+        console.log(
+          `[Optical] Pre-context for ...${(from || '').slice(-4)}: ` +
+            `${opticalPrecontext?.matched ? `matched '${opticalPrecontext.firstName}'` : 'no unique match'}`,
+        );
         factoryResult = agentFactory(undefined, {
           callId,
           callSid: twilioCallSid,
           callerPhone: from,
           dialedNumber: to,
+          precontext: opticalPrecontext ?? undefined,
           get callLogId() { return liveCallLogId(); },
         });
         break;
@@ -4687,18 +4698,30 @@ export function setupVoiceAgentRoutes(app: Express): void {
           // PRIORITY 2: Check metadata for explicitly set agent (e.g., no-ivr bypass on same server)
           const configuredSlug = metadata?.agentSlug;
           
-          if (configuredSlug === 'no-ivr') {
-            agentSlug = 'no-ivr';
-            console.info(`[WEBHOOK] ✓ Using no-ivr agent from metadata (IVR bypassed)`);
-          } else if (configuredSlug === 'after-hours') {
-            agentSlug = 'after-hours';
-            console.info(`[WEBHOOK] ✓ Using after-hours agent from metadata (IVR flow)`);
-          } else if (configuredSlug && validOutboundAgents.includes(configuredSlug)) {
-            agentSlug = configuredSlug;
-            console.info(`[WEBHOOK] ✓ Using outbound agent from metadata: ${agentSlug}`);
-          } else if (configuredSlug && legacyDeletedAgents.includes(configuredSlug)) {
+          // Consult the SAME allowlists the SIP-header path uses, rather than
+          // naming slugs one at a time.
+          //
+          // This block used to check `=== 'no-ivr'`, `=== 'after-hours'`, the
+          // outbound list, and the legacy list — and nothing else. Every other
+          // inbound line (answering-service, pcp, azul-scheduling, demo,
+          // optical) fell through all four branches and kept the default,
+          // which is 'after-hours'. It rarely bit because the SIP header
+          // normally arrives and this is only the fallback; when the header is
+          // missing, the caller silently gets the wrong agent.
+          //
+          // Found by walking the path a call takes in order, after Optical's
+          // first three live calls each died at a different enumerated list.
+          // Adding 'optical' here as a fifth literal would have left the class
+          // intact for the next line.
+          if (configuredSlug && legacyDeletedAgents.includes(configuredSlug)) {
             agentSlug = 'after-hours';
             console.info(`[WEBHOOK] Coercing legacy metadata slug '${configuredSlug}' → 'after-hours'`);
+          } else if (
+            configuredSlug &&
+            [...validInboundAgents, ...validOutboundAgents].includes(configuredSlug)
+          ) {
+            agentSlug = configuredSlug;
+            console.info(`[WEBHOOK] ✓ Using agent from metadata: ${agentSlug}`);
           }
         }
         
@@ -5564,7 +5587,10 @@ export function setupVoiceAgentRoutes(app: Express): void {
     path: '/api/voice/optical',
     slug: 'optical',
     tag: 'OPTICAL',
-    greeting: 'Thank you for calling Azul Vision optical. How can I help you today?',
+    greeting:
+      'Thank you for calling Azul Vision optical. All of our opticians are currently ' +
+      'assisting other customers, but I can take a message and they will follow up with you. ' +
+      'How can I help you today?',
   });
 
   // THE DEMO LINE (+1 626-548-2660). Its own webhook so it can never inherit
