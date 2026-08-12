@@ -242,6 +242,10 @@ export const SURGERY_LOGISTICS: SurgeryLogisticsBucket[] = [
  * request any more.
  */
 export const SURGERY_CATCHALL: SurgeryClassification = {
+  // Department 2's own "Other - See Description". Not a shared id: a reason
+  // belongs to a type and a type belongs to one department, so every queue has
+  // its own and files into the department that took the call. See
+  // `otherReason.ts`, which holds the table for all sixteen.
   requestTypeId: 65,
   requestType: 'Surgery Logistics',
   requestReasonId: 535,

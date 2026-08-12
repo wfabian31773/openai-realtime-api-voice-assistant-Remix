@@ -204,16 +204,28 @@ registerTool({
     // and omitting the fields are both rejected. A request fitting none of the
     // eighteen pairs therefore had nowhere honest to go, and briefly borrowed
     // reason 4, Style Consultation. It does not any more — see below.
-    // Department 1 now has a real reason for this: request type 66,
-    // "General / Other", reason 536, "Other - See Description". Added to the
-    // Support Center on 2026-08-12 alongside Surgery's, on the operator's
-    // instruction — "why don't you create one, to satisfy the nulls".
+    // The catch-all comes from the shared table, keyed on THIS queue's
+    // department — so an unclassifiable optical call is filed as Other in
+    // Optical Support, not in whichever department a server-side guess landed
+    // on. Operator, 2026-08-12: "instead of going to department one, it goes to
+    // the department that took the call."
     //
     // This used to borrow reason 4, Style Consultation, as the least clinical
     // of the eighteen optical reasons. It was still a claim the request had not
     // made. Nothing here borrows a reason any more.
-    const OPTICAL_OTHER = { requestTypeId: 66, requestReasonId: 536, requestReason: 'Other - See Description' };
-    const filing = cls ?? OPTICAL_OTHER;
+    const { otherReasonFor } = await import('./otherReason');
+    const other = otherReasonFor(OPTICAL_DEPARTMENT_ID);
+    if (!cls && !other) {
+      // Cannot happen with the current table, and if it ever does, refusing is
+      // right: a ticket in the wrong department is indistinguishable from a
+      // lost one.
+      return {
+        success: false,
+        error: `no catch-all reason for department ${OPTICAL_DEPARTMENT_ID}`,
+        retryable: false,
+      };
+    }
+    const filing = cls ?? other!;
 
     const res = await ticketingApiClient.createTicket({
       departmentId: OPTICAL_DEPARTMENT_ID,
