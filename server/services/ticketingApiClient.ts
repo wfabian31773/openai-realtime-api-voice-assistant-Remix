@@ -255,10 +255,29 @@ export class TicketingApiClient {
       const url = useDirectApp
         ? `${this.enrichmentBaseUrl}/api/voice-agent/ping`
         : `${this.baseUrl}/api/health`;
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: { 'X-API-Key': this.apiKey! },
-      });
+      // BOUNDED. This was the only fetch in this file without an
+      // AbortController, and it is the one that runs BEFORE every ticket is
+      // created — three times, via warmUpWithRetry. An unbounded probe there
+      // does not degrade ticket creation, it prevents it: the request is never
+      // sent, so nothing appears in the logs and nothing reaches the ticketing
+      // app. On 2026-08-12 `file_surgery_ticket` produced no tool-timeline
+      // event at all on three consecutive live calls, which is the signature of
+      // a call that never settles rather than one that fails.
+      //
+      // Three seconds is generous for a liveness probe whose entire job is to
+      // wake a sleeping deployment.
+      const probe = new AbortController();
+      const probeTimeout = setTimeout(() => probe.abort(), 3000);
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'GET',
+          headers: { 'X-API-Key': this.apiKey! },
+          signal: probe.signal,
+        });
+      } finally {
+        clearTimeout(probeTimeout);
+      }
       if (response.ok) {
         console.info("[TICKETING API] ✓ Health check passed");
         return { ok: true };
@@ -411,14 +430,16 @@ export class TicketingApiClient {
       callDuration: params.callData?.callDurationSeconds,
     });
 
-    // Warm up the ticketing service before creating ticket (handles sleeping deployments)
-    const warmedUp = await this.warmUpWithRetry(3, 2000);
-    if (!warmedUp) {
-      console.error("[TICKETING API] ✗ Ticketing service unreachable after warm-up attempts");
-      return {
-        success: false,
-        error: "Ticketing service is temporarily unavailable. Please try again.",
-      };
+    // Warm-up is ADVISORY, not a gate.
+    //
+    // It exists to wake a sleeping Replit deployment, which is an optimisation.
+    // Treating its failure as fatal meant a health probe that could not answer
+    // stopped a ticket that would otherwise have been filed — and returned a
+    // synthetic "temporarily unavailable" instead of whatever the real endpoint
+    // would have said, which is strictly less information. The request itself
+    // is bounded at 15s by makeRequest and reports its own error.
+    if (!(await this.warmUpWithRetry(2, 500))) {
+      console.warn("[TICKETING API] ⚠ Warm-up did not confirm liveness — sending anyway");
     }
 
     try {
