@@ -308,3 +308,52 @@ describe('every registry agent the router accepts is enabled', () => {
     expect(broken, `accepted slugs with no usable registration: ${broken.join(', ')}`).toEqual([]);
   });
 });
+
+/**
+ * A recognised caller must not be handed two openings.
+ *
+ * The greeting is FORCED verbatim, and the agent prompt's recognition block
+ * tells the model the greeting has already played and to open with "Am I
+ * speaking with <name>?". Both are true only if the greeting was personalised
+ * first. When it is not, the model starts the configured line and abandons it
+ * mid-phrase — heard as the agent being cut off, and reported as exactly that
+ * by the operator on 2026-08-12.
+ *
+ * The personalisation keys on `azulMetadataRef`, which was assigned in one
+ * case only. That is the shape this guards.
+ */
+describe.each(QUEUE_LINES)('the %s line personalises its greeting when it recognises the caller', (slug) => {
+  it('registers its precontext for the greeting, not just the prompt', () => {
+    const start = FACTORY_SWITCH.indexOf(`case '${slug}':`);
+    expect(start, `no factory case for ${slug}`).toBeGreaterThan(-1);
+    const next = FACTORY_SWITCH.indexOf("case '", start + 10);
+    const body = FACTORY_SWITCH.slice(start, next === -1 ? undefined : next);
+
+    // Only meaningful for a case that actually passes precontext.
+    if (!/precontext:/.test(body)) return;
+
+    expect(
+      /azulMetadataRef\s*=/.test(body),
+      `'${slug}' passes precontext to its agent but never registers it for the ` +
+        `greeting, so the model gets the forced greeting AND "do not greet again" ` +
+        `in the same turn and cuts itself off mid-sentence`,
+    ).toBe(true);
+  });
+});
+
+describe('the personalised greeting keeps what the queue greeting is for', () => {
+  it('does not discard the cannot-transfer framing on a queue line', () => {
+    // These lines cannot transfer. Their greeting says so up front, which is
+    // the whole reason it is worded the way it is. A personalisation that
+    // replaced it wholesale would drop that promise to save a sentence.
+    const start = ROUTES.indexOf('const recognisedFirstName');
+    expect(start, 'the greeting personalisation block has moved').toBeGreaterThan(-1);
+    const block = ROUTES.slice(start, start + 1600);
+
+    expect(block, 'the queue lines are no longer distinguished here').toMatch(/isQueueLine/);
+    expect(
+      block,
+      'the queue branch must build on the configured greeting rather than replace it',
+    ).toMatch(/agentGreeting\.replace/);
+  });
+});
