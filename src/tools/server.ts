@@ -16,7 +16,20 @@ import type { Express, Request, Response } from 'express';
 import { manifest, runTool, getTool, allTools } from './registry';
 
 // Importing for side effects: each module registers its tools.
+// EVERY tool module, explicitly.
+//
+// This file imported only opticalTools, so the HTTP surface published five
+// tools and answered `no such tool: file_surgery_ticket` with a 404 — while the
+// voice agent, which imports surgeryTools itself, had all seven. One registry,
+// two different contents depending on which module happened to pull it in.
+//
+// Relying on an incidental import means every new queue silently omits itself
+// from this surface until someone notices. `everyAgentToolIsReachable` in the
+// test suite is the guard: it walks the agent registry and fails if any agent
+// names a tool this file does not register.
+import './sharedPatientTools';
 import './opticalTools';
+import './surgeryTools';
 
 function authorised(req: Request): boolean {
   const expected = process.env.VOICE_TOOL_API_KEY;
