@@ -2189,7 +2189,7 @@ async function observeCall(
   // persons incl. chartless) and is NOT pilot-fenced — verified in the
   // service's sage-tools.ts — so it is correct for the practice-wide
   // answering-service and no-ivr lines, not just the SD pilot.
-  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'no-ivr', 'dev-no-ivr']);
+  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'optical', 'no-ivr', 'dev-no-ivr']);
   if (PRECONTEXT_SLUGS.has(effectiveSlug) && from) {
     azulPrecontextPromise = import('./agents/azulSchedulingAgent')
       .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
@@ -2452,11 +2452,22 @@ async function observeCall(
         // NO handoff callback, deliberately: operator ruling 2026-08-12, only
         // PCP and Scheduling transfer. The factory accepts and ignores the
         // first argument so the registry's shared AgentFactory shape still fits.
+        //
+        // precontext is what lets it open with "Am I speaking with Wayne?"
+        // instead of asking a patient to identify themselves to a system that
+        // already holds their chart. Its first live call asked cold because
+        // this was not passed.
+        const opticalPrecontext = await racePrecontext();
+        console.log(
+          `[Optical] Pre-context for ...${(from || '').slice(-4)}: ` +
+            `${opticalPrecontext?.matched ? `matched '${opticalPrecontext.firstName}'` : 'no unique match'}`,
+        );
         factoryResult = agentFactory(undefined, {
           callId,
           callSid: twilioCallSid,
           callerPhone: from,
           dialedNumber: to,
+          precontext: opticalPrecontext ?? undefined,
           get callLogId() { return liveCallLogId(); },
         });
         break;
@@ -5576,7 +5587,10 @@ export function setupVoiceAgentRoutes(app: Express): void {
     path: '/api/voice/optical',
     slug: 'optical',
     tag: 'OPTICAL',
-    greeting: 'Thank you for calling Azul Vision optical. How can I help you today?',
+    greeting:
+      'Thank you for calling Azul Vision optical. All of our opticians are currently ' +
+      'assisting other customers, but I can take a message and they will follow up with you. ' +
+      'How can I help you today?',
   });
 
   // THE DEMO LINE (+1 626-548-2660). Its own webhook so it can never inherit

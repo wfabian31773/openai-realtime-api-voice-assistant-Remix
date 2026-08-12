@@ -123,6 +123,44 @@ describe('an inbound slug must clear EVERY gate, not just the last one', () => {
   }
 });
 
+describe('a line that recognises callers must be in PRECONTEXT_SLUGS', () => {
+  // The SIXTH list. `precontext` is what lets an agent open with "Am I speaking
+  // with Wayne?" instead of asking a patient to identify themselves to a system
+  // already holding their chart. If the slug is not here, the lookup is never
+  // started, `racePrecontext()` returns null, and the agent silently opens cold
+  // — no error, no log, just a worse call.
+  const PRECONTEXT: string[] = (() => {
+    const m = ROUTES.match(/const PRECONTEXT_SLUGS = new Set\(\[([^\]]+)\]/);
+    expect(m, 'PRECONTEXT_SLUGS has moved or been renamed').toBeTruthy();
+    return [...m![1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+  })();
+
+  it('includes optical', () => {
+    expect(
+      PRECONTEXT,
+      'optical passes precontext to its agent but the lookup is never started',
+    ).toContain('optical');
+  });
+
+  it('every line that reads precontext also requests it', () => {
+    // A case that passes `precontext:` to its factory while its slug is absent
+    // from PRECONTEXT_SLUGS always receives null.
+    for (const slug of VALID_INBOUND) {
+      const caseStart = FACTORY_SWITCH.indexOf(`case '${slug}':`);
+      if (caseStart === -1) continue;
+      const nextCase = FACTORY_SWITCH.indexOf("case '", caseStart + 10);
+      const body = FACTORY_SWITCH.slice(caseStart, nextCase === -1 ? undefined : nextCase);
+      if (/precontext:/.test(body)) {
+        expect(
+          PRECONTEXT.includes(slug),
+          `'${slug}' passes precontext to its agent but is not in PRECONTEXT_SLUGS — ` +
+            `it will always receive null`,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
 describe('the metadata fallback resolves by list, not by literal', () => {
   /** PRIORITY 2 — used when the X-agentSlug SIP header does not arrive. */
   const PRIORITY_2 = (() => {

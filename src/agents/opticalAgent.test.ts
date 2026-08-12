@@ -118,6 +118,77 @@ describe('what it tells the caller about themselves', () => {
   });
 });
 
+describe('the greeting sets expectations before the caller asks for a human', () => {
+  // Operator-dictated, 2026-08-12: "all of our opticians are currently
+  // assisting other customers. I can take a message, and they will follow up
+  // with you... so you can preempt the 'pass me to a human'."
+  it('says why nobody is answering and what will happen instead', () => {
+    const g = opticalAgentConfig.greeting;
+    expect(g).toMatch(/opticians are currently\s*assisting other customers/i);
+    expect(g).toMatch(/take a message/i);
+    expect(g).toMatch(/follow up with you/i);
+  });
+
+  it('never implies a person is on the line', () => {
+    // Also the honest framing if this line is ever looked at for disclosure.
+    expect(opticalAgentConfig.greeting).not.toMatch(/speaking with a representative|one of our team members will be right/i);
+  });
+});
+
+describe('caller recognition — credibility, not cosmetics', () => {
+  // Operator, 2026-08-12: "it lets the person know that, hey, I have your
+  // information in my hand so I'm able to help... if they know my name, they
+  // might know when my next appointment is." Opening cold tells them the
+  // opposite.
+  const matched = buildOpticalPrompt({
+    callerPhone: '8455317471',
+    precontext: { matched: true, firstName: 'Wayne', lastNameOnFile: 'Fabian', dobOnFile: '1973-03-17' },
+  });
+
+  it('opens by confirming the name rather than asking for it', () => {
+    expect(matched).toMatch(/Am I speaking with Wayne\?/);
+    expect(matched).toMatch(/NEVER open with "can I get your name and date of birth"/i);
+  });
+
+  it('still treats the match as a hint, not as verification', () => {
+    expect(matched).toMatch(/A first name is not verification/i);
+    expect(matched).toMatch(/still collect the date of birth/i);
+    expect(matched).toMatch(/matched the WRONG person/i);
+  });
+
+  it('says nothing about recognition when the number matches nobody', () => {
+    const cold = buildOpticalPrompt({ callerPhone: '8455317471' });
+    expect(cold).not.toMatch(/Am I speaking with/);
+    expect(cold).not.toMatch(/YOU ALREADY KNOW WHO THIS PROBABLY IS/);
+  });
+
+  it('does not claim a match when precontext came back unmatched', () => {
+    const unmatched = buildOpticalPrompt({
+      callerPhone: '8455317471',
+      precontext: { matched: false },
+    });
+    expect(unmatched).not.toMatch(/Am I speaking with/);
+  });
+});
+
+describe('the callback number is confirmed BEFORE the ticket is filed', () => {
+  // VA-50813 said "Your request has been filed... Now, is this number ending in
+  // 7471 the best one to reach you?" Operator: correcting it afterwards "would
+  // have required another ticket".
+  const p = buildOpticalPrompt({ callerPhone: '8455317471' });
+
+  it('is instructed to confirm first, and told why', () => {
+    expect(p).toMatch(/CONFIRM THE CALLBACK NUMBER BEFORE YOU FILE, not after/);
+    expect(p).toMatch(/means a second\s*\n?\s*ticket/i);
+  });
+
+  it('puts confirming ahead of filing in the numbered steps', () => {
+    expect(p.indexOf('CONFIRM THE CALLBACK NUMBER')).toBeLessThan(
+      p.indexOf('File it with file_optical_ticket'),
+    );
+  });
+});
+
 describe('config', () => {
   it('is slug "optical" so the webhook and the registry agree', () => {
     expect(opticalAgentConfig.slug).toBe('optical');
