@@ -104,6 +104,12 @@ import { runTool } from './registry';
 import './opticalTools';
 
 beforeEach(() => {
+  // Spies on the shared ticketing client accumulate across tests otherwise, so
+  // `mock.calls[0]` would be some earlier test's call. That is how the
+  // omit-the-taxonomy assertion first "failed" against a requestTypeId left
+  // behind by the test above it — and how a later one could just as easily pass
+  // for the wrong reason.
+  vi.restoreAllMocks();
   vi.spyOn(console, 'info').mockImplementation(() => {});
 });
 
@@ -196,6 +202,90 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     })) as Record<string, unknown>;
     expect(r.classified).toBe(false);
     expect(String(r.message)).toMatch(/Do not pick a category/i);
+  });
+
+  it('will not file a ticket that nobody will be assigned', async () => {
+    // VA-50803, filed for real on 2026-08-12, landed with location_id NULL and
+    // assigned_to_id NULL. It was in the right department with the right
+    // classification and it reached nobody, because create-ticket sets the
+    // location foreign key from `locationId` and treats `locationOfLastVisit`
+    // as text. For a queue whose assignment IS the location, filing without the
+    // id is worse than refusing: an unassigned ticket looks filed.
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    const lookup = vi
+      .spyOn(ticketingApiClient, 'lookupProviderAndLocation')
+      .mockResolvedValueOnce({ success: true, locationId: null });
+    const create = vi.spyOn(ticketingApiClient, 'createTicket');
+
+    const out = await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471',
+      location: 'Somewhere We Do Not Have',
+      request_description: 'glasses broke',
+    });
+
+    expect(lookup).toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(out.success).toBe(false);
+    expect((out as { message: string }).message).toMatch(/which office/i);
+  });
+
+  it('sends the numeric location id, not just the name', async () => {
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation').mockResolvedValueOnce({
+      success: true,
+      locationId: 12,
+    });
+    const create = vi
+      .spyOn(ticketingApiClient, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST' });
+
+    await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471',
+      location: 'Eastvale',
+      request_description: 'my glasses broke at the hinge',
+    });
+
+    expect(create.mock.calls[0][0]).toMatchObject({
+      departmentId: 1,
+      locationId: 12,
+      requestTypeId: 1,
+      requestReasonId: 2,
+    });
+  });
+
+  it('omits the taxonomy rather than sending zero when it cannot classify', async () => {
+    // Sending 0/0 is what the first version did, and create-ticket answered
+    // "Validation failed" — 0 is not a foreign key. Both columns are nullable
+    // and 736 real Optical tickets already carry null, so omitting is a filing
+    // the app accepts and a zero is not.
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation').mockResolvedValueOnce({
+      success: true,
+      locationId: 12,
+    });
+    const create = vi
+      .spyOn(ticketingApiClient, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST2' });
+
+    await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471',
+      location: 'Eastvale',
+      request_description: 'a question about my account that fits no optical category',
+    });
+
+    const sent = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(sent.requestTypeId).toBeUndefined();
+    expect(sent.requestReasonId).toBeUndefined();
+    expect('requestTypeId' in sent).toBe(false);
   });
 
   it('refuses to file without the office that decides who gets the ticket', async () => {

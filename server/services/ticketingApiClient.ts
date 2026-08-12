@@ -21,8 +21,15 @@ interface CallData {
 
 interface CreateTicketParams {
   departmentId: number;
-  requestTypeId: number;
-  requestReasonId: number;
+  /**
+   * Omit both when the request genuinely does not fit the department's
+   * taxonomy. Sending 0 is NOT the same thing — create-ticket answers
+   * "Validation failed" for it, measured 2026-08-12, because 0 is not a
+   * foreign key. `tickets.request_type_id` and `request_reason_id` are both
+   * nullable, and 736 real Optical tickets already carry null.
+   */
+  requestTypeId?: number;
+  requestReasonId?: number;
   patientFirstName: string;
   patientLastName: string;
   patientPhone: string;
