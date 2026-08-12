@@ -51,6 +51,31 @@ const VALID_SLUGS: string[] = (() => {
 })();
 
 /**
+ * The webhook's own allowlist — a THIRD gate, ahead of `validAgentSlugs`.
+ *
+ * This is the one that actually broke Optical. The first fix added `case
+ * 'optical':` to the factory switch and added the slug to `validAgentSlugs`,
+ * and the call STILL answered as after-hours, because the webhook coerces to
+ * after-hours before `observeCall` is ever called.
+ *
+ * The comment above it in the source says, verbatim: "This list is a SECOND
+ * allowlist, separate from validAgentSlugs in observeCall(); both must know a
+ * slug or the call is silently answered by the after-hours agent." The code
+ * warned about exactly this, and I checked two of the gates and not the third.
+ */
+const VALID_INBOUND: string[] = (() => {
+  const m = ROUTES.match(/const validInboundAgents = \[([^\]]+)\]/);
+  expect(m, 'validInboundAgents has moved or been renamed').toBeTruthy();
+  return [...m![1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+})();
+
+/** Outbound-only agents. They never arrive on an inbound webhook. */
+const VALID_OUTBOUND: string[] = (() => {
+  const m = ROUTES.match(/const validOutboundAgents = \[([^\]]+)\]/);
+  return m ? [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]) : [];
+})();
+
+/**
  * Agents whose slug is accepted but which are resolved from the database rather
  * than the hardcoded switch. `demo` is the standalone transport; `dev-no-ivr`
  * IS in the switch and is listed here only so the intent is explicit.
@@ -72,9 +97,36 @@ describe('an accepted slug must reach a factory', () => {
   }
 });
 
+describe('an inbound slug must clear EVERY gate, not just the last one', () => {
+  // A slug has to survive four independent places before a caller hears the
+  // right agent:
+  //
+  //   1. validInboundAgents   (webhook)        ← broke Optical
+  //   2. validAgentSlugs      (observeCall)
+  //   3. the factory switch   (observeCall)
+  //   4. the agent registry
+  //
+  // Each one silently falls back to after-hours. Nothing forces them to agree,
+  // so this does.
+  const inboundHardcoded = VALID_SLUGS.filter(
+    (s) => !NOT_HARDCODED.has(s) && !VALID_OUTBOUND.includes(s) && s !== 'dev-no-ivr',
+  );
+
+  for (const slug of inboundHardcoded) {
+    it(`'${slug}' is in validInboundAgents`, () => {
+      expect(
+        VALID_INBOUND.includes(slug),
+        `'${slug}' clears observeCall but the WEBHOOK will coerce it to after-hours ` +
+          `before observeCall is ever called — this is what happened to Optical`,
+      ).toBe(true);
+    });
+  }
+});
+
 describe('the Optical line specifically', () => {
-  it('is an accepted slug', () => {
+  it('is an accepted slug at both gates', () => {
     expect(VALID_SLUGS).toContain('optical');
+    expect(VALID_INBOUND).toContain('optical');
   });
 
   it('has a webhook route of its own', () => {
