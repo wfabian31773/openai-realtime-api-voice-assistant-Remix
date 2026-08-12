@@ -1994,7 +1994,7 @@ async function observeCall(
   // It MUST be listed here — an unknown slug is silently coerced to
   // 'after-hours' below, which would have made the demo line quietly answer
   // as the after-hours agent.
-  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'optical', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
+  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
   const legacyDeletedSlugs = ['greeter', 'non-urgent-ticketing'];
   
   let effectiveSlug = agentSlug || 'no-ivr';
@@ -2189,7 +2189,7 @@ async function observeCall(
   // persons incl. chartless) and is NOT pilot-fenced — verified in the
   // service's sage-tools.ts — so it is correct for the practice-wide
   // answering-service and no-ivr lines, not just the SD pilot.
-  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'optical', 'no-ivr', 'dev-no-ivr']);
+  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'optical', 'surgery', 'no-ivr', 'dev-no-ivr']);
   if (PRECONTEXT_SLUGS.has(effectiveSlug) && from) {
     azulPrecontextPromise = import('./agents/azulSchedulingAgent')
       .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
@@ -2468,6 +2468,33 @@ async function observeCall(
           callerPhone: from,
           dialedNumber: to,
           precontext: opticalPrecontext ?? undefined,
+          get callLogId() { return liveCallLogId(); },
+        });
+        break;
+      }
+
+      case 'surgery': {
+        // The Surgery Coordination queue. Same shape as Optical and for the
+        // same reason: its own number, so the call is a surgery matter because
+        // of the line it rang.
+        //
+        // NO handoff callback, deliberately: operator ruling 2026-08-12, only
+        // PCP and Scheduling transfer.
+        //
+        // precontext matters more here than anywhere else. These callers have a
+        // surgery already booked; being asked to identify themselves from
+        // scratch tells them we have lost track of it.
+        const surgeryPrecontext = await racePrecontext();
+        console.log(
+          `[Surgery] Pre-context for ...${(from || '').slice(-4)}: ` +
+            `${surgeryPrecontext?.matched ? `matched '${surgeryPrecontext.firstName}'` : 'no unique match'}`,
+        );
+        factoryResult = agentFactory(undefined, {
+          callId,
+          callSid: twilioCallSid,
+          callerPhone: from,
+          dialedNumber: to,
+          precontext: surgeryPrecontext ?? undefined,
           get callLogId() { return liveCallLogId(); },
         });
         break;
@@ -4686,7 +4713,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         // number and runs the ticket agent. This list is a SECOND allowlist,
         // separate from validAgentSlugs in observeCall(); both must know a slug
         // or the call is silently answered by the after-hours agent.
-        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'optical', 'azul-scheduling', 'pcp', 'demo'];
+        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'azul-scheduling', 'pcp', 'demo'];
         const validOutboundAgents = ['drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
         const legacyDeletedAgents = ['greeter', 'non-urgent-ticketing'];
         
@@ -5599,6 +5626,18 @@ export function setupVoiceAgentRoutes(app: Express): void {
       'Thank you for calling Azul Vision optical. All of our opticians are currently ' +
       'assisting other customers, but I can take a message and they will follow up with you. ' +
       'How can I help you today?',
+  });
+
+  // Point the Surgery number's Twilio voice webhook here. Until that number
+  // exists the route is harmless: nothing dials it.
+  registerOverflowLine({
+    path: '/api/voice/surgery',
+    slug: 'surgery',
+    tag: 'SURGERY',
+    greeting:
+      'Thank you for calling Azul Vision surgery coordination. All of our coordinators are ' +
+      'currently assisting other patients, but I can take a message and they will follow up ' +
+      'with you. How can I help you today?',
   });
 
   // THE DEMO LINE (+1 626-548-2660). Its own webhook so it can never inherit

@@ -82,6 +82,13 @@ const VALID_OUTBOUND: string[] = (() => {
  */
 const NOT_HARDCODED = new Set(['demo']);
 
+/** PRECONTEXT_SLUGS, read at module scope so the queue table can assert on it. */
+const PRECONTEXT_SLUGS_LIST: string[] = (() => {
+  const m = ROUTES.match(/const PRECONTEXT_SLUGS = new Set\(\[([^\]]+)\]/);
+  if (!m) return [];
+  return [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+})();
+
 describe('an accepted slug must reach a factory', () => {
   for (const slug of VALID_SLUGS.filter((s) => !NOT_HARDCODED.has(s))) {
     it(`'${slug}' has a case in the factory switch`, () => {
@@ -199,39 +206,94 @@ describe('the metadata fallback resolves by list, not by literal', () => {
   });
 });
 
-describe('the Optical line specifically', () => {
+/**
+ * The queue lines: one number, one webhook, one slug, no handoff.
+ *
+ * A TABLE, not a describe block per queue. The Optical rollout answered as the
+ * after-hours line three times running, and each time the fix was one more list
+ * nobody had thought to check. Writing this per-queue reproduces exactly that:
+ * the next queue gets whichever assertions its author happened to remember.
+ * Adding a row here is the whole cost of the next one.
+ */
+const QUEUE_LINES = ['optical', 'surgery'];
+
+/** The tool names a queue's agent actually declares. */
+async function toolNamesFor(slug: string): Promise<string[]> {
+  if (slug === 'optical') return (await import('./opticalAgent')).OPTICAL_TOOLS;
+  if (slug === 'surgery') return (await import('./surgeryAgent')).SURGERY_TOOLS;
+  throw new Error(`no tool list known for ${slug}`);
+}
+
+describe.each(QUEUE_LINES)('the %s queue line', (slug) => {
   it('is an accepted slug at both gates', () => {
-    expect(VALID_SLUGS).toContain('optical');
-    expect(VALID_INBOUND).toContain('optical');
+    expect(VALID_SLUGS).toContain(slug);
+    expect(VALID_INBOUND).toContain(slug);
   });
 
   it('has a webhook route of its own', () => {
-    expect(ROUTES).toMatch(/path:\s*'\/api\/voice\/optical'/);
+    expect(ROUTES).toContain(`path: '/api/voice/${slug}'`);
   });
 
-  it('stamps X-agentSlug from the line config rather than a literal', () => {
-    // The overflow lines share one handler; the slug has to come from the
-    // registration, or Optical calls would arrive stamped answering-service.
-    expect(ROUTES).toMatch(/X-agentSlug=\$\{opts\.slug\}/);
+  it('requests precontext', () => {
+    expect(
+      PRECONTEXT_SLUGS_LIST,
+      `${slug} passes precontext to its agent but the lookup is never started`,
+    ).toContain(slug);
   });
 
-  it('is registered in the agent registry', async () => {
+  it('is registered in the agent registry and enabled', async () => {
     const { agentRegistry } = await import('../config/agents');
-    const cfg = agentRegistry.getAgentConfig('optical');
-    expect(cfg, 'optical is not in the registry').toBeTruthy();
+    const cfg = agentRegistry.getAgentConfig(slug);
+    expect(cfg, `${slug} is not in the registry`).toBeTruthy();
     expect(cfg!.enabled).toBe(true);
-    expect(agentRegistry.getAgentFactory('optical')).toBeTruthy();
-  });
+    expect(agentRegistry.getAgentFactory(slug)).toBeTruthy();
+    // Generous: this is the first test to pull the whole agent module graph,
+    // and the cold import alone is close to the 5s default.
+  }, 20_000);
 
   it('is passed no handoff callback', () => {
-    // Operator ruling 2026-08-12: only PCP and Scheduling transfer. The case
-    // must pass `undefined` where other lines pass `handoffCallback`.
-    const caseBody = FACTORY_SWITCH.slice(
-      FACTORY_SWITCH.indexOf("case 'optical':"),
-      FACTORY_SWITCH.indexOf("case 'pcp':"),
-    );
+    // Operator ruling 2026-08-12: only PCP and Scheduling transfer.
+    //
+    // The slice ends at the NEXT case, found by scanning forward — not at a
+    // named one. It used to end at `case 'pcp':`, which stopped being adjacent
+    // the moment a second queue was inserted between them, and the assertion
+    // would then have been reading two cases at once and passing on the wrong
+    // one's text.
+    const start = FACTORY_SWITCH.indexOf(`case '${slug}':`);
+    expect(start, `no factory case for ${slug}`).toBeGreaterThan(-1);
+    const next = FACTORY_SWITCH.indexOf("case '", start + 10);
+    const caseBody = FACTORY_SWITCH.slice(start, next === -1 ? undefined : next);
     expect(caseBody).toContain('agentFactory(undefined,');
     expect(caseBody).not.toContain('handoffCallback');
+  });
+});
+
+describe.each(QUEUE_LINES)('the %s agent', (slug) => {
+  it('declares only tools that exist in the shared library', async () => {
+    // The adapter throws at agent-construction time on an unknown name, which
+    // surfaces as a dead line rather than a build failure. Catch it here.
+    await import('../tools/sharedPatientTools');
+    await import('../tools/opticalTools');
+    await import('../tools/surgeryTools');
+    const { getTool } = await import('../tools/registry');
+    const names = await toolNamesFor(slug);
+    expect(names.length, `${slug} declares no tools`).toBeGreaterThan(0);
+    for (const name of names) {
+      const def = getTool(name);
+      expect(def, `${slug} names '${name}' but it is not registered`).toBeTruthy();
+      expect(def!.layer, `${name} is a primitive and must not be given to an agent`).toBe('agent');
+    }
+  });
+
+  it('has no transfer tool at all', async () => {
+    // Not a disabled one, not one that reports a request. A tool the agent
+    // cannot see is a promise it cannot make. Operator ruling 2026-08-12.
+    const names = await toolNamesFor(slug);
+    const offenders = names.filter((n) => /transfer|handoff|escalat|human/i.test(n));
+    expect(
+      offenders,
+      `${slug} can see ${offenders.join(', ')} — this line has nobody to transfer to`,
+    ).toEqual([]);
   });
 });
 

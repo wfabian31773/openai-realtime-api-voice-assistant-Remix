@@ -13,238 +13,10 @@
  * whether the call is optical.
  */
 import { registerTool, missing, type ToolResult } from './registry';
-
-// ---------------------------------------------------------------- who
-
-registerTool({
-  name: 'lookup_patient',
-  layer: 'agent',
-  timeoutMs: 6000,
-  description:
-    'Find a patient and their recent visit history. Call this as soon as you have ' +
-    'either their phone number, or their first name, last name and date of birth. ' +
-    'It returns the offices and providers they have actually been seen at, which is ' +
-    'how you confirm which office they mean.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      phone: { type: 'string', description: 'Any format. The number they are calling from is usually best.', askAs: 'What is the best phone number for you?' },
-      first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'Can I get your first name?' },
-      last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'And your last name?' },
-      date_of_birth: { type: 'string', description: 'Any spoken format — "March 17th 1973", "03/17/1973".', askAs: 'And your date of birth?' },
-    },
-  },
-  handler: async (input): Promise<ToolResult> => {
-    const phone = str(input.phone);
-    const first = str(input.first_name);
-    const last = str(input.last_name);
-    const dob = str(input.date_of_birth);
-
-    // Either a phone, or the full name+DOB trio. Half a trio is not a lookup.
-    if (!phone && !(first && last && dob)) {
-      return missing(
-        phone ? [] : ['first_name', 'last_name', 'date_of_birth'].filter((f) =>
-          f === 'first_name' ? !first : f === 'last_name' ? !last : !dob,
-        ),
-        "I need either a phone number, or their full name and date of birth, to look them up.",
-      );
-    }
-
-    const { scheduleLookupService } = await import('../services/scheduleLookupService');
-    const ctx = await scheduleLookupService.lookupPatient({
-      phone: phone || undefined,
-      firstName: first || undefined,
-      lastName: last || undefined,
-      dateOfBirth: dob || undefined,
-    });
-
-    if (!ctx.patientFound) {
-      return {
-        success: true,
-        found: false,
-        message:
-          'No record found. They may be new, or calling from a different number. ' +
-          'Ask for their name and date of birth if you have not already.',
-      };
-    }
-
-    const seen = [
-      ...new Set(
-        (ctx.pastAppointments ?? []).map((a) => a.location).filter((l) => l && l !== 'Unknown'),
-      ),
-    ].slice(0, 6) as string[];
-
-    // The most recent visit is NOT necessarily an optical office.
-    //
-    // Found by predicting this tool's answer for a real patient before testing
-    // it: their last Active visit was Dwayne Logan at Loma Linda SURGERY
-    // CENTER. An optical agent taking `lastLocationSeen` at face value would
-    // file a glasses ticket against a building with no optician in it, and
-    // Optical assigns by location — so it would never reach anyone.
-    //
-    // So the clinic is resolved separately, and the raw most-recent stays
-    // available but is clearly labelled.
-    const usualClinic = await mostRecentClinic(seen);
-
-    // A phone number can carry more than one person, and a surname carries
-    // whole families. The service reports which case this was, and the agent
-    // needs it because it changes what may be SAID: an uncertain match is one
-    // real person's record, but it is a guess among several, so the name must
-    // be confirmed and the history must not be read back.
-    const certain = ctx.identity?.unique !== false;
-
-    return {
-      success: true,
-      found: true,
-      patient_name: ctx.patientName,
-      matched_by: ctx.matchedBy,
-      identity_is_certain: certain,
-      ...(certain
-        ? {}
-        : {
-            identity_warning:
-              `This ${phone && !first ? 'phone number' : 'name'} matches ` +
-              `${ctx.identity?.candidateCount} different people on file, and what follows ` +
-              `is only the most recently seen of them. Ask for their full name and date of ` +
-              `birth before using any of it, and do not read their history back until they ` +
-              `confirm who they are.`,
-          }),
-      // The field Optical routes on — a clinic, never a surgery center.
-      usual_clinic: usualClinic,
-      // Where they were seen last, whatever kind of place that is.
-      last_location_any_kind: ctx.lastLocationSeen ?? null,
-      last_provider: ctx.lastProviderSeen ?? null,
-      last_visit: ctx.lastVisitDate ?? null,
-      recent_locations: seen.slice(0, 4),
-      total_appointments: ctx.totalAppointmentsFound,
-      ...(usualClinic
-        ? {}
-        : {
-            message:
-              'No optical office found in their visit history — the places they have been ' +
-              'seen are surgery centers or screening sites. Ask which office they use for ' +
-              'glasses or contacts.',
-          }),
-    };
-  },
-});
-
-// ---------------------------------------------------------------- where
-
-registerTool({
-  name: 'resolve_location',
-  layer: 'agent',
-  timeoutMs: 4000,
-  description:
-    'Turn what the caller said about an office into the real office name. Call it ' +
-    'with their words — "the Encinitas one", "Azul Vision Redlands" — before you ' +
-    'file a ticket. Optical tickets cannot be assigned without a location, so if ' +
-    'this cannot resolve it, ask the caller which office they visit.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      spoken_location: { type: 'string', description: 'Whatever the caller said, verbatim.', askAs: 'Which of our offices do you usually visit?' },
-    },
-    required: ['spoken_location'],
-  },
-  handler: async (input): Promise<ToolResult> => {
-    const spoken = str(input.spoken_location);
-    const { sanitizeLocationName } = await import('../services/ticketFieldSanitizers');
-    const cleaned = sanitizeLocationName(spoken);
-    if (!cleaned.value) {
-      return missing(['spoken_location'], 'Which of our offices do you usually visit?');
-    }
-
-    const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
-    if (!isDirectoryConfigured()) {
-      // No mirror: pass the cleaned string through rather than block a call.
-      return { success: true, resolved: false, location: cleaned.value, verified: false };
-    }
-
-    const hit = await lookupLocation(cleaned.value);
-    if (!hit) {
-      return {
-        success: true,
-        resolved: false,
-        location: cleaned.value,
-        verified: false,
-        message:
-          `I could not match "${spoken}" to one of our offices. Ask the caller to name ` +
-          `the city, and pass that instead.`,
-      };
-    }
-
-    // A surgery center or screening site is a real place but not an optical
-    // office. Say so rather than filing a ticket nobody can action.
-    const isClinic = hit.facilityKind === 'clinic' || hit.facilityKind == null;
-
-    // `location` is the form the RECEIVER stores, not the form the mirror does.
-    //
-    // Found on the first live run against production: asked to resolve "Azul
-    // Vision Eastvale" this returned `hit.canonical`, which is the Console's
-    // nextgen_name — "Azul Vision Eastvale", brand and all. The Support Center's
-    // own locations table stores "Eastvale". Handing an agent the mirror's form
-    // hands it a name the ticketing app does not hold, and an optical ticket
-    // whose location does not match reaches nobody, because Optical assigns by
-    // location.
-    //
-    // file_optical_ticket happens to sanitize this on the way out, so the
-    // Optical path was covered by luck rather than by design. Any other caller
-    // of this tool was not. Emit the fileable form, and keep the mirror's name
-    // beside it for anyone who needs to look it up there.
-    const fileable = sanitizeLocationName(hit.canonical).value || hit.canonical;
-
-    return {
-      success: true,
-      resolved: true,
-      verified: true,
-      location: fileable,
-      canonical_name: hit.canonical,
-      facility_kind: hit.facilityKind,
-      is_optical_office: isClinic,
-      ...(isClinic
-        ? {}
-        : {
-            message:
-              `${hit.canonical} is a ${hit.facilityKind?.replace('_', ' ')}, not an optical ` +
-              `office. Ask which clinic they use for glasses or contacts.`,
-          }),
-    };
-  },
-});
-
-// ---------------------------------------------------------------- already asked?
-
-registerTool({
-  name: 'check_open_tickets',
-  layer: 'agent',
-  timeoutMs: 5000,
-  description:
-    'Check whether this caller already has an open request with us. Call it before ' +
-    'filing anything, so a patient chasing an existing request is told where it ' +
-    'stands instead of having a second ticket opened.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      phone: { type: 'string', description: 'The number they are calling from.', askAs: 'What is the best phone number for you?' },
-    },
-    required: ['phone'],
-  },
-  handler: async (input): Promise<ToolResult> => {
-    const phone = str(input.phone);
-    const { SyncAgentService } = await import('../services/syncAgentService');
-    const open = await SyncAgentService.checkOpenTickets(phone);
-    return {
-      success: true,
-      has_open_tickets: open.length > 0,
-      open_tickets: open.map((t) => ({
-        ticket_number: t.ticketNumber,
-        reason: t.reason,
-        days_ago: t.daysAgo,
-      })),
-    };
-  },
-});
+// lookup_patient, resolve_location and check_open_tickets are registered by the
+// shared module. Importing it here is what puts them in the registry for this
+// queue — the same three definitions Surgery uses, not copies of them.
+import { str } from './sharedPatientTools';
 
 // ---------------------------------------------------------------- what kind
 
@@ -412,66 +184,70 @@ registerTool({
       };
     }
 
-    // TWO ENDPOINTS, chosen by whether we have a classification.
+    // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
     //
-    // create-ticket takes an explicit (departmentId, requestTypeId,
-    // requestReasonId) triple, which is the whole point of routing by queue: an
-    // agent that arrived on the optical line already knows the department and
-    // has just classified the request, and submit-ticket would discard that and
-    // re-derive it from free text — which is how 42% of optical tickets ended
-    // up with no request type and 953 with a Technicians-Support reason.
+    // This used to fall back to submit-ticket when nothing classified. Proving
+    // the Surgery build against production killed that: VA-50811 was filed by
+    // THIS agent through that fallback, its description said in plain words "a
+    // question about my account that fits no optical category", and it landed
+    // in department 8 — After Hours Call Service — with assigned_to_id NULL and
+    // a subject reading "Wayne Fabian - After Hours Call". Nothing in the text
+    // said after hours. submit-ticket re-derives the DEPARTMENT server-side,
+    // not merely the reason, and defaults to 8 when it cannot derive one.
     //
-    // But create-ticket REQUIRES the triple. Measured against production on
-    // 2026-08-12, twice: `requestTypeId: 0` is rejected ("Validation failed"),
-    // and OMITTING the fields is rejected identically. So there is no way to
-    // express "no category" through it, and a request that genuinely fits none
-    // of Optical's eighteen pairs — a billing question that reached this line —
-    // would be unfileable.
+    // The old comment here reasoned that a filed ticket with a weak category
+    // beats telling a caller we cannot help. That was right. What it got wrong
+    // was believing the fallback produced a weak CATEGORY, when it produced a
+    // weak DEPARTMENT — a ticket no optician will ever open.
     //
-    // submit-ticket accepts free text and derives its own taxonomy. That is
-    // exactly the wrong tool when we KNOW the answer and the right one when we
-    // do not: the ticket exists, the location resolves server-side, the
-    // optician sees it, and the description carries the truth. Better a
-    // filed ticket with a weak category than a caller told we cannot help.
+    // create-ticket REQUIRES the triple: measured 2026-08-12, `requestTypeId: 0`
+    // and omitting the fields are both rejected. A request fitting none of the
+    // eighteen pairs therefore had nowhere honest to go, and briefly borrowed
+    // reason 4, Style Consultation. It does not any more — see below.
+    // The catch-all comes from the shared table, keyed on THIS queue's
+    // department — so an unclassifiable optical call is filed as Other in
+    // Optical Support, not in whichever department a server-side guess landed
+    // on. Operator, 2026-08-12: "instead of going to department one, it goes to
+    // the department that took the call."
     //
-    // The proper fix is nullable columns on create-ticket; raised with the
-    // ticketing app. Until then this is the honest fallback rather than
-    // inventing a category that nearly fits.
-    const res = cls
-      ? await ticketingApiClient.createTicket({
-          departmentId: OPTICAL_DEPARTMENT_ID,
-          requestTypeId: cls.requestTypeId,
-          requestReasonId: cls.requestReasonId,
-          patientFirstName: first,
-          patientLastName: last,
-          patientPhone: phone,
-          patientEmail: str(input.email) || undefined,
-          preferredContactMethod: 'phone',
-          patientBirthMonth: parts.month,
-          patientBirthDay: parts.day,
-          patientBirthYear: parts.year,
-          // The id is what sets the foreign key; the name is what staff read.
-          locationId: lookup.locationId,
-          locationOfLastVisit: cleanLocation,
-          ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
-          lastProviderSeen: cleanProvider || undefined,
-          description: cleanDescription.value,
-          priority: 'medium',
-          callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
-        })
-      : await ticketingApiClient.submitTicket({
-          patientFullName: `${first} ${last}`,
-          patientDOB: `${parts.month}/${parts.day}/${parts.year}`,
-          reasonForCalling: cleanDescription.value,
-          preferredContactMethod: 'phone',
-          patientPhone: phone,
-          patientEmail: str(input.email) || undefined,
-          locationOfLastVisit: cleanLocation,
-          lastProviderSeen: cleanProvider || undefined,
-          priority: 'medium',
-          callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
-          ...(callSid ? { idempotencyKey: `call-${callSid}` } : {}),
-        });
+    // This used to borrow reason 4, Style Consultation, as the least clinical
+    // of the eighteen optical reasons. It was still a claim the request had not
+    // made. Nothing here borrows a reason any more.
+    const { otherReasonFor } = await import('./otherReason');
+    const other = otherReasonFor(OPTICAL_DEPARTMENT_ID);
+    if (!cls && !other) {
+      // Cannot happen with the current table, and if it ever does, refusing is
+      // right: a ticket in the wrong department is indistinguishable from a
+      // lost one.
+      return {
+        success: false,
+        error: `no catch-all reason for department ${OPTICAL_DEPARTMENT_ID}`,
+        retryable: false,
+      };
+    }
+    const filing = cls ?? other!;
+
+    const res = await ticketingApiClient.createTicket({
+      departmentId: OPTICAL_DEPARTMENT_ID,
+      requestTypeId: filing.requestTypeId,
+      requestReasonId: filing.requestReasonId,
+      patientFirstName: first,
+      patientLastName: last,
+      patientPhone: phone,
+      patientEmail: str(input.email) || undefined,
+      preferredContactMethod: 'phone',
+      patientBirthMonth: parts.month,
+      patientBirthDay: parts.day,
+      patientBirthYear: parts.year,
+      // The id is what sets the foreign key; the name is what staff read.
+      locationId: lookup.locationId,
+      locationOfLastVisit: cleanLocation,
+      ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
+      lastProviderSeen: cleanProvider || undefined,
+      description: cleanDescription.value,
+      priority: 'medium',
+      callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
+    });
 
     if (!res.success || !res.ticketNumber) {
       return {
@@ -485,7 +261,8 @@ registerTool({
       success: true,
       ticket_number: res.ticketNumber,
       classified: Boolean(cls),
-      request_reason: cls?.requestReason ?? null,
+      request_reason: filing.requestReason,
+      request_reason_id: filing.requestReasonId,
       // The id we actually attached, so a caller can tell a real assignment
       // from a ticket that merely mentions an office in its text.
       location_id: lookup.locationId,
@@ -494,38 +271,3 @@ registerTool({
     };
   },
 });
-
-function str(v: unknown): string {
-  return typeof v === 'string' ? v.trim() : '';
-}
-
-/**
- * The first place in this list that is actually a clinic.
- *
- * `locations` is already newest-first, so the first clinic is the most recent
- * one. Returns null when the patient has only ever been seen at surgery
- * centers or screening sites — which is a real answer, not a failure, and the
- * caller should ask rather than assume.
- *
- * Falls back to the first entry when the Console mirror is unreachable: a
- * best guess beats blocking the call, and `resolve_location` will catch it
- * before a ticket is filed.
- */
-async function mostRecentClinic(locations: string[]): Promise<string | null> {
-  if (locations.length === 0) return null;
-  const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
-  if (!isDirectoryConfigured()) return locations[0];
-
-  for (const name of locations) {
-    try {
-      const hit = await lookupLocation(name);
-      // An unknown location is more likely a clinic we have not mirrored than
-      // a surgery center, so it is not disqualified here — resolve_location
-      // is the gate that matters.
-      if (!hit || hit.facilityKind === 'clinic' || hit.facilityKind == null) return name;
-    } catch {
-      return locations[0];
-    }
-  }
-  return null;
-}
