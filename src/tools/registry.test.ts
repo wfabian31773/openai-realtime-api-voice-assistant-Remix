@@ -162,11 +162,39 @@ describe('the manifest describes the tools an agent should call', () => {
 });
 
 describe('the Optical tool set is exactly what that queue needs', () => {
-  it('registers who / where / already-asked, and nothing else', () => {
+  it('registers who / where / already-asked / what-kind / file-it', () => {
+    // Five tools, and they are the whole call: who is calling, which office
+    // they use, whether they have already asked, what kind of request it is,
+    // and file it. Nothing here decides WHETHER the call is optical — that came
+    // from the queue it arrived on, which is the point of routing by queue and
+    // why this set stays small.
     const names = manifest().map((t) => t.name);
     expect(names).toContain('lookup_patient');
     expect(names).toContain('resolve_location');
     expect(names).toContain('check_open_tickets');
+    expect(names).toContain('classify_optical_request');
+    expect(names).toContain('file_optical_ticket');
+  });
+
+  it('gives filing enough time to finish', () => {
+    // submit-ticket's measured p95 is 22.8s and its worst case 319s. Filing is
+    // the one step where giving up early loses the caller's request outright,
+    // so its timeout is deliberately not the default.
+    const file = manifest().find((t) => t.name === 'file_optical_ticket');
+    expect(file!.timeout_seconds).toBeGreaterThanOrEqual(30);
+  });
+
+  it('will not file without the four things a ticket cannot be assigned without', () => {
+    const file = manifest().find((t) => t.name === 'file_optical_ticket');
+    const required = file!.input_schema.required ?? [];
+    // Location above all: one optician per office, and Optical assigns BY
+    // location, so a ticket without one reaches nobody. Measured: the hard
+    // requires hold this to 2.1% missing across 1,744 real tickets.
+    expect(required).toContain('location');
+    expect(required).toContain('first_name');
+    expect(required).toContain('last_name');
+    expect(required).toContain('date_of_birth');
+    expect(required).toContain('callback_number');
   });
 
   it('every agent tool has a usable description and a timeout', () => {

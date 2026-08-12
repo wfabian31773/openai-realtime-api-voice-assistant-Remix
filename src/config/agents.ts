@@ -8,6 +8,7 @@ import { createNoIvrAgent, noIvrAgentConfig, type NoIvrAgentMetadata } from '../
 import { createNoIvrAgentV2, noIvrAgentV2Config } from '../agents/noIvrAgentV2';
 import { createAzulSchedulingAgent, azulSchedulingAgentConfig } from '../agents/azulSchedulingAgent';
 import { createPcpAgent, pcpAgentConfig } from '../agents/pcpAgent';
+import { createOpticalAgent, opticalAgentConfig } from '../agents/opticalAgent';
 
 export type AgentFactory = (...args: any[]) => RealtimeAgent | Promise<RealtimeAgent>;
 
@@ -86,6 +87,25 @@ export class AgentRegistry {
       voice: answeringServiceAgentConfig.voice,
       language: answeringServiceAgentConfig.language,
       greeting: answeringServiceAgentConfig.greeting,
+    });
+
+    // Optical queue. Its own number, so the call is optical because of the line
+    // it rang rather than because a model decided — which is what keeps its
+    // prompt and its tool set small. NO handoff: operator ruling 2026-08-12,
+    // only PCP and Scheduling transfer; everything else takes a callback.
+    // twilioNumbers stays empty until the number is bought and the answering
+    // service forwards optical overflow to it.
+    this.register({
+      id: opticalAgentConfig.slug,
+      factory: createOpticalAgent as AgentFactory,
+      enabled: true,
+      description: opticalAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'inbound',
+      version: opticalAgentConfig.version,
+      voice: opticalAgentConfig.voice,
+      language: opticalAgentConfig.language,
+      greeting: opticalAgentConfig.greeting,
     });
 
     // Azul Vision NextGen scheduling line (San Diego pilot).

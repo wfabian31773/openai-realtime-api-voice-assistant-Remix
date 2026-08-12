@@ -38,11 +38,26 @@ const FACILITY_KIND: Record<string, string> = {
   'virtual visits': 'virtual',
 };
 
+/**
+ * What the Console actually returns as `canonical` — its `nextgen_name`, brand
+ * and all. This is the detail that made the live bug invisible in an earlier
+ * version of this mock, which echoed the input back and so could never
+ * reproduce it. Clinics are brand-prefixed in the mirror; surgery centres and
+ * screening sites mostly are not.
+ */
+const CANONICAL: Record<string, string> = {
+  eastvale: 'Azul Vision Eastvale',
+  'rancho cucamonga': 'Azul Vision Rancho Cucamonga',
+  upland: 'Azul Vision Upland',
+  redlands: 'Azul Vision Redlands',
+};
+
 vi.mock('../services/consoleDirectory', () => ({
   isDirectoryConfigured: () => true,
   lookupLocation: async (raw: string) => {
-    const kind = FACILITY_KIND[raw.trim().toLowerCase()];
-    return kind ? { canonical: raw, facilityKind: kind } : null;
+    const key = raw.trim().toLowerCase();
+    const kind = FACILITY_KIND[key];
+    return kind ? { canonical: CANONICAL[key] ?? raw, facilityKind: kind } : null;
   },
 }));
 
@@ -68,7 +83,17 @@ const REAL_CONTEXT = {
   lastLocationSeen: 'Loma Linda Surgery Center LLC',
   lastProviderSeen: 'Dwayne Logan, MD',
   lastVisitDate: 'Monday, July 13, 2026',
-  totalAppointmentsFound: 44,
+  // What buildContext reports once it has grouped the rows by person. 43 of the
+  // 44 rows on this number are Wayne's; the 44th belongs to a John Doe test
+  // record and is excluded from the history rather than merged into it.
+  identity: {
+    unique: true,
+    candidateCount: 1,
+    candidates: [
+      { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17', appointmentCount: 43 },
+    ],
+  },
+  totalAppointmentsFound: 43,
 };
 
 vi.mock('../services/scheduleLookupService', () => ({
@@ -110,6 +135,96 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     // We must emit the form the receiver stores, or the ticket lands unassigned.
     const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
     expect(String(r.usual_clinic)).not.toMatch(/^(Azul Vision|Atlantis Eyecare)\s/i);
+  });
+
+  it('tells the agent when the number could be more than one person', async () => {
+    // +1 845 531 7471 really does carry two records in production: Wayne Fabian
+    // (43 rows) and a John Doe test record (1 row). The service now hands back
+    // one person's history and says so; the tool has to pass that on, because
+    // an agent that reads a history back to the wrong person has disclosed it.
+    const { scheduleLookupService } = await import('../services/scheduleLookupService');
+    vi.spyOn(scheduleLookupService, 'lookupPatient').mockResolvedValueOnce({
+      ...REAL_CONTEXT,
+      identity: {
+        unique: false,
+        candidateCount: 2,
+        candidates: [
+          { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17', appointmentCount: 43 },
+          { firstName: 'John', lastName: 'Doe', dateOfBirth: '1980-01-01', appointmentCount: 1 },
+        ],
+      },
+    } as never);
+
+    const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
+    expect(r.identity_is_certain).toBe(false);
+    expect(String(r.identity_warning)).toMatch(/2 different people/);
+    expect(String(r.identity_warning)).toMatch(/do not read their history back/i);
+  });
+
+  it('says the identity is certain when only one person matched', async () => {
+    const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
+    expect(r.identity_is_certain).toBe(true);
+    expect(r.identity_warning).toBeUndefined();
+  });
+
+  it('resolve_location emits the name the ticketing app stores, not the mirror\'s', async () => {
+    // Live run against production, 2026-08-12: asked for "Azul Vision Eastvale"
+    // this returned location: "Azul Vision Eastvale" — the Console's
+    // nextgen_name. The Support Center's locations table stores "Eastvale", and
+    // an optical ticket whose location does not match is assigned to nobody.
+    const r = (await runTool('resolve_location', {
+      spoken_location: 'Azul Vision Eastvale',
+    })) as Record<string, unknown>;
+    expect(String(r.location)).not.toMatch(/^(Azul Vision|Atlantis Eyecare)\s/i);
+    expect(r.location).toBe('Eastvale');
+  });
+
+  it('classifies a real optical request into Optical\'s own categories', async () => {
+    const r = (await runTool('classify_optical_request', {
+      request_description: 'I need to pick up my glasses if they are ready',
+    })) as Record<string, unknown>;
+    expect(r.classified).toBe(true);
+    expect(r.department_id).toBe(1);
+    expect(r.request_reason_id).toBe(20); // Glasses Ready - Pickup
+    // The value 953 real tickets carry, which belongs to Technicians Support.
+    expect(r.request_reason_id).not.toBe(153);
+  });
+
+  it('says so rather than forcing a category that nearly fits', async () => {
+    const r = (await runTool('classify_optical_request', {
+      request_description: 'I have a question about my bill',
+    })) as Record<string, unknown>;
+    expect(r.classified).toBe(false);
+    expect(String(r.message)).toMatch(/Do not pick a category/i);
+  });
+
+  it('refuses to file without the office that decides who gets the ticket', async () => {
+    const out = await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471',
+      request_description: 'glasses broke',
+      // location deliberately absent
+    });
+    expect(out.success).toBe(false);
+    expect((out as { missingFields: string[] }).missingFields).toContain('location');
+    // Spoken to a patient, so it has to read like a sentence a person would say.
+    expect((out as { message: string }).message).toMatch(/which of our offices/i);
+  });
+
+  it('refuses a half-heard callback number instead of filing it', async () => {
+    const out = await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531',
+      location: 'Eastvale',
+      request_description: 'glasses broke',
+    });
+    expect(out.success).toBe(false);
+    expect((out as { missingFields: string[] }).missingFields).toContain('callback_number');
+    expect((out as { message: string }).message).toMatch(/ten digits/i);
   });
 
   it('asks rather than guesses when every visit is at a surgery center', async () => {

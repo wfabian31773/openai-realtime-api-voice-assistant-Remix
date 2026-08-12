@@ -1994,7 +1994,7 @@ async function observeCall(
   // It MUST be listed here — an unknown slug is silently coerced to
   // 'after-hours' below, which would have made the demo line quietly answer
   // as the after-hours agent.
-  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
+  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'optical', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
   const legacyDeletedSlugs = ['greeter', 'non-urgent-ticketing'];
   
   let effectiveSlug = agentSlug || 'no-ivr';
@@ -5400,7 +5400,30 @@ export function setupVoiceAgentRoutes(app: Express): void {
   // ANSWERING SERVICE ENDPOINT - Daytime overflow calls
   // For patients who have been on hold 3+ minutes
   // Routes to Optical, Tech, or Surgery departments
-  app.post("/api/voice/answering-service", webhookRateLimiter, async (req, res) => {
+  /**
+   * One overflow line, one number, one agent.
+   *
+   * The answering service forwards a queue to a number; that number's webhook
+   * names the agent. Nothing in the call has to work out which queue it is,
+   * which is what keeps each agent's prompt and tool set small — and it is why
+   * a queue's identity must not be inferred from the audio.
+   *
+   * All 10,672 answering-service calls in the 30 days to 2026-08-12 arrived on
+   * ONE number, +1 909 413 5645, with no queue signal on them at all. This
+   * factory is what makes adding the second, third and fourth lines a
+   * configuration change rather than a copy of a hundred lines of transport.
+   *
+   * NONE of these lines transfer. Operator ruling 2026-08-12: only PCP and
+   * Scheduling hand off; every other agent says plainly that it cannot and
+   * takes a callback request instead.
+   */
+  function registerOverflowLine(opts: {
+    path: string;
+    slug: string;
+    tag: string;
+    greeting: string;
+  }) {
+  app.post(opts.path, webhookRateLimiter, async (req, res) => {
     const rawBody = req.body.toString("utf8");
     const parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
     
@@ -5409,15 +5432,15 @@ export function setupVoiceAgentRoutes(app: Express): void {
     const callerIDNumber = parsedBody.From;
     const dialedNumber = parsedBody.To;
 
-    console.info(`\n[ANSWERING-SERVICE] ✓ Overflow call received: ${callSid} from ${callerIDNumber} to ${dialedNumber}`);
+    console.info(`\n[${opts.tag}] ✓ Overflow call received: ${callSid} from ${callerIDNumber} to ${dialedNumber}`);
 
     if (!callSid || !callerIDNumber) {
-      console.error('[ANSWERING-SERVICE] ✗ Missing required parameters (callSid or callerIDNumber)');
+      console.error('[${opts.tag}] ✗ Missing required parameters (callSid or callerIDNumber)');
       res.status(400).send('<Response><Say>Invalid request</Say></Response>');
       return;
     }
     if (!callToken) {
-      console.warn('[ANSWERING-SERVICE] ⚠️ No CallToken in webhook body — fresh token will be generated from OpenAI API');
+      console.warn('[${opts.tag}] ⚠️ No CallToken in webhook body — fresh token will be generated from OpenAI API');
     }
 
     const domain = process.env.DOMAIN || req.get('host');
@@ -5432,8 +5455,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
     
     // Store metadata for answering-service agent
     callMetadata.set(conferenceName, {
-      agentSlug: 'answering-service',
-      agentGreeting: 'Hello and thank you for calling Azul Vision, all of our agents are currently busy, but I am here to assist, how can I help you?',
+      agentSlug: opts.slug,
+      agentGreeting: opts.greeting,
       language: 'english',
       ivrSelection: undefined,
     } as any);
@@ -5444,7 +5467,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       extendedMeta.languageForCall = 'en'; // Use agent config language - prevents auto-detect issues
     }
 
-    console.info(`[ANSWERING-SERVICE] Routing to answering-service agent (overflow, voice=sage, lang=en)`);
+    console.info(`[${opts.tag}] Routing to ${opts.slug} agent (overflow, voice=sage, lang=en)`);
 
     // Brief hold bridge while OpenAI SIP participant connects (~1-2s).
     // The AI agent delivers the full greeting once connected via response.create.
@@ -5473,23 +5496,23 @@ export function setupVoiceAgentRoutes(app: Express): void {
 
     res.setHeader("Content-Type", "application/xml");
     res.send(twimlResponse);
-    console.info(`[ANSWERING-SERVICE] ✓ Caller joined conference: ${conferenceName}`);
+    console.info(`[${opts.tag}] ✓ Caller joined conference: ${conferenceName}`);
     
     try {
       if (!twilioClient) {
         twilioClient = await getTwilioClient();
       }
     } catch (twilioInitError) {
-      console.error(`[ANSWERING-SERVICE] ✗ Failed to initialize Twilio client:`, twilioInitError);
+      console.error(`[${opts.tag}] ✗ Failed to initialize Twilio client:`, twilioInitError);
       return;
     }
     
-    console.info(`[ANSWERING-SERVICE] Adding answering-service agent to conference: ${conferenceName}`);
+    console.info(`[${opts.tag}] Adding ${opts.slug} agent to conference: ${conferenceName}`);
     
     try {
       const webhookToken = ConferenceNametoCallTokenMapping[conferenceName];
       if (!webhookToken) {
-        console.warn('[ANSWERING-SERVICE] ⚠️ No webhook CallToken found — passing empty string');
+        console.warn('[${opts.tag}] ⚠️ No webhook CallToken found — passing empty string');
       }
       const effectiveToken = webhookToken || '';
       const participant = await twilioClient.conferences(conferenceName)
@@ -5497,16 +5520,34 @@ export function setupVoiceAgentRoutes(app: Express): void {
         .create({
           from: envConfig.twilio.phoneNumber!,
           label: 'virtual agent',
-          to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=answering-service`,
+          to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=${opts.slug}`,
           earlyMedia: true,
           callToken: effectiveToken,
           conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
           conferenceStatusCallbackEvent: ['join']
         });
-      console.info(`[ANSWERING-SERVICE] ✓ Answering-service agent successfully added to conference: ${conferenceName}`);
+      console.info(`[${opts.tag}] ✓ ${opts.slug} agent successfully added to conference: ${conferenceName}`);
     } catch (error) {
-      console.error(`[ANSWERING-SERVICE] ✗ Failed to add agent to conference:`, error);
+      console.error(`[${opts.tag}] ✗ Failed to add agent to conference:`, error);
     }
+  });
+  }
+
+  registerOverflowLine({
+    path: '/api/voice/answering-service',
+    slug: 'answering-service',
+    tag: 'ANSWERING-SERVICE',
+    greeting:
+      'Hello and thank you for calling Azul Vision, all of our agents are currently busy, but I am here to assist, how can I help you?',
+  });
+
+  // Point the Optical number's Twilio voice webhook here. Until that number
+  // exists the route is harmless: nothing dials it.
+  registerOverflowLine({
+    path: '/api/voice/optical',
+    slug: 'optical',
+    tag: 'OPTICAL',
+    greeting: 'Thank you for calling Azul Vision optical. How can I help you today?',
   });
 
   // THE DEMO LINE (+1 626-548-2660). Its own webhook so it can never inherit

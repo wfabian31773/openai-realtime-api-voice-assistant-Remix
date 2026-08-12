@@ -102,6 +102,74 @@ describe('what counts as the last appointment', () => {
 });
 
 /**
+ * One person per context.
+ *
+ * A phone number is not an identity. +1 845 531 7471 carries two real records
+ * in production — Wayne Fabian (43 rows) and a John Doe test record (1 row) —
+ * and buildContext used to pool every row a query returned into a single
+ * history. John Doe's 2025-09-16 Anaheim visit was appearing in Wayne's recent
+ * visits, and `patientName` came from whichever row happened to sort first.
+ *
+ * A name-only lookup does the same to every family that shares a surname, which
+ * is a much larger population than shared phones.
+ */
+const JOHN_DOE_ROW = {
+  appointmentDate: '2025-09-16',
+  appointmentStart: '0900',
+  appointmentStatus: 'Active',
+  renderingPhysician: 'DRS',
+  officeLocation: 'Anaheim',
+  patientFirstName: 'John',
+  patientLastName: 'Doe',
+  patientDateOfBirth: '1980-01-01',
+};
+const WAYNE_ROWS = [DEC_30_REMOVED, JUL_13_ACTIVE].map((r) => ({
+  ...r,
+  patientDateOfBirth: '1973-03-17',
+}));
+
+describe('two people on one phone number', () => {
+  it('builds the history from ONE person, not from both', () => {
+    const ctx = build([...WAYNE_ROWS, JOHN_DOE_ROW]);
+    // Wayne owns the most recent row, so the context is his.
+    expect(ctx.patientData?.lastName).toBe('Fabian');
+    // And John Doe's visit is not in it.
+    expect(ctx.pastAppointments.map((a) => a.location)).not.toContain('Anaheim');
+    expect(ctx.pastAppointments.map((a) => a.isoDate)).toEqual(['2026-07-13']);
+  });
+
+  it('counts only that person\'s appointments', () => {
+    const ctx = build([...WAYNE_ROWS, JOHN_DOE_ROW]);
+    // Two rows are Wayne's; the third belongs to someone else entirely.
+    expect(ctx.totalAppointmentsFound).toBe(2);
+  });
+
+  it('says the lookup was ambiguous, so nobody asserts a name out loud', () => {
+    const ctx = build([...WAYNE_ROWS, JOHN_DOE_ROW]);
+    expect(ctx.identity?.unique).toBe(false);
+    expect(ctx.identity?.candidateCount).toBe(2);
+    expect(ctx.identity?.candidates.map((c) => c.lastName)).toEqual(['Fabian', 'Doe']);
+  });
+
+  it('reports a clean single match as unique, so recognition still works', () => {
+    const ctx = build(WAYNE_ROWS);
+    expect(ctx.identity?.unique).toBe(true);
+    expect(ctx.identity?.candidateCount).toBe(1);
+  });
+
+  it('treats two people with the same name but different birthdays as two people', () => {
+    // The case that makes DOB part of the key: a mother and daughter sharing a
+    // name and a household line. Merging them would disclose one's visits to
+    // the other.
+    const daughter = { ...JUL_13_ACTIVE, patientDateOfBirth: '1998-05-02', appointmentDate: '2026-08-01' };
+    const mother = { ...JUL_13_ACTIVE, patientDateOfBirth: '1973-03-17' };
+    const ctx = build([daughter, mother]);
+    expect(ctx.identity?.unique).toBe(false);
+    expect(ctx.totalAppointmentsFound).toBe(1);
+  });
+});
+
+/**
  * Where the caller's name lives.
  *
  * The demo line's caller recognition read `context.patientFirstName` and
