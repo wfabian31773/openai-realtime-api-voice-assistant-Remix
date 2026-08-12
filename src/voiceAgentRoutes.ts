@@ -4687,18 +4687,30 @@ export function setupVoiceAgentRoutes(app: Express): void {
           // PRIORITY 2: Check metadata for explicitly set agent (e.g., no-ivr bypass on same server)
           const configuredSlug = metadata?.agentSlug;
           
-          if (configuredSlug === 'no-ivr') {
-            agentSlug = 'no-ivr';
-            console.info(`[WEBHOOK] ✓ Using no-ivr agent from metadata (IVR bypassed)`);
-          } else if (configuredSlug === 'after-hours') {
-            agentSlug = 'after-hours';
-            console.info(`[WEBHOOK] ✓ Using after-hours agent from metadata (IVR flow)`);
-          } else if (configuredSlug && validOutboundAgents.includes(configuredSlug)) {
-            agentSlug = configuredSlug;
-            console.info(`[WEBHOOK] ✓ Using outbound agent from metadata: ${agentSlug}`);
-          } else if (configuredSlug && legacyDeletedAgents.includes(configuredSlug)) {
+          // Consult the SAME allowlists the SIP-header path uses, rather than
+          // naming slugs one at a time.
+          //
+          // This block used to check `=== 'no-ivr'`, `=== 'after-hours'`, the
+          // outbound list, and the legacy list — and nothing else. Every other
+          // inbound line (answering-service, pcp, azul-scheduling, demo,
+          // optical) fell through all four branches and kept the default,
+          // which is 'after-hours'. It rarely bit because the SIP header
+          // normally arrives and this is only the fallback; when the header is
+          // missing, the caller silently gets the wrong agent.
+          //
+          // Found by walking the path a call takes in order, after Optical's
+          // first three live calls each died at a different enumerated list.
+          // Adding 'optical' here as a fifth literal would have left the class
+          // intact for the next line.
+          if (configuredSlug && legacyDeletedAgents.includes(configuredSlug)) {
             agentSlug = 'after-hours';
             console.info(`[WEBHOOK] Coercing legacy metadata slug '${configuredSlug}' → 'after-hours'`);
+          } else if (
+            configuredSlug &&
+            [...validInboundAgents, ...validOutboundAgents].includes(configuredSlug)
+          ) {
+            agentSlug = configuredSlug;
+            console.info(`[WEBHOOK] ✓ Using agent from metadata: ${agentSlug}`);
           }
         }
         
