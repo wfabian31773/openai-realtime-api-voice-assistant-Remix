@@ -259,21 +259,27 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     });
   });
 
-  it('omits the taxonomy rather than sending zero when it cannot classify', async () => {
-    // Sending 0/0 is what the first version did, and create-ticket answered
-    // "Validation failed" — 0 is not a foreign key. Both columns are nullable
-    // and 736 real Optical tickets already carry null, so omitting is a filing
-    // the app accepts and a zero is not.
+  it('falls back to submit-ticket when it cannot classify, rather than failing', async () => {
+    // create-ticket REQUIRES the (type, reason) pair. Measured against
+    // production twice on 2026-08-12: requestTypeId 0 is rejected, and omitting
+    // the fields is rejected identically. So a request that fits none of
+    // Optical's eighteen pairs — a billing question that reached this line —
+    // has no route through that endpoint at all.
+    //
+    // submit-ticket derives its own taxonomy from free text. Wrong tool when we
+    // know the answer; right tool when we do not. The alternative is telling a
+    // caller we cannot take their request.
     const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
     vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation').mockResolvedValueOnce({
       success: true,
-      locationId: 12,
+      locationId: 8,
     });
-    const create = vi
-      .spyOn(ticketingApiClient, 'createTicket')
-      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST2' });
+    const create = vi.spyOn(ticketingApiClient, 'createTicket');
+    const submit = vi
+      .spyOn(ticketingApiClient, 'submitTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-FALLBACK' });
 
-    await runTool('file_optical_ticket', {
+    const out = await runTool('file_optical_ticket', {
       first_name: 'Wayne',
       last_name: 'Fabian',
       date_of_birth: '03/17/1973',
@@ -282,10 +288,38 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       request_description: 'a question about my account that fits no optical category',
     });
 
-    const sent = create.mock.calls[0][0] as unknown as Record<string, unknown>;
-    expect(sent.requestTypeId).toBeUndefined();
-    expect(sent.requestReasonId).toBeUndefined();
-    expect('requestTypeId' in sent).toBe(false);
+    expect(create).not.toHaveBeenCalled();
+    expect(submit).toHaveBeenCalledOnce();
+    expect(out).toMatchObject({ success: true, ticket_number: 'VA-FALLBACK', classified: false });
+    // The truth still travels, in the one field that carries free text.
+    expect(submit.mock.calls[0][0].reasonForCalling).toMatch(/no optical category/);
+  });
+
+  it('uses create-ticket, not the fallback, when it CAN classify', async () => {
+    // The fallback must never become the default — that would put this queue
+    // straight back into the 42%-no-type / reason-153 population it exists to
+    // escape.
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation').mockResolvedValueOnce({
+      success: true,
+      locationId: 8,
+    });
+    const submit = vi.spyOn(ticketingApiClient, 'submitTicket');
+    const create = vi
+      .spyOn(ticketingApiClient, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-CLASSIFIED' });
+
+    await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471',
+      location: 'Eastvale',
+      request_description: 'my glasses broke at the hinge',
+    });
+
+    expect(submit).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledOnce();
   });
 
   it('refuses to file without the office that decides who gets the ticket', async () => {

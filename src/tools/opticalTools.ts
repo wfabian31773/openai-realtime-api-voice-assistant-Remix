@@ -412,38 +412,66 @@ registerTool({
       };
     }
 
-    // create-ticket, not submit-ticket, and deliberately.
+    // TWO ENDPOINTS, chosen by whether we have a classification.
     //
-    // submit-ticket takes `reasonForCalling` as free text and re-derives the
-    // taxonomy server-side, which is why 42% of optical tickets have no request
-    // type at all. An agent routed to this queue already knows it is optical and
-    // has just classified the request; sending that explicitly is the whole
-    // point of routing by queue. create-ticket is the endpoint that accepts it.
-    const res = await ticketingApiClient.createTicket({
-      departmentId: OPTICAL_DEPARTMENT_ID,
-      // OMITTED, not zero, when the request does not fit the taxonomy.
-      // create-ticket answers "Validation failed" for 0 — measured on a real
-      // filing attempt, 2026-08-12 — because 0 is not a foreign key. Both
-      // columns are nullable and 736 real Optical tickets already carry null,
-      // so an honest description with no category is a filing the app accepts.
-      ...(cls ? { requestTypeId: cls.requestTypeId, requestReasonId: cls.requestReasonId } : {}),
-      patientFirstName: first,
-      patientLastName: last,
-      patientPhone: phone,
-      patientEmail: str(input.email) || undefined,
-      preferredContactMethod: 'phone',
-      patientBirthMonth: parts.month,
-      patientBirthDay: parts.day,
-      patientBirthYear: parts.year,
-      // The id is what sets the foreign key; the name is what staff read.
-      locationId: lookup.locationId,
-      locationOfLastVisit: cleanLocation,
-      ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
-      lastProviderSeen: cleanProvider || undefined,
-      description: cleanDescription.value,
-      priority: 'medium',
-      callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
-    });
+    // create-ticket takes an explicit (departmentId, requestTypeId,
+    // requestReasonId) triple, which is the whole point of routing by queue: an
+    // agent that arrived on the optical line already knows the department and
+    // has just classified the request, and submit-ticket would discard that and
+    // re-derive it from free text — which is how 42% of optical tickets ended
+    // up with no request type and 953 with a Technicians-Support reason.
+    //
+    // But create-ticket REQUIRES the triple. Measured against production on
+    // 2026-08-12, twice: `requestTypeId: 0` is rejected ("Validation failed"),
+    // and OMITTING the fields is rejected identically. So there is no way to
+    // express "no category" through it, and a request that genuinely fits none
+    // of Optical's eighteen pairs — a billing question that reached this line —
+    // would be unfileable.
+    //
+    // submit-ticket accepts free text and derives its own taxonomy. That is
+    // exactly the wrong tool when we KNOW the answer and the right one when we
+    // do not: the ticket exists, the location resolves server-side, the
+    // optician sees it, and the description carries the truth. Better a
+    // filed ticket with a weak category than a caller told we cannot help.
+    //
+    // The proper fix is nullable columns on create-ticket; raised with the
+    // ticketing app. Until then this is the honest fallback rather than
+    // inventing a category that nearly fits.
+    const res = cls
+      ? await ticketingApiClient.createTicket({
+          departmentId: OPTICAL_DEPARTMENT_ID,
+          requestTypeId: cls.requestTypeId,
+          requestReasonId: cls.requestReasonId,
+          patientFirstName: first,
+          patientLastName: last,
+          patientPhone: phone,
+          patientEmail: str(input.email) || undefined,
+          preferredContactMethod: 'phone',
+          patientBirthMonth: parts.month,
+          patientBirthDay: parts.day,
+          patientBirthYear: parts.year,
+          // The id is what sets the foreign key; the name is what staff read.
+          locationId: lookup.locationId,
+          locationOfLastVisit: cleanLocation,
+          ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
+          lastProviderSeen: cleanProvider || undefined,
+          description: cleanDescription.value,
+          priority: 'medium',
+          callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
+        })
+      : await ticketingApiClient.submitTicket({
+          patientFullName: `${first} ${last}`,
+          patientDOB: `${parts.month}/${parts.day}/${parts.year}`,
+          reasonForCalling: cleanDescription.value,
+          preferredContactMethod: 'phone',
+          patientPhone: phone,
+          patientEmail: str(input.email) || undefined,
+          locationOfLastVisit: cleanLocation,
+          lastProviderSeen: cleanProvider || undefined,
+          priority: 'medium',
+          callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
+          ...(callSid ? { idempotencyKey: `call-${callSid}` } : {}),
+        });
 
     if (!res.success || !res.ticketNumber) {
       return {
