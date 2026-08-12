@@ -154,7 +154,8 @@ describe('the call id must not depend on the model remembering it', () => {
       provider: null, email: null, call_sid: null, caller_phone: null, dialed_number: null,
     }));
 
-    const passed = spy.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    const calls = spy.mock.calls;
+    const passed = calls[calls.length - 1][1] as Record<string, unknown>;
     expect(passed.call_sid, 'a null from the model must not blank the injected id').toBe('CAreal123');
     expect(passed.caller_phone).toBe('8455317471');
     expect(passed.dialed_number).toBe('8186193692');
@@ -168,6 +169,7 @@ describe('the call id must not depend on the model remembering it', () => {
       (x) => x.name === 'check_open_tickets',
     );
     await t!.invoke?.({} as never, JSON.stringify({ phone: '845-531-7471' }));
-    expect((spy.mock.calls.at(-1)?.[1] as Record<string, unknown>).call_sid).toBe('call-only');
+    const calls = spy.mock.calls;
+    expect((calls[calls.length - 1][1] as Record<string, unknown>).call_sid).toBe('call-only');
   });
 });
