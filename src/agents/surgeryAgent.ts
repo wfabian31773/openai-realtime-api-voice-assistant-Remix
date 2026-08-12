@@ -173,9 +173,15 @@ accurate question in a ticket is worth more than a confident answer from you.
 # HOW A CALL RUNS
 1. Find them. Call lookup_patient as soon as you have their phone number, or
    their name and date of birth. If it says identity_is_certain is false, the
-   number matches more than one person — confirm their full name and date of
-   birth before you use anything it returned, and do not read their history
-   back to them.
+   number matches more than one person — collect their last name and date of
+   birth, then CALL lookup_patient AGAIN with first name, last name and date of
+   birth together. That almost always resolves it to one person, and it is the
+   whole point of asking. Do not carry on with an uncertain match you could
+   have resolved.
+   Never tell the caller how many records matched, and never say anything like
+   "we've matched more than one record". That is our problem, not theirs. Just
+   ask for what you need and move on. Do not read their history back to them
+   until you are certain who they are.
 2. Understand the request. Get the actual words. If they have a surgery date,
    ask for it and pass it as surgery_date — a coordinator triaging a queue
    works the nearest date first, and "my surgery is Monday" changes everything.
@@ -211,6 +217,13 @@ Do not perform sympathy at them and do not over-apologise. Take the details
 accurately, tell them exactly what will happen next, and give them the ticket
 number. That is what actually helps.
 
+A tool asking you for something is NOT a fault. When a tool comes back saying it
+needs a field, it hands you the sentence to say — just say it and carry on. Never
+tell a caller there is a technical problem, a system issue or a delay unless a
+tool actually reported an error. Saying "I'm having trouble filing this" when
+you were simply asked for a phone number invents a fault that did not happen and
+makes the practice look broken.
+
 If a tool tells you something is missing, ask for exactly that, in the words the
 tool gives you. Do not guess a name, a date of birth, a surgery date, an office
 or a phone number, and never file a ticket with a detail you invented — a wrong
@@ -241,6 +254,17 @@ export async function createSurgeryAgent(
       // for this call. Injected as context, so it is not a schema field and the
       // model can neither set it nor blank it.
       queue: 'surgery',
+    },
+    // Recording target. Without it this line's tool calls leave no trace on the
+    // call row at all — no event, no error, no arguments — which is exactly why
+    // two failed Surgery filings on 2026-08-12 could not be diagnosed from the
+    // database. The callLogId getter is preserved rather than read here: it is
+    // not resolved yet at agent-construction time.
+    {
+      callId: metadata.callId,
+      callSid: metadata.callSid ?? metadata.callId,
+      get callLogId() { return metadata.callLogId; },
+      agentSlug: 'surgery',
     }),
   });
 

@@ -14,6 +14,24 @@
 import { tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { getTool, runTool } from './registry';
+import { recordingExecute } from '../services/toolTimeline';
+
+/**
+ * Who is calling, for the tool timeline.
+ *
+ * `callLogId` is declared as a getter-friendly property rather than a value on
+ * purpose: the id does not exist when the agent is built, it is resolved a
+ * moment later. Reading it eagerly freezes `undefined` — the exact bug that put
+ * VA-50813 on the board with a null call_sid. Pass an object with a getter and
+ * it is read at tool-call time, when the answer is known.
+ */
+export interface ToolTelemetry {
+  callId?: string;
+  callSid?: string;
+  readonly callLogId?: string;
+  /** The queue, so a call's tools can be attributed to the line that took it. */
+  agentSlug: string;
+}
 
 /**
  * SDK tools for the named library tools, in the order given.
@@ -40,6 +58,18 @@ export function realtimeToolsFor(
    * as null and would otherwise overwrite what we injected.
    */
   context: Record<string, unknown> = {},
+  /**
+   * Recording target. Without it these tools are invisible: `tool_timeline` and
+   * `tool_call_count` stay null on the call row, which is how both Surgery
+   * lines failed to file a ticket on 2026-08-12 and left NOTHING anywhere I
+   * could read — no event, no error, no argument list. The answering service
+   * has had this since it was built (`recordedTool`); the shared library never
+   * did, so every queue built on it was blind.
+   *
+   * Optional so the HTTP surface, which has no call, does not have to invent
+   * one. Recording never changes what a tool returns and never throws into it.
+   */
+  telemetry?: ToolTelemetry,
 ): ReturnType<typeof tool>[] {
   return names.map((name) => {
     const def = getTool(name);
@@ -69,7 +99,7 @@ export function realtimeToolsFor(
       // runTool applies the declared timeout and never throws, so a tool that
       // fails returns something the model can read and act on rather than
       // ending the turn. The string is what the model sees.
-      execute: async (input: unknown) => {
+      execute: wrapWithTelemetry(def.name, telemetry, async (input: unknown) => {
         const supplied = Object.fromEntries(
           Object.entries((input ?? {}) as Record<string, unknown>).filter(
             ([, v]) => v !== null && v !== undefined,
@@ -77,7 +107,7 @@ export function realtimeToolsFor(
         );
         const result = await runTool(def.name, { ...context, ...supplied });
         return JSON.stringify(result);
-      },
+      }),
     } as unknown as Parameters<typeof tool>[0];
 
     return tool(options);
@@ -117,4 +147,32 @@ function toZod(def: NonNullable<ReturnType<typeof getTool>>) {
     shape[key] = base.describe(spec.description).nullable();
   }
   return z.object(shape);
+}
+
+/**
+ * Time and record the call, or pass it straight through when there is nothing
+ * to record against.
+ *
+ * `recordingExecute` reads its context at call time, so the getter on
+ * `callLogId` survives — see ToolTelemetry.
+ */
+function wrapWithTelemetry(
+  name: string,
+  telemetry: ToolTelemetry | undefined,
+  execute: (input: unknown) => Promise<string>,
+): (input: unknown) => Promise<string> {
+  if (!telemetry) return execute;
+  if (!telemetry.callId && !telemetry.callSid) return execute;
+  return recordingExecute<unknown, string>(
+    {
+      callId: telemetry.callId,
+      callSid: telemetry.callSid,
+      get callLogId() {
+        return telemetry.callLogId;
+      },
+      agentSlug: telemetry.agentSlug,
+    },
+    name,
+    execute,
+  );
 }
