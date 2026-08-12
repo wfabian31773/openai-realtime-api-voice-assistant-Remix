@@ -2445,6 +2445,23 @@ async function observeCall(
         break;
       }
 
+      case 'optical': {
+        // The Optical queue. Its own number, so the call is optical because of
+        // the line it rang — nothing here decides that.
+        //
+        // NO handoff callback, deliberately: operator ruling 2026-08-12, only
+        // PCP and Scheduling transfer. The factory accepts and ignores the
+        // first argument so the registry's shared AgentFactory shape still fits.
+        factoryResult = agentFactory(undefined, {
+          callId,
+          callSid: twilioCallSid,
+          callerPhone: from,
+          dialedNumber: to,
+          get callLogId() { return liveCallLogId(); },
+        });
+        break;
+      }
+
       case 'pcp':
         factoryResult = agentFactory(() => addHumanAgent(callId), {
           callId,
