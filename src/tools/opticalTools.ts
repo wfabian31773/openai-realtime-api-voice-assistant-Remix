@@ -365,6 +365,38 @@ registerTool({
       return missing(['date_of_birth'], 'I did not catch that date of birth — month, day and year?');
     }
 
+    // Resolve the office to the ticketing app's numeric id BEFORE filing.
+    //
+    // `locationOfLastVisit` is only a text hint — create-ticket sets the
+    // location foreign key from `locationId` and nothing else. Filing VA-50803
+    // with the name alone produced location_id NULL and assigned_to_id NULL:
+    // a real ticket, in the right department, that reached nobody. For a queue
+    // whose assignment IS the location, that is the whole failure mode.
+    const lookup = await ticketingApiClient.lookupProviderAndLocation({
+      locationName: cleanLocation,
+      ...(cleanProvider ? { providerName: cleanProvider } : {}),
+    });
+    if (!lookup.locationId) {
+      // Refuse rather than file something nobody will see. The agent can ask
+      // again; an unassigned optical ticket is indistinguishable from a lost one.
+      return {
+        success: false,
+        error: `no optical office matched "${cleanLocation}"`,
+        retryable: true,
+        ...(lookup.locationMatches?.length
+          ? {
+              message:
+                `I have a few offices that could be it — ` +
+                `${lookup.locationMatches.map((m) => m.name).join(', ')}. Which one do they mean?`,
+            }
+          : {
+              message:
+                `I could not match that to one of our offices. Ask the caller which office ` +
+                `they visit, then call resolve_location with their answer before filing.`,
+            }),
+      };
+    }
+
     // create-ticket, not submit-ticket, and deliberately.
     //
     // submit-ticket takes `reasonForCalling` as free text and re-derives the
@@ -374,8 +406,12 @@ registerTool({
     // point of routing by queue. create-ticket is the endpoint that accepts it.
     const res = await ticketingApiClient.createTicket({
       departmentId: OPTICAL_DEPARTMENT_ID,
-      requestTypeId: cls?.requestTypeId ?? 0,
-      requestReasonId: cls?.requestReasonId ?? 0,
+      // OMITTED, not zero, when the request does not fit the taxonomy.
+      // create-ticket answers "Validation failed" for 0 — measured on a real
+      // filing attempt, 2026-08-12 — because 0 is not a foreign key. Both
+      // columns are nullable and 736 real Optical tickets already carry null,
+      // so an honest description with no category is a filing the app accepts.
+      ...(cls ? { requestTypeId: cls.requestTypeId, requestReasonId: cls.requestReasonId } : {}),
       patientFirstName: first,
       patientLastName: last,
       patientPhone: phone,
@@ -384,11 +420,14 @@ registerTool({
       patientBirthMonth: parts.month,
       patientBirthDay: parts.day,
       patientBirthYear: parts.year,
+      // The id is what sets the foreign key; the name is what staff read.
+      locationId: lookup.locationId,
       locationOfLastVisit: cleanLocation,
+      ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       lastProviderSeen: cleanProvider || undefined,
       description,
       priority: 'medium',
-      ...(callSid ? { callData: { callSid } } : {}),
+      callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
     });
 
     if (!res.success || !res.ticketNumber) {
@@ -404,7 +443,9 @@ registerTool({
       ticket_number: res.ticketNumber,
       classified: Boolean(cls),
       request_reason: cls?.requestReason ?? null,
-      location_matched: res.locationMatched ?? null,
+      // The id we actually attached, so a caller can tell a real assignment
+      // from a ticket that merely mentions an office in its text.
+      location_id: lookup.locationId,
       // Say the number back. Callers ask for it, and staff quote it.
       message: `Filed as ${res.ticketNumber}. Read the ticket number back to the caller.`,
     };
