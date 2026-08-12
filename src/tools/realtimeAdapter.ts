@@ -105,8 +105,40 @@ export function realtimeToolsFor(
             ([, v]) => v !== null && v !== undefined,
           ),
         );
-        const result = await runTool(def.name, { ...context, ...supplied });
-        return JSON.stringify(result);
+
+        // ONE LINE IN, ONE LINE OUT — the same pair the HTTP surface writes.
+        //
+        // The tool timeline only reaches the database when the call ends and
+        // flushes, so a tool still running at hangup leaves no record at all.
+        // That is exactly the state `file_surgery_ticket` was in on three live
+        // calls: invoked, never completed, nothing written anywhere. The same
+        // handler filed VA-51058 in 4.9s over HTTP with identical arguments, so
+        // the difference is the process, and the process had no logging.
+        //
+        // These two lines are unconditional and cheap. A tool that starts and
+        // never finishes now says so, with a name and a timestamp, in the only
+        // place that was still dark.
+        const started = Date.now();
+        console.info(`[TOOLS] → ${def.name} (${telemetry?.agentSlug ?? 'no-slug'})`);
+        try {
+          const result = await runTool(def.name, { ...context, ...supplied });
+          const outcome =
+            result.success === true
+              ? 'ok'
+              : 'missingFields' in result
+                ? `refused:${result.missingFields.join(',')}`
+                : `error:${(result as { error: string }).error}`;
+          console.info(`[TOOLS] ← ${def.name} ${Date.now() - started}ms ${outcome}`);
+          return JSON.stringify(result);
+        } catch (err) {
+          // runTool does not throw, so this is a defect in the adapter itself
+          // rather than in a tool — and it would otherwise be silent.
+          console.error(
+            `[TOOLS] ✗ ${def.name} threw after ${Date.now() - started}ms:`,
+            err,
+          );
+          throw err;
+        }
       }),
     } as unknown as Parameters<typeof tool>[0];
 
