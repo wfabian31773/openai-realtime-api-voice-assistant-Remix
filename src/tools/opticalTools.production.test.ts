@@ -303,16 +303,18 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
 
     const sent = create.mock.calls[0][0];
     expect(sent.departmentId, 'the department is never guessed').toBe(1);
-    // The truth leads the description — the placeholder reason must never be
-    // the only thing describing this ticket.
-    expect(sent.description).toMatch(/^UNCATEGORISED - /);
+    // Department 1 now has a real reason for this: type 66, reason 536,
+    // "Other - See Description", added 2026-08-12. No prefix, no borrowed
+    // reason, and the description is just what the caller said.
+    expect(sent.requestTypeId).toBe(66);
+    expect(sent.requestReasonId).toBe(536);
     expect(sent.description).toMatch(/no optical category/);
+    expect(sent.description).not.toMatch(/UNCATEGORISED/);
 
     expect(out).toMatchObject({
       success: true,
       ticket_number: 'VA-PLACEHOLDER',
       classified: false,
-      reason_is_placeholder: true,
     });
   });
 

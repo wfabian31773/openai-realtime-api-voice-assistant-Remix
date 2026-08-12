@@ -201,26 +201,19 @@ registerTool({
     // weak DEPARTMENT — a ticket no optician will ever open.
     //
     // create-ticket REQUIRES the triple: measured 2026-08-12, `requestTypeId: 0`
-    // and omitting the fields are both rejected. So a request fitting none of
-    // the eighteen pairs is filed under a placeholder reason, in department 1,
-    // with the description leading "UNCATEGORISED" so the first words an
-    // optician reads are true. Style Consultation is the placeholder because it
-    // is the only optical reason that asserts nothing clinical — it does not
-    // claim a new prescription, a broken frame or a failed lens.
+    // and omitting the fields are both rejected. A request fitting none of the
+    // eighteen pairs therefore had nowhere honest to go, and briefly borrowed
+    // reason 4, Style Consultation. It does not any more — see below.
+    // Department 1 now has a real reason for this: request type 66,
+    // "General / Other", reason 536, "Other - See Description". Added to the
+    // Support Center on 2026-08-12 alongside Surgery's, on the operator's
+    // instruction — "why don't you create one, to satisfy the nulls".
     //
-    // The proper fix is a nullable reason on create-ticket, or an
-    // uncategorised reason per department. Both are raised with the ticketing
-    // app; neither is ours to apply unilaterally.
-    const OPTICAL_PLACEHOLDER = { requestTypeId: 1, requestReasonId: 4, requestReason: 'Style Consultation' };
-    const filing = cls ?? OPTICAL_PLACEHOLDER;
-    // Prefixed from the SANITIZED text, with a plain hyphen. Prefixing after
-    // sanitising would put an em dash back into a string that had just been
-    // cleared for GSM-7 — one character outside it turns a 160-character SMS
-    // segment into 70 and makes the message far more exposed to US carrier
-    // A2P filtering.
-    const filedDescription = cls
-      ? cleanDescription.value
-      : `UNCATEGORISED - ${cleanDescription.value}`;
+    // This used to borrow reason 4, Style Consultation, as the least clinical
+    // of the eighteen optical reasons. It was still a claim the request had not
+    // made. Nothing here borrows a reason any more.
+    const OPTICAL_OTHER = { requestTypeId: 66, requestReasonId: 536, requestReason: 'Other - See Description' };
+    const filing = cls ?? OPTICAL_OTHER;
 
     const res = await ticketingApiClient.createTicket({
       departmentId: OPTICAL_DEPARTMENT_ID,
@@ -239,7 +232,7 @@ registerTool({
       locationOfLastVisit: cleanLocation,
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       lastProviderSeen: cleanProvider || undefined,
-      description: filedDescription,
+      description: cleanDescription.value,
       priority: 'medium',
       callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
     });
@@ -256,10 +249,8 @@ registerTool({
       success: true,
       ticket_number: res.ticketNumber,
       classified: Boolean(cls),
-      request_reason: cls?.requestReason ?? null,
-      // Say so out loud, so a caller can tell a reason the request earned from
-      // one supplied to satisfy a required field.
-      reason_is_placeholder: !cls,
+      request_reason: filing.requestReason,
+      request_reason_id: filing.requestReasonId,
       // The id we actually attached, so a caller can tell a real assignment
       // from a ticket that merely mentions an office in its text.
       location_id: lookup.locationId,

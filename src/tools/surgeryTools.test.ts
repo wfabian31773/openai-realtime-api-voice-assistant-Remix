@@ -52,8 +52,20 @@ describe('the department is never guessed', () => {
   });
 });
 
-describe('a reason the request did not earn is declared as such', () => {
-  it('files the placeholder and says it is one', async () => {
+describe('every ticket carries a reason the request actually earned', () => {
+  // THIS BLOCK USED TO TEST A PLACEHOLDER. When it was written, the only reasons
+  // department 2 had were procedure boxes, create-ticket refuses an incomplete
+  // triple, and so an unclassifiable call — the majority of this queue — had to
+  // borrow reason 43, Surgery Scheduling, with the truth pushed into a
+  // description prefix.
+  //
+  // Operator, 2026-08-12: "why don't you create one? Create another reason, to
+  // satisfy the nulls, the ones that we can't quantify." Request type 65,
+  // "Surgery Logistics", now exists on department 2 with the six measured
+  // reasons (529-534) and a catch-all (535). There is nothing left to borrow
+  // and nothing left to smuggle through a prefix.
+
+  it('files a deposit question as Deposit / Balance Question, not as a cataract consult', async () => {
     const api = await client();
     const create = vi
       .spyOn(api, 'createTicket')
@@ -62,19 +74,15 @@ describe('a reason the request did not earn is declared as such', () => {
     const out = (await runTool('file_surgery_ticket', {
       ...BASE,
       request_description: 'nobody has called me back about my surgery deposit',
-      description_prefix: 'DEPOSIT / BALANCE',
     })) as Record<string, unknown>;
 
     const sent = create.mock.calls[0][0];
-    // 43 Surgery Scheduling, NOT 42 New Cataract Consult — 42 is a clinical
-    // claim and it is the one already sitting on 1,710 unearned tickets.
-    expect(sent.requestReasonId).toBe(43);
-    expect(sent.requestTypeId).toBe(10);
-    expect(out.classified).toBe(false);
-    expect(out.reason_is_placeholder).toBe(true);
+    expect(sent.requestTypeId).toBe(65);
+    expect(sent.requestReasonId).toBe(533);
+    expect(out.request_reason).toBe('Deposit / Balance Question');
   });
 
-  it('leads the description with what the request actually is', async () => {
+  it('files drops that never arrived as Pre-Op Drops / Prescription', async () => {
     const api = await client();
     const create = vi
       .spyOn(api, 'createTicket')
@@ -82,16 +90,15 @@ describe('a reason the request did not earn is declared as such', () => {
 
     await runTool('file_surgery_ticket', {
       ...BASE,
-      request_description: 'I need to move my surgery to a different day',
-      description_prefix: 'RESCHEDULE / CANCEL',
+      request_description: 'my surgery is Monday and the eye drops never came',
     });
 
-    expect(create.mock.calls[0][0].description).toMatch(/^RESCHEDULE \/ CANCEL - /);
+    expect(create.mock.calls[0][0].requestReasonId).toBe(529);
   });
 
-  it('prefixes UNCATEGORISED when the agent passed no bucket at all', async () => {
-    // The prefix cannot depend on the model remembering to pass one. With a
-    // placeholder reason id, the description is the ONLY true field.
+  it('does not mangle the description any more — no prefix is needed', async () => {
+    // The prefix existed only because the reason id was a lie. It is gone, and
+    // the description is now just what the caller said.
     const api = await client();
     const create = vi
       .spyOn(api, 'createTicket')
@@ -99,27 +106,61 @@ describe('a reason the request did not earn is declared as such', () => {
 
     await runTool('file_surgery_ticket', {
       ...BASE,
-      request_description: 'something that fits none of the buckets',
+      request_description: 'I need to move my surgery to a different day',
     });
 
-    expect(create.mock.calls[0][0].description).toMatch(/^UNCATEGORISED - /);
+    const sent = create.mock.calls[0][0];
+    expect(sent.description).toBe('I need to move my surgery to a different day');
+    expect(sent.requestReasonId).toBe(531); // Reschedule / Cancel Surgery
   });
 
-  it('does NOT prefix, and does not use the placeholder, when it really classified', async () => {
+  it('falls to the catch-all only when nothing at all matches', async () => {
     const api = await client();
     const create = vi
       .spyOn(api, 'createTicket')
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-5' } as never);
 
-    const out = (await runTool('file_surgery_ticket', {
+    await runTool('file_surgery_ticket', {
       ...BASE,
-      request_description: 'I had my right eye done, I want the second eye scheduled',
-    })) as Record<string, unknown>;
+      request_description: 'zzz qqq nothing resembling any request',
+    });
 
-    const sent = create.mock.calls[0][0];
-    expect(sent.requestReasonId).toBe(47); // Second Eye Surgery
-    expect(sent.description).not.toMatch(/UNCATEGORISED/);
-    expect(out.reason_is_placeholder).toBe(false);
+    expect(create.mock.calls[0][0].requestReasonId).toBe(535); // Other - See Description
+  });
+
+  it('a procedure reason still beats a logistics one', async () => {
+    // "move my post-op appointment" is a post-op matter that happens to involve
+    // a date. The procedure reason is the more specific of the two.
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-6' } as never);
+
+    await runTool('file_surgery_ticket', {
+      ...BASE,
+      request_description: 'I need to move my post-op appointment to the morning',
+    });
+
+    expect(create.mock.calls[0][0].requestReasonId).toBe(46); // Post-Op Follow-Up
+  });
+
+  it('never files a reason from another department', async () => {
+    // 153 is the Technicians-Support medication-refill reason that 1,443
+    // surgery tickets carried until June. An agent naming it explicitly must
+    // not be able to put it back.
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-7' } as never);
+
+    await runTool('file_surgery_ticket', {
+      ...BASE,
+      request_reason_id: '153',
+      request_description: 'my surgery is Monday and the eye drops never came',
+    });
+
+    expect(create.mock.calls[0][0].requestReasonId).not.toBe(153);
+    expect(create.mock.calls[0][0].requestReasonId).toBe(529);
   });
 });
 

@@ -38,10 +38,10 @@ registerTool({
   description:
     "Work out which kind of surgery request this is, in the practice's own " +
     'categories. Call it with the caller\'s own words once you understand what they ' +
-    'want, and before filing. Many real surgery calls — drops that never arrived, ' +
-    'clearance forms, arrival times, reschedules, deposits — have NO category in ' +
-    'our system, and this will tell you so. When it does, file anyway with a clear ' +
-    'description and no category. Never force a request into a box that nearly fits.',
+    'want, and before filing. It covers the logistics people actually ring about — ' +
+    'drops that never arrived, clearance forms, arrival times, reschedules, deposits, ' +
+    'chasing a callback — as well as the operations themselves, so it always returns ' +
+    'something. Pass its request_reason_id to file_surgery_ticket.',
   input_schema: {
     type: 'object',
     properties: {
@@ -56,57 +56,39 @@ registerTool({
     required: ['request_description'],
   },
   handler: async (input): Promise<ToolResult> => {
-    const { classifySurgery, classifySurgeryLogistics, SURGERY_DEPARTMENT_ID } = await import(
-      './surgeryTaxonomy'
+    const { classifySurgeryRequest, SURGERY_DEPARTMENT_ID } = await import('./surgeryTaxonomy');
+    const { classification, isCatchAll, isLogistics } = classifySurgeryRequest(
+      str(input.request_description),
     );
-    const text = str(input.request_description);
-    const hit = classifySurgery(text);
 
-    if (hit) {
-      return {
-        success: true,
-        classified: true,
-        department_id: SURGERY_DEPARTMENT_ID,
-        request_type: hit.requestType,
-        request_type_id: hit.requestTypeId,
-        request_reason: hit.requestReason,
-        request_reason_id: hit.requestReasonId,
-        ...(hit.urgent
-          ? {
-              urgent: true,
-              message:
-                'These are the words we treat as a surgical emergency. Tell the caller to ' +
-                'seek emergency care or call 911 now, and file this at urgent priority. ' +
-                'Do not take a routine message and hang up.',
-            }
-          : {}),
-      };
-    }
-
-    // No reason exists for this. Say WHICH kind of no — a coordinator reading
-    // "RESCHEDULE / CANCEL" at the top of a description can act on it without
-    // reading the rest, and the practice can count these later to size the
-    // reasons the Support Center is missing.
-    const bucket = classifySurgeryLogistics(text);
     return {
       success: true,
-      classified: false,
+      // Always true now. Before request type 65 existed this said false for
+      // most of the queue, because there was nothing true to return.
+      classified: !isCatchAll,
       department_id: SURGERY_DEPARTMENT_ID,
-      ...(bucket
+      request_type: classification.requestType,
+      request_type_id: classification.requestTypeId,
+      request_reason: classification.requestReason,
+      request_reason_id: classification.requestReasonId,
+      ...(isLogistics ? { logistics: true } : {}),
+      ...(isCatchAll
         ? {
-            recognised_as: bucket.key,
-            description_prefix: bucket.label,
             message:
-              `This is a ${bucket.label.toLowerCase()} request. Our system has no category ` +
-              `for it, which is expected — file it with description_prefix "${bucket.label}" ` +
-              `and no category. Do not pick a category that nearly fits.`,
+              'Nothing matched, so this is filed as "Other - See Description". That is a ' +
+              'real category, not a guess — but it means the description is the only thing ' +
+              'a coordinator has. Make sure it says what they actually asked for.',
           }
-        : {
+        : {}),
+      ...(classification.urgent
+        ? {
+            urgent: true,
             message:
-              'This does not match one of our surgery categories. That is fine — file the ' +
-              'ticket with a clear description of what they asked for and leave the category ' +
-              'off. Do not pick a category that nearly fits.',
-          }),
+              'These are the words we treat as a surgical emergency. Tell the caller to ' +
+              'seek emergency care or call 911 now, and file this at urgent priority. ' +
+              'Do not take a routine message and hang up.',
+          }
+        : {}),
     };
   },
 });
@@ -157,7 +139,7 @@ registerTool({
       return missing(['callback_number'], 'I only caught part of that number — can I get all ten digits?');
     }
 
-    const { SURGERY_DEPARTMENT_ID, surgeryClassificationByReasonId, classifySurgery } =
+    const { SURGERY_DEPARTMENT_ID, surgeryReasonById, classifySurgeryRequest } =
       await import('./surgeryTaxonomy');
 
     // The reason must be one of SURGERY's own, whatever we were handed. This is
@@ -166,23 +148,13 @@ registerTool({
     // carried until June — and off 42 as a catch-all, which is what replaced it.
     const named = input.request_reason_id ? Number(input.request_reason_id) : NaN;
     const cls =
-      (Number.isFinite(named) ? surgeryClassificationByReasonId(named) : null) ??
-      classifySurgery(description);
+      (Number.isFinite(named) ? surgeryReasonById(named) : null) ??
+      classifySurgeryRequest(description).classification;
 
     // Lead with the bucket when there is no reason id to carry the meaning.
     // A coordinator scanning a queue reads the first three words.
-    // When there is no true reason, the description carries the meaning — so it
-    // is prefixed ALWAYS, not only when the agent remembered to pass a bucket.
-    // A coordinator reads the first three words; the placeholder reason id must
-    // never be the only thing describing this ticket.
-    const prefix = str(input.description_prefix);
     const surgeryDate = str(input.surgery_date);
-    // Plain hyphen, not an em dash: an em dash is outside GSM-7, so
-    // sanitizeForSms would rewrite it and log a normalisation on every single
-    // unclassified ticket — which is most of them on this queue.
-    const leader = cls ? '' : `${prefix || 'UNCATEGORISED'} - `;
     const body = [
-      leader,
       description,
       surgeryDate ? `\n\nSurgery date given by caller: ${surgeryDate}` : '',
     ].join('');
@@ -233,55 +205,23 @@ registerTool({
 
     // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
     //
-    // This used to fall back to submit-ticket when nothing classified, copying
-    // Optical. Proving it against production killed that: VA-50811 was filed by
-    // the OPTICAL agent through submit-ticket, its description said "a question
-    // about my account that fits no optical category", and it landed in
-    // department 8 — After Hours Call Service — with assigned_to_id NULL and a
-    // subject reading "Wayne Fabian - After Hours Call". Nothing in the text
-    // said after hours. submit-ticket re-derives the DEPARTMENT, not just the
-    // reason, and defaults to 8 when it cannot.
+    // Not submit-ticket, ever. VA-50811 was filed by the OPTICAL agent through
+    // that fallback, its description said "a question about my account that
+    // fits no optical category", and it landed in department 8 — After Hours
+    // Call Service — with assigned_to_id NULL. submit-ticket re-derives the
+    // DEPARTMENT, not just the reason, and defaults to 8 when it cannot.
     //
-    // For Optical that is the rare tail. For Surgery the unclassifiable case is
-    // the MAJORITY — drops, clearance forms, arrival times, reschedules,
-    // deposits and status chases are roughly 55% of the queue and none of them
-    // match a reason. Routing those through submit-ticket would have sent more
-    // than half of this queue to After Hours, unassigned: worse than the defect
-    // this agent exists to fix, which at least reaches department 2.
-    //
-    // So the reason is a placeholder when nothing fits, the department never
-    // is, and the description leads with what the request actually is. See
-    // SURGERY_PLACEHOLDER for why 43 and not 42.
-    const { SURGERY_PLACEHOLDER } = await import('./surgeryTaxonomy');
-    const filing = cls ?? SURGERY_PLACEHOLDER;
-
-    //
-    // create-ticket takes an explicit (departmentId, requestTypeId,
-    // requestReasonId) triple, which is the whole point of routing by queue: an
-    // agent that arrived on the surgery line already knows the department and
-    // has just classified the request, and submit-ticket would discard that and
-    // re-derive it from free text.
-    //
-    // But create-ticket REQUIRES the triple. Measured against production on
-    // 2026-08-12, twice: `requestTypeId: 0` is rejected ("Validation failed"),
-    // and OMITTING the fields is rejected identically. So there is no way to
-    // express "no category" through it — and for THIS queue the no-category
-    // case is the majority of calls, not the tail. Drops, clearance forms,
-    // arrival times, reschedules, deposits and status chases have no reason id
-    // in the Support Center at all.
-    //
-    // submit-ticket accepts free text and derives its own taxonomy server-side.
-    // That is the honest fallback: the ticket exists, the coordinator sees it,
-    // and the description leads with what kind of request it is. Whatever the
-    // server derives, the first words a human reads are true.
-    //
-    // The proper fix is nullable taxonomy columns on create-ticket, or the six
-    // missing reasons added to department 2. Both are raised with the ticketing
-    // app; neither is ours to apply unilaterally.
+    // create-ticket REQUIRES the (departmentId, requestTypeId, requestReasonId)
+    // triple: measured twice on 2026-08-12, requestTypeId 0 is rejected and
+    // omitting the fields is rejected identically. That used to mean an
+    // unclassifiable request had to borrow a reason from a procedure it was not
+    // about. It no longer does — request type 65, "Surgery Logistics", was
+    // added to department 2 with the six measured reasons and a catch-all, so
+    // `cls` is always a reason this request genuinely earned.
     const res = await ticketingApiClient.createTicket({
       departmentId: SURGERY_DEPARTMENT_ID,
-      requestTypeId: filing.requestTypeId,
-      requestReasonId: filing.requestReasonId,
+      requestTypeId: cls.requestTypeId,
+      requestReasonId: cls.requestReasonId,
       patientFirstName: first,
       patientLastName: last,
       patientPhone: phone,
@@ -310,13 +250,8 @@ registerTool({
     return {
       success: true,
       ticket_number: res.ticketNumber,
-      classified: Boolean(cls),
-      request_reason: cls?.requestReason ?? null,
-      // Say so out loud. A caller reading this result must be able to tell a
-      // reason the request earned from one it was given to satisfy a required
-      // field — otherwise this becomes the next 1,710-ticket statistic.
-      reason_is_placeholder: !cls,
-      ...(cls ? {} : { filed_under: SURGERY_PLACEHOLDER.requestReason, description_leads_with: leader.replace(' — ', '') }),
+      request_reason: cls.requestReason,
+      request_reason_id: cls.requestReasonId,
       priority,
       location_id: lookup.locationId ?? null,
       provider_id: lookup.providerId ?? null,

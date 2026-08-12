@@ -36,12 +36,13 @@
  * two hardcoded fallbacks in `config/answeringServiceTicketing.ts`, written up
  * in `tools/surgeryTaxonomy.ts`.
  *
- * And the taxonomy does not describe the calls. Its nineteen reasons are
+ * And the taxonomy did not describe the calls. Its nineteen reasons were all
  * procedure boxes; the calls are logistics around a surgery already booked —
  * drops that never arrived, clearance forms, arrival times, reschedules,
- * deposits, and people chasing a callback. Operator ruling when asked: map what
- * fits, leave the rest honestly unclassified, do not change the Support Center
- * today.
+ * deposits, and people chasing a callback. On the operator's instruction those
+ * six were added to the Support Center as real reasons under a new request
+ * type, "Surgery Logistics", with a catch-all for the rest. This agent files
+ * every call under a reason the caller's own words earned.
  */
 import { RealtimeAgent } from '@openai/agents/realtime';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
@@ -187,12 +188,11 @@ accurate question in a ticket is worth more than a confident answer from you.
    is genuinely unclear, but do NOT hold the call hostage over it: unlike the
    optical line, a surgery ticket without a location still reaches its
    coordinator.
-5. Work out what kind of request it is with classify_surgery_request. Most of
-   the time it will tell you there is no category for what they are asking, and
-   that is expected, not a problem — it happens because our system has boxes for
-   which operation and none for the things people actually ring about. When it
-   gives you a description_prefix, pass it. Say nothing to the caller about
-   categories either way.
+5. Work out what kind of request it is with classify_surgery_request. It always
+   returns one — the practice has categories for the logistics people actually
+   ring about (drops, forms, reschedules, arrival times, deposits, chasing a
+   callback) as well as for the operations themselves. Say nothing to the caller
+   about categories.
 6. CONFIRM THE CALLBACK NUMBER BEFORE YOU FILE, not after. A ticket is a record
    the coordinator acts on; correcting a number after filing means a second
    ticket and a patient who was told the wrong thing. Ask once — "is the number

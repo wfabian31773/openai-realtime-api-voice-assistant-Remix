@@ -42,13 +42,17 @@
  * laser, which retinal repair. The calls are LOGISTICS around a surgery that is
  * already booked. The taxonomy and the phone do not describe the same queue.
  *
- * Operator ruling, 2026-08-12, asked directly: map what fits, leave the rest
- * honestly unclassified, do not change the Support Center today. So this file
- * covers the procedure calls and `classifySurgery` returns null for the rest —
- * and null means null. A ticket that says "needs pre-op drops, has not received
- * them, surgery is Monday" with no category is worth more to a coordinator than
- * one that confidently says New Cataract Consult, because the second one is a
- * lie they have to read the description to discover.
+ * Asked about that gap, the operator's first ruling was to map what fits and
+ * leave the rest unclassified. Told that "unclassified" could not actually be
+ * expressed — create-ticket requires a complete triple — he gave the better
+ * answer: "why don't you create one? Create another reason, to satisfy the
+ * nulls, the ones that we can't quantify."
+ *
+ * So request type 65, "Surgery Logistics", was added to department 2 with seven
+ * reasons: the six buckets above that we CAN quantify (529-534) and a catch-all
+ * for what is left (535). `classifySurgeryRequest` therefore always returns a
+ * reason the request genuinely earned, and nothing in this file borrows one
+ * from a procedure the caller never mentioned.
  *
  * Every pair below was read out of the Support Center's own `request_types` /
  * `request_reasons` tables for department 2 on 2026-08-12. A reason that does
@@ -189,69 +193,61 @@ export function surgeryClassificationByReasonId(reasonId: number): SurgeryClassi
  * The counts are 90-day measurements and are what the ticketing app would need
  * to size new reasons if the operator decides to add them.
  */
-export interface SurgeryLogisticsBucket {
+export interface SurgeryLogisticsBucket extends SurgeryClassification {
   key: string;
-  /** Prefix for the ticket description, so these are countable without a reason id. */
+  /** Human label, also used when a description needs to name the bucket. */
   label: string;
-  cues: string[];
   /** Measured 90-day volume of descriptions mentioning this, dept 2. */
   measured90d: number;
 }
 
+const LOGISTICS_TYPE = { requestTypeId: 65, requestType: 'Surgery Logistics' } as const;
+
 export const SURGERY_LOGISTICS: SurgeryLogisticsBucket[] = [
-  { key: 'drops_rx', label: 'PRE-OP DROPS / RX', measured90d: 579,
+  { ...LOGISTICS_TYPE, requestReasonId: 529, requestReason: 'Pre-Op Drops / Prescription',
+    key: 'drops_rx', label: 'Pre-Op Drops / Prescription', measured90d: 579,
     cues: ['eye drop', 'eyedrop', 'drops', 'prescription', 'pharmacy', 'not received my rx', "haven't received my rx"] },
-  { key: 'clearance', label: 'CLEARANCE / FORMS', measured90d: 361,
+  { ...LOGISTICS_TYPE, requestReasonId: 530, requestReason: 'Clearance / Pre-Op Forms',
+    key: 'clearance', label: 'Clearance / Pre-Op Forms', measured90d: 361,
     cues: ['clearance', 'clear me', 'pre-op form', 'pre op form', 'paperwork', 'primary care', 'pcp form', 'sign the form', 'labs', 'ekg', 'physical'] },
-  { key: 'reschedule', label: 'RESCHEDULE / CANCEL', measured90d: 561,
+  { ...LOGISTICS_TYPE, requestReasonId: 531, requestReason: 'Reschedule / Cancel Surgery',
+    key: 'reschedule', label: 'Reschedule / Cancel Surgery', measured90d: 561,
     cues: ['reschedule', 'cancel', 'move my surgery', 'change my surgery', 'change the date', 'different day', 'postpone'] },
-  { key: 'arrival', label: 'ARRIVAL / TRANSPORT', measured90d: 368,
+  { ...LOGISTICS_TYPE, requestReasonId: 532, requestReason: 'Arrival Time / Transportation',
+    key: 'arrival', label: 'Arrival Time / Transportation', measured90d: 368,
     cues: ['what time', 'arrival time', 'when should i arrive', 'how early', 'transportation', 'ride', 'access', 'driver', 'address of'] },
-  { key: 'financial', label: 'DEPOSIT / BALANCE', measured90d: 259,
+  { ...LOGISTICS_TYPE, requestReasonId: 533, requestReason: 'Deposit / Balance Question',
+    key: 'financial', label: 'Deposit / Balance Question', measured90d: 259,
     cues: ['deposit', 'balance', 'how much', 'cost', 'price', 'pay', 'owe', 'invoice', 'bill'] },
-  { key: 'status', label: 'STATUS FOLLOW-UP', measured90d: 1369,
+  { ...LOGISTICS_TYPE, requestReasonId: 534, requestReason: 'Status Follow-Up',
+    key: 'status', label: 'Status Follow-Up', measured90d: 1369,
     cues: ['status', 'update on', 'still waiting', 'waiting for a call', 'no one has called', 'nobody called', 'called several times', 'follow up on my', 'any word'] },
 ];
 
 /**
- * The pair used when nothing fits — and why it is not "none".
+ * The catch-all, which is now a REAL reason rather than a borrowed one.
  *
- * "No category" cannot be expressed. create-ticket REQUIRES a
- * (departmentId, requestTypeId, requestReasonId) triple; measured against
- * production 2026-08-12, `requestTypeId: 0` and omitting the fields are both
- * rejected. And submit-ticket, the free-text endpoint, re-derives the
- * DEPARTMENT server-side and defaults to 8 when it cannot: VA-50811 was filed
- * by the Optical agent, said in its own description "a question about my
- * account that fits no optical category", and landed in After Hours Call
- * Service with assigned_to_id NULL. For Optical that path is the rare tail.
- * For Surgery it would be the majority of calls.
+ * This block used to define a placeholder: reason 43 "Surgery Scheduling",
+ * chosen as the least-wrong of the nineteen procedure boxes, because
+ * create-ticket REQUIRES a (departmentId, requestTypeId, requestReasonId)
+ * triple and "no category" could not be expressed. Every unclassifiable call —
+ * the majority of this queue — would have carried a reason it did not earn.
  *
- * So the choice is not between a true reason and no reason. It is between a
- * placeholder reason on a ticket that reaches the surgery coordinator, and an
- * honest one on a ticket that reaches nobody. This is the first.
+ * Operator, 2026-08-12, on being told that: "why don't you create one? Create
+ * another reason, to satisfy the nulls, the ones that we can't quantify."
  *
- * 43 "Surgery Scheduling" rather than 42 "New Cataract Consult", deliberately.
- * 42 is a CLINICAL claim — it asserts this person needs evaluating for
- * cataracts — and it is the assertion currently sitting on 1,710 tickets that
- * never earned it. 43 asserts only that the call concerns a surgery being
- * arranged, which is true of every logistics bucket below. Type 10 comes with
- * it because 43 belongs to it and Surgery Coordination has no non-procedure
- * type at all; that is the gap the Support Center needs to close, and it is
- * written up rather than papered over.
- *
- * Every ticket filed this way leads its description with the bucket label, so
- * a coordinator reads what it actually is in the first three words and the
- * practice can count these later without a reason id to group by.
+ * So request type 65, "Surgery Logistics", was added to department 2 with seven
+ * reasons: the six buckets measured below, which we CAN quantify, and this one
+ * for what is left. Nothing in this file borrows a reason from another kind of
+ * request any more.
  */
-export const SURGERY_PLACEHOLDER = {
-  requestTypeId: 10,
-  requestType: 'Cataract Surgery',
-  requestReasonId: 43,
-  requestReason: 'Surgery Scheduling',
-} as const;
-
-/** Prefix for a request that matched no bucket either. Still countable. */
-export const SURGERY_UNCATEGORISED_LABEL = 'UNCATEGORISED';
+export const SURGERY_CATCHALL: SurgeryClassification = {
+  requestTypeId: 65,
+  requestType: 'Surgery Logistics',
+  requestReasonId: 535,
+  requestReason: 'Other - See Description',
+  cues: [],
+};
 
 /**
  * Which logistics bucket this is, when the taxonomy has no reason for it.
@@ -267,4 +263,50 @@ export function classifySurgeryLogistics(text: string): SurgeryLogisticsBucket |
     if (b.cues.some((cue) => t.includes(cue))) return b;
   }
   return null;
+}
+
+/**
+ * The classification for this request. Never null.
+ *
+ * Procedure boxes first, then the logistics reasons, then the catch-all. The
+ * order between the first two is what makes "I need to move my post-op
+ * appointment" reason 46 rather than a bare reschedule: it is a post-op matter
+ * that happens to involve a date, and the procedure reason is the more specific
+ * of the two.
+ *
+ * Before request type 65 existed this function could not have been written —
+ * there was nothing true to return for most of the queue.
+ */
+export function classifySurgeryRequest(text: string): {
+  classification: SurgeryClassification;
+  /** True when nothing matched and this is the catch-all. */
+  isCatchAll: boolean;
+  /** True when the match came from a logistics reason rather than a procedure one. */
+  isLogistics: boolean;
+} {
+  const procedure = classifySurgery(text);
+  if (procedure) return { classification: procedure, isCatchAll: false, isLogistics: false };
+
+  const bucket = classifySurgeryLogistics(text);
+  if (bucket) return { classification: bucket, isCatchAll: false, isLogistics: true };
+
+  return { classification: SURGERY_CATCHALL, isCatchAll: true, isLogistics: false };
+}
+
+/** Every reason this queue may file under, procedure or logistics. */
+export function isSurgeryReasonId(id: number): boolean {
+  return (
+    SURGERY_REASON_IDS.has(id) ||
+    SURGERY_LOGISTICS.some((b) => b.requestReasonId === id) ||
+    id === SURGERY_CATCHALL.requestReasonId
+  );
+}
+
+/** Look up any reason this queue may file under, procedure or logistics. */
+export function surgeryReasonById(id: number): SurgeryClassification | null {
+  return (
+    surgeryClassificationByReasonId(id) ??
+    SURGERY_LOGISTICS.find((b) => b.requestReasonId === id) ??
+    (id === SURGERY_CATCHALL.requestReasonId ? SURGERY_CATCHALL : null)
+  );
 }
