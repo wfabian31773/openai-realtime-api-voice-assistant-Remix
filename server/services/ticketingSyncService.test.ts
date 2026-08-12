@@ -4,6 +4,8 @@ import {
   classifyNoTicketOutcome,
   NO_TICKET_TERMINAL_PREFIX,
 } from "./ticketingSyncPolicy";
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 describe("isNoTicketError", () => {
   it("matches the ticketing app's 404 body for callSid lookups", () => {
@@ -52,5 +54,110 @@ describe("terminal marker", () => {
   it("is distinguishable from real sync failures", () => {
     expect(NO_TICKET_TERMINAL_PREFIX).toContain("NO_TICKET");
     expect(NO_TICKET_TERMINAL_PREFIX).not.toContain("GAVE UP");
+  });
+});
+
+describe('the sweeper selects on data delivery, not on ticket existence', () => {
+  // The defect this replaces, measured 2026-08-12 over 30 consecutive calls:
+  // we held a transcript for 30/30; the ticket had one for 19/30. On 37% of
+  // calls the optician saw no recording, no transcript and no summary while we
+  // held the entire conversation.
+  //
+  // Cause: `ticketing_synced` is set when the TICKET is created, which happens
+  // during the call. The transcript only exists after the call ends. Selecting
+  // on that flag therefore excluded every call that filed a ticket — precisely
+  // the population that needs sweeping — and the single post-call push has no
+  // retry, so one transient failure lost the data permanently.
+  //
+  // These read the source rather than the behaviour. The query is built with
+  // Drizzle expressions that are awkward to execute in a unit test, and the
+  // thing worth pinning is WHICH COLUMN it asks about — a distinction the
+  // existing eight tests pass either way, which is how this shipped broken.
+  const SRC = readFileSync(join(__dirname, 'ticketingSyncService.ts'), 'utf8');
+  const SELECTION = SRC.slice(
+    SRC.indexOf('.where('),
+    SRC.indexOf('.limit(20)'),
+  );
+
+  it('filters on callDataSynced', () => {
+    expect(
+      SELECTION.includes('callLogs.callDataSynced'),
+      'the sweeper must select on whether the DATA landed',
+    ).toBe(true);
+  });
+
+  it('does not filter on ticketingSynced', () => {
+    expect(
+      SELECTION.includes('callLogs.ticketingSynced'),
+      'ticketingSynced is true from the moment the ticket is created, mid-call — ' +
+        'selecting on it excludes exactly the calls whose data has not arrived yet',
+    ).toBe(false);
+  });
+
+  it('sets callDataSynced only after a successful push', () => {
+    // It must be written inside the `response.success` branch, alongside
+    // ticketingSyncedAt — not on failure, and not optimistically before.
+    const successBranch = SRC.slice(
+      SRC.indexOf('if (response.success)'),
+      SRC.indexOf('console.log(`[TICKETING SYNC] ✓'),
+    );
+    expect(successBranch).toContain('callDataSynced: true');
+  });
+
+  it('marks a terminal no-ticket call under the flag the sweeper reads', () => {
+    // Codex review, PR #172: setting only ticketingSynced here left these rows
+    // eligible under the new predicate, so a call that will NEVER have a ticket
+    // was retried until retries hit 3 — burning the 20-row batch on
+    // deterministic 404s and contradicting the branch's own "will not retry".
+    const terminal = SRC.slice(
+      SRC.indexOf('=== "terminal"'),
+      SRC.indexOf('marked terminal, will not retry'),
+    );
+    expect(terminal).toContain('callDataSynced: true');
+  });
+
+  it('reports the backlog the sweeper actually has', () => {
+    // getSyncStatus counted ticketingSynced, so a call whose ticket exists but
+    // whose transcript never arrived was reported SYNCED — hiding the exact
+    // backlog the endpoint is for.
+    const status = SRC.slice(SRC.indexOf('async getSyncStatus'));
+    expect(status).toContain('callLogs.callDataSynced');
+    expect(status).not.toContain('callLogs.ticketingSynced');
+  });
+
+  it('leaves ticketingSynced doing its original job', () => {
+    // Nothing else should change meaning. It still marks "a ticket exists",
+    // and other code reads it for that.
+    expect(SRC).toContain('ticketingSynced: true');
+  });
+});
+
+describe('a successful primary push must record itself as delivered', () => {
+  // Codex review, PR #172, and the most consequential of the four: only the
+  // sweeper's success branch wrote callDataSynced. The three primary post-call
+  // pushes in voiceAgentRoutes logged success and wrote nothing, so every
+  // healthy call stayed eligible and the sweeper re-pushed it five minutes
+  // later. With a hard .limit(20) per cycle and ~600 calls a day, normal
+  // traffic would have saturated the sweeper re-sending calls that already
+  // landed — crowding out the failures it exists to recover, which is the exact
+  // opposite of this change's purpose.
+  const ROUTES = readFileSync(
+    join(__dirname, '..', '..', 'src', 'voiceAgentRoutes.ts'),
+    'utf8',
+  );
+
+  it('every updateTicketCallData success branch marks the call delivered', () => {
+    const sites = [...ROUTES.matchAll(/updateTicketCallData\(/g)].map((m) => m.index!);
+    expect(sites.length, 'expected the three known push sites').toBeGreaterThanOrEqual(3);
+
+    for (const idx of sites) {
+      // Look at the window following the call — the success branch and its body.
+      const window = ROUTES.slice(idx, idx + 2600);
+      expect(
+        window.includes('callDataSynced: true'),
+        `an updateTicketCallData site near offset ${idx} does not record delivery — ` +
+          `the sweeper will re-push every call it succeeds on`,
+      ).toBe(true);
+    }
   });
 });
