@@ -143,7 +143,15 @@ export async function createOpticalAgent(
     name: opticalAgentConfig.name,
     voice: opticalAgentConfig.voice,
     instructions: buildOpticalPrompt(metadata),
-    tools: realtimeToolsFor(OPTICAL_TOOLS),
+    // The call knows its own id. Passing it here rather than asking the model
+    // for it is what makes the recording and transcript attachable later —
+    // VA-50813 filed with call_sid null because the prompt was the only thing
+    // carrying it.
+    tools: realtimeToolsFor(OPTICAL_TOOLS, {
+      call_sid: metadata.callSid ?? metadata.callId,
+      caller_phone: metadata.callerPhone,
+      dialed_number: metadata.dialedNumber,
+    }),
   });
 
   console.info(

@@ -123,3 +123,51 @@ describe('config', () => {
     expect(opticalAgentConfig.slug).toBe('optical');
   });
 });
+
+describe('the call id must not depend on the model remembering it', () => {
+  // VA-50813 — the Optical line's first working call — filed with
+  // `call_sid: null`. The tool accepts it as an input and the model simply
+  // never passed it. Without it `update-call-data` can never match the ticket
+  // to the call, so the recording, transcript and summary are not late, they
+  // are unattachable forever.
+  it('injects call_sid, caller_phone and dialed_number into every tool', async () => {
+    const { runTool } = await import('../tools/registry');
+    const spy = vi.spyOn(await import('../tools/registry'), 'runTool');
+
+    const agent = await createOpticalAgent(undefined, {
+      callId: 'call-1',
+      callSid: 'CAreal123',
+      callerPhone: '8455317471',
+      dialedNumber: '8186193692',
+    });
+    const file = ((agent as { tools?: Array<{ name: string; invoke?: Function }> }).tools ?? []).find(
+      (t) => t.name === 'file_optical_ticket',
+    );
+    expect(file, 'file_optical_ticket must be on the agent').toBeTruthy();
+
+    // Invoke with the arguments a model actually sends: everything present,
+    // the ones it does not know set to null.
+    await file!.invoke?.({} as never, JSON.stringify({
+      first_name: 'Wayne', last_name: 'Fabian', date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471', location: 'Eastvale',
+      request_description: 'hinge broke', request_reason_id: null,
+      provider: null, email: null, call_sid: null, caller_phone: null, dialed_number: null,
+    }));
+
+    const passed = spy.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(passed.call_sid, 'a null from the model must not blank the injected id').toBe('CAreal123');
+    expect(passed.caller_phone).toBe('8455317471');
+    expect(passed.dialed_number).toBe('8186193692');
+    void runTool;
+  });
+
+  it('falls back to callId when there is no callSid', async () => {
+    const spy = vi.spyOn(await import('../tools/registry'), 'runTool');
+    const agent = await createOpticalAgent(undefined, { callId: 'call-only' });
+    const t = ((agent as { tools?: Array<{ name: string; invoke?: Function }> }).tools ?? []).find(
+      (x) => x.name === 'check_open_tickets',
+    );
+    await t!.invoke?.({} as never, JSON.stringify({ phone: '845-531-7471' }));
+    expect((spy.mock.calls.at(-1)?.[1] as Record<string, unknown>).call_sid).toBe('call-only');
+  });
+});
