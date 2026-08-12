@@ -177,11 +177,29 @@ registerTool({
     // A surgery center or screening site is a real place but not an optical
     // office. Say so rather than filing a ticket nobody can action.
     const isClinic = hit.facilityKind === 'clinic' || hit.facilityKind == null;
+
+    // `location` is the form the RECEIVER stores, not the form the mirror does.
+    //
+    // Found on the first live run against production: asked to resolve "Azul
+    // Vision Eastvale" this returned `hit.canonical`, which is the Console's
+    // nextgen_name — "Azul Vision Eastvale", brand and all. The Support Center's
+    // own locations table stores "Eastvale". Handing an agent the mirror's form
+    // hands it a name the ticketing app does not hold, and an optical ticket
+    // whose location does not match reaches nobody, because Optical assigns by
+    // location.
+    //
+    // file_optical_ticket happens to sanitize this on the way out, so the
+    // Optical path was covered by luck rather than by design. Any other caller
+    // of this tool was not. Emit the fileable form, and keep the mirror's name
+    // beside it for anyone who needs to look it up there.
+    const fileable = sanitizeLocationName(hit.canonical).value || hit.canonical;
+
     return {
       success: true,
       resolved: true,
       verified: true,
-      location: hit.canonical,
+      location: fileable,
+      canonical_name: hit.canonical,
       facility_kind: hit.facilityKind,
       is_optical_office: isClinic,
       ...(isClinic

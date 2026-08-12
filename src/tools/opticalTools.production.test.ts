@@ -38,11 +38,26 @@ const FACILITY_KIND: Record<string, string> = {
   'virtual visits': 'virtual',
 };
 
+/**
+ * What the Console actually returns as `canonical` — its `nextgen_name`, brand
+ * and all. This is the detail that made the live bug invisible in an earlier
+ * version of this mock, which echoed the input back and so could never
+ * reproduce it. Clinics are brand-prefixed in the mirror; surgery centres and
+ * screening sites mostly are not.
+ */
+const CANONICAL: Record<string, string> = {
+  eastvale: 'Azul Vision Eastvale',
+  'rancho cucamonga': 'Azul Vision Rancho Cucamonga',
+  upland: 'Azul Vision Upland',
+  redlands: 'Azul Vision Redlands',
+};
+
 vi.mock('../services/consoleDirectory', () => ({
   isDirectoryConfigured: () => true,
   lookupLocation: async (raw: string) => {
-    const kind = FACILITY_KIND[raw.trim().toLowerCase()];
-    return kind ? { canonical: raw, facilityKind: kind } : null;
+    const key = raw.trim().toLowerCase();
+    const kind = FACILITY_KIND[key];
+    return kind ? { canonical: CANONICAL[key] ?? raw, facilityKind: kind } : null;
   },
 }));
 
@@ -150,6 +165,18 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     const r = (await runTool('lookup_patient', { phone: '845-531-7471' })) as Record<string, unknown>;
     expect(r.identity_is_certain).toBe(true);
     expect(r.identity_warning).toBeUndefined();
+  });
+
+  it('resolve_location emits the name the ticketing app stores, not the mirror\'s', async () => {
+    // Live run against production, 2026-08-12: asked for "Azul Vision Eastvale"
+    // this returned location: "Azul Vision Eastvale" — the Console's
+    // nextgen_name. The Support Center's locations table stores "Eastvale", and
+    // an optical ticket whose location does not match is assigned to nobody.
+    const r = (await runTool('resolve_location', {
+      spoken_location: 'Azul Vision Eastvale',
+    })) as Record<string, unknown>;
+    expect(String(r.location)).not.toMatch(/^(Azul Vision|Atlantis Eyecare)\s/i);
+    expect(r.location).toBe('Eastvale');
   });
 
   it('classifies a real optical request into Optical\'s own categories', async () => {
