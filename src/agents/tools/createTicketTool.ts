@@ -1,5 +1,6 @@
 import { tool } from '@openai/agents/realtime';
 import { z } from 'zod';
+import { detectCrossQueue } from '../../tools/queueRouting';
 
 const DEPARTMENTS = {
   OPTICAL: 1,
@@ -18,7 +19,10 @@ const REVIEW_QUEUE = { departmentId: 8, requestTypeId: 35, requestReasonId: 172 
 interface ValidationResult {
   valid: boolean;
   error?: string;
-  correctedParams?: Record<string, number>;
+  // Widened from Record<string, number> so a correction can also carry the
+  // rewritten description — a redirected ticket must say how it arrived, or the
+  // receiving team sees a request with no idea why it landed with them.
+  correctedParams?: Record<string, number | string>;
 }
 
 const MEDICATION_KEYWORDS = [
@@ -96,6 +100,43 @@ function validateTicketParams(params: {
       return {
         valid: true,
         correctedParams: { departmentId: DEPARTMENTS.TECH, requestTypeId: 6 },
+      };
+    }
+  }
+
+  // CROSS-QUEUE ROUTING, for every agent that files through this tool.
+  //
+  // Operator ruling 2026-08-13: "if someone calls and they press two for
+  // medication refill, and it's an optical question, we can't just tell the
+  // patient call back ... anything that's schedule related that comes through
+  // any of these should go to the HVA hub." Then: "cross queue routing should
+  // be for all agents."
+  //
+  // This function was already doing exactly this for one case — a medication
+  // request landing on CEC Networking — so the concept is not new, only its
+  // reach. The answering service, no-IVR and no-IVR v2 all file through here.
+  //
+  // SCHEDULING IS THE ONE THAT COULD NOT WORK BEFORE. ANSWERING_SERVICE_DEPARTMENTS
+  // is {OPTICAL:1, SURGERY:2, TECH:3, RESEARCH:11, CEC_NETWORKING:12} — the HVA
+  // Hub is not in it, so no agent using that map could route an appointment
+  // request anywhere but into a clinical queue. That is why "request to
+  // schedule an eye exam" is sitting in the medication queue today.
+  if (params.description) {
+    const redirect = detectCrossQueue(params.description, params.departmentId);
+    if (redirect) {
+      console.warn(
+        `[CREATE_TICKET] ⚠️ ${redirect.departmentName} request arrived on dept ` +
+          `${params.departmentId} — routing to dept ${redirect.departmentId} ` +
+          `(${redirect.requestReason})`,
+      );
+      return {
+        valid: true,
+        correctedParams: {
+          departmentId: redirect.departmentId,
+          requestTypeId: redirect.requestTypeId,
+          requestReasonId: redirect.requestReasonId,
+          description: `${redirect.note}\n\n${params.description}`,
+        },
       };
     }
   }

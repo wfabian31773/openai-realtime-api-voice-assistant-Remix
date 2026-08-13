@@ -115,3 +115,45 @@ describe('medication and surgery calls reaching the optical line', () => {
     expect(detectCrossQueue('a question about my cataract surgery', OPTICAL)?.departmentId).toBe(SURGERY);
   });
 });
+
+/**
+ * The shared create_ticket guard, used by the answering service, no-IVR and
+ * no-IVR v2 — "cross queue routing should be for all agents".
+ *
+ * That guard was already auto-correcting one misroute (a medication request
+ * landing on CEC Networking), so this is the same idea with a wider reach.
+ */
+describe('every agent that files through the shared guard is routed too', () => {
+  it('routes a scheduling request off a clinical queue', () => {
+    // ANSWERING_SERVICE_DEPARTMENTS is {OPTICAL, SURGERY, TECH, RESEARCH,
+    // CEC_NETWORKING} — the HVA Hub is not in it, so before this an agent
+    // using that map could not send an appointment request anywhere but into a
+    // clinical queue. "Request to schedule an eye exam" is sitting in the
+    // medication queue today because of it.
+    const r = detectCrossQueue('request to schedule an eye exam', TECH);
+    expect(r?.departmentId).toBe(HVA);
+    expect(r?.requestTypeId).toBe(32);
+    expect(r?.requestReasonId).toBe(146);
+  });
+
+  it('routes an eyeglass request off the medication queue', () => {
+    // Also real, also sitting in department 3 today.
+    const r = detectCrossQueue('assistance with eyeglass prescription selection', TECH);
+    expect(r?.departmentId).toBe(OPTICAL);
+  });
+
+  it('leaves a deliberate, correct department choice alone', () => {
+    // The answering service CHOOSES a department. When it chose right, this
+    // must say nothing — a router that second-guesses a correct decision is
+    // worse than no router.
+    expect(detectCrossQueue('I need a refill of my Latanoprost', TECH)).toBeNull();
+    expect(detectCrossQueue('my glasses broke', OPTICAL)).toBeNull();
+    expect(detectCrossQueue('question about my cataract surgery', SURGERY)).toBeNull();
+  });
+
+  it('carries a note so the receiving team knows how it arrived', () => {
+    const r = detectCrossQueue('I need to reschedule my appointment', TECH);
+    expect(r?.note).toMatch(/scheduling request/i);
+    expect(r?.note).toMatch(/another line/i);
+  });
+});

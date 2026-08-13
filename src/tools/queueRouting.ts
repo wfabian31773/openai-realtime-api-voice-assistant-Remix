@@ -86,11 +86,24 @@ const SURGERY_CUES = [
   'surgery center', 'pre-op', 'post-op', 'operation', 'cirugía', 'cirugia',
 ];
 
-/** Medication, which belongs to Clinical Tech Support. */
-const TECH_CUES = [
-  'refill', 'prescription', 'pharmacy', 'medication', 'eye drop', 'eyedrop',
-  'prior auth', 'receta', 'medicamento', 'farmacia', 'gotas',
+/**
+ * Medication, which belongs to Clinical Tech Support.
+ *
+ * SPLIT ON PURPOSE. "Prescription" means a drug on this line and a pair of
+ * glasses on the optical one — "assistance with eyeglass prescription
+ * selection" is a real department 3 ticket today, and treating that word as a
+ * medication signal kept it in the medication queue.
+ *
+ * So the ambiguous words identify a medication call, but they do NOT hold a
+ * call against a clearer signal from another queue. Only the unambiguous ones
+ * do that.
+ */
+const TECH_CUES_STRONG = [
+  'refill', 'pharmacy', 'medication', 'eye drop', 'eyedrop',
+  'prior auth', 'medicamento', 'farmacia', 'gotas',
 ];
+const TECH_CUES_AMBIGUOUS = ['prescription', 'receta', 'rx'];
+const TECH_CUES = [...TECH_CUES_STRONG, ...TECH_CUES_AMBIGUOUS];
 
 function hit(text: string, cues: string[]): boolean {
   return cues.some((c) => text.includes(c));
@@ -123,6 +136,9 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   const mentionsSurgery = hit(t, SURGERY_CUES);
   const mentionsOptical = hit(t, OPTICAL_CUES);
   const mentionsMedication = hit(t, TECH_CUES);
+  // Only an unambiguous drug signal keeps a call on the medication line against
+  // a clear signal from elsewhere. See TECH_CUES_STRONG.
+  const mentionsMedicationClearly = hit(t, TECH_CUES_STRONG);
 
   // 1. Appointments -> HVA Hub, from anywhere, unless it is a surgery date.
   if (!mentionsSurgery) {
@@ -145,7 +161,7 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   if (
     homeDepartmentId !== OPTICAL &&
     mentionsOptical &&
-    !(homeDepartmentId === TECH && mentionsMedication) &&
+    !(homeDepartmentId === TECH && mentionsMedicationClearly) &&
     !(homeDepartmentId === SURGERY && mentionsSurgery)
   ) {
     return {
@@ -163,7 +179,11 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   }
 
   // 3. Surgery, when it is unmistakably about an operation.
-  if (homeDepartmentId !== SURGERY && mentionsSurgery && !(homeDepartmentId === TECH && mentionsMedication)) {
+  if (
+    homeDepartmentId !== SURGERY &&
+    mentionsSurgery &&
+    !(homeDepartmentId === TECH && mentionsMedicationClearly)
+  ) {
     return {
       departmentId: SURGERY,
       departmentName: 'Surgery Coordination',
