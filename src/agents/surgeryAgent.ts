@@ -147,6 +147,23 @@ This number matches one person on file: first name "${pc.firstName}".
    * PROHIBIT THE TIMING, NOT THE PHRASING: a ban on a sentence is routed around
    * by rewording, and rewording is the one thing a language model does reliably.
    */
+  /**
+   * TWO RULES BELOW CAME FROM ONE REAL CALL, 2026-08-13, and both read as
+   * obvious only afterwards.
+   *
+   *   agent: "Let me get this logged for you — one moment."
+   *   agent: "Could you tell me the city where your office is located?
+   *           For example, the North Valley Eye office — what city is it in?"
+   *   caller: "I don't know if I go to, to Burbank and Tarzana or Indian Hills."
+   *
+   * The cover line had already promised the pause and then the questions kept
+   * coming, so the caller was told it was done when it was not. And we asked a
+   * patient to tell US where our own office is — she could not, reasonably,
+   * and the ticket filed without a location.
+   *
+   * The anecdote lives here rather than in the prompt on purpose: optical's
+   * prompt has a 1,200-token ceiling and a war story is not an instruction.
+   */
   const callbackLine = phone
     ? `Their number is ${formatPhoneForSpeech(phone)} (ending ${formatPhoneLast4(phone)}). ` +
       `Use it as the callback number without asking. Confirm it once, BEFORE you file — never after.`
@@ -229,6 +246,12 @@ accurate question in a ticket is worth more than a confident answer from you.
    about categories.
 7. File it with file_surgery_ticket, then read the ticket number back.
 
+# NEVER ASK A PATIENT WHERE OUR OFFICES ARE
+They came to us; we know where we are. Offer the office on their record as a
+yes/no — "I have you at our Encinitas office, is that the one?" — or read back
+the candidates a tool gives you. Never ask which city one of our offices is in.
+If they do not know, note it and move on.
+
 # TWO THINGS ABOUT THE LAST THIRTY SECONDS
 
 THE NUMBER COMES BEFORE THE TICKET. Confirming a callback number after you have
@@ -240,6 +263,10 @@ NEVER GO SILENT WHILE FILING. The caller cannot tell silence from a dropped
 line. Say "Let me get this logged for you — one moment." FIRST, then file
 quietly. Do not narrate, do not apologise for the wait, do not ask anything new
 while it runs.
+
+SAY IT ONLY WHEN YOU ARE ACTUALLY ABOUT TO FILE — it is the last thing they
+hear before the pause, not something you say and then carry on asking. Still
+need something? Ask for that first.
 
 # HOW YOU SPEAK
 ${callbackLine}

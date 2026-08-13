@@ -114,6 +114,10 @@ export const SURGERY_SCHEDULING_CUES: string[] = [
   'still waiting for a date', 'waiting for appointment date',
   'waiting for a surgery date', 'needs scheduling', 'need scheduling',
   'requesting sx', 'requesting surgery', 'next available sx', 'next available surgery',
+  // Live 2026-08-13: "I need the date for my surgery." The generated cues
+  // carry 'surgery date' and the caller inverted it.
+  'date for my surgery', 'date for the surgery', 'date for my sx', 'date of the surgery',
+  'fecha para la cirugia', 'fecha para mi cirugia',
   'cuando es mi cirugia', 'fecha de la cirugia', 'fecha de mi cirugia',
 ];
 
@@ -276,6 +280,17 @@ const POSTOP_CONTEXT_CUES = [
   'after my surgery', 'after the surgery', 'since my surgery', 'since the surgery',
   'post-op', 'post op', 'postop', 'had my sx', 'had sx', 'my surgery was',
   'operated', 'me operaron', 'despues de la cirugia', 'desde la cirugia', 'ya me operaron',
+  // ADDED 2026-08-13 FROM A LIVE MISS. This filed as Other, priority medium:
+  //   "My right eye that Dr. Brookman did the surgery on is very blurry and
+  //    it's really upsetting. I need to know what's happening."
+  // A post-cataract patient describing a blurry eye, recorded as routine. The
+  // context is named by the SURGEON rather than by the event — "the eye Dr X
+  // did" — which no cue above reaches. Patients say who operated on them at
+  // least as often as they say when.
+  'did the surgery', 'did my surgery', 'performed the surgery', 'performed my surgery',
+  'did the operation', 'operated on', 'the eye he did', 'the eye she did',
+  'the eye they did', 'the eye i had done', 'eye that dr', 'eye my doctor did',
+  'me hizo la cirugia', 'me opero', 'el ojo que me operaron',
 ];
 
 const POSTOP_SYMPTOM_CUES = [
@@ -344,11 +359,21 @@ export const SURGERY_LOGISTICS: SurgeryLogisticsBucket[] = [
     key: 'arrival', label: 'Arrival Time / Transportation', measured90d: 368,
     cues: ['what time', 'arrival time', 'when should i arrive', 'how early', 'transportation', 'ride', 'access', 'driver', 'address of',
            'surgery time', 'sx time', 'time of his surgery', 'time of her surgery', 'time of my surgery',
-           'nearer', 'closer to', 'hora de la cirugia', 'transporte'] },
+           'nearer', 'closer to', 'hora de la cirugia', 'transporte',
+           // Live 2026-08-13, both filed as Other:
+           //   "I need to confirm the appointment time for my surgery on August 14"
+           //   "Quiero saber a que hora tengo la cirugia manana"
+           'time for my surgery', 'appointment time', 'confirm the time',
+           'a que hora', 'que hora tengo', 'hora de mi cirugia'] },
   { ...LOGISTICS_TYPE, requestReasonId: 533, requestReason: 'Deposit / Balance Question',
     key: 'financial', label: 'Deposit / Balance Question', measured90d: 259,
+    // Live 2026-08-13, filed as Other: "They're charging me $2,450 for a
+    // surgery that was done on December 3, but it's already been paid for."
+    // `pay` is not a substring of `paid`, which is the sort of thing only real
+    // text tells you.
     cues: ['deposit', 'balance', 'how much', 'cost', 'price', 'pay', 'owe', 'invoice', 'bill',
-           'pagar', 'pago', 'costo', 'precio', 'cuanto cuesta', 'financial question'] },
+           'pagar', 'pago', 'costo', 'precio', 'cuanto cuesta', 'financial question',
+           'paid', 'charging', 'charged', 'charge me', 'billed', 'refund', 'reembolso'] },
   { ...LOGISTICS_TYPE, requestReasonId: 534, requestReason: 'Status Follow-Up',
     key: 'status', label: 'Status Follow-Up', measured90d: 1369,
     // The largest bucket in the queue at 1,369 in 90 days, and the one whose

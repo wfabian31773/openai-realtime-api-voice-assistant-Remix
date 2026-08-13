@@ -58,6 +58,8 @@
  * `request_reasons` tables for department 3 on 2026-08-13.
  */
 
+import { anyCue } from './cueMatch';
+
 export const TECH_DEPARTMENT_ID = 3;
 
 export interface TechClassification {
@@ -213,10 +215,20 @@ export const TECH_REASON_IDS = new Set([
 
 /** The pair whose cues the caller's words match, or null. */
 export function classifyTech(text: string): TechClassification | null {
-  const t = String(text ?? '').toLowerCase();
-  if (!t.trim()) return null;
+  if (!String(text ?? '').trim()) return null;
   for (const c of TECH_CLASSIFICATIONS) {
-    if (c.cues.some((cue) => t.includes(cue))) return c;
+    // THE LAST TAXONOMY THAT COULD NOT READ SPANISH.
+    //
+    // This was `toLowerCase().includes` until 2026-08-13 — no diacritic
+    // folding, so an accented word could not match a cue even when the cue
+    // existed. Surgery, Optical and After Hours were all converted once real
+    // tickets showed the miss. Tech is the LARGEST queue in the practice and
+    // was the last one still doing it, which is the wrong order to have found
+    // them in — I converted the ones whose failures I happened to read.
+    //
+    // `anyCue` also word-boundaries short cues, so `rx` cannot fire inside
+    // another word.
+    if (anyCue(text, c.cues)) return c;
   }
   return null;
 }

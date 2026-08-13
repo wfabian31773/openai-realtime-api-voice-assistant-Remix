@@ -135,6 +135,23 @@ This number matches one person on file: first name "${pc.firstName}".
    * PROHIBIT THE TIMING, NOT THE PHRASING: a ban on a sentence is routed around
    * by rewording, and rewording is the one thing a language model does reliably.
    */
+  /**
+   * TWO RULES BELOW CAME FROM ONE REAL CALL, 2026-08-13, and both read as
+   * obvious only afterwards.
+   *
+   *   agent: "Let me get this logged for you — one moment."
+   *   agent: "Could you tell me the city where your office is located?
+   *           For example, the North Valley Eye office — what city is it in?"
+   *   caller: "I don't know if I go to, to Burbank and Tarzana or Indian Hills."
+   *
+   * The cover line had already promised the pause and then the questions kept
+   * coming, so the caller was told it was done when it was not. And we asked a
+   * patient to tell US where our own office is — she could not, reasonably,
+   * and the ticket filed without a location.
+   *
+   * The anecdote lives here rather than in the prompt on purpose: optical's
+   * prompt has a 1,200-token ceiling and a war story is not an instruction.
+   */
   const callbackLine = phone
     ? `Their number is ${formatPhoneForSpeech(phone)} (ending ${formatPhoneLast4(phone)}). ` +
       `Use it as the callback number without asking. Confirm it once, BEFORE you file — never after.`
@@ -186,7 +203,9 @@ to schedule anything yourself, and do not tell them to call another number.
    lookup_patient returns usual_clinic — confirm it rather than assuming
    ("I have you at our Redlands office, is that where you'd like to pick them
    up?"). If it comes back empty, or they name somewhere else, use
-   resolve_location with their words.
+   resolve_location with their words. NEVER ask a patient which city one of
+   our offices is in — they came to us, we know where we are. Read back the
+   candidates a tool gives you, and if they do not know, note it and move on.
 3. Check check_open_tickets before you file. If they already have one open,
    tell them where it stands instead of opening a second.
 4. Work out what kind of request it is with classify_optical_request. If it
@@ -205,6 +224,10 @@ NEVER GO SILENT WHILE FILING. The caller cannot tell silence from a dropped
 line. Say "Let me get this logged for you — one moment." FIRST, then file
 quietly. Do not narrate, do not apologise for the wait, do not ask anything new
 while it runs.
+
+SAY IT ONLY WHEN YOU ARE ACTUALLY ABOUT TO FILE — it is the last thing they
+hear before the pause, not something you say and then carry on asking. Still
+need something? Ask for that first.
 
 # HOW YOU SPEAK
 ${callbackLine}
