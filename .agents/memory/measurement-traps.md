@@ -119,6 +119,49 @@ The fix is mechanical: extract the pure part into a module that imports nothing
 stateful (`agents/azulSchedulingPrompt.ts`) and re-export it. `p0Hardening.test.ts`
 still fails this way and is the remaining instance.
 
+## "We don't have that" is a claim about your data, not about the world
+
+I told the operator a caller had named an optical office we do not have —
+"Downtown LA". His reply: *"we do have downtwon la that is our main los angeles
+office."*
+
+It was invisible from both ends. The NextGen mirror calls it **Azul Vision
+DTLA**; the ticketing app calls it **Los Angeles**. The caller's own words
+matched neither, and neither system's name matched the other's.
+
+Three more offices had the same defect, found only by listing every clinic
+beside its brand-stripped alias:
+
+| caller says | mirror | ticketing app | vol/90d |
+|---|---|---|---|
+| "Downtown LA" | `Azul Vision DTLA` | Los Angeles | 4,810 |
+| "Riverside" | `Azul Vision Riverside Latham` | Riverside | **11,399** |
+| "Mission Hills" | `Azul Vision Mission Hlls` | Mission Hills | 7,259 |
+| "Willow" | `Azul Vision Willow` | Long Beach Willow | 3,373 |
+
+**26,841 appointments a quarter — a fifth of clinic volume**, including the
+busiest clinic in the practice. `Mission Hlls` is a typo in NextGen itself.
+
+Three things to carry forward:
+
+- **A lookup that returns nothing is evidence about the index, not the world.**
+  Before reporting an entity as non-existent, check what the other systems call
+  it — and ask the operator, who knows the building.
+- **Fixing the match alone is half a fix.** Even resolved, we handed on the
+  mirror's form, and the receiver sets its foreign key by name. Two systems,
+  two names, and the caller's word is a third.
+- **I had already been told this.** The ticketing agent measured exactly this
+  drift across 11,296 appointments — for PROVIDERS. I checked providers,
+  wrote it up, and never asked whether locations had the same problem. When a
+  class of bug is found in one column, go and look in the others.
+
+`LOCATION_ALIASES` in `services/consoleDirectory.ts` is deliberately a
+named-exceptions list, not a fuzzy matcher: fuzzy would hide the drift this
+exists to expose, and would eventually route someone to the wrong clinic.
+`long beach` is explicitly NOT aliased to Willow — a different clinic with
+9,241 a quarter. **An alias that steals a key is worse than one that does not
+resolve.**
+
 ## A deploy that did not take looks exactly like a fix that did not work
 
 Wayne pulls and republishes on Replit. On 2026-08-11 a GitHub rate limit made his

@@ -180,6 +180,41 @@ reschedule flow calls SERIOUS — `cancelled_not_rebooked`, where the old
 appointment is gone and the new one did not take. A prompt long enough to
 contradict itself will, and only reading it end to end finds it.
 
+## What one live day taught that 1,600 tests had not — 2026-08-13
+
+The four queue lines ran for a day. Every finding below came from reading real
+calls and real tickets; none of them would have surfaced from the code.
+
+**Catch-all rate is the health metric for a taxonomy.** Tech 9.6%, Surgery 67%,
+Optical 85%. Tech was the only one whose cues were GENERATED from measured
+ticket text; the other two were hand-written. That difference is the entire
+gap, and it is the same lesson as `PHARMACY_TRANSFER_CUES` — a hand-listed
+phrase encodes one word order, and callers use all of them. "schedule my
+surgery" does not match "schedule **a cataract** surgery".
+
+**A test corpus written by whoever wrote the cues proves only that they agree
+with each other.** `surgeryTaxonomy.test.ts` passed throughout while the queue
+filed 67% catch-all. Pull the strings from the database.
+
+**Looping is measurable, and worth measuring per line.** From
+`call_logs.tool_timeline`, count calls where one tool fires 3+ times:
+Tech 4.6%, Surgery 8.3%, answering-service 8.3%, **Optical 20.7%**. The looping
+optical calls averaged 229s against 134s and NONE ended `resolved`.
+
+**A tool that returns `success: true` having done nothing is an invitation to
+retry.** `resolve_location` returned `{success: true, verified: false}` and the
+model called it ten times in a row with identical arguments. The advisory
+message told it to go and ask the caller; the envelope said the call had
+worked. Refuse with `missing()` instead — the prompts already teach the agent
+to answer that by speaking to the caller. `retryable: true` on a name that did
+not match is the same mistake: **a definite answer about the input is not a
+transient failure.**
+
+**Short cues need word boundaries, not banning.** `sx` is the practice's own
+word and had to be added; matched as a substring it is the `er` bug again.
+`SHORT_CUE_MAX = 3` — at 4, `pain` stopped matching "painful", so a boundary
+rule that is too generous silently turns stems into whole words.
+
 ## Greeting personalisation
 
 `src/services/greetingPersonalisation.ts`. `greetingStyleFor` returns `'append'`
