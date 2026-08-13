@@ -43,6 +43,21 @@ type HandoffOutcome = { ok: true; destination?: string } | {
   ok: false;
   status?: 'HANDOFF_UNAVAILABLE' | 'NO_ANSWER' | 'FAILED';
   reason?: string;
+  /**
+   * WHERE WE ACTUALLY DIALLED, on a handoff that failed.
+   *
+   * It used to be recorded on success only, and the cost of that shows up in
+   * the 90 days to 2026-08-13: 57 PCP handoffs attempted, 11 connected, and
+   * every one of the 46 failures has pcp_handoff_destination NULL. So the
+   * question that decides whether PCP can go back on — was the queue DID not
+   * answering, or were we still dialling the retired PCP_AGENT_DIDS roster? —
+   * cannot be answered from the data at all. Every ticket that could have
+   * settled it recorded nothing.
+   *
+   * The failures that DID record a destination tell the opposite story: all 11
+   * went to +17149564300 and 9 of them connected.
+   */
+  destination?: string;
 } | void;
 type HandoffCallback = () => Promise<HandoffOutcome>;
 
@@ -439,7 +454,9 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         requestedAt,
         attempted: true,
         attemptedAt,
-        destination: outcome && outcome.ok ? outcome.destination : undefined,
+        // Recorded whether or not it connected. A failed transfer with no
+        // destination is an unanswerable question later; see HandoffOutcome.
+        destination: outcome ? outcome.destination : undefined,
         humanAnswerStatus: finalStatus,
         connectedAt: ok ? new Date().toISOString() : undefined,
         finalStatus,

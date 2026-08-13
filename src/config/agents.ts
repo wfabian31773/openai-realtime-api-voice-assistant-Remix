@@ -11,6 +11,8 @@ import { createPcpAgent, pcpAgentConfig } from '../agents/pcpAgent';
 import { createOpticalAgent, opticalAgentConfig } from '../agents/opticalAgent';
 import { createSurgeryAgent, surgeryAgentConfig } from '../agents/surgeryAgent';
 import { createTechAgent, techAgentConfig } from '../agents/techAgent';
+import { createRecordsAgent, recordsAgentConfig } from '../agents/recordsAgent';
+import { createHubAgent, hubAgentConfig } from '../agents/hubAgent';
 
 export type AgentFactory = (...args: any[]) => RealtimeAgent | Promise<RealtimeAgent>;
 
@@ -141,6 +143,42 @@ export class AgentRegistry {
       voice: techAgentConfig.voice,
       language: techAgentConfig.language,
       greeting: techAgentConfig.greeting,
+    });
+
+    // Medical Records — department 16. The worst classification gap in the
+    // practice: 453 of 495 tickets in 90 days carry no reason at all. Same
+    // shape as the other queue lines. NO handoff: operator ruling 2026-08-12.
+    // twilioNumbers stays empty until the number is pointed at
+    // /api/voice/records.
+    this.register({
+      id: recordsAgentConfig.slug,
+      factory: createRecordsAgent as AgentFactory,
+      enabled: true,
+      description: recordsAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'inbound',
+      version: recordsAgentConfig.version,
+      voice: recordsAgentConfig.voice,
+      language: recordsAgentConfig.language,
+      greeting: recordsAgentConfig.greeting,
+    });
+
+    // The HVA Hub scheduling queue — department 9, where the operator's
+    // cross-queue ruling sends every schedule-related call in the practice.
+    // It takes requests; it does NOT book. Booking is azul-scheduling's
+    // contract, a different line. twilioNumbers stays empty until the number is
+    // pointed at /api/voice/hub.
+    this.register({
+      id: hubAgentConfig.slug,
+      factory: createHubAgent as AgentFactory,
+      enabled: true,
+      description: hubAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'inbound',
+      version: hubAgentConfig.version,
+      voice: hubAgentConfig.voice,
+      language: hubAgentConfig.language,
+      greeting: hubAgentConfig.greeting,
     });
 
     // Azul Vision NextGen scheduling line (San Diego pilot).

@@ -272,3 +272,67 @@ pipeline work. **Open question for Wayne (§7).**
 clean. Note: running `npm run build` in-tree creates `dist/` with compiled test
 files that vitest will also run — **delete `dist/` afterwards** or the suite
 reports phantom failures.
+
+---
+
+## 8. The queue lines — 2026-08-12 / 08-13
+
+Three queue agents built and shipped: **Optical** (dept 1), **Surgery
+Coordination** (dept 2), **Clinical Tech Support** (dept 3). The pattern, the
+operator rulings behind it, and the taxonomy method are in
+**`.agents/memory/queue-agents.md`** — read that before building the next one.
+
+### The day's real cost: one bug, most of a day
+
+A tool that worked in the library, in tests, and over HTTP could not be called by
+an agent. `toZod` in `realtimeAdapter.ts` made every property `.nullable()` but
+never `.optional()`, so all 15 of `file_surgery_ticket`'s landed in `required`;
+under `strict: true` the SDK rejected the model's 13-key call **before `execute`
+ran** — no HTTP request, no log line, no timeline event.
+
+**Three wrong root causes stated out loud before the right one.** What found it
+was a control, and Wayne supplied it: *"the optical agent can call a tool and
+create a ticket, why can't the surgery agent?"* Optical worked. Same library,
+same adapter, same process, different field count.
+
+Full write-up: **`.agents/memory/realtime-tool-schemas.md`**. Proof it works:
+**VA-51121**.
+
+### Cross-queue routing
+
+Wayne, 08-13: *"we can't just tell the patient call back, call the wrong
+extension… anything that's schedule related should go to the HVA hub"*, then
+*"cross queue routing should be for all agents"*, then *"surgery is an exception
+to that hva hub rule."*
+
+`src/tools/queueRouting.ts`, wired into all three queue filing tools **and** the
+shared `createTicketTool` guard (answering-service, no-IVR, no-IVR v2). Merged as
+**#184**.
+
+### The lock on the after-hours path
+
+`submitSimplifiedTicket` released its 60-second lock on success only, so the
+retry a failure invites hit the lock that failure left behind — four create
+attempts on one call at 23:38, no ticket. **This is the line that carries the
+night**: Wayne, 08-13, *"all overnight volume is on the no ivr agent which i use
+as the after hours agent."* Fixed in **#185**.
+Details: **`.agents/memory/ticket-creation-lock.md`**.
+
+### Still open from this stretch
+
+- **Rotate `VOICE_TOOL_API_KEY`.** It was pasted in plaintext and used for
+  production curls. Wayne, 08-13: *"I will rotate the key once we are done with
+  these agents and testing but keep reminding me."* **Keep reminding him.**
+- **Prove `file_tech_ticket` over HTTP** before the Clinical Tech Support number
+  goes live — a plain refill (expect dept 3 / reason 155 / high), "my glasses
+  broke" (expect Optical), "schedule an eye exam" (expect HVA Hub / 146).
+- **Close test tickets** VA-51047, VA-51058, VA-51121.
+- **Clear the six test records' phone in NextGen.** I declined to delete them
+  from `patients_master`: it is a live mirror (14,182 rows re-synced in 7 days)
+  and the rows would come back. The fix is upstream.
+- Department 3 receives real optical and appointment traffic today — cross-queue
+  routing addresses it going forward, not the backlog.
+- *"Prescription never reached the pharmacy"* (167 in 90 days) has **no reason
+  code**. Needs one.
+- `config/answeringServiceTicketing.ts` fallbacks are stale, and
+  `validDepartments = [1,2,3,11,12]` is wrong — it omits the HVA Hub (9).

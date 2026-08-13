@@ -1169,7 +1169,15 @@ function sendUrgentTransferSms(opts: {
 }
 
 // Handle human agent handoff
-type HandoffOutcome = { ok: true; destination: string } | { ok: false; status: string; reason: string };
+type HandoffOutcome =
+  | { ok: true; destination: string }
+  // `destination` on the failure side is what we ACTUALLY dialled. Recording
+  // it only on success cost the PCP investigation its whole evidence base:
+  // 46 no-answers in the 90 days to 2026-08-13, every one with a null
+  // destination, so "was the queue DID not answering, or were we dialling the
+  // retired roster?" has no answer in the data. Optional because two failures
+  // happen before a destination is resolved at all.
+  | { ok: false; status: string; reason: string; destination?: string };
 
 async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
   // Use wrapper function that checks both legacy maps and service cache
@@ -1223,7 +1231,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
 
   if (!callerID) {
     console.error('[HANDOFF] ✗ Missing callerID');
-    return { ok: false, status: 'FAILED', reason: 'caller_id_missing' };
+    return { ok: false, status: 'FAILED', reason: 'caller_id_missing', destination: handoffDestination };
   }
 
   // WHERE the urgent call goes. Until 2026-08-03 this was always the global
@@ -1296,9 +1304,14 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
         'Press any key to accept, or remain on the line to connect.',
       ].filter(Boolean).join(' ');
       for (let index = 0; index < pcpDialSequence.length; index += 1) {
-        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected' };
+        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected', destination: handoffDestination };
         const destination = pcpDialSequence[index];
-        console.log(`[HANDOFF] PCP sequential attempt ${index + 1}/${pcpDialSequence.length}`);
+        // Set BEFORE the dial, not only on success. Every failure return below
+        // reports this, and a failed PCP handoff that records no destination is
+        // an unanswerable question later — which is exactly what the 46
+        // no-answers in the 90 days to 2026-08-13 are.
+        handoffDestination = destination;
+        console.log(`[HANDOFF] PCP sequential attempt ${index + 1}/${pcpDialSequence.length} -> ${destination}`);
         if (index > 0) {
           pcpHandoffProgress.get(openAiCallId)?.(
             `Say exactly: "That team member wasn't available, so I'm trying the next person now. Please stay with me." Say nothing else.`,
@@ -1332,7 +1345,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
           // completion of it never ran.
           break;
         }
-        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected' };
+        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected', destination: handoffDestination };
         console.warn(`[HANDOFF] PCP sequential attempt ${index + 1} was not accepted: ${outcome.detail || 'unknown'}`);
       }
       // Only when the loop exhausted every destination without an accept —
@@ -1341,7 +1354,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
         pcpHandoffProgress.get(openAiCallId)?.(
           'Say exactly: "Thanks for holding. I couldn’t reach the team live, but your PCP request has already been recorded for follow-up." Say nothing else and do not claim a transfer occurred.',
         );
-        return { ok: false, status: 'NO_ANSWER', reason: 'pcp_sequence_no_answer' };
+        return { ok: false, status: 'NO_ANSWER', reason: 'pcp_sequence_no_answer', destination: handoffDestination };
       }
     }
 
@@ -1438,7 +1451,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
           dialTarget: handoffDestination,
         });
       }
-      return { ok: false, status: 'FAILED', reason: 'dial_failed' };
+      return { ok: false, status: 'FAILED', reason: 'dial_failed', destination: handoffDestination };
     }
 
     // STEP 3: Wait for human to actually answer before disconnecting AI
@@ -1457,14 +1470,14 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       // PCP creates its own structured ticket before dialing. Never route a
       // professional-caller failure into the patient/after-hours contract.
       if (policy.policy === 'pcp') {
-        return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer' };
+        return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer', destination: handoffDestination };
       }
       await fileUrgentHandoffFallbackTicket(openAiCallId, escalationDetails, callerID, {
         why: 'URGENT TRANSFER NOT ANSWERED: The patient was transferred but no one picked up.',
         dialTarget: handoffDestination,
       });
 
-      return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer' };
+      return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer', destination: handoffDestination };
     }
     }
     
@@ -1994,7 +2007,7 @@ async function observeCall(
   // It MUST be listed here — an unknown slug is silently coerced to
   // 'after-hours' below, which would have made the demo line quietly answer
   // as the after-hours agent.
-  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
+  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'hub', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
   const legacyDeletedSlugs = ['greeter', 'non-urgent-ticketing'];
   
   let effectiveSlug = agentSlug || 'no-ivr';
@@ -2189,7 +2202,7 @@ async function observeCall(
   // persons incl. chartless) and is NOT pilot-fenced — verified in the
   // service's sage-tools.ts — so it is correct for the practice-wide
   // answering-service and no-ivr lines, not just the SD pilot.
-  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'optical', 'surgery', 'tech', 'no-ivr', 'dev-no-ivr']);
+  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'hub', 'no-ivr', 'dev-no-ivr']);
   if (PRECONTEXT_SLUGS.has(effectiveSlug) && from) {
     azulPrecontextPromise = import('./agents/azulSchedulingAgent')
       .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
@@ -2562,6 +2575,66 @@ async function observeCall(
         //     "Thank you for calling Azul" / "Am I speaking with Wayne?"
         azulMetadataRef = techMeta;
         factoryResult = agentFactory(undefined, techMeta);
+        break;
+      }
+
+      case 'records': {
+        // The Medical Records queue. Same shape as the other queue lines: its
+        // own number, so the call is a records matter because of the line it
+        // rang.
+        //
+        // NO handoff callback, deliberately: operator ruling 2026-08-12, only
+        // PCP and Scheduling transfer.
+        //
+        // The caller here is often NOT the patient — another clinic, a health
+        // plan, an attorney's office. precontext still resolves the NUMBER, and
+        // the prompt says so, so a match is never read as "this is the patient".
+        const recordsPrecontext = await racePrecontext();
+        console.log(
+          `[Records] Pre-context for ...${(from || '').slice(-4)}: ` +
+            `${recordsPrecontext?.matched ? `matched '${recordsPrecontext.firstName}'` : 'no unique match'}`,
+        );
+        const recordsMeta = {
+          callId,
+          callSid: twilioCallSid,
+          callerPhone: from,
+          dialedNumber: to,
+          precontext: recordsPrecontext ?? undefined,
+          get callLogId() { return liveCallLogId(); },
+        };
+        // Register the precontext for the GREETING, not just the prompt — see
+        // the note in the tech case. Without this the model gets the forced
+        // greeting AND a prompt saying the greeting already played, and the
+        // caller hears it cut itself off mid-phrase.
+        azulMetadataRef = recordsMeta;
+        factoryResult = agentFactory(undefined, recordsMeta);
+        break;
+      }
+
+      case 'hub': {
+        // The HVA Hub scheduling queue. Its own number, so the call is a
+        // scheduling matter because of the line it rang.
+        //
+        // NO handoff callback, deliberately: operator ruling 2026-08-12, only
+        // PCP and Scheduling SD transfer, and this is not that line. This agent
+        // also does not BOOK — see the prompt.
+        const hubPrecontext = await racePrecontext();
+        console.log(
+          `[Hub] Pre-context for ...${(from || '').slice(-4)}: ` +
+            `${hubPrecontext?.matched ? `matched '${hubPrecontext.firstName}'` : 'no unique match'}`,
+        );
+        const hubMeta = {
+          callId,
+          callSid: twilioCallSid,
+          callerPhone: from,
+          dialedNumber: to,
+          precontext: hubPrecontext ?? undefined,
+          get callLogId() { return liveCallLogId(); },
+        };
+        // Register the precontext for the GREETING, not just the prompt — see
+        // the note in the tech case.
+        azulMetadataRef = hubMeta;
+        factoryResult = agentFactory(undefined, hubMeta);
         break;
       }
 
@@ -4797,7 +4870,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         // number and runs the ticket agent. This list is a SECOND allowlist,
         // separate from validAgentSlugs in observeCall(); both must know a slug
         // or the call is silently answered by the after-hours agent.
-        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'azul-scheduling', 'pcp', 'demo'];
+        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'hub', 'azul-scheduling', 'pcp', 'demo'];
         const validOutboundAgents = ['drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
         const legacyDeletedAgents = ['greeter', 'non-urgent-ticketing'];
         
@@ -5733,6 +5806,30 @@ export function setupVoiceAgentRoutes(app: Express): void {
       'Thank you for calling Azul Vision clinical support. All of our technicians are ' +
       'currently assisting other patients, but I can take a message and they will follow ' +
       'up with you. How can I help you today?',
+  });
+
+  // Point the Medical Records number's Twilio voice webhook here. Until that
+  // number exists the route is harmless: nothing dials it.
+  registerOverflowLine({
+    path: '/api/voice/records',
+    slug: 'records',
+    tag: 'RECORDS',
+    greeting:
+      'Thank you for calling Azul Vision medical records. Our records team is currently ' +
+      'assisting other patients, but I can take the details and they will follow up with ' +
+      'you. How can I help you today?',
+  });
+
+  // Point the scheduling Hub number's Twilio voice webhook here. Until that
+  // number exists the route is harmless: nothing dials it.
+  registerOverflowLine({
+    path: '/api/voice/hub',
+    slug: 'hub',
+    tag: 'HUB',
+    greeting:
+      'Thank you for calling Azul Vision scheduling. All of our schedulers are currently ' +
+      'assisting other patients, but I can take your request and they will follow up with ' +
+      'you. How can I help you today?',
   });
 
   // THE DEMO LINE (+1 626-548-2660). Its own webhook so it can never inherit

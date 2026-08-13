@@ -1,0 +1,61 @@
+# The hardcoded reason fallback, and where it has leaked
+
+One function is responsible for the largest wrong-data population in the
+practice. `detectRequestReason()` in `config/answeringServiceTicketing.ts`:
+
+> no keyword matched → return the **first reason of the default type**
+
+Its sibling `detectRequestType()` does the same thing one level up. Neither ever
+fails; both always return something, and the something is whatever happens to be
+first in the table.
+
+## The count, measured 2026-08-13 over 90 days
+
+| Department | Symptom | Tickets |
+|---|---|---|
+| 3 Clinical Tech Support | reason **153** Prescription Refill | 6,905 |
+| 3 | no reason at all | 1,714 |
+| 8 After Hours | reason **159** Transferred to On-Call Provider | 479 |
+| 8 | no reason at all | 274 |
+| 8 | reason **153** — another department's | 13 |
+| 9 HVA Hub | reason **153** on request type 32 | 224 |
+| 9 | no reason at all | 463 |
+| 16 Medical Records | no type and no reason | 453 |
+
+**Department 8 is 76% mis-recorded. Department 16 is 91.5%.**
+
+## Why each one is invisible in the obvious report
+
+- **The department is right.** Group by department and department 9 looks
+  healthy; the 224 only appear if you group by *reason within department* and
+  notice that 153 does not belong to 9 at all.
+- **The reason is plausible.** 153 on a medication queue is what you expect. It
+  is 6,905 of 8,064 that gives it away, not the value.
+- **The harm inverts.** Department 8's 479 do not under-describe emergencies —
+  they record *routine* calls as urgent transfers. "Caller is asking for the
+  exact office hours of the Eastvale location" and "Worsening pain in right eye
+  over the past day" carry the same reason. That is what makes the real ones
+  unfindable.
+
+## The fix, and the shape of it
+
+Every queue taxonomy falls to **its own department's "Other - See Description"**
+rather than to a default type's first reason, and `classify*Request` never
+returns null. The filing tools additionally refuse a reason id that belongs to
+another department, whatever the agent names — so 153 is now impossible in
+departments 8, 9 and 16 by construction, not by convention.
+
+`159 is a disposition, not a reason.` It records that a transfer *happened*.
+Only the code that completes one knows that. It is exported from
+`afterHoursTaxonomy.ts` separately and is deliberately absent from the
+classification table.
+
+## Still to do
+
+`config/answeringServiceTicketing.ts` itself is untouched — the queue tools
+bypass it, but the answering-service path still runs it. Fixing the fallback
+there is the change that stops new bad rows arriving from the biggest line of
+all; nothing above does that.
+
+Also still true: `validDepartments = [1,2,3,11,12]` in that file omits the HVA
+Hub (9), Medical Records (16), PCP Support (18) and After Hours (8).

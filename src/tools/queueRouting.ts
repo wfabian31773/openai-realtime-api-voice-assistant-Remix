@@ -46,25 +46,94 @@ const OPTICAL = 1;
 const SURGERY = 2;
 const TECH = 3;
 const HVA_HUB = 9;
+/**
+ * Medical Records is a HOME department here, never a destination.
+ *
+ * Nothing redirects INTO it: "can I get a copy of my records" on the optical
+ * line is a question the optician can pass along, and a records team is not a
+ * place to send a call on a keyword. But records requests constantly name
+ * another department's subject — "the notes from the surgery I had on 7/30",
+ * "a copy of my glasses prescription" — and without a guard those would be
+ * dragged off the records queue by the surgery and optical cues below.
+ */
+const MEDICAL_RECORDS = 16;
+
+/**
+ * What a records request sounds like. Used ONLY to keep such a request on the
+ * records line, never to route one there.
+ */
+const RECORDS_CUES = [
+  // Deliberately broad, and safe because it is CONSULTED ONLY when the call
+  // arrived on the records line. On that line a document word is the default
+  // reading — "the notes from the surgery she had on 7/30" is a records
+  // request, not a surgery one. It is still specific enough that a genuine
+  // optical request reaching this line ("my glasses broke") routes onward, as
+  // the operator's ruling requires.
+  'record', 'chart', 'note', 'report', 'documentation',
+  'copy of', 'copies of', 'release of information',
+  'expediente', 'historial', 'copia', 'copias', 'informe',
+];
 
 /**
  * Appointment scheduling, which the operator routed to the HVA Hub from every
  * queue. Type 32 is the live one: 456 reschedules, 198 new, 55 same-day in 90
- * days. Type 40 carries the same four concepts and is effectively dead at 7.
+ * days. Type 40 carries the same four concepts and is effectively dead at 9.
+ *
+ * SPANISH IS NOT A TRANSLATION OF THE ENGLISH LIST — measured 2026-08-13.
+ *
+ * The first version of these cues was written English-first with a few Spanish
+ * phrases appended, and it was wrong in a way that only the real tickets show.
+ * Department 8's 274 unclassified tickets are overwhelmingly Spanish appointment
+ * requests, and **10 of a 17-line sample missed every cue.**
+ *
+ * Two reasons, both structural rather than vocabulary:
+ *
+ *   NOMINALISATION. Ticket text says "Reprogramación de cita" and "Cancelación
+ *   de la cita", not "reprogramar" and "cancelar mi cita". Spanish states these
+ *   as nouns far more often than English does, so a cue built from the verb
+ *   misses the common form. The cues below are stems — `reprogram` catches
+ *   reprogramar, reprogramación and reprogramacion together.
+ *
+ *   ACCENTS. "Cancelación" and "cancelacion" both appear, because transcription
+ *   and staff typing do not agree. Rather than doubling every entry, `hit()`
+ *   strips diacritics from both sides, so a cue may be written either way.
  */
-const SCHEDULING: Array<{ reasonId: number; reason: string; cues: string[] }> = [
+export interface SchedulingCue { reasonId: number; reason: string; cues: string[] }
+
+/**
+ * Exported so department 9's own taxonomy uses the SAME table rather than a
+ * copy of it. The Spanish work above was hard-won against real ticket text; a
+ * second list would start out identical and drift the first time either is
+ * touched.
+ */
+export const SCHEDULING: SchedulingCue[] = [
   { reasonId: 151, reason: 'Same-Day Appointment Request',
-    cues: ['same day', 'same-day', 'today if', 'get in today', 'seen today', 'squeeze me in', 'sooner appointment', 'earlier appointment', 'move my appointment up'] },
+    cues: ['same day', 'same-day', 'today if', 'get in today', 'seen today', 'squeeze me in', 'sooner appointment', 'earlier appointment', 'move my appointment up', 'cita para hoy', 'hoy mismo'] },
   { reasonId: 148, reason: 'Cancel Appointment',
-    cues: ['cancel my appointment', 'cancel my appt', 'cancel the appointment', 'cancelar mi cita', 'cannot make my appointment', "can't make my appointment"] },
+    cues: ['cancel my appointment', 'cancel my appt', 'cancel the appointment', 'cannot make my appointment', "can't make my appointment",
+           'cancelar mi cita', 'cancelar la cita', 'cancelar cita', 'cancelación de la cita', 'cancelación de cita', 'cancelar su cita'] },
   { reasonId: 147, reason: 'Reschedule Existing Appointment',
-    cues: ['reschedule', 'change my appointment', 'move my appointment', 'different day for my appointment', 'cambiar mi cita', 'reprogramar'] },
+    cues: ['reschedule', 'change my appointment', 'move my appointment', 'different day for my appointment',
+           'reprogram', 'cambiar mi cita', 'cambiar la cita', 'mover mi cita', 'mover la cita'] },
   { reasonId: 149, reason: 'Appointment Confirmation Call',
-    cues: ['confirm my appointment', 'confirming my appointment', 'is my appointment', 'what time is my appointment', 'confirmar mi cita'] },
+    cues: ['confirm my appointment', 'confirming my appointment', 'is my appointment', 'what time is my appointment',
+           'confirmar mi cita', 'confirmar la cita', 'confirmar cita', 'confirmación de la cita', 'confirmación de cita', 'confirmar si tiene', 'confirmar si tengo'] },
+  // NOT "cualquier horario disponible". That is a caller saying they are
+  // flexible while BOOKING — "Solicita agendar cita para cualquier horario
+  // disponible" is a new appointment, and cueing 150 on it took the request
+  // off 146. An availability inquiry asks what exists; it does not ask for one.
   { reasonId: 150, reason: 'Appointment Availability Inquiry',
-    cues: ['do you have any openings', 'what times do you have', 'next available', 'availability'] },
+    cues: ['do you have any openings', 'what times do you have', 'next available', 'availability',
+           'tienen disponibilidad', 'hay disponibilidad', 'qué horarios tienen', 'que horarios hay'] },
   { reasonId: 146, reason: 'New Appointment Request',
-    cues: ['make an appointment', 'schedule an appointment', 'schedule an eye exam', 'book an appointment', 'set up an appointment', 'need an appointment', 'get an appointment', 'new patient exam', 'eye exam', 'hacer una cita', 'sacar una cita', 'agendar', 'solicitud de cita', 'cita para'] },
+    cues: ['make an appointment', 'schedule an appointment', 'schedule an eye exam', 'book an appointment', 'set up an appointment', 'set-up a', 'need an appointment', 'get an appointment', 'new patient exam', 'new patient appointment', 'eye exam',
+           // Named exam types. "Request to schedule regular check-up" is a real
+           // department 9 ticket that matched nothing here. Hyphenated and
+           // joined forms only — a bare "check up" would take "check up on my
+           // glasses" off the optical line.
+           'check-up', 'checkup', 'annual exam', 'yearly exam', 'routine exam', 'vision exam', 'dilated exam',
+           'hacer una cita', 'sacar una cita', 'pedir una cita', 'agendar', 'solicitud de cita', 'solicitud de nueva cita', 'solicita una cita', 'solicita cita', 'nueva cita', 'cita nueva', 'cita para', 'quiere una cita', 'necesita una cita', 'desea una cita',
+           'examen de la vista', 'examen de ojos', 'revision general', 'revisión general'] },
 ];
 
 /**
@@ -105,8 +174,21 @@ const TECH_CUES_STRONG = [
 const TECH_CUES_AMBIGUOUS = ['prescription', 'receta', 'rx'];
 const TECH_CUES = [...TECH_CUES_STRONG, ...TECH_CUES_AMBIGUOUS];
 
+/**
+ * Lowercase and strip diacritics, so "Cancelación" and "cancelacion" are the
+ * same word to a cue. Both sides go through it, which is what lets a cue be
+ * written in whichever form reads better.
+ */
+export function fold(s: string): string {
+  return String(s ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+/** `text` is already folded by the caller; cues are folded here. */
 function hit(text: string, cues: string[]): boolean {
-  return cues.some((c) => text.includes(c));
+  return cues.some((c) => text.includes(fold(c)));
 }
 
 /**
@@ -135,7 +217,7 @@ function hit(text: string, cues: string[]): boolean {
  * queue's language WITHOUT the home queue's.
  */
 export function detectCrossQueue(text: string, homeDepartmentId: number): QueueRedirect | null {
-  const t = String(text ?? '').toLowerCase();
+  const t = fold(text);
   if (!t.trim()) return null;
 
   const mentionsSurgery = hit(t, SURGERY_CUES);
@@ -144,6 +226,20 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   // Only an unambiguous drug signal keeps a call on the medication line against
   // a clear signal from elsewhere. See TECH_CUES_STRONG.
   const mentionsMedicationClearly = hit(t, TECH_CUES_STRONG);
+
+  /**
+   * A records request on the records line stays there, whatever else it names.
+   *
+   * "The notes from the surgery she had on 7/30, the PCP has not got the
+   * report" is a real department 16 ticket. Every subject-matter rule below
+   * would pull it into Surgery on the words "the surgery", and the records team
+   * would never see it. Same for "a copy of my glasses prescription".
+   *
+   * Scheduling is deliberately NOT covered by this guard — the operator's
+   * ruling is that schedule-related requests go to the Hub from every queue,
+   * and a records line is one of them.
+   */
+  const holdsOnRecordsLine = homeDepartmentId === MEDICAL_RECORDS && hit(t, RECORDS_CUES);
 
   // 1. Appointments -> HVA Hub, from anywhere, unless it is a surgery date.
   if (!mentionsSurgery) {
@@ -166,6 +262,7 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   if (
     homeDepartmentId !== OPTICAL &&
     mentionsOptical &&
+    !holdsOnRecordsLine &&
     !(homeDepartmentId === TECH && mentionsMedicationClearly) &&
     !(homeDepartmentId === SURGERY && mentionsSurgery)
   ) {
@@ -187,6 +284,7 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   if (
     homeDepartmentId !== SURGERY &&
     mentionsSurgery &&
+    !holdsOnRecordsLine &&
     !(homeDepartmentId === TECH && mentionsMedicationClearly)
   ) {
     return {
@@ -200,7 +298,13 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   }
 
   // 4. Medication, when it is unmistakably a prescription matter.
-  if (homeDepartmentId !== TECH && mentionsMedication && !mentionsSurgery && !mentionsOptical) {
+  if (
+    homeDepartmentId !== TECH &&
+    mentionsMedication &&
+    !holdsOnRecordsLine &&
+    !mentionsSurgery &&
+    !mentionsOptical
+  ) {
     return {
       departmentId: TECH,
       departmentName: 'Clinical Tech Support',
