@@ -535,7 +535,7 @@ export class SyncAgentService {
     priority?: 'low' | 'normal' | 'medium' | 'high' | 'urgent';
   }): Promise<SyncAgentResponse> {
     const { callSid } = params;
-    
+
     console.info('[SYNC AGENT] Processing simplified ticket submission:', {
       patientName: params.patientFullName,
       hasPhone: !!params.patientPhone,
@@ -545,11 +545,58 @@ export class SyncAgentService {
       callSid,
     });
 
+    /**
+     * Whether WE hold the lock, so a failure gives it back.
+     *
+     * Only true when claimTicketCreation actually claimed it. There are two
+     * paths below that proceed WITHOUT the lock — no call log to lock, and the
+     * claim itself throwing — and releasing in those cases would clear a lock
+     * another process is holding, which is the duplicate this whole mechanism
+     * exists to prevent.
+     */
+    let weHoldTheLock = false;
+
+    /**
+     * Give the lock back after a failed attempt.
+     *
+     * WHY THIS EXISTS. This method claimed the lock and released it on success
+     * only. Every failure return left `ticket_creation_pending` set, and the
+     * lease is 60 SECONDS — so the retry that failure invites was refused by
+     * the lock the failure itself left behind. The agent got "Concurrent ticket
+     * creation in progress" and a 3-second wait, over and over, with the caller
+     * on the line. Observed 2026-08-12 23:38: four create attempts on one call
+     * and no ticket at the end of it.
+     *
+     * The recoverable failure is the one that hurts most. When the API comes
+     * back with missingFields the agent is TOLD to collect them and try again;
+     * the caller answers in ten or twenty seconds, well inside the lease, and
+     * the second attempt cannot get through. A refusal designed to be
+     * recoverable was made unrecoverable for a minute.
+     *
+     * Releasing is safe against duplicates: every submit carries
+     * `idempotencyKey: call-<callSid>`, which the ticketing API dedupes on — the
+     * same backup the abort path at the top of this method already names. The
+     * sibling createTicket has released on failure all along; this is that
+     * behaviour, made deliberate.
+     */
+    const releaseOnFailure = async () => {
+      if (!callSid || !weHoldTheLock) return;
+      try {
+        await storage.releaseTicketCreationLock(callSid);
+        weHoldTheLock = false;
+      } catch (e) {
+        // A stuck lock expires on its own in 60s. Never let this throw over the
+        // real error we are on our way to reporting.
+        console.warn(`[SYNC AGENT] ⚠️  Could not release lock for ${callSid}:`, e);
+      }
+    };
+
     // DEDUPLICATION: Atomic lock to prevent race conditions
     if (callSid) {
       try {
         const claimResult = await storage.claimTicketCreation(callSid, 60000);
-        
+        weHoldTheLock = claimResult.claimed;
+
         if (claimResult.existingTicket) {
           console.info(`[SYNC AGENT] ⚠️  Ticket already exists for this call: ${claimResult.existingTicket}`);
           return {
@@ -615,13 +662,18 @@ export class SyncAgentService {
       console.info(`[SYNC AGENT] ✓ Using callerPhone as patientPhone not provided`);
     }
 
-    // A provider name the ticketing app cannot resolve costs the CALLER a
-    // Schedule-DB fallback — measured at roughly double the round trip, and
-    // 48% of every wait over 15 seconds. Sending "A-Scan" as a doctor buys
-    // that wait for a lookup which cannot possibly succeed.
-    const lookupFields = await resolveTicketLookupFields(params, callSid);
-
     try {
+      // A provider name the ticketing app cannot resolve costs the CALLER a
+      // Schedule-DB fallback — measured at roughly double the round trip, and
+      // 48% of every wait over 15 seconds. Sending "A-Scan" as a doctor buys
+      // that wait for a lookup which cannot possibly succeed.
+      //
+      // INSIDE the try on purpose. This is a lookup over the network, and it
+      // ran between claiming the lock and the only code that could release it —
+      // so a throw here left the lock set with no release on any path, which is
+      // the same 60-second blackout as a failed submit and harder to see.
+      const lookupFields = await resolveTicketLookupFields(params, callSid);
+
       // Use the new simplified endpoint
       // Free text we send becomes the body of a patient-facing SMS on the other
       // side, and ONE character outside GSM-7 turns that message from a single
@@ -682,6 +734,11 @@ export class SyncAgentService {
         const errorMsg = response.error || 'Unknown error creating ticket';
         console.error(`[SYNC AGENT] ✗ Simplified ticket creation failed: ${errorMsg}`);
         
+        // The agent is about to be told to collect something and try again.
+        // Hand the lock back first, or the retry we just asked for is the one
+        // thing that cannot happen for the next minute.
+        await releaseOnFailure();
+
         // If missing fields, return helpful message for agent
         if (response.missingFields && response.missingFields.length > 0) {
           return {
@@ -690,7 +747,7 @@ export class SyncAgentService {
             message: `I need to collect more information. Please provide: ${response.missingFields.join(', ')}`,
           };
         }
-        
+
         return {
           success: false,
           error: errorMsg,
@@ -699,6 +756,9 @@ export class SyncAgentService {
       }
     } catch (error) {
       console.error('[SYNC AGENT] ✗ Simplified ticket submission exception:', error);
+      // Same reasoning as above, and more pressing: "Please try again" is the
+      // message the caller hears.
+      await releaseOnFailure();
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
