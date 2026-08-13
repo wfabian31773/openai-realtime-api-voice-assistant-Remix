@@ -241,15 +241,38 @@ registerTool({
 
     const hit = await lookupLocation(cleaned.value);
     if (!hit) {
-      return {
-        success: true,
-        resolved: false,
-        location: cleaned.value,
-        verified: false,
-        message:
-          `I could not match "${spoken}" to one of our offices. Ask the caller to name ` +
-          `the city, and pass that instead.`,
-      };
+      /**
+       * THIS USED TO RETURN `success: true`, AND IT WAS THE WORST LOOP WE HAD.
+       *
+       * Measured on the queue's first live day, 2026-08-13: `resolve_location`
+       * ran 41 times across 29 optical calls, and 32 of those returned
+       * `verified: false`. Five calls looped it three or more times, one of
+       * them TEN times in a row with identical arguments. Those five averaged
+       * 229 seconds against 134 for the rest — 95 extra seconds of a patient's
+       * life each — and not one of them ended `resolved`.
+       *
+       * The trace is unambiguous. A caller said "Downtown LA", where we have no
+       * optical office:
+       *
+       *   file_optical_ticket -> error: no optical office matched "Downtown LA"
+       *   resolve_location    -> { success: true, verified: false }   x9
+       *   file_optical_ticket -> error: no optical office matched "Downtown Los Angeles"
+       *   resolve_location    -> { success: true, verified: false }
+       *
+       * `success: true` is what did it. The advisory `message` asked the agent
+       * to go and ask the caller, but the envelope said the call had WORKED, so
+       * the model had no reason to change anything and every reason to try
+       * again. This is `local-tool-gates.md` exactly: answer a predictable
+       * refusal with the refusal envelope, or the model retries it verbatim.
+       *
+       * Now it refuses, which hands the agent a sentence to say to the caller —
+       * and the queue prompts already tell it that a tool asking for something
+       * is not a fault.
+       */
+      return missing(
+        ['spoken_location'],
+        `I'm not finding an office by that name — which city is the office in?`,
+      );
     }
 
     const usable = acceptsFacility(queue, hit.facilityKind);
@@ -268,7 +291,11 @@ registerTool({
     // path was covered by luck rather than by design. Any other caller of this
     // tool was not. Emit the fileable form, and keep the mirror's name beside
     // it for anyone who needs to look it up there.
-    const fileable = sanitizeLocationName(hit.canonical).value || hit.canonical;
+    // `fileAs` wins when the ticketing app calls the office something else
+    // entirely. "Azul Vision DTLA" in the mirror is "Los Angeles" over there,
+    // and brand-stripping alone yields "DTLA" — a name the receiver has never
+    // heard of, which is how a resolved office still failed to file.
+    const fileable = hit.fileAs || sanitizeLocationName(hit.canonical).value || hit.canonical;
 
     return {
       success: true,

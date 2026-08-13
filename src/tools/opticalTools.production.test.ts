@@ -229,7 +229,24 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     expect(lookup).toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
     expect(out.success).toBe(false);
-    expect((out as { message: string }).message).toMatch(/which office/i);
+    expect((out as { message: string }).message).toMatch(/office/i);
+
+    /**
+     * AND IT MUST REFUSE AS A MISSING FIELD, NOT AS A RETRYABLE ERROR.
+     *
+     * This is the half that cost real calls. It used to return
+     * `retryable: true` alongside a message telling the agent to call
+     * resolve_location again — and on 2026-08-13 it did, nine times in a row,
+     * on a 236-second call where the caller said "Downtown LA" and we have no
+     * optical office there. Five optical calls looped that day, averaging 229
+     * seconds against 134 for the rest, and not one ended `resolved`.
+     *
+     * A name that does not match is a definite answer about the input, not a
+     * transient failure. The missing-field envelope is the one the prompts
+     * teach the agent to answer by SPEAKING TO THE CALLER.
+     */
+    expect((out as { retryable?: boolean }).retryable).not.toBe(true);
+    expect((out as { missingFields?: string[] }).missingFields).toContain('location');
   });
 
   it('sends the numeric location id, not just the name', async () => {

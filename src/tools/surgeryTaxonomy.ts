@@ -59,7 +59,63 @@
  * not belong to its type cannot be expressed.
  */
 
+import { anyCue, crossProduct } from './cueMatch';
+
 export const SURGERY_DEPARTMENT_ID = 2;
+
+/**
+ * HOW A CUE IS MATCHED — rebuilt 2026-08-13 from the queue's first live day.
+ *
+ * It went live and filed 32 tickets. TWENTY-ONE landed on the catch-all, and
+ * reading them showed three defects, none of which a unit test would have
+ * found, because every test string was one I had written myself:
+ *
+ *   1. no diacritic folding, so Spanish could not match at all;
+ *   2. hand-listed phrases with the object in the middle, so reason 43 missed
+ *      every real "schedule a cataract surgery" sentence;
+ *   3. "sx" — the practice's own word — in no cue anywhere.
+ *
+ * The matcher and the reasoning now live in `cueMatch.ts`, shared with Optical,
+ * which turned out to have the identical three.
+ */
+export const anySurgeryCue = anyCue;
+
+const SCHED_VERBS = [
+  'schedule', 'scheduling', 'scheduled', 'book', 'booking', 'set up', 'setup',
+  'arrange', 'programar', 'agendar',
+];
+const SCHED_DETERMINERS = [
+  '', 'a ', 'an ', 'my ', 'the ', 'her ', 'his ', 'their ', 'this ', 'that ',
+  'mi ', 'la ', 'el ', 'her 2nd ', 'my 2nd ', 'the 2nd ', 'my second ', 'her second ',
+  // LATERALITY. "schedule the right eye surgery after the left surgery" is a
+  // real sentence from the first live day and no determiner above reaches it.
+  'the right ', 'the left ', 'my right ', 'my left ', 'her right ', 'her left ',
+  'his right ', 'his left ', 'the other ', 'my other ', 'her other ',
+];
+const SCHED_OBJECTS = [
+  'surgery', 'surgeries', 'sx', 'procedure', 'operation', 'cirugia', 'operacion',
+  'cataract surgery', 'cataract sx', 'eye surgery', 'eye sx',
+  'surgery appointment', 'surgery appt', 'sx appointment', 'sx appt',
+];
+
+/**
+ * The scheduling vocabulary, GENERATED rather than guessed.
+ *
+ * Exported so a test can assert the real sentences from the live queue against
+ * it, rather than against sentences I invented.
+ */
+export const SURGERY_SCHEDULING_CUES: string[] = [
+  ...crossProduct(SCHED_VERBS, SCHED_DETERMINERS, SCHED_OBJECTS),
+  // Asking WHEN is the same request phrased as a question.
+  'when is my surgery', 'when is my sx', 'when is the surgery',
+  'date and time of my', 'date of my surgery', 'surgery date', 'sx date',
+  'what day is my surgery', 'when they have scheduled',
+  'have not been scheduled', 'has not been scheduled', 'no surgery scheduled',
+  'still waiting for a date', 'waiting for appointment date',
+  'waiting for a surgery date', 'needs scheduling', 'need scheduling',
+  'requesting sx', 'requesting surgery', 'next available sx', 'next available surgery',
+  'cuando es mi cirugia', 'fecha de la cirugia', 'fecha de mi cirugia',
+];
 
 export interface SurgeryClassification {
   requestTypeId: number;
@@ -131,7 +187,11 @@ export const SURGERY_CLASSIFICATIONS: SurgeryClassification[] = [
 
   // --- Cataract (10), specific reasons before the two generic ones.
   { requestTypeId: 10, requestType: 'Cataract Surgery', requestReasonId: 47, requestReason: 'Second Eye Surgery',
-    cues: ['second eye', 'other eye', 'next eye', 'my left eye done', 'my right eye done', 'the second one'] },
+    // "2nd eye sx" is how the practice writes it — six of these in 90 days
+    // used the digit form and none of them matched.
+    cues: ['second eye', '2nd eye', 'other eye', 'next eye', 'my left eye done', 'my right eye done',
+           'the second one', 'second surgery', '2nd surgery', 'second sx', '2nd sx',
+           'segundo ojo', 'otro ojo', 'right eye surgery after', 'left eye surgery after'] },
   { requestTypeId: 10, requestType: 'Cataract Surgery', requestReasonId: 44, requestReason: 'IOL Selection Counseling',
     cues: ['iol', 'lens implant', 'lens option', 'which lens', 'premium lens', 'multifocal', 'toric', 'lens choice'] },
   { requestTypeId: 10, requestType: 'Cataract Surgery', requestReasonId: 45, requestReason: 'Pre-Op Measurements',
@@ -139,7 +199,9 @@ export const SURGERY_CLASSIFICATIONS: SurgeryClassification[] = [
   { requestTypeId: 10, requestType: 'Cataract Surgery', requestReasonId: 46, requestReason: 'Post-Op Follow-Up',
     cues: ['post-op appointment', 'post op appointment', 'post-op visit', 'after my surgery', 'since my surgery', 'since the surgery', 'follow-up after surgery', 'post-op check'] },
   { requestTypeId: 10, requestType: 'Cataract Surgery', requestReasonId: 43, requestReason: 'Surgery Scheduling',
-    cues: ['schedule my surgery', 'schedule the surgery', 'get my surgery scheduled', 'surgery date', 'when is my surgery', 'book my surgery', 'set up my surgery', 'cataract surgery scheduled'] },
+    // GENERATED — see SURGERY_SCHEDULING_CUES. The hand-written list this
+    // replaced missed every real sentence on the queue's first live day.
+    cues: SURGERY_SCHEDULING_CUES },
   { requestTypeId: 10, requestType: 'Cataract Surgery', requestReasonId: 42, requestReason: 'New Cataract Consult',
     // LAST, and deliberately narrow. This reason is currently on 1,710 tickets
     // that never earned it; it should only be reached when the caller actually
@@ -149,7 +211,16 @@ export const SURGERY_CLASSIFICATIONS: SurgeryClassification[] = [
     // most people who say it are ringing about drops, a date or a form for a
     // cataract surgery they already have booked, and matching on the condition
     // alone is precisely how 1,710 of those became New Cataract Consult.
-    cues: ['cataract evaluation', 'cataract consult', 'cataract consultation', 'evaluated for cataract', 'evaluation for cataract', 'think i have cataract', 'told me i have cataract', 'told i have cataract', 'diagnosed with cataract', 'need an evaluation', 'want to be evaluated', 'set up an evaluation'] },
+    cues: ['cataract evaluation', 'cataract consult', 'cataract consultation', 'evaluated for cataract', 'evaluation for cataract', 'think i have cataract', 'told me i have cataract', 'told i have cataract', 'diagnosed with cataract', 'need an evaluation', 'want to be evaluated', 'set up an evaluation',
+           // THE REFERRAL IN, which is the one first-contact shape the narrow
+           // list above could not reach: "My husband went to the optometrist
+           // today, and they sent him to the ophthalmologist. They said he has
+           // a cataract." It still pairs a referral with the condition, so it
+           // does not reopen the 1,710-ticket over-capture.
+           'sent him to the ophthalmologist', 'sent her to the ophthalmologist',
+           'sent me to the ophthalmologist', 'referred to the ophthalmologist',
+           'referred me to a surgeon', 'said he has a cataract', 'said she has a cataract',
+           'me mandaron al oftalmologo'] },
 ];
 
 /** Every reason id Surgery may legitimately use. Used to reject anything else. */
@@ -168,12 +239,56 @@ export const SURGERY_REASON_IDS = new Set(SURGERY_CLASSIFICATIONS.map((c) => c.r
  * to call every one of them a New Cataract Consult.
  */
 export function classifySurgery(text: string): SurgeryClassification | null {
-  const t = String(text ?? '').toLowerCase();
-  if (!t.trim()) return null;
+  if (!String(text ?? '').trim()) return null;
   for (const c of SURGERY_CLASSIFICATIONS) {
-    if (c.cues.some((cue) => t.includes(cue))) return c;
+    if (anySurgeryCue(text, c.cues)) return c;
   }
   return null;
+}
+
+/**
+ * A POST-OPERATIVE SYMPTOM — someone who has had the surgery and something is
+ * wrong with the eye now.
+ *
+ * Added 2026-08-13 because the first live day produced this, filed as
+ * "Other - See Description" at medium priority:
+ *
+ *   "I had cataract surgery on my right eye, but it feels like there's
+ *    something stuck in my eye and I need to see the doctor."
+ *
+ * Surgery flagged 0 of 32 tickets that day at any raised priority, while the
+ * tech queue flagged 18 of 57. This queue had no urgency concept beyond a
+ * detaching retina, and a post-op foreign-body sensation is not a detaching
+ * retina — but it is not a scheduling question either.
+ *
+ * DELIBERATELY NOT `urgent`. That flag makes the agent say "seek emergency
+ * care or call 911 now", which is right for reason 53 and wrong here. This
+ * raises priority to high and says a coordinator should call today. The
+ * distinction matters: telling a post-op cataract patient to dial 911 over a
+ * gritty eye is its own harm.
+ *
+ * BOTH HALVES ARE REQUIRED — a post-op context AND a symptom. "When is my
+ * post-op appointment" is not a symptom, and "my eye hurts" from someone who
+ * has had no surgery is not this queue's call.
+ */
+const POSTOP_CONTEXT_CUES = [
+  'had surgery', 'had my surgery', 'had cataract surgery', 'had the surgery', 'had my cataract',
+  'after my surgery', 'after the surgery', 'since my surgery', 'since the surgery',
+  'post-op', 'post op', 'postop', 'had my sx', 'had sx', 'my surgery was',
+  'operated', 'me operaron', 'despues de la cirugia', 'desde la cirugia', 'ya me operaron',
+];
+
+const POSTOP_SYMPTOM_CUES = [
+  'stuck in my eye', 'something in my eye', 'feels like something', 'foreign body',
+  'pain', 'hurts', 'hurting', 'burning', 'swollen', 'swelling', 'redness', 'red eye',
+  'discharge', 'pus', 'bleeding', 'blurry', 'blurred', 'cannot see', "can't see",
+  'vision is worse', 'getting worse', 'flashes', 'floaters', 'light sensitivity',
+  'dolor', 'duele', 'hinchado', 'sangrado', 'borroso', 'no puedo ver', 'empeorando',
+];
+
+export function isSurgeryPostOpSymptom(text: string): boolean {
+  if (!String(text ?? '').trim()) return false;
+  return anySurgeryCue(text, POSTOP_CONTEXT_CUES) && anySurgeryCue(text, POSTOP_SYMPTOM_CUES);
 }
 
 /** Look up a pair the agent named explicitly, so it cannot invent one. */
@@ -206,22 +321,61 @@ const LOGISTICS_TYPE = { requestTypeId: 65, requestType: 'Surgery Logistics' } a
 export const SURGERY_LOGISTICS: SurgeryLogisticsBucket[] = [
   { ...LOGISTICS_TYPE, requestReasonId: 529, requestReason: 'Pre-Op Drops / Prescription',
     key: 'drops_rx', label: 'Pre-Op Drops / Prescription', measured90d: 579,
-    cues: ['eye drop', 'eyedrop', 'drops', 'prescription', 'pharmacy', 'not received my rx', "haven't received my rx"] },
+    cues: ['eye drop', 'eyedrop', 'drops', 'prescription', 'pharmacy', 'not received my rx', "haven't received my rx",
+           'gotas', 'receta', 'farmacia', 'pre-op drops', 'pre op drops', 'combo drop'] },
   { ...LOGISTICS_TYPE, requestReasonId: 530, requestReason: 'Clearance / Pre-Op Forms',
     key: 'clearance', label: 'Clearance / Pre-Op Forms', measured90d: 361,
-    cues: ['clearance', 'clear me', 'pre-op form', 'pre op form', 'paperwork', 'primary care', 'pcp form', 'sign the form', 'labs', 'ekg', 'physical'] },
+    cues: ['clearance', 'clear me', 'pre-op form', 'pre op form', 'paperwork', 'primary care', 'pcp form',
+           'sign the form', 'labs', 'ekg', 'physical',
+           // The packet is what patients call the pre-op paperwork bundle, and
+           // "pre-surgery things" is how they ask whether it is all done.
+           'surgery packet', 'sx packet', 'pre-surgery kit', 'pre surgery kit',
+           'pre-surgery things', 'pre surgery things', 'papeleo', 'formulario'] },
   { ...LOGISTICS_TYPE, requestReasonId: 531, requestReason: 'Reschedule / Cancel Surgery',
     key: 'reschedule', label: 'Reschedule / Cancel Surgery', measured90d: 561,
-    cues: ['reschedule', 'cancel', 'move my surgery', 'change my surgery', 'change the date', 'different day', 'postpone'] },
+    cues: ['reschedule', 'cancel', 'move my surgery', 'change my surgery', 'change the date', 'different day', 'postpone',
+           // Spanish nominalises where English uses a verb — "Cancelación de la
+           // cita", not "cancelar". Stems cover both, and fold() handles the
+           // accent. Same lesson as the department 8 cue list.
+           'cancelacion', 'cancelar', 'reprogram', 'mover la cirugia', 'cambiar la fecha',
+           'cambiado la cita', 'cambiar la cita', 'cambio de cita', 'cambiado la fecha',
+           'postponed', 'was moved to', 'moved to october', 'rs appt', 'rescheduling'] },
   { ...LOGISTICS_TYPE, requestReasonId: 532, requestReason: 'Arrival Time / Transportation',
     key: 'arrival', label: 'Arrival Time / Transportation', measured90d: 368,
-    cues: ['what time', 'arrival time', 'when should i arrive', 'how early', 'transportation', 'ride', 'access', 'driver', 'address of'] },
+    cues: ['what time', 'arrival time', 'when should i arrive', 'how early', 'transportation', 'ride', 'access', 'driver', 'address of',
+           'surgery time', 'sx time', 'time of his surgery', 'time of her surgery', 'time of my surgery',
+           'nearer', 'closer to', 'hora de la cirugia', 'transporte'] },
   { ...LOGISTICS_TYPE, requestReasonId: 533, requestReason: 'Deposit / Balance Question',
     key: 'financial', label: 'Deposit / Balance Question', measured90d: 259,
-    cues: ['deposit', 'balance', 'how much', 'cost', 'price', 'pay', 'owe', 'invoice', 'bill'] },
+    cues: ['deposit', 'balance', 'how much', 'cost', 'price', 'pay', 'owe', 'invoice', 'bill',
+           'pagar', 'pago', 'costo', 'precio', 'cuanto cuesta', 'financial question'] },
   { ...LOGISTICS_TYPE, requestReasonId: 534, requestReason: 'Status Follow-Up',
     key: 'status', label: 'Status Follow-Up', measured90d: 1369,
-    cues: ['status', 'update on', 'still waiting', 'waiting for a call', 'no one has called', 'nobody called', 'called several times', 'follow up on my', 'any word'] },
+    // The largest bucket in the queue at 1,369 in 90 days, and the one whose
+    // real phrasing is most varied — it is nearly always a complaint about
+    // silence rather than a request for information.
+    cues: ['status', 'update on', 'still waiting', 'waiting for a call', 'no one has called', 'nobody called',
+           'called several times', 'follow up on my', 'any word',
+           'no one is calling', 'not calling her back', 'not calling him back', 'has not received a call',
+           "haven't heard", 'have not heard', "hasn't called", 'has not called', 'never called',
+           'waiting for a return call', 'return my call', 'forgot about', 'been trying to reach',
+           'leaving messages', 'left messages', 'lack of updates', 'called 3 times', 'called three times',
+           'follow up on surgery', 'follow-up on surgery', 'following up',
+           'no me han llamado', 'no me llamaron', 'sigo esperando', 'esperando una llamada',
+           // A CALLBACK REQUEST IS A STATUS CHASE on this queue. Nearly every
+           // one of these is "nobody has got back to me", and the named person
+           // is a surgery coordinator. Broad on purpose and SAFE because this
+           // bucket is checked last, after every procedure box and every other
+           // logistics bucket — the rule that a bare `copy of` is safe in
+           // Medical Records' 500 only because everything stronger ran first.
+           // "call me back" does NOT contain "call back" — the object sits in
+           // the middle again, which is the same trap that cost reason 43 its
+           // whole vocabulary. Enumerate the pronouns rather than assume.
+           'call me back', 'call him back', 'call her back', 'call them back',
+           'calling me back', 'calling her back', 'calling him back', 'call me',
+           'call back', 'callback', 'call the patient', 'please call', 'give her a call',
+           'give him a call', 'speak with someone', 'speak to someone', 'speak directly to',
+           'surgery coordinator', 'sx coordinator', 'coordinator', 'que me llamen'] },
 ];
 
 /**
@@ -261,10 +415,9 @@ export const SURGERY_CATCHALL: SurgeryClassification = {
  * with a reschedule note, not an unclassified reschedule.
  */
 export function classifySurgeryLogistics(text: string): SurgeryLogisticsBucket | null {
-  const t = String(text ?? '').toLowerCase();
-  if (!t.trim()) return null;
+  if (!String(text ?? '').trim()) return null;
   for (const b of SURGERY_LOGISTICS) {
-    if (b.cues.some((cue) => t.includes(cue))) return b;
+    if (anySurgeryCue(text, b.cues)) return b;
   }
   return null;
 }
