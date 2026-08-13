@@ -12,7 +12,6 @@
  * platform calls over HTTP are the same code path.
  */
 import { tool } from '@openai/agents/realtime';
-import { z } from 'zod';
 import { getTool, runTool } from './registry';
 import { recordingExecute, flushAzulTimeline } from '../services/toolTimeline';
 
@@ -90,12 +89,41 @@ export function realtimeToolsFor(
     const options = {
       name: def.name,
       description: def.description,
-      parameters: toZod(def),
-      // The SDK requires strict mode for Zod parameters, and strict mode
-      // requires every property to be present. See toZod: everything is
-      // nullable, so "I do not have this" is expressible as null — which
-      // validateInput already treats as missing. The two contracts line up.
-      strict: true,
+      // THE REGISTRY'S OWN JSON SCHEMA, not a Zod translation of it.
+      //
+      // This used to be `toZod(def)` with `strict: true`, and that combination
+      // is what stopped `file_surgery_ticket` from ever running on a live call.
+      //
+      // toZod made every property `.nullable()` but never `.optional()`, so all
+      // fifteen landed in `required`. Strict mode then demands the model emit
+      // all fifteen keys — and on 2026-08-12 it emitted thirteen, omitting
+      // `callback_number` and `description_prefix`. The SDK rejected the
+      // arguments with "Invalid JSON input for tool" BEFORE calling execute, so
+      // there was no handler run, no log line, no timeline event, and nothing
+      // anywhere to see. The model got an error and told the caller it was
+      // having trouble filing. Four live calls, all identical.
+      //
+      // file_optical_ticket has twelve properties and the model happened to
+      // emit all twelve, which is the entire reason Optical filed and Surgery
+      // did not. Nothing was wrong with either tool.
+      //
+      // The registry's schema already carries the RIGHT required list — five
+      // fields for file_surgery_ticket, not fifteen — because that is what the
+      // tool actually needs. Handing it over directly means a model may omit
+      // what it does not have, `validateInput` refuses with a sentence the
+      // agent can say out loud, and the caller is asked for the missing field
+      // instead of hearing that the system is broken. That refusal contract is
+      // the whole point of the library and it was unreachable.
+      parameters: {
+        ...def.input_schema,
+        // Strict-adjacent hygiene, independent of the strict flag: never let a
+        // model invent a field the handler will silently ignore.
+        additionalProperties: false,
+      },
+      // NOT strict. Strict requires every property in `required`, which is the
+      // constraint that caused this. The library refuses missing fields itself,
+      // and it does it with words a patient can hear.
+      strict: false,
       // runTool applies the declared timeout and never throws, so a tool that
       // fails returns something the model can read and act on rather than
       // ending the turn. The string is what the model sees.
@@ -161,41 +189,6 @@ export function realtimeToolsFor(
 
     return tool(options);
   });
-}
-
-/**
- * The registry's JSON Schema as the Zod schema the SDK wants.
- *
- * Note what this does NOT do: it does not enforce required-ness. Every field is
- * optional here, and refusal is left to the registry's own `validateInput`.
- *
- * That is deliberate. A schema-level rejection comes back to the model as a
- * malformed-arguments error with no guidance in it; the registry's refusal
- * comes back as `{missingFields, message}` where the message is a sentence the
- * agent can say to the patient — "And your date of birth?" — which is the
- * behaviour holding surgery-missing-surgeon to 0.4% and optical-missing-location
- * to 2.1%. Letting the call reach the handler and be refused properly is worth
- * more than blocking it a layer earlier.
- */
-function toZod(def: NonNullable<ReturnType<typeof getTool>>) {
-  const shape: Record<string, z.ZodTypeAny> = {};
-  for (const [key, spec] of Object.entries(def.input_schema.properties)) {
-    const base = spec.enum?.length
-      ? z.enum(spec.enum as [string, ...string[]])
-      : spec.type === 'number'
-        ? z.number()
-        : spec.type === 'boolean'
-          ? z.boolean()
-          : z.string();
-    // Nullable, never optional. Strict mode requires every property to be
-    // present, so "I do not have this yet" has to be sayable — and null is how
-    // the model says it. validateInput already reads null as missing, so a
-    // half-supplied call still reaches the handler and comes back as a proper
-    // refusal with a sentence in it, rather than as a schema error the model
-    // cannot act on.
-    shape[key] = base.describe(spec.description).nullable();
-  }
-  return z.object(shape);
 }
 
 /**
