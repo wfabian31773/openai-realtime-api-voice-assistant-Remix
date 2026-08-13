@@ -14,17 +14,32 @@
  *   153 Prescription Refill Request        13  <-- a DEPARTMENT 3 reason
  *   the clinical emergencies (160-165)      4
  *
- * TWO SEPARATE FALLBACKS, ONE CAUSE. `detectRequestReason()` in
- * `config/answeringServiceTicketing.ts` returns the first reason of the default
- * type when no keyword matches. Type 34's first reason is 159. So 479 tickets
- * say a clinician was pulled out of bed, and here is what they actually are:
+ * WHOSE FALLBACK — CORRECTED 2026-08-13. I first wrote that this was
+ * `detectRequestReason()` in our own `config/answeringServiceTicketing.ts`.
+ * It is not, and the attribution matters because it decides who can fix it:
  *
- *   "Caller wants to know when she will be getting her glasses"
- *   "Caller is asking for the exact office hours of the Eastvale location"
- *   "Pharmacy requesting updated phone number for mutual patient"
- *   "glasses broke at the hinge"
- *   "wants to confirm Torrance office address and phone number"
- *   "arrange transportation (Uber ride) for clinical trial appointment"
+ *   dept 8, agent no-ivr             687 tickets, 413 on reason 159
+ *   dept 8, agent answering-service  170 tickets,   9 on reason 159
+ *
+ * `detectRequestReason` is imported by `answeringServiceAgent` and nothing
+ * else. no-ivr files through `submitSimplifiedTicket`, which posts
+ * conversational fields to /api/voice-agent/submit-ticket and sends NO
+ * department, NO request type and NO reason — the comment at that call site
+ * says so: "all mapping done server-side". So the 413 are the TICKETING APP's
+ * derivation, and type 34's first reason is 159.
+ *
+ * Our own fallback is real and it owns department 3 (6,119 of the 6,905 on
+ * reason 153 come from answering-service). It does not own this one.
+ *
+ * WHAT THAT MEANS FOR THIS FILE. It cannot be wired into the no-ivr path by
+ * choosing a reason, because that path does not send one. Switching no-ivr to
+ * create-ticket would mean this repo picking the DEPARTMENT for every overnight
+ * call — the entire answering-service classification problem, on the line that
+ * carries the night. Not worth it to fix a label.
+ *
+ * So the taxonomy is sent as a HINT alongside the request instead. It is inert
+ * until the ticketing app reads it, which is what makes it safe to send today,
+ * and it hands them the classification rather than an argument about one.
  *
  * THE HARM IS THE INVERSE OF WHAT IT LOOKS LIKE. The problem is not that urgent
  * calls are under-described — it is that ROUTINE calls are recorded as urgent

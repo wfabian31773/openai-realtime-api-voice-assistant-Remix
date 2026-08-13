@@ -85,6 +85,31 @@ interface CreateTicketResponse {
 
 // NEW SIMPLIFIED ENDPOINT - accepts conversational data, handles all mapping server-side
 export interface SubmitTicketParams {
+  /**
+   * A CLASSIFICATION HINT, not an instruction.
+   *
+   * This endpoint derives the department, request type and reason server-side,
+   * which is why the voice side sends none of them. The cost of that shows up
+   * in department 8: 413 of no-ivr's 687 tickets carry reason 159,
+   * "Transferred to On-Call Provider", and almost none were transferred. They
+   * are office-hours questions, broken glasses, a pharmacy asking for a phone
+   * number. Type 34's first reason is 159, and that is the whole mechanism.
+   *
+   * The harm runs opposite to how it reads: routine calls recorded as urgent
+   * transfers make the genuinely urgent ones unfindable. Sitting in the same
+   * 413 is "Worsening pain in right eye over the past day".
+   *
+   * We are not taking the derivation over — doing that would mean this repo
+   * choosing the DEPARTMENT for every overnight call. We send what our own
+   * taxonomy concluded and let the ticketing app decide whether to use it.
+   * Inert until read, which is what makes it safe on the line that carries
+   * the night.
+   */
+  suggestedRequestTypeId?: number;
+  suggestedRequestReasonId?: number;
+  suggestedRequestReason?: string;
+  /** Sight-threatening per `tools/afterHoursTaxonomy.ts`. */
+  suggestedUrgent?: boolean;
   patientFullName: string;
   patientDOB: string; // Any format: "March 15, 1980" or "03/15/1980"
   reasonForCalling: string;
