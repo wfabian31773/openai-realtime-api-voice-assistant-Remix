@@ -215,7 +215,7 @@ describe('the metadata fallback resolves by list, not by literal', () => {
  * the next queue gets whichever assertions its author happened to remember.
  * Adding a row here is the whole cost of the next one.
  */
-const QUEUE_LINES = ['optical', 'surgery', 'tech', 'records'];
+const QUEUE_LINES = ['optical', 'surgery', 'tech', 'records', 'hub'];
 
 /** The tool names a queue's agent actually declares. */
 async function toolNamesFor(slug: string): Promise<string[]> {
@@ -223,6 +223,7 @@ async function toolNamesFor(slug: string): Promise<string[]> {
   if (slug === 'surgery') return (await import('./surgeryAgent')).SURGERY_TOOLS;
   if (slug === 'tech') return (await import('./techAgent')).TECH_TOOLS;
   if (slug === 'records') return (await import('./recordsAgent')).RECORDS_TOOLS;
+  if (slug === 'hub') return (await import('./hubAgent')).HUB_TOOLS;
   throw new Error(`no tool list known for ${slug}`);
 }
 

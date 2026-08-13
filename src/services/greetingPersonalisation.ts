@@ -35,7 +35,7 @@ export type GreetingStyle = 'replace' | 'append';
  * Operator-dictated, and worth more than the sentence it costs.
  */
 export function greetingStyleFor(agentSlug: string | undefined): GreetingStyle {
-  return agentSlug === 'optical' || agentSlug === 'surgery' || agentSlug === 'tech' || agentSlug === 'records'
+  return agentSlug === 'optical' || agentSlug === 'surgery' || agentSlug === 'tech' || agentSlug === 'records' || agentSlug === 'hub'
     ? 'append'
     : 'replace';
 }

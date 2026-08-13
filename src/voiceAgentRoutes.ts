@@ -1994,7 +1994,7 @@ async function observeCall(
   // It MUST be listed here — an unknown slug is silently coerced to
   // 'after-hours' below, which would have made the demo line quietly answer
   // as the after-hours agent.
-  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
+  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'hub', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
   const legacyDeletedSlugs = ['greeter', 'non-urgent-ticketing'];
   
   let effectiveSlug = agentSlug || 'no-ivr';
@@ -2189,7 +2189,7 @@ async function observeCall(
   // persons incl. chartless) and is NOT pilot-fenced — verified in the
   // service's sage-tools.ts — so it is correct for the practice-wide
   // answering-service and no-ivr lines, not just the SD pilot.
-  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'no-ivr', 'dev-no-ivr']);
+  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'hub', 'no-ivr', 'dev-no-ivr']);
   if (PRECONTEXT_SLUGS.has(effectiveSlug) && from) {
     azulPrecontextPromise = import('./agents/azulSchedulingAgent')
       .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
@@ -2595,6 +2595,33 @@ async function observeCall(
         // caller hears it cut itself off mid-phrase.
         azulMetadataRef = recordsMeta;
         factoryResult = agentFactory(undefined, recordsMeta);
+        break;
+      }
+
+      case 'hub': {
+        // The HVA Hub scheduling queue. Its own number, so the call is a
+        // scheduling matter because of the line it rang.
+        //
+        // NO handoff callback, deliberately: operator ruling 2026-08-12, only
+        // PCP and Scheduling SD transfer, and this is not that line. This agent
+        // also does not BOOK — see the prompt.
+        const hubPrecontext = await racePrecontext();
+        console.log(
+          `[Hub] Pre-context for ...${(from || '').slice(-4)}: ` +
+            `${hubPrecontext?.matched ? `matched '${hubPrecontext.firstName}'` : 'no unique match'}`,
+        );
+        const hubMeta = {
+          callId,
+          callSid: twilioCallSid,
+          callerPhone: from,
+          dialedNumber: to,
+          precontext: hubPrecontext ?? undefined,
+          get callLogId() { return liveCallLogId(); },
+        };
+        // Register the precontext for the GREETING, not just the prompt — see
+        // the note in the tech case.
+        azulMetadataRef = hubMeta;
+        factoryResult = agentFactory(undefined, hubMeta);
         break;
       }
 
@@ -4830,7 +4857,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         // number and runs the ticket agent. This list is a SECOND allowlist,
         // separate from validAgentSlugs in observeCall(); both must know a slug
         // or the call is silently answered by the after-hours agent.
-        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'azul-scheduling', 'pcp', 'demo'];
+        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'hub', 'azul-scheduling', 'pcp', 'demo'];
         const validOutboundAgents = ['drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
         const legacyDeletedAgents = ['greeter', 'non-urgent-ticketing'];
         
@@ -5777,6 +5804,18 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision medical records. Our records team is currently ' +
       'assisting other patients, but I can take the details and they will follow up with ' +
+      'you. How can I help you today?',
+  });
+
+  // Point the scheduling Hub number's Twilio voice webhook here. Until that
+  // number exists the route is harmless: nothing dials it.
+  registerOverflowLine({
+    path: '/api/voice/hub',
+    slug: 'hub',
+    tag: 'HUB',
+    greeting:
+      'Thank you for calling Azul Vision scheduling. All of our schedulers are currently ' +
+      'assisting other patients, but I can take your request and they will follow up with ' +
       'you. How can I help you today?',
   });
 

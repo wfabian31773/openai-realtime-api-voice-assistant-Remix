@@ -98,7 +98,15 @@ const RECORDS_CUES = [
  *   and staff typing do not agree. Rather than doubling every entry, `hit()`
  *   strips diacritics from both sides, so a cue may be written either way.
  */
-const SCHEDULING: Array<{ reasonId: number; reason: string; cues: string[] }> = [
+export interface SchedulingCue { reasonId: number; reason: string; cues: string[] }
+
+/**
+ * Exported so department 9's own taxonomy uses the SAME table rather than a
+ * copy of it. The Spanish work above was hard-won against real ticket text; a
+ * second list would start out identical and drift the first time either is
+ * touched.
+ */
+export const SCHEDULING: SchedulingCue[] = [
   { reasonId: 151, reason: 'Same-Day Appointment Request',
     cues: ['same day', 'same-day', 'today if', 'get in today', 'seen today', 'squeeze me in', 'sooner appointment', 'earlier appointment', 'move my appointment up', 'cita para hoy', 'hoy mismo'] },
   { reasonId: 148, reason: 'Cancel Appointment',
@@ -118,8 +126,14 @@ const SCHEDULING: Array<{ reasonId: number; reason: string; cues: string[] }> = 
     cues: ['do you have any openings', 'what times do you have', 'next available', 'availability',
            'tienen disponibilidad', 'hay disponibilidad', 'qué horarios tienen', 'que horarios hay'] },
   { reasonId: 146, reason: 'New Appointment Request',
-    cues: ['make an appointment', 'schedule an appointment', 'schedule an eye exam', 'book an appointment', 'set up an appointment', 'need an appointment', 'get an appointment', 'new patient exam', 'eye exam',
-           'hacer una cita', 'sacar una cita', 'pedir una cita', 'agendar', 'solicitud de cita', 'solicitud de nueva cita', 'solicita una cita', 'solicita cita', 'nueva cita', 'cita nueva', 'cita para', 'quiere una cita', 'necesita una cita', 'desea una cita'] },
+    cues: ['make an appointment', 'schedule an appointment', 'schedule an eye exam', 'book an appointment', 'set up an appointment', 'set-up a', 'need an appointment', 'get an appointment', 'new patient exam', 'new patient appointment', 'eye exam',
+           // Named exam types. "Request to schedule regular check-up" is a real
+           // department 9 ticket that matched nothing here. Hyphenated and
+           // joined forms only — a bare "check up" would take "check up on my
+           // glasses" off the optical line.
+           'check-up', 'checkup', 'annual exam', 'yearly exam', 'routine exam', 'vision exam', 'dilated exam',
+           'hacer una cita', 'sacar una cita', 'pedir una cita', 'agendar', 'solicitud de cita', 'solicitud de nueva cita', 'solicita una cita', 'solicita cita', 'nueva cita', 'cita nueva', 'cita para', 'quiere una cita', 'necesita una cita', 'desea una cita',
+           'examen de la vista', 'examen de ojos', 'revision general', 'revisión general'] },
 ];
 
 /**
