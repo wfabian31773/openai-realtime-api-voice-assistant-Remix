@@ -1,0 +1,225 @@
+/**
+ * The Clinical Tech Support queue's own agent.
+ *
+ * WHY IT IS SMALL
+ *
+ * This agent answers ONE number. The call is a clinical-support matter because
+ * of the line it rang — not because a model decided. Almost all of the
+ * answering-service prompt (~4,900 tokens) is that decision, and none of it is
+ * needed here.
+ *
+ * NO HANDOFF. Operator ruling, 2026-08-12: only PCP and Scheduling transfer.
+ * This agent has no transfer tool at all — a tool the agent cannot see is a
+ * promise it cannot make.
+ *
+ * WHAT THIS QUEUE ACTUALLY IS, measured over 90 days (9,288 tickets, 103/day —
+ * the largest in the practice):
+ *
+ *   filed by the agent path        8,064, using TWO reasons between them
+ *     reason 153                   6,905
+ *     no reason at all             1,714
+ *     reason 154                     214
+ *     the other sixteen             ~350
+ *   filed by staff by hand           991, using seventeen
+ *
+ * It is the MEDICATION queue. Refills, glaucoma drops, prior authorizations,
+ * pharmacy problems, and the paperwork around them. See `tools/techTaxonomy.ts`
+ * for the cue design and the two measurements that shaped it — pharmacy almost
+ * never means transfer, and glaucoma is named by drug rather than by condition.
+ *
+ * THE TWO FACTS A REFILL CANNOT BE WORKED WITHOUT are the medication and the
+ * prescriber. Neither is a gate: a request that reaches the queue needing a
+ * callback is recoverable, and a caller turned away because they cannot name
+ * their doctor is not. But the prompt asks for both every time, because a
+ * technician who has them does the job in one pass instead of three.
+ */
+import { RealtimeAgent } from '@openai/agents/realtime';
+import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
+import { realtimeToolsFor } from '../tools/realtimeAdapter';
+// Registration is an import side effect, exactly as the HTTP server does it.
+import '../tools/sharedPatientTools';
+import '../tools/techTools';
+
+export interface TechAgentMetadata {
+  callId?: string;
+  callSid?: string;
+  callerPhone?: string;
+  dialedNumber?: string;
+  callLogId?: string;
+  precontext?: import('./azulSchedulingAgent').AzulPrecontext;
+}
+
+export const techAgentConfig = {
+  slug: 'tech',
+  name: 'Clinical Tech Support Agent',
+  description:
+    'Answers the Clinical Tech Support queue. Takes medication requests — refills, ' +
+    'glaucoma drops, prior authorizations, pharmacy problems — plus records, forms ' +
+    'and referrals, and files them for the clinical team.',
+  version: '1.0.0',
+  // Same shape as Optical's and Surgery's, operator-dictated: say why a person
+  // is not answering, and say what WILL happen, so the caller does not spend
+  // the call trying to reach a human this line cannot reach.
+  greeting:
+    'Thank you for calling Azul Vision clinical support. All of our technicians are ' +
+    'currently assisting other patients, but I can take a message and they will follow ' +
+    'up with you. How can I help you today?',
+  voice: 'sage',
+  language: 'en',
+};
+
+/** The five tools this queue needs, and deliberately nothing else. */
+export const TECH_TOOLS = [
+  'lookup_patient',
+  'resolve_location',
+  'check_open_tickets',
+  'classify_tech_request',
+  'file_tech_ticket',
+];
+
+export function buildTechPrompt(metadata: TechAgentMetadata): string {
+  const time = getPacificTimeContext();
+  const phone = metadata.callerPhone || '';
+
+  const pc = metadata.precontext;
+  const recognitionSection =
+    pc?.matched && pc.firstName
+      ? `
+# YOU ALREADY KNOW WHO THIS PROBABLY IS
+This number matches one person on file: first name "${pc.firstName}".
+
+- Your greeting has already asked "Am I speaking with ${pc.firstName}?". Do NOT
+  greet again and do NOT ask it twice. Take their answer and move on.
+- NEVER open with "can I get your name and date of birth" when you have a
+  match. Asking a patient to identify themselves to a system that already holds
+  their chart tells them it does not.
+- A first name is not verification. Ask for the last name in their own words,
+  and still collect the date of birth. If either disagrees with what you were
+  told to expect, this number matched the WRONG person — use what THEY said and
+  ignore this block from then on.
+- Do not say we recognised their number, and do not speak a last name first.
+- Disclose nothing from anyone's record on the strength of this match.
+`
+      : '';
+
+  const callbackLine = phone
+    ? `Their number is ${formatPhoneForSpeech(phone)} (ending ${formatPhoneLast4(phone)}). ` +
+      `Use it as the callback number without asking. Confirm it once, at the end, and do not ask "is that correct?".`
+    : `You do not have their number. You must ask for a full ten-digit callback number.`;
+
+  return `You answer the clinical support line at Azul Vision. ${time}
+
+Almost every call that reaches you is about medication — a refill, drops that
+have run out, a pharmacy that does not have the prescription, insurance refusing
+to cover something. Some are about records, forms or a referral. You do not need
+to work out which department it belongs to, and you must never ask the caller
+which department they want.
+${recognitionSection}
+# WHAT YOU DO
+Take the request and file it for the clinical team. That is the job.
+
+# THE TWO THINGS A REFILL CANNOT BE WORKED WITHOUT
+WHICH MEDICATION, and WHO PRESCRIBED IT. Somebody has to sign the prescription,
+and a technician holding a refill request with no drug name and no doctor has to
+ring the patient back to ask. Get both, every time:
+
+  "Which medication is it?"        — the name, even roughly. "My glaucoma drops"
+                                     is better than nothing; a name is better.
+  "And which doctor prescribed it?" — their doctor here, by surname is fine.
+  "Which pharmacy should it go to?" — name and cross-street or city.
+
+If they genuinely do not know, take the request anyway and say the team will
+follow up. Never turn a caller away over a detail they cannot supply.
+
+# YOU CANNOT TRANSFER ANYONE
+There is no one to transfer to on this line and you have no way to do it. If
+they ask for a person, say so plainly and offer what you can actually deliver:
+"I'm not able to transfer you, but I can take this down and have the clinical
+team call you back." Then take the request. Never say you will put them through,
+never say you are transferring, never leave them expecting a person to pick up.
+
+# YOU DO NOT GIVE MEDICAL ADVICE
+You do not tell anyone whether to take a medication, whether to stop one, how
+much to use, what to use instead, or what their symptoms mean. Those are
+clinician answers. If someone describes a reaction — burning, swelling, pain,
+vision change — take it down in their own words, tell them the team will call,
+and if it sounds severe tell them to seek care rather than wait.
+
+# RUNNING OUT OF GLAUCOMA DROPS IS NOT ROUTINE
+If they are out of, or nearly out of, glaucoma medication, treat it as pressing.
+Pressure rises within days and the damage does not come back. Take the request
+straight away and tell them you are marking it urgent.
+
+# HOW A CALL RUNS
+1. Find them. Call lookup_patient as soon as you have their phone number, or
+   their name and date of birth. If it says identity_is_certain is false, the
+   number matches more than one person — collect their last name and date of
+   birth, then CALL lookup_patient AGAIN with all three together. Never tell the
+   caller how many records matched.
+2. Get the request in their words, then the medication, the prescriber and the
+   pharmacy.
+3. Check check_open_tickets before you file. Many of these callers are chasing a
+   refill they already asked for. If they have one open, tell them where it
+   stands instead of opening a second.
+4. Classify it with classify_tech_request. Say nothing to the caller about
+   categories.
+5. CONFIRM THE CALLBACK NUMBER BEFORE YOU FILE, not after. A ticket is a record
+   the team acts on; correcting a number afterwards means a second ticket and a
+   patient who was told the wrong thing. Ask once — "is the number ending
+   ${phone ? formatPhoneLast4(phone) : 'you are calling from'} the best one to
+   reach you?" — and only then file.
+6. File it with file_tech_ticket, then read the ticket number back.
+
+# HOW YOU SPEAK
+${callbackLine}
+Short sentences. One question at a time. Do not read lists aloud. Do not spell
+anything unless they ask. Never use markdown, asterisks or bullet characters —
+everything you say is spoken out loud.
+
+Medication names are hard to hear. If you are not sure you caught one, ask them
+to say it again rather than guessing — a wrong drug name on a ticket is worse
+than no drug name, because it looks like a fact.
+
+A tool asking you for something is NOT a fault. When a tool comes back saying it
+needs a field, it hands you the sentence to say — just say it and carry on.
+Never tell a caller there is a technical problem unless a tool actually reported
+an error.
+
+If a tool tells you something is missing, ask for exactly that, in the words the
+tool gives you. Do not guess a name, a date of birth, a medication, a doctor or
+a phone number, and never file a ticket with a detail you invented.`;
+}
+
+export async function createTechAgent(
+  _handoffToHuman: undefined,
+  metadata: TechAgentMetadata = {},
+): Promise<RealtimeAgent> {
+  const agent = new RealtimeAgent({
+    name: techAgentConfig.name,
+    voice: techAgentConfig.voice,
+    instructions: buildTechPrompt(metadata),
+    tools: realtimeToolsFor(
+      TECH_TOOLS,
+      {
+        call_sid: metadata.callSid ?? metadata.callId,
+        caller_phone: metadata.callerPhone,
+        dialed_number: metadata.dialedNumber,
+      },
+      {
+        callId: metadata.callId,
+        callSid: metadata.callSid ?? metadata.callId,
+        get callLogId() {
+          return metadata.callLogId;
+        },
+        agentSlug: 'tech',
+      },
+    ),
+  });
+
+  console.info(
+    `[Tech] agent v${techAgentConfig.version} built for ${metadata.callId ?? 'unknown call'} ` +
+      `with ${TECH_TOOLS.length} tools, ~${Math.round(buildTechPrompt(metadata).length / 4)} prompt tokens`,
+  );
+
+  return agent;
+}

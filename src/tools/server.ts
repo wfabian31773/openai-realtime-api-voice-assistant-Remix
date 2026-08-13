@@ -30,6 +30,7 @@ import { manifest, runTool, getTool, allTools } from './registry';
 import './sharedPatientTools';
 import './opticalTools';
 import './surgeryTools';
+import './techTools';
 
 function authorised(req: Request): boolean {
   const expected = process.env.VOICE_TOOL_API_KEY;

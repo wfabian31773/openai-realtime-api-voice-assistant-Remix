@@ -10,6 +10,7 @@ import { createAzulSchedulingAgent, azulSchedulingAgentConfig } from '../agents/
 import { createPcpAgent, pcpAgentConfig } from '../agents/pcpAgent';
 import { createOpticalAgent, opticalAgentConfig } from '../agents/opticalAgent';
 import { createSurgeryAgent, surgeryAgentConfig } from '../agents/surgeryAgent';
+import { createTechAgent, techAgentConfig } from '../agents/techAgent';
 
 export type AgentFactory = (...args: any[]) => RealtimeAgent | Promise<RealtimeAgent>;
 
@@ -123,6 +124,23 @@ export class AgentRegistry {
       voice: surgeryAgentConfig.voice,
       language: surgeryAgentConfig.language,
       greeting: surgeryAgentConfig.greeting,
+    });
+
+    // Clinical Tech Support — the practice's largest queue, 103 tickets a day.
+    // Same shape as Optical and Surgery. NO handoff: operator ruling
+    // 2026-08-12. twilioNumbers stays empty until the number is pointed at
+    // /api/voice/tech.
+    this.register({
+      id: techAgentConfig.slug,
+      factory: createTechAgent as AgentFactory,
+      enabled: true,
+      description: techAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'inbound',
+      version: techAgentConfig.version,
+      voice: techAgentConfig.voice,
+      language: techAgentConfig.language,
+      greeting: techAgentConfig.greeting,
     });
 
     // Azul Vision NextGen scheduling line (San Diego pilot).

@@ -40,7 +40,7 @@ describe('the HTTP surface registers every tool module', () => {
   it('imports every per-queue tool module that exists', () => {
     // Discovered from the agents, not hardcoded — a hardcoded list here would
     // have the same blind spot as the import it is checking.
-    const missing = ['opticalTools', 'surgeryTools'].filter(
+    const missing = ['opticalTools', 'surgeryTools', 'techTools'].filter(
       (m) => !SERVER_SIDE_EFFECT_IMPORTS.includes(m),
     );
     expect(
@@ -76,6 +76,7 @@ describe('every tool an agent declares is reachable over HTTP', () => {
     for (const [queue, agentFile, constName] of [
       ['optical', 'opticalAgent', 'OPTICAL_TOOLS'],
       ['surgery', 'surgeryAgent', 'SURGERY_TOOLS'],
+      ['tech', 'techAgent', 'TECH_TOOLS'],
     ] as const) {
       for (const name of declaredBy(agentFile, constName)) {
         if (!reachable.has(name)) unreachable.push(`${queue}:${name}`);
