@@ -60,7 +60,21 @@
  *
  * 159 IS A DISPOSITION, NOT A REASON. It describes how the call ended. Nothing
  * in this taxonomy returns it — it belongs to the code that actually completes
- * a transfer, and that code knows whether one happened.
+ * a transfer, and that code knows whether one happened. That population is
+ * real and still arrives: department 8 carries genuine "URGENT TRANSFER
+ * (record ticket — caller connected to on-call)" rows, which is why 159 stays
+ * active and stays exported.
+ *
+ * WHY THE DISPOSITION WAS LOAD-BEARING, AND WHAT REPLACED IT. Type 34's other
+ * six reasons all require the caller to NAME a symptom. Someone who said only
+ * "this is urgent" matched none of them, and 159 was the only value left on
+ * the type. Wayne ruled on 2026-08-13 and the ticketing app created
+ *
+ *   551  "Urgent Request - Symptom Not Specified"   type 34, active
+ *
+ * verified in the Support Center's own tables before being used here. It is
+ * the LAST entry below, guarded by `excludes`, for reasons the reason name
+ * does not tell you — see the comment on the entry itself.
  *
  * OFFICE HOURS AND LOCATION IS THE REAL WORKLOAD. It has 23 tickets on record
  * and is visibly one of the largest groups inside the 479. That is what a line
@@ -87,6 +101,14 @@ export interface AfterHoursClassification {
   cues: string[];
   /** Sight-threatening. Raises priority; does not make the agent a clinician. */
   urgent?: true;
+  /**
+   * Words that DISQUALIFY this entry even when a cue matched.
+   *
+   * Exists for exactly one entry — reason 551 — and documented not to grow.
+   * A cue list says "this is what the caller means"; an exclude says "this
+   * word means something else here", and only one word on this line does.
+   */
+  excludes?: string[];
 }
 
 /**
@@ -146,6 +168,41 @@ export const AFTER_HOURS_CLASSIFICATIONS: AfterHoursClassification[] = [
   // the real reasons.
   { requestTypeId: 35, requestType: 'General Inquiry', requestReasonId: 172, requestReason: 'General Message for Office',
     cues: ['message for the office', 'leave a message', 'pass along', 'let them know', 'dejar un mensaje', 'un mensaje'] },
+
+  // --- The floor for type 34. LAST, so every specific category above wins.
+  //
+  // Added 2026-08-13 after Wayne ruled and the ticketing app created reason
+  // 551. Until it existed, a caller who said only "this is urgent" matched
+  // none of the six symptom entries and the only other value on type 34 was
+  // 159 — a disposition. That is why the disposition was load-bearing.
+  //
+  // WHY THIS IS LAST AND GUARDED, which the reason name does not tell you.
+  // Read the 90-day department 8 text: 40 tickets declare urgency, and only 6
+  // name a symptom. Of the other 34, the single largest group is not a
+  // complaint at all — it is a CANCELLATION, where "emergency" explains why
+  // the patient cannot come:
+  //
+  //   "cancel the appointment ... due to family emergency, husband in ICU"
+  //   "Cancel appointment due to patient being in the emergency hospital"
+  //   "cancelar la cita ... debido a una emergencia familiar"
+  //
+  // Filing those as an urgent eye complaint inverts their meaning. The word
+  // points AWAY from needing care. So scheduling language disqualifies the
+  // entry outright — which also keeps the operator's ruling intact, because
+  // scheduling leaves this department and a type-34 hint would pin it here.
+  //
+  // Stems, not enumerations: `urgent` covers urgently/urgente, `emergenc`
+  // covers emergency/emergencies/emergencia. Both are long enough to be safe
+  // as substrings — the `er` lesson at the top of this file.
+  { requestTypeId: 34, requestType: 'Urgent/Emergency Transfer', requestReasonId: 551,
+    requestReason: 'Urgent Request - Symptom Not Specified', urgent: true,
+    cues: ['urgent', 'emergenc'],
+    excludes: [
+      // The cancellation/scheduling group — 23 of the 34.
+      'cancel', 'reschedul', 'reprogram', 'appointment', 'cita', 'schedule',
+      // "I want a person", which is a demand, not a symptom.
+      'real human', 'real person', 'live person', 'speak with a human',
+    ] },
 ];
 
 /** Department 8's own "Other - See Description" — see `otherReason.ts`. */
@@ -183,7 +240,9 @@ export function classifyAfterHours(text: string): AfterHoursClassification | nul
   const t = fold(text);
   if (!t.trim()) return null;
   for (const c of AFTER_HOURS_CLASSIFICATIONS) {
-    if (c.cues.some((cue) => t.includes(fold(cue)))) return c;
+    if (!c.cues.some((cue) => t.includes(fold(cue)))) continue;
+    if (c.excludes?.some((ex) => t.includes(fold(ex)))) continue;
+    return c;
   }
   return null;
 }
