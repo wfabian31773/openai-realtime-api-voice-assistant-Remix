@@ -276,8 +276,16 @@ registerTool({
     return {
       success: true,
       ticket_number: res.ticketNumber,
-      request_reason: cls.requestReason,
-      request_reason_id: cls.requestReasonId,
+      // REPORT WHAT WAS FILED, not what the home queue classified it as.
+      //
+      // These used to report `cls`, the home-queue classification, even when
+      // the ticket had been redirected. A live curl on 2026-08-13 filed "my
+      // glasses broke at the hinge" into Optical and reported reason 542 —
+      // department 3's catch-all, which is not on the ticket and not the
+      // department's. The number the agent reads back has to be the number a
+      // person will find.
+      request_reason: redirect ? redirect.requestReason : cls.requestReason,
+      request_reason_id: filedReasonId,
       priority,
       location_id: lookup.locationId ?? null,
       provider_id: lookup.providerId ?? null,

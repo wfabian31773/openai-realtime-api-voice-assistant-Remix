@@ -220,3 +220,36 @@ describe('the things that make a clerk ring the patient back', () => {
     expect(r.retryable).toBe(true);
   });
 });
+
+describe('a redirected ticket reports the reason it was actually filed under', () => {
+  it('reports the destination reason, not the home classification', async () => {
+    // A live curl on 2026-08-13 filed "my glasses broke at the hinge" into
+    // Optical and reported request_reason_id 542 — department 3's catch-all,
+    // which is neither on the ticket nor that department's. The number the
+    // agent reads back has to be the number a person will find.
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-R10'));
+
+    const r = (await runTool('file_records_ticket', {
+      ...BASE,
+      request_description: 'I need to reschedule my appointment',
+    })) as Record<string, unknown>;
+
+    const filed = create.mock.calls[0][0].requestReasonId;
+    expect(r.request_reason_id, 'reported a different reason than it filed').toBe(filed);
+    expect(r.request_reason).toBe('Reschedule Existing Appointment');
+  });
+
+  it('still reports its own reason when nothing was redirected', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-R11'));
+
+    const r = (await runTool('file_records_ticket', {
+      ...BASE,
+      request_description: 'I need copy of my records',
+    })) as Record<string, unknown>;
+
+    expect(r.request_reason_id).toBe(create.mock.calls[0][0].requestReasonId);
+    expect(r.request_reason_id).toBe(500);
+  });
+});

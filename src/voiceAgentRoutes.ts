@@ -894,7 +894,38 @@ function applyDirectorAction(session: any, callId: string, agentSlug: string, ac
       item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: action.text }] },
     });
 
-    if (action.enforcement !== 'inject') {
+    // NEVER CUT THE GREETING.
+    //
+    // Measured on PCP, 2026-08-06/07, 419 calls: only 102 callers heard the
+    // whole greeting. 317 heard a fragment — "Thank you for calling Azul
+    // Vision PCP" — and 268 of those 317 were then greeted a SECOND time in
+    // different words. On the 102 that played through, it happened 3 times.
+    //
+    // The chain: the director rules on `response.audio_transcript.done`, which
+    // fires BEFORE `response.done`, so an authored action lands while the
+    // greeting is still in flight and the `response.cancel` below truncates it.
+    // The cancelled response then carries no transcript, so the greeting
+    // guarantee concludes the greeting never played and resends it — and the
+    // model, having just said it, paraphrases. Hence two greetings.
+    //
+    // It is not barge-in: in 312 of those 317 calls the caller had not spoken
+    // at all. And it is PCP-shaped because PCP is the line with a director —
+    // the answering service ran 909 calls the same two days and truncated 18.
+    //
+    // The guard is `pendingGreetings`, not a timer: it is deleted the moment
+    // the greeting is confirmed delivered, so this suppresses the cancel for
+    // the seconds the greeting is actually speaking and nothing longer (20s
+    // ceiling via the guarantee's own expiry). The director's instruction is
+    // still INJECTED, so its intent survives and lands on the next turn —
+    // only the audio cut is withheld.
+    const greetingStillSpeaking = pendingGreetings.has(callId);
+    if (greetingStillSpeaking && action.enforcement !== 'inject') {
+      console.info(
+        `[DIRECTOR] ${agentSlug} action withheld from cutting audio on ${callId} — the greeting is still playing`,
+      );
+    }
+
+    if (action.enforcement !== 'inject' && !greetingStillSpeaking) {
       // Cut the in-flight utterance. Mid-loop this is a mercy: the model is
       // repeating a question the caller has already answered.
       //
