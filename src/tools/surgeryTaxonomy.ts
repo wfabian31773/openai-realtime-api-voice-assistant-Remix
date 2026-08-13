@@ -59,68 +59,26 @@
  * not belong to its type cannot be expressed.
  */
 
-import { fold } from './queueRouting';
+import { anyCue, crossProduct } from './cueMatch';
 
 export const SURGERY_DEPARTMENT_ID = 2;
 
 /**
- * HOW A CUE IS MATCHED — rebuilt 2026-08-13 from the first live day.
+ * HOW A CUE IS MATCHED — rebuilt 2026-08-13 from the queue's first live day.
  *
- * The queue went live and filed 32 tickets. TWENTY-ONE landed on the catch-all,
- * and reading them showed three defects, none of which a unit test would have
- * found, because every test string was one I had written myself.
+ * It went live and filed 32 tickets. TWENTY-ONE landed on the catch-all, and
+ * reading them showed three defects, none of which a unit test would have
+ * found, because every test string was one I had written myself:
  *
- * 1. NO DIACRITIC FOLDING AT ALL. Matching was `text.toLowerCase().includes`,
- *    so "Necesito pagar la cirugía" could not have matched a Spanish cue even
- *    if one had been there. It is a bilingual queue and half the vocabulary
- *    was unreachable.
+ *   1. no diacritic folding, so Spanish could not match at all;
+ *   2. hand-listed phrases with the object in the middle, so reason 43 missed
+ *      every real "schedule a cataract surgery" sentence;
+ *   3. "sx" — the practice's own word — in no cue anywhere.
  *
- * 2. HAND-LISTED PHRASES WITH THE OBJECT IN THE MIDDLE. Reason 43 carried
- *    'schedule my surgery' and 'schedule the surgery'. Real callers said:
- *      "schedule a cataract surgery"    "schedule my eye surgery"
- *      "schedule the right eye surgery" "We need to schedule cataract surgery"
- *    Every one misses, always the same way — the determiner varies and the
- *    object sits between verb and noun. This is the documented trap that
- *    `PHARMACY_TRANSFER_CUES` already solved on the tech queue by generating
- *    verb × determiner × object, and I hand-wrote this list anyway.
- *
- * 3. "SX" IS THE PRACTICE'S OWN WORD and appeared in no cue at all:
- *    "schedule sx", "2nd eye sx", "cancel sx", "requesting sx appt".
- *
- * `sx` is two characters, which is exactly the shape that put 479 tickets on
- * reason 159 — a two-letter `er` matched with `String.includes`. So SHORT CUES
- * ARE MATCHED ON A WORD BOUNDARY, never as a bare substring. That is the fix
- * for a short token: not banning it, but matching it as a word.
+ * The matcher and the reasoning now live in `cueMatch.ts`, shared with Optical,
+ * which turned out to have the identical three.
  */
-/**
- * THREE, not four, and the off-by-one is worth recording.
- *
- * At four, `pain` became boundary-matched and stopped matching "painful" — so
- * the post-op symptom check missed "my eye has been very red and painful". A
- * boundary rule that is too generous silently turns stems into whole words,
- * which is the opposite failure to the one it exists to prevent.
- *
- * At three it covers exactly the tokens that need it — `sx`, `rx`, `iol`,
- * `ekg`, `prk`, `pus` — and `iol` is the proof it is needed at all: it appears
- * inside "violet". Every cue of four characters or more is matched as a
- * substring, which is what lets short stems do their job.
- */
-const SHORT_CUE_MAX = 3;
-
-function cueMatches(foldedText: string, cue: string): boolean {
-  const c = fold(cue);
-  if (!c) return false;
-  if (c.length > SHORT_CUE_MAX) return foldedText.includes(c);
-  // Cues are data, not patterns — escape before building the boundary regex.
-  const safe = c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|[^a-z0-9])${safe}([^a-z0-9]|$)`).test(foldedText);
-}
-
-/** True when any cue matches, with the short-cue boundary rule applied. */
-export function anySurgeryCue(text: string, cues: string[]): boolean {
-  const t = fold(text);
-  return cues.some((cue) => cueMatches(t, cue));
-}
+export const anySurgeryCue = anyCue;
 
 const SCHED_VERBS = [
   'schedule', 'scheduling', 'scheduled', 'book', 'booking', 'set up', 'setup',
@@ -139,12 +97,6 @@ const SCHED_OBJECTS = [
   'cataract surgery', 'cataract sx', 'eye surgery', 'eye sx',
   'surgery appointment', 'surgery appt', 'sx appointment', 'sx appt',
 ];
-
-function crossProduct(verbs: string[], dets: string[], objects: string[]): string[] {
-  const out: string[] = [];
-  for (const v of verbs) for (const d of dets) for (const o of objects) out.push(`${v} ${d}${o}`);
-  return out;
-}
 
 /**
  * The scheduling vocabulary, GENERATED rather than guessed.
