@@ -110,22 +110,46 @@ Only the code that completes one knows that. It is exported from
 `afterHoursTaxonomy.ts` separately and is deliberately absent from the
 classification table.
 
-## The residue is a taxonomy gap, not a code gap — open, Wayne's call
+## The residue was a taxonomy gap — CLOSED 2026-08-13, reason 551
 
-Their replay still lands 4.3% on 159 after the fix, and those cases are honest:
-the caller genuinely said *urgent* or *emergency* but never named a symptom, and
-**request type 34 has no generic "urgent, symptom not stated" reason to put them
-in.** Neither side invented one.
+Their replay still landed 4.3% on 159 after the keyword fix, and those cases
+were honest: the caller said *urgent* but never named a symptom, and type 34's
+other six reasons all **require** a named symptom. 159 was the only value left
+on the type. **That is why the disposition was load-bearing.**
 
-Two ways to close it, and only one is general:
+Wayne ruled. The ticketing app created
 
-1. **Add the reason to type 34.** Fixes every path at once, including the
-   answering service.
-2. **My hint carries it every time.** Only reaches the overnight line; the
-   answering service still has nowhere to go.
+    551  "Urgent Request - Symptom Not Specified"   type 34, active
 
-(1) is the recommendation. Until it exists, real urgency is filed as a transfer
-that never happened.
+and rewired both sites that produced 159. Replay: **300 → 13 → 0** still on the
+disposition. Deliberately **not backfilled** — 1,449 of the 1,455 rows on 159
+are already closed, and rewriting finished work changes reporting history for
+tickets staff already handled.
+
+**159 stays active and stays exported.** Genuine transfers still use it — the
+queue really does carry "URGENT TRANSFER (record ticket — caller connected to
+on-call)" rows. The classifier just can no longer claim one happened.
+
+### The word points the other way more often than not
+
+Before adding 551 to our own table, read the 90-day department 8 text. **40
+tickets declare urgency; only 6 name a symptom.** Of the other 34, the largest
+single group is a **cancellation**, where "emergency" explains why the patient
+*cannot come*:
+
+> "cancel the appointment … due to family emergency—husband in intensive care"
+> "Cancel appointment due to patient being in the emergency hospital"
+> "cancelar la cita … debido a una emergencia familiar"
+
+Filing those as an urgent eye complaint inverts the caller's meaning. So our
+551 entry is **last** in the table and carries an `excludes` list — the only
+entry allowed one, documented not to grow. Scheduling language disqualifies it
+outright, which also keeps the operator's ruling intact: a type-34 hint would
+pin a scheduling call into department 8, and scheduling leaves this department.
+
+**A reason name tells you what a value means, not when to use it.** "Urgent
+Request - Symptom Not Specified" sounds like it wants every urgent-sounding
+call. The data says two thirds of them are something else.
 
 ## Still to do
 

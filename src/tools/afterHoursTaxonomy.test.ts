@@ -77,12 +77,25 @@ describe('a real emergency is never missed', () => {
     }
   });
 
-  it('checks the emergencies before anything else', () => {
+  it('checks the NAMED symptoms before anything else', () => {
     // "I have severe pain and I wanted to ask about my bill" must not become a
     // billing question. Ordering is the only thing enforcing that.
+    //
+    // 551 is the exception and is deliberately LAST — it names no symptom, so
+    // every specific category outranks it. Guarding the invariant as "all
+    // urgent entries come first" would have been satisfied by putting the
+    // floor at the top, which is the bug this ordering exists to avoid.
+    const symptomEntries = AFTER_HOURS_CLASSIFICATIONS.filter(
+      (c) => c.urgent && c.requestReasonId !== 551,
+    );
     const firstNonUrgent = AFTER_HOURS_CLASSIFICATIONS.findIndex((c) => !c.urgent);
-    const lastUrgent = AFTER_HOURS_CLASSIFICATIONS.map((c) => Boolean(c.urgent)).lastIndexOf(true);
-    expect(lastUrgent).toBeLessThan(firstNonUrgent);
+    const lastSymptom = AFTER_HOURS_CLASSIFICATIONS.map(
+      (c) => Boolean(c.urgent) && c.requestReasonId !== 551,
+    ).lastIndexOf(true);
+
+    expect(symptomEntries).toHaveLength(6);
+    expect(lastSymptom).toBeLessThan(firstNonUrgent);
+    expect(AFTER_HOURS_CLASSIFICATIONS[AFTER_HOURS_CLASSIFICATIONS.length - 1].requestReasonId).toBe(551);
     expect(reason('I have severe pain and I also wanted to ask about my bill')).toBe(163);
   });
 });
@@ -107,6 +120,71 @@ describe('159 is a disposition, not a reason', () => {
     expect(r.isCatchAll).toBe(true);
     expect(r.classification.requestReasonId).toBe(538);
     expect(r.classification.requestTypeId).toBe(68);
+  });
+});
+
+describe('551 — the floor for declared urgency, and the word that points the other way', () => {
+  // Every string below is real department 8 ticket text from the 90 days to
+  // 2026-08-13. 40 tickets declare urgency; only 6 name a symptom.
+
+  it('catches a caller who declares urgency and names nothing', () => {
+    expect(reason('Patient with cornea transplant wishes to urgently leave message for on-call doctor')).toBe(551);
+    expect(classifyAfterHours('this is an emergency')?.urgent).toBe(true);
+    expect(reason('es una emergencia')).toBe(551);
+  });
+
+  it('NEVER takes a cancellation, which is the largest group carrying the word', () => {
+    // 23 of the 34. Here "emergency" explains why the patient CANNOT come —
+    // it points away from needing care, and filing it as an urgent eye
+    // complaint inverts the caller's meaning.
+    const cancellations = [
+      'Caller needs to cancel the appointment on June 16, 2026 with Dr. Julia Chu in Riverside due to family emergency—husband in intensive care',
+      'Cancel appointment due to patient being in the emergency hospital',
+      'Caller needs to cancel the appointment on Monday at 2:20 PM with Dr. Amini due to an emergency gallbladder operation',
+      'Desea cancelar la cita del 4 de junio con la Dra. Samira Khan debido a una emergencia familiar',
+      'Cancelación de la cita programada el 11 de junio de 2026 debido a una emergencia',
+    ];
+    for (const text of cancellations) {
+      expect(reason(text), text.slice(0, 50)).not.toBe(551);
+      expect(classifyAfterHoursRequest(text).classification.requestTypeId, text.slice(0, 50)).not.toBe(34);
+    }
+  });
+
+  it('does not pin an urgent APPOINTMENT request into this department', () => {
+    // Scheduling leaves department 8 by the operator's ruling. A type 34 hint
+    // would hold it here, so the entry declines and the ticketing app decides.
+    expect(reason('New patient requesting an urgent appointment with Dr. Eugene Kang')).not.toBe(551);
+    expect(reason('Requesting to schedule a new patient emergency eye exam appointment')).not.toBe(551);
+  });
+
+  it('does not treat "I want a real person" as a clinical urgency', () => {
+    expect(reason('Caller is requesting to speak with a real human urgently and is expressing frustration about speaking with an AI')).not.toBe(551);
+  });
+
+  it('still loses to a named symptom, every time', () => {
+    // Their words: "A named symptom still wins. 551 is the floor for type 34,
+    // not a replacement for triage."
+    expect(reason('this is urgent, I have sudden vision loss')).toBe(161);
+    expect(reason('emergency — chemical splashed in my eye')).toBe(164);
+    expect(reason('urgent, worsening pain in right eye')).toBe(163);
+  });
+
+  it('loses to a specific non-clinical category too', () => {
+    expect(reason('I urgently need to know your office hours')).toBe(166);
+    expect(reason('urgent — please have someone call me back')).toBe(174);
+  });
+
+  it('uses stems long enough to be safe as substrings', () => {
+    // The `er` lesson. Every cue on this entry must be long enough that it
+    // cannot fire inside an ordinary word.
+    const entry = AFTER_HOURS_CLASSIFICATIONS.find((c) => c.requestReasonId === 551)!;
+    for (const cue of entry.cues) expect(cue.length, cue).toBeGreaterThanOrEqual(6);
+    expect(reason('caller asked her provider to transfer the number')).not.toBe(551);
+  });
+
+  it('is the only entry allowed an excludes list', () => {
+    const guarded = AFTER_HOURS_CLASSIFICATIONS.filter((c) => c.excludes?.length);
+    expect(guarded.map((c) => c.requestReasonId)).toEqual([551]);
   });
 });
 
