@@ -115,11 +115,16 @@ function hit(text: string, cues: string[]): boolean {
  *
  * ORDER, and why:
  *
- *   1. SCHEDULING FIRST, from every queue — the operator's ruling. But NOT when
- *      the words are about a surgery date: "reschedule my surgery" is a surgery
- *      coordination matter and department 2 was given its own reason for it
- *      (531) earlier the same day. Appointments go to the Hub; operations stay
- *      with Surgery.
+ *   1. SCHEDULING FIRST, from every queue — the operator's ruling — EXCEPT an
+ *      operation. Asked directly, 2026-08-13: "surgery is an exception to that
+ *      hva hub rule."
+ *
+ *      Moving a surgery date is coordinator work rather than front-desk
+ *      scheduling: it drags a surgeon's block, a facility slot, pre-op
+ *      measurements and a drop schedule with it, which is why department 2 has
+ *      its own reason 531. The exception is the OPERATION, not the word
+ *      "reschedule" — "reschedule my post-op appointment" is still Surgery's,
+ *      and "reschedule my eye exam" still goes to the Hub.
  *
  *   2. Then the subject-matter queues, each only when the home queue is not
  *      already the right one.

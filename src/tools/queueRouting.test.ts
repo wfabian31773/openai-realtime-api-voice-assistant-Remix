@@ -47,12 +47,31 @@ describe('scheduling goes to the HVA Hub from every queue', () => {
     expect(detectCrossQueue('I need to reschedule my appointment', HVA)).toBeNull();
   });
 
-  it('leaves a SURGERY date change with Surgery', () => {
-    // The operator created reason 531, Reschedule / Cancel Surgery, for
-    // department 2 earlier the same day. Appointments go to the Hub;
-    // operations stay with the coordinators.
-    expect(detectCrossQueue('I need to reschedule my surgery', SURGERY)).toBeNull();
-    expect(detectCrossQueue('please cancel my surgery on the 10th', SURGERY)).toBeNull();
+  // SURGERY IS THE EXCEPTION TO THE HUB RULE. Operator, 2026-08-13, asked
+  // directly: "surgery is an exception to that hva hub rule."
+  //
+  // Everything schedule-related goes to the Hub except an operation. Moving a
+  // surgery date is coordinator work — it drags a surgeon's block, a facility
+  // slot, pre-op measurements and drops with it — which is why department 2 has
+  // its own reason 531, Reschedule / Cancel Surgery.
+  describe('surgery is the exception', () => {
+    it('keeps a surgery date change with Surgery, from every queue', () => {
+      for (const home of [SURGERY, TECH, OPTICAL]) {
+        const r = detectCrossQueue('I need to reschedule my surgery', home);
+        expect(r?.departmentId ?? SURGERY, `from department ${home}`).toBe(SURGERY);
+      }
+    });
+
+    it('keeps a surgery cancellation with Surgery', () => {
+      expect(detectCrossQueue('please cancel my surgery on the 10th', SURGERY)).toBeNull();
+      expect(detectCrossQueue('cancel my cataract surgery', TECH)?.departmentId).toBe(SURGERY);
+    });
+
+    it('still sends an ordinary appointment to the Hub', () => {
+      // The exception is the OPERATION, not the word "reschedule".
+      expect(detectCrossQueue('reschedule my post-op appointment', SURGERY)).toBeNull();
+      expect(detectCrossQueue('reschedule my eye exam', TECH)?.departmentId).toBe(HVA);
+    });
   });
 });
 
