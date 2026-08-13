@@ -287,8 +287,11 @@ registerTool({
       success: true,
       ticket_number: res.ticketNumber,
       classified: Boolean(cls),
-      request_reason: filing.requestReason,
-      request_reason_id: filing.requestReasonId,
+      // REPORT WHAT WAS FILED, not what the home queue classified it as.
+      // See the note in techTools — a live curl on 2026-08-13 reported a
+      // department 3 reason on a ticket filed into Optical.
+      request_reason: redirect ? redirect.requestReason : filing.requestReason,
+      request_reason_id: filedReasonId,
       // The id we actually attached, so a caller can tell a real assignment
       // from a ticket that merely mentions an office in its text.
       location_id: lookup.locationId,

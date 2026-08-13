@@ -533,6 +533,11 @@ export class SyncAgentService {
     callDurationSeconds?: number;
     transcript?: string;
     priority?: 'low' | 'normal' | 'medium' | 'high' | 'urgent';
+    /** Classification hint — see SubmitTicketParams. Never a routing decision. */
+    suggestedRequestTypeId?: number;
+    suggestedRequestReasonId?: number;
+    suggestedRequestReason?: string;
+    suggestedUrgent?: boolean;
   }): Promise<SyncAgentResponse> {
     const { callSid } = params;
 
@@ -706,6 +711,12 @@ export class SyncAgentService {
           callDurationSeconds: params.callDurationSeconds,
           transcript: params.transcript,
         } : undefined,
+        // Hint only. The endpoint derives its own; this travels alongside so
+        // the ticketing app can stop defaulting reason 159 when it is ready to.
+        ...(params.suggestedRequestTypeId ? { suggestedRequestTypeId: params.suggestedRequestTypeId } : {}),
+        ...(params.suggestedRequestReasonId ? { suggestedRequestReasonId: params.suggestedRequestReasonId } : {}),
+        ...(params.suggestedRequestReason ? { suggestedRequestReason: params.suggestedRequestReason } : {}),
+        ...(params.suggestedUrgent !== undefined ? { suggestedUrgent: params.suggestedUrgent } : {}),
         idempotencyKey: callSid ? `call-${callSid}` : undefined,
       });
 

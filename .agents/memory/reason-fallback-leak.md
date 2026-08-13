@@ -24,6 +24,40 @@ first in the table.
 
 **Department 8 is 76% mis-recorded. Department 16 is 91.5%.**
 
+## WHOSE FALLBACK — corrected 2026-08-13
+
+I first wrote that all of the above came from our `detectRequestReason()`. It
+does not, and the attribution decides who can fix each one.
+
+`detectRequestReason` is imported by `answeringServiceAgent` and **nothing
+else**. `no-ivr` files through `submitSimplifiedTicket`, which posts
+conversational fields and sends **no department, no request type and no
+reason** — the mapping is the ticketing app's. The split proves it:
+
+| Dept | symptom | `answering-service` | `no-ivr` |
+|---|---|---|---|
+| 3 | reason 153 | **6,119** | 106 |
+| 8 | reason **159** | 9 | **413** |
+| 9 | reason 153 | 0 | **168** |
+
+**Ours:** department 3. **Theirs:** department 8's 159 and department 9's 153.
+
+The practical consequence: department 8 cannot be corrected from this repo by
+picking a better reason, because that path has no field to put one in.
+Switching `no-ivr` to `create-ticket` would mean this repo choosing the
+DEPARTMENT for every overnight call — the entire answering-service
+classification problem, on the line that carries the night. Not a trade worth
+making to fix a label.
+
+So `afterHoursTaxonomy`'s classification is sent as a **hint**
+(`suggestedRequestTypeId` / `suggestedRequestReasonId` / `suggestedRequestReason`
+/ `suggestedUrgent`), inert until the ticketing app reads it. Same shape as the
+CAP fields on the records path.
+
+**The general lesson**, and it is the one that keeps recurring: *which* code
+produced a row is a separate question from *what* the row says. Both times I
+got this wrong I reasoned from the value rather than tracing the writer.
+
 ## Why each one is invisible in the obvious report
 
 - **The department is right.** Group by department and department 9 looks

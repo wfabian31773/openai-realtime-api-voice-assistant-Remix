@@ -251,3 +251,137 @@ export function recordsReasonById(reasonId: number): RecordsClassification | nul
   if (reasonId === RECORDS_CATCHALL.requestReasonId) return RECORDS_CATCHALL;
   return RECORDS_CLASSIFICATIONS.find((c) => c.requestReasonId === reasonId) ?? null;
 }
+
+/* -------------------------------------------------------------------------
+ * THE CAP CLOCK
+ *
+ * Azul Vision is under a Corrective Action Plan with HHS OCR, entered into
+ * after a complaint about being late with medical records. For two years the
+ * practice must report on records timing. That is why a medical records
+ * request becomes a CASE (`mr_cases`) and not merely a ticket.
+ *
+ * Operator, 2026-08-13: "the only thing that should be tracking that clock is
+ * patient requests for medical records. If it's going to a patient, then it
+ * should be on the clock. If it's going anywhere else to anyone else, then it
+ * shouldn't be on that clock."
+ *
+ * WHY THIS CODE HAS TO EXIST, measured 2026-08-13:
+ *
+ *   mr_cases rows                                       470
+ *   pathway 'roa_patient' / requestor 'patient'         470   — all of them
+ *   created by the VOICE AGENT                          421
+ *   with a requestor_name captured                        0
+ *   with a relationship_to_patient captured               0
+ *   whose linked ticket reads as third-party            >=77
+ *
+ * Every case is on the California 15-calendar-day clock because every field
+ * took its database default, and the one fact that decides whether the clock
+ * applies — who is asking — has never been captured on a single row. At least
+ * 77 of them are health plans, records-retrieval firms, attorneys, Social
+ * Security or another clinic. That is a floor from a conservative text match,
+ * not a total.
+ *
+ * So the requester is not a nice-to-have on this queue. It is the field a
+ * statutory clock keys on, and nothing downstream can reconstruct it.
+ *
+ * THE ONE CASE THAT IS NOT OBVIOUS, and it is a question for counsel rather
+ * than for code: a patient may direct their OWN records to somebody else —
+ * "send my chart to my new doctor". Read by destination, that is off the
+ * clock. Read as a right of access, it is the patient exercising that right
+ * and stays on it (45 CFR 164.524(c)(3)(ii) covers an individual's request to
+ * transmit to a designated person). The two readings differ in exactly this
+ * case and nowhere else.
+ *
+ * Until it is settled, this code treats PATIENT-INITIATED as on the clock
+ * whatever the destination, because the two errors are not symmetric: being
+ * wrongly ON the clock costs a self-imposed deadline, and being wrongly OFF it
+ * is a CAP violation on the very obligation the CAP exists to police.
+ * ---------------------------------------------------------------------- */
+
+export type RequesterType =
+  | 'patient'
+  | 'personal_representative'
+  | 'provider'
+  | 'health_plan'
+  | 'legal'
+  | 'other';
+
+export interface CapDetermination {
+  requesterType: RequesterType;
+  /** Does the statutory records clock apply? */
+  onClock: boolean;
+  /** `mr_cases.request_pathway`. */
+  pathway: 'roa_patient' | 'third_party_treatment' | 'third_party_plan' | 'third_party_legal' | 'third_party_other';
+  /** One line for the ticket, so a clerk can see the call it was made on. */
+  note: string;
+}
+
+/** Cues for who is on the phone, keyed to how they actually introduce themselves. */
+const REQUESTER_CUES: Array<{ type: RequesterType; cues: string[] }> = [
+  // Checked before 'patient': a parent or guardian says "my daughter's
+  // records", which contains neither "I am the patient" nor an organisation.
+  { type: 'personal_representative', cues: [
+    'power of attorney', 'personal representative', 'conservator', 'guardian', 'executor',
+    "my mother's", "my father's", "my son's", "my daughter's", "my husband's", "my wife's",
+    'my mother', 'my father', 'my son', 'my daughter', 'my husband', 'my wife',
+    'i am her', 'i am his', 'on behalf of my', 'apoderado', 'tutor', 'mi madre', 'mi padre', 'mi hijo', 'mi hija',
+  ] },
+  { type: 'legal', cues: [
+    'attorney', 'lawyer', 'law office', 'law firm', 'legal', 'subpoena', 'court', 'litigation',
+    'lexitas', 'record retrieval', 'records retrieval', 'social security', 'ssa', 'disability determination',
+    'workers comp', "worker's comp", 'immigration', 'abogado', 'seguro social',
+  ] },
+  { type: 'health_plan', cues: [
+    'health plan', 'risk adjustment', 'hedis', 'chart review', 'chart audit',
+    'scan health', 'blue shield', 'blue cross', 'anthem', 'molina', 'health net',
+    'united healthcare', 'humana', 'aetna', 'cigna', 'medicare advantage',
+    'insurance company', 'insurance carrier', 'claims department', 'ipa',
+  ] },
+  { type: 'provider', cues: [
+    "doctor's office", 'doctors office', 'medical group', 'clinic', 'calling from dr',
+    'primary care', 'referring provider', 'referring doctor', 'our patient', 'mutual patient',
+    'i am a nurse', 'medical assistant', 'front office', 'consultorio',
+  ] },
+  { type: 'patient', cues: [
+    'i am the patient', "i'm the patient", 'my own records', 'my records', 'my chart',
+    'for myself', 'soy el paciente', 'soy la paciente', 'mis registros', 'mi expediente',
+  ] },
+];
+
+/** Who is asking, from whatever the caller said. Null when it cannot be told. */
+export function classifyRequester(text: string): RequesterType | null {
+  const t = fold(text);
+  if (!t.trim()) return null;
+  for (const r of REQUESTER_CUES) {
+    if (r.cues.some((c) => t.includes(fold(c)))) return r.type;
+  }
+  return null;
+}
+
+const PATHWAYS: Record<RequesterType, CapDetermination['pathway']> = {
+  patient: 'roa_patient',
+  personal_representative: 'roa_patient',
+  provider: 'third_party_treatment',
+  health_plan: 'third_party_plan',
+  legal: 'third_party_legal',
+  other: 'third_party_other',
+};
+
+/**
+ * Whether this request belongs on the CAP clock, and under which pathway.
+ *
+ * A personal representative stands in the patient's shoes under HIPAA, so
+ * they are on the clock too — a daughter with power of attorney asking for
+ * her mother's chart is the same right being exercised.
+ */
+export function determineCapClock(requesterType: RequesterType): CapDetermination {
+  const onClock = requesterType === 'patient' || requesterType === 'personal_representative';
+  return {
+    requesterType,
+    onClock,
+    pathway: PATHWAYS[requesterType],
+    note: onClock
+      ? 'PATIENT REQUEST — on the records clock (CAP reportable).'
+      : `Third-party request (${requesterType.replace(/_/g, ' ')}) — NOT on the patient records clock.`,
+  };
+}

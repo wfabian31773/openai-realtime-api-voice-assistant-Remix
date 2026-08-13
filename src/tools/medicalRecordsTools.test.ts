@@ -12,6 +12,12 @@ import './sharedPatientTools';
 import './medicalRecordsTools';
 
 const BASE = {
+  // A complete, on-the-clock patient request. deliver_to and date_range are
+  // here because the CAP gate refuses a patient request without them — see the
+  // gate tests at the bottom, which strip them deliberately.
+  requester: 'I am the patient',
+  deliver_to: 'to me',
+  date_range: 'everything',
   first_name: 'Wayne',
   last_name: 'Fabian',
   date_of_birth: '03/17/1973',
@@ -121,16 +127,21 @@ describe('the two facts this queue turns on reach the clerk', () => {
     expect(d).toMatch(/Dates needed: July 2026/);
   });
 
-  it('says plainly when they are missing, so the agent can still ask', async () => {
+  it('notes a missing destination on an OFF-clock request rather than refusing', async () => {
+    // On-clock requests are gated (see the CAP gate tests). A third-party
+    // request still files, with the gap called out so the agent can ask if
+    // there is time — recoverable rather than refused.
     const api = await client();
     vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-R6'));
 
+    const { deliver_to, date_range, ...noDest } = BASE;
     const r = (await runTool('file_records_ticket', {
-      ...BASE,
-      request_description: 'I need my records',
+      ...noDest,
+      requester: 'calling from Dr. Warn\'s office',
+      request_description: 'the chart for a mutual patient',
     })) as Record<string, unknown>;
 
-    expect(r.note_requester).toMatch(/who is asking/i);
+    expect(r.success).toBe(true);
     expect(r.note_destination).toMatch(/where these should be sent/i);
   });
 
@@ -218,5 +229,263 @@ describe('the things that make a clerk ring the patient back', () => {
 
     expect(r.success).toBe(false);
     expect(r.retryable).toBe(true);
+  });
+});
+
+describe('a redirected ticket reports the reason it was actually filed under', () => {
+  it('reports the destination reason, not the home classification', async () => {
+    // A live curl on 2026-08-13 filed "my glasses broke at the hinge" into
+    // Optical and reported request_reason_id 542 — department 3's catch-all,
+    // which is neither on the ticket nor that department's. The number the
+    // agent reads back has to be the number a person will find.
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-R10'));
+
+    const r = (await runTool('file_records_ticket', {
+      ...BASE,
+      request_description: 'I need to reschedule my appointment',
+    })) as Record<string, unknown>;
+
+    const filed = create.mock.calls[0][0].requestReasonId;
+    expect(r.request_reason_id, 'reported a different reason than it filed').toBe(filed);
+    expect(r.request_reason).toBe('Reschedule Existing Appointment');
+  });
+
+  it('still reports its own reason when nothing was redirected', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-R11'));
+
+    const r = (await runTool('file_records_ticket', {
+      ...BASE,
+      request_description: 'I need copy of my records',
+    })) as Record<string, unknown>;
+
+    expect(r.request_reason_id).toBe(create.mock.calls[0][0].requestReasonId);
+    expect(r.request_reason_id).toBe(500);
+  });
+});
+
+/**
+ * THE CAP CLOCK.
+ *
+ * Azul Vision is under a Corrective Action Plan with HHS OCR over late medical
+ * records, and must report on records timing for two years. A PATIENT's request
+ * runs on a statutory clock; a health plan's or an attorney's does not.
+ *
+ * Measured 2026-08-13: all 470 mr_cases rows read pathway 'roa_patient', 421 of
+ * them minted by the voice agent, and NOT ONE carries a requestor — every field
+ * took its database default. At least 77 are demonstrably third-party. A
+ * statutory clock is being set by a column default.
+ *
+ * The call is the only place the requester can be got, which is why the tool
+ * refuses without it.
+ */
+describe('the CAP clock is set by who is asking, never by a default', () => {
+  it('refuses to file without a requester', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+
+    const { requester, deliver_to, date_range, ...noRequester } = BASE;
+    const r = (await runTool('file_records_ticket', {
+      ...noRequester,
+      request_description: 'I need a copy of my records',
+    })) as Record<string, unknown>;
+
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toContain('requester');
+    expect(r.message).toMatch(/are you the patient yourself/i);
+    expect(create, 'filed a records ticket with no requester').not.toHaveBeenCalled();
+  });
+
+  const cases: Array<[string, string, boolean, string]> = [
+    ['I am the patient', 'patient', true, 'roa_patient'],
+    ['I have power of attorney for my mother', 'personal_representative', true, 'roa_patient'],
+    ["I'm calling for my daughter", 'personal_representative', true, 'roa_patient'],
+    ["calling from Dr. Warn's office", 'provider', false, 'third_party_treatment'],
+    ['this is SCAN Health Plan, Medicare risk adjustment review', 'health_plan', false, 'third_party_plan'],
+    ['I am an attorney at Lexitas', 'legal', false, 'third_party_legal'],
+    ['Social Security disability determination', 'legal', false, 'third_party_legal'],
+  ];
+
+  for (const [requester, type, onClock, pathway] of cases) {
+    it(`${type}: "${requester.slice(0, 40)}…" -> ${onClock ? 'ON' : 'OFF'} the clock`, async () => {
+      const api = await client();
+      const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C1'));
+
+      const r = (await runTool('file_records_ticket', {
+        ...BASE,
+        requester,
+        request_description: 'copy of the chart please',
+      })) as Record<string, unknown>;
+
+      expect(r.requester_type, requester).toBe(type);
+      expect(r.cap_clock_applies, requester).toBe(onClock);
+
+      const sent = create.mock.calls[0][0];
+      expect(sent.requestorType).toBe(type);
+      expect(sent.capClockApplies).toBe(onClock);
+      expect(sent.requestPathway).toBe(pathway);
+    });
+  }
+
+  it('a personal representative stands in the patient\'s shoes', async () => {
+    // HIPAA treats a personal representative as the individual. A daughter with
+    // power of attorney is the same right being exercised, so the same clock.
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C2'));
+
+    await runTool('file_records_ticket', {
+      ...BASE,
+      requester: 'I have power of attorney for my mother',
+      request_description: 'her chart from the June visit',
+    });
+
+    expect(create.mock.calls[0][0].requestPathway).toBe('roa_patient');
+  });
+
+  it('keeps a patient on the clock even when the records go elsewhere', async () => {
+    // A patient may direct their OWN records to somebody else. Read by
+    // destination that is off the clock; read as a right of access it stays on
+    // it. This is the open question for counsel, and the code takes the safer
+    // side: wrongly ON costs a self-imposed deadline, wrongly OFF is a CAP
+    // violation on the very obligation the CAP exists to police.
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C3'));
+
+    const r = (await runTool('file_records_ticket', {
+      ...BASE,
+      requester: 'I am the patient',
+      deliver_to: "my new doctor's office, fax 555-1212",
+      request_description: 'please send my chart to my new doctor',
+    })) as Record<string, unknown>;
+
+    expect(r.cap_clock_applies).toBe(true);
+    expect(create.mock.calls[0][0].requestPathway).toBe('roa_patient');
+  });
+
+  it('puts the clock line first, where a clerk will see it', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C4'));
+
+    await runTool('file_records_ticket', {
+      ...BASE,
+      requester: 'this is SCAN Health Plan',
+      request_description: 'chart review for risk adjustment',
+    });
+
+    const d = create.mock.calls[0][0].description as string;
+    expect(d.startsWith('Third-party request'), d.slice(0, 60)).toBe(true);
+    expect(d).toMatch(/NOT on the patient records clock/);
+  });
+
+  it('marks an unrecognised requester as third-party rather than assuming patient', async () => {
+    // The default that caused this whole problem was 'patient'. When we cannot
+    // tell, the honest answer is not the one that starts a statutory clock.
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C5'));
+
+    const r = (await runTool('file_records_ticket', {
+      ...BASE,
+      requester: 'Barbara from the third floor',
+      request_description: 'some records',
+    })) as Record<string, unknown>;
+
+    expect(r.requester_type).toBe('other');
+    expect(r.cap_clock_applies).toBe(false);
+  });
+});
+
+/**
+ * The CAP fields are hard-gated when the clock applies.
+ *
+ * Operator, 2026-08-13: "can we hard gate the records to require the
+ * appropriate fields". An mr_cases row is built from what records, over what
+ * dates, delivered how — and a case opened without them starts a statutory
+ * clock nobody can actually work.
+ *
+ * Gated ONLY when the clock applies. Refusing a health plan's request over a
+ * missing date range would turn a reporting requirement into a reason to turn
+ * callers away, which is the thing this queue exists not to do.
+ */
+describe('the CAP fields are required when the clock is running', () => {
+  it('refuses a patient request with no destination and no dates', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+
+    const { deliver_to, date_range, ...bare } = BASE;
+    const r = (await runTool('file_records_ticket', {
+      ...bare,
+      requester: 'I am the patient',
+      request_description: 'I need my records',
+    })) as Record<string, unknown>;
+
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toEqual(['deliver_to', 'date_range']);
+    expect(r.message).toMatch(/where should these be sent/i);
+    expect(create, 'opened a case with no deliverable fields').not.toHaveBeenCalled();
+  });
+
+  it('asks for whichever one is missing, not both', async () => {
+    const { deliver_to: _d, date_range: _r, ...bare } = BASE;
+    const withDest = (await runTool('file_records_ticket', {
+      ...bare,
+      deliver_to: 'to me',
+      request_description: 'I need my records',
+    })) as Record<string, unknown>;
+    expect(withDest.missingFields).toEqual(['date_range']);
+    expect(withDest.message).toMatch(/which dates/i);
+
+    const withDates = (await runTool('file_records_ticket', {
+      ...bare,
+      date_range: 'everything',
+      request_description: 'I need my records',
+    })) as Record<string, unknown>;
+    expect(withDates.missingFields).toEqual(['deliver_to']);
+  });
+
+  it('accepts a vague answer — the gate is on presence, not quality', async () => {
+    // "Everything" and "whatever you have" are real answers. The caller is not
+    // being interrogated; the column just cannot be silent.
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C6'));
+
+    const r = (await runTool('file_records_ticket', {
+      ...BASE,
+      deliver_to: 'not sure, whatever is easiest',
+      date_range: 'everything',
+      request_description: 'I need my records',
+    })) as Record<string, unknown>;
+
+    expect(r.success).toBe(true);
+    expect(create).toHaveBeenCalled();
+  });
+
+  it('does NOT gate a third-party request', async () => {
+    // An attorney or a health plan is off the clock. Blocking them over a date
+    // range would turn a CAP obligation into a reason to refuse a caller.
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C7'));
+
+    const { deliver_to, date_range, ...bare } = BASE;
+    const r = (await runTool('file_records_ticket', {
+      ...bare,
+      requester: 'I am an attorney at Lexitas',
+      request_description: 'records for our client',
+    })) as Record<string, unknown>;
+
+    expect(r.success).toBe(true);
+    expect(create.mock.calls[0][0].capClockApplies).toBe(false);
+  });
+
+  it('gates a personal representative too — same clock', async () => {
+    const { deliver_to, date_range, ...bare } = BASE;
+    const r = (await runTool('file_records_ticket', {
+      ...bare,
+      requester: 'I have power of attorney for my mother',
+      request_description: 'her chart',
+    })) as Record<string, unknown>;
+
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toContain('deliver_to');
   });
 });

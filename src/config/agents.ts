@@ -12,7 +12,6 @@ import { createOpticalAgent, opticalAgentConfig } from '../agents/opticalAgent';
 import { createSurgeryAgent, surgeryAgentConfig } from '../agents/surgeryAgent';
 import { createTechAgent, techAgentConfig } from '../agents/techAgent';
 import { createRecordsAgent, recordsAgentConfig } from '../agents/recordsAgent';
-import { createHubAgent, hubAgentConfig } from '../agents/hubAgent';
 
 export type AgentFactory = (...args: any[]) => RealtimeAgent | Promise<RealtimeAgent>;
 
@@ -161,24 +160,6 @@ export class AgentRegistry {
       voice: recordsAgentConfig.voice,
       language: recordsAgentConfig.language,
       greeting: recordsAgentConfig.greeting,
-    });
-
-    // The HVA Hub scheduling queue — department 9, where the operator's
-    // cross-queue ruling sends every schedule-related call in the practice.
-    // It takes requests; it does NOT book. Booking is azul-scheduling's
-    // contract, a different line. twilioNumbers stays empty until the number is
-    // pointed at /api/voice/hub.
-    this.register({
-      id: hubAgentConfig.slug,
-      factory: createHubAgent as AgentFactory,
-      enabled: true,
-      description: hubAgentConfig.description,
-      twilioNumbers: [],
-      agentType: 'inbound',
-      version: hubAgentConfig.version,
-      voice: hubAgentConfig.voice,
-      language: hubAgentConfig.language,
-      greeting: hubAgentConfig.greeting,
     });
 
     // Azul Vision NextGen scheduling line (San Diego pilot).

@@ -1220,6 +1220,24 @@ The ticket will include schedule context (last appointment info) automatically.`
         ? contactMethodMap[params.preferred_contact] || 'phone'
         : 'phone';
 
+      // WHAT WE THINK THIS IS, sent alongside — never instead of.
+      //
+      // This endpoint maps everything server-side, which is why nothing below
+      // names a department or a reason. That mapping is currently putting 413
+      // of this agent's 687 department-8 tickets on reason 159, "Transferred
+      // to On-Call Provider", when they are office-hours questions and broken
+      // glasses. Type 34's first reason is 159; that is the whole mechanism.
+      //
+      // We do not take the mapping over. Doing that would mean this file
+      // choosing the DEPARTMENT for every overnight call, which is the entire
+      // answering-service classification problem on the line that carries the
+      // night — a bad trade for fixing a label. So we send our own
+      // classification as a hint and leave the decision where it is.
+      //
+      // Inert until the ticketing app reads it. No behaviour changes here.
+      const { classifyAfterHoursRequest } = await import('../tools/afterHoursTaxonomy');
+      const ahHint = classifyAfterHoursRequest(finalSummary);
+
       // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
       const result = await SyncAgentService.submitSimplifiedTicket({
         patientFullName,
@@ -1235,6 +1253,14 @@ The ticket will include schedule context (last appointment info) automatically.`
         callerPhone: metadata.callerPhone,
         dialedNumber: metadata.dialedNumber,
         agentUsed: 'no-ivr',
+        ...(ahHint.isCatchAll
+          ? {}
+          : {
+              suggestedRequestTypeId: ahHint.classification.requestTypeId,
+              suggestedRequestReasonId: ahHint.classification.requestReasonId,
+              suggestedRequestReason: ahHint.classification.requestReason,
+              suggestedUrgent: Boolean(ahHint.classification.urgent),
+            }),
         callStartTime: new Date().toISOString(),
         // Transcript deliberately NOT sent at filing.
         //

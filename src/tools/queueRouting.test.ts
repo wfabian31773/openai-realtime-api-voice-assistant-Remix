@@ -272,3 +272,61 @@ describe('every agent that files through the shared guard is routed too', () => 
     expect(r?.note).toMatch(/another line/i);
   });
 });
+
+/**
+ * The HVA Hub has no phone line.
+ *
+ * Operator, 2026-08-13: "we don't have a queue for the HVA hub. The HVA hub are
+ * just our health care virtual assistants that are primarily responsible for
+ * the scheduling team... those have been landing [in other queues], and then
+ * they've been moving over manually into the HVA hub."
+ *
+ * So this redirect is not a transfer to another agent — it IS the manual move,
+ * done at filing time. Which makes the reason it picks the whole value: the
+ * scheduling team either receives a sorted queue or the pile they get today.
+ */
+describe('routing into department 9 replaces a manual move', () => {
+  it('picks the specialist reason over the generic one', () => {
+    // 152 has been used ONCE in 90 days while the unclassified pile is full of
+    // these. A cornea consult is a different scheduling problem from a routine
+    // exam — different provider list, different slot length.
+    const r = detectCrossQueue('I need an appointment with the cornea specialist', TECH);
+    expect(r?.departmentId).toBe(HVA);
+    expect(r?.requestReasonId).toBe(152);
+  });
+
+  it('catches a cataract consult from the optical line', () => {
+    expect(detectCrossQueue('he needs to set-up a cataract consult', OPTICAL)?.requestReasonId).toBe(152);
+  });
+
+  it('leaves an ordinary exam on the generic reason', () => {
+    expect(detectCrossQueue('I need to schedule an eye exam', TECH)?.requestReasonId).toBe(146);
+    expect(detectCrossQueue('I need to reschedule my appointment', TECH)?.requestReasonId).toBe(147);
+  });
+
+  it('does not turn a non-scheduling call into a specialist referral', () => {
+    // The specialist check only runs once a scheduling cue has already matched.
+    expect(detectCrossQueue('a question about my cornea specialist visit', TECH)?.requestReasonId).not.toBe(152);
+  });
+});
+
+describe('patients say medicine, charts say medication', () => {
+  const PCP = 18;
+
+  it('routes a real PCP transcript that matched nothing', () => {
+    // Verbatim from a 2026-08-07 PCP call. It stayed on the PCP line because
+    // the cue list had the clinical word and not the ordinary one.
+    const r = detectCrossQueue('I want to call the doctor office and I want the refer some my eye doctor medicine', PCP);
+    expect(r?.departmentId).toBe(TECH);
+  });
+
+  it('catches the Spanish form too', () => {
+    expect(detectCrossQueue('necesita su medicina para los ojos', PCP)?.departmentId).toBe(TECH);
+  });
+
+  it('does not pull an optical call off the optical line', () => {
+    // 'medicine' is a strong cue, so it must still lose to the home queue's
+    // own subject when both appear.
+    expect(detectCrossQueue('my glasses broke and I also take medicine', OPTICAL)).toBeNull();
+  });
+});
