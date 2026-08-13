@@ -227,10 +227,36 @@ registerTool({
     }
     const filing = cls ?? other!;
 
+    // A CALLER WHO PRESSED THE WRONG OPTION IS NOT SENT AWAY.
+    //
+    // Operator ruling 2026-08-13: these queues are forwarded, so a patient who
+    // pressed the medication option with an optical question must not be told
+    // to call back and dial again. If the words clearly belong to another
+    // department, the ticket is filed THERE, and the receiving team is told how
+    // it arrived. Scheduling goes to the HVA Hub from every queue.
+    //
+    // The detector stays silent unless the misroute is obvious — the line that
+    // rang is better evidence than a keyword, and a redirect on a guess would
+    // be worse than none.
+    const { detectCrossQueue } = await import('./queueRouting');
+    const redirect = detectCrossQueue(description, OPTICAL_DEPARTMENT_ID);
+    const filedDepartmentId = redirect?.departmentId ?? OPTICAL_DEPARTMENT_ID;
+    const filedTypeId = redirect?.requestTypeId ?? filing.requestTypeId;
+    const filedReasonId = redirect?.requestReasonId ?? filing.requestReasonId;
+    const filedDescription = redirect
+      ? `${redirect.note}\n\n${cleanDescription.value}`
+      : cleanDescription.value;
+    if (redirect) {
+      console.info(
+        `[optical] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
+          `${redirect.requestReason}`,
+      );
+    }
+
     const res = await ticketingApiClient.createTicket({
-      departmentId: OPTICAL_DEPARTMENT_ID,
-      requestTypeId: filing.requestTypeId,
-      requestReasonId: filing.requestReasonId,
+      departmentId: filedDepartmentId,
+      requestTypeId: filedTypeId,
+      requestReasonId: filedReasonId,
       patientFirstName: first,
       patientLastName: last,
       patientPhone: phone,
@@ -244,7 +270,7 @@ registerTool({
       locationOfLastVisit: cleanLocation,
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       lastProviderSeen: cleanProvider || undefined,
-      description: cleanDescription.value,
+      description: filedDescription,
       priority: 'medium',
       callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
     });
@@ -267,7 +293,12 @@ registerTool({
       // from a ticket that merely mentions an office in its text.
       location_id: lookup.locationId,
       // Say the number back. Callers ask for it, and staff quote it.
-      message: `Filed as ${res.ticketNumber}. Read the ticket number back to the caller.`,
+      ...(redirect
+        ? { routed_to: redirect.departmentName, routed_department_id: redirect.departmentId }
+        : {}),
+      message: redirect
+        ? `Filed as ${res.ticketNumber} with our ${redirect.departmentName} team. Read the ticket number back and say that team will follow up.`
+        : `Filed as ${res.ticketNumber}. Read the ticket number back to the caller.`,
     };
   },
 });
