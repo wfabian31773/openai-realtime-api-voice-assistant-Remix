@@ -309,3 +309,24 @@ describe('routing into department 9 replaces a manual move', () => {
     expect(detectCrossQueue('a question about my cornea specialist visit', TECH)?.requestReasonId).not.toBe(152);
   });
 });
+
+describe('patients say medicine, charts say medication', () => {
+  const PCP = 18;
+
+  it('routes a real PCP transcript that matched nothing', () => {
+    // Verbatim from a 2026-08-07 PCP call. It stayed on the PCP line because
+    // the cue list had the clinical word and not the ordinary one.
+    const r = detectCrossQueue('I want to call the doctor office and I want the refer some my eye doctor medicine', PCP);
+    expect(r?.departmentId).toBe(TECH);
+  });
+
+  it('catches the Spanish form too', () => {
+    expect(detectCrossQueue('necesita su medicina para los ojos', PCP)?.departmentId).toBe(TECH);
+  });
+
+  it('does not pull an optical call off the optical line', () => {
+    // 'medicine' is a strong cue, so it must still lose to the home queue's
+    // own subject when both appear.
+    expect(detectCrossQueue('my glasses broke and I also take medicine', OPTICAL)).toBeNull();
+  });
+});

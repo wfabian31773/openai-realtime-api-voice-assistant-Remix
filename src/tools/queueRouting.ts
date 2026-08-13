@@ -183,8 +183,12 @@ const SURGERY_CUES = [
  * do that.
  */
 const TECH_CUES_STRONG = [
-  'refill', 'pharmacy', 'medication', 'eye drop', 'eyedrop',
-  'prior auth', 'medicamento', 'farmacia', 'gotas',
+  // 'medicine' as well as 'medication' — a real PCP transcript read "I want
+  // the refer some my eye doctor medicine" and matched nothing, because the
+  // list had the clinical word and not the ordinary one. Patients say
+  // medicine; charts say medication.
+  'refill', 'pharmacy', 'medication', 'medicine', 'eye drop', 'eyedrop',
+  'prior auth', 'medicamento', 'medicina', 'farmacia', 'gotas',
 ];
 const TECH_CUES_AMBIGUOUS = ['prescription', 'receta', 'rx'];
 const TECH_CUES = [...TECH_CUES_STRONG, ...TECH_CUES_AMBIGUOUS];
