@@ -137,6 +137,21 @@ export const SCHEDULING: SchedulingCue[] = [
 ];
 
 /**
+ * Sub-specialties the practice actually schedules separately. A caller naming
+ * one of these is not asking for a routine exam.
+ */
+export const SPECIALIST_CUES = [
+  'cornea specialist', 'retina specialist', 'glaucoma specialist',
+  'oculoplastic', 'oculoplastics', 'neuro-ophthalm', 'neuro ophthalm',
+  'pediatric optometrist', 'pediatric ophthalm', 'peds',
+  'see a specialist', 'specialist consult', 'specialist appointment',
+  'referral appointment', 'referred to', 'was referred', 'referral from my',
+  'cataract consult', 'cataract evaluation', 'consult for my cataract',
+  'low vision', 'uveitis',
+  'especialista', 'consulta con especialista',
+];
+
+/**
  * Optical, which is glasses and contacts as OBJECTS — the frames, the lenses,
  * the prescription for them, collecting them.
  *
@@ -184,6 +199,19 @@ export function fold(s: string): string {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
+}
+
+/**
+ * Is this scheduling request for a named sub-specialty?
+ *
+ * The cue list lives HERE rather than in `hubTaxonomy`, even though 152 is a
+ * department 9 reason, because hubTaxonomy already imports from this file and
+ * the reverse would be a cycle. Same list either way — which is the point: a
+ * request routed from another queue gets the same reason as one classified
+ * directly.
+ */
+function specialistReferral(foldedText: string): boolean {
+  return SPECIALIST_CUES.some((c) => foldedText.includes(fold(c)));
 }
 
 /** `text` is already folded by the caller; cues are folded here. */
@@ -242,16 +270,30 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   const holdsOnRecordsLine = homeDepartmentId === MEDICAL_RECORDS && hit(t, RECORDS_CUES);
 
   // 1. Appointments -> HVA Hub, from anywhere, unless it is a surgery date.
+  //
+  // THIS REPLACES A MANUAL MOVE. Operator, 2026-08-13: "we don't have a queue
+  // for the HVA hub... those have been landing [in other queues], and then
+  // they've been moving over manually into the HVA hub for our scheduling team
+  // to address." Nobody answers a department 9 number; this is the handoff
+  // between the queue that took the call and the team that works it, so the
+  // reason has to be right or the scheduling team gets an undifferentiated pile
+  // instead of a sorted queue.
   if (!mentionsSurgery) {
     for (const s of SCHEDULING) {
       if (hit(t, s.cues)) {
         if (homeDepartmentId === HVA_HUB) return null;
+        // A named sub-specialty is a different scheduling problem from a
+        // routine exam — different provider list, different slot length, often
+        // a referral to chase first. Department 9 has reason 152 for it and it
+        // has been used ONCE in 90 days, so it is asked BEFORE the six ordinary
+        // appointment reasons rather than after.
+        const specialist = specialistReferral(t);
         return {
           departmentId: HVA_HUB,
           departmentName: 'HVA Hub',
           requestTypeId: 32,
-          requestReasonId: s.reasonId,
-          requestReason: s.reason,
+          requestReasonId: specialist ? 152 : s.reasonId,
+          requestReason: specialist ? 'Specialist Referral Appointment' : s.reason,
           note: 'Scheduling request — taken on another line and routed here.',
         };
       }

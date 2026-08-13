@@ -44,6 +44,19 @@
  * routine exam: a different provider list, a different slot length, often a
  * referral to chase first.
  *
+ * THERE IS NO HVA PHONE LINE. Operator, 2026-08-13: "we don't have a queue for
+ * the HVA hub. The HVA hub are just our health care virtual assistants that are
+ * primarily responsible for the scheduling team." Scheduling requests land in
+ * the queues patients actually dial and are then MOVED BY HAND into department
+ * 9 for that team.
+ *
+ * That is what this file is for. It is not an agent's taxonomy — no agent
+ * answers a department 9 number — it is the reason table that `queueRouting`
+ * uses when it files a scheduling request into department 9 on another queue's
+ * behalf. It replaces the manual move, so getting the reason right here is the
+ * difference between the scheduling team receiving a sorted queue and receiving
+ * an undifferentiated pile.
+ *
  * TYPE 40 IS DEAD. "Scheduling Request" (189-192) carries the same four
  * concepts as type 32 and has nine tickets in 90 days against type 32's 735.
  * Nothing should file into it. It is listed nowhere below.
@@ -51,7 +64,7 @@
  * Every pair was read out of the Support Center's own `request_types` /
  * `request_reasons` tables for department 9 on 2026-08-13.
  */
-import { fold, SCHEDULING } from './queueRouting';
+import { fold, SCHEDULING, SPECIALIST_CUES } from './queueRouting';
 
 export const HUB_DEPARTMENT_ID = 9;
 
@@ -75,21 +88,6 @@ export interface HubClassification {
    */
   alsoRequires?: string[];
 }
-
-/**
- * Sub-specialties the practice actually schedules separately. A caller naming
- * one of these is not asking for a routine exam.
- */
-const SPECIALIST_CUES = [
-  'cornea specialist', 'retina specialist', 'glaucoma specialist',
-  'oculoplastic', 'oculoplastics', 'neuro-ophthalm', 'neuro ophthalm',
-  'pediatric optometrist', 'pediatric ophthalm', 'peds',
-  'see a specialist', 'specialist consult', 'specialist appointment',
-  'referral appointment', 'referred to', 'was referred', 'referral from my',
-  'cataract consult', 'cataract evaluation', 'consult for my cataract',
-  'low vision', 'uveitis',
-  'especialista', 'consulta con especialista',
-];
 
 /** Interpreter bookings — 47 in 90 days, and they have their own request type. */
 const INTERPRETER_CUES = [
