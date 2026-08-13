@@ -142,11 +142,11 @@ describe('what it tells the caller about themselves', () => {
 
 describe('the greeting sets expectations before the caller asks for a human', () => {
   // Operator-dictated, 2026-08-12: "all of our opticians are currently
-  // assisting other customers. I can take a message, and they will follow up
+  // assisting other patients. I can take a message, and they will follow up
   // with you... so you can preempt the 'pass me to a human'."
   it('says why nobody is answering and what will happen instead', () => {
     const g = opticalAgentConfig.greeting;
-    expect(g).toMatch(/opticians are currently\s*assisting other customers/i);
+    expect(g).toMatch(/opticians are currently\s*assisting other patients/i);
     expect(g).toMatch(/take a message/i);
     expect(g).toMatch(/follow up with you/i);
   });
@@ -200,14 +200,18 @@ describe('the callback number is confirmed BEFORE the ticket is filed', () => {
   const p = buildOpticalPrompt({ callerPhone: '8455317471' });
 
   it('is instructed to confirm first, and told why', () => {
-    expect(p).toMatch(/CONFIRM THE CALLBACK NUMBER BEFORE YOU FILE, not after/);
-    expect(p).toMatch(/means a second\s*\n?\s*ticket/i);
+    // Reworded 2026-08-13 after the operator heard it ask for the number AFTER
+    // filing on a live call. The rule is unchanged; the wording is stronger and
+    // now names the failure it prevents.
+    expect(p).toMatch(/THE NUMBER COMES BEFORE THE TICKET/);
+    expect(p).toMatch(/If you have already filed, do not ask/);
   });
 
   it('puts confirming ahead of filing in the numbered steps', () => {
-    expect(p.indexOf('CONFIRM THE CALLBACK NUMBER')).toBeLessThan(
-      p.indexOf('File it with file_optical_ticket'),
+    expect(p.indexOf('THE NUMBER COMES BEFORE THE TICKET')).toBeLessThan(
+      p.indexOf('NEVER GO SILENT WHILE FILING'),
     );
+    expect(p).toMatch(/Ask, hear the answer, THEN file/);
   });
 });
 
@@ -264,5 +268,36 @@ describe('the call id must not depend on the model remembering it', () => {
     await t!.invoke?.({} as never, JSON.stringify({ phone: '845-531-7471' }));
     const calls = spy.mock.calls;
     expect((calls[calls.length - 1][1] as Record<string, unknown>).call_sid).toBe('call-only');
+  });
+});
+
+/**
+ * Both of these came from the operator calling the live lines on 2026-08-13.
+ *
+ *   "it's asking for the best contact AFTER the ticket is submitted"
+ *   "we need something to fill the silence while the ticket is being created"
+ *
+ * They are asserted here because Optical is the line he called first, but the
+ * same two blocks are in all four queue prompts — "you fix one you fix all",
+ * which is the point of the shared shape.
+ */
+describe('what the operator heard on a live call', () => {
+  const live = buildOpticalPrompt({ callerPhone: '8455317471' });
+
+  it('tells it not to ask for the number after filing', () => {
+    expect(live).toMatch(/THE NUMBER COMES BEFORE THE TICKET/);
+    expect(live).toMatch(/If you have already filed, do not ask/);
+  });
+
+  it('gives it a line to say before the silence, not after', () => {
+    expect(live).toMatch(/NEVER GO SILENT WHILE FILING/);
+    expect(live).toMatch(/Let me get this logged for you/);
+    expect(live).toMatch(/FIRST, then file/);
+  });
+
+  it('does not call patients "customers"', () => {
+    // Operator: "customers sounds like we are a department store."
+    expect(opticalAgentConfig.greeting).not.toMatch(/customer/i);
+    expect(live).not.toMatch(/customer/i);
   });
 });
