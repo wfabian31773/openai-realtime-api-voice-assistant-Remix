@@ -20,7 +20,7 @@
  * not register them.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -38,11 +38,24 @@ describe('the HTTP surface registers every tool module', () => {
   });
 
   it('imports every per-queue tool module that exists', () => {
-    // Discovered from the agents, not hardcoded — a hardcoded list here would
-    // have the same blind spot as the import it is checking.
-    const missing = ['opticalTools', 'surgeryTools', 'techTools'].filter(
-      (m) => !SERVER_SIDE_EFFECT_IMPORTS.includes(m),
-    );
+    // READ FROM DISK, not hardcoded.
+    //
+    // This assertion used to carry the comment "Discovered from the agents, not
+    // hardcoded — a hardcoded list here would have the same blind spot as the
+    // import it is checking", written directly above a hardcoded list of three.
+    // On 2026-08-13 two queues were added and both walked straight through it:
+    // file_records_ticket and file_hub_ticket were callable on a live call and
+    // 404 over HTTP, which is character-for-character the defect this file
+    // exists to prevent.
+    //
+    // A guard whose coverage has to be extended by hand only guards what
+    // somebody remembered to extend it with.
+    const onDisk = readdirSync(__dirname)
+      .filter((f) => /^[A-Za-z0-9_]+Tools\.ts$/.test(f))
+      .map((f) => f.replace(/\.ts$/, ''));
+    expect(onDisk.length, 'no tool modules found — the glob is wrong').toBeGreaterThan(3);
+
+    const missing = onDisk.filter((m) => !SERVER_SIDE_EFFECT_IMPORTS.includes(m));
     expect(
       missing,
       `tools/server.ts does not import: ${missing.join(', ')} — those tools 404 on /api/tools/:name`,
@@ -72,14 +85,25 @@ describe('every tool an agent declares is reachable over HTTP', () => {
     // property of the source text.
     const reachable = new Set(SERVER_SIDE_EFFECT_IMPORTS.flatMap(registeredBy));
 
+    // Every agent that declares a *_TOOLS list, found on disk. Hardcoding the
+    // queues here was the other half of the same blind spot: `records` and
+    // `hub` were absent from this list too, so even a correct module check
+    // would not have caught their tools going missing.
+    const agentDir = join(__dirname, '..', 'agents');
+    const agentFiles = readdirSync(agentDir).filter((f) => /Agent\.ts$/.test(f));
+    const declarations: Array<[string, string]> = [];
+    for (const file of agentFiles) {
+      const src = readFileSync(join(agentDir, file), 'utf8');
+      for (const m of src.matchAll(/export const ([A-Z0-9_]+_TOOLS) = \[/g)) {
+        declarations.push([file.replace(/\.ts$/, ''), m[1]]);
+      }
+    }
+    expect(declarations.length, 'no *_TOOLS declarations found — the scan is wrong').toBeGreaterThan(3);
+
     const unreachable: string[] = [];
-    for (const [queue, agentFile, constName] of [
-      ['optical', 'opticalAgent', 'OPTICAL_TOOLS'],
-      ['surgery', 'surgeryAgent', 'SURGERY_TOOLS'],
-      ['tech', 'techAgent', 'TECH_TOOLS'],
-    ] as const) {
+    for (const [agentFile, constName] of declarations) {
       for (const name of declaredBy(agentFile, constName)) {
-        if (!reachable.has(name)) unreachable.push(`${queue}:${name}`);
+        if (!reachable.has(name)) unreachable.push(`${agentFile}:${name}`);
       }
     }
 
