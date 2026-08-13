@@ -20,20 +20,60 @@ and the HTTP surface run the same code.
 | Optical | `optical` | 1 | lookup_patient, resolve_location, check_open_tickets, classify_optical_request, file_optical_ticket |
 | Surgery | `surgery` | 2 | …, classify_surgery_request, file_surgery_ticket |
 | Clinical Tech | `tech` | 3 | …, classify_tech_request, file_tech_ticket |
-| Scheduling Hub | `hub` | 9 | …, classify_hub_request, file_hub_ticket |
 | Medical Records | `records` | 16 | …, classify_records_request, file_records_ticket |
 
-**Adding the next one:** put its slug in `QUEUE_LINES` in
-`agents/agentWiring.test.ts` FIRST. That table-driven test then names every
-hookup you have not done — slug gates, precontext set, factory case, greeting
-personalisation, webhook route, registry entry. It exists because the Optical
-rollout answered as the after-hours line three times running, each time because
-of one more list nobody thought to check.
+**Adding the next one — SEVEN places, and the test only knows six.**
 
-**Two things a queue agent must be told it cannot do**, because the model will
-otherwise oblige: the Hub cannot BOOK (it cannot see the schedule or hold a
-slot), and Records cannot read a record back or promise a date (release needs a
-signed authorization it does not handle).
+Put its slug in `QUEUE_LINES` in `agents/agentWiring.test.ts` FIRST. That
+table-driven test then names every code hookup you have not done:
+
+1. webhook route (`registerOverflowLine`)
+2. registry entry (`config/agents.ts`)
+3. slug gates (`validAgentSlugs`, `validInboundAgents`)
+4. `PRECONTEXT_SLUGS`
+5. factory case in the switch
+6. greeting personalisation (`greetingStyleFor`)
+
+**7. A ROW IN THE `agents` TABLE (Operations Hub), which no test can catch.**
+
+Optical, Surgery, Tech and Records all shipped without one and nobody noticed
+until the operator asked for a list of endpoints on 2026-08-13. They still
+worked — the greeting falls back to the hardcoded route string — so nothing was
+visibly broken, which is exactly why it survived.
+
+What is lost without the row:
+
+- `resolveConfiguredGreeting` returns null, so the DB **rescue** never fires.
+  That rescue exists because the realtime webhook can land on a different
+  instance than the one that stored the call metadata, and the greeting is then
+  improvised. That is the documented root cause of four live SD calls opening
+  wrong on 2026-08-06. Single-instance deploys hide it completely.
+- The greeting is not editable from the admin UI.
+
+The test cannot enforce this: importing the DB would make it a guard that only
+runs where a database is configured, which the file itself argues is not a
+guard. So it lives here instead.
+
+**Set `system_prompt` to a note saying the prompt is versioned in code** — the
+`pcp` row already does this. These agents build their instructions in
+`buildXPrompt()`; a row whose prompt field looks editable but changes nothing is
+the same trap as an admin-editable greeting the code ignores.
+
+**Verify the greeting matches the code by hash**, not by eye. The DB value
+OUTRANKS the hardcoded one, so a near-miss silently replaces the agent's opening
+with a slightly different sentence, and it will look like a model that will not
+follow instructions.
+
+**THERE IS NO HUB LINE.** I built one on 2026-08-13 and removed it the same day:
+the HVA Hub is the scheduling team, not a queue. Operator: *"we don't have a
+queue for the HVA hub… those have been landing, and then they've been moving
+over manually into the HVA hub."* `hubTaxonomy` survives as the reason table
+`queueRouting` uses when it files INTO department 9 on another queue's behalf —
+that redirect **is** the manual move, done at filing time.
+
+**Records must be told it cannot read a record back or promise a date** — release
+needs a signed authorization it does not handle, and the model will otherwise
+oblige.
 
 **Route by queue.** Each queue gets its own number, webhook and slug. Do not
 multiplex queues onto one agent with a mode flag.
