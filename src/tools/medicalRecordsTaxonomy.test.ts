@@ -11,6 +11,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   classifyRecords,
+  classifyRequester,
+  determineCapClock,
   classifyRecordsRequest,
   recordsReasonById,
   RECORDS_CATCHALL,
@@ -28,7 +30,6 @@ describe('a legal or plan requester outranks the generic phrase', () => {
     ['Medical records request for patient from SCAN Health Plan', 'health plan'],
     ['Request for medical records fax number — Blue Shield of California', 'plan'],
     ['Medical Records Request from Lexitas', 'records-retrieval firm'],
-    ['Medical records request involving power of attorney', 'legal'],
   ];
   for (const [text, why] of cases) {
     it(`${why}: "${text.slice(0, 46)}…"`, () => {
@@ -146,5 +147,73 @@ describe('the table itself', () => {
     expect(recordsReasonById(503)?.requestReason).toBe('Records for Legal or Insurance');
     expect(recordsReasonById(547)).toBe(RECORDS_CATCHALL);
     expect(recordsReasonById(153)).toBeNull(); // a department 3 reason
+  });
+});
+
+/**
+ * WHO IS SPEAKING, and the substring trap that sits on top of it.
+ *
+ * The ticketing agent shipped a backfill on 2026-08-13 whose pattern matched
+ * the bare word "attorney" — which appears inside "power of attorney". It took
+ * 9 personal-representative requests off a clock that applies to them. All 15
+ * affected rows were reverted.
+ *
+ * Checking the same shape here found two of my own, pointing the other way:
+ *
+ *   "I am the patient, this is for Social Security"  classified as legal
+ *   "the patient himself"                            classified as other
+ *
+ * Both are false negatives on the clock — a patient exercising their right of
+ * access, taken off it because a PURPOSE word outranked an IDENTITY claim.
+ *
+ * And the fix has its own trap: "I am the patient's attorney" contains "i am
+ * the patient". Moving identity above the organisation lists without a
+ * possessive guard reproduces their error in mirror image.
+ *
+ * A mention is not an actor. Their words.
+ */
+describe('identity outranks purpose, and the possessive outranks identity', () => {
+  const onClock = (t: string) => determineCapClock(classifyRequester(t) ?? 'other').onClock;
+
+  it('keeps a patient on the clock when they name a purpose', () => {
+    // Verbatim shape from the ticketing agent's revert list.
+    expect(classifyRequester('I am the patient, this is for Social Security')).toBe('patient');
+    expect(onClock('I am the patient, this is for Social Security')).toBe(true);
+    expect(onClock('I am the patient and my attorney asked me to get these')).toBe(true);
+  });
+
+  it('recognises a patient who does not say "I"', () => {
+    expect(classifyRequester('the patient himself')).toBe('patient');
+    expect(classifyRequester('the patient herself is asking')).toBe('patient');
+  });
+
+  it('does NOT read "the patient\'s attorney" as the patient', () => {
+    // The mirror image of their bug, and the reason the guard exists.
+    expect(classifyRequester("I am the patient's attorney")).toBe('legal');
+    expect(onClock("I am the patient's attorney")).toBe(false);
+    expect(classifyRequester("calling about our patient's chart")).not.toBe('patient');
+  });
+
+  it('keeps power of attorney ON the clock — their exact case', () => {
+    expect(classifyRequester('I have power of attorney for my mother')).toBe('personal_representative');
+    expect(onClock('I have power of attorney for my mother')).toBe(true);
+    expect(onClock('calling as her personal representative')).toBe(true);
+  });
+
+  it('still puts a named organisation off the clock', () => {
+    expect(onClock('this is SCAN Health Plan, risk adjustment review')).toBe(false);
+    expect(onClock('I am an attorney at Lexitas')).toBe(false);
+    expect(onClock("calling from Dr. Warn's office")).toBe(false);
+  });
+
+  it('files a personal representative\'s copy request as a COPY, not a legal matter', () => {
+    // This case used to assert 503. It was wrong, and the ticketing agent's
+    // 2026-08-13 revert is why: a power of attorney stands in the patient's
+    // shoes, so their request is a copy request on the clock — not a "Records
+    // for Legal or Insurance" matter routed to whoever handles subpoenas.
+    expect(classifyRecords('Medical records request involving power of attorney')?.requestReasonId).toBe(500);
+    // 'power of attorney' described the requester, not a legal purpose, and was
+    // pulling these to 503 "Records for Legal or Insurance".
+    expect(classifyRecords('I have power of attorney and need a copy of her records')?.requestReasonId).toBe(500);
   });
 });

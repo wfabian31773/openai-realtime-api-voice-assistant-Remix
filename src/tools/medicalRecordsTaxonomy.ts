@@ -79,8 +79,11 @@ const LEGAL_AND_INSURANCE_CUES = [
   // Legal process
   'attorney', 'lawyer', 'law office', 'law firm', 'legal', 'subpoena', 'court',
   'litigation', 'deposition', 'lexitas', 'record retrieval', 'records retrieval',
-  'proof of service', 'power of attorney', 'personal representative',
-  'immigration', 'abogado', 'demanda',
+  'proof of service', 'immigration', 'abogado', 'demanda',
+  // NOT 'power of attorney' or 'personal representative'. Those describe WHO is
+  // asking, not a legal purpose — a daughter with power of attorney requesting
+  // her mother's chart is a copy request (500), and filing it as "Records for
+  // Legal or Insurance" sends it down the wrong path.
   // Benefits and disability
   'social security', 'seguro social', 'ssa', 'ssi', 'disability determination',
   'workers comp', "worker's comp", 'workers compensation', 'state disability', 'edd',
@@ -221,7 +224,12 @@ export const RECORDS_REASON_IDS = new Set([
 
 /** The pair whose cues the caller's words match, or null. */
 export function classifyRecords(text: string): RecordsClassification | null {
-  const t = fold(text);
+  // "power of attorney" contains "attorney", and the legal bucket matches the
+  // bare word. Removing the phrase from the cue list was not enough — this is
+  // exactly the substring the ticketing agent's backfill tripped on, and it
+  // survived my first fix. Neutralise the false friend before matching rather
+  // than trusting a list not to contain a prefix of itself.
+  const t = fold(text).replace(/power of attorney/g, 'poa');
   if (!t.trim()) return null;
   for (const c of RECORDS_CLASSIFICATIONS) {
     if (c.cues.some((cue) => t.includes(fold(cue)))) return c;
@@ -316,6 +324,23 @@ export interface CapDetermination {
   note: string;
 }
 
+/**
+ * A caller SPEAKING FOR SOMEBODY ELSE, which suppresses the first-person cues
+ * below.
+ *
+ * "I am the patient's attorney" contains "i am the patient". Moving the patient
+ * cues above the organisation lists without this guard would classify that
+ * caller as the patient and put a law firm's request on a statutory clock —
+ * the ticketing agent's 2026-08-13 error in mirror image. They matched
+ * "attorney" inside "power of attorney" and took 9 personal representatives OFF
+ * a clock that applies to them; this is the same substring trap pointing the
+ * other way.
+ */
+const SPEAKING_FOR_ANOTHER = [
+  "patient's", 'patients ', 'for the patient', 'on behalf of the patient',
+  'our patient', 'mutual patient', 'the patient is my',
+];
+
 /** Cues for who is on the phone, keyed to how they actually introduce themselves. */
 const REQUESTER_CUES: Array<{ type: RequesterType; cues: string[] }> = [
   // Checked before 'patient': a parent or guardian says "my daughter's
@@ -325,6 +350,19 @@ const REQUESTER_CUES: Array<{ type: RequesterType; cues: string[] }> = [
     "my mother's", "my father's", "my son's", "my daughter's", "my husband's", "my wife's",
     'my mother', 'my father', 'my son', 'my daughter', 'my husband', 'my wife',
     'i am her', 'i am his', 'on behalf of my', 'apoderado', 'tutor', 'mi madre', 'mi padre', 'mi hijo', 'mi hija',
+  ] },
+  // BEFORE the organisation lists. A caller who says "I am the patient" is
+  // telling you who is speaking; "Social Security" in the same sentence is
+  // telling you why. Purpose was outranking identity: "I am the patient, this
+  // is for Social Security Disability" classified as legal and came OFF a clock
+  // that applies to them — a false negative, which is the dangerous direction.
+  //
+  // Guarded by SPEAKING_FOR_ANOTHER so the possessive does not slip through.
+  { type: 'patient', cues: [
+    'i am the patient', "i'm the patient", 'this is the patient',
+    'the patient himself', 'the patient herself', 'patient myself',
+    'my own records', 'my records', 'my chart', 'for myself',
+    'soy el paciente', 'soy la paciente', 'mis registros', 'mi expediente',
   ] },
   { type: 'legal', cues: [
     'attorney', 'lawyer', 'law office', 'law firm', 'legal', 'subpoena', 'court', 'litigation',
@@ -342,17 +380,15 @@ const REQUESTER_CUES: Array<{ type: RequesterType; cues: string[] }> = [
     'primary care', 'referring provider', 'referring doctor', 'our patient', 'mutual patient',
     'i am a nurse', 'medical assistant', 'front office', 'consultorio',
   ] },
-  { type: 'patient', cues: [
-    'i am the patient', "i'm the patient", 'my own records', 'my records', 'my chart',
-    'for myself', 'soy el paciente', 'soy la paciente', 'mis registros', 'mi expediente',
-  ] },
 ];
 
 /** Who is asking, from whatever the caller said. Null when it cannot be told. */
 export function classifyRequester(text: string): RequesterType | null {
   const t = fold(text);
   if (!t.trim()) return null;
+  const speaksForAnother = SPEAKING_FOR_ANOTHER.some((c) => t.includes(fold(c)));
   for (const r of REQUESTER_CUES) {
+    if (r.type === 'patient' && speaksForAnother) continue;
     if (r.cues.some((c) => t.includes(fold(c)))) return r.type;
   }
   return null;
