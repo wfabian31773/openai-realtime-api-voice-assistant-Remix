@@ -291,7 +291,11 @@ registerTool({
     // path was covered by luck rather than by design. Any other caller of this
     // tool was not. Emit the fileable form, and keep the mirror's name beside
     // it for anyone who needs to look it up there.
-    const fileable = sanitizeLocationName(hit.canonical).value || hit.canonical;
+    // `fileAs` wins when the ticketing app calls the office something else
+    // entirely. "Azul Vision DTLA" in the mirror is "Los Angeles" over there,
+    // and brand-stripping alone yields "DTLA" — a name the receiver has never
+    // heard of, which is how a resolved office still failed to file.
+    const fileable = hit.fileAs || sanitizeLocationName(hit.canonical).value || hit.canonical;
 
     return {
       success: true,

@@ -41,6 +41,13 @@ export interface DirectoryLocation {
   /** clinic | surgery_center | screening_site | mobile | … */
   facilityKind: string | null;
   volume90d: number;
+  /**
+   * The name the TICKETING APP stores, when it differs from the mirror's.
+   *
+   * Only set for the handful of offices in LOCATION_ALIASES. Everywhere else
+   * the brand-stripped mirror name is already what the receiver holds.
+   */
+  fileAs?: string;
 }
 
 interface Snapshot {
@@ -85,6 +92,80 @@ function getPool(): pg.Pool {
  * on two rows, and 8 providers with no credential at all. Normalising both
  * sides is the only way a comparison means anything.
  */
+/**
+ * THE THREE OFFICES WHOSE NAME NOBODY AGREES ON.
+ *
+ * Found 2026-08-13, from a live optical call that looped `resolve_location`
+ * ten times. The caller said "Downtown LA". The operator's answer when I
+ * reported it as an unknown office: *"we do have downtown la that is our main
+ * los angeles office."*
+ *
+ * He is right, and the office is invisible to this code from BOTH ends:
+ *
+ *   caller says        NextGen mirror              ticketing app     vol/90d
+ *   ---------------------------------------------------------------------
+ *   "Downtown LA"      Azul Vision DTLA            Los Angeles         4,810
+ *   "Riverside"        Azul Vision Riverside Latham Riverside         11,399
+ *   "Mission Hills"    Azul Vision Mission Hlls    Mission Hills       7,259
+ *   "Long Beach"/"Willow" Azul Vision Willow       Long Beach Willow   3,373
+ *
+ * Every other clinic brand-strips to a plain city name and resolves fine.
+ * These four do not, and between them they carry 26,841 appointments a
+ * quarter — a fifth of all clinic volume. "Mission Hlls" is a TYPO in NextGen
+ * itself, which no amount of normalising will fix from our side.
+ *
+ * TWO SEPARATE BREAKS, and fixing either alone still fails:
+ *
+ *   1. `spoken` — what a caller calls it does not match the mirror, so
+ *      lookupLocation returns null and the agent has nothing to file.
+ *   2. `fileAs` — even once resolved, we hand on the MIRROR's form. The
+ *      ticketing app sets the location foreign key by name, and it has never
+ *      heard of "DTLA". That is the same class as the provider drift the
+ *      ticketing agent measured across 11,296 appointments, and I only ever
+ *      checked providers.
+ *
+ * This table is deliberately small and explicit. It is NOT a fuzzy matcher —
+ * a fuzzy matcher would paper over exactly the drift we want to keep visible,
+ * and would eventually route a caller to the wrong clinic. Any office added
+ * here needs a real reason, written down.
+ */
+export const LOCATION_ALIASES: Array<{
+  /** Key as it appears in the Console mirror, after directoryKey(). */
+  mirror: string;
+  /** The name the TICKETING APP stores, which is what we must file. */
+  fileAs: string;
+  /** What callers and staff actually say. */
+  spoken: string[];
+}> = [
+  {
+    mirror: 'azul vision dtla',
+    fileAs: 'Los Angeles',
+    spoken: ['downtown la', 'downtown los angeles', 'los angeles', 'downtown', 'dtla', 'l a office', 'the la office'],
+  },
+  {
+    mirror: 'azul vision riverside latham',
+    fileAs: 'Riverside',
+    // NOT 'latham' alone — that is a street, and the LASIK centre also sits in
+    // Riverside. Callers say the city.
+    spoken: ['riverside', 'riverside latham', 'latham'],
+  },
+  {
+    mirror: 'azul vision mission hlls',
+    fileAs: 'Mission Hills',
+    // The mirror's own spelling is missing an 'i'. Index the correct spelling
+    // so a caller who says it properly is not punished for NextGen's typo.
+    spoken: ['mission hills', 'mission hlls'],
+  },
+  {
+    mirror: 'azul vision willow',
+    fileAs: 'Long Beach Willow',
+    // Deliberately NOT 'long beach' — that is a DIFFERENT clinic (Atlantis
+    // Eyecare Long Beach, 9,241 a quarter). Aliasing it here would send those
+    // callers to the wrong office, which is worse than not resolving.
+    spoken: ['willow', 'long beach willow'],
+  },
+];
+
 export function directoryKey(raw: string): string {
   return raw
     .replace(/,?\s*(O\.?,?\s?D\.?|M\.?\s?D\.?|D\.?O\.?|N\.?P\.?|P\.?A\.?|DNP|PhD)\s*$/i, '')
@@ -130,6 +211,36 @@ async function load(): Promise<Snapshot | null> {
     // app both say "Encinitas". Index both so either resolves.
     const bare = key.replace(/^(azul vision|atlantis eyecare)\s+/, '');
     if (bare !== key && !locations.has(bare)) locations.set(bare, entry);
+  }
+
+  // The four offices nobody names the same way. See LOCATION_ALIASES.
+  for (const alias of LOCATION_ALIASES) {
+    const entry = locations.get(alias.mirror);
+    if (!entry) {
+      // The mirror renamed it, or it was retired. Say so — a silently dead
+      // alias is how this class of bug hides in the first place.
+      console.warn(
+        `[DIRECTORY] alias target "${alias.mirror}" is not in the mirror — ` +
+          `the ${alias.fileAs} aliases will not resolve`,
+      );
+      continue;
+    }
+    entry.fileAs = alias.fileAs;
+    for (const spoken of alias.spoken) {
+      const k = directoryKey(spoken);
+      const existing = locations.get(k);
+      // NEVER overwrite a real office. "long beach" already resolves to the
+      // Long Beach clinic and must keep doing so; an alias that steals a key
+      // sends callers to the wrong clinic, which is worse than not resolving.
+      if (existing && existing !== entry) {
+        console.warn(
+          `[DIRECTORY] alias "${spoken}" already resolves to "${existing.canonical}" — ` +
+            `not remapping it to "${entry.canonical}"`,
+        );
+        continue;
+      }
+      locations.set(k, entry);
+    }
   }
 
   return { providers, locations, loadedAt: Date.now() };
