@@ -63,10 +63,32 @@ describe('the queue decides what the call is, not the model', () => {
     expect(approxTokens).toBeLessThan(1200);
   });
 
-  it('knows appointments are somebody else\'s job', () => {
-    // MASTER.md §9: Optical takes anything optical EXCEPT appointment requests.
+  it('takes an appointment request rather than deflecting it', () => {
+    // SUPERSEDED RULING. MASTER.md §9 said Optical takes anything optical
+    // EXCEPT appointment requests, and this test used to assert the deflection.
+    //
+    // Operator, 2026-08-13: "these are specific queues that are being forwarded
+    // ... we can't just tell the patient call back, call the wrong extension ...
+    // anything that's schedule related that comes through any of these should
+    // go to the HVA hub." The queue still does not SCHEDULE anything — it takes
+    // the request and the tool routes it.
     expect(prompt).toMatch(/appointment/i);
-    expect(prompt).toMatch(/do not attempt to schedule/i);
+    // Whitespace-tolerant: the prompt is hard-wrapped, and an assertion about
+    // MEANING must not break because a phrase moved across a line ending.
+    expect(prompt).toMatch(/do not attempt\s+to schedule/i);
+    expect(prompt, 'the agent must not send a caller away').toMatch(
+      /do not tell them to call\s+another number/i,
+    );
+    expect(prompt).toMatch(/scheduling hub/i);
+  });
+
+  it('never tells a caller they reached the wrong place', () => {
+    // Assert the forbidden-phrase list, which is the stable part. Matching a
+    // whole sentence would break every time the prompt is re-wrapped, which it
+    // already did once.
+    expect(prompt).toMatch(/never say "wrong number"/i);
+    expect(prompt).toMatch(/wrong extension/i);
+    expect(prompt).toMatch(/routed_to/);
   });
 });
 

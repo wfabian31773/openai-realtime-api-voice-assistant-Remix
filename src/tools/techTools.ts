@@ -189,10 +189,36 @@ registerTool({
     // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
     // Never submit-ticket: it re-derives the DEPARTMENT server-side and
     // defaults to 8, which is how VA-50811 reached nobody.
+    // A CALLER WHO PRESSED THE WRONG OPTION IS NOT SENT AWAY.
+    //
+    // Operator ruling 2026-08-13: these queues are forwarded, so a patient who
+    // pressed the medication option with an optical question must not be told
+    // to call back and dial again. If the words clearly belong to another
+    // department, the ticket is filed THERE, and the receiving team is told how
+    // it arrived. Scheduling goes to the HVA Hub from every queue.
+    //
+    // The detector stays silent unless the misroute is obvious — the line that
+    // rang is better evidence than a keyword, and a redirect on a guess would
+    // be worse than none.
+    const { detectCrossQueue } = await import('./queueRouting');
+    const redirect = detectCrossQueue(description, TECH_DEPARTMENT_ID);
+    const filedDepartmentId = redirect?.departmentId ?? TECH_DEPARTMENT_ID;
+    const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
+    const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
+    const filedDescription = redirect
+      ? `${redirect.note}\n\n${cleanDescription.value}`
+      : cleanDescription.value;
+    if (redirect) {
+      console.info(
+        `[tech] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
+          `${redirect.requestReason}`,
+      );
+    }
+
     const res = await ticketingApiClient.createTicket({
-      departmentId: TECH_DEPARTMENT_ID,
-      requestTypeId: cls.requestTypeId,
-      requestReasonId: cls.requestReasonId,
+      departmentId: filedDepartmentId,
+      requestTypeId: filedTypeId,
+      requestReasonId: filedReasonId,
       patientFirstName: first,
       patientLastName: last,
       patientPhone: phone,
@@ -205,7 +231,7 @@ registerTool({
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
       lastProviderSeen: cleanProvider || undefined,
-      description: cleanDescription.value,
+      description: filedDescription,
       priority,
       callData: { agentUsed: 'tech', ...(callSid ? { callSid } : {}) },
     });
@@ -224,7 +250,12 @@ registerTool({
       // Say plainly what is missing, so the agent can still ask before the call
       // ends rather than the technician chasing it tomorrow.
       ...(cleanProvider ? {} : { note: 'No prescriber captured — ask who prescribed it if there is still time.' }),
-      message: `Filed as ${res.ticketNumber}. Read the ticket number back to the caller.`,
+      ...(redirect
+        ? { routed_to: redirect.departmentName, routed_department_id: redirect.departmentId }
+        : {}),
+      message: redirect
+        ? `Filed as ${res.ticketNumber} with our ${redirect.departmentName} team. Read the ticket number back and say that team will follow up.`
+        : `Filed as ${res.ticketNumber}. Read the ticket number back to the caller.`,
     };
   },
 });
