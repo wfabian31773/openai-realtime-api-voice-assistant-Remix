@@ -308,3 +308,65 @@ describe('every registry agent the router accepts is enabled', () => {
     expect(broken, `accepted slugs with no usable registration: ${broken.join(', ')}`).toEqual([]);
   });
 });
+
+/**
+ * A recognised caller must not be handed two openings.
+ *
+ * The greeting is FORCED verbatim, and the agent prompt's recognition block
+ * tells the model the greeting has already played and to open with "Am I
+ * speaking with <name>?". Both are true only if the greeting was personalised
+ * first. When it is not, the model starts the configured line and abandons it
+ * mid-phrase — heard as the agent being cut off, and reported as exactly that
+ * by the operator on 2026-08-12.
+ *
+ * The personalisation keys on `azulMetadataRef`, which was assigned in one
+ * case only. That is the shape this guards.
+ */
+describe.each(QUEUE_LINES)('the %s line personalises its greeting when it recognises the caller', (slug) => {
+  it('registers its precontext for the greeting, not just the prompt', () => {
+    const start = FACTORY_SWITCH.indexOf(`case '${slug}':`);
+    expect(start, `no factory case for ${slug}`).toBeGreaterThan(-1);
+    const next = FACTORY_SWITCH.indexOf("case '", start + 10);
+    const body = FACTORY_SWITCH.slice(start, next === -1 ? undefined : next);
+
+    // Only meaningful for a case that actually passes precontext.
+    if (!/precontext:/.test(body)) return;
+
+    expect(
+      /azulMetadataRef\s*=/.test(body),
+      `'${slug}' passes precontext to its agent but never registers it for the ` +
+        `greeting, so the model gets the forced greeting AND "do not greet again" ` +
+        `in the same turn and cuts itself off mid-sentence`,
+    ).toBe(true);
+  });
+});
+
+describe('the personalised greeting is not reimplemented inline', () => {
+  it('delegates to the tested module rather than doing it with a regex here', () => {
+    // The first version of this was an inline regex keyed on the exact phrase
+    // "How can I help you today?". `welcome_greeting` is admin-editable and
+    // outranks the configured string, so editing the greeting turned the
+    // personalisation into a no-op and put the configured question and the
+    // confirm question back to back — the exact defect it existed to remove.
+    // Codex caught it on #178.
+    //
+    // The behaviour is covered properly in
+    // services/greetingPersonalisation.test.ts. What this guards is that the
+    // route keeps using it, because a regex inline in a 7,000-line file is
+    // reachable only by a test that reads source as text.
+    const start = ROUTES.indexOf('const recognisedFirstName');
+    expect(start, 'the greeting personalisation block has moved').toBeGreaterThan(-1);
+    const block = ROUTES.slice(start, start + 1600);
+
+    expect(block, 'the route no longer calls personaliseGreeting').toMatch(
+      /personaliseGreeting\(/,
+    );
+    expect(block, 'the route no longer asks which style the line uses').toMatch(
+      /greetingStyleFor\(/,
+    );
+    expect(
+      block,
+      'the greeting is being rewritten inline again — put it in the module where it can be tested',
+    ).not.toMatch(/agentGreeting\.replace\(/);
+  });
+});

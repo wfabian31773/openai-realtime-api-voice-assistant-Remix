@@ -2462,14 +2462,27 @@ async function observeCall(
           `[Optical] Pre-context for ...${(from || '').slice(-4)}: ` +
             `${opticalPrecontext?.matched ? `matched '${opticalPrecontext.firstName}'` : 'no unique match'}`,
         );
-        factoryResult = agentFactory(undefined, {
+        const opticalMeta = {
           callId,
           callSid: twilioCallSid,
           callerPhone: from,
           dialedNumber: to,
           precontext: opticalPrecontext ?? undefined,
           get callLogId() { return liveCallLogId(); },
-        });
+        };
+        // Register the precontext for the GREETING, not just the prompt.
+        //
+        // The personalisation below keys on this ref, and it was assigned only
+        // in the azul-scheduling branch only, so on this line the model received
+        // BOTH the forced verbatim greeting and a prompt block telling it the
+        // greeting had already played and to go straight to "Am I speaking
+        // with <name>?". Two orders, one turn. The model starts the configured
+        // line and abandons it mid-phrase, which is heard as the agent being
+        // cut off. Operator, 2026-08-12: "when the pre context arrives it cuts
+        // off the greeting." The 19:45 transcript is the proof:
+        //     "Thank you for calling Azul" / "Am I speaking with Wayne?"
+        azulMetadataRef = opticalMeta;
+        factoryResult = agentFactory(undefined, opticalMeta);
         break;
       }
 
@@ -2489,14 +2502,27 @@ async function observeCall(
           `[Surgery] Pre-context for ...${(from || '').slice(-4)}: ` +
             `${surgeryPrecontext?.matched ? `matched '${surgeryPrecontext.firstName}'` : 'no unique match'}`,
         );
-        factoryResult = agentFactory(undefined, {
+        const surgeryMeta = {
           callId,
           callSid: twilioCallSid,
           callerPhone: from,
           dialedNumber: to,
           precontext: surgeryPrecontext ?? undefined,
           get callLogId() { return liveCallLogId(); },
-        });
+        };
+        // Register the precontext for the GREETING, not just the prompt.
+        //
+        // The personalisation below keys on this ref, and it was assigned only
+        // in the azul-scheduling branch only, so on this line the model received
+        // BOTH the forced verbatim greeting and a prompt block telling it the
+        // greeting had already played and to go straight to "Am I speaking
+        // with <name>?". Two orders, one turn. The model starts the configured
+        // line and abandons it mid-phrase, which is heard as the agent being
+        // cut off. Operator, 2026-08-12: "when the pre context arrives it cuts
+        // off the greeting." The 19:45 transcript is the proof:
+        //     "Thank you for calling Azul" / "Am I speaking with Wayne?"
+        azulMetadataRef = surgeryMeta;
+        factoryResult = agentFactory(undefined, surgeryMeta);
         break;
       }
 
@@ -3866,8 +3892,27 @@ async function observeCall(
       ? String(azulMetadataRef.precontext.firstName ?? '').trim()
       : '';
     if (recognisedFirstName && agentGreeting) {
-      agentGreeting = `Hello, thank you for calling Azul Vision. Am I speaking with ${recognisedFirstName}?`;
-      console.info(`[AZUL-SCHED] Greeting personalised for recognised caller (${recognisedFirstName})`);
+      // The QUEUE lines keep their own opening and swap only its closing
+      // question. Their greeting does a second job besides saying hello: "All
+      // of our coordinators are currently assisting other patients, but I can
+      // take a message" pre-empts the ask for a human on a line that cannot
+      // transfer. azul-scheduling keeps the wholesale replacement it has always
+      // had — a working line whose greeting carries no such promise.
+      //
+      // The logic lives in `services/greetingPersonalisation` because the first
+      // version was a regex inline here, keyed on one hardcoded phrase, and
+      // `welcome_greeting` is admin-editable — so editing the greeting silently
+      // disabled it and put two questions back to back. That is testable now,
+      // and tested.
+      const { personaliseGreeting, greetingStyleFor } = await import(
+        './services/greetingPersonalisation'
+      );
+      agentGreeting = personaliseGreeting(
+        agentGreeting,
+        recognisedFirstName,
+        greetingStyleFor(agentSlug),
+      );
+      console.info(`[GREETING] Personalised for recognised caller (${recognisedFirstName}) on ${agentSlug}`);
     }
 
     // Reconstruction cutover: when NEW_CORE_LINES names this line, its
