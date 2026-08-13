@@ -93,3 +93,73 @@ describe('a tool call is persisted when it finishes, not when the call does', ()
     expect(JSON.parse(out).success).toBe(true);
   });
 });
+
+/**
+ * THE DEFECT THAT COST A DAY.
+ *
+ * `toZod` made every property `.nullable()` but never `.optional()`, so all
+ * fifteen of file_surgery_ticket's landed in `required`. With `strict: true`
+ * the SDK then demanded the model emit all fifteen keys. On four live calls it
+ * emitted thirteen — omitting `callback_number` and `description_prefix` — and
+ * the SDK rejected the arguments with "Invalid JSON input for tool" BEFORE
+ * calling execute. No handler run, no log line, no timeline event, nothing
+ * anywhere to see. The model received an error and told the caller the system
+ * was having trouble.
+ *
+ * file_optical_ticket has twelve properties, the model emitted all twelve, and
+ * Optical filed perfectly. That single difference is why one queue worked and
+ * the other never did. Nothing was wrong with either tool.
+ */
+describe('a model may omit what it does not have', () => {
+  it('reaches the handler with the exact arguments the live call sent', async () => {
+    // Verbatim from the 2026-08-12 23:44 call: 13 of 15 keys.
+    const liveArgs = {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: 'March 17, 1973',
+      request_description: 'I need a refill for my combo drops',
+      location: 'Loma Linda Surgery Center LLC',
+      surgeon: 'Dwayne Logan, MD',
+      request_reason_id: '529',
+      surgery_date: null,
+      urgent: null,
+      email: null,
+      call_sid: null,
+      caller_phone: '+18455317471',
+      dialed_number: null,
+    };
+
+    await import('./surgeryTools');
+    const { realtimeToolsFor } = await import('./realtimeAdapter');
+    const tool = realtimeToolsFor(['file_surgery_ticket'], { queue: 'surgery' })[0];
+
+    const out = await callTool(tool as never, liveArgs);
+
+    // The handler RAN and refused in words the agent can say — rather than the
+    // SDK rejecting the call and the agent inventing a system failure.
+    expect(out, 'the SDK rejected the arguments before the handler saw them').not.toMatch(
+      /Invalid JSON input|An error occurred/,
+    );
+    const parsed = JSON.parse(out);
+    expect(parsed.success).toBe(false);
+    expect(parsed.missingFields).toEqual(['callback_number']);
+    expect(parsed.message).toMatch(/best number to reach you/i);
+  });
+
+  it('requires only what the tool actually needs, not every property', async () => {
+    await import('./surgeryTools');
+    const { realtimeToolsFor } = await import('./realtimeAdapter');
+    const tool = realtimeToolsFor(['file_surgery_ticket'], {})[0] as unknown as {
+      parameters: { properties: Record<string, unknown>; required?: string[] };
+      strict?: boolean;
+    };
+
+    const props = Object.keys(tool.parameters.properties).length;
+    const required = tool.parameters.required?.length ?? 0;
+    expect(props).toBeGreaterThan(required);
+    expect(
+      tool.strict,
+      'strict forces every property into required — the exact cause of the outage',
+    ).toBe(false);
+  });
+});
