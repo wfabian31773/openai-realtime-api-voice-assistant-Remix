@@ -75,6 +75,62 @@ describe('scheduling goes to the HVA Hub from every queue', () => {
   });
 });
 
+/**
+ * Real Spanish ticket text, taken verbatim from department 8's unclassified
+ * tickets on 2026-08-13. Ten of these seventeen missed every cue in the first
+ * version of the list — it was written English-first, and Spanish states these
+ * requests as nouns ("Reprogramación de cita") far more often than English does.
+ *
+ * These are the actual sentences, accents and all, because that is the only way
+ * to know the cues match what people really write rather than what I imagined
+ * they would.
+ */
+describe('Spanish appointment requests reach the Hub', () => {
+  const AFTER_HOURS = 8;
+  const real: Array<[string, number]> = [
+    ['Paciente nuevo desea agendar cita nueva por la tarde', 146],
+    ['Solicita agendar cita para cualquier horario disponible', 146],
+    ['Solicitud de nueva cita tras pérdida de cita anterior', 146],
+    ['Solicita una nueva cita por la tarde, de lunes o viernes', 146],
+    ['Solicitud de cita para examen de la vista', 146],
+    ['Solicita una cita nueva con el oculista, con preferencia para un sábado', 146],
+    ['Nueva paciente quiere agendar cita con un doctor de los ojos', 146],
+    ['Solicitud de cita para revisión general', 146],
+    ['Solicita cita para examen de ojos', 146],
+    ['Quiere reprogramar su cita a partir del 7 de septiembre', 147],
+    ['Solicitud de reprogramación de cita', 147],
+    ['Reprogramación de cita', 147],
+    ['Cancelación de la cita programada para hoy a las 10:10 de la mañana', 148],
+    ['Cancelar cita del 5 de agosto de 2026', 148],
+    ['Confirmación de la cita de hoy, ya que el paciente cree que fue cancelada', 149],
+    ['Paciente necesita confirmar si tiene una cita hoy en la oficina de San Bernardino', 149],
+  ];
+
+  for (const [text, reasonId] of real) {
+    it(`"${text.slice(0, 44)}…" -> ${reasonId}`, () => {
+      const r = detectCrossQueue(text, AFTER_HOURS);
+      expect(r?.departmentId, text).toBe(HVA);
+      expect(r?.requestTypeId).toBe(32);
+      expect(r?.requestReasonId, text).toBe(reasonId);
+    });
+  }
+
+  it('matches with or without accents', () => {
+    // Transcription and staff typing do not agree on these, so both appear in
+    // the real data. fold() strips diacritics from both sides.
+    expect(detectCrossQueue('Reprogramacion de cita', AFTER_HOURS)?.requestReasonId).toBe(147);
+    expect(detectCrossQueue('Cancelacion de la cita', AFTER_HOURS)?.requestReasonId).toBe(148);
+    expect(detectCrossQueue('Confirmacion de la cita', AFTER_HOURS)?.requestReasonId).toBe(149);
+  });
+
+  it('still says nothing about a Spanish request that is not scheduling', () => {
+    // The point of the wider net is appointments, not "any sentence with a
+    // Spanish word in it". A refill stays a refill.
+    expect(detectCrossQueue('Necesita un resurtido de su medicamento', TECH)).toBeNull();
+    expect(detectCrossQueue('Sus lentes están listos para recoger', OPTICAL)).toBeNull();
+  });
+});
+
 describe('the operator\'s example: optical question on the medication line', () => {
   it('routes glasses from Tech Support to Optical', () => {
     const r = detectCrossQueue('my glasses broke at the hinge', TECH);

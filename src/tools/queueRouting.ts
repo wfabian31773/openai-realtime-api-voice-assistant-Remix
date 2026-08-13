@@ -50,21 +50,49 @@ const HVA_HUB = 9;
 /**
  * Appointment scheduling, which the operator routed to the HVA Hub from every
  * queue. Type 32 is the live one: 456 reschedules, 198 new, 55 same-day in 90
- * days. Type 40 carries the same four concepts and is effectively dead at 7.
+ * days. Type 40 carries the same four concepts and is effectively dead at 9.
+ *
+ * SPANISH IS NOT A TRANSLATION OF THE ENGLISH LIST — measured 2026-08-13.
+ *
+ * The first version of these cues was written English-first with a few Spanish
+ * phrases appended, and it was wrong in a way that only the real tickets show.
+ * Department 8's 274 unclassified tickets are overwhelmingly Spanish appointment
+ * requests, and **10 of a 17-line sample missed every cue.**
+ *
+ * Two reasons, both structural rather than vocabulary:
+ *
+ *   NOMINALISATION. Ticket text says "Reprogramación de cita" and "Cancelación
+ *   de la cita", not "reprogramar" and "cancelar mi cita". Spanish states these
+ *   as nouns far more often than English does, so a cue built from the verb
+ *   misses the common form. The cues below are stems — `reprogram` catches
+ *   reprogramar, reprogramación and reprogramacion together.
+ *
+ *   ACCENTS. "Cancelación" and "cancelacion" both appear, because transcription
+ *   and staff typing do not agree. Rather than doubling every entry, `hit()`
+ *   strips diacritics from both sides, so a cue may be written either way.
  */
 const SCHEDULING: Array<{ reasonId: number; reason: string; cues: string[] }> = [
   { reasonId: 151, reason: 'Same-Day Appointment Request',
-    cues: ['same day', 'same-day', 'today if', 'get in today', 'seen today', 'squeeze me in', 'sooner appointment', 'earlier appointment', 'move my appointment up'] },
+    cues: ['same day', 'same-day', 'today if', 'get in today', 'seen today', 'squeeze me in', 'sooner appointment', 'earlier appointment', 'move my appointment up', 'cita para hoy', 'hoy mismo'] },
   { reasonId: 148, reason: 'Cancel Appointment',
-    cues: ['cancel my appointment', 'cancel my appt', 'cancel the appointment', 'cancelar mi cita', 'cannot make my appointment', "can't make my appointment"] },
+    cues: ['cancel my appointment', 'cancel my appt', 'cancel the appointment', 'cannot make my appointment', "can't make my appointment",
+           'cancelar mi cita', 'cancelar la cita', 'cancelar cita', 'cancelación de la cita', 'cancelación de cita', 'cancelar su cita'] },
   { reasonId: 147, reason: 'Reschedule Existing Appointment',
-    cues: ['reschedule', 'change my appointment', 'move my appointment', 'different day for my appointment', 'cambiar mi cita', 'reprogramar'] },
+    cues: ['reschedule', 'change my appointment', 'move my appointment', 'different day for my appointment',
+           'reprogram', 'cambiar mi cita', 'cambiar la cita', 'mover mi cita', 'mover la cita'] },
   { reasonId: 149, reason: 'Appointment Confirmation Call',
-    cues: ['confirm my appointment', 'confirming my appointment', 'is my appointment', 'what time is my appointment', 'confirmar mi cita'] },
+    cues: ['confirm my appointment', 'confirming my appointment', 'is my appointment', 'what time is my appointment',
+           'confirmar mi cita', 'confirmar la cita', 'confirmar cita', 'confirmación de la cita', 'confirmación de cita', 'confirmar si tiene', 'confirmar si tengo'] },
+  // NOT "cualquier horario disponible". That is a caller saying they are
+  // flexible while BOOKING — "Solicita agendar cita para cualquier horario
+  // disponible" is a new appointment, and cueing 150 on it took the request
+  // off 146. An availability inquiry asks what exists; it does not ask for one.
   { reasonId: 150, reason: 'Appointment Availability Inquiry',
-    cues: ['do you have any openings', 'what times do you have', 'next available', 'availability'] },
+    cues: ['do you have any openings', 'what times do you have', 'next available', 'availability',
+           'tienen disponibilidad', 'hay disponibilidad', 'qué horarios tienen', 'que horarios hay'] },
   { reasonId: 146, reason: 'New Appointment Request',
-    cues: ['make an appointment', 'schedule an appointment', 'schedule an eye exam', 'book an appointment', 'set up an appointment', 'need an appointment', 'get an appointment', 'new patient exam', 'eye exam', 'hacer una cita', 'sacar una cita', 'agendar', 'solicitud de cita', 'cita para'] },
+    cues: ['make an appointment', 'schedule an appointment', 'schedule an eye exam', 'book an appointment', 'set up an appointment', 'need an appointment', 'get an appointment', 'new patient exam', 'eye exam',
+           'hacer una cita', 'sacar una cita', 'pedir una cita', 'agendar', 'solicitud de cita', 'solicitud de nueva cita', 'solicita una cita', 'solicita cita', 'nueva cita', 'cita nueva', 'cita para', 'quiere una cita', 'necesita una cita', 'desea una cita'] },
 ];
 
 /**
@@ -105,8 +133,21 @@ const TECH_CUES_STRONG = [
 const TECH_CUES_AMBIGUOUS = ['prescription', 'receta', 'rx'];
 const TECH_CUES = [...TECH_CUES_STRONG, ...TECH_CUES_AMBIGUOUS];
 
+/**
+ * Lowercase and strip diacritics, so "Cancelación" and "cancelacion" are the
+ * same word to a cue. Both sides go through it, which is what lets a cue be
+ * written in whichever form reads better.
+ */
+export function fold(s: string): string {
+  return String(s ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+/** `text` is already folded by the caller; cues are folded here. */
 function hit(text: string, cues: string[]): boolean {
-  return cues.some((c) => text.includes(c));
+  return cues.some((c) => text.includes(fold(c)));
 }
 
 /**
@@ -135,7 +176,7 @@ function hit(text: string, cues: string[]): boolean {
  * queue's language WITHOUT the home queue's.
  */
 export function detectCrossQueue(text: string, homeDepartmentId: number): QueueRedirect | null {
-  const t = String(text ?? '').toLowerCase();
+  const t = fold(text);
   if (!t.trim()) return null;
 
   const mentionsSurgery = hit(t, SURGERY_CUES);
