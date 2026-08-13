@@ -159,6 +159,27 @@ the same problem and is **not yet done** — it is ~2,000 lines and books real
 appointments through the Eye Care rules engine, a different contract from a
 queue agent.
 
+## Rewriting a prompt that encodes incidents — Scheduling, 2026-08-13
+
+`azulSchedulingAgent`'s prompt was ~275 lines and almost every line was paid for
+by a real call. Restyling it into the house voice is exactly the change that
+silently drops one and looks fine in review.
+
+What made it safe: **extract the prompt to its own module, then assert the RULES
+survived, not the wording.** `azulSchedulingPrompt.test.ts` names each rule and
+what it protects — "seven refused handoffs in 34 seconds", "Oct 25 verified as
+January 25", "five callers ended with nothing". Whitespace-tolerant matching, so
+a re-wrap does not break it.
+
+**The rewrite found a contradiction no reader had caught.** The prompt said,
+under *What you cannot do*: "You cannot reschedule — cancel + book through the
+allowed flow." Four sections earlier it said: "NEVER cancel their appointment
+and then look for a new time." Both shipped together, with `sage_reschedule`
+registered as a real tool. The stale line instructed the exact failure the
+reschedule flow calls SERIOUS — `cancelled_not_rebooked`, where the old
+appointment is gone and the new one did not take. A prompt long enough to
+contradict itself will, and only reading it end to end finds it.
+
 ## Greeting personalisation
 
 `src/services/greetingPersonalisation.ts`. `greetingStyleFor` returns `'append'`

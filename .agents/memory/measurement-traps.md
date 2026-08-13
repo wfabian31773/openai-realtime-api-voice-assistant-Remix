@@ -89,6 +89,36 @@ a prefix of itself".
 When a mechanism has been asserted and confirmed but nobody has pointed at the
 line that does it, it is still a hypothesis. Say so in the sentence.
 
+## A test that reads the wall clock is not flaky — it is wrong at a known time
+
+Six `handoffPolicy` tests and four `director` tests failed on 2026-08-13 at
+12:05 Pacific and passed at 12:05 every other hour. `resolveHandoffDestination`
+and `PcpDirector` read the real clock for the **12:00–13:00 lunch closure**
+unless it is injected, and these tests did not inject it. Both already
+supported injection; `lunchClosure.test.ts` used it correctly, so the gap was
+invisible from the code.
+
+The trap is the diagnosis, not the bug: they went red in the middle of an
+unrelated change and looked exactly like a regression I had just caused.
+**Confirm a failure exists on a clean checkout before debugging it** — `git
+stash`, re-run, compare. Every PCP director and policy test now pins the clock.
+
+## Import-time database connections make code impossible to LOOK AT
+
+`azulSchedulingAgent.ts` imports `toolTimeline`, which opens a DB connection at
+import, so the whole module threw `DATABASE_URL: Required` in any test. The
+largest prompt in the fleet — ~275 lines, roughly thirty rules each paid for by
+a real call — could not be asserted on at all.
+
+That is the same shape as the ticketing app's reason-159 classifier: it also
+connected at import, so it had no tests, could not be loaded to inspect, and a
+two-character keyword sat in it for months while two agents guessed at the
+mechanism. **The bug was not hard to see, it was impossible to look at.**
+
+The fix is mechanical: extract the pure part into a module that imports nothing
+stateful (`agents/azulSchedulingPrompt.ts`) and re-export it. `p0Hardening.test.ts`
+still fails this way and is the remaining instance.
+
 ## A deploy that did not take looks exactly like a fix that did not work
 
 Wayne pulls and republishes on Replit. On 2026-08-11 a GitHub rate limit made his

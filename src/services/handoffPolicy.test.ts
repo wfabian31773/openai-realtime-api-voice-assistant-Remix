@@ -1,3 +1,16 @@
+/**
+ * THE CLOCK IS PINNED ON EVERY PCP CASE BELOW, and it has to be.
+ *
+ * `resolveHandoffDestination` reads the real Pacific clock for the 12:00-13:00
+ * lunch closure unless `lunchClosure` is passed. These tests did not pass it,
+ * so six of them failed for one hour a day, every day, and passed the other
+ * twenty-three -- which is why nobody noticed. Found on 2026-08-13 at 12:05
+ * Pacific, while checking whether an unrelated change had broken them.
+ *
+ * A test that depends on the wall clock is not a flaky test, it is a test that
+ * is wrong at a predictable time. Lunch behaviour has its own file,
+ * `lunchClosure.test.ts`, which pins it in both directions.
+ */
 import { describe, expect, it } from 'vitest';
 import { resolveHandoffDestination, resolvePcpDialSequence } from './handoffPolicy';
 import { PCP_CALL_PURPOSES } from '../pcp/policy';
@@ -11,12 +24,12 @@ describe('slug-aware handoff policy', () => {
   });
 
   it('allows only PCP handoff reasons on the PCP line', () => {
-    expect(resolveHandoffDestination({ agentSlug: 'pcp', callerType: 'peer_to_peer', pcpNumber: '+15550000002', clinicalNumber: '+15550000001' })).toEqual({ allowed: true, destination: '+15550000002', policy: 'pcp' });
-    expect(resolveHandoffDestination({ agentSlug: 'pcp', callerType: 'patient_urgent', pcpNumber: '+15550000002' }).allowed).toBe(false);
+    expect(resolveHandoffDestination({ agentSlug: 'pcp', lunchClosure: false, callerType: 'peer_to_peer', pcpNumber: '+15550000002', clinicalNumber: '+15550000001' })).toEqual({ allowed: true, destination: '+15550000002', policy: 'pcp' });
+    expect(resolveHandoffDestination({ agentSlug: 'pcp', lunchClosure: false, callerType: 'patient_urgent', pcpNumber: '+15550000002' }).allowed).toBe(false);
   });
 
   it('fails closed when the PCP destination is missing', () => {
-    expect(resolveHandoffDestination({ agentSlug: 'pcp', callerType: 'grievance_follow_up', clinicalNumber: '+15550000001' })).toEqual({ allowed: false, reason: 'pcp_destination_not_configured' });
+    expect(resolveHandoffDestination({ agentSlug: 'pcp', lunchClosure: false, callerType: 'grievance_follow_up', clinicalNumber: '+15550000001' })).toEqual({ allowed: false, reason: 'pcp_destination_not_configured' });
   });
 
   it('sends every PCP transfer to the queue and nowhere else', () => {
@@ -57,14 +70,14 @@ describe('destination normalization', () => {
   });
 
   it('normalizes the destination the handoff actually dials', () => {
-    expect(resolveHandoffDestination({ agentSlug: 'pcp', callerType: 'peer_to_peer', pcpNumber: '714-956-4300' }))
+    expect(resolveHandoffDestination({ agentSlug: 'pcp', lunchClosure: false, callerType: 'peer_to_peer', pcpNumber: '714-956-4300' }))
       .toEqual({ allowed: true, destination: '+17149564300', policy: 'pcp' });
     expect(resolveHandoffDestination({ agentSlug: 'after-hours', callerType: 'patient_urgent', clinicalNumber: '714-956-4300' }))
       .toEqual({ allowed: true, destination: '+17149564300', policy: 'clinical' });
   });
 
   it('still fails closed on an unset or empty destination', () => {
-    expect(resolveHandoffDestination({ agentSlug: 'pcp', callerType: 'peer_to_peer', pcpNumber: '   ' }))
+    expect(resolveHandoffDestination({ agentSlug: 'pcp', lunchClosure: false, callerType: 'peer_to_peer', pcpNumber: '   ' }))
       .toEqual({ allowed: false, reason: 'pcp_destination_not_configured' });
     expect(resolvePcpDialSequence({ mode: 'queue', queueNumber: '', agentDids: [] })).toEqual([]);
   });
@@ -87,14 +100,14 @@ describe('PCP transfer eligibility tracks the purpose table', () => {
 
   it('accepts every purpose the policy table allows to hand off', () => {
     const refused = eligible.filter(
-      (slug) => !resolveHandoffDestination({ agentSlug: 'pcp', callerType: slug, pcpNumber: QUEUE }).allowed,
+      (slug) => !resolveHandoffDestination({ agentSlug: 'pcp', lunchClosure: false, callerType: slug, pcpNumber: QUEUE }).allowed,
     );
     expect(refused).toEqual([]);
   });
 
   it('routes scheduling requests to the PCP queue', () => {
     for (const slug of ['schedule_appointment', 'reschedule_appointment', 'cancel_appointment']) {
-      expect(resolveHandoffDestination({ agentSlug: 'pcp', callerType: slug, pcpNumber: QUEUE }))
+      expect(resolveHandoffDestination({ agentSlug: 'pcp', lunchClosure: false, callerType: slug, pcpNumber: QUEUE }))
         .toEqual({ allowed: true, destination: QUEUE, policy: 'pcp' });
     }
   });
@@ -103,13 +116,13 @@ describe('PCP transfer eligibility tracks the purpose table', () => {
     // e.g. patient_medical_records_request stays on its isolated manual-review path.
     expect(ineligible).toContain('patient_medical_records_request');
     const wronglyAllowed = ineligible.filter(
-      (slug) => resolveHandoffDestination({ agentSlug: 'pcp', callerType: slug, pcpNumber: QUEUE }).allowed,
+      (slug) => resolveHandoffDestination({ agentSlug: 'pcp', lunchClosure: false, callerType: slug, pcpNumber: QUEUE }).allowed,
     );
     expect(wronglyAllowed).toEqual([]);
   });
 
   it('still fails closed on an unknown caller type', () => {
-    expect(resolveHandoffDestination({ agentSlug: 'pcp', callerType: 'not_a_purpose', pcpNumber: QUEUE }))
+    expect(resolveHandoffDestination({ agentSlug: 'pcp', lunchClosure: false, callerType: 'not_a_purpose', pcpNumber: QUEUE }))
       .toEqual({ allowed: false, reason: 'pcp_reason_not_allowed' });
   });
 });
