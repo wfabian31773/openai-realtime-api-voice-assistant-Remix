@@ -164,24 +164,26 @@ registerTool({
       ...(cleanProvider ? { providerName: cleanProvider } : {}),
     });
     if (!lookup.locationId) {
-      // Refuse rather than file something nobody will see. The agent can ask
-      // again; an unassigned optical ticket is indistinguishable from a lost one.
-      return {
-        success: false,
-        error: `no optical office matched "${cleanLocation}"`,
-        retryable: true,
-        ...(lookup.locationMatches?.length
-          ? {
-              message:
-                `I have a few offices that could be it — ` +
-                `${lookup.locationMatches.map((m) => m.name).join(', ')}. Which one do they mean?`,
-            }
-          : {
-              message:
-                `I could not match that to one of our offices. Ask the caller which office ` +
-                `they visit, then call resolve_location with their answer before filing.`,
-            }),
-      };
+      /**
+       * A NAME THAT DOES NOT MATCH IS NOT A TRANSIENT ERROR, and this used to
+       * say `retryable: true` while telling the agent to go and call
+       * resolve_location again. It did — nine times in a row, on one 236-second
+       * call on 2026-08-13 where the caller said "Downtown LA" and we have no
+       * optical office there.
+       *
+       * Refuse rather than file something nobody will see — an unassigned
+       * optical ticket is indistinguishable from a lost one, and this queue
+       * assigns BY location. But refuse as a MISSING FIELD, which is the
+       * envelope the prompts already teach the agent to answer by speaking to
+       * the caller, rather than as an error it is invited to retry.
+       */
+      const candidates = lookup.locationMatches?.length
+        ? ` I have ${lookup.locationMatches.map((m) => m.name).join(', ')} — is it one of those?`
+        : '';
+      return missing(
+        ['location'],
+        `I'm not finding an office by that name — which city is your optical office in?${candidates}`,
+      );
     }
 
     // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
