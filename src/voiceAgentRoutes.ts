@@ -1169,7 +1169,15 @@ function sendUrgentTransferSms(opts: {
 }
 
 // Handle human agent handoff
-type HandoffOutcome = { ok: true; destination: string } | { ok: false; status: string; reason: string };
+type HandoffOutcome =
+  | { ok: true; destination: string }
+  // `destination` on the failure side is what we ACTUALLY dialled. Recording
+  // it only on success cost the PCP investigation its whole evidence base:
+  // 46 no-answers in the 90 days to 2026-08-13, every one with a null
+  // destination, so "was the queue DID not answering, or were we dialling the
+  // retired roster?" has no answer in the data. Optional because two failures
+  // happen before a destination is resolved at all.
+  | { ok: false; status: string; reason: string; destination?: string };
 
 async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
   // Use wrapper function that checks both legacy maps and service cache
@@ -1223,7 +1231,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
 
   if (!callerID) {
     console.error('[HANDOFF] ✗ Missing callerID');
-    return { ok: false, status: 'FAILED', reason: 'caller_id_missing' };
+    return { ok: false, status: 'FAILED', reason: 'caller_id_missing', destination: handoffDestination };
   }
 
   // WHERE the urgent call goes. Until 2026-08-03 this was always the global
@@ -1296,9 +1304,14 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
         'Press any key to accept, or remain on the line to connect.',
       ].filter(Boolean).join(' ');
       for (let index = 0; index < pcpDialSequence.length; index += 1) {
-        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected' };
+        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected', destination: handoffDestination };
         const destination = pcpDialSequence[index];
-        console.log(`[HANDOFF] PCP sequential attempt ${index + 1}/${pcpDialSequence.length}`);
+        // Set BEFORE the dial, not only on success. Every failure return below
+        // reports this, and a failed PCP handoff that records no destination is
+        // an unanswerable question later — which is exactly what the 46
+        // no-answers in the 90 days to 2026-08-13 are.
+        handoffDestination = destination;
+        console.log(`[HANDOFF] PCP sequential attempt ${index + 1}/${pcpDialSequence.length} -> ${destination}`);
         if (index > 0) {
           pcpHandoffProgress.get(openAiCallId)?.(
             `Say exactly: "That team member wasn't available, so I'm trying the next person now. Please stay with me." Say nothing else.`,
@@ -1332,7 +1345,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
           // completion of it never ran.
           break;
         }
-        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected' };
+        if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected', destination: handoffDestination };
         console.warn(`[HANDOFF] PCP sequential attempt ${index + 1} was not accepted: ${outcome.detail || 'unknown'}`);
       }
       // Only when the loop exhausted every destination without an accept —
@@ -1341,7 +1354,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
         pcpHandoffProgress.get(openAiCallId)?.(
           'Say exactly: "Thanks for holding. I couldn’t reach the team live, but your PCP request has already been recorded for follow-up." Say nothing else and do not claim a transfer occurred.',
         );
-        return { ok: false, status: 'NO_ANSWER', reason: 'pcp_sequence_no_answer' };
+        return { ok: false, status: 'NO_ANSWER', reason: 'pcp_sequence_no_answer', destination: handoffDestination };
       }
     }
 
@@ -1438,7 +1451,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
           dialTarget: handoffDestination,
         });
       }
-      return { ok: false, status: 'FAILED', reason: 'dial_failed' };
+      return { ok: false, status: 'FAILED', reason: 'dial_failed', destination: handoffDestination };
     }
 
     // STEP 3: Wait for human to actually answer before disconnecting AI
@@ -1457,14 +1470,14 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       // PCP creates its own structured ticket before dialing. Never route a
       // professional-caller failure into the patient/after-hours contract.
       if (policy.policy === 'pcp') {
-        return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer' };
+        return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer', destination: handoffDestination };
       }
       await fileUrgentHandoffFallbackTicket(openAiCallId, escalationDetails, callerID, {
         why: 'URGENT TRANSFER NOT ANSWERED: The patient was transferred but no one picked up.',
         dialTarget: handoffDestination,
       });
 
-      return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer' };
+      return { ok: false, status: 'NO_ANSWER', reason: 'human_no_answer', destination: handoffDestination };
     }
     }
     
