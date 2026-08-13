@@ -46,6 +46,33 @@ const OPTICAL = 1;
 const SURGERY = 2;
 const TECH = 3;
 const HVA_HUB = 9;
+/**
+ * Medical Records is a HOME department here, never a destination.
+ *
+ * Nothing redirects INTO it: "can I get a copy of my records" on the optical
+ * line is a question the optician can pass along, and a records team is not a
+ * place to send a call on a keyword. But records requests constantly name
+ * another department's subject — "the notes from the surgery I had on 7/30",
+ * "a copy of my glasses prescription" — and without a guard those would be
+ * dragged off the records queue by the surgery and optical cues below.
+ */
+const MEDICAL_RECORDS = 16;
+
+/**
+ * What a records request sounds like. Used ONLY to keep such a request on the
+ * records line, never to route one there.
+ */
+const RECORDS_CUES = [
+  // Deliberately broad, and safe because it is CONSULTED ONLY when the call
+  // arrived on the records line. On that line a document word is the default
+  // reading — "the notes from the surgery she had on 7/30" is a records
+  // request, not a surgery one. It is still specific enough that a genuine
+  // optical request reaching this line ("my glasses broke") routes onward, as
+  // the operator's ruling requires.
+  'record', 'chart', 'note', 'report', 'documentation',
+  'copy of', 'copies of', 'release of information',
+  'expediente', 'historial', 'copia', 'copias', 'informe',
+];
 
 /**
  * Appointment scheduling, which the operator routed to the HVA Hub from every
@@ -186,6 +213,20 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   // a clear signal from elsewhere. See TECH_CUES_STRONG.
   const mentionsMedicationClearly = hit(t, TECH_CUES_STRONG);
 
+  /**
+   * A records request on the records line stays there, whatever else it names.
+   *
+   * "The notes from the surgery she had on 7/30, the PCP has not got the
+   * report" is a real department 16 ticket. Every subject-matter rule below
+   * would pull it into Surgery on the words "the surgery", and the records team
+   * would never see it. Same for "a copy of my glasses prescription".
+   *
+   * Scheduling is deliberately NOT covered by this guard — the operator's
+   * ruling is that schedule-related requests go to the Hub from every queue,
+   * and a records line is one of them.
+   */
+  const holdsOnRecordsLine = homeDepartmentId === MEDICAL_RECORDS && hit(t, RECORDS_CUES);
+
   // 1. Appointments -> HVA Hub, from anywhere, unless it is a surgery date.
   if (!mentionsSurgery) {
     for (const s of SCHEDULING) {
@@ -207,6 +248,7 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   if (
     homeDepartmentId !== OPTICAL &&
     mentionsOptical &&
+    !holdsOnRecordsLine &&
     !(homeDepartmentId === TECH && mentionsMedicationClearly) &&
     !(homeDepartmentId === SURGERY && mentionsSurgery)
   ) {
@@ -228,6 +270,7 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   if (
     homeDepartmentId !== SURGERY &&
     mentionsSurgery &&
+    !holdsOnRecordsLine &&
     !(homeDepartmentId === TECH && mentionsMedicationClearly)
   ) {
     return {
@@ -241,7 +284,13 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   }
 
   // 4. Medication, when it is unmistakably a prescription matter.
-  if (homeDepartmentId !== TECH && mentionsMedication && !mentionsSurgery && !mentionsOptical) {
+  if (
+    homeDepartmentId !== TECH &&
+    mentionsMedication &&
+    !holdsOnRecordsLine &&
+    !mentionsSurgery &&
+    !mentionsOptical
+  ) {
     return {
       departmentId: TECH,
       departmentName: 'Clinical Tech Support',

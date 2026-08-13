@@ -1994,7 +1994,7 @@ async function observeCall(
   // It MUST be listed here — an unknown slug is silently coerced to
   // 'after-hours' below, which would have made the demo line quietly answer
   // as the after-hours agent.
-  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
+  const validAgentSlugs = ['no-ivr', 'dev-no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'azul-scheduling', 'pcp', 'drs-scheduler', 'appointment-confirmation', 'fantasy-football', 'demo'];
   const legacyDeletedSlugs = ['greeter', 'non-urgent-ticketing'];
   
   let effectiveSlug = agentSlug || 'no-ivr';
@@ -2189,7 +2189,7 @@ async function observeCall(
   // persons incl. chartless) and is NOT pilot-fenced — verified in the
   // service's sage-tools.ts — so it is correct for the practice-wide
   // answering-service and no-ivr lines, not just the SD pilot.
-  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'optical', 'surgery', 'tech', 'no-ivr', 'dev-no-ivr']);
+  const PRECONTEXT_SLUGS = new Set(['azul-scheduling', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'no-ivr', 'dev-no-ivr']);
   if (PRECONTEXT_SLUGS.has(effectiveSlug) && from) {
     azulPrecontextPromise = import('./agents/azulSchedulingAgent')
       .then(({ fetchAzulPrecontext }) => fetchAzulPrecontext(from))
@@ -2562,6 +2562,39 @@ async function observeCall(
         //     "Thank you for calling Azul" / "Am I speaking with Wayne?"
         azulMetadataRef = techMeta;
         factoryResult = agentFactory(undefined, techMeta);
+        break;
+      }
+
+      case 'records': {
+        // The Medical Records queue. Same shape as the other queue lines: its
+        // own number, so the call is a records matter because of the line it
+        // rang.
+        //
+        // NO handoff callback, deliberately: operator ruling 2026-08-12, only
+        // PCP and Scheduling transfer.
+        //
+        // The caller here is often NOT the patient — another clinic, a health
+        // plan, an attorney's office. precontext still resolves the NUMBER, and
+        // the prompt says so, so a match is never read as "this is the patient".
+        const recordsPrecontext = await racePrecontext();
+        console.log(
+          `[Records] Pre-context for ...${(from || '').slice(-4)}: ` +
+            `${recordsPrecontext?.matched ? `matched '${recordsPrecontext.firstName}'` : 'no unique match'}`,
+        );
+        const recordsMeta = {
+          callId,
+          callSid: twilioCallSid,
+          callerPhone: from,
+          dialedNumber: to,
+          precontext: recordsPrecontext ?? undefined,
+          get callLogId() { return liveCallLogId(); },
+        };
+        // Register the precontext for the GREETING, not just the prompt — see
+        // the note in the tech case. Without this the model gets the forced
+        // greeting AND a prompt saying the greeting already played, and the
+        // caller hears it cut itself off mid-phrase.
+        azulMetadataRef = recordsMeta;
+        factoryResult = agentFactory(undefined, recordsMeta);
         break;
       }
 
@@ -4797,7 +4830,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         // number and runs the ticket agent. This list is a SECOND allowlist,
         // separate from validAgentSlugs in observeCall(); both must know a slug
         // or the call is silently answered by the after-hours agent.
-        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'azul-scheduling', 'pcp', 'demo'];
+        const validInboundAgents = ['no-ivr', 'after-hours', 'answering-service', 'optical', 'surgery', 'tech', 'records', 'azul-scheduling', 'pcp', 'demo'];
         const validOutboundAgents = ['drs-scheduler', 'appointment-confirmation', 'fantasy-football'];
         const legacyDeletedAgents = ['greeter', 'non-urgent-ticketing'];
         
@@ -5733,6 +5766,18 @@ export function setupVoiceAgentRoutes(app: Express): void {
       'Thank you for calling Azul Vision clinical support. All of our technicians are ' +
       'currently assisting other patients, but I can take a message and they will follow ' +
       'up with you. How can I help you today?',
+  });
+
+  // Point the Medical Records number's Twilio voice webhook here. Until that
+  // number exists the route is harmless: nothing dials it.
+  registerOverflowLine({
+    path: '/api/voice/records',
+    slug: 'records',
+    tag: 'RECORDS',
+    greeting:
+      'Thank you for calling Azul Vision medical records. Our records team is currently ' +
+      'assisting other patients, but I can take the details and they will follow up with ' +
+      'you. How can I help you today?',
   });
 
   // THE DEMO LINE (+1 626-548-2660). Its own webhook so it can never inherit

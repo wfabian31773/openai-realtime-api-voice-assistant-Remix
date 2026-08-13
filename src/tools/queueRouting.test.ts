@@ -131,6 +131,46 @@ describe('Spanish appointment requests reach the Hub', () => {
   });
 });
 
+/**
+ * Medical Records is a home department, never a destination.
+ *
+ * Records requests name other departments' subjects constantly, because a
+ * record is always a record OF something. Without a guard the surgery and
+ * optical cues drag them off the records queue.
+ */
+describe('a records request stays on the records line', () => {
+  const RECORDS = 16;
+
+  it('keeps surgery notes with Medical Records', () => {
+    // Real department 16 ticket: "requesting the notes from the sx she had on
+    // 7/30/26 from Dr. Tompkins as pcp has not gotten the report".
+    expect(detectCrossQueue('the notes from the surgery she had on 7/30, her pcp has not gotten the report', RECORDS)).toBeNull();
+    expect(detectCrossQueue('I need the records from my cataract surgery', RECORDS)).toBeNull();
+  });
+
+  it('keeps a glasses prescription copy with Medical Records', () => {
+    expect(detectCrossQueue('Request for Copies of Glasses and Contact Lens Prescriptions', RECORDS)).toBeNull();
+  });
+
+  it('keeps a medication list request with Medical Records', () => {
+    expect(detectCrossQueue('she needs a copy of her chart including the medication list', RECORDS)).toBeNull();
+  });
+
+  it('still sends a scheduling request from the records line to the Hub', () => {
+    // The guard covers subject matter, not the operator's scheduling ruling.
+    expect(detectCrossQueue('while I have you, I need to reschedule my appointment', RECORDS)?.departmentId).toBe(HVA);
+  });
+
+  it('does not route anything INTO Medical Records', () => {
+    // Nothing here returns department 16. A records team is not a place to send
+    // a call on a keyword — the optician can pass a records question along.
+    for (const home of [OPTICAL, SURGERY, TECH, HVA]) {
+      const r = detectCrossQueue('can I get a copy of my medical records', home);
+      expect(r?.departmentId ?? null, `from department ${home}`).not.toBe(16);
+    }
+  });
+});
+
 describe('the operator\'s example: optical question on the medication line', () => {
   it('routes glasses from Tech Support to Optical', () => {
     const r = detectCrossQueue('my glasses broke at the hinge', TECH);
