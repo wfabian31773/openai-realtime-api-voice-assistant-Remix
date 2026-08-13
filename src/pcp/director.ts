@@ -119,8 +119,22 @@ export class PcpDirector {
 
   next(callId: string): PcpDirectorDecision {
     const state = this.get(callId);
-    const required = [...PROFESSIONAL_FIELDS];
     const purpose = state.callPurpose ? getPcpCallPurpose(state.callPurpose) : undefined;
+
+    // A PATIENT IS NOT ASKED FOR A ROLE, AN ORGANISATION OR A FACILITY TYPE.
+    //
+    // PROFESSIONAL_FIELDS is the right intake for a clinic calling about a
+    // mutual patient and absurd for the patient themselves: "What type of
+    // healthcare organization is that?" is not a question a person ringing
+    // about their own eye drops can answer, and the transcripts show those
+    // calls dying in the intake.
+    //
+    // What a callback actually needs from a patient is a name, a number and
+    // what they want. That is the whole list.
+    const isPatient = state.callPurpose === 'patient_caller';
+    const required: Array<keyof PcpConversationState> = isPatient
+      ? ['callerName', 'callbackNumber', 'callPurpose']
+      : [...PROFESSIONAL_FIELDS];
 
     // Purposes whose destination is a live human do not gate the transfer on patient
     // context: minimum professional identity is enough to connect. Details may be
@@ -161,7 +175,13 @@ export class PcpDirector {
     // An explicit ask for a person is eligible on its own: no purpose
     // required, no completed intake required. Lunch closure and a previously
     // failed handoff still apply — those are about whether anyone can pick up.
-    const askedForAPerson = Boolean(state.callerRequestedHuman);
+    //
+    // NOT for a patient, however plainly they ask. The destination is the PCP
+    // queue — staffed to talk to clinics — and dialling a patient into it is
+    // worse than the honest answer that this line will take a message and the
+    // right team will call back. 117 of 419 callers asked for a person on this
+    // line, and a large share of them were patients.
+    const askedForAPerson = Boolean(state.callerRequestedHuman) && !isPatient;
     const eligibleByAsk = askedForAPerson && !handoffFailed && !(lunchClosure);
     if (eligibleByAsk && disposition !== 'HAND_OFF' && !handoffFailed && !lunchClosure) disposition = 'HAND_OFF';
     const handoffEligible =

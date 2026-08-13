@@ -20,6 +20,7 @@ export const PCP_CALL_PURPOSE_SLUGS = [
   'peer_to_peer',
   'patient_medical_records_request',
   'pharmaceutical_representative',
+  'patient_caller',
 ] as const;
 
 export type PcpCallPurposeSlug = (typeof PCP_CALL_PURPOSE_SLUGS)[number];
@@ -67,6 +68,27 @@ export const PCP_CALL_PURPOSES: readonly PcpCallPurpose[] = [
   { slug: 'grievance_follow_up', defaultDisposition: 'HAND_OFF', allowedDispositions: ['HAND_OFF', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'peer_to_peer', defaultDisposition: 'HAND_OFF', allowedDispositions: ['HAND_OFF', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'patient_medical_records_request', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
+  // A PATIENT REACHED THE PROFESSIONAL LINE, which happens constantly.
+  //
+  // Measured over PCP's only two full days (2026-08-06/07, 419 calls): 117
+  // callers asked for a person or an operator, and the transcripts are full of
+  // patients — "I want to call the doctor office and I want the refer some my
+  // eye doctor medicine", "My doctor requested a pharmacy". The prompt opens
+  // "this line is for healthcare professionals", the intake asks for a role and
+  // an organisation, and handoffPolicy refuses a transfer for any caller type
+  // that is not a PCP one. So a patient on this line had no path at all.
+  //
+  // CREATE_TASK ONLY, and that is load-bearing twice over. PCP_CALLER_TYPES in
+  // handoffPolicy is DERIVED from the purposes that allow HAND_OFF, so leaving
+  // it off this list is what stops a patient being dialled into the PCP
+  // queue — a queue staffed to talk to clinics, not to patients. The derived
+  // set means nobody has to remember to add an exclusion.
+  //
+  // The ticket does not stay in department 18 either: create_pcp_task files a
+  // patient's request through the same cross-queue routing every other line
+  // uses, so a refill reaches Clinical Tech Support and an appointment reaches
+  // the scheduling hub. Nobody is told to call back — the operator's ruling.
+  { slug: 'patient_caller', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK'], patientContextRequired: false, authoritativeSource: null, containsPhi: true },
   { slug: 'pharmaceutical_representative', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: false, authoritativeSource: null, containsPhi: false },
 ];
 

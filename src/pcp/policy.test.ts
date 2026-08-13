@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   PCP_CALL_PURPOSES,
+  PCP_CALL_PURPOSE_SLUGS,
   classifyPcpToolAccess,
   getPcpCallPurpose,
   resolvePcpHandoffPolicy,
@@ -8,7 +9,11 @@ import {
 
 describe('PCP policy', () => {
   it('defines one deterministic default disposition for every supported purpose', () => {
-    expect(PCP_CALL_PURPOSES).toHaveLength(18);
+    // One entry per slug — the actual invariant. A hardcoded count (it was 18)
+    // fails on every legitimate addition and says nothing about coherence;
+    // `patient_caller` tripped it in 2026-08-13 without anything being wrong.
+    expect(PCP_CALL_PURPOSES).toHaveLength(PCP_CALL_PURPOSE_SLUGS.length);
+    expect(new Set(PCP_CALL_PURPOSES.map((p) => p.slug))).toEqual(new Set(PCP_CALL_PURPOSE_SLUGS));
     for (const purpose of PCP_CALL_PURPOSES) {
       expect(['AUTOMATE', 'CREATE_TASK', 'HAND_OFF']).toContain(purpose.defaultDisposition);
       expect(purpose.allowedDispositions).toContain(purpose.defaultDisposition);

@@ -71,6 +71,14 @@ SERVER AUTHORITY:
 - Do not attempt verification on the call. Store the request as pending for staff verification after intake.
 - Use handle_patient_medical_records_request only when the caller explicitly requests copies or release of a patient's medical record. Never use it for peer-to-peer, medical-group, referral, grievance, or other PCP requests; those remain in their own PCP purpose.
 
+IF A PATIENT REACHES THIS LINE, TAKE THEIR REQUEST — DO NOT INTERROGATE THEM:
+- This number is published for healthcare organizations, and patients ring it anyway. That is not their mistake to fix.
+- The moment it is clear you are speaking to a patient or their family rather than a clinic — they say "I'm a patient", they ask about their own eyes, their own medication, their own appointment, or they simply cannot answer "which organization are you calling from" — record call_purpose as patient_caller.
+- Then STOP asking professional questions. No role, no organization, no facility type, no "professional relationship to this patient". Ask only for their name, a callback number, and what they need.
+- File it with create_pcp_task. It routes their request to the right team automatically and tells you which in routed_to. Use THAT name when you say what happens next.
+- You cannot transfer a patient. This queue is staffed to speak with clinics. If they ask for a person, say plainly: "I'm not able to put you through from this line, but I'll take this down and the right team will call you back." Then take it. Never promise a transfer you cannot make.
+- Never say "wrong number", "wrong extension", "you've reached the provider line" or "you'll need to call another number". They rang us, and that is enough.
+
 DISPOSITIONS:
 - AUTOMATE: answer only from an allowed authoritative tool, then record_automated_resolution.
 - CREATE_TASK: use create_pcp_task and read back the ticket number.
@@ -345,6 +353,77 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       if (disposition === 'HAND_OFF' && pcpDirector.next(callId).disposition !== 'HAND_OFF') {
         return { success: false, error: 'director_disposition_mismatch' };
       }
+      // A PATIENT'S REQUEST DOES NOT BELONG IN DEPARTMENT 18.
+      //
+      // The PCP endpoint files a professional-caller record — caller role,
+      // organisation, facility type, the CAP-adjacent records pathway. None of
+      // that describes a patient ringing about their own eye drops, and a
+      // ticket sitting in PCP Support is one a person has to move by hand.
+      //
+      // So a patient files through the SAME create-ticket path and the SAME
+      // cross-queue routing every other line uses: a refill reaches Clinical
+      // Tech Support, glasses reach Optical, an appointment reaches the
+      // scheduling hub. Nothing new was built for this — it is the machinery
+      // that is already live on four queues.
+      //
+      // When the words match nothing, it lands on department 18's own
+      // "Other - See Description" rather than being guessed at.
+      if (state.callPurpose === 'patient_caller') {
+        const [{ detectCrossQueue }, { otherReasonFor }, { ticketingApiClient }, { sanitizeForSms }] =
+          await Promise.all([
+            import('../tools/queueRouting'),
+            import('../tools/otherReason'),
+            import('../../server/services/ticketingApiClient'),
+            import('../services/gsm7'),
+          ]);
+
+        const PCP_DEPARTMENT_ID = 18;
+        const redirect = detectCrossQueue(narrative, PCP_DEPARTMENT_ID);
+        // Never null for 18, but handled rather than asserted: a missing
+        // catch-all must not silently file into another department's Other.
+        const home = otherReasonFor(PCP_DEPARTMENT_ID);
+        if (!redirect && !home) return { success: false, error: 'no_catchall_for_pcp' };
+        const body = sanitizeForSms(
+          [
+            'Patient called the PCP Support line.',
+            redirect ? redirect.note : null,
+            '',
+            narrative,
+          ].filter((l) => l !== null).join('\n'),
+        ).value;
+
+        const nameParts = String(state.callerName ?? '').trim().split(/\s+/);
+        const patientResult = await ticketingApiClient.createTicket({
+          departmentId: redirect?.departmentId ?? PCP_DEPARTMENT_ID,
+          requestTypeId: redirect?.requestTypeId ?? home!.requestTypeId,
+          requestReasonId: redirect?.requestReasonId ?? home!.requestReasonId,
+          patientFirstName: nameParts[0] || 'Unknown',
+          patientLastName: nameParts.slice(1).join(' ') || 'Caller',
+          patientPhone: String(state.callbackNumber ?? metadata.callerPhone ?? ''),
+          preferredContactMethod: 'phone',
+          description: body,
+          priority: urgency === 'urgent' || urgency === 'high' ? 'high' : 'medium',
+          callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
+        });
+
+        if (!patientResult.success || !patientResult.ticketNumber) {
+          return { success: false, error: patientResult.error ?? 'ticket_creation_failed', retryable: true };
+        }
+        pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+        console.info(
+          `[PCP] patient caller filed to ${redirect ? redirect.departmentName : 'PCP Support'} ` +
+            `(dept ${redirect?.departmentId ?? PCP_DEPARTMENT_ID}) as ${patientResult.ticketNumber}`,
+        );
+        return {
+          success: true,
+          ticketNumber: patientResult.ticketNumber,
+          ...(redirect ? { routed_to: redirect.departmentName } : {}),
+          message: redirect
+            ? `Filed as ${patientResult.ticketNumber} with our ${redirect.departmentName} team. Read the ticket number back and say that team will follow up.`
+            : `Filed as ${patientResult.ticketNumber}. Read the ticket number back to the caller.`,
+        };
+      }
+
       const response = await submitPcpTicket(
         buildPayload(metadata, state, disposition, narrative, urgency, undefined, failureInformation, missing),
       );
