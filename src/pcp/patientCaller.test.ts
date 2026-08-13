@@ -140,3 +140,44 @@ describe('the purpose table stays coherent', () => {
     expect(new Set(slugs).size).toBe(slugs.length);
   });
 });
+
+/**
+ * A patient asking the PCP line for their own records goes to Medical Records,
+ * and onto the clock. Operator ruling, 2026-08-13: "yes to patients routing
+ * to 16".
+ *
+ * Nothing ELSE routes into department 16 — a records team is not somewhere to
+ * send a call on a keyword, and a request arriving without a known requester
+ * lets the ticketing app default the mr_cases pathway to `roa_patient`, which
+ * is the defect that put all 470 existing cases on a 15-day statutory clock.
+ *
+ * This path is the exception because it is the one place we KNOW: the purpose
+ * IS patient_caller, so the requester is stated rather than inferred.
+ */
+describe('a patient\'s records request leaves the PCP line for department 16', () => {
+  it('recognises the records language the taxonomy already knows', async () => {
+    const { classifyRecords } = await import('../tools/medicalRecordsTaxonomy');
+
+    expect(classifyRecords('I need a copy of my records')?.requestReasonId).toBe(500);
+    expect(classifyRecords('can you send my chart to my new doctor')?.requestReasonId).toBe(502);
+    expect(classifyRecords("I need a doctor's note for work")?.requestReasonId).toBe(504);
+  });
+
+  it('puts a patient on the clock under the right-of-access pathway', async () => {
+    const { determineCapClock } = await import('../tools/medicalRecordsTaxonomy');
+    const cap = determineCapClock('patient');
+
+    expect(cap.onClock).toBe(true);
+    expect(cap.pathway).toBe('roa_patient');
+    expect(cap.note).toMatch(/CAP reportable/i);
+  });
+
+  it('still leaves a non-records patient request to cross-queue routing', async () => {
+    // The records branch must not swallow everything. A refill is a refill.
+    const { classifyRecords } = await import('../tools/medicalRecordsTaxonomy');
+    const { detectCrossQueue } = await import('../tools/queueRouting');
+
+    expect(classifyRecords('I need a refill on my eye drops')).toBeNull();
+    expect(detectCrossQueue('I need a refill on my eye drops', 18)?.departmentId).toBe(3);
+  });
+});

@@ -174,6 +174,39 @@ registerTool({
     const requesterType = classifyRequester(requesterRaw) ?? 'other';
     const cap = determineCapClock(requesterType);
 
+    // ON THE CLOCK MEANS THE FIELDS ARE NOT OPTIONAL.
+    //
+    // Operator, 2026-08-13: "can we hard gate the records to require the
+    // appropriate fields". For a patient right-of-access request the practice
+    // must report on timing under the CAP, and an `mr_cases` row is built from
+    // exactly these: what records, over what dates, delivered how. A case
+    // opened without them starts a statutory clock that nobody can actually
+    // work, which is the worst of both.
+    //
+    // GATED ONLY WHEN THE CLOCK APPLIES. A health plan or an attorney asking
+    // for a chart is not on the clock, and refusing their request over a
+    // missing date range would turn a reporting requirement into a reason to
+    // turn callers away — the thing this queue exists not to do.
+    //
+    // The gate is on PRESENCE, not content. "All of it" and "I'm not sure" are
+    // both valid answers; the agent asks once, the caller says something, it
+    // files. What is not acceptable is silence in a column the CAP report reads.
+    if (cap.onClock) {
+      const gaps: string[] = [];
+      if (!str(input.deliver_to)) gaps.push('deliver_to');
+      if (!str(input.date_range)) gaps.push('date_range');
+      if (gaps.length) {
+        return missing(
+          gaps,
+          gaps.length === 2
+            ? 'Two quick things so the records team can start on this — where should these be sent, and which dates do you need covered?'
+            : gaps[0] === 'deliver_to'
+              ? 'And where should these be sent — to you, or to an office?'
+              : 'And which dates do you need covered? "Everything" is a fine answer.',
+        );
+      }
+    }
+
     // The reason must be one of THIS department's, whatever we were handed.
     const named = input.request_reason_id ? Number(input.request_reason_id) : NaN;
     const cls =

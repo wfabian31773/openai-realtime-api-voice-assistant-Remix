@@ -378,6 +378,62 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           ]);
 
         const PCP_DEPARTMENT_ID = 18;
+
+        // A PATIENT ASKING FOR THEIR OWN RECORDS GOES TO MEDICAL RECORDS, AND
+        // ON THE CLOCK. Operator ruling, 2026-08-13.
+        //
+        // Nothing else routes INTO department 16 — a records team is not
+        // somewhere to send a call on a keyword, and a request arriving there
+        // without a known requester would let the ticketing app default the
+        // `mr_cases` pathway to `roa_patient`, which is the defect that put all
+        // 470 existing cases on a 15-day statutory clock.
+        //
+        // This path is the exception because it is the one place we KNOW: the
+        // purpose IS patient_caller. So the requester is not inferred, and the
+        // CAP fields go with it stated rather than defaulted. Left in
+        // department 18 instead, a patient's right-of-access request is
+        // invisible to the report the CAP exists to produce.
+        const { classifyRecords } = await import('../tools/medicalRecordsTaxonomy');
+        const recordsHit = classifyRecords(narrative);
+        if (recordsHit) {
+          const { determineCapClock } = await import('../tools/medicalRecordsTaxonomy');
+          const cap = determineCapClock('patient');
+          const { sanitizeForSms: sms } = await import('../services/gsm7');
+          const nameBits = String(state.callerName ?? '').trim().split(/\s+/);
+          const recordsResult = await ticketingApiClient.createTicket({
+            departmentId: 16,
+            requestTypeId: recordsHit.requestTypeId,
+            requestReasonId: recordsHit.requestReasonId,
+            patientFirstName: nameBits[0] || 'Unknown',
+            patientLastName: nameBits.slice(1).join(' ') || 'Caller',
+            patientPhone: String(state.callbackNumber ?? metadata.callerPhone ?? ''),
+            preferredContactMethod: 'phone',
+            description: sms(
+              [cap.note, '', 'Patient called the PCP Support line.', '', narrative].join('\n'),
+            ).value,
+            priority: 'medium',
+            requestorType: cap.requesterType,
+            requestPathway: cap.pathway,
+            capClockApplies: cap.onClock,
+            requestorName: String(state.callerName ?? 'the patient'),
+            callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
+          });
+          if (!recordsResult.success || !recordsResult.ticketNumber) {
+            return { success: false, error: recordsResult.error ?? 'ticket_creation_failed', retryable: true };
+          }
+          pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+          console.info(
+            `[PCP] patient records request filed to Medical Records as ${recordsResult.ticketNumber} ` +
+              `(${recordsHit.requestReason}, on the clock)`,
+          );
+          return {
+            success: true,
+            ticketNumber: recordsResult.ticketNumber,
+            routed_to: 'Medical Records',
+            message: `Filed as ${recordsResult.ticketNumber} with our medical records team. Read the ticket number back and say that team will follow up. Do not promise a date.`,
+          };
+        }
+
         const redirect = detectCrossQueue(narrative, PCP_DEPARTMENT_ID);
         // Never null for 18, but handled rather than asserted: a missing
         // catch-all must not silently file into another department's Other.
