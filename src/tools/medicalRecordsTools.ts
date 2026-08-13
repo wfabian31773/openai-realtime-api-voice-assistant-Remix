@@ -308,7 +308,18 @@ registerTool({
       requestorType: cap.requesterType,
       requestPathway: cap.pathway,
       capClockApplies: cap.onClock,
-      requestorName: requesterRaw,
+      // A NAME, not a description. The ticketing agent, 2026-08-13: "Send
+      // requestorName even when the requester is the patient. Zero of 470 rows
+      // carry one. The name is the evidence that a classification was made;
+      // without it an audit cannot tell 'confirmed patient' from 'defaulted to
+      // patient', which is the hole we are climbing out of."
+      //
+      // "I am the patient" is not evidence of anything. When the requester IS
+      // the patient the name is theirs; otherwise it is whatever they said,
+      // which is where the organisation usually sits ("SCAN Health Plan",
+      // "an attorney at Lexitas").
+      requestorName:
+        cap.requesterType === 'patient' ? `${first} ${last}`.trim() : requesterRaw,
       callData: { agentUsed: 'records', ...(callSid ? { callSid } : {}) },
     });
 
