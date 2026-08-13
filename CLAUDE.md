@@ -57,6 +57,30 @@ written down.
    `replayRealCalls.test.ts` *before* any code changes. Show red-then-green
    offline. Do not ask him to dial to find out whether a guess was right.
 
+9. **"There is no handoff for any of the answering service agents, only for
+   PCP, Scheduling SD. All other agents politely state they are unable to
+   handoff and can only create a request for a callback."** (2026-08-12)
+   Those agents get **no transfer tool at all** — not a disabled one. A tool the
+   agent cannot see is a promise it cannot make.
+
+10. **Nobody is told to call back.** (2026-08-13) *"We can't just tell the
+    patient call back, call the wrong extension."* Queues are forwarded; a
+    caller who pressed the wrong option gets their request taken and routed.
+    Schedule-related goes to the **HVA Hub from every queue — except a surgery
+    date**: *"surgery is an exception to that hva hub rule."*
+
+11. **Route by queue.** Each queue gets its own number, webhook and slug. Do not
+    multiplex queues onto one agent behind a mode flag.
+
+12. **Confirm the callback number BEFORE filing, not after.** Correcting it
+    afterwards means a second ticket and a patient who was told the wrong thing.
+
+13. **After hours, everything goes to the after-hours agent** via Nextiva
+    enterprise routing, and it escalates to Wayne directly. *"It's impossible to
+    reach that line after hours."* Do not build after-hours behaviour into a
+    queue agent. **All overnight volume is on the no-IVR agent**, which Wayne
+    uses as the after-hours agent (2026-08-13).
+
 ---
 
 ## Line status — check this before saying anything about what is on or off
@@ -70,6 +94,12 @@ As of **2026-08-11 01:00 UTC**. Update this table whenever it changes.
 | **pcp** | **OFF** in Twilio | Wayne decided, **I recommended it and sequenced it as step 1** | Transfer failures seen Friday; complaints from surgery centers; medical-facing. *"I just cannot see the disasters I was seeing on Friday on that line."* Was ~200 calls/day. |
 | **azul-scheduling** (San Diego) | **OFF** | Wayne, Aug 10–11 | Gate B replay: **books 8 of 21** the old core booked. Not ready. Was ~80 calls/day. |
 | **claude-as** | Test number only | — | The Claude pipeline. **Unproven — zero clean end-to-end calls.** |
+| **optical** (queue) | **LIVE** | Wayne, Aug 12 | Forwarded optical overflow. *"Optical works like a charm."* Dept 1, 1,744 tickets/90d. |
+| **surgery** (queue) | **LIVE** | Wayne, Aug 12 | Dept 2. Filing was dead until the strict-mode schema fix; **VA-51121** is the proof it works. |
+| **tech** (queue) | Built, number pending | Wayne, Aug 13 | Clinical Tech Support, dept 3 — **9,288 tickets/90d, 103/day, the largest queue in the practice.** It is the medication queue. |
+
+**Queue lines take no calls after hours** — Nextiva routes everything to the
+after-hours agent. See standing instruction 13.
 
 **Do not ask Wayne why PCP or San Diego are off. It is written above.**
 
@@ -164,6 +194,15 @@ Whenever you ship something whose effect is hard to see, add a marker like this.
    already built. This file is the fix. Use it.
 6. **Declaring success before evidence.** Report what the log actually shows,
    including when it shows nothing.
+7. **Theorising instead of diffing.** On 2026-08-12 I stated three wrong root
+   causes out loud for one bug. What found it was a *control* — Wayne asking why
+   Optical could file a ticket when Surgery could not. Two paths through the same
+   code, one working: diff them before theorising. See
+   `.agents/memory/realtime-tool-schemas.md`.
+8. **Accepting a constraint as immovable.** I treated "the API has no way to
+   express *no category*" as the end of the discussion. Wayne: *"why don't you
+   just create one?"* Ask whether the constraint can be changed before designing
+   around it.
 
 ---
 
@@ -171,3 +210,14 @@ Whenever you ship something whose effect is hard to see, add a marker like this.
 
 Full running history, decisions and open items:
 **`docs/observatory/STATE-OF-PLAY.md`** — read it with this file.
+
+Hard-won specifics, one topic per file, indexed in **`.agents/memory/MEMORY.md`**.
+Start there before debugging anything in these areas:
+
+| If you are about to… | Read first |
+|---|---|
+| debug "the agent won't call the tool" | `realtime-tool-schemas.md` |
+| build or change a queue agent | `queue-agents.md` |
+| file, route or classify a ticket | `ticketing-api-contract.md` |
+| touch ticket creation on the after-hours path | `ticket-creation-lock.md` |
+| quote a number at Wayne | `measurement-traps.md` |
