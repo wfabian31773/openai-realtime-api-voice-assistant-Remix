@@ -47,6 +47,38 @@ it is expressed in the text.
 Do not "fix" a misroute by passing a `departmentId` to this call. It will be
 dropped.
 
+### The hints — live on `submit-ticket` as of 2026-08-13
+
+`submitSimplifiedTicket` now carries `suggestedRequestTypeId` /
+`suggestedRequestReasonId` / `suggestedRequestReason` / `suggestedUrgent` from
+`afterHoursTaxonomy`. The far side reads them at **priority 0**, ahead of both
+of its own paths, and **validates rather than trusts** — a pair that does not
+exist, or belongs to another department, is refused and logged.
+
+Three things that contract implies for this repo:
+
+- **Verify every pair against the live tables before shipping a taxonomy.** An
+  invalid pair does not error; it falls back to their keyword path and looks
+  like the hint was ignored. All 19 after-hours pairs were checked on
+  2026-08-13 and are valid.
+- **159 must never appear in a hint.** It is a disposition — only the code that
+  completes a transfer knows one happened — and a hinted 159 is refused on
+  arrival by agreement, not by accident.
+- **Unknown keys were being dropped silently** until they fixed their logging.
+  I shipped these fields before asking, having been explicitly told *"do not
+  just start sending them"*. Ask first; the endpoint that accepts a field and
+  the endpoint that discards it are indistinguishable from the sending side.
+
+The four CAP fields are **not** sent through `submit-ticket` and will not be
+without asking. They go on `create-ticket` only — `file_records_ticket` and the
+PCP patient path.
+
+**Consequence worth restating:** a records request arriving through the
+answering service structurally cannot carry a requester, because that path
+files through `submit-ticket`. Those keep defaulting. Fixing it would mean this
+repo choosing the department for the whole answering-service volume — the trade
+already declined for `no-ivr`.
+
 ## Idempotency
 
 Every submit carries `idempotencyKey: call-<callSid>`. The far side dedupes on

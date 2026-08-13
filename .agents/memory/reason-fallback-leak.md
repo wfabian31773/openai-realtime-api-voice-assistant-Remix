@@ -110,6 +110,23 @@ Only the code that completes one knows that. It is exported from
 `afterHoursTaxonomy.ts` separately and is deliberately absent from the
 classification table.
 
+## The residue is a taxonomy gap, not a code gap — open, Wayne's call
+
+Their replay still lands 4.3% on 159 after the fix, and those cases are honest:
+the caller genuinely said *urgent* or *emergency* but never named a symptom, and
+**request type 34 has no generic "urgent, symptom not stated" reason to put them
+in.** Neither side invented one.
+
+Two ways to close it, and only one is general:
+
+1. **Add the reason to type 34.** Fixes every path at once, including the
+   answering service.
+2. **My hint carries it every time.** Only reaches the overnight line; the
+   answering service still has nowhere to go.
+
+(1) is the recommendation. Until it exists, real urgency is filed as a transfer
+that never happened.
+
 ## Still to do
 
 `config/answeringServiceTicketing.ts` itself is untouched — the queue tools

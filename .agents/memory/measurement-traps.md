@@ -22,6 +22,23 @@ whether the field is written *at all* before reporting an absence as a finding.
 The strict-mode tool bug looked like "the model chose not to call the tool" for
 exactly this reason — the rejection happened upstream of every counter we have.
 
+### The worst version: a log written *after* validation
+
+The ticketing agent could not tell whether my `suggested*` hints were arriving,
+because `submit-ticket` logged `validation.data` — the object **after** zod had
+stripped every unrecognised key. Their words: *"that zero is worthless… the
+table that exists to record what you send was recording what survived my
+validation."*
+
+A zero there reads identically for "the sender never sent it" and "I threw it
+away on arrival", and those need opposite fixes. **Log the raw body before
+parsing, and warn by name on keys you drop.** Any instrumentation downstream of
+a filter measures the filter.
+
+This is the same shape as the strict-mode tool bug — the rejection happened
+upstream of every counter — and it is now the third time in this thread a zero
+has meant *not recorded*.
+
 ## Floor vs total
 
 A parser floor, a classified subset, a filtered view — none of them is the
@@ -54,6 +71,23 @@ test that mocks away the exact mechanism under test. See
 **The habit that catches all of these: revert the fix, re-run the test, and
 confirm it goes red.** A test that passes both ways is documentation, not
 verification — which is fine, as long as you know which one you wrote.
+
+## Two agents agreeing is not verification
+
+I proposed a mechanism for department 8's reason 159 — "the fallback picks the
+first active reason of the default type". The ticketing agent confirmed it in
+writing. **Neither of us had read the code and there is no such fallback**; the
+real cause was a two-character keyword (`er`) matched with `String.includes`.
+See [reason-fallback-leak.md](reason-fallback-leak.md).
+
+The agreement felt like corroboration and was the same story told twice. What
+made it possible: the classifier opened a database connection at import, so it
+had no tests and could not be loaded to inspect. **The bug was not hard to see,
+it was impossible to look at** — the same condition that hid "a list containing
+a prefix of itself".
+
+When a mechanism has been asserted and confirmed but nobody has pointed at the
+line that does it, it is still a hypothesis. Say so in the sentence.
 
 ## A deploy that did not take looks exactly like a fix that did not work
 
