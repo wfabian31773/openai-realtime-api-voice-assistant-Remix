@@ -139,7 +139,7 @@ registerTool({
       return missing(['callback_number'], 'I only caught part of that number — can I get all ten digits?');
     }
 
-    const { SURGERY_DEPARTMENT_ID, surgeryReasonById, classifySurgeryRequest } =
+    const { SURGERY_DEPARTMENT_ID, surgeryReasonById, classifySurgeryRequest, isSurgeryPostOpSymptom } =
       await import('./surgeryTaxonomy');
 
     // The reason must be one of SURGERY's own, whatever we were handed. This is
@@ -201,7 +201,24 @@ registerTool({
         : { locationId: undefined, providerId: undefined, locationMatches: [] };
 
     const urgent = str(input.urgent).toLowerCase() === 'true' || cls?.urgent === true;
-    const priority = urgent ? 'urgent' : 'medium';
+
+    /**
+     * A POST-OPERATIVE SYMPTOM sits between the two priorities we had.
+     *
+     * On the queue's first live day this arrived and filed at medium:
+     * "I had cataract surgery on my right eye, but it feels like there's
+     * something stuck in my eye and I need to see the doctor." Surgery flagged
+     * 0 of 32 tickets that day at any raised priority; tech flagged 18 of 57.
+     *
+     * It is NOT `urgent` — that flag tells the caller to seek emergency care or
+     * dial 911, which is right for a detaching retina and wrong for a gritty
+     * eye after a cataract operation. It is not routine either.
+     *
+     * Computed from the caller's own words rather than trusted from the model,
+     * because the model is the thing that called it routine.
+     */
+    const postOpSymptom = !urgent && isSurgeryPostOpSymptom(description);
+    const priority = urgent ? 'urgent' : postOpSymptom ? 'high' : 'medium';
 
     // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
     //
