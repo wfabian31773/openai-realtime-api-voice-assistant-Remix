@@ -14,7 +14,7 @@
 import { tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { getTool, runTool } from './registry';
-import { recordingExecute } from '../services/toolTimeline';
+import { recordingExecute, flushAzulTimeline } from '../services/toolTimeline';
 
 /**
  * Who is calling, for the tool timeline.
@@ -129,6 +129,23 @@ export function realtimeToolsFor(
                 ? `refused:${result.missingFields.join(',')}`
                 : `error:${(result as { error: string }).error}`;
           console.info(`[TOOLS] ← ${def.name} ${Date.now() - started}ms ${outcome}`);
+
+          // PERSIST NOW, not at hangup.
+          //
+          // The timeline reaches the database only when the call ends and
+          // flushes. A tool still running at that moment leaves no record at
+          // all — and `file_surgery_ticket` has a 30s budget while a caller who
+          // has just been told there is a problem hangs up in about that long.
+          // Four consecutive live calls produced three tool events and nothing
+          // for the fourth, which reads identically to "never called" and cost
+          // most of a day.
+          //
+          // Flushing per tool makes the record independent of how long the call
+          // survives. It is safe to call repeatedly: the flush writes a
+          // superset and is idempotent by event count, and it never throws into
+          // the caller — a telemetry failure must not break a patient's call.
+          void flushTimelineSafely(telemetry);
+
           return JSON.stringify(result);
         } catch (err) {
           // runTool does not throw, so this is a defect in the adapter itself
@@ -207,4 +224,20 @@ function wrapWithTelemetry(
     name,
     execute,
   );
+}
+
+/**
+ * Write the timeline out now, and never let that failure reach the call.
+ *
+ * Keyed on whichever id the recorder registered the entry under; the flush
+ * falls back to scanning by callSid or callLogId, so either works.
+ */
+async function flushTimelineSafely(telemetry: ToolTelemetry | undefined): Promise<void> {
+  const key = telemetry?.callId ?? telemetry?.callSid;
+  if (!key) return;
+  try {
+    await flushAzulTimeline(key);
+  } catch (e) {
+    console.warn('[TOOLS] timeline flush failed (call unaffected):', e);
+  }
 }
