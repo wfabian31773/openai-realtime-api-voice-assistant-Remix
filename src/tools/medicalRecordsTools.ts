@@ -111,9 +111,12 @@ registerTool({
       requester: {
         type: 'string',
         description:
-          'Who is asking — the patient, a relative, another doctor\'s office, a health ' +
-          'plan, an attorney. Include the organisation name when there is one.',
-        askAs: 'And who am I speaking with — are you the patient, or calling from an office?',
+          'REQUIRED. Who is asking, in their own words — the patient themselves, a ' +
+          'relative or someone with power of attorney, another doctor\'s office, a health ' +
+          'plan, an attorney or records company. Include the organisation name when there ' +
+          'is one. This decides whether a statutory records clock applies, so it cannot ' +
+          'be guessed or left out.',
+        askAs: 'And just so I route this correctly — are you the patient yourself, or calling on someone\'s behalf?',
       },
       deliver_to: {
         type: 'string',
@@ -132,7 +135,7 @@ registerTool({
       caller_phone: { type: 'string', description: 'The number they called from.' },
       dialed_number: { type: 'string', description: 'The number they dialled.' },
     },
-    required: ['first_name', 'last_name', 'date_of_birth', 'callback_number', 'request_description'],
+    required: ['first_name', 'last_name', 'date_of_birth', 'callback_number', 'request_description', 'requester'],
   },
   handler: async (input): Promise<ToolResult> => {
     const first = str(input.first_name);
@@ -147,8 +150,29 @@ registerTool({
       return missing(['callback_number'], 'I only caught part of that number — can I get all ten digits?');
     }
 
-    const { MEDICAL_RECORDS_DEPARTMENT_ID, recordsReasonById, classifyRecordsRequest } =
-      await import('./medicalRecordsTaxonomy');
+    const { MEDICAL_RECORDS_DEPARTMENT_ID, recordsReasonById, classifyRecordsRequest,
+            classifyRequester, determineCapClock } = await import('./medicalRecordsTaxonomy');
+
+    // WHO IS ASKING IS HARD-REQUIRED ON THIS QUEUE, the way LOCATION is on
+    // Optical — and for a stronger reason than assignment.
+    //
+    // Azul Vision is under a Corrective Action Plan with HHS OCR over late
+    // medical records. A PATIENT's request runs on a statutory clock the
+    // practice must report on; a health plan's or an attorney's does not.
+    // Measured 2026-08-13: all 470 mr_cases rows are pathway 'roa_patient',
+    // 421 of them minted by the voice agent, and NOT ONE has a requestor
+    // captured. At least 77 are demonstrably third-party. Nothing downstream
+    // can reconstruct this after the call ends, so the call is the only place
+    // it can be got.
+    const requesterRaw = str(input.requester);
+    if (!requesterRaw) {
+      return missing(
+        ['requester'],
+        'And just so I route this correctly — are you the patient yourself, or calling on someone\'s behalf?',
+      );
+    }
+    const requesterType = classifyRequester(requesterRaw) ?? 'other';
+    const cap = determineCapClock(requesterType);
 
     // The reason must be one of THIS department's, whatever we were handed.
     const named = input.request_reason_id ? Number(input.request_reason_id) : NaN;
@@ -159,12 +183,14 @@ registerTool({
     // Who is asking and where it goes are the two facts this queue turns on.
     // On their own lines so a records clerk reads them rather than hunting
     // through a paragraph for a fax number.
-    const requester = str(input.requester);
     const deliverTo = str(input.deliver_to);
     const dateRange = str(input.date_range);
+    // The clock line goes FIRST. A records clerk opening this ticket should not
+    // have to read to the bottom to learn whether it is CAP-reportable.
     const body = [
-      description,
-      requester ? `\n\nRequested by: ${requester}` : '',
+      `${cap.note}`,
+      `\n\n${description}`,
+      `\n\nRequested by: ${requesterRaw} [${requesterType}]`,
       deliverTo ? `\nSend to: ${deliverTo}` : '',
       dateRange ? `\nDates needed: ${dateRange}` : '',
     ].join('');
@@ -242,6 +268,14 @@ registerTool({
       lastProviderSeen: cleanProvider || undefined,
       description: filedDescription,
       priority: 'medium',
+      // Structured, so the ticketing app can stop defaulting mr_cases to
+      // 'roa_patient'. Extra fields are ignored by an endpoint that does not
+      // read them yet, which is why they are safe to send today — but the
+      // ticketing app is the half that has to change for the clock to be right.
+      requestorType: cap.requesterType,
+      requestPathway: cap.pathway,
+      capClockApplies: cap.onClock,
+      requestorName: requesterRaw,
       callData: { agentUsed: 'records', ...(callSid ? { callSid } : {}) },
     });
 
@@ -264,7 +298,8 @@ registerTool({
       request_reason_id: filedReasonId,
       // Say plainly what is missing, so the agent can still ask before the call
       // ends rather than a clerk chasing it tomorrow.
-      ...(requester ? {} : { note_requester: 'No requester captured — ask who is asking if there is still time.' }),
+      requester_type: cap.requesterType,
+      cap_clock_applies: cap.onClock,
       ...(deliverTo ? {} : { note_destination: 'No destination captured — ask where these should be sent.' }),
       ...(redirect
         ? { routed_to: redirect.departmentName, routed_department_id: redirect.departmentId }

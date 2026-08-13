@@ -20,6 +20,28 @@ interface CallData {
 }
 
 interface CreateTicketParams {
+  /**
+   * MEDICAL RECORDS / CAP ONLY.
+   *
+   * Azul Vision is under a Corrective Action Plan with HHS OCR over late
+   * medical records, so a records request becomes an `mr_cases` row with a
+   * statutory due date. Whether that clock APPLIES depends on who is asking:
+   * a patient exercising their right of access, yes; a health plan, an
+   * attorney or another clinic, no.
+   *
+   * Measured 2026-08-13: all 470 mr_cases rows read pathway 'roa_patient',
+   * 421 of them created by the voice agent, and not one has a requestor
+   * recorded — because nothing was ever sent. Every field took its database
+   * default, so a statutory clock is being set by a column default.
+   *
+   * The voice side now sends these. The ticketing app has to READ them for the
+   * clock to be right; until it does they are inert extra fields on the
+   * payload, which is what makes sending them safe today.
+   */
+  requestorType?: 'patient' | 'personal_representative' | 'provider' | 'health_plan' | 'legal' | 'other';
+  requestPathway?: 'roa_patient' | 'third_party_treatment' | 'third_party_plan' | 'third_party_legal' | 'third_party_other';
+  capClockApplies?: boolean;
+  requestorName?: string;
   departmentId: number;
   /**
    * Omit both when the request genuinely does not fit the department's

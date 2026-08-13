@@ -12,6 +12,7 @@ import './sharedPatientTools';
 import './medicalRecordsTools';
 
 const BASE = {
+  requester: 'I am the patient',
   first_name: 'Wayne',
   last_name: 'Fabian',
   date_of_birth: '03/17/1973',
@@ -130,7 +131,9 @@ describe('the two facts this queue turns on reach the clerk', () => {
       request_description: 'I need my records',
     })) as Record<string, unknown>;
 
-    expect(r.note_requester).toMatch(/who is asking/i);
+    // note_requester is gone — the requester is now hard-required and refused
+    // outright rather than noted after the fact, because a statutory clock
+    // keys on it. The destination note remains advisory.
     expect(r.note_destination).toMatch(/where these should be sent/i);
   });
 
@@ -251,5 +254,135 @@ describe('a redirected ticket reports the reason it was actually filed under', (
 
     expect(r.request_reason_id).toBe(create.mock.calls[0][0].requestReasonId);
     expect(r.request_reason_id).toBe(500);
+  });
+});
+
+/**
+ * THE CAP CLOCK.
+ *
+ * Azul Vision is under a Corrective Action Plan with HHS OCR over late medical
+ * records, and must report on records timing for two years. A PATIENT's request
+ * runs on a statutory clock; a health plan's or an attorney's does not.
+ *
+ * Measured 2026-08-13: all 470 mr_cases rows read pathway 'roa_patient', 421 of
+ * them minted by the voice agent, and NOT ONE carries a requestor — every field
+ * took its database default. At least 77 are demonstrably third-party. A
+ * statutory clock is being set by a column default.
+ *
+ * The call is the only place the requester can be got, which is why the tool
+ * refuses without it.
+ */
+describe('the CAP clock is set by who is asking, never by a default', () => {
+  it('refuses to file without a requester', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+
+    const { requester, ...noRequester } = BASE;
+    const r = (await runTool('file_records_ticket', {
+      ...noRequester,
+      request_description: 'I need a copy of my records',
+    })) as Record<string, unknown>;
+
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toContain('requester');
+    expect(r.message).toMatch(/are you the patient yourself/i);
+    expect(create, 'filed a records ticket with no requester').not.toHaveBeenCalled();
+  });
+
+  const cases: Array<[string, string, boolean, string]> = [
+    ['I am the patient', 'patient', true, 'roa_patient'],
+    ['I have power of attorney for my mother', 'personal_representative', true, 'roa_patient'],
+    ["I'm calling for my daughter", 'personal_representative', true, 'roa_patient'],
+    ["calling from Dr. Warn's office", 'provider', false, 'third_party_treatment'],
+    ['this is SCAN Health Plan, Medicare risk adjustment review', 'health_plan', false, 'third_party_plan'],
+    ['I am an attorney at Lexitas', 'legal', false, 'third_party_legal'],
+    ['Social Security disability determination', 'legal', false, 'third_party_legal'],
+  ];
+
+  for (const [requester, type, onClock, pathway] of cases) {
+    it(`${type}: "${requester.slice(0, 40)}…" -> ${onClock ? 'ON' : 'OFF'} the clock`, async () => {
+      const api = await client();
+      const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C1'));
+
+      const r = (await runTool('file_records_ticket', {
+        ...BASE,
+        requester,
+        request_description: 'copy of the chart please',
+      })) as Record<string, unknown>;
+
+      expect(r.requester_type, requester).toBe(type);
+      expect(r.cap_clock_applies, requester).toBe(onClock);
+
+      const sent = create.mock.calls[0][0];
+      expect(sent.requestorType).toBe(type);
+      expect(sent.capClockApplies).toBe(onClock);
+      expect(sent.requestPathway).toBe(pathway);
+    });
+  }
+
+  it('a personal representative stands in the patient\'s shoes', async () => {
+    // HIPAA treats a personal representative as the individual. A daughter with
+    // power of attorney is the same right being exercised, so the same clock.
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C2'));
+
+    await runTool('file_records_ticket', {
+      ...BASE,
+      requester: 'I have power of attorney for my mother',
+      request_description: 'her chart from the June visit',
+    });
+
+    expect(create.mock.calls[0][0].requestPathway).toBe('roa_patient');
+  });
+
+  it('keeps a patient on the clock even when the records go elsewhere', async () => {
+    // A patient may direct their OWN records to somebody else. Read by
+    // destination that is off the clock; read as a right of access it stays on
+    // it. This is the open question for counsel, and the code takes the safer
+    // side: wrongly ON costs a self-imposed deadline, wrongly OFF is a CAP
+    // violation on the very obligation the CAP exists to police.
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C3'));
+
+    const r = (await runTool('file_records_ticket', {
+      ...BASE,
+      requester: 'I am the patient',
+      deliver_to: "my new doctor's office, fax 555-1212",
+      request_description: 'please send my chart to my new doctor',
+    })) as Record<string, unknown>;
+
+    expect(r.cap_clock_applies).toBe(true);
+    expect(create.mock.calls[0][0].requestPathway).toBe('roa_patient');
+  });
+
+  it('puts the clock line first, where a clerk will see it', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C4'));
+
+    await runTool('file_records_ticket', {
+      ...BASE,
+      requester: 'this is SCAN Health Plan',
+      request_description: 'chart review for risk adjustment',
+    });
+
+    const d = create.mock.calls[0][0].description as string;
+    expect(d.startsWith('Third-party request'), d.slice(0, 60)).toBe(true);
+    expect(d).toMatch(/NOT on the patient records clock/);
+  });
+
+  it('marks an unrecognised requester as third-party rather than assuming patient', async () => {
+    // The default that caused this whole problem was 'patient'. When we cannot
+    // tell, the honest answer is not the one that starts a statutory clock.
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-C5'));
+
+    const r = (await runTool('file_records_ticket', {
+      ...BASE,
+      requester: 'Barbara from the third floor',
+      request_description: 'some records',
+    })) as Record<string, unknown>;
+
+    expect(r.requester_type).toBe('other');
+    expect(r.cap_clock_applies).toBe(false);
   });
 });
