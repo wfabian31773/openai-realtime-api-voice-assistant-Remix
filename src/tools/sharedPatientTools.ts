@@ -81,7 +81,21 @@ registerTool({
   },
   handler: async (input): Promise<ToolResult> => {
     const queue = input.queue as ToolQueue | undefined;
-    const phone = str(input.phone);
+    // The number the call ARRIVED on, when the model did not pass one.
+    //
+    // `caller_phone` is injected as call context on every tool. This tool's
+    // schema field is `phone`, so until now the caller's own number reached the
+    // lookup only if the model chose to type it out — even though the process
+    // had already matched that number to a patient before the caller spoke.
+    //
+    // Live on 2026-08-13: the transcriber heard "Thanks." and "No. March 17th,
+    // 1973." for a date of birth, the model looked up that mangled trio, and
+    // the tool answered "no record found" for a patient it had recognised
+    // seconds earlier. The ticket filed with no provider and no location.
+    //
+    // Same lesson as VA-50813 filing with a null call_sid: never make a value
+    // the process already holds depend on the model remembering to pass it.
+    const phone = str(input.phone) || str(input.caller_phone);
     const first = str(input.first_name);
     const last = str(input.last_name);
     const dob = str(input.date_of_birth);
@@ -104,7 +118,24 @@ registerTool({
       dateOfBirth: dob || undefined,
     });
 
-    if (!ctx.patientFound) {
+    // A name+DOB miss is very often ONE mis-transcribed field, not a stranger.
+    // The number they are calling from is the one piece nobody misheard, so try
+    // it before telling an agent this person is unknown.
+    //
+    // Rebound rather than mutated: `ctx` is the service's own returned object,
+    // and writing into it would change a value the caller still owns. The first
+    // version did `Object.assign(ctx, byPhone)` and a test caught it corrupting
+    // a shared fixture — which is the same hazard in miniature.
+    let resolved = ctx;
+    if (!ctx.patientFound && phone && (first || last || dob)) {
+      const byPhone = await scheduleLookupService.lookupPatient({ phone });
+      if (byPhone.patientFound) {
+        console.info('[TOOLS] lookup_patient: name+DOB missed, matched on the caller phone instead');
+        resolved = byPhone;
+      }
+    }
+
+    if (!resolved.patientFound) {
       return {
         success: true,
         found: false,
@@ -116,7 +147,7 @@ registerTool({
 
     const seen = [
       ...new Set(
-        (ctx.pastAppointments ?? []).map((a) => a.location).filter((l) => l && l !== 'Unknown'),
+        (resolved.pastAppointments ?? []).map((a) => a.location).filter((l) => l && l !== 'Unknown'),
       ),
     ].slice(0, 6) as string[];
 
@@ -138,20 +169,20 @@ registerTool({
     // needs it because it changes what may be SAID: an uncertain match is one
     // real person's record, but it is a guess among several, so the name must
     // be confirmed and the history must not be read back.
-    const certain = ctx.identity?.unique !== false;
+    const certain = resolved.identity?.unique !== false;
 
     return {
       success: true,
       found: true,
-      patient_name: ctx.patientName,
-      matched_by: ctx.matchedBy,
+      patient_name: resolved.patientName,
+      matched_by: resolved.matchedBy,
       identity_is_certain: certain,
       ...(certain
         ? {}
         : {
             identity_warning:
               `This ${phone && !first ? 'phone number' : 'name'} matches ` +
-              `${ctx.identity?.candidateCount} different people on file, and what follows ` +
+              `${resolved.identity?.candidateCount} different people on file, and what follows ` +
               `is only the most recently seen of them. Ask for their full name and date of ` +
               `birth before using any of it, and do not read their history back until they ` +
               `confirm who they are.`,
@@ -160,11 +191,11 @@ registerTool({
       usual_clinic: usualOffice,
       usual_office: usualOffice,
       // Where they were seen last, whatever kind of place that is.
-      last_location_any_kind: ctx.lastLocationSeen ?? null,
-      last_provider: ctx.lastProviderSeen ?? null,
-      last_visit: ctx.lastVisitDate ?? null,
+      last_location_any_kind: resolved.lastLocationSeen ?? null,
+      last_provider: resolved.lastProviderSeen ?? null,
+      last_visit: resolved.lastVisitDate ?? null,
       recent_locations: seen.slice(0, 4),
-      total_appointments: ctx.totalAppointmentsFound,
+      total_appointments: resolved.totalAppointmentsFound,
       ...(usualOffice
         ? {}
         : {
