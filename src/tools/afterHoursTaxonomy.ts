@@ -14,32 +14,42 @@
  *   153 Prescription Refill Request        13  <-- a DEPARTMENT 3 reason
  *   the clinical emergencies (160-165)      4
  *
- * WHOSE FALLBACK — CORRECTED 2026-08-13. I first wrote that this was
- * `detectRequestReason()` in our own `config/answeringServiceTicketing.ts`.
- * It is not, and the attribution matters because it decides who can fix it:
+ * WHOSE FALLBACK. Department 8's 159s come from the ticketing app, not from our
+ * `detectRequestReason()` — that function is imported by `answeringServiceAgent`
+ * and nothing else, and no-ivr sends no department, type or reason at all.
+ * Our own fallback is real and owns department 3 (6,119 of 6,905 on reason 153).
  *
- *   dept 8, agent no-ivr             687 tickets, 413 on reason 159
- *   dept 8, agent answering-service  170 tickets,   9 on reason 159
+ * WHY 159 ACTUALLY HAPPENS — CORRECTED 2026-08-13, and I had this wrong twice.
  *
- * `detectRequestReason` is imported by `answeringServiceAgent` and nothing
- * else. no-ivr files through `submitSimplifiedTicket`, which posts
- * conversational fields to /api/voice-agent/submit-ticket and sends NO
- * department, NO request type and NO reason — the comment at that call site
- * says so: "all mapping done server-side". So the 413 are the TICKETING APP's
- * derivation, and type 34's first reason is 159.
+ * I wrote that type 34's first reason is 159 and "that is the whole mechanism".
+ * The ticketing agent confirmed it. NEITHER OF US READ THE CODE. There is no
+ * first-active-reason fallback on their side at all.
  *
- * Our own fallback is real and it owns department 3 (6,119 of the 6,905 on
- * reason 153 come from answering-service). It does not own this one.
+ * The real cause, found by reading their mapping table: `urgent_transfer`
+ * carries the TWO-CHARACTER keyword `er`, matched with String.includes, at
+ * priority 2 — the highest in the table, so it beat every correct mapping it
+ * competed with. It fires inside:
  *
- * WHAT THAT MEANS FOR THIS FILE. It cannot be wired into the no-ivr path by
- * choosing a reason, because that path does not send one. Switching no-ivr to
- * create-ticket would mean this repo picking the DEPARTMENT for every overnight
- * call — the entire answering-service classification problem, on the line that
- * carries the night. Not worth it to fix a label.
+ *   "Caller wants to know when she will be getting her glasses"   -> 159
+ *   "Caller wants confirmation of the Indio office hours"         -> 159
+ *   "Caller stated that their glasses broke at the hinge"         -> 159
+ *   "Quiero cancelar mi cita"                                     -> 159
  *
- * So the taxonomy is sent as a HINT alongside the request instead. It is inert
- * until the ticketing app reads it, which is what makes it safe to send today,
- * and it hands them the classification rather than an argument about one.
+ * call-ER, h-ER, numb-ER, provid-ER, transf-ER, and Qui-ER-o. Their `now`
+ * keyword has the same defect one letter longer: it matches inside "know".
+ *
+ * And the scale is bigger than either of us had it: not 413 on the no-ivr
+ * path but 479 in 90 days across the board, 97% of every ticket on request
+ * type 34, and 462 of those contain no urgent word at all. Replaying 300 of
+ * them through their fix reclassifies 287 (95.7%).
+ *
+ * THE LESSON, which is not about keywords: two agents agreeing is not
+ * verification. I proposed a plausible mechanism, they confirmed it, and the
+ * agreement felt like evidence. It was the same story told twice. The code was
+ * unreadable to both of us — their classifier opened a database connection at
+ * import, so it had no tests and could not be loaded to check — which is the
+ * same shape as "a list containing a prefix of itself": the bug was not hard
+ * to see, it was impossible to look at.
  *
  * THE HARM IS THE INVERSE OF WHAT IT LOOKS LIKE. The problem is not that urgent
  * calls are under-described — it is that ROUTINE calls are recorded as urgent

@@ -119,6 +119,46 @@ multiplex queues onto one agent with a mode flag.
    agent."* So a queue line's after-hours behaviour is not the queue agent's
    problem — do not build one.
 
+## What four live calls found that 1,400 tests did not — 2026-08-13
+
+Wayne pointed the numbers and called Optical, Surgery, Tech and Records himself,
+deliberately **from an unregistered number** to exercise the verification path.
+Three defects, all in the last thirty seconds of the call, none reachable by a
+unit test because each is about *ordering in time* rather than output:
+
+1. **The number was confirmed after the ticket was filed.** Ruling 3 above was
+   written and still not obeyed — the prompt stated the requirement but not the
+   sequence, so the model filed and then tidied up. It reproduced on Optical and
+   Surgery identically: *"you fix one you fix all."*
+2. **Dead silence while the ticket was being created.** The filing call takes
+   seconds and the model said nothing through it, which on a phone reads as a
+   dropped call. It must speak *before* the tool, not after.
+3. **"Customers".** Wayne: *"change customers to patients, customers sounds like
+   we are a department store."* It came from the operator's own dictated
+   greeting and survived four agents.
+
+The fix is one shared block, verbatim in every queue prompt:
+
+```
+# TWO THINGS ABOUT THE LAST THIRTY SECONDS
+THE NUMBER COMES BEFORE THE TICKET…
+NEVER GO SILENT WHILE FILING… Say "Let me get this logged for you — one moment." FIRST
+```
+
+**A rule the model must obey in a particular order has to state the order.** A
+requirement phrased as a fact ("confirm the callback number") is satisfied by
+doing it at any point.
+
+**And beware a blanket find-and-replace on prompt vocabulary** — mine renamed a
+test called *"does not call patients customers"* into *"does not call patients
+patients"*, which passes forever.
+
+The fourth call, PCP, was hung up on: *"completely broken, sounds nothing like
+the other lines you created."* It still had the pre-queue prompt. Scheduling has
+the same problem and is **not yet done** — it is ~2,000 lines and books real
+appointments through the Eye Care rules engine, a different contract from a
+queue agent.
+
 ## Greeting personalisation
 
 `src/services/greetingPersonalisation.ts`. `greetingStyleFor` returns `'append'`

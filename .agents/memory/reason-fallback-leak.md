@@ -58,6 +58,32 @@ CAP fields on the records path.
 produced a row is a separate question from *what* the row says. Both times I
 got this wrong I reasoned from the value rather than tracing the writer.
 
+## And the mechanism was wrong too — corrected 2026-08-13
+
+I wrote that department 8's 159s came from "the first active reason of the
+default type". The ticketing agent confirmed it. **Neither of us read the code,
+and there is no such fallback.**
+
+The real cause is a **two-character keyword**: their `urgent_transfer` mapping
+carries `er`, matched with `String.includes`, at the highest priority in the
+table. It fires inside call**er**, h**er**, numb**er**, provid**er**,
+transf**er** — and Qui**er**o. Their `now` keyword has the same defect one
+letter longer: it matches inside "know".
+
+Bigger than we had it, too: not 413 on one path but **479 in 90 days, 97% of
+every type-34 ticket, 462 with no urgent word in them at all.** A replay of 300
+through their fix reclassifies 287 — **95.7%**.
+
+**TWO AGENTS AGREEING IS NOT VERIFICATION.** I proposed a plausible mechanism,
+they confirmed it, and the agreement felt like evidence when it was the same
+story told twice. Neither of us could read the classifier: it opened a database
+connection at import, so it had no tests and could not be loaded to inspect.
+Same shape as "a list containing a prefix of itself" — the bug was not hard to
+see, it was impossible to look at.
+
+**So: when a mechanism is asserted and confirmed but nobody has pointed at the
+line that does it, it is still a hypothesis.** Say so.
+
 ## Why each one is invisible in the obvious report
 
 - **The department is right.** Group by department and department 9 looks
@@ -83,6 +109,23 @@ departments 8, 9 and 16 by construction, not by convention.
 Only the code that completes one knows that. It is exported from
 `afterHoursTaxonomy.ts` separately and is deliberately absent from the
 classification table.
+
+## The residue is a taxonomy gap, not a code gap — open, Wayne's call
+
+Their replay still lands 4.3% on 159 after the fix, and those cases are honest:
+the caller genuinely said *urgent* or *emergency* but never named a symptom, and
+**request type 34 has no generic "urgent, symptom not stated" reason to put them
+in.** Neither side invented one.
+
+Two ways to close it, and only one is general:
+
+1. **Add the reason to type 34.** Fixes every path at once, including the
+   answering service.
+2. **My hint carries it every time.** Only reaches the overnight line; the
+   answering service still has nowhere to go.
+
+(1) is the recommendation. Until it exists, real urgency is filed as a transfer
+that never happened.
 
 ## Still to do
 

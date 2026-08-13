@@ -359,8 +359,18 @@ const REQUESTER_CUES: Array<{ type: RequesterType; cues: string[] }> = [
   //
   // Guarded by SPEAKING_FOR_ANOTHER so the possessive does not slip through.
   { type: 'patient', cues: [
+    // THIRD TIME. A live call on 2026-08-13 said "the patient themselves" and
+    // classified as `other`, taking a right-of-access request OFF the clock.
+    // The list had himself and herself and not the one people actually say.
+    //
+    // So this is now a STEM — 'the patient' plus a self-referring word — rather
+    // than an enumeration of pronouns, because enumerating them is how the last
+    // two got missed. The possessive guard is what keeps "the patient's
+    // attorney" out.
     'i am the patient', "i'm the patient", 'this is the patient',
-    'the patient himself', 'the patient herself', 'patient myself',
+    'the patient them', 'the patient him', 'the patient her',
+    'patient themselves', 'patient himself', 'patient herself', 'patient myself',
+    'the patient is calling', 'speaking with the patient', 'the patient themself',
     'my own records', 'my records', 'my chart', 'for myself',
     'soy el paciente', 'soy la paciente', 'mis registros', 'mi expediente',
   ] },
