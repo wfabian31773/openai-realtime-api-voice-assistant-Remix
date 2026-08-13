@@ -5,8 +5,14 @@
  *
  * 413 of no-ivr's 687 department-8 tickets carry reason 159, "Transferred to
  * On-Call Provider", and almost none were transferred — they are office-hours
- * questions, broken glasses, a pharmacy asking for a phone number. Type 34's
- * first reason is 159.
+ * questions, broken glasses, a pharmacy asking for a phone number.
+ *
+ * WHY, corrected 2026-08-13: I said "type 34's first reason is 159" and the
+ * ticketing agent confirmed it. Neither of us read the code and there is no
+ * such fallback. The cause is a TWO-CHARACTER keyword — `er`, matched with
+ * String.includes at the highest priority in their table, firing inside
+ * call-ER, h-ER, numb-ER and Qui-ER-o. Two agents agreeing is not
+ * verification.
  *
  * But no-ivr files through `submitSimplifiedTicket`, which sends NO department,
  * NO request type and NO reason: the mapping is the ticketing app's. So this

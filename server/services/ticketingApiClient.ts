@@ -93,7 +93,13 @@ export interface SubmitTicketParams {
    * in department 8: 413 of no-ivr's 687 tickets carry reason 159,
    * "Transferred to On-Call Provider", and almost none were transferred. They
    * are office-hours questions, broken glasses, a pharmacy asking for a phone
-   * number. Type 34's first reason is 159, and that is the whole mechanism.
+   * number.
+   *
+   * The cause is NOT the first-active-reason fallback I originally claimed and
+   * the ticketing agent confirmed — neither of us read the code. It is a
+   * two-character keyword, `er`, matched with String.includes at the highest
+   * priority in their table: call-ER, h-ER, numb-ER, Qui-ER-o. Their fix
+   * reclassifies 95.7% of a 300-ticket replay.
    *
    * The harm runs opposite to how it reads: routine calls recorded as urgent
    * transfers make the genuinely urgent ones unfindable. Sitting in the same
