@@ -121,6 +121,24 @@ export function recordTurn(
       sincePrevMs: b.turns.length === 0 ? null : now - b.lastAt,
     });
     b.lastAt = now;
+
+    /**
+     * INCREMENTAL FLUSH — added 2026-08-13, after measuring what "write at
+     * call end" actually cost.
+     *
+     * 11–17% of that day's real calls (45s+, full transcript in call_logs)
+     * had ZERO rows in this table. The transcript survives because the
+     * coordinator persists it incrementally; the turns buffered in THIS
+     * process and the operator republished four times that day. Every
+     * restart silently discarded every in-flight buffer — and the grader
+     * reads turns, so those calls looked empty to every downstream check
+     * ("transcript_coverage" flagged 16% of calls that were fine).
+     *
+     * A fire-and-forget insert every few turns adds no latency to the call
+     * path — flushTurns is already idempotent by count, so the teardown
+     * flush writes only what is new.
+     */
+    if (b.turns.length - b.flushedCount >= 6) void flushTurns(callId);
   } catch (e) {
     console.error('[TURN-LOG] record failed:', e);
   }

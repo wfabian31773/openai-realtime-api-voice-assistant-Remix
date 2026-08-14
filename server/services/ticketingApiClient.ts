@@ -506,6 +506,31 @@ export class TicketingApiClient {
         `[TICKETING API] ✓ Ticket created: ${response.ticketNumber} (ID: ${response.ticketId})`
       );
 
+      /**
+       * WRITE THE TICKET NUMBER BACK TO THE CALL LOG — found 2026-08-13, and
+       * it was the single biggest red number on the dashboard.
+       *
+       * Only the submit-ticket path ever did this (releaseTicketCreationLock
+       * in syncAgentService). Every create-ticket caller — all four queue
+       * lines, PCP, records — filed real tickets that call_logs never heard
+       * about. The grader reads call_logs.ticket_number, so every queue call
+       * looked ticketless: ticket_required_vs_created failed 46.2% of tech's
+       * calls on a day tech filed 106 real tickets.
+       *
+       * The check was never measuring lost requests. It was measuring this
+       * missing write.
+       *
+       * Reuses releaseTicketCreationLock because it already does exactly this
+       * write; clearing a pending-lock the create-ticket path never set is a
+       * no-op. Fire-and-forget: bookkeeping must never delay a filed ticket.
+       */
+      const sidForWriteback = params.callData?.callSid;
+      if (sidForWriteback && response.ticketNumber) {
+        void import('../storage')
+          .then(({ storage }) => storage.releaseTicketCreationLock(sidForWriteback, response.ticketNumber))
+          .catch((e) => console.warn('[TICKETING API] ticket_number writeback failed:', e));
+      }
+
       // Log lookup results for visibility
       if (response.providerSearched !== undefined || response.locationSearched !== undefined) {
         console.info(`[TICKETING API] Lookup results:`, {
