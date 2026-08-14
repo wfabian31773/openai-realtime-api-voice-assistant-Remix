@@ -163,7 +163,29 @@ export async function flushTurns(callIdOrSid: string): Promise<void> {
   }
   if (!b || b.turns.length === b.flushedCount) return;
 
+  /**
+   * CLAIM BEFORE THE AWAIT — fixed 2026-08-14, same day the race was created.
+   *
+   * `flushedCount` used to be updated only AFTER the insert resolved. That was
+   * safe while the sole caller was teardown. It stopped being safe this
+   * morning when incremental flushing was added: an incremental flush and the
+   * teardown flush (or two incrementals) both read the same `flushedCount`,
+   * both sliced the same pending turns, and both inserted them.
+   *
+   * The operator's PCP test call CA62a1245d shows it plainly — turn_index
+   * 1,1,2,2,3,3,4,4,5,5,6,6 then 7,8,9 unduplicated. Exactly one 6-turn batch
+   * written twice, which is the first incremental flush racing teardown.
+   *
+   * Duplicated turns are worse than missing ones: every reader of this table —
+   * the call-detail page, the graders, any repetition analysis — now sees the
+   * agent saying everything twice, which is also the defect being hunted.
+   *
+   * The identical guard was written into callEventLog the same morning and
+   * simply not carried across. Roll back on failure so teardown retries.
+   */
   const pending = b.turns.slice(b.flushedCount);
+  const claimedFrom = b.flushedCount;
+  b.flushedCount = b.turns.length;
   try {
     await db.insert(callTurns).values(
       pending.map((t) => ({
@@ -181,10 +203,11 @@ export async function flushTurns(callIdOrSid: string): Promise<void> {
         sincePrevMs: t.sincePrevMs,
       })),
     );
-    b.flushedCount = b.turns.length;
     console.info(`[TURN-LOG] wrote ${pending.length} turn(s) for ${b.callLogId ?? b.callSid ?? key}`);
   } catch (e) {
-    // Losing the debugging record must never affect the call.
+    // Losing the debugging record must never affect the call. Give the claim
+    // back so the teardown flush retries these turns.
+    b.flushedCount = claimedFrom;
     console.error('[TURN-LOG] flush failed:', e);
   }
 }

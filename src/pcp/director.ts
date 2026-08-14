@@ -182,8 +182,31 @@ export class PcpDirector {
     // right team will call back. 117 of 419 callers asked for a person on this
     // line, and a large share of them were patients.
     const askedForAPerson = Boolean(state.callerRequestedHuman) && !isPatient;
-    const eligibleByAsk = askedForAPerson && !handoffFailed && !(lunchClosure);
-    if (eligibleByAsk && disposition !== 'HAND_OFF' && !handoffFailed && !lunchClosure) disposition = 'HAND_OFF';
+    /**
+     * WHERE THIS GRANT LEADS, and the deadlock it caused on 2026-08-14.
+     *
+     * An explicit ask from a professional grants HAND_OFF whatever the purpose
+     * — operator directive, and deliberately so: "the staffer who picks up
+     * collects what they need."
+     *
+     * But the purpose's own allowedDispositions still gate the TICKET. On the
+     * operator's test call CA62a1245d that combination locked every exit:
+     *
+     *   handoff_to_pcp  -> durable_ticket_required_before_handoff
+     *   create_pcp_task -> disposition_not_allowed: HAND_OFF is not allowed
+     *                      for PCP purpose check_patient_scheduled
+     *   terminate_call  -> durable_disposition_required   (x4)
+     *
+     * 188 seconds, no ticket, no transfer, and the agent could not even hang
+     * up. Each guard was individually correct; together they had no floor.
+     *
+     * The grant stays (it is the ruling). What changed is downstream: the
+     * durable ticket a handoff files is no longer rejected for carrying the
+     * disposition the director just granted, and mayTerminate below no longer
+     * demands that a recorded disposition still match a recomputed one.
+     */
+    const eligibleByAsk = askedForAPerson && !handoffFailed && !lunchClosure;
+    if (eligibleByAsk && disposition !== 'HAND_OFF') disposition = 'HAND_OFF';
     const handoffEligible =
       eligibleByAsk || Boolean(purpose && disposition === 'HAND_OFF' && !missing && !handoffFailed);
 
@@ -194,7 +217,27 @@ export class PcpDirector {
       authoritativeToolAllowed,
       handoffEligible,
       mustCreateFallbackTicket: Boolean(handoffFailed),
-      mayTerminate: Boolean(disposition && state.dispositionRecorded === disposition),
+      /**
+       * A RECORDED DISPOSITION IS ENOUGH. It no longer has to be the one the
+       * director happens to compute at this instant.
+       *
+       * The old rule was `dispositionRecorded === disposition`, which reads as
+       * "we did the thing we currently intend". But `disposition` is
+       * recomputed every turn from live state, so anything that moves it after
+       * a disposition is recorded — a late "can I speak to someone", a purpose
+       * reclassification — retroactively invalidates a record that is already
+       * durable, and the call can never be ended.
+       *
+       * That is what CA62a1245d hit: terminate_call refused four times on a
+       * call where work HAD been recorded. The caller sat through it.
+       *
+       * The guarantee this check exists to give is "no PCP call ends without a
+       * durable record of what happened". A recorded disposition satisfies
+       * that, whatever the director would choose now. Belt and braces with the
+       * fix above: that one stops the mismatch arising, this one stops any
+       * future mismatch trapping a live caller.
+       */
+      mayTerminate: Boolean(state.dispositionRecorded),
     };
   }
 }
