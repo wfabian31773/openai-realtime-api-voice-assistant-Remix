@@ -170,3 +170,42 @@ On 2026-08-12 the `call_data_synced` sweeper "was broken" because the **workspac
 had been republished and the **Deployment** had not.
 
 Before diagnosing behaviour, confirm the build under test is the build running.
+
+## A tool that records `{}` is not a tool that did nothing
+
+2026-08-14. Wayne: *"still bad, pull the last two calls to the pcp line."* On
+`CAf00cfcb4` the tool timeline held this nine times:
+
+    {"tool":"record_pcp_intake","args":{},"outcome":{}}
+
+I read that as "the model is calling the intake tool empty." It was not. Every
+argument `record_pcp_intake` takes is an identifier, so `SAFE_ARG_KEYS` dropped
+all of them; and it returns a `PcpDirectorDecision`, none of whose keys were in
+`summarizeResult`'s list. **The most important tool on the line was invisible in
+both directions, and had been since the day it was written.**
+
+Nine empty records is indistinguishable from nine useless calls. I could not
+tell the operator which he had, on the exact question he was asking.
+
+The general trap: **an allow-list that drops everything produces a record that
+looks like an observation.** A tool whose arguments are ALL identifiers and
+whose result is ALL policy will silently record nothing, forever, and no test
+notices because `{}` is a valid object. When adding a tool, ask what its
+timeline row will look like — if the answer is `{}`, the row is a lie.
+
+What is safe to record, and the reasoning that generalizes:
+
+- **Field NAMES, never values.** `Object.keys(args)` answers "did it record the
+  name?" without storing the name. Same discipline `missingFields` already used.
+- **A closed enum that names a DESK is routing, not identity.** `callPurpose`
+  and `callerFacilityType` are the same class as `department_id` — they decide
+  where the request lands and describe no person. They belong in the allow-list.
+- **Policy verdicts are not PHI.** `disposition`, `handoffEligible`,
+  `mayTerminate` are what the server decided, not what the caller said.
+- **But not the WORDING.** `nextQuestion.prompt` is fixed text from `PROMPTS`
+  today and is deliberately not stored: it is the one field a later change
+  could make quote the caller back, and by then nobody revisits the allow-list.
+
+Pinned in `services/pcpIntakeTelemetry.test.ts`, including a test that
+serializes the whole record and asserts the real call's name, organization,
+phone and DOB appear nowhere in it.

@@ -344,6 +344,67 @@ failure.
 - Tests that assert on prompt text need **whitespace-tolerant regexes**, or a
   re-wrap breaks them.
 
+## PCP, 2026-08-14 morning: the ticket is filed before the intake
+
+`CA7a5f2bfa` (06:48:03 PT, 124s, 15 turns). Timeline, against the transcript:
+
+    +27s  handle_patient_medical_records_request -> PCP-51559 filed
+    +37s  caller gives his name and medical group
+    +55s  caller gives the patient name and DOB
+    +82s  caller gives the callback number
+    +85s  caller gives the fax number
+    +89s  terminate_call
+
+`record_pcp_intake` was **never called on this call**. So PCP-51559 carries
+`FIELD_PLACEHOLDERS` — "Not provided by caller", "Not provided", "NOT PROVIDED"
+— on a call where the caller answered every single question. The records desk
+gets a blank ticket and a 124-second recording nobody will listen to.
+
+Why it files that early is not a bug on its own: on 2026-08-06 this tool threw
+on a missing administrative field like every other, and **21 records requests
+reached this line with nothing filed behind them**, including one caller who
+rang back eight minutes later and got nothing a second time. Filing immediately
+with whatever exists was the fix, and it was the right one.
+
+What is missing is the other half. Three facts, and they compose badly:
+
+1. The tool files on first mention, with whatever intake produced.
+2. There is **no amend path**. `updateTicketCallData` updates recording,
+   transcript, duration and quality score — it cannot touch an intake field.
+   Adding one is the ticketing app's API, not ours.
+3. The realtime PCP agent has **no hangup fallback**. `pcpLine.finalize()`
+   exists in the deterministic core (`core/pcpLine.ts`) and files a
+   `CALL ENDED BEFORE CONFIRMATION` task; the realtime agent inherited nothing
+   equivalent. So filing early is currently the *only* guarantee.
+
+Which means the fix cannot be "file later" on its own — that reintroduces the
+08-06 loss. It is one of:
+
+  (a) a hangup fallback for the realtime PCP agent, after which filing can move
+      to the end of the intake — entirely within our control; or
+  (b) an amend endpoint on the ticketing app, after which the early file stands
+      and `record_pcp_intake` updates it — needs the ticketing team.
+
+(a) is ours and is the smaller change. Do not do either unilaterally: the
+08-06 ruling was the operator's and this trades against it. **Ask.**
+
+## The same morning, the other call: three voices, no gate
+
+`CAf00cfcb4` (06:45:30 PT) and `CA7a5f2bfa` are the same root cause wearing two
+faces. Three places send an out-of-band `response.create` — the greeting
+guarantee, the director's author action, the holding callback — and none
+checked `responseInFlight`. The caller hears:
+
+    AGENT: Thank you for calling Azul
+    AGENT: Hello, and thank you for calling Azul Vision's PCP support line...
+    AGENT: Understood. One moment while I
+    AGENT: Of course —
+    CALLER: Hello.                          <- he thought the line had dropped
+    AGENT: Still with you — one moment while I log that
+
+Four fragments, three truncated. Fixed on `claude/pcp-sequencing` (PR #201).
+**Anything that exists to fill silence must check whether there is silence.**
+
 ## The after-hours line is `no-ivr`, and it is the only agent that can transfer
 
 2026-08-15, operator: *"It's called no-IVR only because initially we had tried
