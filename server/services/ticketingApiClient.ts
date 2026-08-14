@@ -561,6 +561,107 @@ export class TicketingApiClient {
   }
 
   /**
+   * THE LOCATION-QUEUE MODE of create-ticket — the third way in, and until
+   * 2026-08-14 the only one that did not live in this file.
+   *
+   * The scheduling agent routes by OFFICE, not by department: it posts
+   * `queue: 'location'` with a `locationName` and lets the server pick the
+   * team. `createTicket` cannot express that — `departmentId` is required
+   * there — so `azulSchedulingAgent` had its own raw `fetch`, and with it its
+   * own timeout, its own writeback and no warm-up at all.
+   *
+   * That last one is the gap that mattered. Every other path calls
+   * `warmUpWithRetry` first because the ticketing app is a Replit deployment
+   * that sleeps; scheduling went straight to `fetch`, so a sleeping deployment
+   * meant a lost ticket and a console line. This is the queue that books real
+   * appointments and files the failed-transfer callbacks.
+   *
+   * Behaviour preserved exactly, because it was all load-bearing:
+   *   - the 15s hard timeout (a hung POST must never wedge teardown)
+   *   - the 422 re-file into the default queue when an office has no queue
+   *     onboarded yet, with the real office named in the description
+   *   - the ticket-number writeback onto the call log
+   */
+  async createLocationQueueTicket(params: {
+    locationName: string;
+    defaultLocationName: string;
+    body: Record<string, unknown>;
+    callSid?: string;
+  }): Promise<{ ok: boolean; status: number; text: string; ticketNumber?: string; refiled?: boolean }> {
+    this.ensureInitialized();
+    if (!this.baseUrl || !this.apiKey) {
+      // Same shape a failed POST returns, so the caller has one path to handle.
+      console.warn('[TICKETING API] location-queue ticket skipped — client not configured');
+      return { ok: false, status: 0, text: 'ticketing client not configured' };
+    }
+    const url = `${this.baseUrl}/api/voice-agent/create-ticket`;
+    const apiKey = this.apiKey;
+
+    // Advisory, exactly as elsewhere: a probe that cannot answer must not stop
+    // a ticket that would otherwise be filed.
+    await this.warmUpWithRetry(2, 500);
+
+    const post = (payload: unknown) =>
+      fetch(url, {
+        method: 'POST',
+        headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(15_000),
+      });
+
+    let r = await post(params.body);
+    let text = await r.text();
+    let refiled = false;
+
+    if (
+      r.status === 422 &&
+      params.locationName.toLowerCase() !== params.defaultLocationName.toLowerCase()
+    ) {
+      console.warn(
+        `[TICKETING API] no queue for '${params.locationName}' — re-filing to ${params.defaultLocationName}`,
+      );
+      refiled = true;
+      r = await post({
+        ...params.body,
+        locationName: params.defaultLocationName,
+        description:
+          `[For office: ${params.locationName} — no queue onboarded yet, routed to default]\n` +
+          `${String(params.body.description ?? '')}`,
+      });
+      text = await r.text();
+    }
+
+    let ticketNumber: string | undefined;
+    if (r.ok) {
+      try {
+        const parsed = JSON.parse(text);
+        ticketNumber = parsed?.ticketNumber ?? parsed?.ticket?.ticketNumber;
+      } catch {
+        /* a non-JSON 200 is still a filed ticket */
+      }
+    }
+
+    // Same writeback every other path now performs — the grader reads
+    // call_logs.ticket_number, and a ticket it cannot see does not exist.
+    if (ticketNumber && params.callSid) {
+      try {
+        const { storage } = await import('../storage');
+        const log = await storage.getCallLogByCallSid(params.callSid);
+        if (log && !log.ticketNumber) {
+          await storage.updateCallLog(log.id, { ticketNumber: String(ticketNumber) });
+        }
+      } catch (e) {
+        console.warn('[TICKETING API] location-queue writeback failed:', e);
+      }
+    }
+
+    console.log(
+      `[TICKETING API] location-queue ticket ${r.ok ? `created${refiled ? ' (re-filed)' : ''}` : `FAILED ${r.status}`}: ${text.slice(0, 200)}`,
+    );
+    return { ok: r.ok, status: r.status, text, ticketNumber, refiled };
+  }
+
+  /**
    * NEW SIMPLIFIED ENDPOINT - Submit ticket with conversational data
    * The external API handles all mapping (DOB parsing, reason categorization, provider/location matching)
    * This is the preferred method for voice agents - more reliable than the legacy createTicket

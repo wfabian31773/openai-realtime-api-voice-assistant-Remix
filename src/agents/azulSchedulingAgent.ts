@@ -456,9 +456,9 @@ export async function fetchAzulPrecontext(phone: string): Promise<AzulPrecontext
 // ticket in the location's queue (ticketing-app PR #162) so nothing —
 // dropped transfers included — is ever lost. Fire-and-forget: must never
 // delay the live call; reuses the app's existing ticketing secrets.
-const TICKETING_URL =
-  process.env.TICKETING_ENRICHMENT_URL || process.env.TICKETING_SYSTEM_URL || '';
-const TICKETING_KEY = process.env.TICKETING_API_KEY || '';
+// TICKETING_URL / TICKETING_KEY removed 2026-08-14: ticketingApiClient owns
+// its own configuration, and a second copy here was a second answer to
+// "are we configured?".
 const DEFAULT_QUEUE_LOCATION = process.env.AZUL_DEFAULT_QUEUE_LOCATION || 'Encinitas';
 
 async function fileLocationQueueTicket(
@@ -494,11 +494,18 @@ async function fileLocationQueueTicket(
       record({ skipped: 'transfer already accepted' });
       return;
     }
-    if (!TICKETING_URL || !TICKETING_KEY) {
-      console.warn('[AZUL-SCHED] ticketing env not configured — tier-3 ticket skipped');
-      record({ skipped: 'ticketing env not configured' });
-      return;
-    }
+    /**
+     * NO LOCAL ENV CHECK — removed 2026-08-14 with the raw fetch.
+     *
+     * This read TICKETING_ENRICHMENT_URL / TICKETING_SYSTEM_URL /
+     * TICKETING_API_KEY itself and skipped before trying. The client resolves
+     * its own configuration, and two places deciding "are we configured?" from
+     * different reads is how one of them ends up wrong — this one could refuse
+     * a ticket the client would have filed, or wave through one it could not.
+     *
+     * `createLocationQueueTicket` returns a clean not-configured result, so
+     * there is one authority and one code path.
+     */
     let handoffResult: any = {};
     try {
       const env = JSON.parse(handoffResultRaw);
@@ -561,51 +568,41 @@ async function fileLocationQueueTicket(
         ...(liveTranscriptFor(meta?.callId) ? { transcript: liveTranscriptFor(meta?.callId) } : {}),
       },
     };
-    // 15s hard timeout: a hung ticketing POST must never wedge the caller's
-    // teardown chain (sweep → flush) or vanish without trace (2026-07-22
-    // lost POST; 2026-07-24 unflushed timeline).
-    const postTicket = (payload: unknown) =>
-      fetch(`${TICKETING_URL}/api/voice-agent/create-ticket`, {
-        method: 'POST',
-        headers: { 'X-API-Key': TICKETING_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(15_000),
-      });
-    let r = await postTicket(body);
-    let txt = await r.text();
-    // A 422 means the office has no ticket queue yet (not a pilot location,
-    // e.g. Redlands). Re-file into the pilot default queue rather than lose
-    // the ticket — the description names the office it was really for.
-    if (r.status === 422 && locationName.toLowerCase() !== DEFAULT_QUEUE_LOCATION.toLowerCase()) {
-      console.warn(`[AZUL-SCHED] no queue for '${locationName}' — re-filing to ${DEFAULT_QUEUE_LOCATION}`);
-      r = await postTicket({
-        ...body,
-        locationName: DEFAULT_QUEUE_LOCATION,
-        description: `[For office: ${locationName} — no queue onboarded yet, routed to default]\n${description}`,
-      });
-      txt = await r.text();
-    }
-    console.log(
-      `[AZUL-SCHED] tier-3 location-queue ticket ${r.ok ? 'created' : `FAILED ${r.status}`}: ${txt.slice(0, 200)}`,
-    );
-    // Persist the ticket number onto the call log so the post-call
-    // enrichment path (final transcript, recording URL, grades) finds this
-    // call's ticket — azul tickets previously never joined enrichment and
-    // stayed frozen at whatever the initial POST carried.
-    if (r.ok && meta?.callSid) {
-      try {
-        const parsedResp = JSON.parse(txt);
-        const ticketNumber = parsedResp?.ticketNumber ?? parsedResp?.ticket?.ticketNumber;
-        if (ticketNumber) {
-          const { storage } = await import('../../server/storage');
-          const log = await storage.getCallLogByCallSid(meta.callSid);
-          if (log && !log.ticketNumber) {
-            await storage.updateCallLog(log.id, { ticketNumber: String(ticketNumber) });
-          }
-        }
-      } catch { /* best-effort: the ticket itself is already filed */ }
-    }
-    record({ status: r.status, ok: r.ok, locationName, response: txt.slice(0, 250) });
+    /**
+     * FILED THROUGH ticketingApiClient — migrated 2026-08-14.
+     *
+     * This was a raw `fetch`, and it was the last create-ticket caller that
+     * did not go through the shared client. The 15s timeout, the 422 re-file
+     * and the ticket-number writeback all moved into
+     * `createLocationQueueTicket` unchanged — they were load-bearing, and the
+     * point of consolidating is to keep them while gaining what this path
+     * never had.
+     *
+     * WHAT IT NEVER HAD: the warm-up. Every other caller probes first because
+     * the ticketing app is a Replit deployment that sleeps; this one went
+     * straight to `fetch`, so a sleeping deployment lost the ticket and left a
+     * console line. On the queue that books real appointments and files the
+     * failed-transfer callbacks.
+     *
+     * `queue: 'location'` still means the SERVER picks the team from the
+     * office — createTicket cannot express that, which is exactly why this
+     * needed its own method on the client rather than being forced into one
+     * that requires a departmentId.
+     */
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    const filed = await ticketingApiClient.createLocationQueueTicket({
+      locationName,
+      defaultLocationName: DEFAULT_QUEUE_LOCATION,
+      body,
+      ...(meta?.callSid ? { callSid: meta.callSid } : {}),
+    });
+    record({
+      status: filed.status,
+      ok: filed.ok,
+      locationName,
+      ...(filed.refiled ? { refiledTo: DEFAULT_QUEUE_LOCATION } : {}),
+      response: filed.text.slice(0, 250),
+    });
   } catch (e) {
     console.error('[AZUL-SCHED] tier-3 ticket error (call unaffected):', e);
     record({ error: e instanceof Error ? e.message.slice(0, 250) : String(e).slice(0, 250) });
