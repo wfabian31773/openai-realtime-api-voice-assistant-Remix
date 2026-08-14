@@ -542,11 +542,40 @@ export class CallCostService {
         costCents = Math.ceil(Math.abs(parseFloat(twilioCall.price)) * 100);
       }
       
-      // Build update object - only with finalized data
+      /**
+       * DO NOT LET A CONFERENCE LEG'S DURATION REPLACE A MEASURED CONVERSATION.
+       *
+       * Twilio's parent-call duration is authoritative for a simple call and
+       * unreliable for a diverted conference call. The operator pulled
+       * CA04e33c56cfe458d6b26070ceee675aba in the console: `No Answer`,
+       * 0 sec, start == end, Stir/Shaken `Failed-C-Diverted` — on a call that
+       * carried FIVE conversational turns inside `conf_CA04e33c…`.
+       *
+       * 45 of 534 after-hours calls in 7 days (8.4%) look like that.
+       *
+       * `localDurationSeconds` is our own start-to-finalize measurement. When
+       * Twilio's number is drastically smaller, keep ours and record the
+       * disagreement in the columns that already exist for it, rather than
+       * silently picking one. A mismatch we can see is worth more than a
+       * number we quietly trust.
+       */
+      const localMeasured = existing?.localDurationSeconds ?? null;
+      const twilioLooksWrong =
+        localMeasured != null && localMeasured >= 30 && actualDuration < Math.min(10, localMeasured * 0.2);
+
       const updateData: any = {
-        duration: actualDuration, // Only set when > 0 and terminal
+        duration: twilioLooksWrong ? localMeasured : actualDuration,
         twilioStatus,
       };
+
+      if (twilioLooksWrong) {
+        updateData.durationMismatchFlag = true;
+        updateData.durationMismatchRatio = localMeasured > 0 ? actualDuration / localMeasured : 0;
+        console.warn(
+          `[TWILIO RECONCILE] ${callLogId}: keeping local ${localMeasured}s over Twilio ${actualDuration}s ` +
+            `(status=${twilioStatus}) — conference leg duration looks wrong`,
+        );
+      }
       
       // Map Twilio status to our status
       const statusMap: Record<string, string> = {

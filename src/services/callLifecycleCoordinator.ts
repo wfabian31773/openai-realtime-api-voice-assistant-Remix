@@ -774,10 +774,41 @@ class CallLifecycleCoordinator extends EventEmitter {
     try {
       const transcript = record.transcriptLines.join('\n');
       
+      /**
+       * ALWAYS WRITE OUR OWN MEASURED DURATION — corrected 2026-08-14.
+       *
+       * This used to defer entirely to Twilio whenever a callSid existed
+       * (`record.twilioCallSid ? undefined : localDuration`), on the
+       * reasonable assumption that Twilio knows how long its own call was.
+       *
+       * For conference calls it does not. The operator pulled
+       * CA04e33c56cfe458d6b26070ceee675aba in the Twilio console:
+       *
+       *     Status     No Answer
+       *     Duration   0 sec
+       *     Start/End  18:11:29 / 18:11:29   (identical)
+       *     Stir/Shaken  Failed-C-Diverted
+       *
+       * That call carried FIVE conversational turns. Its TwiML is
+       * `<Dial><Conference>conf_CA04e33c…</Conference></Dial>` — the
+       * conversation happens inside the conference, and on a diverted
+       * (Nextiva-forwarded) leg Twilio can finalise the parent call resource
+       * as no-answer/0 while the media session ran normally.
+       *
+       * 45 of 534 after-hours calls in 7 days (8.4%) landed this way: 0-3
+       * second durations on calls with 5-12 turns. Everything downstream
+       * reads that column — cost per minute, the graders, the dashboard.
+       *
+       * localDuration is measured from OUR start to OUR finalize, so it is
+       * always a real number for a real conversation. Twilio reconciliation
+       * still runs afterwards and may refine it; it just may no longer
+       * replace a measured conversation with a zero.
+       */
       const updateData: Record<string, any> = {
           status: finalStatus,
           endTime,
-          duration: record.twilioCallSid ? undefined : localDuration,
+          duration: localDuration,
+          localDurationSeconds: localDuration,
           transcript: transcript || null,
       };
       
