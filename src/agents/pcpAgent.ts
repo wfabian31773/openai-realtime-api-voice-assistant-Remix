@@ -487,35 +487,63 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         const { classifyRecords } = await import('../tools/medicalRecordsTaxonomy');
         const recordsHit = classifyRecords(narrative);
         if (recordsHit) {
-          const { determineCapClock } = await import('../tools/medicalRecordsTaxonomy');
-          const cap = determineCapClock('patient');
-          const { sanitizeForSms: sms } = await import('../services/gsm7');
-          const nameBits = String(state.callerName ?? '').trim().split(/\s+/);
-          const recordsResult = await ticketingApiClient.createTicket({
-            departmentId: 16,
-            requestTypeId: recordsHit.requestTypeId,
-            requestReasonId: recordsHit.requestReasonId,
-            patientFirstName: nameBits[0] || 'Unknown',
-            patientLastName: nameBits.slice(1).join(' ') || 'Caller',
-            patientPhone: String(state.callbackNumber ?? metadata.callerPhone ?? ''),
-            preferredContactMethod: 'phone',
-            description: sms(
-              [cap.note, '', 'Patient called the PCP Support line.', '', narrative].join('\n'),
-            ).value,
-            priority: 'medium',
-            requestorType: cap.requesterType,
-            requestPathway: cap.pathway,
-            capClockApplies: cap.onClock,
-            requestorName: String(state.callerName ?? 'the patient'),
-            callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
-          });
-          if (!recordsResult.success || !recordsResult.ticketNumber) {
-            return { success: false, error: recordsResult.error ?? 'ticket_creation_failed', retryable: true };
+          /**
+           * FILE THROUGH THE LIBRARY, NOT ALONGSIDE IT — migrated 2026-08-14.
+           *
+           * This block used to call `ticketingApiClient.createTicket` directly
+           * with its own copy of the CAP logic. It worked, and it had already
+           * drifted: `file_records_ticket` gained the operator's hard gate on
+           * 2026-08-13 — "can we hard gate the records to require the
+           * appropriate fields" — and this copy never did.
+           *
+           * So a patient's right-of-access request arriving through PCP opened
+           * an `mr_cases` row with no destination and no date range, starting a
+           * statutory clock nobody could actually work. That is precisely what
+           * the gate exists to prevent, and it was being bypassed by the one
+           * path where we KNOW the requester.
+           *
+           * It also missed the department-16 reason ownership guard and the
+           * structured body a records clerk reads (Requested by / Send to /
+           * Dates needed, each on its own line).
+           *
+           * One library, one records contract. A missing-field refusal comes
+           * straight back to the model as a question to ask — the same envelope
+           * every queue agent already answers.
+           */
+          const { getTool } = await import('../tools/registry');
+          await import('../tools/medicalRecordsTools');
+          const fileRecords = getTool('file_records_ticket');
+          if (!fileRecords) {
+            return { success: false, error: 'records_tool_unavailable', retryable: true };
           }
+
+          const nameBits = String(state.callerName ?? '').trim().split(/\s+/).filter(Boolean);
+          const recordsResult = (await fileRecords.handler({
+            first_name: state.patientFirstName || nameBits[0] || 'Unknown',
+            last_name: state.patientLastName || nameBits.slice(1).join(' ') || 'Caller',
+            date_of_birth: state.patientDob ?? '',
+            callback_number: String(state.callbackNumber ?? metadata.callerPhone ?? ''),
+            request_description: `Patient called the PCP Support line.\n\n${narrative}`,
+            request_reason_id: String(recordsHit.requestReasonId),
+            // NOT inferred. The director established callPurpose ===
+            // 'patient_caller', which is the one place on this line where the
+            // requester is known rather than guessed — the whole reason this
+            // path is allowed into department 16 at all.
+            requester: `the patient themselves${state.callerName ? ` (${state.callerName})` : ''}`,
+            ...(metadata.callSid ? { call_sid: metadata.callSid } : {}),
+            ...(metadata.callerPhone ? { caller_phone: metadata.callerPhone } : {}),
+          })) as Record<string, any>;
+
+          // A refusal here is a question for the caller, not a fault. Hand it
+          // back verbatim so the model speaks the tool's own askAs.
+          if (recordsResult?.success === false) {
+            return recordsResult as never;
+          }
+
           pcpDirector.recordDisposition(callId, 'CREATE_TASK');
           console.info(
             `[PCP] patient records request filed to Medical Records as ${recordsResult.ticketNumber} ` +
-              `(${recordsHit.requestReason}, on the clock)`,
+              `(${recordsHit.requestReason}, via the shared library)`,
           );
           return {
             success: true,
