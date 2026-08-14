@@ -24,7 +24,19 @@ export const pcpAgentConfig = {
   name: 'PCP Support Agent',
   description: 'Professional-caller support for PCP offices, referring providers, health plans, facilities, pharmacies, and related healthcare organizations.',
   version: '1.0.0',
-  greeting: 'Thank you for calling Azul Vision PCP Support. This line is for healthcare professionals. How may I help you today?',
+  /**
+   * THE GREETING CONTRADICTED THE PROMPT — fixed 2026-08-14.
+   *
+   * The prompt says "Patients ring it too, and that is not their mistake to
+   * fix", and there is a whole patient_caller path below it. The greeting then
+   * opened with "This line is for healthcare professionals", which tells a
+   * patient in the first six seconds that they have got it wrong. 117 of 419
+   * callers on this line asked for a person and a large share were patients.
+   *
+   * Says what the line is FOR without telling anyone they should not have
+   * called it.
+   */
+  greeting: 'Thank you for calling Azul Vision PCP Support. How can I help you today?',
   voice: 'sage',
   language: 'en',
 } as const;
@@ -306,6 +318,12 @@ function buildPayload(
     statedRelationship: state.statedRelationship,
     callPurpose: state.callPurpose!,
     disposition,
+    // The director's explicit-ask grant travels WITH the ticket, so the one
+    // sanctioned exception to allowedDispositions is visible to whoever reads
+    // it later rather than inferred. See PcpTicketPayloadSchema.
+    ...(disposition === 'HAND_OFF' && state.callerRequestedHuman
+      ? { dispositionGrantedByExplicitAsk: true }
+      : {}),
     urgency,
     verificationStatus: state.verificationStatus,
     patientFirstName: state.patientFirstName,

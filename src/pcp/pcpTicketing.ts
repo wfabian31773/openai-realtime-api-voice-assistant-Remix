@@ -17,6 +17,28 @@ export const PcpTicketPayloadSchema = z.object({
   statedRelationship: optionalText(500),
   callPurpose: z.enum(PCP_CALL_PURPOSE_SLUGS),
   disposition: z.enum(PCP_DISPOSITIONS),
+  /**
+   * THE ONE SANCTIONED EXCEPTION to allowedDispositions — the operator's own
+   * ruling, not a loophole.
+   *
+   * 2026-08-09: a professional who asks for a person gets one, "whatever the
+   * call is about and whatever intake is still missing — the staffer who picks
+   * up collects what they need." The director implements that by forcing
+   * HAND_OFF regardless of the classified purpose.
+   *
+   * The ticket then has to record what actually happened. Without this flag
+   * `assertPcpDisposition` rejected it, and on the operator's test call
+   * CA62a1245d that produced a deadlock with no floor: the handoff needed a
+   * durable ticket first, the ticket was refused for carrying HAND_OFF on
+   * purpose `check_patient_scheduled`, and terminate_call then refused four
+   * times because no disposition had been recorded. 188 seconds, nothing
+   * filed, and the agent could not hang up.
+   *
+   * Set ONLY by the director's explicit-ask grant. It never widens what a
+   * purpose allows anywhere else, and it travels with the ticket so a reviewer
+   * can see why this one carries HAND_OFF.
+   */
+  dispositionGrantedByExplicitAsk: z.boolean().optional(),
   urgency: z.enum(['routine', 'normal', 'high', 'urgent']).default('normal'),
   verificationStatus: z.enum(['not_required', 'pending', 'verified', 'failed']).default('pending'),
   patientFirstName: optionalText(120),
@@ -98,12 +120,21 @@ export async function submitPcpTicket(payload: PcpTicketPayload, client?: Client
     console.error(`[PCP-TICKET] payload rejected, ticket NOT filed — fields: ${fields.join(', ')}`);
     return { success: false, error: `invalid_payload: ${fields.join(', ')}` };
   }
-  try {
-    assertPcpDisposition(parsed.data.callPurpose, parsed.data.disposition);
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    console.error(`[PCP-TICKET] disposition rejected for ${parsed.data.callPurpose}: ${detail}`);
-    return { success: false, error: `disposition_not_allowed: ${detail}` };
+  if (parsed.data.dispositionGrantedByExplicitAsk && parsed.data.disposition === 'HAND_OFF') {
+    // The operator's ruling outranks the purpose's own list. Logged, never
+    // silent — a ticket carrying a disposition its purpose does not normally
+    // allow should be explainable from the logs alone.
+    console.info(
+      `[PCP-TICKET] HAND_OFF on purpose ${parsed.data.callPurpose} — granted by the caller's explicit ask for a person`,
+    );
+  } else {
+    try {
+      assertPcpDisposition(parsed.data.callPurpose, parsed.data.disposition);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error(`[PCP-TICKET] disposition rejected for ${parsed.data.callPurpose}: ${detail}`);
+      return { success: false, error: `disposition_not_allowed: ${detail}` };
+    }
   }
   const effectiveClient = client ?? (await import('../../server/services/ticketingApiClient')).ticketingApiClient;
   return effectiveClient.createPcpTicket(parsed.data);
