@@ -159,6 +159,28 @@ describe('transcript_coverage — short call vs lost record', () => {
     expect(r.reason).toMatch(/instrumentation gap/i);
     expect(r.metadata?.instrumentationGap).toBe(true);
   });
+
+  /**
+   * THE FALSE PASS THIS CHECK NEARLY SHIPPED WITH, found the next morning.
+   *
+   * 45 of 534 no-IVR calls in 7 days carry a duration of 0-3 seconds while
+   * holding 5-12 conversational turns — the duration is reconciled from a
+   * Twilio leg that is not the one the conversation happened on (one of them
+   * is `no-answer` with five turns of dialogue).
+   *
+   * Trusting duration alone would call those "short call, full coverage" and
+   * wave through exactly the population this check exists to catch. Turns come
+   * from our own recorder, so they are the honest signal for "was there a
+   * conversation".
+   */
+  it('does not call a multi-turn conversation a short call because duration is wrong', () => {
+    const r = check(
+      run({ transcript: 'AGENT: Thank you for calling Azul Vision.', durationSeconds: 1, totalTurns: 8 }),
+      'transcript_coverage',
+    );
+    expect(r.pass).toBe(false);
+    expect(r.metadata?.instrumentationGap).toBe(true);
+  });
 });
 
 describe('actionable_request_needs_ticket — same floor', () => {

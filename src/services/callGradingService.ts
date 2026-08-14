@@ -426,8 +426,27 @@ function gradeTranscriptCoverage(input: DeterministicGraderInput): GraderResult 
      * failed". A grader that cannot tell those apart teaches people to ignore
      * red.
      */
+    /**
+     * DO NOT TRUST `duration` ALONE HERE — corrected 2026-08-14, the morning
+     * after this check shipped.
+     *
+     * 45 of 534 no-IVR calls in 7 days (8.4%) carry a duration of 0-3 seconds
+     * while holding 5-12 conversational turns. The wallclock on those calls
+     * is a tight cluster around 600s, and one of them is `twilio_status =
+     * no-answer` with five turns of dialogue — so the SID whose duration we
+     * reconcile is not the leg the conversation happened on.
+     *
+     * Yesterday's version asked only "is duration < 45?" and would have
+     * called a ten-minute conversation a short call with full coverage: a
+     * FALSE PASS on exactly the population this check exists to catch.
+     *
+     * Turns are the honest signal for "was there a conversation", and they
+     * come from our own recorder rather than from Twilio's view of one leg.
+     */
     const dur = input.durationSeconds ?? 0;
-    if (dur < 45) {
+    const turns = input.totalTurns ?? 0;
+    const looksShort = dur < 45 && turns < 4;
+    if (looksShort) {
       return {
         grader: 'transcript_coverage',
         pass: true,
@@ -440,8 +459,15 @@ function gradeTranscriptCoverage(input: DeterministicGraderInput): GraderResult 
       grader: 'transcript_coverage',
       pass: false,
       score: 0.0,
-      reason: `Instrumentation gap: ${dur}s call but only ${lines.length} transcript line(s) survived — record loss, not agent behaviour`,
-      metadata: { totalLines: lines.length, callerLines: callerLines.length, agentLines: agentLines.length, instrumentationGap: true },
+      reason: `Instrumentation gap: ${turns} turn(s) over ${dur}s but only ${lines.length} transcript line(s) survived — record loss, not agent behaviour`,
+      metadata: {
+        totalLines: lines.length,
+        callerLines: callerLines.length,
+        agentLines: agentLines.length,
+        totalTurns: turns,
+        durationSeconds: dur,
+        instrumentationGap: true,
+      },
     };
   }
 
