@@ -108,6 +108,14 @@ const SAFE_ARG_KEYS = new Set([
   // caller's own words land in.
   'department_id', 'request_type_id', 'request_reason_id', 'priority',
   'confirmation_type', 'location_id', 'provider_id', 'decision_type',
+  // PCP, 2026-08-14. `callPurpose` and `callerFacilityType` are closed enums
+  // (PCP_CALL_PURPOSE_SLUGS / PCP_FACILITY_TYPES) that name a DESK, not a
+  // person — the same class of routing value as department_id above. They are
+  // the two fields that decide where a professional's request lands, and until
+  // now neither was observable. Still absent, and staying absent: callerName,
+  // callerOrganization, callerRole, callbackNumber, statedRelationship,
+  // patientFirstName, patientLastName, patientDob, patientMrn, narrative.
+  'callPurpose', 'callerFacilityType',
 ]);
 
 /** Booleans derived from arguments we must NOT store verbatim. "Did the agent
@@ -120,6 +128,32 @@ function derivedFlags(tool: string, args: Record<string, unknown>): Record<strin
     // Whether the agent had the identity fields it needs, without storing them.
     out.hasPatientName = Boolean(args?.first_name && args?.last_name);
     out.hasCallbackNumber = Boolean(args?.callback_number);
+  }
+  /**
+   * WHAT record_pcp_intake WAS TOLD — as field NAMES, never values.
+   *
+   * This is the tool the whole PCP line turns on, and until 2026-08-14 it was
+   * completely invisible: every one of its arguments is an identifier, so the
+   * allow-list dropped all of them, and its result is a PcpDirectorDecision
+   * whose keys were not in the outcome list either. The timeline recorded
+   * `{"args":{},"outcome":{}}`, nine times on one call, which is
+   * indistinguishable from the model calling it empty.
+   *
+   * That mattered on CAf00cfcb4 (2026-08-14 06:45 PT): the agent asked the
+   * caller his name twice and his professional relationship twice, and there
+   * was no way to tell from the data whether the tool had been given the
+   * answers and ignored the reply, or never given them at all.
+   *
+   * `recorded` is Object.keys — the NAMES of the fields the model passed. The
+   * same discipline `missingFields` already uses in summarizeResult: a field
+   * name is not a patient.
+   */
+  if (tool === 'record_pcp_intake') {
+    const keys = Object.keys(args ?? {}).filter((k) => args?.[k] != null && args[k] !== '');
+    out.recorded = keys;
+    out.recordedCount = keys.length;
+    // The single question this exists to answer: was it called with nothing?
+    out.empty = keys.length === 0;
   }
   return out;
 }
@@ -184,6 +218,29 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
   // Field NAMES only — the values are the caller's data.
   if (Array.isArray(parsed?.missingFields)) {
     out.missingFields = parsed.missingFields.map(String);
+  }
+  /**
+   * THE DIRECTOR'S VERDICT — the other half of the PCP blind spot.
+   *
+   * record_pcp_intake returns a PcpDirectorDecision, and none of its keys were
+   * in the list above, so every reply summarized to `{}`. The decision is pure
+   * policy: a FIELD NAME to ask next, a disposition slug, and four booleans.
+   * Nothing in it is the caller's data.
+   *
+   * `nextQuestion.prompt` is deliberately NOT stored. It is fixed wording from
+   * PROMPTS today, but it is the one field a future change could make quote the
+   * caller back — the field name is the diagnostic, so store only that.
+   *
+   * With this, the sequence is finally readable end to end: what the model
+   * recorded, what the director asked for next, and whether the agent then
+   * asked that question or a different one.
+   */
+  if (parsed?.nextQuestion || parsed?.mayTerminate !== undefined || parsed?.handoffEligible !== undefined) {
+    if (parsed?.nextQuestion?.field) out.nextField = String(parsed.nextQuestion.field);
+    else if (parsed?.mayTerminate !== undefined) out.nextField = null; // intake complete
+    for (const k of ['disposition', 'handoffEligible', 'mayTerminate', 'phiDisclosureAllowed', 'authoritativeToolAllowed', 'mustCreateFallbackTicket']) {
+      if (parsed?.[k] !== undefined) out[k] = parsed[k];
+    }
   }
   return out;
 }
