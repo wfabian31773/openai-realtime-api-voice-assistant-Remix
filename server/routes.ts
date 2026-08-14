@@ -2076,6 +2076,122 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  /**
+   * THE ONE-CALL PAYLOAD for the call-detail page (operator, 2026-08-13: "I
+   * want something more like vapi has"). Everything the tabs need in one
+   * round trip: the normalized log row, the per-turn table, the event log,
+   * parsed grader results and the tool timeline.
+   */
+  app.get('/api/call-logs/:id/detail', isAuthenticated, async (req, res) => {
+    try {
+      const callLog = await storage.getCallLog(req.params.id);
+      if (!callLog) return res.status(404).json({ message: 'Call log not found' });
+
+      const { db } = await import('./db');
+      const { sql } = await import('drizzle-orm');
+      const log: any = callLog;
+      const callSid = log.callSid ?? log.call_sid ?? null;
+      const logId = log.id;
+
+      let turns: unknown[] = [];
+      try {
+        const r = await db.execute(sql`
+          SELECT turn_index, role, at, raw_transcript, final_transcript, state,
+                 director_decision, model_output, since_prev_ms
+          FROM call_turns
+          WHERE call_log_id = ${logId} OR (${callSid}::varchar IS NOT NULL AND call_sid = ${callSid})
+          ORDER BY turn_index ASC
+        `);
+        turns = (r as any).rows ?? r;
+      } catch (e) {
+        console.warn('[CALL-DETAIL] turns query failed:', e);
+      }
+
+      let events: unknown[] = [];
+      try {
+        // The table is created lazily by callEventLog on its first flush; a
+        // deploy that has never taken a call since the feature shipped will
+        // not have it, and that must read as "no events yet", not a 500.
+        const r = await db.execute(sql`
+          SELECT at, level, category, message, data
+          FROM call_events
+          WHERE call_log_id = ${logId} OR (${callSid}::varchar IS NOT NULL AND call_sid = ${callSid})
+          ORDER BY at ASC, id ASC
+        `);
+        events = (r as any).rows ?? r;
+      } catch {
+        events = [];
+      }
+
+      let graderResults: unknown = null;
+      try {
+        const raw = log.graderResults ?? log.grader_results;
+        graderResults = typeof raw === 'string' ? JSON.parse(raw) : raw ?? null;
+      } catch {
+        graderResults = null;
+      }
+
+      let toolTimeline: unknown = null;
+      try {
+        const raw = log.toolTimeline ?? log.tool_timeline;
+        toolTimeline = typeof raw === 'string' ? JSON.parse(raw) : raw ?? null;
+      } catch {
+        toolTimeline = null;
+      }
+
+      res.json({ callLog: normalizeCallLog(callLog), turns, events, graderResults, toolTimeline });
+    } catch (error) {
+      console.error('Error building call detail:', error);
+      res.status(500).json({ message: 'Failed to build call detail' });
+    }
+  });
+
+  /**
+   * STREAM THE RECORDING AUDIO through our own origin.
+   *
+   * Twilio media requires basic auth, so a browser <audio> pointed at the
+   * api.twilio.com URL gets a 401 — which is why the old page could show a
+   * recording exists but not reliably play it, and why no waveform was
+   * possible (Web Audio needs same-origin/CORS bytes). Auth happens here,
+   * server-side; the page gets plain audio/mpeg it can both play and decode.
+   */
+  app.get('/api/call-logs/:id/audio', isAuthenticated, async (req, res) => {
+    try {
+      const callLog = await storage.getCallLog(req.params.id);
+      if (!callLog?.callSid) return res.status(404).json({ message: 'No call SID for this log' });
+
+      const sid = process.env.TWILIO_ACCOUNT_SID;
+      const token = process.env.TWILIO_AUTH_TOKEN;
+      if (!sid || !token) return res.status(500).json({ message: 'Twilio credentials not configured' });
+      const auth = `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}`;
+
+      const list = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${sid}/Calls/${callLog.callSid}/Recordings.json`,
+        { headers: { Authorization: auth } },
+      );
+      if (!list.ok) return res.status(list.status).json({ message: 'Failed to list recordings' });
+      const data: any = await list.json();
+      const rec = data.recordings?.[0];
+      if (!rec) return res.status(404).json({ message: 'No recording found for this call' });
+
+      // Dual-channel when available: caller and agent land on separate stereo
+      // channels, which is what makes the two-tone waveform honest.
+      const media = await fetch(
+        `https://api.twilio.com${rec.uri.replace('.json', '.mp3')}?RequestedChannels=2`,
+        { headers: { Authorization: auth } },
+      );
+      if (!media.ok || !media.body) return res.status(media.status || 502).json({ message: 'Failed to fetch media' });
+
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Cache-Control', 'private, max-age=3600');
+      const { Readable } = await import('node:stream');
+      Readable.fromWeb(media.body as any).pipe(res);
+    } catch (error) {
+      console.error('Error streaming recording audio:', error);
+      if (!res.headersSent) res.status(500).json({ message: 'Failed to stream audio' });
+    }
+  });
+
   // Fetch recording URL from Twilio for a specific call
   app.get('/api/call-logs/:id/recording', isAuthenticated, async (req, res) => {
     try {

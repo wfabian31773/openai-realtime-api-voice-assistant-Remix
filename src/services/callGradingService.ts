@@ -63,11 +63,62 @@ const GHOST_CALL_INDICATORS = [
   'hello', 'hi', 'is anyone there',
 ];
 
-function gradeHandoffExpectedVsActual(input: DeterministicGraderInput): GraderResult {
-  const transcriptLower = input.transcript.toLowerCase();
+/**
+ * AGENTS THAT HAVE NO TRANSFER TOOL, BY THE OPERATOR'S OWN RULING.
+ *
+ * 2026-08-12: "there is no handoff for any of the answering service agents,
+ * only for PCP, Scheduling SD. All other agents politely state they are unable
+ * to handoff and can only create a request for a callback."
+ *
+ * A grader that expects a transfer from these lines is measuring against a
+ * capability that was deliberately removed — on 2026-08-13 this one check was
+ * 52 of tech's 55 "critical fails" while the agent did exactly what it was
+ * told. On these lines the whole obligation is a TICKET, so that is what the
+ * check now verifies.
+ */
+const NO_TRANSFER_AGENTS = new Set([
+  'answering-service', 'no-ivr', 'after-hours', 'dev-no-ivr',
+  'optical', 'surgery', 'tech', 'records',
+]);
 
-  const handoffRequested = HANDOFF_KEYWORDS.some(kw => transcriptLower.includes(kw));
+function gradeHandoffExpectedVsActual(input: DeterministicGraderInput): GraderResult {
+  /**
+   * CALLER LINES ONLY — rewritten 2026-08-13. This used to scan the whole
+   * transcript, agent lines included, and the agents SAY these words
+   * constantly: "is this urgent?", "the on-call team", "I can't transfer you
+   * but…". The agent asking a triage question tripped the "caller demanded a
+   * transfer" detector.
+   */
+  const callerText = input.transcript
+    .split('\n')
+    .filter(l => /^(caller|patient|user):/i.test(l.trim()))
+    .join(' ')
+    .toLowerCase();
+  // No speaker labels at all → fall back to the old whole-transcript scan
+  // rather than silently passing everything.
+  const scanText = callerText || input.transcript.toLowerCase();
+
+  const handoffRequested = HANDOFF_KEYWORDS.some(kw => scanText.includes(kw));
   const handoffOccurred = input.transferredToHuman;
+
+  if (handoffRequested && NO_TRANSFER_AGENTS.has(input.agentSlug ?? '')) {
+    if (input.ticketNumber || handoffOccurred) {
+      return {
+        grader: 'handoff_expected_vs_actual',
+        pass: true,
+        score: 1.0,
+        reason: 'Escalation language on a no-transfer line and a ticket was filed — the whole obligation for this agent',
+        metadata: { noTransferLine: true, ticketNumber: input.ticketNumber },
+      };
+    }
+    return {
+      grader: 'handoff_expected_vs_actual',
+      pass: false,
+      score: 0.0,
+      reason: 'Escalation language on a no-transfer line and NO ticket filed — the caller left with nothing',
+      metadata: { noTransferLine: true },
+    };
+  }
 
   if (handoffRequested && handoffOccurred) {
     return {
@@ -88,7 +139,7 @@ function gradeHandoffExpectedVsActual(input: DeterministicGraderInput): GraderRe
   }
 
   if (handoffRequested && !handoffOccurred) {
-    const matchedKeywords = HANDOFF_KEYWORDS.filter(kw => transcriptLower.includes(kw));
+    const matchedKeywords = HANDOFF_KEYWORDS.filter(kw => scanText.includes(kw));
     return {
       grader: 'handoff_expected_vs_actual',
       pass: false,
@@ -296,6 +347,25 @@ function gradeTicketRequiredVsCreated(input: DeterministicGraderInput): GraderRe
     };
   }
 
+  /**
+   * A CONVERSATION FLOOR, added 2026-08-13. `callerLines.length > 20` reads
+   * like "twenty caller turns" and is actually twenty CHARACTERS of a joined
+   * string — "call me back" alone clears it. Measured that day: of tech's 173
+   * calls, 45 called no tool and averaged 2.3 turns — hangups and wrong
+   * numbers — and this check demanded tickets from them. The honest
+   * denominator is calls where a conversation actually happened.
+   */
+  const callerTurnCount = lines.filter(l => /^(caller|patient|user):/i.test(l.trim())).length;
+  if (callerTurnCount < 2) {
+    return {
+      grader: 'ticket_required_vs_created',
+      pass: true,
+      score: 1.0,
+      reason: `No real conversation (${callerTurnCount} caller turn${callerTurnCount === 1 ? '' : 's'}) — ticket judgment not applicable`,
+      metadata: { callerTurnCount, notApplicable: true },
+    };
+  }
+
   const ticketIndicators = TICKET_REQUIRED_INDICATORS.filter(ind => callerLines.includes(ind));
   const ticketLikelyRequired = ticketIndicators.length >= 1 && callerLines.length > 20;
   const ticketCreated = !!input.ticketNumber;
@@ -344,12 +414,34 @@ function gradeTranscriptCoverage(input: DeterministicGraderInput): GraderResult 
   const agentLines = lines.filter(l => /^(agent|assistant|ai):/i.test(l.trim()));
 
   if (lines.length < 3) {
+    /**
+     * SHORT CALL vs LOST RECORD — split 2026-08-13. A 12-second hangup with
+     * one transcript line has FULL coverage: nothing more was said. Failing it
+     * counted ghost calls as agent defects (16.3% of tech, mostly this).
+     *
+     * The genuine defect is the other way round: a long call whose record is
+     * thin. That is instrumentation loss — the measured cause that day was
+     * per-process buffers dying on mid-day republishes — and it is flagged as
+     * such so the dashboard separates "the agent failed" from "the recorder
+     * failed". A grader that cannot tell those apart teaches people to ignore
+     * red.
+     */
+    const dur = input.durationSeconds ?? 0;
+    if (dur < 45) {
+      return {
+        grader: 'transcript_coverage',
+        pass: true,
+        score: 1.0,
+        reason: `Short call (${dur}s) fully covered by ${lines.length} line(s)`,
+        metadata: { totalLines: lines.length, shortCall: true },
+      };
+    }
     return {
       grader: 'transcript_coverage',
       pass: false,
       score: 0.0,
-      reason: `Transcript too sparse: only ${lines.length} lines (minimum 3 expected)`,
-      metadata: { totalLines: lines.length, callerLines: callerLines.length, agentLines: agentLines.length },
+      reason: `Instrumentation gap: ${dur}s call but only ${lines.length} transcript line(s) survived — record loss, not agent behaviour`,
+      metadata: { totalLines: lines.length, callerLines: callerLines.length, agentLines: agentLines.length, instrumentationGap: true },
     };
   }
 
@@ -810,6 +902,19 @@ function gradeActionableRequestNeedsTicket(input: DeterministicGraderInput): Gra
       score: 1.0,
       reason: 'Ghost/silent call - no actionable request detected',
       metadata: { isGhostCall: true },
+    };
+  }
+
+  // Same conversation floor as ticket_required_vs_created, same 2026-08-13
+  // measurement: a hangup is not a lost request.
+  const callerTurnCount = lines.filter(l => /^(caller|patient|user):/i.test(l.trim())).length;
+  if (callerTurnCount < 2) {
+    return {
+      grader: 'actionable_request_needs_ticket',
+      pass: true,
+      score: 1.0,
+      reason: `No real conversation (${callerTurnCount} caller turn${callerTurnCount === 1 ? '' : 's'}) — not applicable`,
+      metadata: { callerTurnCount, notApplicable: true },
     };
   }
 

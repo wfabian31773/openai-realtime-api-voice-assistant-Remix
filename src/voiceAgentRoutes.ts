@@ -46,6 +46,16 @@ import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/d
 import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
 import { startProviderRosterRefresh } from './services/providerRoster';
 import { recordTurn, flushTurns, releaseTurns } from './services/turnLog';
+// Vapi-grain instrumentation (operator, 2026-08-13): the per-call event log
+// and per-turn latency clocks. Everything here already flowed through the
+// transport handler — it went to console.log and died there.
+import {
+  emitCallEvent,
+  markLatency,
+  turnLatencySnapshot,
+  flushCallEvents,
+  releaseCallEvents,
+} from './services/callEventLog';
 
 // Load centralized environment configuration
 let envConfig: ReturnType<typeof getEnvironmentConfig>;
@@ -3003,6 +3013,9 @@ async function observeCall(
 
   session.on('error', (event) => {
     console.error('[SESSION ERROR]', event.error);
+    emitCallEvent(callId, 'error', 'session', 'session error', {
+      message: event?.error instanceof Error ? event.error.message : String(event?.error ?? 'unknown'),
+    });
   });
 
   // Debug: Track function call events
@@ -3014,13 +3027,29 @@ async function observeCall(
   });
 
   // Debug: Track tool execution
+  const toolStartedAt = new Map<string, number>();
   session.on('agent_tool_start', (_context: any, _agent: any, tool: any, details: any) => {
+    toolStartedAt.set(`${callId}:${tool.name}`, Date.now());
+    emitCallEvent(callId, 'info', 'tool', `tool started: ${tool.name}`, null, {
+      callSid: twilioCallSid, callLogId: callMetadataForDB.get(callId)?.dbCallLogId, agentSlug: effectiveSlug,
+    });
     console.info(`[TOOL EXECUTION] Starting tool: ${tool.name}`, {
       toolCall: details.toolCall,
     });
   });
 
   session.on('agent_tool_end', (_context: any, _agent: any, tool: any, result: string, details: any) => {
+    const startKey = `${callId}:${tool.name}`;
+    const startedAt = toolStartedAt.get(startKey);
+    toolStartedAt.delete(startKey);
+    // The result envelope's success flag without the payload — shapes, not PHI.
+    let ok: boolean | null = null;
+    try { ok = JSON.parse(result)?.success ?? null; } catch { /* not JSON */ }
+    emitCallEvent(callId, ok === false ? 'warn' : 'info', 'tool', `tool finished: ${tool.name}`, {
+      ms: startedAt ? Date.now() - startedAt : null,
+      success: ok,
+      resultChars: result?.length ?? 0,
+    });
     console.info(`[TOOL EXECUTION] Tool completed: ${tool.name}`, {
       resultLength: result?.length,
     });
@@ -3036,17 +3065,48 @@ async function observeCall(
     // has stopped conversing, so counting those would defeat the whole thing.
     if (isActivityEvent(eventType)) deadAirWatchdog.touch(callId);
 
+    // ---- Per-call event log + latency clocks (fail-open, PHI-free) --------
+    // Marks first: they are Map writes and must not wait on anything.
+    if (eventType === 'input_audio_buffer.speech_stopped') {
+      markLatency(callId, 'speech_stopped');
+      emitCallEvent(callId, 'info', 'vad', 'caller stopped speaking', null, {
+        callSid: twilioCallSid, callLogId: callMetadataForDB.get(callId)?.dbCallLogId, agentSlug: effectiveSlug,
+      });
+    } else if (eventType === 'input_audio_buffer.speech_started') {
+      emitCallEvent(callId, 'info', 'vad', 'caller started speaking');
+    } else if (eventType === 'response.output_audio.delta' || eventType === 'response.audio.delta') {
+      markLatency(callId, 'first_audio'); // no event row — hundreds per reply
+    } else if (eventType === 'error') {
+      emitCallEvent(callId, 'error', 'session', 'realtime error event', {
+        code: event?.error?.code ?? null, type: event?.error?.type ?? null,
+      });
+    }
+    // -----------------------------------------------------------------------
+
     // Is a response actually in flight? See responseInFlight — a `response.cancel`
     // with nothing to cancel comes back as a server error, and this session's
     // error handler treats anything off its three-item allowlist as fatal.
     if (eventType === 'response.created') {
       responseInFlight.add(callId);
+      markLatency(callId, 'response_created');
+      emitCallEvent(callId, 'info', 'model', 'response started');
     } else if (
       eventType === 'response.done' ||
       eventType === 'response.cancelled' ||
       eventType === 'response.canceled'
     ) {
       responseInFlight.delete(callId);
+      if (eventType === 'response.done') {
+        markLatency(callId, 'response_done');
+        const u = event?.response?.usage;
+        emitCallEvent(callId, 'info', 'model', 'response finished', {
+          inputTokens: u?.input_tokens ?? null,
+          outputTokens: u?.output_tokens ?? null,
+          latency: turnLatencySnapshot(callId),
+        });
+      } else {
+        emitCallEvent(callId, 'warn', 'model', 'response cancelled');
+      }
       // Greeting guarantee: turn boundary is the one collision-free moment
       // to resend a greeting that never played (see pendingGreetings).
       checkGreetingDelivered(callId, event);
@@ -3060,6 +3120,7 @@ async function observeCall(
     // Caller barge-in → the SDK truncates the in-flight agent response.
     if (eventType === 'conversation.item.truncated') {
       conversationLoopGuard.onTruncation(callId);
+      emitCallEvent(callId, 'warn', 'vad', 'caller barge-in truncated the reply');
     }
 
     // Log specific events for debugging
@@ -3067,6 +3128,12 @@ async function observeCall(
       const transcript = event?.transcript;
       const itemId = event?.item_id;
       logPHI(`${BRIGHT_GREEN}[CALLER TRANSCRIPT] ${transcript}${RESET}`);
+      markLatency(callId, 'transcript_done');
+      // Shape only — the words live in call_turns, never in the event log.
+      emitCallEvent(callId, 'info', 'transcriber', 'caller transcript final', {
+        chars: transcript?.length ?? 0,
+        latency: turnLatencySnapshot(callId),
+      });
       
       if (transcript) {
         // Persist transcript incrementally via coordinator (saves to DB immediately)
@@ -3356,15 +3423,26 @@ async function observeCall(
         let turnDecision: DirectorAction | null = null;
         if (directorEnabledFor(effectiveSlug)) {
           turnDecision = director.observeAgent(callId, effectiveSlug, transcript);
-          if (turnDecision) applyDirectorAction(session, callId, effectiveSlug, turnDecision);
+          if (turnDecision) {
+            applyDirectorAction(session, callId, effectiveSlug, turnDecision);
+            emitCallEvent(callId, 'warn', 'director', `director ${turnDecision.enforcement}: ${turnDecision.code}`, {
+              topic: turnDecision.topic ?? null,
+            });
+          }
         }
+        emitCallEvent(callId, 'info', 'transcript', 'agent line final', { chars: transcript.length });
         recordTurn(callId, 'agent', transcript, {
           state: director.stateSnapshot(callId),
           // Verdict only — action.text and .speak quote the caller.
           directorDecision: turnDecision
             ? { enforcement: turnDecision.enforcement, code: turnDecision.code, topic: turnDecision.topic }
             : null,
-          modelOutput: { tools: (getAzulTimeline(callId) ?? []).map((e) => e.tool) },
+          modelOutput: {
+            tools: (getAzulTimeline(callId) ?? []).map((e) => e.tool),
+            // The Vapi-grain components for THIS turn: transcriber, model to
+            // first sound, voice, and the silence the caller actually heard.
+            latency: turnLatencySnapshot(callId),
+          },
           callSid: twilioCallSid,
           callLogId: callMetadataForDB.get(callId)?.dbCallLogId,
           agentSlug: effectiveSlug,
@@ -4553,6 +4631,8 @@ async function observeCall(
     // Turn table: write before releasing, then free. Fire-and-forget — a
     // debugging record must never delay teardown.
     void flushTurns(callId).finally(() => releaseTurns(callId));
+    emitCallEvent(callId, 'info', 'session', 'session teardown');
+    void flushCallEvents(callId).finally(() => releaseCallEvents(callId));
     
     // Clean up conference mappings to prevent stale entries
     // Use wrapper for restart recovery - may find session in service cache
