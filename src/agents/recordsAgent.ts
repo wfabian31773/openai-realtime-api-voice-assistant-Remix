@@ -98,10 +98,46 @@ This number matches one person on file: first name "${pc.firstName}".
 `
       : '';
 
+  /**
+   * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
+   *
+   * This line used to end "Confirm it once, at the end", a few lines above a
+   * block reading THE NUMBER COMES BEFORE THE TICKET. The prompt said both, and
+   * on 2026-08-13 the surgery line did what THIS one said, on VA-51417:
+   *
+   *   "I've filed your request. Your ticket number is VA-51417.
+   *    Is this number ending in 3921 the best one to reach you?"
+   *
+   * The operator had reported that defect fixed a deploy earlier. It was not —
+   * the block was added in #189 and never reconciled with the line that
+   * predated it. The model obeyed the more concrete instruction, which is what
+   * a model should do.
+   *
+   * It also dodged the old ban on the words "is that correct?" by rephrasing.
+   * PROHIBIT THE TIMING, NOT THE PHRASING: a ban on a sentence is routed around
+   * by rewording, and rewording is the one thing a language model does reliably.
+   */
+  /**
+   * TWO RULES BELOW CAME FROM ONE REAL CALL, 2026-08-13, and both read as
+   * obvious only afterwards.
+   *
+   *   agent: "Let me get this logged for you — one moment."
+   *   agent: "Could you tell me the city where your office is located?
+   *           For example, the North Valley Eye office — what city is it in?"
+   *   caller: "I don't know if I go to, to Burbank and Tarzana or Indian Hills."
+   *
+   * The cover line had already promised the pause and then the questions kept
+   * coming, so the caller was told it was done when it was not. And we asked a
+   * patient to tell US where our own office is — she could not, reasonably,
+   * and the ticket filed without a location.
+   *
+   * The anecdote lives here rather than in the prompt on purpose: optical's
+   * prompt has a 1,200-token ceiling and a war story is not an instruction.
+   */
   const callbackLine = phone
     ? `Their number is ${formatPhoneForSpeech(phone)} (ending ${formatPhoneLast4(phone)}). ` +
-      `Use it as the callback number without asking. Confirm it once, at the end, and do not ask "is that correct?".`
-    : `You do not have their number. You must ask for a full ten-digit callback number.`;
+      `Use it as the callback number without asking. Confirm it once, BEFORE you file — never after.`
+    : `You do not have their number. Ask for a full ten-digit callback number BEFORE you file, never after.`;
 
   return `You answer the medical records line at Azul Vision. ${time}
 
@@ -191,6 +227,12 @@ never say you are transferring, never leave them expecting a person to pick up.
    categories.
 6. File it with file_records_ticket, then read the ticket number back.
 
+# NEVER ASK A PATIENT WHERE OUR OFFICES ARE
+They came to us; we know where we are. Offer the office on their record as a
+yes/no — "I have you at our Encinitas office, is that the one?" — or read back
+the candidates a tool gives you. Never ask which city one of our offices is in.
+If they do not know, note it and move on.
+
 # TWO THINGS ABOUT THE LAST THIRTY SECONDS
 
 THE NUMBER COMES BEFORE THE TICKET. Confirming a callback number after you have
@@ -202,6 +244,10 @@ NEVER GO SILENT WHILE FILING. The caller cannot tell silence from a dropped
 line. Say "Let me get this logged for you — one moment." FIRST, then file
 quietly. Do not narrate, do not apologise for the wait, do not ask anything new
 while it runs.
+
+SAY IT ONLY WHEN YOU ARE ACTUALLY ABOUT TO FILE — it is the last thing they
+hear before the pause, not something you say and then carry on asking. Still
+need something? Ask for that first.
 
 # HOW YOU SPEAK
 ${callbackLine}
