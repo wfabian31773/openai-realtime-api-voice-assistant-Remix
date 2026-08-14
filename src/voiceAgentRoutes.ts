@@ -3013,8 +3013,15 @@ async function observeCall(
 
   session.on('error', (event) => {
     console.error('[SESSION ERROR]', event.error);
+    // `String(someObject)` is "[object Object]", which is what this logged on
+    // its first night — the row that mattered carried no information at all.
+    // The realtime error shape nests two levels deep, so reach for the code
+    // before falling back to stringifying anything.
+    const e: any = (event as any)?.error;
     emitCallEvent(callId, 'error', 'session', 'session error', {
-      message: event?.error instanceof Error ? event.error.message : String(event?.error ?? 'unknown'),
+      code: e?.error?.code ?? e?.code ?? null,
+      type: e?.error?.type ?? e?.type ?? null,
+      message: e instanceof Error ? e.message : e?.error?.message ?? e?.message ?? null,
     });
   });
 
@@ -3074,7 +3081,23 @@ async function observeCall(
       });
     } else if (eventType === 'input_audio_buffer.speech_started') {
       emitCallEvent(callId, 'info', 'vad', 'caller started speaking');
-    } else if (eventType === 'response.output_audio.delta' || eventType === 'response.audio.delta') {
+    } else if (typeof eventType === 'string' && eventType.startsWith('response.') && eventType.endsWith('.delta')) {
+      /**
+       * ANY response delta means the model has started producing output.
+       *
+       * This was pinned to `response.output_audio.delta` /
+       * `response.audio.delta` — the names `standalone/demoLine.ts` uses on a
+       * raw websocket. The Agents SDK transport does not surface those under
+       * those names, so the mark never fired once: on the first live night
+       * `modelFirstAudioMs` and `callerWaitMs` were blank on all 51 agent
+       * turns while transcriber and endpointing populated fine.
+       *
+       * Matching the SHAPE rather than two guessed names catches audio and
+       * transcript deltas alike, whichever this SDK version emits first —
+       * and both mean the same thing for this measurement. `first_audio`
+       * only records the earliest, so the hundreds that follow cost a
+       * comparison each and nothing more.
+       */
       markLatency(callId, 'first_audio'); // no event row — hundreds per reply
     } else if (eventType === 'error') {
       emitCallEvent(callId, 'error', 'session', 'realtime error event', {
@@ -4282,7 +4305,32 @@ async function observeCall(
         const nonFatalErrors = [
           'cannot_update_voice',            // Session update during active audio
           'unknown_parameter',               // Malformed session update structure
-          'conversation_already_has_active_response' // Multiple responses in progress
+          'conversation_already_has_active_response', // Multiple responses in progress
+          /**
+           * A CANCEL THAT ARRIVED A MOMENT TOO LATE — added 2026-08-14, from
+           * the first call the new event log ever explained.
+           *
+           * CA9323de99, 19:38:16 Pacific, four rows in sequence:
+           *   director author: bundled_questions
+           *   realtime error: response_cancel_not_active (invalid_request_error)
+           *   session error
+           *   session teardown                     <- 19:38:17
+           *
+           * The caller stayed on that line until it billed 1,483 seconds —
+           * nearly 25 minutes — and ended `inconclusive`.
+           *
+           * `applyDirectorAction` DOES guard this: it only sends
+           * `response.cancel` when `responseInFlight` has the call. But the
+           * director rules on `response.audio_transcript.done`, which fires
+           * BEFORE `response.done` — so the flag is still set locally while
+           * the server has already finished the response. The guard cannot
+           * win that race from this side; it is a round trip.
+           *
+           * Which makes this error benign by nature: it means "the thing you
+           * asked me to cancel already ended", and the correct response is to
+           * carry on. Tearing down a live call over it is the actual defect.
+           */
+          'response_cancel_not_active',
         ];
         
         if (nonFatalErrors.includes(errorCode)) {
