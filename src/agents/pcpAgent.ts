@@ -7,7 +7,14 @@ import { markCallConcluded } from '../services/callConclusion';
 import { recordingExecute } from '../services/toolTimeline';
 import { withToolDirection } from '../services/toolDirection';
 import { scheduleLookupService } from '../services/scheduleLookupService';
-import { PCP_FACILITY_TYPES, pcpDirector, type PcpConversationState } from '../pcp/director';
+import {
+  PCP_FACILITY_TYPES,
+  PROFESSIONAL_FIELDS,
+  PATIENT_INTAKE_ORDER,
+  PROMPTS as DIRECTOR_PROMPTS,
+  pcpDirector,
+  type PcpConversationState,
+} from '../pcp/director';
 import {
   PCP_CALL_PURPOSE_SLUGS,
   assertPcpDisposition,
@@ -93,6 +100,52 @@ type HandoffCallback = () => Promise<HandoffOutcome>;
  * filing, and never going silent while a tool runs — are stated the same way
  * they are on the other four.
  */
+/**
+ * THE INTAKE SCRIPT, RENDERED FROM THE DIRECTOR'S OWN LISTS.
+ *
+ * Operator, 2026-08-14, after a live call: "we should have maybe in the prompt
+ * ask these questions in order and get a response and record them in order...
+ * if it's a PCP you ask these questions, if it's a patient you do this,
+ * because this shit sounds crazy."
+ *
+ * He is right, and the cause was structural. The prompt told the model to "ask
+ * only the single next question record_pcp_intake gives you" and never showed
+ * it WHAT the order was. So the model invented a sequence, the director
+ * corrected it a turn later, and the caller heard both — on his call the agent
+ * asked for his name, then asked for his name again bundled with the medical
+ * group, then jumped to the callback number. His words: "the sequencing is
+ * off."
+ *
+ * Generating the script from PROFESSIONAL_FIELDS / PATIENT_INTAKE_ORDER and
+ * PROMPTS means the prompt and the director cannot drift apart. Add a field to
+ * the director and it appears here; change the wording once and both follow.
+ */
+function renderIntakeScript(): string {
+  const line = (f: keyof PcpConversationState, i: number) =>
+    `  ${i + 1}. ${DIRECTOR_PROMPTS[f] ?? String(f)}`;
+  return `# THE INTAKE, IN ORDER — DO NOT IMPROVISE THE SEQUENCE
+
+Ask ONE question. Wait for the answer. Record it with record_pcp_intake. Then
+ask the next. Never bundle two, never skip ahead, and NEVER re-ask something the
+caller has already answered — if you have it, move on.
+
+A HEALTHCARE PROFESSIONAL (a clinic, a plan, a facility, a pharmacy):
+${PROFESSIONAL_FIELDS.map(line).join('\n')}
+
+A PATIENT or their family — the moment it is clear you are speaking to one,
+switch to this list and never ask the professional questions:
+${PATIENT_INTAKE_ORDER.map(line).join('\n')}
+
+record_pcp_intake tells you which field is still missing. That answer is the
+authority: if it names a field, ask THAT one. If it stops naming fields, stop
+asking and act.
+
+If the caller has already given you something before you asked — a name in
+their opening sentence, an organization, why they are calling — record it and
+skip that step. Asking for what you were just told is the fastest way to lose a
+professional's confidence.`;
+}
+
 export function buildPcpPrompt(metadata: PcpAgentMetadata = {} as PcpAgentMetadata): string {
   const time = getPacificTimeContext();
   const phone = metadata.callerPhone || '';
@@ -117,6 +170,8 @@ Ask only the single next question record_pcp_intake gives you, and never re-ask
 something already stored. It decides which fields are missing, whether a
 transfer is available, and what happens at the end of the call. If it stops
 asking, stop asking.
+
+${renderIntakeScript()}
 
 Never invent a patient, an organization, a callback number, a verification
 result, an appointment, a provider, a plan or a location. If you do not have a
