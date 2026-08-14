@@ -11,6 +11,9 @@ import {
 // instantiation (ticketingApiClient validation triggers in production)
 import type { CallerMemory } from "../services/callerMemoryService";
 import { URGENT_SYMPTOMS, getCurrentDateTimeContext } from "../config/knowledgeBase";
+// The three presentations the symptom list above cannot express, because two
+// of its entries are conditionals written as prose. See afterHoursTriage.ts.
+import { renderTriagePrompt } from "../tools/afterHoursTriage";
 import { recordingExecute } from "../services/toolTimeline";
 import { buildCompactLocationReference } from "../config/azulVisionKnowledge";
 import { getNextBusinessDayContext } from "../utils/timeAware";
@@ -612,6 +615,8 @@ You have an internal checklist to track. Execute these phases IN ORDER. Track yo
 ===== URGENT SYMPTOMS (see Phase 3 for handling) =====
 ${URGENT_SYMPTOMS.symptoms.map((s) => `• ${s}`).join("\n")}
 (Use emit_decision tool in Phase 3 when urgency is classified)
+
+${renderTriagePrompt()}
 
 ===== REQUEST-SPECIFIC QUESTIONS =====
 
