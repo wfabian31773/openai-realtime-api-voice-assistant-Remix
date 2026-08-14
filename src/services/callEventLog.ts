@@ -200,16 +200,29 @@ export interface TurnLatency {
 const span = (a?: number, b?: number): number | undefined =>
   a !== undefined && b !== undefined && b >= a ? b - a : undefined;
 
-/** The components for the turn that just finished. Reads without clearing —
- *  a response.done and the transcript.done that follows both want it. */
-export function turnLatencySnapshot(callId: string): TurnLatency | null {
+/**
+ * The components for the turn that just finished. Reads without clearing —
+ * a response.done and the transcript.done that follows both want it.
+ *
+ * `atMs` is the moment the caller ACTUALLY heard the reply complete. The
+ * snapshot for a turn is taken on `response.audio_transcript.done`, which
+ * fires BEFORE `response.done` — so `responseDoneAt` is still unset at that
+ * point and `voiceMs` came back empty on every single turn of the first live
+ * night. Measured 2026-08-14: 51 of 51 agent turns had transcriber and
+ * endpointing populated and voice/model/callerWait blank.
+ *
+ * Passing the call site's own clock closes it honestly: the transcript
+ * finishing IS when the spoken reply finished being produced.
+ */
+export function turnLatencySnapshot(callId: string, atMs: number = Date.now()): TurnLatency | null {
   const c = clocks.get(callId);
   if (!c) return null;
+  const doneAt = c.responseDoneAt ?? atMs;
   const out: TurnLatency = {
     transcriberMs: span(c.speechStoppedAt, c.transcriptDoneAt),
     endpointingMs: span(c.transcriptDoneAt, c.responseCreatedAt),
     modelFirstAudioMs: span(c.responseCreatedAt, c.firstAudioAt),
-    voiceMs: span(c.firstAudioAt, c.responseDoneAt),
+    voiceMs: span(c.firstAudioAt, doneAt),
     callerWaitMs: span(c.speechStoppedAt, c.firstAudioAt),
   };
   return Object.values(out).some((v) => v !== undefined) ? out : null;
