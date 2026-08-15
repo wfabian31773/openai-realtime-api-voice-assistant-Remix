@@ -20,6 +20,8 @@
  * "asked again", live and post-mortem.
  */
 
+import { canTransfer } from '../config/agentCapabilities';
+
 /** Topics an agent asks callers about. A line is bucketed by the FIRST
  *  topic it matches; unmatched lines are not counted, so the guard
  *  under-reports rather than inventing loops. Superset of the azul
@@ -125,32 +127,18 @@ export const HUMAN_REQUEST_CAP = 2;
 export const HUMAN_REQUEST_CAP_NO_TRANSFER = 1;
 
 /**
- * Agents with no handoff/transfer capability of any kind.
+ * On a line that can never transfer, the honest answer — "I can't connect
+ * calls, I can have someone call you back" — is owed on the FIRST ask, not the
+ * second. A vague "I'll get this to the right team" is what made callers ask up
+ * to ten times on 07-29.
  *
- * THE DEPARTMENT LINES WERE MISSING FROM THIS (fixed 2026-08-15). Operator:
- * *"something in the answering service works but when you built individual
- * agents, it stopped working."* This is one of them.
- *
- * The whole point of HUMAN_REQUEST_CAP_NO_TRANSFER is that on a line which can
- * never transfer, the honest answer — "I can't connect calls, I can have
- * someone call you back" — is owed on the FIRST ask, not the second. The
- * answering service got that. Tech, Surgery, Optical and Records have exactly
- * the same limitation and were left on the default cap of 2, so their callers
- * had to ask twice before hearing the truth.
- *
- * Membership verified against the code rather than assumed: `escalate_to_human`
- * / `handoffToHuman()` appears in noIvrAgent and noIvrAgentV2 only. Every agent
- * listed here has no transfer tool at all. `no-ivr` is deliberately ABSENT — it
- * is the real after-hours triage line and it does transfer, for a provider, a
- * hospital, or a true emergency.
+ * Asked of the capability registry rather than a local list. This module used
+ * to keep its own `NO_TRANSFER_AGENTS = {answering-service}`, which is why
+ * Tech, Surgery, Optical and Records callers had to ask twice before being told
+ * the line cannot connect them.
  */
-const NO_TRANSFER_AGENTS = new Set([
-  'answering-service', 'after-hours',
-  'tech', 'surgery', 'optical', 'records',
-]);
-
 export function humanRequestCapFor(agentSlug: string): number {
-  return NO_TRANSFER_AGENTS.has(agentSlug) ? HUMAN_REQUEST_CAP_NO_TRANSFER : HUMAN_REQUEST_CAP;
+  return canTransfer(agentSlug) ? HUMAN_REQUEST_CAP : HUMAN_REQUEST_CAP_NO_TRANSFER;
 }
 
 const AGENT_EXIT: Record<string, string> = {

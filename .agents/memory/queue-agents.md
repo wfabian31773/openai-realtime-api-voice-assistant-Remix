@@ -408,3 +408,53 @@ surgery"**, **"large floaTER"**. All three still passed, but only via
 default-open, which means they would have been REFUSED had the sentence also
 contained "appointment". A list of keywords does not survive contact with how
 people actually speak; an interposed word breaks it silently.
+
+## Capabilities are properties of an agent, never lists of slugs
+
+2026-08-15, operator: *"do the refactor, capability based not slug lists."*
+
+The audit that prompted it found the same question answered four different ways
+in four files, every one written when the answering service was the only tenant:
+
+    conversationLoopGuard  NO_TRANSFER_AGENTS  = {answering-service}
+    callGradingService     NO_TRANSFER_AGENTS  = {answering-service, no-ivr,
+                                                  after-hours, dev-no-ivr,
+                                                  optical, surgery, tech, records}
+    callGradingService     TICKET_ONLY_AGENTS  = {answering-service, no-ivr,
+                                                  after-hours, dev-no-ivr}
+    voiceAgentRoutes       (two inline literals) = {after-hours, no-ivr,
+                                                    answering-service,
+                                                    azul-scheduling, pcp}
+
+**Splitting one agent into many turns every such list into a migration step
+nobody schedules.** The loop-guard list cost Tech, Surgery, Optical and Records
+callers a second ask before being told the line cannot transfer. And I put
+`no-ivr` — the ONLY agent in the fleet with a transfer tool — into a
+no-transfer set, which made a hospital getting a ticket instead of a transfer
+score 1.0.
+
+`config/agentCapabilities.ts` now owns the answer. Three properties worth
+copying if this pattern is repeated elsewhere:
+
+- **Store the EVIDENCE, not just the boolean.** `transferTool: 'escalate_to_human'`
+  rather than `canTransfer: true` alone. A boolean can be wrong and nothing
+  notices; a tool name is checkable, and `agentCapabilities.test.ts` reads each
+  agent's source to verify it. A registry that can drift from the code is just a
+  fifth list, and a worse one because everything now trusts it.
+- **Derive what can be derived.** `isTicketOnly = filesTickets && !canTransfer`.
+  The two lists that disagreed with each other were expressing one fact twice.
+- **Fail safe in a NAMED direction.** An unregistered slug is assumed unable to
+  transfer (worst case: takes a message when it could have connected someone)
+  and assumed to file tickets (worst case: a wasted no-op push). Both chosen so
+  the failure is the cheap one. Never throws — it sits in the live call path.
+
+The grep that makes the conformance test honest: `name: "escalate_to_human"`,
+i.e. a model-callable tool DEFINITION — not a substring. `techAgent` contains
+`_handoffToHuman: undefined` as a deliberate no-op and `answeringServiceAgent`
+declares a `handoffToHuman` parameter it never invokes. A naive substring search
+calls both transfer-capable and both are wrong.
+
+**Per-agent WORDING stays keyed by slug** — the director's ceiling scripts and
+exit lines are genuinely per-agent. What must not be per-agent is the CHOICE OF
+SHAPE: those now fall back through `isTicketOnly`, so a ticket-only line can
+never be handed a script that names a transfer tool it does not have.

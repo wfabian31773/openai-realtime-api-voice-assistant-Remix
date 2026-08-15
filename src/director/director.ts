@@ -31,6 +31,7 @@
  */
 import { ASK_TOPICS, classifyAsk } from '../services/conversationLoopGuard';
 import { spokenDates } from '../services/identityArgGuard';
+import { isTicketOnly } from '../config/agentCapabilities';
 
 export type DirectorEnforcement = 'inject' | 'author' | 'force_exit';
 
@@ -569,30 +570,6 @@ const CEILING_ACTION: Record<string, { fix: string; speak: string; then: string 
     speak: "I'm having trouble getting that down clearly. Let me take what I have and make sure someone calls you back.",
     then: 'call create_ticket with the reason the caller already gave and whatever name you captured — leave the name fields empty if you captured none',
   },
-  /**
-   * THE DEPARTMENT LINES — Tech, Surgery, Optical, Records (added 2026-08-15).
-   *
-   * They were falling through to `default`, which tells the agent to "hand off
-   * with sage_handoff". None of them HAS sage_handoff, or any transfer tool at
-   * all. So the one moment the director intervenes on a department call, it
-   * would direct the agent to do something impossible — and the matching
-   * EXIT_LINE below promises the caller "someone who can help directly", which
-   * is precisely what `human_request_deflection` grades as a CRITICAL failure:
-   * promising a transfer on a ticket-only line. The safety net would have
-   * caused the injury.
-   *
-   * Latent rather than live: DIRECTOR_AGENTS is empty in production and the
-   * timeline shows zero director actions on any agent in the fleet. But it
-   * would bite the day the director is switched on for these lines — which is
-   * the day nobody would be looking for a new failure.
-   *
-   * Operator, 2026-08-15: *"something in the answering service works but when
-   * you built individual agents, it stopped working."*
-   */
-  tech: TICKET_ONLY_CEILING,
-  surgery: TICKET_ONLY_CEILING,
-  optical: TICKET_ONLY_CEILING,
-  records: TICKET_ONLY_CEILING,
   default: {
     fix: 'Stop collecting identity. Hand off with sage_handoff reason patient_identity_uncertain, or file what you have. Do NOT ask again.',
     speak: "I'm having trouble getting that down, and I don't want to keep you any longer. Let me get this to someone who can help.",
@@ -605,18 +582,39 @@ const EXIT_LINE: Record<string, string> = {
     "I'm sorry — I'm clearly going in circles and I don't want to keep you any longer. Let me get you to someone on our team who can take it from here.",
   'answering-service':
     "I'm sorry, I'm going in circles here. Let me take down what I have and make sure someone from the office calls you back.",
-  // Same reason as CEILING_ACTION above: these lines cannot transfer, so the
-  // default's "let me get you to someone who can help directly" is a promise
-  // they cannot keep.
-  tech: TICKET_ONLY_EXIT_LINE,
-  surgery: TICKET_ONLY_EXIT_LINE,
-  optical: TICKET_ONLY_EXIT_LINE,
-  records: TICKET_ONLY_EXIT_LINE,
   'after-hours':
     "I'm sorry, I'm going in circles here. Let me take down what I have and make sure someone calls you back.",
   default:
     "I'm sorry about that — let me get you to someone who can help directly.",
 };
+
+/**
+ * WHICH SCRIPT AN AGENT GETS — resolved by CAPABILITY, not by membership.
+ *
+ * Operator, 2026-08-15: *"do the refactor, capability based not slug lists."*
+ *
+ * The tables above hold per-agent WORDING, which is genuinely per-agent and
+ * stays keyed by slug. What must not be per-agent is the CHOICE OF SHAPE: an
+ * agent that cannot transfer must never be handed a script that says "hand off
+ * with sage_handoff" or "let me get you to someone who can help directly".
+ *
+ * That is what happened before this. Tech, Surgery, Optical and Records had no
+ * entry, so they fell through to `default` — which names a transfer tool none
+ * of them has, and promises the caller a person none of them can reach. The one
+ * moment the director stepped in to rescue a call, it would have directed the
+ * agent into the exact critical failure `human_request_deflection` punishes.
+ *
+ * Resolving through `isTicketOnly` means a NEW ticket-only queue is correct on
+ * the day it is created, with nothing added here. That is the whole point of
+ * the refactor: the fallback knows what kind of line it is looking at.
+ */
+function ceilingActionFor(agentSlug: string) {
+  return CEILING_ACTION[agentSlug] ?? (isTicketOnly(agentSlug) ? TICKET_ONLY_CEILING : CEILING_ACTION.default);
+}
+
+function exitLineFor(agentSlug: string): string {
+  return EXIT_LINE[agentSlug] ?? (isTicketOnly(agentSlug) ? TICKET_ONLY_EXIT_LINE : EXIT_LINE.default);
+}
 
 export class Director {
   private calls = new Map<string, CallState>();
@@ -964,7 +962,7 @@ export class Director {
         s.identityAsks += 1;
         if (s.identityAsks >= IDENTITY_ASK_CEILING && !s.ceilingFired) {
           s.ceilingFired = true;
-          const plan = CEILING_ACTION[s.agentSlug] ?? CEILING_ACTION.default;
+          const plan = ceilingActionFor(s.agentSlug);
           return this.action(s, 'identity_ceiling', 'identity', 2, {
             why:
               `You have asked for identity ${s.identityAsks} times and still do not have it. ` +
@@ -1053,7 +1051,7 @@ export class Director {
     const enforcement: DirectorEnforcement =
       effectiveLevel >= 3 ? 'force_exit' : effectiveLevel >= 2 ? 'author' : 'inject';
     if (enforcement === 'force_exit') {
-      const speak = EXIT_LINE[s.agentSlug] ?? EXIT_LINE.default;
+      const speak = exitLineFor(s.agentSlug);
       return {
         enforcement,
         code,

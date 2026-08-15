@@ -6,13 +6,17 @@
  * answering service works but when you built individual agents, it stopped
  * working."*
  *
- * He was right, and the audit found the shape of it: the fleet gates behaviour
- * on agent slug in a dozen scattered literal lists, every one of them written
- * when the answering service was the only tenant. Splitting it into department
- * queues meant each list had to be revisited, and several never were.
+ * He was right, and the audit found the shape of it: the fleet gated behaviour
+ * on agent slug in four scattered literal lists, every one written when the
+ * answering service was the only tenant. Splitting it into department queues
+ * meant each list had to be revisited by hand. Several never were, and the ones
+ * that were, I got wrong.
  *
- * These tests exist so membership is asserted rather than remembered. Each one
- * is a list that was wrong on 2026-08-15.
+ * Those lists are now gone — `config/agentCapabilities.ts` owns the answer and
+ * `agentCapabilities.test.ts` proves the registry matches the agent sources.
+ * What stays HERE is the other half: that each consumer, given the registry's
+ * answer, then does the right thing with it. Each case below is a real defect
+ * from 2026-08-15.
  */
 import { describe, it, expect } from 'vitest';
 
@@ -41,91 +45,111 @@ describe('a line that cannot transfer owes the truth on the FIRST ask', () => {
      */
     expect(humanRequestCapFor('no-ivr')).toBe(HUMAN_REQUEST_CAP);
   });
+
+  it('a queue nobody has registered yet still gets the honest answer first', async () => {
+    // The payoff of resolving by capability: a new department line is correct
+    // on the day it is created, with nothing added anywhere.
+    const { humanRequestCapFor, HUMAN_REQUEST_CAP_NO_TRANSFER } = await import('./conversationLoopGuard');
+    expect(humanRequestCapFor('glaucoma-clinic')).toBe(HUMAN_REQUEST_CAP_NO_TRANSFER);
+  });
 });
 
-describe('the director never tells an agent to use a tool it does not have', () => {
-  /**
-   * The department lines were falling through to the `default` ceiling action,
-   * which says "hand off with sage_handoff". None of them has sage_handoff or
-   * any transfer tool, and the matching exit line promised the caller "someone
-   * who can help directly" — exactly what human_request_deflection grades as a
-   * CRITICAL failure on a ticket-only line. The safety net would have caused
-   * the injury.
-   */
-  it('gives every ticket-only line a file-the-ticket ceiling, not a handoff', async () => {
-    // CEILING_ACTION is module-private, so this asserts on the source: the
-    // shared ticket-only entry must not name a transfer tool, and each
-    // department slug must be explicitly bound to it rather than falling
-    // through to `default`.
-    const src = await import('node:fs').then((fs) =>
-      fs.readFileSync(new URL('../director/director.ts', import.meta.url), 'utf8'),
-    );
-    const ceilingBlock = src.slice(src.indexOf('const TICKET_ONLY_CEILING'), src.indexOf('const CEILING_ACTION'));
-    expect(ceilingBlock).not.toMatch(/sage_handoff/);
-    expect(ceilingBlock).toMatch(/cannot|do NOT offer to transfer/i);
+describe('the grader reads escalation language against what the line can DO', () => {
+  const grade = async (agentSlug: string, over: Record<string, unknown> = {}) => {
+    const { callGradingService } = await import('./callGradingService');
+    const results = callGradingService.runDeterministicGraders({
+      callLogId: 'test', transcript: 'AGENT: Thanks for calling.\nCALLER: Can you transfer me to someone?',
+      transferredToHuman: false, ticketNumber: 'VA-1', agentSlug, totalTurns: 6,
+      interruptionCount: 0, truncationCount: 0, toolCallCount: 2, durationSeconds: 120,
+      firstTranscriptDelayMs: 800, postTranscriptTailMs: 0, localDurationSeconds: 120,
+      transcriptWindowSeconds: 120, durationMismatchRatio: null, durationMismatchFlag: false,
+      ...over,
+    } as never);
+    return (results as Array<{ grader: string; pass: boolean; reason: string }>);
+  };
 
+  it('a department line that filed a ticket has met its whole obligation', async () => {
     for (const slug of DEPARTMENT_LINES) {
-      expect(src, `${slug} must have an explicit ceiling action`).toMatch(
-        new RegExp(`\\b${slug}: TICKET_ONLY_CEILING`),
-      );
-      expect(src, `${slug} must have an explicit exit line`).toMatch(
-        new RegExp(`\\b${slug}: TICKET_ONLY_EXIT_LINE`),
-      );
+      const g = (await grade(slug)).find((x) => x.grader === 'handoff_expected_vs_actual')!;
+      expect(g.pass, `${slug}: ${g.reason}`).toBe(true);
+      expect(g.reason).toMatch(/no-transfer line/);
     }
   });
 
-  it('the ticket-only exit line does not promise a person', async () => {
-    const src = await import('node:fs').then((fs) =>
+  it('a department line that filed NOTHING still fails — the caller left with nothing', async () => {
+    // The check has to keep biting. This is the 38 real no-ticket escalations.
+    const g = (await grade('tech', { ticketNumber: null })).find(
+      (x) => x.grader === 'handoff_expected_vs_actual',
+    )!;
+    expect(g.pass).toBe(false);
+    expect(g.reason).toMatch(/NO ticket filed/);
+  });
+
+  it('does NOT excuse no-ivr, which can actually transfer', async () => {
+    /**
+     * The error I made on 08-13. With no-ivr treated as a no-transfer line, a
+     * hospital ringing about a patient and getting a ticket instead of a
+     * transfer scored 1.0 — "the whole obligation for this agent". On this line
+     * it is not.
+     */
+    const g = (await grade('no-ivr')).find((x) => x.grader === 'handoff_expected_vs_actual')!;
+    expect(g.reason).not.toMatch(/no-transfer line/);
+    expect(g.pass, 'a transfer was asked for on a line that can transfer, and did not happen').toBe(false);
+  });
+});
+
+describe('the director never hands a ticket-only line a transfer script', () => {
+  /**
+   * The department lines used to fall through to the `default` ceiling action,
+   * which says "hand off with sage_handoff" — a tool none of them has — and to
+   * a default exit line promising "someone who can help directly", which is
+   * precisely what human_request_deflection grades as a CRITICAL failure on a
+   * ticket-only line. The safety net would have caused the injury.
+   *
+   * Latent rather than live: DIRECTOR_AGENTS is empty in production and the
+   * timeline shows zero director actions on any agent. It would have bitten the
+   * day the director was switched on.
+   */
+  const src = () =>
+    import('node:fs').then((fs) =>
       fs.readFileSync(new URL('../director/director.ts', import.meta.url), 'utf8'),
     );
-    const line = src.match(/const TICKET_ONLY_EXIT_LINE\s*=\s*\n?\s*"([^"]+)"/)?.[1] ?? '';
+
+  it('resolves the ceiling by capability, so a new queue is right on day one', async () => {
+    const s = await src();
+    expect(s).toMatch(/isTicketOnly\(agentSlug\)\s*\?\s*TICKET_ONLY_CEILING/);
+    const block = s.slice(s.indexOf('const TICKET_ONLY_CEILING'), s.indexOf('const CEILING_ACTION'));
+    expect(block, 'the ticket-only ceiling must not name a transfer tool').not.toMatch(/sage_handoff/);
+  });
+
+  it('the ticket-only exit line does not promise a person', async () => {
+    const s = await src();
+    const line = s.match(/const TICKET_ONLY_EXIT_LINE\s*=\s*\n?\s*"([^"]+)"/)?.[1] ?? '';
     expect(line, 'exit line not found').toBeTruthy();
     expect(line).not.toMatch(/get you to someone|connect you|transfer/i);
     expect(line).toMatch(/calls? you back/i);
   });
 });
 
-describe('the grader knows which lines can transfer and which cannot', () => {
-  it('protects the department lines running the busy-team script', async () => {
-    const src = await import('node:fs').then((fs) =>
-      fs.readFileSync(new URL('./callGradingService.ts', import.meta.url), 'utf8'),
-    );
-    const block = src.slice(src.indexOf('const TICKET_ONLY_AGENTS'), src.indexOf('const TICKET_ONLY_AGENTS') + 300);
-    for (const slug of DEPARTMENT_LINES) {
-      expect(block, `${slug} missing from TICKET_ONLY_AGENTS`).toContain(`'${slug}'`);
-    }
-    // And no-ivr must NOT be there — it transfers, and grading a legitimate
-    // transfer promise as a critical failure punishes correct behaviour.
-    expect(block).not.toContain("'no-ivr'");
-  });
-
-  it('keeps no-ivr out of the no-transfer set too', async () => {
-    const src = await import('node:fs').then((fs) =>
-      fs.readFileSync(new URL('./callGradingService.ts', import.meta.url), 'utf8'),
-    );
-    const block = src.slice(src.indexOf('const NO_TRANSFER_AGENTS'), src.indexOf('const NO_TRANSFER_AGENTS') + 220);
-    expect(block).not.toContain("'no-ivr'");
-    expect(block).toContain("'answering-service'");
-  });
-});
-
 describe('every ticket-filing line gets its call data attached at hangup', () => {
-  it('includes the department queues in the immediate enrichment push', async () => {
+  it('asks the registry at both enrichment sites', async () => {
     /**
-     * Both enrichment sites listed five slugs inline and neither included the
-     * department queues, so their tickets only got call data on a later sweep
-     * cycle. Not lost — ticketingSyncService has no slug filter — but late, on
-     * lines that already wait 120s to finalize.
+     * Both sites listed five slugs inline and neither included the department
+     * queues, so their tickets only got recording/transcript/duration on a
+     * later sweep cycle. Not lost — ticketingSyncService has no slug filter —
+     * but late, on lines that already wait 120s to finalize.
      */
     const src = await import('node:fs').then((fs) =>
       fs.readFileSync(new URL('../voiceAgentRoutes.ts', import.meta.url), 'utf8'),
     );
-    const block = src.slice(src.indexOf('const TICKET_FILING_AGENTS'), src.indexOf('const TICKET_FILING_AGENTS') + 400);
+    const uses = src.match(/filesTickets\(agentSlug\)/g) ?? [];
+    expect(uses.length, 'both enrichment sites must ask the registry').toBe(2);
+  });
+
+  it('covers the department queues and the transferring lines alike', async () => {
+    const { filesTickets } = await import('../config/agentCapabilities');
     for (const slug of [...DEPARTMENT_LINES, 'answering-service', 'no-ivr', 'pcp', 'azul-scheduling', 'after-hours']) {
-      expect(block, `${slug} missing from TICKET_FILING_AGENTS`).toContain(`'${slug}'`);
+      expect(filesTickets(slug), `${slug} files tickets and needs its call data`).toBe(true);
     }
-    // One named set, used at both sites — the duplication is what let them drift.
-    const uses = src.match(/TICKET_FILING_AGENTS\.has/g) ?? [];
-    expect(uses.length, 'both enrichment sites must use the shared set').toBe(2);
   });
 });
