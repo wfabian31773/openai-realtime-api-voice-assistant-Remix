@@ -343,3 +343,68 @@ failure.
 - **`case '…'` inside a comment** truncated the factory-switch scanner.
 - Tests that assert on prompt text need **whitespace-tolerant regexes**, or a
   re-wrap breaks them.
+
+## The after-hours line is `no-ivr`, and it is the only agent that can transfer
+
+2026-08-15, operator: *"It's called no-IVR only because initially we had tried
+the IVR selection. But in true meaning it's the after-hours agent. That's the
+agent that takes all the after-hours phone calls."*
+
+Names to carry: the slug `no-ivr` maps to `src/agents/noIvrAgent.ts` (1,596
+lines). `no-ivr-v2` and `dev-no-ivr` map to `noIvrAgentV2.ts`. There is also a
+separate `afterHoursAgent.ts` behind the `after-hours` slug — 4 calls ever, and
+it is NOT the after-hours line. Do not confuse them again.
+
+**It holds `escalate_to_human`, and it is the ONLY agent in the fleet that
+does.** Verified by grep: answering-service, optical, surgery, tech, records
+and afterHoursAgent have no transfer tool at all. Out of hours the transfer
+goes to on-call; in hours `urgentTransfer.ts` asks the rules engine for the
+office queue.
+
+I got this wrong on 08-13 and put `no-ivr` in the grader's `NO_TRANSFER_AGENTS`,
+which made "escalation language, ticket filed" score 1.0 — *"the whole
+obligation for this agent"*. On this line it is not. A hospital that gets a
+ticket instead of a transfer is a failure, and the grader was blind to it.
+
+### The operator's rule, verbatim, and the three cases
+
+> "The only times it's supposed to fire is if it's calling from a provider's
+> office, if it's calling from a hospital, or if it's a truly urgent situation
+> with a patient. Not 'I need an urgent appointment tomorrow because I need an
+> eye checkup.'"
+
+Everything else — including *"I couldn't hear the patient"* — is
+`create_ticket` with whatever was collected. **Filing a partial ticket IS the
+job.** That is what an after-hours triage agent is for.
+
+### What went wrong, and the general lesson
+
+`escalate_to_human` offered `patient_unresponsive` as a caller type: "cannot
+communicate after 3 attempts". It became the biggest escalation bucket on the
+line — 14 of 33 events over 14 days. **A tool that OFFERS a category will have
+that category used.** The prompt saying "RARE - TRUE EMERGENCIES ONLY" three
+hundred lines away does not outrank an enum value the model can select.
+
+Two more that compound it:
+- **Nothing refused a second escalation.** One call fired three, another two —
+  each dialling on-call and filing its own record ticket. Most of "all kinds of
+  different messages" was one call several times, not many calls.
+- **The prompt and the tool description disagreed.** Phase 6 listed only
+  clinical symptoms and omitted providers/hospitals; the tool listed all three.
+  When two places state a rule, they drift, and the model gets to choose.
+
+The fix is `services/afterHoursEscalationGate.ts` — deterministic, server-side,
+on the arguments actually sent. **Allow by default**: a refusal must be
+positively matched, because a needless transfer costs a phone call and a
+wrongly refused one could cost somebody their sight. Identity is checked first,
+so a discharge nurse who says "appointment" in the same breath still gets
+through.
+
+### Backtesting a gate against real strings is worth more than the tests
+
+Replaying all 26 recorded escalation reasons through the gate caught three
+acute phrases the substring list missed — **"severe EYE pain"**, **"recent EYE
+surgery"**, **"large floaTER"**. All three still passed, but only via
+default-open, which means they would have been REFUSED had the sentence also
+contained "appointment". A list of keywords does not survive contact with how
+people actually speak; an interposed word breaks it silently.
