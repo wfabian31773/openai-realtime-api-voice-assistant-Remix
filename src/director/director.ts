@@ -31,6 +31,7 @@
  */
 import { ASK_TOPICS, classifyAsk } from '../services/conversationLoopGuard';
 import { spokenDates } from '../services/identityArgGuard';
+import { isTicketOnly } from '../config/agentCapabilities';
 
 export type DirectorEnforcement = 'inject' | 'author' | 'force_exit';
 
@@ -538,6 +539,21 @@ const IDENTITY_TOPICS = new Set(['full name', 'first name', 'last name', 'date o
  * because it cannot book without a verified patient and should not pretend
  * otherwise.
  */
+/**
+ * The ceiling action for a line that files tickets and cannot transfer. Shared
+ * by the four department queues so they cannot drift apart, and so adding a
+ * fifth is one line rather than a copy.
+ */
+const TICKET_ONLY_CEILING = {
+  fix: 'File the ticket NOW with what you already have — the callback number is attached to the call and the reason they gave in their first turn is enough. Leave any field you did not capture empty. Do NOT ask for the name or date of birth again, and do NOT offer to transfer: this line cannot.',
+  speak: "I'm having trouble getting that down clearly, and I don't want to keep you. Let me pass on what I have with your number and have the team call you back.",
+  then: 'file the ticket with the reason the caller already gave and whatever name you captured — leave the name fields empty if you captured none',
+} as const;
+
+/** The give-up line for the same lines. Never promises a person. */
+const TICKET_ONLY_EXIT_LINE =
+  "I'm sorry, I'm going in circles here. Let me take down what I have and make sure the right team calls you back.";
+
 const CEILING_ACTION: Record<string, { fix: string; speak: string; then: string }> = {
   'answering-service': {
     fix: 'Call create_ticket NOW with what you already have — the callback number is attached to the call, and the reason they gave in their first turn is enough. Set the name fields to whatever you managed to capture, or leave them empty. Do NOT ask for the name or date of birth again.',
@@ -566,9 +582,39 @@ const EXIT_LINE: Record<string, string> = {
     "I'm sorry — I'm clearly going in circles and I don't want to keep you any longer. Let me get you to someone on our team who can take it from here.",
   'answering-service':
     "I'm sorry, I'm going in circles here. Let me take down what I have and make sure someone from the office calls you back.",
+  'after-hours':
+    "I'm sorry, I'm going in circles here. Let me take down what I have and make sure someone calls you back.",
   default:
     "I'm sorry about that — let me get you to someone who can help directly.",
 };
+
+/**
+ * WHICH SCRIPT AN AGENT GETS — resolved by CAPABILITY, not by membership.
+ *
+ * Operator, 2026-08-15: *"do the refactor, capability based not slug lists."*
+ *
+ * The tables above hold per-agent WORDING, which is genuinely per-agent and
+ * stays keyed by slug. What must not be per-agent is the CHOICE OF SHAPE: an
+ * agent that cannot transfer must never be handed a script that says "hand off
+ * with sage_handoff" or "let me get you to someone who can help directly".
+ *
+ * That is what happened before this. Tech, Surgery, Optical and Records had no
+ * entry, so they fell through to `default` — which names a transfer tool none
+ * of them has, and promises the caller a person none of them can reach. The one
+ * moment the director stepped in to rescue a call, it would have directed the
+ * agent into the exact critical failure `human_request_deflection` punishes.
+ *
+ * Resolving through `isTicketOnly` means a NEW ticket-only queue is correct on
+ * the day it is created, with nothing added here. That is the whole point of
+ * the refactor: the fallback knows what kind of line it is looking at.
+ */
+function ceilingActionFor(agentSlug: string) {
+  return CEILING_ACTION[agentSlug] ?? (isTicketOnly(agentSlug) ? TICKET_ONLY_CEILING : CEILING_ACTION.default);
+}
+
+function exitLineFor(agentSlug: string): string {
+  return EXIT_LINE[agentSlug] ?? (isTicketOnly(agentSlug) ? TICKET_ONLY_EXIT_LINE : EXIT_LINE.default);
+}
 
 export class Director {
   private calls = new Map<string, CallState>();
@@ -916,7 +962,7 @@ export class Director {
         s.identityAsks += 1;
         if (s.identityAsks >= IDENTITY_ASK_CEILING && !s.ceilingFired) {
           s.ceilingFired = true;
-          const plan = CEILING_ACTION[s.agentSlug] ?? CEILING_ACTION.default;
+          const plan = ceilingActionFor(s.agentSlug);
           return this.action(s, 'identity_ceiling', 'identity', 2, {
             why:
               `You have asked for identity ${s.identityAsks} times and still do not have it. ` +
@@ -1005,7 +1051,7 @@ export class Director {
     const enforcement: DirectorEnforcement =
       effectiveLevel >= 3 ? 'force_exit' : effectiveLevel >= 2 ? 'author' : 'inject';
     if (enforcement === 'force_exit') {
-      const speak = EXIT_LINE[s.agentSlug] ?? EXIT_LINE.default;
+      const speak = exitLineFor(s.agentSlug);
       return {
         enforcement,
         code,

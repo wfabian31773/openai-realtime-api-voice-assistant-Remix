@@ -1033,6 +1033,9 @@ const aircallDTMFSent = new Set<string>();
 // Import escalation details from shared store (avoids circular dependency with noIvrAgent.ts)
 import { escalationDetailsMap, type EscalationDetails } from './services/escalationStore';
 import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
+import { filesTickets } from './config/agentCapabilities';
+
+
 
 // Log conversation history (PHI-protected)
 function logHistoryItem(item: RealtimeItem, callId?: string): void {
@@ -4556,7 +4559,7 @@ async function observeCall(
             const hasValidTicket = updatedCallLog?.ticketNumber && updatedCallLog.ticketNumber.trim().length > 0;
             const hasValidTranscript = finalTranscript && finalTranscript.length > 50;
             
-            if (twilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service' || agentSlug === 'azul-scheduling' || agentSlug === 'pcp') && hasValidTicket && hasValidTranscript) {
+            if (twilioCallSid && filesTickets(agentSlug) && hasValidTicket && hasValidTranscript) {
               
               // Use shared retry utility for ticketing API updates
               const ticketResult = await withRetry(
@@ -7755,7 +7758,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       const agentSlug = callLog?.agentId ? (await storage.getAgent(callLog.agentId))?.slug : null;
       const hasTicket = callLog?.ticketNumber && callLog.ticketNumber.trim().length > 0;
       
-      if (effectiveTwilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service' || agentSlug === 'azul-scheduling' || agentSlug === 'pcp') && hasTicket) {
+      if (effectiveTwilioCallSid && filesTickets(agentSlug) && hasTicket) {
         try {
           const ticketUpdateResult = await ticketingApiClient.updateTicketCallData({
             callSid: effectiveTwilioCallSid,

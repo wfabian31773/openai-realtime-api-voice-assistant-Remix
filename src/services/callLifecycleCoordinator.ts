@@ -804,12 +804,44 @@ class CallLifecycleCoordinator extends EventEmitter {
        * still runs afterwards and may refine it; it just may no longer
        * replace a measured conversation with a zero.
        */
+      /**
+       * THE TWO GRADERS THAT HAVE NEVER ONCE PRODUCED A SIGNAL.
+       *
+       * `gradeLatency` reads firstTranscriptDelayMs and `gradeTailSafety` reads
+       * postTranscriptTailMs. Both columns were NULL on all 2,203 calls in the
+       * fleet — every agent, since the day the columns were added — so both
+       * graders returned "No … data available" and scored 0.5, forever. Two of
+       * fifteen checks pinned at half marks is a flat ~6.7% off the rubric of
+       * every call we have ever scored, and it is nobody's agent behaviour.
+       *
+       * The values were never missing. They were computed immediately below
+       * this, in SECONDS, for a log message, and thrown away. All that was
+       * missing was the write.
+       *
+       * MILLISECONDS, because that is the unit the graders' thresholds are in
+       * (<=2000 excellent, <=4000 acceptable). Writing the log line's seconds
+       * would have scored every call in the fleet as instant — a worse lie than
+       * the missing data, because it looks like a measurement.
+       */
+      const firstTranscriptDelayMs = record.firstTranscriptAt
+        ? Math.max(0, record.firstTranscriptAt.getTime() - record.startTime.getTime())
+        : null;
+      const postTranscriptTailMs = record.lastTranscriptAt
+        ? Math.max(0, endTime.getTime() - record.lastTranscriptAt.getTime())
+        : null;
+      const transcriptWindowSeconds = record.firstTranscriptAt && record.lastTranscriptAt
+        ? Math.max(0, Math.floor((record.lastTranscriptAt.getTime() - record.firstTranscriptAt.getTime()) / 1000))
+        : null;
+
       const updateData: Record<string, any> = {
           status: finalStatus,
           endTime,
           duration: localDuration,
           localDurationSeconds: localDuration,
           transcript: transcript || null,
+          firstTranscriptDelayMs,
+          postTranscriptTailMs,
+          transcriptWindowSeconds,
       };
       
       if (record.transferredToHuman) {

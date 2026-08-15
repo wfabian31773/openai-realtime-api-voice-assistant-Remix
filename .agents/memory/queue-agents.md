@@ -343,3 +343,118 @@ failure.
 - **`case '…'` inside a comment** truncated the factory-switch scanner.
 - Tests that assert on prompt text need **whitespace-tolerant regexes**, or a
   re-wrap breaks them.
+
+## The after-hours line is `no-ivr`, and it is the only agent that can transfer
+
+2026-08-15, operator: *"It's called no-IVR only because initially we had tried
+the IVR selection. But in true meaning it's the after-hours agent. That's the
+agent that takes all the after-hours phone calls."*
+
+Names to carry: the slug `no-ivr` maps to `src/agents/noIvrAgent.ts` (1,596
+lines). `no-ivr-v2` and `dev-no-ivr` map to `noIvrAgentV2.ts`. There is also a
+separate `afterHoursAgent.ts` behind the `after-hours` slug — 4 calls ever, and
+it is NOT the after-hours line. Do not confuse them again.
+
+**It holds `escalate_to_human`, and it is the ONLY agent in the fleet that
+does.** Verified by grep: answering-service, optical, surgery, tech, records
+and afterHoursAgent have no transfer tool at all. Out of hours the transfer
+goes to on-call; in hours `urgentTransfer.ts` asks the rules engine for the
+office queue.
+
+I got this wrong on 08-13 and put `no-ivr` in the grader's `NO_TRANSFER_AGENTS`,
+which made "escalation language, ticket filed" score 1.0 — *"the whole
+obligation for this agent"*. On this line it is not. A hospital that gets a
+ticket instead of a transfer is a failure, and the grader was blind to it.
+
+### The operator's rule, verbatim, and the three cases
+
+> "The only times it's supposed to fire is if it's calling from a provider's
+> office, if it's calling from a hospital, or if it's a truly urgent situation
+> with a patient. Not 'I need an urgent appointment tomorrow because I need an
+> eye checkup.'"
+
+Everything else — including *"I couldn't hear the patient"* — is
+`create_ticket` with whatever was collected. **Filing a partial ticket IS the
+job.** That is what an after-hours triage agent is for.
+
+### What went wrong, and the general lesson
+
+`escalate_to_human` offered `patient_unresponsive` as a caller type: "cannot
+communicate after 3 attempts". It became the biggest escalation bucket on the
+line — 14 of 33 events over 14 days. **A tool that OFFERS a category will have
+that category used.** The prompt saying "RARE - TRUE EMERGENCIES ONLY" three
+hundred lines away does not outrank an enum value the model can select.
+
+Two more that compound it:
+- **Nothing refused a second escalation.** One call fired three, another two —
+  each dialling on-call and filing its own record ticket. Most of "all kinds of
+  different messages" was one call several times, not many calls.
+- **The prompt and the tool description disagreed.** Phase 6 listed only
+  clinical symptoms and omitted providers/hospitals; the tool listed all three.
+  When two places state a rule, they drift, and the model gets to choose.
+
+The fix is `services/afterHoursEscalationGate.ts` — deterministic, server-side,
+on the arguments actually sent. **Allow by default**: a refusal must be
+positively matched, because a needless transfer costs a phone call and a
+wrongly refused one could cost somebody their sight. Identity is checked first,
+so a discharge nurse who says "appointment" in the same breath still gets
+through.
+
+### Backtesting a gate against real strings is worth more than the tests
+
+Replaying all 26 recorded escalation reasons through the gate caught three
+acute phrases the substring list missed — **"severe EYE pain"**, **"recent EYE
+surgery"**, **"large floaTER"**. All three still passed, but only via
+default-open, which means they would have been REFUSED had the sentence also
+contained "appointment". A list of keywords does not survive contact with how
+people actually speak; an interposed word breaks it silently.
+
+## Capabilities are properties of an agent, never lists of slugs
+
+2026-08-15, operator: *"do the refactor, capability based not slug lists."*
+
+The audit that prompted it found the same question answered four different ways
+in four files, every one written when the answering service was the only tenant:
+
+    conversationLoopGuard  NO_TRANSFER_AGENTS  = {answering-service}
+    callGradingService     NO_TRANSFER_AGENTS  = {answering-service, no-ivr,
+                                                  after-hours, dev-no-ivr,
+                                                  optical, surgery, tech, records}
+    callGradingService     TICKET_ONLY_AGENTS  = {answering-service, no-ivr,
+                                                  after-hours, dev-no-ivr}
+    voiceAgentRoutes       (two inline literals) = {after-hours, no-ivr,
+                                                    answering-service,
+                                                    azul-scheduling, pcp}
+
+**Splitting one agent into many turns every such list into a migration step
+nobody schedules.** The loop-guard list cost Tech, Surgery, Optical and Records
+callers a second ask before being told the line cannot transfer. And I put
+`no-ivr` — the ONLY agent in the fleet with a transfer tool — into a
+no-transfer set, which made a hospital getting a ticket instead of a transfer
+score 1.0.
+
+`config/agentCapabilities.ts` now owns the answer. Three properties worth
+copying if this pattern is repeated elsewhere:
+
+- **Store the EVIDENCE, not just the boolean.** `transferTool: 'escalate_to_human'`
+  rather than `canTransfer: true` alone. A boolean can be wrong and nothing
+  notices; a tool name is checkable, and `agentCapabilities.test.ts` reads each
+  agent's source to verify it. A registry that can drift from the code is just a
+  fifth list, and a worse one because everything now trusts it.
+- **Derive what can be derived.** `isTicketOnly = filesTickets && !canTransfer`.
+  The two lists that disagreed with each other were expressing one fact twice.
+- **Fail safe in a NAMED direction.** An unregistered slug is assumed unable to
+  transfer (worst case: takes a message when it could have connected someone)
+  and assumed to file tickets (worst case: a wasted no-op push). Both chosen so
+  the failure is the cheap one. Never throws — it sits in the live call path.
+
+The grep that makes the conformance test honest: `name: "escalate_to_human"`,
+i.e. a model-callable tool DEFINITION — not a substring. `techAgent` contains
+`_handoffToHuman: undefined` as a deliberate no-op and `answeringServiceAgent`
+declares a `handoffToHuman` parameter it never invokes. A naive substring search
+calls both transfer-capable and both are wrong.
+
+**Per-agent WORDING stays keyed by slug** — the director's ceiling scripts and
+exit lines are genuinely per-agent. What must not be per-agent is the CHOICE OF
+SHAPE: those now fall back through `isTicketOnly`, so a ticket-only line can
+never be handed a script that names a transfer tool it does not have.

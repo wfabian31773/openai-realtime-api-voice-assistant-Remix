@@ -20,6 +20,7 @@ import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
 import { storage } from "../../server/storage";
 import { escalationDetailsMap } from "../services/escalationStore";
+import { judgeEscalation } from "../services/afterHoursEscalationGate";
 import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
 
@@ -593,11 +594,25 @@ You have an internal checklist to track. Execute these phases IN ORDER. Track yo
 ║  ❌ NEVER say "request submitted" or "passed your message"     ║
 ║     UNLESS the tool returned success=true                      ║
 ║                                                                ║
-║  ═══ ESCALATION (RARE - TRUE EMERGENCIES ONLY) ═══════════════ ║
-║  Only for: vision loss, severe pain, injury, chemical exposure ║
+║  ═══ ESCALATION — EXACTLY THREE CASES, NOTHING ELSE ══════════ ║
+║  1. A provider's office calling about a patient                ║
+║  2. A hospital, ER or urgent care calling about a patient      ║
+║  3. A TRUE eye emergency happening now: vision loss, severe    ║
+║     pain, injury, chemical exposure, flashes or floaters,      ║
+║     post-surgical trouble                                      ║
+║                                                                ║
+║  NOT a transfer, however the caller phrases it:                ║
+║  ❌ "urgent" appointment, refill, glasses, authorization, fax  ║
+║  ❌ billing, insurance, records, office hours                  ║
+║  ❌ you could not hear them, could not get a date of birth,    ║
+║     could not understand the language, they would not answer   ║
+║     → ALL of these are create_ticket with whatever you have.   ║
+║     Filing a partial ticket IS the job. Waking the on-call     ║
+║     provider because you missed a detail is not.               ║
+║                                                                ║
 ║  Say: "Based on what you're describing, I want to connect you  ║
 ║        with our on-call team right away."                      ║
-║  Then call escalate_to_human tool                               ║
+║  Then call escalate_to_human — ONCE. Never twice on one call.  ║
 ║                                                                ║
 ║  ═══ CLOSING (CRITICAL: SAY THIS ONLY ONCE) ════════════════   ║
 ║  After SUCCESSFUL ticket: "Your message will be sent to        ║
@@ -1456,9 +1471,27 @@ PREREQUISITE: For medical emergencies — collect caller info BEFORE calling thi
 For healthcare provider calls — escalate immediately with whatever info you have.`,
     parameters: z.object({
       reason: z.string().describe("Specific urgent symptoms or provider details - NOT general frustration. ALWAYS write in English, even if the caller speaks another language (this goes to English-speaking staff via SMS)."),
+      /**
+       * `patient_unresponsive` REMOVED 2026-08-15.
+       *
+       * It sanctioned "cannot communicate after 3 attempts" as grounds for a
+       * transfer, and it became the single largest escalation bucket on this
+       * line — 14 of 33 over 14 days, six of which rang the on-call provider:
+       * "unable to understand caller's language", "repeated difficulty
+       * capturing medication details", "unable to confirm date of birth".
+       *
+       * Operator: "I've been getting all kinds of different messages — 'I
+       * couldn't hear the patient' and all different kinds of weird stuff
+       * lately. That has to stop."
+       *
+       * He is right, and the category was a category error. This agent's whole
+       * purpose is that it can file a ticket with whatever it managed to
+       * collect. Failing to catch a medication name is the ordinary case for
+       * taking a message, not for waking a doctor at 2am.
+       */
       caller_type: z
-        .enum(["patient_urgent_medical", "healthcare_provider", "patient_unresponsive"])
-        .describe("patient_urgent_medical=true emergency, healthcare_provider=Dr/nurse/hospital, patient_unresponsive=cannot communicate after 3 attempts"),
+        .enum(["patient_urgent_medical", "healthcare_provider"])
+        .describe("patient_urgent_medical=a true eye emergency happening now, healthcare_provider=a doctor, nurse, hospital, ER or clinic calling about a patient. There is no third option: if you could not understand the caller or could not collect a detail, that is create_ticket, never this tool."),
       patient_first_name: z.string().optional().describe("Patient first name if collected"),
       patient_last_name: z.string().optional().describe("Patient last name if collected"),
       patient_dob: z.string().optional().describe("Patient date of birth if collected"),
@@ -1474,6 +1507,52 @@ For healthcare provider calls — escalate immediately with whatever info you ha
         hasProviderInfo: !!params.provider_info,
         callId,
       });
+
+      /**
+       * ONE TRANSFER PER CALL.
+       *
+       * Nothing refused a second escalation. On 08-08 11:28 one call fired
+       * three, on 08-04 17:51 another fired two — each one dialling the
+       * on-call provider and each one filing its own record ticket. That is
+       * most of the "all kinds of different messages" the operator has been
+       * receiving: not many calls, the same call several times.
+       */
+      if (escalationDetailsMap.has(callId)) {
+        console.warn(`[HANDOFF] duplicate escalate_to_human refused for ${callId} — already escalated`);
+        return {
+          success: false,
+          message:
+            'You have already transferred this call — the on-call provider has been reached once and must not be ' +
+            'paged again. If there is more to record, call create_ticket. Otherwise stay with the caller.',
+        };
+      }
+
+      /**
+       * THE THREE CASES, ENFORCED SERVER-SIDE.
+       *
+       * The prompt already said "RARE - TRUE EMERGENCIES ONLY" and this tool's
+       * own description already said "NEVER ESCALATE FOR ... patient
+       * frustration". Prose did not hold: 18 of 33 escalations over 14 days
+       * were outside the operator's three cases and 11 connected a human.
+       *
+       * judgeEscalation reads the arguments the model actually sent and is
+       * ALLOW-BY-DEFAULT — a refusal has to be positively matched, because a
+       * needless transfer costs a phone call and a wrongly refused one could
+       * cost somebody their sight.
+       */
+      const verdict = judgeEscalation({
+        callerType: params.caller_type,
+        reason: params.reason,
+        symptomsSummary: params.symptoms_summary,
+        providerInfo: params.provider_info,
+      });
+      if (!verdict.allowed) {
+        console.warn(
+          `[HANDOFF] escalation refused for ${callId} — ${verdict.code}: ${params.reason?.substring(0, 120)}`,
+        );
+        return { success: false, refused: verdict.code, message: verdict.directive };
+      }
+      console.info(`[HANDOFF] escalation sanctioned for ${callId} — basis: ${verdict.basis}`);
 
       const escalationDetails = {
         reason: params.reason,
@@ -1514,7 +1593,11 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               ].filter(Boolean).join('\n'),
               preferredContactMethod: 'phone',
               patientPhone: phone || undefined,
-              priority: params.caller_type === 'patient_unresponsive' ? 'medium' : 'urgent',
+              // Every sanctioned escalation is now urgent by construction:
+              // the only two caller types left are a live eye emergency and a
+              // provider calling about a patient. The 'medium' branch existed
+              // solely for patient_unresponsive, which no longer exists.
+              priority: 'urgent',
               callSid: metadata.callSid,
               callerPhone: metadata.callerPhone,
               dialedNumber: metadata.dialedNumber,

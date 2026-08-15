@@ -20,6 +20,8 @@
  * "asked again", live and post-mortem.
  */
 
+import { canTransfer } from '../config/agentCapabilities';
+
 /** Topics an agent asks callers about. A line is bucketed by the FIRST
  *  topic it matches; unmatched lines are not counted, so the guard
  *  under-reports rather than inventing loops. Superset of the azul
@@ -124,11 +126,19 @@ export const REASK_HARD_CAP = 5;
 export const HUMAN_REQUEST_CAP = 2;
 export const HUMAN_REQUEST_CAP_NO_TRANSFER = 1;
 
-/** Agents with no handoff/transfer capability of any kind. */
-const NO_TRANSFER_AGENTS = new Set(['answering-service']);
-
+/**
+ * On a line that can never transfer, the honest answer — "I can't connect
+ * calls, I can have someone call you back" — is owed on the FIRST ask, not the
+ * second. A vague "I'll get this to the right team" is what made callers ask up
+ * to ten times on 07-29.
+ *
+ * Asked of the capability registry rather than a local list. This module used
+ * to keep its own `NO_TRANSFER_AGENTS = {answering-service}`, which is why
+ * Tech, Surgery, Optical and Records callers had to ask twice before being told
+ * the line cannot connect them.
+ */
 export function humanRequestCapFor(agentSlug: string): number {
-  return NO_TRANSFER_AGENTS.has(agentSlug) ? HUMAN_REQUEST_CAP_NO_TRANSFER : HUMAN_REQUEST_CAP;
+  return canTransfer(agentSlug) ? HUMAN_REQUEST_CAP : HUMAN_REQUEST_CAP_NO_TRANSFER;
 }
 
 const AGENT_EXIT: Record<string, string> = {

@@ -76,10 +76,6 @@ const GHOST_CALL_INDICATORS = [
  * told. On these lines the whole obligation is a TICKET, so that is what the
  * check now verifies.
  */
-const NO_TRANSFER_AGENTS = new Set([
-  'answering-service', 'no-ivr', 'after-hours', 'dev-no-ivr',
-  'optical', 'surgery', 'tech', 'records',
-]);
 
 function gradeHandoffExpectedVsActual(input: DeterministicGraderInput): GraderResult {
   /**
@@ -101,7 +97,7 @@ function gradeHandoffExpectedVsActual(input: DeterministicGraderInput): GraderRe
   const handoffRequested = HANDOFF_KEYWORDS.some(kw => scanText.includes(kw));
   const handoffOccurred = input.transferredToHuman;
 
-  if (handoffRequested && NO_TRANSFER_AGENTS.has(input.agentSlug ?? '')) {
+  if (handoffRequested && !canTransfer(input.agentSlug)) {
     if (input.ticketNumber || handoffOccurred) {
       return {
         grader: 'handoff_expected_vs_actual',
@@ -222,8 +218,7 @@ function gradeHumanRequestDeflection(input: DeterministicGraderInput): GraderRes
   // What fails them: promising a transfer they cannot make, or ending with
   // no ticket AND no message offer. A caller who declines the offered
   // message is the caller's choice, not an agent failure.
-  const TICKET_ONLY_AGENTS = new Set(['answering-service', 'no-ivr', 'after-hours', 'dev-no-ivr']);
-  if (TICKET_ONLY_AGENTS.has(input.agentSlug ?? '')) {
+  if (isTicketOnly(input.agentSlug)) {
     const agentText = input.transcript
       .split('\n')
       .filter(l => /^agent:/i.test(l.trim()))
@@ -610,6 +605,7 @@ const EMERGENCY_KEYWORDS = [
 // normal"/"switch to" flagged routine appointment talk as critical medical
 // advice on essentially every call (2026-08-02 log flood).
 import { findMedicalAdviceViolations } from './graderLexicons';
+import { canTransfer, isTicketOnly } from '../config/agentCapabilities';
 
 function gradeTailSafety(input: DeterministicGraderInput): GraderResult {
   const tailMs = input.postTranscriptTailMs;
@@ -1003,6 +999,28 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
     // and a professional answering "Albert" has given their name just as
     // surely as one who says "my name is Albert".
     /(first and last name|may i have your name|your name and the office|patient's name|who am i speaking)[\s\S]{0,200}\n\s*CALLER:[^\n]*[a-záéíóúñ'-]{2,}/i,
+    /**
+     * RECOGNITION-FIRST GREETINGS — the department lines, 2026-08-15.
+     *
+     * This check was calibrated on the answering-service, which cold-opens and
+     * asks "may I have your first and last name?". The department agents were
+     * built to do something better: pre-context matches the caller from their
+     * number, so the agent CONFIRMS rather than interrogates —
+     *
+     *     AGENT:  Am I speaking with Charles?
+     *     CALLER: Yes.
+     *     AGENT:  Can you please tell me your last name?
+     *     CALLER: Fate.
+     *
+     * The name is fully collected and the ticket carries it. Not one pattern
+     * above matches, so 104 tech/surgery/optical tickets were graded CRITICAL
+     * for a missing name that was right there — and I reported that to the
+     * operator as the fleet's top behavioural defect. It was the measuring
+     * stick failing to recognise the better behaviour.
+     */
+    /am i (speaking|talking) (with|to) [a-záéíóúñ'-]{2,}[\s\S]{0,160}\n\s*CALLER:[^\n]*\b(yes|yeah|yep|correct|that's right|si|sí|speaking|this is)\b/i,
+    /(your last name|last name, please|and your last name)[\s\S]{0,200}\n\s*CALLER:[^\n]*[a-záéíóúñ'-]{2,}/i,
+    /\bthank you,?\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ'-]{1,}[.,]/,
   ];
   const hasName = namePatterns.some(p => p.test(input.transcript));
   if (hasName) collectedFields.push('name');
@@ -1276,7 +1294,32 @@ Respond with a JSON object only, no other text:
   // v8 (2026-08-03): medical-advice lexicon made advice-shaped (graderLexicons)
   // — bare "you have" flagged appointment confirmations as critical on ~every
   // call. Bumping the version lets the stale-version sweep re-score history.
-  static readonly CURRENT_GRADER_VERSION = 8;
+  // v9 (2026-08-15): THE BUMP THAT SHOULD HAVE COME WITH #196 AND #198.
+  //
+  // Both changed what these graders MEAN and neither bumped this number, so
+  // three different graders have been writing "v8" onto call_logs since
+  // 08-13 evening. The sweep below skips anything already at CURRENT_GRADER_VERSION,
+  // which means those calls could never be re-scored — the contamination was
+  // permanent, not transient.
+  //
+  // It is measurable. The word "emergency" in the agent's OWN greeting ("if
+  // this is a medical emergency, please hang up and dial 911") was being read
+  // as the caller requesting a transfer: 172 no-ivr calls failed
+  // handoff_expected_vs_actual for a phrase the caller never said. #196 fixed
+  // the scan to read caller lines only, and the false positive stops dead at
+  // 08-13 18:24 — zero after. But all 172 keep the failure, and no-ivr's
+  // headline handoff failure rate reads 81% when the post-fix truth is 53%.
+  //
+  // Same shape on the ticket checks: tech's ticket_required_vs_created reads
+  // 27.9% across the window and 8.6% after the fix; optical 7.9% and 0.0%.
+  //
+  // Bumping to 9 lets regradeStaleCalls re-score the whole corpus under ONE
+  // grader, which is the only way the fleet comparison means anything. It also
+  // picks up first_transcript_delay_ms / post_transcript_tail_ms, which were
+  // NULL on all 2,203 calls and pinned `latency` and `tail_safety` at 0.5 —
+  // note those two stay 0.5 for HISTORICAL calls, which have no such data to
+  // recover; only calls finalized after that fix carry real values.
+  static readonly CURRENT_GRADER_VERSION = 9;
 
   /** Re-run the deterministic graders on calls graded under an older
    *  grader version. Deterministic-only — the LLM analysis is not re-run,
