@@ -812,13 +812,47 @@ export class TicketingApiClient {
   /** PCP uses a caller-first contract and always bypasses the n8n/patient path. */
   async createPcpTicket(params: PcpTicketPayload): Promise<PcpTicketResponse> {
     try {
-      return await this.makeRequest<PcpTicketResponse>(
+      const response = await this.makeRequest<PcpTicketResponse>(
         '/api/voice-agent/pcp-ticket',
         'POST',
         params,
         15_000,
         true,
       );
+
+      /**
+       * THE WRITEBACK THIS PATH NEVER HAD — the last filing route without one.
+       *
+       * `createTicket` and `createLocationQueueTicket` both write the ticket
+       * number onto call_logs. This one did not, so EVERY PCP ticket ever filed
+       * left call_logs.ticket_number NULL. Two consequences, both live:
+       *
+       *   - No PCP call could be traced to the ticket it produced. On
+       *     2026-08-14 the operator's own afternoon test calls show
+       *     `create_pcp_task -> terminate_call` with a clean exit and a blank
+       *     ticket column; the ticket exists, we just could not name it.
+       *   - `ticket_required_vs_created` reads that column, so a filed ticket
+       *     graded as no ticket. PCP fails that check on 23% of calls — the
+       *     same false failure that `create_ticket` was producing until it got
+       *     this writeback on 08-13.
+       *
+       * Guarded by `!log.ticketNumber` so a call that filed twice keeps the
+       * first number rather than flapping, and wrapped so a telemetry failure
+       * can never fail a ticket that was actually filed.
+       */
+      if (response?.success && response.ticketNumber && params.callSid) {
+        try {
+          const { storage } = await import('../storage');
+          const log = await storage.getCallLogByCallSid(params.callSid);
+          if (log && !log.ticketNumber) {
+            await storage.updateCallLog(log.id, { ticketNumber: String(response.ticketNumber) });
+          }
+        } catch (e) {
+          console.warn('[TICKETING API] pcp-ticket writeback failed:', e);
+        }
+      }
+
+      return response;
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'pcp_ticket_request_failed' };
     }
