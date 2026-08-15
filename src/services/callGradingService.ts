@@ -76,8 +76,28 @@ const GHOST_CALL_INDICATORS = [
  * told. On these lines the whole obligation is a TICKET, so that is what the
  * check now verifies.
  */
+/**
+ * Lines with NO transfer capability at all — for them, a ticket IS the whole
+ * obligation and escalation language must not be graded as a missed handoff.
+ *
+ * `no-ivr` WAS IN THIS SET AND SHOULD NEVER HAVE BEEN (fixed 2026-08-15).
+ *
+ * I added it on 08-13 on the assumption that the after-hours line takes
+ * messages only. It does not. It is the practice's real after-hours triage
+ * agent and it holds `escalate_to_human`, which dials the office queue in
+ * hours and the on-call provider out of hours. Verified by grep: of every
+ * agent in this set, no-ivr and its v2/dev variants are the ONLY ones with a
+ * transfer tool — answering-service, optical, surgery, tech, records and
+ * after-hours have none.
+ *
+ * The cost of the mistake was a blind spot on the exact behaviour the
+ * operator cares most about: with no-ivr in this set, a hospital ringing
+ * about a patient and getting a ticket instead of a transfer scored 1.0 —
+ * "the whole obligation for this agent". It is not. On that line a provider,
+ * a hospital, or a true eye emergency must reach a human.
+ */
 const NO_TRANSFER_AGENTS = new Set([
-  'answering-service', 'no-ivr', 'after-hours', 'dev-no-ivr',
+  'answering-service', 'after-hours',
   'optical', 'surgery', 'tech', 'records',
 ]);
 
