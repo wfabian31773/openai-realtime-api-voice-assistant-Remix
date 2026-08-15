@@ -124,8 +124,30 @@ export const REASK_HARD_CAP = 5;
 export const HUMAN_REQUEST_CAP = 2;
 export const HUMAN_REQUEST_CAP_NO_TRANSFER = 1;
 
-/** Agents with no handoff/transfer capability of any kind. */
-const NO_TRANSFER_AGENTS = new Set(['answering-service']);
+/**
+ * Agents with no handoff/transfer capability of any kind.
+ *
+ * THE DEPARTMENT LINES WERE MISSING FROM THIS (fixed 2026-08-15). Operator:
+ * *"something in the answering service works but when you built individual
+ * agents, it stopped working."* This is one of them.
+ *
+ * The whole point of HUMAN_REQUEST_CAP_NO_TRANSFER is that on a line which can
+ * never transfer, the honest answer — "I can't connect calls, I can have
+ * someone call you back" — is owed on the FIRST ask, not the second. The
+ * answering service got that. Tech, Surgery, Optical and Records have exactly
+ * the same limitation and were left on the default cap of 2, so their callers
+ * had to ask twice before hearing the truth.
+ *
+ * Membership verified against the code rather than assumed: `escalate_to_human`
+ * / `handoffToHuman()` appears in noIvrAgent and noIvrAgentV2 only. Every agent
+ * listed here has no transfer tool at all. `no-ivr` is deliberately ABSENT — it
+ * is the real after-hours triage line and it does transfer, for a provider, a
+ * hospital, or a true emergency.
+ */
+const NO_TRANSFER_AGENTS = new Set([
+  'answering-service', 'after-hours',
+  'tech', 'surgery', 'optical', 'records',
+]);
 
 export function humanRequestCapFor(agentSlug: string): number {
   return NO_TRANSFER_AGENTS.has(agentSlug) ? HUMAN_REQUEST_CAP_NO_TRANSFER : HUMAN_REQUEST_CAP;

@@ -1034,6 +1034,29 @@ const aircallDTMFSent = new Set<string>();
 import { escalationDetailsMap, type EscalationDetails } from './services/escalationStore';
 import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
 
+/**
+ * Every agent that files a ticket, and therefore has call data worth attaching
+ * to it — the recording, the transcript, the duration, the handoff flag.
+ *
+ * THE DEPARTMENT LINES WERE MISSING (fixed 2026-08-15). Both enrichment sites
+ * listed five slugs inline and neither included tech, surgery, optical or
+ * records, so their tickets never took the IMMEDIATE post-call push. They were
+ * not lost — ticketingSyncService sweeps on `callDataSynced = false` with no
+ * slug filter and catches them — but they arrive on a later sweep cycle rather
+ * than at hangup, and on lines that already wait 120s for teardown that is the
+ * difference between a staffer opening a ticket with the call attached and
+ * opening one without.
+ *
+ * Operator, 2026-08-15: *"something in the answering service works but when you
+ * built individual agents, it stopped working."* One list, named, so the next
+ * queue is added in one place instead of two.
+ */
+const TICKET_FILING_AGENTS = new Set([
+  'after-hours', 'no-ivr', 'answering-service', 'azul-scheduling', 'pcp',
+  'tech', 'surgery', 'optical', 'records',
+]);
+
+
 // Log conversation history (PHI-protected)
 function logHistoryItem(item: RealtimeItem, callId?: string): void {
   // Type guard: only message items have role and content
@@ -4556,7 +4579,7 @@ async function observeCall(
             const hasValidTicket = updatedCallLog?.ticketNumber && updatedCallLog.ticketNumber.trim().length > 0;
             const hasValidTranscript = finalTranscript && finalTranscript.length > 50;
             
-            if (twilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service' || agentSlug === 'azul-scheduling' || agentSlug === 'pcp') && hasValidTicket && hasValidTranscript) {
+            if (twilioCallSid && TICKET_FILING_AGENTS.has(agentSlug ?? '') && hasValidTicket && hasValidTranscript) {
               
               // Use shared retry utility for ticketing API updates
               const ticketResult = await withRetry(
@@ -7755,7 +7778,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
       const agentSlug = callLog?.agentId ? (await storage.getAgent(callLog.agentId))?.slug : null;
       const hasTicket = callLog?.ticketNumber && callLog.ticketNumber.trim().length > 0;
       
-      if (effectiveTwilioCallSid && (agentSlug === 'after-hours' || agentSlug === 'no-ivr' || agentSlug === 'answering-service' || agentSlug === 'azul-scheduling' || agentSlug === 'pcp') && hasTicket) {
+      if (effectiveTwilioCallSid && TICKET_FILING_AGENTS.has(agentSlug ?? '') && hasTicket) {
         try {
           const ticketUpdateResult = await ticketingApiClient.updateTicketCallData({
             callSid: effectiveTwilioCallSid,

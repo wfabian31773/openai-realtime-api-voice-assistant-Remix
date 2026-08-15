@@ -538,6 +538,21 @@ const IDENTITY_TOPICS = new Set(['full name', 'first name', 'last name', 'date o
  * because it cannot book without a verified patient and should not pretend
  * otherwise.
  */
+/**
+ * The ceiling action for a line that files tickets and cannot transfer. Shared
+ * by the four department queues so they cannot drift apart, and so adding a
+ * fifth is one line rather than a copy.
+ */
+const TICKET_ONLY_CEILING = {
+  fix: 'File the ticket NOW with what you already have — the callback number is attached to the call and the reason they gave in their first turn is enough. Leave any field you did not capture empty. Do NOT ask for the name or date of birth again, and do NOT offer to transfer: this line cannot.',
+  speak: "I'm having trouble getting that down clearly, and I don't want to keep you. Let me pass on what I have with your number and have the team call you back.",
+  then: 'file the ticket with the reason the caller already gave and whatever name you captured — leave the name fields empty if you captured none',
+} as const;
+
+/** The give-up line for the same lines. Never promises a person. */
+const TICKET_ONLY_EXIT_LINE =
+  "I'm sorry, I'm going in circles here. Let me take down what I have and make sure the right team calls you back.";
+
 const CEILING_ACTION: Record<string, { fix: string; speak: string; then: string }> = {
   'answering-service': {
     fix: 'Call create_ticket NOW with what you already have — the callback number is attached to the call, and the reason they gave in their first turn is enough. Set the name fields to whatever you managed to capture, or leave them empty. Do NOT ask for the name or date of birth again.',
@@ -554,6 +569,30 @@ const CEILING_ACTION: Record<string, { fix: string; speak: string; then: string 
     speak: "I'm having trouble getting that down clearly. Let me take what I have and make sure someone calls you back.",
     then: 'call create_ticket with the reason the caller already gave and whatever name you captured — leave the name fields empty if you captured none',
   },
+  /**
+   * THE DEPARTMENT LINES — Tech, Surgery, Optical, Records (added 2026-08-15).
+   *
+   * They were falling through to `default`, which tells the agent to "hand off
+   * with sage_handoff". None of them HAS sage_handoff, or any transfer tool at
+   * all. So the one moment the director intervenes on a department call, it
+   * would direct the agent to do something impossible — and the matching
+   * EXIT_LINE below promises the caller "someone who can help directly", which
+   * is precisely what `human_request_deflection` grades as a CRITICAL failure:
+   * promising a transfer on a ticket-only line. The safety net would have
+   * caused the injury.
+   *
+   * Latent rather than live: DIRECTOR_AGENTS is empty in production and the
+   * timeline shows zero director actions on any agent in the fleet. But it
+   * would bite the day the director is switched on for these lines — which is
+   * the day nobody would be looking for a new failure.
+   *
+   * Operator, 2026-08-15: *"something in the answering service works but when
+   * you built individual agents, it stopped working."*
+   */
+  tech: TICKET_ONLY_CEILING,
+  surgery: TICKET_ONLY_CEILING,
+  optical: TICKET_ONLY_CEILING,
+  records: TICKET_ONLY_CEILING,
   default: {
     fix: 'Stop collecting identity. Hand off with sage_handoff reason patient_identity_uncertain, or file what you have. Do NOT ask again.',
     speak: "I'm having trouble getting that down, and I don't want to keep you any longer. Let me get this to someone who can help.",
@@ -566,6 +605,15 @@ const EXIT_LINE: Record<string, string> = {
     "I'm sorry — I'm clearly going in circles and I don't want to keep you any longer. Let me get you to someone on our team who can take it from here.",
   'answering-service':
     "I'm sorry, I'm going in circles here. Let me take down what I have and make sure someone from the office calls you back.",
+  // Same reason as CEILING_ACTION above: these lines cannot transfer, so the
+  // default's "let me get you to someone who can help directly" is a promise
+  // they cannot keep.
+  tech: TICKET_ONLY_EXIT_LINE,
+  surgery: TICKET_ONLY_EXIT_LINE,
+  optical: TICKET_ONLY_EXIT_LINE,
+  records: TICKET_ONLY_EXIT_LINE,
+  'after-hours':
+    "I'm sorry, I'm going in circles here. Let me take down what I have and make sure someone calls you back.",
   default:
     "I'm sorry about that — let me get you to someone who can help directly.",
 };

@@ -242,7 +242,20 @@ function gradeHumanRequestDeflection(input: DeterministicGraderInput): GraderRes
   // What fails them: promising a transfer they cannot make, or ending with
   // no ticket AND no message offer. A caller who declines the offered
   // message is the caller's choice, not an agent failure.
-  const TICKET_ONLY_AGENTS = new Set(['answering-service', 'no-ivr', 'after-hours', 'dev-no-ivr']);
+  /**
+   * Same membership error as NO_TRANSFER_AGENTS above, in both directions
+   * (fixed 2026-08-15).
+   *
+   * The department lines were MISSING, so a Tech agent correctly running the
+   * busy-team script and taking a message got none of the protection this
+   * branch exists to give. And `no-ivr` was wrongly present: it is the real
+   * after-hours triage line and it DOES transfer, so grading a promise of a
+   * transfer there as a critical failure punishes the correct behaviour.
+   */
+  const TICKET_ONLY_AGENTS = new Set([
+    'answering-service', 'after-hours',
+    'tech', 'surgery', 'optical', 'records',
+  ]);
   if (TICKET_ONLY_AGENTS.has(input.agentSlug ?? '')) {
     const agentText = input.transcript
       .split('\n')
