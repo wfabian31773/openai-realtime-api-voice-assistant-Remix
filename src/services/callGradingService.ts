@@ -1023,6 +1023,28 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
     // and a professional answering "Albert" has given their name just as
     // surely as one who says "my name is Albert".
     /(first and last name|may i have your name|your name and the office|patient's name|who am i speaking)[\s\S]{0,200}\n\s*CALLER:[^\n]*[a-záéíóúñ'-]{2,}/i,
+    /**
+     * RECOGNITION-FIRST GREETINGS — the department lines, 2026-08-15.
+     *
+     * This check was calibrated on the answering-service, which cold-opens and
+     * asks "may I have your first and last name?". The department agents were
+     * built to do something better: pre-context matches the caller from their
+     * number, so the agent CONFIRMS rather than interrogates —
+     *
+     *     AGENT:  Am I speaking with Charles?
+     *     CALLER: Yes.
+     *     AGENT:  Can you please tell me your last name?
+     *     CALLER: Fate.
+     *
+     * The name is fully collected and the ticket carries it. Not one pattern
+     * above matches, so 104 tech/surgery/optical tickets were graded CRITICAL
+     * for a missing name that was right there — and I reported that to the
+     * operator as the fleet's top behavioural defect. It was the measuring
+     * stick failing to recognise the better behaviour.
+     */
+    /am i (speaking|talking) (with|to) [a-záéíóúñ'-]{2,}[\s\S]{0,160}\n\s*CALLER:[^\n]*\b(yes|yeah|yep|correct|that's right|si|sí|speaking|this is)\b/i,
+    /(your last name|last name, please|and your last name)[\s\S]{0,200}\n\s*CALLER:[^\n]*[a-záéíóúñ'-]{2,}/i,
+    /\bthank you,?\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ'-]{1,}[.,]/,
   ];
   const hasName = namePatterns.some(p => p.test(input.transcript));
   if (hasName) collectedFields.push('name');
