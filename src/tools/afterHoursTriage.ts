@@ -94,8 +94,8 @@ export const AFTER_HOURS_TRIAGE: TriagePresentation[] = [
     // mine. Before today every one of these filed as General/Other, NOT
     // urgent, on the line that answers at 2am.
     cues: ['bleeding', 'bleed', 'blood', 'hemorrhag', 'haemorrhag', 'sangre', 'sangrado', 'sangrando'],
-    ask: 'I want to make sure this gets to the right person — was there any injury to the eye, and has your vision changed at all?',
-    askEs: 'Quiero asegurarme de dirigir esto a la persona correcta — ¿hubo alguna lesión en el ojo, y ha cambiado su visión?',
+    ask: 'Was there any injury to the eye?',
+    askEs: '¿Hubo alguna lesión en el ojo?',
     why:
       'Blood in or around the eye spans a subconjunctival haemorrhage, which looks ' +
       'alarming and resolves on its own, to a hyphema or a vitreous bleed, which do not. ' +
@@ -130,8 +130,27 @@ export const AFTER_HOURS_TRIAGE: TriagePresentation[] = [
     key: 'redness',
     // The other conditional already on the list: "eye redness with severe pain".
     cues: ['red eye', 'my eye is red', 'redness', 'bloodshot', 'ojo rojo', 'enrojecimiento'],
-    ask: 'Is there any pain with it, and has your vision changed at all?',
-    askEs: '¿Tiene dolor, y ha cambiado su visión?',
+    /**
+     * ONE QUESTION, AND IT USED TO BE TWO.
+     *
+     * This read "Is there any pain with it, and has your vision changed at
+     * all?" — a compound question inside the very taxonomy whose prompt says
+     * "ask ONE question, do not stack them". The agent obeyed it verbatim on
+     * call d30ca58b (2026-08-15 10:20 PT), got a single "Yes", and paged the
+     * on-call provider with "red eye with pain and vision changes reported".
+     * The caller had said DISCHARGE and asked for a callback. She never
+     * mentioned pain and never mentioned her vision.
+     *
+     * Operator: *"This is not a reason for the agent to pass the call through
+     * as urgent."*
+     *
+     * A yes to a two-part question answers neither part. If the vision
+     * discriminator is needed it is a SEPARATE turn — and the branch list
+     * below already routes on VISION_CUES when the caller raises it in their
+     * own words.
+     */
+    ask: 'Is there any pain with it?',
+    askEs: '¿Tiene dolor?',
     why:
       'Redness alone covers conjunctivitis and a dozen harmless causes. Redness with ' +
       'severe pain or vision change is a different call entirely, and the practice list ' +

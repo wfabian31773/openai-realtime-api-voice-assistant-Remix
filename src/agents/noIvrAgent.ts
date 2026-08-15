@@ -21,6 +21,7 @@ import { type TriageOutcome } from "../config/afterHoursTicketing";
 import { storage } from "../../server/storage";
 import { escalationDetailsMap } from "../services/escalationStore";
 import { judgeEscalation } from "../services/afterHoursEscalationGate";
+import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
 
@@ -1545,6 +1546,9 @@ For healthcare provider calls — escalate immediately with whatever info you ha
         reason: params.reason,
         symptomsSummary: params.symptoms_summary,
         providerInfo: params.provider_info,
+        // What the caller actually said, so a symptom the AGENT supplied
+        // cannot page the on-call provider. See symptomCorroboration.
+        corroboration: corroborate(callId, [params.reason, params.symptoms_summary].filter(Boolean).join(' ')),
       });
       if (!verdict.allowed) {
         console.warn(

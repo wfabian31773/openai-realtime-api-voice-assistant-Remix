@@ -810,6 +810,7 @@ import { conversationLoopGuard, type LoopGuardDirective, type LoopGuardStats } f
  *  (dbCallLogId / twilioCallSid). Returns the stats it wrote, or undefined
  *  when another path already flushed them. */
 async function flushLoopTelemetry(key: string, callLogId: string): Promise<LoopGuardStats | undefined> {
+  releaseCallerSpeech(key);
   const stats = conversationLoopGuard.endCall(key);
   if (!stats) return undefined;
   try {
@@ -1034,6 +1035,7 @@ const aircallDTMFSent = new Set<string>();
 import { escalationDetailsMap, type EscalationDetails } from './services/escalationStore';
 import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
 import { filesTickets } from './config/agentCapabilities';
+import { recordCallerSpeech, releaseCallerSpeech } from './services/symptomCorroboration';
 
 
 
@@ -3336,6 +3338,21 @@ async function observeCall(
             }
           })();
         }
+
+        /**
+         * KEEP WHAT THE CALLER ACTUALLY SAID.
+         *
+         * Call d30ca58b (2026-08-15 10:20 PT): the agent asked "is there any
+         * pain with the redness, and has your vision changed at all?", got a
+         * single "Yes", and paged the on-call provider with "red eye with pain
+         * and vision changes reported". The caller had said DISCHARGE and
+         * asked for a callback. She never said pain and never said vision.
+         *
+         * A gate reading the agent's own summary cannot catch that, so the
+         * escalation path checks this ledger instead. Unconditional and cheap:
+         * every line, every agent.
+         */
+        recordCallerSpeech(callId, transcript);
 
         // Loop guard: a repeated "representative / customer service" demand
         // trips the escalation directive. (New-core calls handle the busy
