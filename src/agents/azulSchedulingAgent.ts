@@ -138,6 +138,48 @@ export function unregisterAzulHoldingCallback(callId: string): void {
   holdingCallbacks.delete(callId);
 }
 
+/**
+ * THE HOLD LADDER — 45 seconds, three beats, fixed words.
+ *
+ * Operator's spec, 2026-08-16, verbatim: *"45 seconds total before we give up,
+ * like this, one moment while I try to connect you to the office, 15 seconds,
+ * still trying, 15 seconds, my last attempt, 15 seconds, I apologize but it
+ * seems our staff are attending other calls at the moment, I will have to take
+ * a message for a call back."*
+ *
+ * `connecting` is spoken by the agent BEFORE the tool is called (it is in the
+ * tool description, which is where the model reads it). The other three are
+ * server-timed: two injected cut-ins, then the giving-up line on the failure
+ * return.
+ *
+ * WHY FIXED WORDS. The previous instruction said "cut in with ONE short, warm
+ * reassurance (vary the wording)". It did not vary — CAa9a11c3f heard "Still
+ * trying the office for you — hang tight" repeatedly, and the PCP equivalent
+ * on CAdd8ab6dd was word-for-word identical three times across 49 seconds. So
+ * the licence bought nothing and cost control of the one script a caller hears
+ * while they cannot tell us apart from a dead line.
+ *
+ * WHY IT NAMES THE END. "My last attempt" is the beat that makes the wait
+ * finite. Without it the caller is being strung along and has no idea whether
+ * to hang up.
+ *
+ * These are ENGLISH SOURCE. The agent speaks the caller's language, so the
+ * directive says "in their language" — the words are the contract, the
+ * language is the caller's. (Measured: this line takes Spanish calls — one
+ * caller opened "Operadora, por favor".)
+ */
+export const HOLD_LADDER = {
+  connecting: 'One moment while I try to connect you to the office.',
+  stillTrying: 'Still trying to reach them — thank you for holding.',
+  lastAttempt: "I'm making one last attempt to reach them now.",
+  givingUp:
+    'I apologize, but it seems our staff are attending other calls at the moment. ' +
+    'I will have to take a message for a call back.',
+} as const;
+
+/** Total dial window. The two cut-ins land at 15s and 30s inside it. */
+export const HOLD_LADDER_MS = { stillTrying: 15_000, lastAttempt: 30_000, total: 45_000 } as const;
+
 // ── Tier-2 live transfer to the office queue ─────────────────────────────
 // The session layer registers a per-call callback that dials a number into
 // the caller's Twilio conference (same mechanism as the after-hours urgent
@@ -1226,7 +1268,12 @@ export function createAzulSchedulingAgent(
   const transferToOfficeTool = tool({
     name: 'transfer_to_office',
     description:
-      "Connect the caller LIVE to the office queue. Use ONLY after sage_handoff returned method 'cold_transfer'. BEFORE calling this, say the step-away line: \"Give me one moment while I try to connect you to the office team — if it doesn't go through, I'll be right back with you.\" THEN call this. The caller hears silence (never ringing) while the office is dialed for up to 45 seconds; the system prompts you with a brief cut-in every ~10 seconds — speak it, then go quiet again. transferred=true → the office answered and the calls are merged — your part is over, say NOTHING more. transferred=false → the office didn't pick up: come back warmly (\"Thanks for holding — I wasn't able to reach them directly\"), promise the callback (a high-priority ticket is filed for you automatically), and wrap up.",
+      `Connect the caller LIVE to the office queue. Use ONLY after sage_handoff returned method 'cold_transfer'. ` +
+      `BEFORE calling this, say EXACTLY: "${HOLD_LADDER.connecting}" THEN call this. ` +
+      'The caller hears silence (never ringing) while the office is dialed for 45 seconds. ' +
+      'The system will hand you two scripted cut-ins during that wait, at 15 and 30 seconds — say each one EXACTLY as given, then go quiet. Do not improvise a hold line and do not invent your own. ' +
+      'transferred=true → the office answered and the calls are merged; your part is over, say NOTHING more. ' +
+      'transferred=false → the 45 seconds are up: say the `say` line you are given, take the message, and wrap up. The callback ticket is filed automatically — never end the call without either a completed transfer or that message.',
     parameters: z.object({}),
     execute: async () => {
       const callId = metadata?.callId;
@@ -1254,19 +1301,38 @@ export function createAzulSchedulingAgent(
           instruction: 'Live transfer is not available on this call. Apologize and promise the callback — the office queue is notified automatically when the call ends.',
         };
       }
-      // Reassurance while the office rings (up to 45s) — after-hours-style:
-      // the agent's long connect line covers the first stretch, then these
-      // injected updates keep a human voice over the ringback every ~10s.
-      const RING_UPDATE =
-        'You are still trying to connect the caller to the office (they hear silence, not ringing). Cut in with ONE short, warm reassurance (vary the wording), e.g. "Still trying the office for you — hang tight." Then go quiet again. Say nothing else, ask nothing.';
+      // THE HOLD IS A SCRIPT NOW, NOT AN IMPROVISATION.
+      //
+      // Operator, 2026-08-16: "45 seconds total before we give up, like this,
+      // one moment while I try to connect you to the office, 15 seconds, still
+      // trying, 15 seconds, my last attempt, 15 seconds, I apologize but it
+      // seems our staff are attending other calls at the moment, I will have to
+      // take a message for a call back."
+      //
+      // What was here before told the model to "cut in with ONE short, warm
+      // reassurance (vary the wording)" every ten seconds from eight seconds
+      // in. Two problems. The caller heard the SAME improvised sentence three
+      // times anyway — on CAa9a11c3f it was "Still trying the office for you —
+      // hang tight", and on CAdd8ab6dd the PCP equivalent was word-for-word
+      // identical three times over 49 seconds. And "vary the wording" gives the
+      // model licence on a line where nothing should be improvised; today's PCP
+      // work is the same lesson, that a policy the model can reinterpret is not
+      // a policy.
+      //
+      // Now: two scheduled cut-ins at 15s and 30s, fixed words, and the
+      // giving-up line comes from the failure path below at 45s. The ladder
+      // TELLS the caller it is finite — "my last attempt" is the difference
+      // between waiting and being strung along.
       const hb = holdingCallbacks.get(callId);
-      let hbInterval: ReturnType<typeof setInterval> | undefined;
-      const hbFirst = hb
-        ? setTimeout(() => {
-            hb(RING_UPDATE);
-            hbInterval = setInterval(() => hb(RING_UPDATE), 10_000);
-          }, 8_000)
-        : undefined;
+      const holdTimers: Array<ReturnType<typeof setTimeout>> = [];
+      const sayExactly = (line: string) =>
+        `Say EXACTLY this to the caller, in their language, then stop and go quiet: "${line}" ` +
+        'Add nothing, ask nothing, and do not rephrase it.';
+      if (hb) {
+        holdTimers.push(setTimeout(() => hb(sayExactly(HOLD_LADDER.stillTrying)), HOLD_LADDER_MS.stillTrying));
+        holdTimers.push(setTimeout(() => hb(sayExactly(HOLD_LADDER.lastAttempt)), HOLD_LADDER_MS.lastAttempt));
+      }
+      const clearHoldTimers = () => { for (const t of holdTimers) clearTimeout(t); holdTimers.length = 0; };
       const startedAt = Date.now();
       // Warm-transfer briefing (ship gate): the staffer hears WHO is calling
       // and WHY before accepting — the patient never repeats themselves.
@@ -1343,14 +1409,21 @@ export function createAzulSchedulingAgent(
           transferred: false,
           error: 'office_no_answer',
           detail,
+          say: HOLD_LADDER.givingUp,
           instruction:
             target.handoff.handoffReason === 'patient_requested_human'
-              ? 'The office did not pick up. This caller asked for a person WITHOUT saying what they needed, so do NOT just promise a callback and hang up — OFFER THEM THE CHOICE, warmly and in one breath: "Thanks for holding — I wasn\'t able to reach them directly. I can have someone call you back, usually within the hour — or if you\'d like, tell me what you need and I may be able to take care of it right now." Then FOLLOW THEIR ANSWER. If they want the callback, confirm it warmly and wrap up — the office queue is notified automatically. If they tell you what they need, handle it normally — you can book, cancel, reschedule and confirm appointments. Ask ONCE; if they decline or repeat that they want a person, take the callback and stop offering.'
-              : 'The office did not pick up. Apologize, promise the callback ("I was not able to reach them directly, so our team will call you back — usually within the hour"), and wrap up warmly. The office queue is notified automatically when the call ends.',
+              ? `The 45-second attempt is over. Say EXACTLY this first, in the caller's language: "${HOLD_LADDER.givingUp}" ` +
+                'THEN, because this caller asked for a person without ever saying what they needed, add in the same breath: ' +
+                '"— or if you\'d like, tell me what you need and I may be able to take care of it right now." ' +
+                'Then FOLLOW THEIR ANSWER. If they want the callback, confirm it warmly and wrap up — the ticket is filed automatically. ' +
+                'If they tell you what they need, handle it normally; you can book, cancel, reschedule and confirm appointments. ' +
+                'Ask ONCE. If they decline or repeat that they want a person, take the message and stop offering.'
+              : `The 45-second attempt is over. Say EXACTLY this, in the caller's language, then take the message and wrap up warmly: ` +
+                `"${HOLD_LADDER.givingUp}" Do not rephrase it and do not promise a specific callback time. ` +
+                'The ticket is filed automatically when the call ends — never end the call without it.',
         };
       } finally {
-        if (hbFirst) clearTimeout(hbFirst);
-        if (hbInterval) clearInterval(hbInterval);
+        clearHoldTimers();
       }
     },
   });
