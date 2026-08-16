@@ -1,6 +1,6 @@
 import { db } from "../db";
 import { callLogs } from "../../shared/schema";
-import { eq, and, isNull, isNotNull, or, sql, lt, gte } from "drizzle-orm";
+import { eq, and, isNull, isNotNull, or, sql, lt, gte, desc } from "drizzle-orm";
 import { ticketingApiClient } from "./ticketingApiClient";
 import {
   isNoTicketError,
@@ -457,13 +457,48 @@ export class TicketingSyncService {
   }
 
   /**
-   * Fix completed calls with suspicious durations (600s timeout with low Twilio cost).
-   * These are calls where OpenAI session timed out but Twilio shows a short actual call.
-   * This is the "cleanup" step that catches any calls missed by the primary reconciliation.
+   * Fix completed calls whose stored duration disagrees with Twilio's.
+   *
+   * WHAT THIS USED TO SELECT, AND WHY IT NEVER STOPPED (fixed 2026-08-16).
+   *
+   * The filter was `duration >= 550 AND twilio_cost_cents <= 5`, on the theory
+   * that a long call which cost almost nothing must have a wrong duration.
+   * Twilio bills inbound at roughly 0.85 cents a minute, so 550-660 seconds
+   * IS the five-cent bucket — verified against a week of live rows:
+   *
+   *     1c -> 1-180s     3c -> 241-416s    5c -> 482-668s    7c -> 784-946s
+   *     2c -> 121-300s   4c -> 363-524s    6c -> 661-834s    9c -> 1051-1119s
+   *
+   * The two conditions describe the SAME correct call rather than a
+   * contradiction, so every genuine nine-to-eleven minute conversation matched
+   * — 146 of them, including calls with 91 and 93 turns. The sweeper took 20
+   * per boot, reconciled each against Twilio, got back the duration it already
+   * had, logged `595s -> 595s`, recalculated the cost, and left every row
+   * matching for next time. It ran forever and converged on nothing.
+   *
+   * The operator saw it as a wall of DURATION FIX lines on every republish.
+   *
+   * WHAT IT SELECTS NOW: calls Twilio has never been asked about. This is a
+   * BACKSTOP for rows the primary reconciliation missed, which is what the
+   * doc comment always claimed it was, and `twilio_insights_fetched_at IS
+   * NULL` states that directly.
+   *
+   * Measured before changing it: of 14,017 completed calls in the last 30
+   * days, 14,017 had already been reconciled and 0 had not. Every row the old
+   * filter could reach was one the reconciler would refuse — which is why the
+   * log paired every DURATION FIX line with "Already reconciled, skipping
+   * redundant fetch". The sweeper is now silent because there is genuinely
+   * nothing to do, and will speak again the moment a call end fails to
+   * reconcile.
+   *
+   * A disagreement between our clock and Twilio's is deliberately NOT the
+   * filter: after the 2026-08-15 Twilio status-callback fix, `duration` holds
+   * Twilio's number and `local_duration_seconds` holds ours, and the two
+   * differing by more than 30s described 377 rows that were all already
+   * correct. Overrun is a symptom to watch, not a row to re-fetch.
    */
   async fixSuspiciousDurations(): Promise<void> {
     try {
-      // Find completed calls with duration >= 550s but Twilio cost <= 5 cents.
       // Limit to the last 30 days — Twilio Insights API rejects calls older than 30 days
       // and those old records are already fully reconciled (no further data to retrieve).
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -472,7 +507,7 @@ export class TicketingSyncService {
           id: callLogs.id,
           callSid: callLogs.callSid,
           duration: callLogs.duration,
-          twilioCostCents: callLogs.twilioCostCents,
+          localDurationSeconds: callLogs.localDurationSeconds,
         })
         .from(callLogs)
         .where(
@@ -480,14 +515,16 @@ export class TicketingSyncService {
             eq(callLogs.status, "completed"),
             isNotNull(callLogs.callSid),
             isNotNull(callLogs.duration),
-            sql`${callLogs.duration} >= 550`,
             gte(callLogs.startTime, thirtyDaysAgo),
-            or(
-              isNull(callLogs.twilioCostCents),
-              sql`${callLogs.twilioCostCents} <= 5`
-            )
+            // Never asked Twilio about this call. The only rows there is
+            // anything to learn from.
+            isNull(callLogs.twilioInsightsFetchedAt),
           )
         )
+        // Newest first. Without an ORDER BY the LIMIT took an arbitrary 20 of
+        // the matching set, so rows outside whatever the planner happened to
+        // return could never be reached at all.
+        .orderBy(desc(callLogs.startTime))
         .limit(20);
 
       if (suspiciousCalls.length === 0) {
@@ -502,7 +539,15 @@ export class TicketingSyncService {
         
         try {
           const result = await callCostService.reconcileTwilioCallData(call.id, call.callSid);
-          if (result.success && !result.skipped && result.actualDuration) {
+          // Only a CHANGED duration is a fix. Reconciling a row that was
+          // already right and logging "595s → 595s" is what made this sweeper
+          // look busy while doing nothing.
+          if (
+            result.success &&
+            !result.skipped &&
+            result.actualDuration &&
+            result.actualDuration !== call.duration
+          ) {
             // Also recalculate OpenAI cost based on correct duration
             await callCostService.recalculateOpenAICostFromDuration(call.id);
             fixedCount++;
