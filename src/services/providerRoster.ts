@@ -29,8 +29,42 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../../server/db';
 
-/** How far back to look. A provider who has not been on the schedule in a
- *  quarter is not who the caller is asking for. */
+/**
+ * How far back to look. A provider who has not been on the schedule in a
+ * quarter is not who the caller is asking for.
+ *
+ * THIS QUERY USED TO TIME OUT ON EVERY BOOT, and the fix was an index rather
+ * than a smaller window.
+ *
+ *     [ROSTER] refresh failed — falling back to the seed keyword list:
+ *     DrizzleQueryError: canceling statement due to statement timeout
+ *
+ * It fails soft — `refreshProviderRoster` never throws and the seed constants
+ * take over — so it went unnoticed. But a soft failure that happens every
+ * single time is the same as not having the feature: provider and office
+ * recognition was running on hardcoded seeds, not on who is actually on the
+ * schedule.
+ *
+ * Shortening the window to 30 days was tried first and was NOT enough — still
+ * over 60 seconds. The plan showed why: the date index selected the rows, then
+ * 158k wide heap rows were fetched and grouped by two columns no index carried.
+ *
+ * Fixed 2026-08-16 with a covering index, built CONCURRENTLY against
+ * production:
+ *
+ *     CREATE INDEX CONCURRENTLY idx_schedule_roster
+ *       ON "Schedule" ("AppointmentDate", "ProviderFromAppt", "OfficeLocation");
+ *
+ * That makes it an Index Only Scan. Measured after:
+ *
+ *     Index Only Scan using idx_schedule_roster  (actual rows=267917)
+ *     Execution Time: 797.332 ms
+ *
+ * 267,917 rows over the full 90 days in under a second, so the window stays at
+ * the quarter it was always meant to be. (Heap Fetches was 185,084 — the
+ * visibility map is not fully set, so a VACUUM on Schedule would make this
+ * faster again. Not required; noted for whoever tunes this next.)
+ */
 const LOOKBACK_DAYS = 90;
 const REFRESH_MS = 12 * 60 * 60 * 1000;
 /** Keyword lists are hints, not a dictionary — an unbounded one dilutes. */

@@ -209,3 +209,69 @@ What is safe to record, and the reasoning that generalizes:
 Pinned in `services/pcpIntakeTelemetry.test.ts`, including a test that
 serializes the whole record and asserts the real call's name, organization,
 phone and DOB appear nowhere in it.
+
+## The accurate number was computed, then overwritten — 99% of the time
+
+2026-08-16. Operator: *"track down the cost discrepancy... this is the most
+important piece, if we can't get this to agree, we don't know if we are being
+efficient and if we are getting an roi."*
+
+The decisive query, and the shape of it is reusable for any "is this column
+real?" question — **check whether the stored value equals a formula**:
+
+    select count(*) filter (where openai_cost_cents = ceil(duration * 0.19)),
+           count(*) filter (where openai_cost_cents = round(duration/60.0*19)),
+           count(*) filter (where openai_cost_cents = round(duration/60.0*15))
+    from call_logs where input_audio_tokens > 0;
+
+Of 2,318 calls carrying REAL OpenAI token counts, **2,181 matched
+`ceil(duration * 0.19)` exactly** and only 29 — 1.3% — were priced from the
+tokens. A column can be populated, non-null, and derived from something else
+entirely.
+
+Root cause: five writers of one column, four different rates (11.4¢/min,
+19¢/min, 15¢/min, 6+24¢/min), racing after every call with no ordering.
+`recalculateOpenAICostFromDuration` had no `inputAudioTokens == null` guard
+while its two siblings did, and it runs from six places including the teardown
+that just wrote the good number, plus retries at 30s and 90s.
+
+**The token columns survived the overwrite.** So a row showed real usage next
+to a cost never derived from it, and any audit assuming "tokens present =>
+token-derived cost" was wrong. That is the trap: the evidence of measurement
+outlives the measurement.
+
+### A column that exists is not a column that is written
+
+`input_cached_audio_tokens` was **0 on every row ever written**. The column was
+in the schema, the pricing code read it, nothing populated it — OpenAI reports
+the split at `input_token_details.cached_tokens_details.{audio_tokens,
+text_tokens}` and we only captured the undifferentiated `cached_tokens`.
+
+Worth the specific note because of the asymmetry: cached audio is **$0.40/M
+against $32/M — 80x** — while cached text is $0.40 against $4, only 10x. The
+pro-rata split the code fell back on pushes cached tokens toward text and away
+from audio, so it inflates. A token recalculation came out at $55 for a day
+OpenAI billed $44.
+
+### Comparing two estimates tells you nothing; find the third source
+
+I spent a while comparing `call_logs` sums against `daily_org_usage.
+estimated_cost_cents` and got a contradiction, because BOTH are our own rate
+card applied to different token sources. The authoritative number is OpenAI's
+Costs API, stored in `daily_openai_costs.realtime_cost_cents`.
+
+Against that: **$0.27-0.37 per call**, and our per-call sum was +1%, +41%, +5%,
+-15%, +1%, -43% across six days. Not a bias to correct with a coefficient —
+noise, which is exactly what a duration proxy produces when the call mix moves.
+
+### And an alert that cannot fire correctly
+
+`orgBillingLedger` compares whole-org spend against voice-only spend — no
+`project_ids[]` filter — while the SAME function computes a realtime/other
+split and uses only the realtime part when writing `daily_openai_costs`. One
+run persists a scope-matched comparison in one table and an apples-to-oranges
+one in another, and alerts on the second.
+
+I reported that as the cause of the 43% gap and **it was not**:
+`other_cost_cents` is $0.00 every day — essentially all spend here is voice.
+Real bug, immaterial effect. Check the magnitude before naming a cause.

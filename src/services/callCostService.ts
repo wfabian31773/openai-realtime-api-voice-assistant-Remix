@@ -239,15 +239,43 @@ export class CallCostService {
     
     const totalInputTokens = inputAudioTokens + inputTextTokens;
     
+    /**
+     * USE THE REPORTED SPLIT WHEN WE HAVE IT; APPORTION ONLY WHEN WE DO NOT.
+     *
+     * OpenAI reports `cached_tokens_details.{audio_tokens, text_tokens}`
+     * alongside the undifferentiated `cached_tokens`. Until 2026-08-16 the
+     * caller never captured it, so this function had no choice but to split the
+     * scalar pro-rata by the audio/text input mix — an assumption, not data.
+     *
+     * The assumption is expensive to get wrong. Cached audio is $0.40 per
+     * million against $32 uncached (80x) while cached text is $0.40 against $4
+     * (10x), so pushing cached tokens toward text and away from audio inflates
+     * the total. Now that the real split arrives, prefer it.
+     *
+     * The pro-rata path stays for every historical row and for any payload that
+     * omits the breakdown — a missing split must mean "we don't know", never
+     * "no cached audio".
+     */
+    const reportedCachedAudio = (tokens as { inputCachedAudioTokens?: number }).inputCachedAudioTokens;
+    const reportedCachedText = (tokens as { inputCachedTextTokens?: number }).inputCachedTextTokens;
+    const haveReportedSplit =
+      typeof reportedCachedAudio === 'number' && (reportedCachedAudio > 0 || (reportedCachedText ?? 0) > 0);
+
     const effectiveCachedTokens = Math.min(inputCachedTokens, totalInputTokens);
     if (inputCachedTokens > totalInputTokens) {
       console.warn(`[COST] Anomaly: cached tokens (${inputCachedTokens}) > total input (${totalInputTokens}), clamping to ${totalInputTokens}`);
     }
     
-    const cachedAudioTokens = totalInputTokens > 0 
-      ? Math.min(Math.round(effectiveCachedTokens * (inputAudioTokens / totalInputTokens)), inputAudioTokens)
-      : 0;
-    const cachedTextTokens = Math.min(effectiveCachedTokens - cachedAudioTokens, inputTextTokens);
+    const cachedAudioTokens = haveReportedSplit
+      // Still clamped: a reported figure larger than the audio we counted would
+      // otherwise price negative uncached audio.
+      ? Math.min(reportedCachedAudio!, inputAudioTokens)
+      : totalInputTokens > 0
+        ? Math.min(Math.round(effectiveCachedTokens * (inputAudioTokens / totalInputTokens)), inputAudioTokens)
+        : 0;
+    const cachedTextTokens = haveReportedSplit
+      ? Math.min(reportedCachedText ?? 0, inputTextTokens)
+      : Math.min(effectiveCachedTokens - cachedAudioTokens, inputTextTokens);
     
     const uncachedAudioTokens = Math.max(0, inputAudioTokens - cachedAudioTokens);
     const uncachedTextTokens = Math.max(0, inputTextTokens - cachedTextTokens);
@@ -322,6 +350,11 @@ export class CallCostService {
         inputTextTokens: tokens.inputTextTokens,
         outputTextTokens: tokens.outputTextTokens,
         inputCachedTokens: tokens.inputCachedTokens,
+        // The modality split, when OpenAI reported one. `input_cached_audio_tokens`
+        // was 0 on every row ever written before 2026-08-16 because nothing
+        // wrote it — the column existed, the data did not.
+        inputCachedAudioTokens: (tokens as { inputCachedAudioTokens?: number }).inputCachedAudioTokens ?? 0,
+        inputCachedTextTokens: (tokens as { inputCachedTextTokens?: number }).inputCachedTextTokens ?? 0,
         costIsEstimated: false,
         costCalculatedAt: new Date(),
       });
@@ -657,6 +690,32 @@ export class CallCostService {
     try {
       const callLog = await storage.getCallLog(callLogId);
       if (!callLog || !callLog.duration) {
+        return false;
+      }
+
+      /**
+       * NEVER OVERWRITE A MEASUREMENT WITH AN ESTIMATE.
+       *
+       * `retryTwilioCostFetch` and `reconcileTwilioCallData` have both carried
+       * this guard for a long time. This function did not, and it is called
+       * from six places — including the same teardown that has just flushed
+       * the real token counts, plus retries at 30s and 90s. So the accurate
+       * number was computed and then destroyed, on nearly every call.
+       *
+       * Measured on 2026-08-16 across seven days: of 2,318 calls carrying real
+       * OpenAI token counts, 2,181 had a stored cost exactly equal to
+       * `ceil(duration * 0.19)` and only 29 — 1.3% — were priced from the
+       * tokens. The token columns survived, so a row showed real usage next to
+       * a cost never derived from it.
+       *
+       * That is why per-call spend could not be reconciled against the bill:
+       * a duration proxy is calibrated for a mix, not for a call, and daily
+       * totals wobbled between 43% under and 41% over.
+       */
+      if (callLog.inputAudioTokens != null) {
+        console.info(
+          `[COST] Skipping duration estimate for ${callLogId} — token-derived cost already stored`,
+        );
         return false;
       }
 
