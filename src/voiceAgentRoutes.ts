@@ -1028,6 +1028,22 @@ interface CallTokenAccumulator {
   inputTextTokens: number;
   outputTextTokens: number;
   inputCachedTokens: number;
+  /**
+   * Cached tokens split by modality — the field that was never captured.
+   *
+   * OpenAI reports `input_token_details.cached_tokens_details.{audio_tokens,
+   * text_tokens}` alongside the undifferentiated `cached_tokens`. We stored
+   * only the latter, so `call_logs.input_cached_audio_tokens` was 0 on every
+   * row ever written, while OpenAI's own org usage reports cached audio at
+   * 96-133% of uncached audio on the same days.
+   *
+   * It matters more than any other token field: cached audio input is $0.40
+   * per million against $32 uncached — EIGHTY times cheaper. Missing it means
+   * over-pricing the single largest component of a voice call, and it is why a
+   * token-derived recalculation came out at $55 for a day OpenAI billed $44.
+   */
+  inputCachedAudioTokens: number;
+  inputCachedTextTokens: number;
   responses: number;
 }
 const callTokenUsage = new Map<string, CallTokenAccumulator>();
@@ -1036,7 +1052,7 @@ function accumulateUsage(callId: string, usage: any): void {
   if (!usage) return;
   let acc = callTokenUsage.get(callId);
   if (!acc) {
-    acc = { inputAudioTokens: 0, outputAudioTokens: 0, inputTextTokens: 0, outputTextTokens: 0, inputCachedTokens: 0, responses: 0 };
+    acc = { inputAudioTokens: 0, outputAudioTokens: 0, inputTextTokens: 0, outputTextTokens: 0, inputCachedTokens: 0, inputCachedAudioTokens: 0, inputCachedTextTokens: 0, responses: 0 };
     callTokenUsage.set(callId, acc);
   }
   const inDet = usage.input_token_details ?? {};
@@ -1044,6 +1060,12 @@ function accumulateUsage(callId: string, usage: any): void {
   acc.inputAudioTokens += Number(inDet.audio_tokens ?? 0);
   acc.inputTextTokens += Number(inDet.text_tokens ?? 0);
   acc.inputCachedTokens += Number(inDet.cached_tokens ?? 0);
+  // The modality split of the cached figure. Absent on some payloads, so it
+  // stays additive-with-default rather than assumed present — a missing
+  // breakdown must read as "we don't know", not as zero cached audio.
+  const cachedDet = inDet.cached_tokens_details ?? {};
+  acc.inputCachedAudioTokens += Number(cachedDet.audio_tokens ?? 0);
+  acc.inputCachedTextTokens += Number(cachedDet.text_tokens ?? 0);
   acc.outputAudioTokens += Number(outDet.audio_tokens ?? 0);
   acc.outputTextTokens += Number(outDet.text_tokens ?? 0);
   acc.responses += 1;
@@ -4489,10 +4511,12 @@ async function observeCall(
                 inputTextTokens: usage.inputTextTokens,
                 outputTextTokens: usage.outputTextTokens,
                 inputCachedTokens: usage.inputCachedTokens,
+                inputCachedAudioTokens: usage.inputCachedAudioTokens,
+                inputCachedTextTokens: usage.inputCachedTextTokens,
               } as any,
               'gpt-realtime',
             );
-            console.info(`[COST] Token-based cost saved for ${usageCallLogId}: ${usage.responses} responses, in=${usage.inputAudioTokens}a/${usage.inputTextTokens}t (${usage.inputCachedTokens} cached), out=${usage.outputAudioTokens}a/${usage.outputTextTokens}t`);
+            console.info(`[COST] Token-based cost saved for ${usageCallLogId}: ${usage.responses} responses, in=${usage.inputAudioTokens}a/${usage.inputTextTokens}t (${usage.inputCachedTokens} cached, ${usage.inputCachedAudioTokens}a), out=${usage.outputAudioTokens}a/${usage.outputTextTokens}t`);
           } catch (err) {
             console.error(`[COST] Token-based cost update failed for ${usageCallLogId}:`, err);
           }

@@ -30,51 +30,42 @@ import { sql } from 'drizzle-orm';
 import { db } from '../../server/db';
 
 /**
- * How far back to look. A provider who has not been on the schedule recently
- * is not who the caller is asking for.
+ * How far back to look. A provider who has not been on the schedule in a
+ * quarter is not who the caller is asking for.
  *
- * WAS 90, CUT TO 30 ON 2026-08-16 BECAUSE 90 DID NOT COMPLETE.
- *
- * The refresh below groups the whole `Schedule` table by provider and office
- * over the window. At 90 days that exceeded the statement timeout on every
- * boot, twice in four seconds:
+ * THIS QUERY USED TO TIME OUT ON EVERY BOOT, and the fix was an index rather
+ * than a smaller window.
  *
  *     [ROSTER] refresh failed — falling back to the seed keyword list:
  *     DrizzleQueryError: canceling statement due to statement timeout
  *
  * It fails soft — `refreshProviderRoster` never throws and the seed constants
- * take over — which is why it went unnoticed. But soft failure every time is
- * the same as not having the feature: provider and office recognition has been
- * running on hardcoded seeds, not on who is actually on the schedule.
+ * take over — so it went unnoticed. But a soft failure that happens every
+ * single time is the same as not having the feature: provider and office
+ * recognition was running on hardcoded seeds, not on who is actually on the
+ * schedule.
  *
- * NECESSARY BUT NOT SUFFICIENT — measured, not assumed. Thirty days still
- * exceeded a 60-second budget when tested against production. The plan says
- * why:
+ * Shortening the window to 30 days was tried first and was NOT enough — still
+ * over 60 seconds. The plan showed why: the date index selected the rows, then
+ * 158k wide heap rows were fetched and grouped by two columns no index carried.
  *
- *     Sort  (cost=106368.79..106382.16 rows=5346)
- *       HashAggregate  (cost=105984.30..106037.76 rows=5346)
- *         Group Key: "ProviderFromAppt", "OfficeLocation"
- *         Index Scan using idx_schedule_apptdate  (cost=0.43..104799.65
- *                                                  rows=157953 width=28)
+ * Fixed 2026-08-16 with a covering index, built CONCURRENTLY against
+ * production:
  *
- * The date index is used and is not the problem. The cost is fetching 157,953
- * wide heap rows and grouping them by two columns the index does not carry.
- * Ninety days is roughly three times that.
+ *     CREATE INDEX CONCURRENTLY idx_schedule_roster
+ *       ON "Schedule" ("AppointmentDate", "ProviderFromAppt", "OfficeLocation");
  *
- * THE FIX THAT ACTUALLY CLOSES THIS is a covering index —
- *   CREATE INDEX CONCURRENTLY idx_schedule_roster
- *     ON "Schedule" ("AppointmentDate", "ProviderFromAppt", "OfficeLocation");
- * — which turns the whole thing into an index-only scan. It is a heavier
- * operation on a large production table, so it is the operator's call and is
- * deliberately not done here.
+ * That makes it an Index Only Scan. Measured after:
  *
- * Until then this still fails soft, and that is the part worth remembering:
- * `refreshProviderRoster` never throws, so provider and office recognition has
- * been running on the hardcoded seed lists rather than on who is actually on
- * the schedule — silently, on every boot, for as long as the query has been
- * too slow.
+ *     Index Only Scan using idx_schedule_roster  (actual rows=267917)
+ *     Execution Time: 797.332 ms
+ *
+ * 267,917 rows over the full 90 days in under a second, so the window stays at
+ * the quarter it was always meant to be. (Heap Fetches was 185,084 — the
+ * visibility map is not fully set, so a VACUUM on Schedule would make this
+ * faster again. Not required; noted for whoever tunes this next.)
  */
-const LOOKBACK_DAYS = 30;
+const LOOKBACK_DAYS = 90;
 const REFRESH_MS = 12 * 60 * 60 * 1000;
 /** Keyword lists are hints, not a dictionary — an unbounded one dilutes. */
 const MAX_PROVIDERS = 40;
