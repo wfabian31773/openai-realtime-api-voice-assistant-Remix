@@ -458,3 +458,50 @@ calls both transfer-capable and both are wrong.
 exit lines are genuinely per-agent. What must not be per-agent is the CHOICE OF
 SHAPE: those now fall back through `isTicketOnly`, so a ticket-only line can
 never be handed a script that names a transfer tool it does not have.
+
+## An agent's summary is not evidence of what the caller said
+
+2026-08-15. Operator forwarded a transfer SMS reading *"red eye with pain and
+vision changes reported"* — patient 90 years old, on-call provider paged — with
+*"This is not a reason for the agent to pass the call through as urgent."*
+
+Call d30ca58b, 10:20:35 PT, verbatim:
+
+    CALLER: Yes, I would like somebody to give me a call.
+    ...
+    CALLER: And my right eye. With discharge.
+    AGENT:  ...Is there any pain with it, and has your vision changed at all?
+    CALLER: Hello
+    AGENT:  ...Is there any pain with the redness, and has your vision changed?
+    CALLER: Yes.
+
+**The caller never said pain. She never said vision.** She said DISCHARGE and
+asked for a callback. One "Yes" to a compound question became two reported
+symptoms in a page to a doctor.
+
+And the compound question was **mine**: `afterHoursTriage` shipped
+`"Is there any pain with it, and has your vision changed at all?"` as the
+redness entry's single "one question" — inside the very taxonomy whose prompt
+says *"ask ONE question, WAIT for the answer, do not stack them"*. The agent
+obeyed the data, not the prose. **When a rule and an example disagree, the
+example wins**, and the example lives in the config.
+
+Three things worth carrying:
+
+- **A gate that reads the agent's own summary cannot catch fabrication.** By
+  the time the reason string says "pain", the pain has been invented. The check
+  has to be against what the CALLER said —
+  `services/symptomCorroboration.ts`, fed from the same caller-line tap the
+  loop guard uses.
+- **A bare "yes" is not corroboration.** It is precisely what the compound
+  question harvested. Attributing it to both halves is the defect.
+- **Fail open in every direction, and say which.** No caller speech recorded →
+  allow (a transcription gap is not evidence of fabrication). One of two claims
+  supported → allow (quibbling with half a write-up must not block a real
+  transfer). Provider or hospital → allow before corroboration even runs, since
+  a nurse reports someone else's symptoms by definition.
+
+The `spoken` side is deliberately far broader than the `claim` side, matched on
+STEMS: "it stings", "burning", "cloudy", "me duele", "veo borroso" all count.
+The first version used `\bstinging\b` and would have called "it stings so much"
+an invented symptom — the exact false accusation this must never make.

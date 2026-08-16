@@ -70,27 +70,79 @@ describe('the answer picks the category', () => {
   });
 });
 
-describe('NO ANSWER MAY CLEAR THE URGENT FLAG', () => {
+describe('ONLY AN EXPLICIT DENIAL, ON ONLY ONE PRESENTATION, MAY CLEAR THE FLAG', () => {
   /**
-   * The safety property. An agent that can be talked out of an emergency is a
-   * worse product than one that occasionally over-flags — after hours a false
-   * positive is a ticket marked urgent that was not, and a false negative is a
-   * retinal detachment that waited until morning.
+   * The safety property, as amended by the operator on 2026-08-15:
+   * *"redness should be answer driven, leave bleeding and injury alone."*
+   *
+   * An agent that can be talked out of an emergency is a worse product than
+   * one that occasionally over-flags — after hours a false positive is a
+   * ticket marked urgent that was not, and a false negative is a retinal
+   * detachment that waited until morning. So the exception is deliberately
+   * narrow in three separate ways, each pinned below.
    */
-  const DENIALS = [
-    'no', 'no, nothing', 'not really', "I don't think so", 'no idea',
-    'it is fine', "it doesn't hurt and I can see fine", 'nothing at all',
-    'no, no pasa nada', 'no, estoy bien', '', '   ', 'asdfgh',
+  const CLEAR_DENIALS = [
+    'no', 'no, nothing', 'not really', "it doesn't hurt and I can see fine",
+    'nothing at all', 'no, no pasa nada', 'no, estoy bien',
   ];
+  /** Not answers at all. Silence and noise must never downgrade anything. */
+  const NON_ANSWERS = ['', '   ', 'asdfgh'];
+  /** A negator that is not a denial — the caller does not KNOW. */
+  const HEDGES = ["I don't think so", 'no idea', 'not sure', 'maybe', 'no se'];
 
-  for (const p of AFTER_HOURS_TRIAGE) {
-    for (const answer of DENIALS) {
-      it(`${p.key} + ${JSON.stringify(answer)} is still urgent`, () => {
+  const alwaysUrgent = AFTER_HOURS_TRIAGE.filter((p) => !p.answerDecidesUrgency);
+  const answerDriven = AFTER_HOURS_TRIAGE.filter((p) => p.answerDecidesUrgency);
+
+  it('leaves bleeding and injury alone — exactly as the operator ruled', () => {
+    expect(alwaysUrgent.map((p) => p.key)).toContain('bleeding');
+    expect(alwaysUrgent.map((p) => p.key)).toContain('floaters');
+    expect(answerDriven.map((p) => p.key)).toEqual(['redness']);
+  });
+
+  for (const p of alwaysUrgent) {
+    for (const answer of [...CLEAR_DENIALS, ...NON_ANSWERS, ...HEDGES]) {
+      it(`${p.key} + ${JSON.stringify(answer)} is STILL urgent`, () => {
         const r = resolveTriage(p, answer);
         expect(r.urgent).toBe(true);
         expect(r.requestTypeId).toBe(34);
       });
     }
+  }
+
+  for (const p of answerDriven) {
+    for (const answer of CLEAR_DENIALS) {
+      it(`${p.key} + ${JSON.stringify(answer)} becomes a callback`, () => {
+        // The 10:20 caller: a red eye, no pain, and a request for a call back.
+        const r = resolveTriage(p, answer);
+        expect(r.urgent).toBe(false);
+        expect(r.requestTypeId).toBe(34);
+      });
+    }
+
+    for (const answer of NON_ANSWERS) {
+      it(`${p.key} + ${JSON.stringify(answer)} stays urgent — silence is not a no`, () => {
+        expect(resolveTriage(p, answer).urgent).toBe(true);
+      });
+    }
+
+    for (const answer of HEDGES) {
+      it(`${p.key} + ${JSON.stringify(answer)} stays urgent — uncertainty is not a no`, () => {
+        expect(resolveTriage(p, answer).urgent).toBe(true);
+      });
+    }
+
+    it(`${p.key} still escalates when the caller affirms a discriminator`, () => {
+      // The exception lowers the flag ONLY when every discriminator is denied.
+      for (const [answer, reasonId] of [
+        ['yes it hurts a lot', 163],
+        ['my vision is blurry', 161],
+        ['I had surgery last week', 160],
+      ] as const) {
+        const r = resolveTriage(p, answer);
+        expect(r.urgent, `"${answer}" must stay urgent`).toBe(true);
+        expect(r.requestReasonId).toBe(reasonId);
+      }
+    });
   }
 });
 
@@ -173,8 +225,21 @@ describe('every destination is one of the practice\'s own reasons', () => {
 describe('the prompt block', () => {
   const block = renderTriagePrompt();
 
-  it('states that the question cannot clear the urgency', () => {
-    expect(block).toMatch(/NEVER decides that the call is not urgent/i);
+  it('names which presentations stay urgent however they are answered', () => {
+    expect(block).toMatch(/STAY URGENT HOWEVER THEY ARE ANSWERED/i);
+    expect(block).toMatch(/bleeding/);
+    expect(block).toMatch(/floaters/);
+  });
+
+  it('tells the agent that redness is the one the answer decides', () => {
+    expect(block).toMatch(/THE ANSWER DECIDES/i);
+    expect(block).toMatch(/If they say NO, it is NOT urgent/i);
+    expect(block).toMatch(/create_ticket/);
+  });
+
+  it('forbids joining two questions with "and" — the 08-15 defect', () => {
+    expect(block).toMatch(/Never join two questions with "and"/i);
+    expect(block).toMatch(/has answered neither/i);
   });
 
   it('forbids diagnosing and reassuring', () => {

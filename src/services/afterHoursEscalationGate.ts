@@ -54,11 +54,21 @@ export interface EscalationRequest {
   reason?: string;
   symptomsSummary?: string;
   providerInfo?: string;
+  /**
+   * What the CALLER actually said, from services/symptomCorroboration. Optional
+   * so the gate stays a pure function for tests and for any path that has no
+   * live transcript — absent means "cannot check", never "fabricated".
+   */
+  corroboration?: import('./symptomCorroboration').CorroborationResult;
 }
 
 export type EscalationVerdict =
   | { allowed: true; basis: 'provider_or_facility' | 'acute_clinical' | 'unclassified_default_open' }
-  | { allowed: false; code: 'communication_failure' | 'administrative_request'; directive: string };
+  | {
+      allowed: false;
+      code: 'communication_failure' | 'administrative_request' | 'symptoms_not_stated_by_caller';
+      directive: string;
+    };
 
 /**
  * A caller who IS the healthcare system. The operator's first two cases —
@@ -160,6 +170,39 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
   // CASE 1 + 2 — a provider's office or a hospital. Highest precedence.
   if (callerType === 'healthcare_provider' || hits(text, PROVIDER_TERMS)) {
     return { allowed: true, basis: 'provider_or_facility' };
+  }
+
+  /**
+   * DID THE CALLER SAY IT, OR DID THE AGENT?
+   *
+   * Checked BEFORE the acute terms, because an invented symptom will always
+   * match them — that is the whole problem. Call d30ca58b (2026-08-15 10:20
+   * PT): the agent asked "is there any pain with the redness, and has your
+   * vision changed at all?", took one "Yes", and paged the on-call provider
+   * with "red eye with pain and vision changes reported". The caller had said
+   * DISCHARGE and asked for a callback.
+   *
+   * Operator: *"This is not a reason for the agent to pass the call through as
+   * urgent."*
+   *
+   * Refuses only when EVERY acute claim in the reason is unsupported and none
+   * is supported. A caller who genuinely said "it hurts" corroborates the pain
+   * claim and goes straight through; a caller we have no speech for at all
+   * fails open. The bar is "did they raise this", not "did they use this word"
+   * — see CLAIM_EVIDENCE, where "stings", "burns" and "cloudy" all count.
+   */
+  const corr = req.corroboration;
+  if (corr && corr.haveSpeech && corr.unsupported.length > 0 && corr.supported.length === 0) {
+    return {
+      allowed: false,
+      code: 'symptoms_not_stated_by_caller',
+      directive:
+        `The caller never mentioned ${corr.unsupported.join(' or ')}. Do not report symptoms they did not ` +
+        'describe — the on-call provider acts on what you write. Ask ONE question at a time and wait for a ' +
+        'real answer: "Is there any pain?" then, separately, "Has your vision changed?" A single "yes" to a ' +
+        'two-part question answers neither. If the caller has not described an emergency, call create_ticket ' +
+        'with what they actually said and tell them the team will call them back.',
+    };
   }
 
   const administrative = hits(text, ADMINISTRATIVE_SUBJECTS);
