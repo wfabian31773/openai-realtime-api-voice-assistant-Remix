@@ -56,23 +56,63 @@ describe('every question the director can ask appears in the prompt', () => {
     expect(PATIENT_INTAKE_ORDER).not.toContain('callerFacilityType');
   });
 
-  it('matches what the director actually asks a patient first', () => {
-    // The rendered list is worthless if the director asks something else.
-    const d = new PcpDirector({ lunchClosure: () => false });
-    d.update('p1', { callPurpose: 'patient_caller' });
-    expect(d.next('p1').nextQuestion?.field).toBe(PATIENT_INTAKE_ORDER[0]);
+  /**
+   * A value the director will accept for each field, so a walk can answer one
+   * question and move to the next. `callerFacilityType` and `callPurpose` are
+   * closed enums; the rest are free text.
+   */
+  const answerFor = (field: string): Record<string, unknown> => {
+    if (field === 'callPurpose') return { callPurpose: 'peer_to_peer' };
+    if (field === 'callerFacilityType') return { callerFacilityType: 'pcp_office' };
+    return { [field]: 'provided' };
+  };
 
-    d.update('p1', { callerName: 'Wayne Fabian' });
-    expect(d.next('p1').nextQuestion?.field).toBe(PATIENT_INTAKE_ORDER[1]);
+  /**
+   * Walking the WHOLE list, rather than checking index 0 and 1, is what makes
+   * this survive the next reorder: it asserts the director and the rendered
+   * script agree on the sequence, not on two particular positions. The old
+   * version of this test passed on the order that put callPurpose last, which
+   * is the order that refused 88% of handoffs.
+   */
+  it('asks a professional for the whole list, in the rendered order', () => {
+    const d = new PcpDirector({ lunchClosure: () => false });
+    for (const field of PROFESSIONAL_FIELDS) {
+      expect(d.next('pro1').nextQuestion?.field, `expected ${field} next`).toBe(field);
+      d.update('pro1', answerFor(String(field)));
+    }
   });
 
-  it('matches what the director asks a professional first', () => {
+  it('asks the purpose FIRST, and it is what switches a caller to the patient list', () => {
     const d = new PcpDirector({ lunchClosure: () => false });
-    d.update('pro1', {});
-    expect(d.next('pro1').nextQuestion?.field).toBe(PROFESSIONAL_FIELDS[0]);
+    // Nothing known yet: the very first question on this line is the purpose.
+    expect(d.next('p1').nextQuestion?.field).toBe('callPurpose');
+    expect(PROFESSIONAL_FIELDS[0]).toBe('callPurpose');
+    expect(PATIENT_INTAKE_ORDER[0]).toBe('callPurpose');
 
-    d.update('pro1', { callerName: 'Dr Chen office' });
-    expect(d.next('pro1').nextQuestion?.field).toBe(PROFESSIONAL_FIELDS[1]);
+    // Answering it as a patient must switch lists immediately — before a role,
+    // an organization or a facility type is ever asked for. That ordering is
+    // the whole reason bd89b226 was asked "What is your role at Optum Clinic?"
+    d.update('p1', { callPurpose: 'patient_caller' });
+    for (const field of PATIENT_INTAKE_ORDER.slice(1)) {
+      expect(d.next('p1').nextQuestion?.field, `expected ${field} next`).toBe(field);
+      d.update('p1', answerFor(String(field)));
+    }
+    expect(d.next('p1').nextQuestion, 'patient intake should be complete').toBeUndefined();
+  });
+
+  it('never asks a patient a professional question', () => {
+    const d = new PcpDirector({ lunchClosure: () => false });
+    d.update('p2', { callPurpose: 'patient_caller' });
+    const asked: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const field = d.next('p2').nextQuestion?.field;
+      if (!field) break;
+      asked.push(String(field));
+      d.update('p2', answerFor(String(field)));
+    }
+    for (const professionalOnly of ['callerRole', 'callerOrganization', 'callerFacilityType']) {
+      expect(asked, `a patient was asked ${professionalOnly}`).not.toContain(professionalOnly);
+    }
   });
 });
 

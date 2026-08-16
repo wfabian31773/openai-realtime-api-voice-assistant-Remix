@@ -51,20 +51,54 @@ export interface PcpDirectorDecision {
   mayTerminate: boolean;
 }
 
+/**
+ * WHY `callPurpose` IS FIRST, and what it cost to have it last.
+ *
+ * It used to be sixth of six here and third of three in PATIENT_INTAKE_ORDER —
+ * the LAST thing collected. It is also the field that FOUR tools refuse to run
+ * without: handoff_to_pcp, create_pcp_task, lookup_patient_appointments and
+ * record_automated_resolution. So the agent had to complete a six-question
+ * interview before it was permitted to do anything at all, and until it did,
+ * every tool it reached for came back `call_purpose_required`.
+ *
+ * Measured over the ten days to 2026-08-16: handoff_to_pcp was called 240
+ * times and refused 211 of them — 88%. On 08-07 alone, 207 attempts, 199
+ * refused, 180 of those on the missing purpose. The day before, with lighter
+ * traffic through the same code, it was 23 attempts and 2 refusals. That
+ * Friday is the one the operator described as "the disasters I was seeing",
+ * and the line came off the following morning.
+ *
+ * There is a second cost, and it is the one a caller feels. `next()` decides
+ * whether it is speaking to a PATIENT by `callPurpose === 'patient_caller'`.
+ * With the purpose collected last, the director could not know a patient was a
+ * patient until AFTER it had asked them their role, their organisation and
+ * their facility type. The final call this line ever took (bd89b226, 08-14)
+ * was a woman asking how long she could go without her serum drops; she was
+ * asked "What is your role at Optum Clinic?"
+ *
+ * The greeting already asks "How can I help you today?" and callers already
+ * answer it — every transcript reviewed states the purpose in the opening
+ * sentence. Asking for it first costs nothing and unblocks everything.
+ */
 export const PROFESSIONAL_FIELDS: Array<keyof PcpConversationState> = [
-  'callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber', 'callPurpose',
+  'callPurpose', 'callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber',
 ];
 export const PATIENT_FIELDS: Array<keyof PcpConversationState> = ['statedRelationship', 'patientFirstName', 'patientLastName', 'patientDob'];
 /**
- * What the director asks a PATIENT for, in order. Mirrors `next()`.
+ * What the director asks a PATIENT for, in order — and what `next()` itself
+ * uses, so the two cannot disagree.
  *
  * Exported so the PROMPT can render the same list. Until 2026-08-14 the prompt
  * told the model "ask the single next question record_pcp_intake gives you"
  * and never showed it the order — so the model invented one, the director
  * corrected it a turn later, and the caller heard both. The operator, on a
  * live call: "the sequencing is off... this is just all over the place."
+ *
+ * `next()` used to carry its own inline copy of this list. Two literals for
+ * one order is the drift this file already warns about elsewhere; there is now
+ * one.
  */
-export const PATIENT_INTAKE_ORDER: Array<keyof PcpConversationState> = ['callerName', 'callbackNumber', 'callPurpose'];
+export const PATIENT_INTAKE_ORDER: Array<keyof PcpConversationState> = ['callPurpose', 'callerName', 'callbackNumber'];
 export const PROMPTS: Partial<Record<keyof PcpConversationState, string>> = {
   callerName: 'May I have your full name?',
   callerRole: 'What is your role?',
@@ -141,9 +175,12 @@ export class PcpDirector {
     //
     // What a callback actually needs from a patient is a name, a number and
     // what they want. That is the whole list.
+    // One list, from PATIENT_INTAKE_ORDER — the prompt renders that same
+    // constant, so what the model is shown and what the director asks for can
+    // no longer drift apart.
     const isPatient = state.callPurpose === 'patient_caller';
     const required: Array<keyof PcpConversationState> = isPatient
-      ? ['callerName', 'callbackNumber', 'callPurpose']
+      ? [...PATIENT_INTAKE_ORDER]
       : [...PROFESSIONAL_FIELDS];
 
     // Purposes whose destination is a live human do not gate the transfer on patient

@@ -21,6 +21,10 @@ const professional = {
 describe('PcpDirector', () => {
   it('asks exactly one deterministic next question and never re-asks stored fields', () => {
     const director = new PcpDirector({ lunchClosure: () => false });
+    // callPurpose leads — it gates four tools, and collecting it last is what
+    // produced 180 `call_purpose_required` refusals in a single day (08-07).
+    expect(director.next('call-1').nextQuestion?.field).toBe('callPurpose');
+    director.update('call-1', { callPurpose: 'peer_to_peer' });
     expect(director.next('call-1').nextQuestion?.field).toBe('callerName');
     director.update('call-1', { callerName: 'Alex Kim' });
     expect(director.next('call-1').nextQuestion?.field).toBe('callerRole');

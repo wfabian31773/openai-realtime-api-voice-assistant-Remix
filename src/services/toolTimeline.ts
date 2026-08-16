@@ -193,6 +193,18 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     'success', 'ticket_number', 'ticketNumber', 'validationError',
     'department', 'requestType', 'escalated', 'patientFound',
     'say', // directive text — kept so the Phase 7 rubric can grade say-verbatim compliance
+    /**
+     * What a refused PCP gate told the model to do instead (src/pcp/refusals.ts).
+     *
+     * Fixed wording from a constant map, never the caller's data — the same
+     * class of value as `error` beside it. Stored because the question it
+     * answers is the one CA1de3229a could not: when a guard said no, was the
+     * agent given a way out, and did it take that one or improvise?
+     *
+     * Deliberately NOT graded as speak-verbatim like `say` is. This text is
+     * for the model and must never be spoken.
+     */
+    'guidance',
   ]) {
     if (parsed?.[k] !== undefined) out[k] = parsed[k];
   }

@@ -23,6 +23,7 @@ import {
   type PcpDisposition,
   type PcpVerificationStatus,
 } from '../pcp/policy';
+import { refusePcp } from '../pcp/refusals';
 import { submitPcpTicket, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 
@@ -129,11 +130,23 @@ Ask ONE question. Wait for the answer. Record it with record_pcp_intake. Then
 ask the next. Never bundle two, never skip ahead, and NEVER re-ask something the
 caller has already answered — if you have it, move on.
 
+## FIRST, ALWAYS: WHAT IS THIS CALL ABOUT?
+Your greeting already asked. Almost every caller answers it in their opening
+sentence, so usually you are not asking anything — you are RECORDING what they
+just said. Call record_pcp_intake with callPurpose straight away.
+
+This is the first thing for a reason. It decides which list you follow below,
+and every other tool on this line refuses to run until it is set. If you reach
+for a tool and it tells you the purpose is missing, you skipped this step.
+
+If the opening genuinely does not tell you, ask "What are you calling about
+today?" and record the answer before anything else.
+
 A HEALTHCARE PROFESSIONAL (a clinic, a plan, a facility, a pharmacy):
 ${PROFESSIONAL_FIELDS.map(line).join('\n')}
 
-A PATIENT or their family — the moment it is clear you are speaking to one,
-switch to this list and never ask the professional questions:
+A PATIENT or their family — record callPurpose as patient_caller and follow
+THIS list. Never ask a patient the professional questions:
 ${PATIENT_INTAKE_ORDER.map(line).join('\n')}
 
 record_pcp_intake tells you which field is still missing. That answer is the
@@ -257,9 +270,24 @@ loud.
 
 Do not end the call until terminate_call confirms the outcome was recorded.
 
-A tool asking you for something is NOT a fault. When one comes back needing a
-field, say what it asks for and carry on. Never tell a caller there is a
-technical problem unless a tool actually reported an error.`;
+# WHEN A TOOL SAYS NO
+A tool refusing you is NOT a fault and NOT something the caller ever hears
+about. It means do something else, and the reply tells you what.
+
+  guidance   Instructions for YOU. Follow them. NEVER read this out — not a
+             word of it, not a paraphrase of it. The caller must never learn a
+             tool refused anything.
+  say        A sentence for the CALLER. When it is there, say it in those
+             words and do not add an apology to it.
+
+If there is no "say", the caller is owed nothing about it — just do what the
+guidance tells you and carry on as though nothing happened.
+
+Never tell a caller that something is "unavailable", "not available for this
+purpose", "not finalized", "still processing", or that you are having trouble
+recording, submitting or completing anything. Never say goodbye twice. Never
+apologize for a refusal. The only time you mention a problem at all is when a
+tool reported a genuine failure AND handed you a "say" line for it.`;
 }
 
 
@@ -455,7 +483,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     execute: async () => {
       const state = pcpDirector.get(callId);
       if (!state.callPurpose || !['service_inquiry', 'provider_information'].includes(state.callPurpose)) {
-        return { success: false, error: 'public_knowledge_not_allowed_for_purpose' };
+        return refusePcp('public_knowledge_not_allowed_for_purpose');
       }
       pcpDirector.recordToolSuccess(callId, 'knowledge_base');
       return { success: true, reference: buildPcpPublicKnowledgePrompt() };
@@ -473,9 +501,9 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     execute: async (patient) => {
       pcpDirector.update(callId, patient);
       const state = pcpDirector.get(callId);
-      if (!state.callPurpose) return { success: false, error: 'call_purpose_required' };
+      if (!state.callPurpose) return refusePcp('call_purpose_required');
       const access = classifyPcpToolAccess(state.callPurpose, state.verificationStatus);
-      if (!access.allowed || access.source !== 'scheduling') return { success: false, error: access.allowed ? 'scheduling_not_allowed' : access.reason };
+      if (!access.allowed || access.source !== 'scheduling') return refusePcp(access.allowed ? 'scheduling_not_allowed' : access.reason);
       try {
         const context = await scheduleLookupService.lookupByNameAndDOB(
           patient.patientFirstName,
@@ -492,7 +520,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         };
       } catch {
         pcpDirector.recordToolFailure(callId, 'scheduling');
-        return { success: false, error: 'schedule_lookup_failed', retry: pcpDirector.next(callId).authoritativeToolAllowed };
+        return refusePcp('schedule_lookup_failed', { retry: pcpDirector.next(callId).authoritativeToolAllowed });
       }
     },
   });
@@ -510,12 +538,12 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const { state, missing } = ticketState(callId);
       // The purpose is the one thing a ticket cannot be filed without — it is
       // what routes the request to the right desk. Everything else degrades.
-      if (!state.callPurpose) return { success: false, error: 'call_purpose_required' };
+      if (!state.callPurpose) return refusePcp('call_purpose_required');
       // Only the HAND_OFF direction is gated on the director. Filing a task is
       // always a safe floor, and refusing one because the director currently
       // prefers a transfer is how a request ends up as neither.
       if (disposition === 'HAND_OFF' && pcpDirector.next(callId).disposition !== 'HAND_OFF') {
-        return { success: false, error: 'director_disposition_mismatch' };
+        return refusePcp('director_disposition_mismatch');
       }
       // A PATIENT'S REQUEST DOES NOT BELONG IN DEPARTMENT 18.
       //
@@ -587,7 +615,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           await import('../tools/medicalRecordsTools');
           const fileRecords = getTool('file_records_ticket');
           if (!fileRecords) {
-            return { success: false, error: 'records_tool_unavailable', retryable: true };
+            return refusePcp('records_tool_unavailable', { retryable: true });
           }
 
           const nameBits = String(state.callerName ?? '').trim().split(/\s+/).filter(Boolean);
@@ -630,7 +658,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // Never null for 18, but handled rather than asserted: a missing
         // catch-all must not silently file into another department's Other.
         const home = otherReasonFor(PCP_DEPARTMENT_ID);
-        if (!redirect && !home) return { success: false, error: 'no_catchall_for_pcp' };
+        if (!redirect && !home) return refusePcp('no_catchall_for_pcp');
         const body = sanitizeForSms(
           [
             'Patient called the PCP Support line.',
@@ -655,7 +683,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         });
 
         if (!patientResult.success || !patientResult.ticketNumber) {
-          return { success: false, error: patientResult.error ?? 'ticket_creation_failed', retryable: true };
+          return refusePcp(patientResult.error ?? 'ticket_creation_failed', { retryable: true });
         }
         pcpDirector.recordDisposition(callId, 'CREATE_TASK');
         console.info(
@@ -686,15 +714,15 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     parameters: z.object({ narrative: z.string().min(1).max(12000) }),
     execute: async ({ narrative }) => {
       const { state, missing } = ticketState(callId);
-      if (!state.callPurpose) return { success: false, error: 'call_purpose_required' };
+      if (!state.callPurpose) return refusePcp('call_purpose_required');
       // The AUTOMATE gate is a real safety property and stays: an automated
       // resolution may only be claimed off an authoritative tool that actually
       // succeeded. It refuses structurally now rather than throwing.
       if (!getPcpCallPurpose(state.callPurpose).allowedDispositions.includes('AUTOMATE')) {
-        return { success: false, error: 'automate_not_allowed_for_purpose' };
+        return refusePcp('automate_not_allowed_for_purpose');
       }
       const source = getPcpCallPurpose(state.callPurpose).authoritativeSource;
-      if (!source || !state.completedTools.includes(source)) return { success: false, error: 'authoritative_tool_success_required' };
+      if (!source || !state.completedTools.includes(source)) return refusePcp('authoritative_tool_success_required');
       const response = await submitPcpTicket(buildPayload(metadata, state, 'AUTOMATE', narrative, 'routine', undefined, undefined, missing));
       if (response.success) pcpDirector.recordDisposition(callId, 'AUTOMATE');
       return response;
@@ -719,7 +747,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // A professional who asked for a person is not blocked by a missing
       // classification (operator 2026-08-09). The purpose is still recorded
       // on the ticket; it just no longer decides whether the phone rings.
-      if (!state.callPurpose && !askedForAPerson) return { success: false, error: 'call_purpose_required' };
+      if (!state.callPurpose && !askedForAPerson) return refusePcp('call_purpose_required');
       // Not eligible to DIAL is not a reason to lose the request. Previously
       // this threw before it even reached the eligibility check, so the caller
       // got neither a transfer nor a ticket. Now the request is filed as a task
@@ -730,13 +758,11 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           buildPayload(metadata, state, 'CREATE_TASK', narrative, urgency, undefined, 'handoff_not_eligible', missing),
         );
         if (fallback.success) pcpDirector.recordDisposition(callId, 'CREATE_TASK');
-        return {
-          success: false,
+        return refusePcp(fallback.success ? 'handoff_not_eligible_task_created' : 'handoff_not_eligible', {
           handoffStatus: 'HANDOFF_UNAVAILABLE',
           ticketNumber: fallback.ticketNumber,
           fallbackRecorded: fallback.success,
-          error: fallback.success ? 'handoff_not_eligible_task_created' : 'handoff_not_eligible',
-        };
+        });
       }
       const requestedAt = new Date().toISOString();
       // The ticket contract requires a purpose. When the caller simply asked
@@ -750,7 +776,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const initial = await submitPcpTicket(buildPayload(metadata, handoffState, 'HAND_OFF', narrative, urgency, {
         requested: true, requestedAt, attempted: false, finalStatus: 'REQUESTED',
       }, undefined, missing));
-      if (!initial.success) return { success: false, error: 'durable_ticket_required_before_handoff' };
+      if (!initial.success) return refusePcp('durable_ticket_required_before_handoff');
 
       escalationDetailsMap.set(callId, {
         agentSlug: 'pcp',
@@ -821,9 +847,9 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     description: 'End the call only after the PCP director confirms the disposition is durably recorded.',
     parameters: z.object({ reason: z.enum(['completed', 'caller_declined', 'ghost_call', 'spam']) }),
     execute: async ({ reason }) => {
-      if (!pcpDirector.next(callId).mayTerminate) return { success: false, error: 'durable_disposition_required' };
+      if (!pcpDirector.next(callId).mayTerminate) return refusePcp('durable_disposition_required');
       const apiKey = process.env.OPENAI_API_KEY;
-      if (!apiKey) return { success: false, error: 'missing_api_key' };
+      if (!apiKey) return refusePcp('missing_api_key');
       const response = await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`, {
         method: 'POST', headers: { Authorization: `Bearer ${apiKey}` },
       });
