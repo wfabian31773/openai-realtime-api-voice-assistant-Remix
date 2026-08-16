@@ -45,6 +45,35 @@ function calculateEstimatedCostCents(model: string, tokens: OrgUsageRow): number
   return Math.ceil(costDollars * 100);
 }
 
+/**
+ * Split org line items into voice spend and everything else.
+ *
+ * Substring matching on the line-item label — a realtime item whose label
+ * contains none of these words would be misfiled as "other". The labels
+ * OpenAI actually returns have not been verified against this list; if the
+ * realtime figure ever looks implausibly low, check here first.
+ */
+export function splitRealtimeSpend(
+  lineItems: Array<{ lineItem: string; costDollars: number }>,
+): { realtimeCostDollars: number; otherCostDollars: number } {
+  let realtimeCostDollars = 0;
+  let otherCostDollars = 0;
+  for (const item of lineItems) {
+    const lower = (item.lineItem ?? '').toLowerCase();
+    const isRealtime =
+      lower.includes('realtime') ||
+      lower.includes('audio') ||
+      lower.includes('whisper') ||
+      lower.includes('transcri') ||
+      lower.includes('speech') ||
+      lower.includes('tts') ||
+      lower.includes('stt');
+    if (isRealtime) realtimeCostDollars += item.costDollars;
+    else otherCostDollars += item.costDollars;
+  }
+  return { realtimeCostDollars, otherCostDollars };
+}
+
 export class OrgBillingLedgerService {
   private adminApiKey: string | undefined;
 
@@ -236,7 +265,30 @@ export class OrgBillingLedgerService {
 
       const perCallSumCents = await storage.getEstimatedOpenaiCostForDate(dateStr);
 
-      const actualUsd = orgCosts.totalCostDollars;
+      /**
+       * COMPARE LIKE WITH LIKE.
+       *
+       * `actualUsd` was `orgCosts.totalCostDollars` — the WHOLE organisation,
+       * every project, every key, every model — while `estimatedUsd` is a sum
+       * over `call_logs`, i.e. voice only. The request below sends no
+       * `project_ids[]` or `models[]` filter, so anything else billed to the
+       * org flowed straight into the delta and the alert.
+       *
+       * The split already existed twenty lines further down and was already
+       * used when writing `daily_openai_costs` — so a single run persisted a
+       * scope-matched comparison in one table and an apples-to-oranges one in
+       * another, and alarmed on the second. It is computed once, here, now.
+       *
+       * Honest caveat on the size of this: `otherCostDollars` measured $0.00
+       * on every day of the week to 2026-08-16, because essentially all
+       * OpenAI spend here IS voice. This was a real defect with almost no
+       * effect on the numbers — the 43% gap came from per-call costs being a
+       * duration proxy, not from scope. Fixed because a comparison should be
+       * correct by construction, not by the accident of having one workload.
+       */
+      const { realtimeCostDollars, otherCostDollars } = splitRealtimeSpend(orgCosts.lineItems);
+
+      const actualUsd = realtimeCostDollars;
       const estimatedUsd = perCallSumCents / 100;
       const deltaUsd = actualUsd - estimatedUsd;
       const deltaPercent = actualUsd !== 0 ? (deltaUsd / actualUsd) * 100 : 0;
@@ -336,25 +388,7 @@ export class OrgBillingLedgerService {
           },
         });
 
-      const lineItemLower = (s: string) => s.toLowerCase();
-      let realtimeCostDollars = 0;
-      let otherCostDollars = 0;
-      for (const item of orgCosts.lineItems) {
-        const lower = lineItemLower(item.lineItem);
-        const isRealtime =
-          lower.includes('realtime') ||
-          lower.includes('audio') ||
-          lower.includes('whisper') ||
-          lower.includes('transcri') ||
-          lower.includes('speech') ||
-          lower.includes('tts') ||
-          lower.includes('stt');
-        if (isRealtime) {
-          realtimeCostDollars += item.costDollars;
-        } else {
-          otherCostDollars += item.costDollars;
-        }
-      }
+      // realtimeCostDollars / otherCostDollars computed above, once.
 
       await storage.upsertDailyOpenaiCost({
         date: dateStr,

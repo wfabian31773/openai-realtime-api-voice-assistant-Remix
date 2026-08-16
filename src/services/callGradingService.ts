@@ -1251,10 +1251,45 @@ Respond with a JSON object only, no other text:
         analysis.qualityScore = 3;
       }
 
+      /**
+       * ATTRIBUTE WHAT GRADING COSTS, TO THE CALL IT GRADED.
+       *
+       * This completion runs on every graded call and its spend existed only
+       * at the org level, with nothing tying it to a call. That made
+       * `openai_cost_cents` structurally incomplete — and incomplete in the
+       * OPPOSITE direction to the duration-estimate inflation, so the two
+       * errors sometimes cancelled and made daily totals look closer than
+       * they were.
+       *
+       * Priced from the response's own usage, through the same rate table as
+       * everything else. Wrapped so a pricing failure can never lose a grade:
+       * the analysis is the point, the cost is bookkeeping.
+       */
+      let gradingCostCents: number | undefined;
+      try {
+        const u = response.usage;
+        if (u) {
+          const { getModelPricing } = await import('./modelPricing');
+          const pricing = getModelPricing('gpt-4o-mini');
+          const cachedIn = u.prompt_tokens_details?.cached_tokens ?? 0;
+          const uncachedIn = Math.max(0, (u.prompt_tokens ?? 0) - cachedIn);
+          const dollars =
+            (uncachedIn / 1_000_000) * pricing.textInputPerM +
+            (cachedIn / 1_000_000) * pricing.textInputCachedPerM +
+            ((u.completion_tokens ?? 0) / 1_000_000) * pricing.textOutputPerM;
+          // Ceil to a cent: a grade that cost a fraction of a cent must not
+          // record as free, or the programme looks costless in aggregate.
+          gradingCostCents = Math.ceil(dollars * 100);
+        }
+      } catch (e) {
+        console.warn(`[GRADING] could not price the grade for ${callLogId}:`, e);
+      }
+
       await storage.updateCallLog(callLogId, {
         sentiment: analysis.sentiment,
         agentOutcome: analysis.agentOutcome,
         qualityScore: analysis.qualityScore,
+        ...(gradingCostCents != null ? { gradingCostCents } : {}),
         qualityAnalysis: {
           summary: analysis.summary,
           strengths: analysis.strengths,

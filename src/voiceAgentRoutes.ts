@@ -1079,6 +1079,7 @@ import { escalationDetailsMap, type EscalationDetails } from './services/escalat
 import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
 import { filesTickets } from './config/agentCapabilities';
 import { recordCallerSpeech, releaseCallerSpeech } from './services/symptomCorroboration';
+import { OPENAI_COST_CENTS_PER_SECOND } from './services/callCostService';
 
 
 
@@ -4514,7 +4515,19 @@ async function observeCall(
                 inputCachedAudioTokens: usage.inputCachedAudioTokens,
                 inputCachedTextTokens: usage.inputCachedTextTokens,
               } as any,
-              'gpt-realtime',
+              /**
+               * PRICE THE MODEL THAT ACTUALLY RAN.
+               *
+               * This was the literal `'gpt-realtime'`. Meanwhile line ~2948
+               * swaps the session to `abAssignment.challengerModel` — so every
+               * call served by the challenger arm was priced as the control,
+               * by hardcoded string rather than by any lookup. Adding rows to
+               * MODEL_PRICING would not have fixed it: nothing here ever asked.
+               *
+               * `modelForCall` is the value handed to the RealtimeSession, so
+               * it is the arm that carried the call.
+               */
+              String(modelForCall ?? 'gpt-realtime'),
             );
             console.info(`[COST] Token-based cost saved for ${usageCallLogId}: ${usage.responses} responses, in=${usage.inputAudioTokens}a/${usage.inputTextTokens}t (${usage.inputCachedTokens} cached, ${usage.inputCachedAudioTokens}a), out=${usage.outputAudioTokens}a/${usage.outputTextTokens}t`);
           } catch (err) {
@@ -7618,8 +7631,29 @@ export function setupVoiceAgentRoutes(app: Express): void {
       
       // Calculate costs only if we have authoritative Twilio duration
       const duration = twilioProvidedDuration ?? callLog.duration ?? 0;
-      const openaiCostCents = Math.round(duration / 60 * 19); // 19¢/min for realtime
+
+      /**
+       * ONE RATE, AND NEVER OVER A MEASUREMENT.
+       *
+       * This line was `Math.round(duration / 60 * 19)` — 19c/min, which is
+       * 1.67x the 11.4c/min the rest of the codebase intends. The comment on
+       * OPENAI_COST_CENTS_PER_SECOND has called 19c/min a units slip since the
+       * day it was written; the correction landed in server/routes.ts and never
+       * here, in the Twilio status-callback handler — a live path on every
+       * inbound call, and now on five more numbers since the callbacks were
+       * wired up on 2026-08-15.
+       *
+       * It also had no token guard and set costIsEstimated:false below,
+       * stamping a blended-rate guess as authoritative.
+       *
+       * Now: the shared constant, and only when there is nothing better. A row
+       * carrying real token counts keeps the cost derived from them.
+       */
       const twilioCostCents = actualTwilioCostCents ?? callLog.twilioCostCents ?? 0;
+      const hasTokenDerivedCost = callLog.inputAudioTokens != null;
+      const openaiCostCents = hasTokenDerivedCost
+        ? (callLog.openaiCostCents ?? 0)
+        : Math.ceil(duration * OPENAI_COST_CENTS_PER_SECOND);
       const totalCostCents = twilioCostCents + openaiCostCents;
 
       // Update call log with comprehensive tracking data
@@ -7644,8 +7678,24 @@ export function setupVoiceAgentRoutes(app: Express): void {
       // Only update duration and mark as authoritative if Twilio actually provided it
       if (hasTwilioDuration) {
         updateData.duration = twilioProvidedDuration;
-        updateData.costIsEstimated = false;  // AUTHORITATIVE: Twilio provided duration
-        console.info(`[STATUS CALLBACK] ✓ TWILIO AUTHORITATIVE: Duration=${twilioProvidedDuration}s`);
+        /**
+         * "AUTHORITATIVE" IS ABOUT THE DURATION, NOT THE COST.
+         *
+         * Twilio giving us a CallDuration makes the DURATION authoritative. It
+         * says nothing about how the OpenAI cost was derived — and this branch
+         * set costIsEstimated:false unconditionally, stamping a blended-rate
+         * duration guess as a measurement. The flag then meant nothing, which
+         * is why it could not be used to find the rows this whole
+         * investigation was about.
+         *
+         * It now tracks what it names: false only when the cost came from
+         * token counts.
+         */
+        updateData.costIsEstimated = !hasTokenDerivedCost;
+        console.info(
+          `[STATUS CALLBACK] ✓ TWILIO AUTHORITATIVE: Duration=${twilioProvidedDuration}s` +
+            (hasTokenDerivedCost ? ' (cost from tokens, preserved)' : ' (cost estimated from duration)'),
+        );
       } else {
         // Twilio didn't provide duration - keep costIsEstimated true for reconciliation
         console.warn(`[STATUS CALLBACK] ⚠️ Twilio did not provide CallDuration, keeping costIsEstimated=true for reconciliation`);
