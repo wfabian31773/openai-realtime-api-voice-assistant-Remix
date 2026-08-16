@@ -51,11 +51,21 @@ export interface PcpDirectorDecision {
   mayTerminate: boolean;
 }
 
-const PROFESSIONAL_FIELDS: Array<keyof PcpConversationState> = [
+export const PROFESSIONAL_FIELDS: Array<keyof PcpConversationState> = [
   'callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber', 'callPurpose',
 ];
-const PATIENT_FIELDS: Array<keyof PcpConversationState> = ['statedRelationship', 'patientFirstName', 'patientLastName', 'patientDob'];
-const PROMPTS: Partial<Record<keyof PcpConversationState, string>> = {
+export const PATIENT_FIELDS: Array<keyof PcpConversationState> = ['statedRelationship', 'patientFirstName', 'patientLastName', 'patientDob'];
+/**
+ * What the director asks a PATIENT for, in order. Mirrors `next()`.
+ *
+ * Exported so the PROMPT can render the same list. Until 2026-08-14 the prompt
+ * told the model "ask the single next question record_pcp_intake gives you"
+ * and never showed it the order — so the model invented one, the director
+ * corrected it a turn later, and the caller heard both. The operator, on a
+ * live call: "the sequencing is off... this is just all over the place."
+ */
+export const PATIENT_INTAKE_ORDER: Array<keyof PcpConversationState> = ['callerName', 'callbackNumber', 'callPurpose'];
+export const PROMPTS: Partial<Record<keyof PcpConversationState, string>> = {
   callerName: 'May I have your full name?',
   callerRole: 'What is your role?',
   callerOrganization: 'Which organization are you calling from?',

@@ -264,6 +264,27 @@ function normaliseSpoken(s: string): string {
 }
 
 function sendPendingGreeting(callId: string, pending: PendingGreeting): void {
+  /**
+   * DO NOT RE-GREET OVER A GREETING THAT IS STILL BEING SPOKEN.
+   *
+   * The guarantee exists because a cancelled response carries no transcript,
+   * so a greeting that never played looks identical to one that did. But
+   * firing a second `response.create` while the first is still audible
+   * produces exactly what the operator heard on 2026-08-14:
+   *
+   *   turn 1  "Thank you for calling"                      (cut off)
+   *   turn 2  "Hello, thank you for calling Azul Vision's provider
+   *            support line. Let's get started. May I have your name?"
+   *
+   * Two greetings, different words, the first truncated mid-phrase. If a
+   * response is in flight the greeting is being delivered right now — the
+   * retry can wait for the next turn boundary, which is where the guarantee
+   * re-checks anyway.
+   */
+  if (responseInFlight.has(callId)) {
+    console.info(`[GREETING] resend skipped for ${callId} — a response is already speaking`);
+    return;
+  }
   pending.attempts++;
   try {
     pending.transport.sendEvent({
@@ -4031,6 +4052,29 @@ async function observeCall(
     if ((agentConfig?.id === 'azul-scheduling' || agentConfig?.id === 'pcp') && callId) {
       registerAzulHoldingCallback(callId, (instructionOverride?: string) => {
         try {
+          /**
+           * NEVER SPEAK OVER A SENTENCE ALREADY IN PROGRESS.
+           *
+           * The comment above claimed this was protocol-safe because "between
+           * a function_call and its output there is no active response". That
+           * is not reliably true, and the operator heard the consequence on
+           * 2026-08-14: the agent starts a sentence, is cut off, and a
+           * DIFFERENT sentence comes out. His words on the call — "there's
+           * something instructing you, cutting you off mid-sentence and then
+           * you re-change your approach."
+           *
+           * The event log shows it plainly: response started -> response
+           * finished after 94ms -> response started again ->
+           * conversation_already_has_active_response.
+           *
+           * A holding update exists to fill SILENCE. If the agent is already
+           * talking there is no silence to fill, so the right move is to skip
+           * this beat entirely rather than talk over it.
+           */
+          if (responseInFlight.has(callId)) {
+            console.info(`[SESSION] holding update skipped for ${callId} — agent is mid-response`);
+            return;
+          }
           (session.transport as any).sendEvent({
             type: 'response.create',
             response: {
@@ -4047,6 +4091,12 @@ async function observeCall(
       if (agentConfig?.id === 'pcp') {
         pcpHandoffProgress.set(callId, (instructions: string) => {
           try {
+            // Same rule as the holding update above: a progress line is for
+            // silence, never for talking over the agent.
+            if (responseInFlight.has(callId)) {
+              console.info(`[SESSION] PCP handoff update skipped for ${callId} — agent is mid-response`);
+              return;
+            }
             (session.transport as any).sendEvent({ type: 'response.create', response: { instructions } });
           } catch (e) {
             console.error(`[SESSION] PCP handoff update failed for ${callId}:`, e);
