@@ -29,9 +29,52 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../../server/db';
 
-/** How far back to look. A provider who has not been on the schedule in a
- *  quarter is not who the caller is asking for. */
-const LOOKBACK_DAYS = 90;
+/**
+ * How far back to look. A provider who has not been on the schedule recently
+ * is not who the caller is asking for.
+ *
+ * WAS 90, CUT TO 30 ON 2026-08-16 BECAUSE 90 DID NOT COMPLETE.
+ *
+ * The refresh below groups the whole `Schedule` table by provider and office
+ * over the window. At 90 days that exceeded the statement timeout on every
+ * boot, twice in four seconds:
+ *
+ *     [ROSTER] refresh failed — falling back to the seed keyword list:
+ *     DrizzleQueryError: canceling statement due to statement timeout
+ *
+ * It fails soft — `refreshProviderRoster` never throws and the seed constants
+ * take over — which is why it went unnoticed. But soft failure every time is
+ * the same as not having the feature: provider and office recognition has been
+ * running on hardcoded seeds, not on who is actually on the schedule.
+ *
+ * NECESSARY BUT NOT SUFFICIENT — measured, not assumed. Thirty days still
+ * exceeded a 60-second budget when tested against production. The plan says
+ * why:
+ *
+ *     Sort  (cost=106368.79..106382.16 rows=5346)
+ *       HashAggregate  (cost=105984.30..106037.76 rows=5346)
+ *         Group Key: "ProviderFromAppt", "OfficeLocation"
+ *         Index Scan using idx_schedule_apptdate  (cost=0.43..104799.65
+ *                                                  rows=157953 width=28)
+ *
+ * The date index is used and is not the problem. The cost is fetching 157,953
+ * wide heap rows and grouping them by two columns the index does not carry.
+ * Ninety days is roughly three times that.
+ *
+ * THE FIX THAT ACTUALLY CLOSES THIS is a covering index —
+ *   CREATE INDEX CONCURRENTLY idx_schedule_roster
+ *     ON "Schedule" ("AppointmentDate", "ProviderFromAppt", "OfficeLocation");
+ * — which turns the whole thing into an index-only scan. It is a heavier
+ * operation on a large production table, so it is the operator's call and is
+ * deliberately not done here.
+ *
+ * Until then this still fails soft, and that is the part worth remembering:
+ * `refreshProviderRoster` never throws, so provider and office recognition has
+ * been running on the hardcoded seed lists rather than on who is actually on
+ * the schedule — silently, on every boot, for as long as the query has been
+ * too slow.
+ */
+const LOOKBACK_DAYS = 30;
 const REFRESH_MS = 12 * 60 * 60 * 1000;
 /** Keyword lists are hints, not a dictionary — an unbounded one dilutes. */
 const MAX_PROVIDERS = 40;
