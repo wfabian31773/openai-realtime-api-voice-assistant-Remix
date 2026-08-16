@@ -9,6 +9,7 @@ import { authRouter, requireRole, requireManager } from "./auth";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { getTwilioClient, getTwilioFromPhoneNumber } from "../src/lib/twilioClient";
+import { OPENAI_COST_CENTS_PER_SECOND } from '../src/services/callCostService';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -2012,12 +2013,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
             else if (twilioStatus === 'failed' || twilioStatus === 'canceled') finalStatus = 'failed';
             
             const finalDuration = actualDuration ?? call.duration ?? 0;
-            // Same duration-estimate rate as callCostService (0.19 c/sec).
+            // The shared constant, not a copy of its value.
             // The old formula here (19 c/min) was a 12x units slip vs the
             // live pipeline's rate — and token-derived costs must be kept.
             const openaiCostCents = call.inputAudioTokens != null
               ? (call.openaiCostCents ?? 0)
-              : Math.ceil(finalDuration * 0.19);
+              : Math.ceil(finalDuration * OPENAI_COST_CENTS_PER_SECOND);
             const finalTwilioCostCents = actualTwilioCostCents ?? call.twilioCostCents ?? 0;
             
             await storage.updateCallLog(call.id, {
@@ -3292,7 +3293,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           if (needsUpdate) {
             const finalDuration = twilioDuration ?? call.duration ?? 0;
-            const openaiCostCents = Math.round(finalDuration / 60 * 15); // $0.15/min avg
+            // ONE RATE. This was 15c/min — a third value for the same quantity,
+            // alongside 19c/min in the status callback and 11.4c/min everywhere
+            // else. See OPENAI_COST_CENTS_PER_SECOND.
+            const openaiCostCents = Math.ceil(finalDuration * OPENAI_COST_CENTS_PER_SECOND);
 
             if (!dryRun) {
               await storage.updateCallLog(call.id, {
@@ -3336,7 +3340,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       for (const call of callsMissingCost) {
         if (!call.duration) continue;
-        const openaiCostCents = Math.round(call.duration / 60 * 15);
+        // Same consolidation as above. This path only ever runs on rows with no
+        // cost at all, so there is no measurement here to protect — but it must
+        // still agree with every other duration estimate in the codebase.
+        const openaiCostCents = Math.ceil(call.duration * OPENAI_COST_CENTS_PER_SECOND);
         if (!dryRun) {
           await db.update(callLogs).set({ 
             openaiCostCents,

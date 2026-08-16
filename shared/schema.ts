@@ -439,7 +439,22 @@ export const callLogs = pgTable("call_logs", {
   
   // Cost tracking (stored in cents for precision)
   twilioCostCents: integer("twilio_cost_cents"), // Twilio call cost in cents
-  openaiCostCents: integer("openai_cost_cents"), // OpenAI API cost in cents
+  openaiCostCents: integer("openai_cost_cents"), // OpenAI API cost in cents — the REALTIME session only
+  /**
+   * What it cost to GRADE this call, separately from serving it.
+   *
+   * Every graded call runs a gpt-4o-mini completion over the transcript, and
+   * until 2026-08-16 that spend existed only at the org level with nothing
+   * attributing it to a call. It is one reason per-call cost could not be
+   * reconciled: `openai_cost_cents` was structurally incomplete, and in the
+   * opposite direction to the duration-estimate inflation, so the two errors
+   * sometimes cancelled and made the totals look closer than they were.
+   *
+   * Kept in its own column rather than folded into openai_cost_cents so
+   * "what does a conversation cost" and "what does our quality programme cost"
+   * stay separable — they are different decisions.
+   */
+  gradingCostCents: integer("grading_cost_cents"),
   totalCostCents: integer("total_cost_cents"), // Total cost in cents
   audioInputMinutes: integer("audio_input_minutes"), // OpenAI audio input duration (tenths of minutes for precision)
   audioOutputMinutes: integer("audio_output_minutes"), // OpenAI audio output duration (tenths of minutes)
