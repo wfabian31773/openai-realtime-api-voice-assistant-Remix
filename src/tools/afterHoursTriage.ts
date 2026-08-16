@@ -23,14 +23,31 @@
  *
  * THE RULE THIS ENCODES, AND ITS LIMIT
  *
- * The question decides WHICH category, never WHETHER it is urgent. Every
- * presentation below stays urgent on this line no matter how it is answered;
- * asking only routes it to the right named reason. Downgrading on an answer is
- * the dangerous direction and is deliberately not built — an agent that can
- * talk a caller out of an emergency is a different and much worse product than
- * one that occasionally over-flags. After hours, a false positive is a ticket
- * marked urgent that was not. A false negative is a retinal detachment that
- * waited until morning.
+ * The question decides WHICH category. By default it does NOT decide whether
+ * the call is urgent: asking only routes it to the right named reason.
+ * Downgrading on an answer is the dangerous direction — an agent that can talk
+ * a caller out of an emergency is a much worse product than one that
+ * occasionally over-flags. After hours, a false positive is a ticket marked
+ * urgent that was not. A false negative is a retinal detachment that waited
+ * until morning.
+ *
+ * ONE EXCEPTION, added 2026-08-15 by operator ruling: *"redness should be
+ * answer driven, leave bleeding and injury alone."*
+ *
+ * A presentation may carry `answerDecidesUrgency` when the presenting word
+ * covers a large benign population and the discriminator is the whole of what
+ * makes it serious. Redness is the only one today — conjunctivitis and a dozen
+ * harmless causes are indistinguishable over the phone, and the practice's own
+ * list already paired it as "eye redness with severe pain". Bleeding, injury
+ * and detachment symptoms are deliberately NOT eligible: there is no benign
+ * majority to protect there.
+ *
+ * Note what still escalates under the exception: any branch cue the caller
+ * affirms. Red eye with pain, with a vision change, or after surgery all route
+ * urgent. Only a caller answering NO to all of them becomes a callback — which
+ * is what the 2026-08-15 10:20 caller wanted and asked for in her first
+ * sentence, before the agent asked her a two-part question and reported both
+ * halves as symptoms she never mentioned.
  *
  * NOTHING CLINICAL IS INVENTED HERE. Every destination is one of the
  * practice's own type-34 reasons, and every discriminator is a question of
@@ -65,9 +82,26 @@ export interface TriagePresentation {
   why: string;
   /** Answers, most specific first. */
   branches: TriageBranch[];
-  /** Where it lands when the answer names none of the above. Always urgent. */
+  /** Where it lands when the answer names none of the above. */
   fallbackReasonId: number;
   fallbackReason: string;
+  /**
+   * MAY A "NO" CLEAR THE URGENCY? Default false — the answer picks the
+   * category and never clears the flag.
+   *
+   * Operator ruling 2026-08-15, after a red-eye-with-discharge call paged the
+   * on-call provider: *"redness should be answer driven, leave bleeding and
+   * injury alone."*
+   *
+   * Set ONLY where the presenting word covers a large benign population and
+   * the discriminator is what makes it serious. Redness qualifies:
+   * conjunctivitis and a dozen harmless causes look identical over the phone,
+   * and the practice's own list already pairs it — "eye redness with severe
+   * pain". Bleeding, injury and detachment symptoms do NOT: there is no
+   * benign majority to protect, and a false negative there is the retinal
+   * detachment that waited until morning.
+   */
+  answerDecidesUrgency?: boolean;
 }
 
 /** Destinations, all of them existing department 8 / type 34 reasons. */
@@ -160,6 +194,9 @@ export const AFTER_HOURS_TRIAGE: TriagePresentation[] = [
       { cues: VISION_CUES, ...VISION },
       { cues: POSTOP_CUES, ...POSTOP },
     ],
+    // The operator's ruling. A red eye whose owner reports no pain, no vision
+    // change and no recent surgery is a callback, not a page at 2am.
+    answerDecidesUrgency: true,
     ...UNSPECIFIED_FALLBACK(),
   },
 ];
@@ -222,14 +259,67 @@ export function triageNeededFor(text: string): TriagePresentation | null {
 }
 
 /**
+ * UNCERTAINTY IS NOT A DENIAL.
+ *
+ * "I don't know", "no idea", "not sure" all contain a negator and none of them
+ * says the symptom is absent. Neither does silence, nor a garbled answer. The
+ * prompt has always said "if they cannot answer, or the answer is unclear,
+ * treat it as urgent" — this is the code half of that promise, and it is what
+ * stops `answerDecidesUrgency` turning a failed question into a downgrade.
+ */
+const UNCERTAINTY = [
+  'idea', 'know', 'sure', 'maybe', 'perhaps', 'possibly', 'think so', 'guess',
+  'no se', 'no sé', 'quizas', 'quizás', 'tal vez', 'creo',
+];
+
+/**
+ * Did the caller clearly say NO to the discriminator?
+ *
+ * Deliberately strict: an explicit negator, and no hedge. Anything else — an
+ * empty answer, "asdfgh", "it is fine", "I don't think so" — leaves the call
+ * urgent. Over-flagging is the cheap mistake here and this is the one place in
+ * the file that can lower a flag.
+ */
+export function isClearDenial(answer: string): boolean {
+  const raw = String(answer ?? '').toLowerCase().trim();
+  const t = fold(raw).trim();
+  if (!t) return false;
+  if (UNCERTAINTY.some((u) => t.includes(fold(u)))) return false;
+  /**
+   * Contracted negatives, checked on the RAW text before folding.
+   *
+   * "it doesn't hurt and I can see fine" is as plain a denial as English
+   * offers, and it was landing as urgent: fold() drops the apostrophe, leaving
+   * "doesnt", where the standalone-word test for "nt" cannot fire. Caught by
+   * this file's own tests rather than by reading the regex.
+   */
+  if (/\b\w+n['’]?t\b/.test(raw)) return true;
+  return NEGATORS.some((n) => new RegExp(`(^|[^a-z])${n}([^a-z]|$)`).test(t));
+}
+
+/**
  * Route a presentation once the caller has answered.
  *
- * ALWAYS urgent. The answer picks the category; it never clears the flag.
+ * URGENT BY DEFAULT. The answer picks the category and does not clear the
+ * flag — a false positive after hours is a ticket marked urgent that was not,
+ * a false negative is a retinal detachment that waited until morning.
+ *
+ * THE ONE EXCEPTION, by operator ruling on 2026-08-15: a presentation carrying
+ * `answerDecidesUrgency` may come back NOT urgent when the caller affirms none
+ * of its discriminators. Today that is redness alone, and only redness.
+ *
+ *   *"redness should be answer driven, leave bleeding and injury alone."*
+ *
+ * Note what still escalates: any branch cue the caller affirms. A red eye with
+ * pain routes to Severe Eye Pain, with blurred vision to Sudden Vision Loss,
+ * after surgery to Post-Surgery Complication. Only the caller answering NO to
+ * all of them lands as a routine callback — which is what the 10:20 caller
+ * actually wanted, and asked for in her first sentence.
  */
 export function resolveTriage(
   presentation: TriagePresentation,
   answer: string,
-): { requestTypeId: 34; requestReasonId: number; requestReason: string; urgent: true } {
+): { requestTypeId: 34; requestReasonId: number; requestReason: string; urgent: boolean } {
   for (const b of presentation.branches) {
     if (b.cues.some((c) => affirms(answer ?? '', c))) {
       return { requestTypeId: 34, requestReasonId: b.requestReasonId, requestReason: b.requestReason, urgent: true };
@@ -239,32 +329,63 @@ export function resolveTriage(
     requestTypeId: 34,
     requestReasonId: presentation.fallbackReasonId,
     requestReason: presentation.fallbackReason,
-    urgent: true,
+    // Downgrade ONLY on an explicit denial. Silence, a garbled answer or a
+    // hedge all stay urgent — see isClearDenial.
+    urgent: !(presentation.answerDecidesUrgency && isClearDenial(answer)),
   };
 }
 
-/** The block rendered into the after-hours prompt. */
+/**
+ * The block rendered into the after-hours prompt.
+ *
+ * GENERATED FROM THE TABLE, including which presentations the answer may
+ * downgrade. The compound-question defect on 2026-08-15 happened because the
+ * prompt said "ask ONE question, do not stack them" while the table shipped
+ * "is there any pain with it, AND has your vision changed?" — the model obeyed
+ * the data. Prose and data must not be able to disagree, so both the questions
+ * and the urgency rule below come from the same objects.
+ */
 export function renderTriagePrompt(): string {
-  const items = AFTER_HOURS_TRIAGE.map(
-    (p) =>
-      `- If they mention ${p.cues.slice(0, 3).join(', ')}: ask exactly one question —\n` +
-      `  "${p.ask}"\n` +
-      `  (Spanish: "${p.askEs}")`,
-  ).join('\n');
+  const line = (p: TriagePresentation) =>
+    `- If they mention ${p.cues.slice(0, 3).join(', ')}: ask exactly one question —\n` +
+    `  "${p.ask}"\n` +
+    `  (Spanish: "${p.askEs}")` +
+    (p.answerDecidesUrgency ? '\n  → THE ANSWER DECIDES. See below.' : '');
+
+  const items = AFTER_HOURS_TRIAGE.map(line).join('\n');
+
+  const alwaysUrgent = AFTER_HOURS_TRIAGE.filter((p) => !p.answerDecidesUrgency);
+  const answerDriven = AFTER_HOURS_TRIAGE.filter((p) => p.answerDecidesUrgency);
+
+  const answerDrivenBlock = answerDriven.length
+    ? `
+THESE ONES THE ANSWER DECIDES: ${answerDriven.map((p) => p.key).join(', ')}.
+
+If the caller affirms ANY of the things you asked about — pain, a vision
+change, recent surgery — it is urgent and you hand it off.
+
+If they say NO, it is NOT urgent. Take it as a normal callback request with
+create_ticket, in their own words, and tell them the team will call them back.
+Do not page the on-call provider, and do not write down a symptom they did not
+describe. A red eye with discharge and no pain is the ordinary reason people
+ring this line.
+`
+    : '';
 
   return `# TRIAGE — ASK ONE QUESTION, THEN DECIDE
 
 Some things a caller says do not tell you how serious they are. For these, ask
-ONE short question, WAIT for the answer, and let the answer decide. Do not ask
-a second one, and do not stack them.
+ONE short question, WAIT for the answer, and let the answer decide. Ask ONE.
+Never join two questions with "and" — a caller who says "yes" to a two-part
+question has answered neither, and you must not record both as reported.
 
 ${items}
 
-WHAT THE QUESTION IS FOR. It decides WHICH kind of urgent this is, so the right
-person gets it. It NEVER decides that the call is not urgent. If they answer
-"no" to everything, it is still urgent and you still hand it off — you simply
-have less to tell the on-call team.
-
+THESE ONES STAY URGENT HOWEVER THEY ARE ANSWERED: ${alwaysUrgent.map((p) => p.key).join(', ')}.
+The question only decides WHICH kind of urgent, so the right person gets it. If
+they answer "no" to everything, it is still urgent and you still hand it off —
+you simply have less to tell the on-call team.
+${answerDrivenBlock}
 YOU ARE NOT DIAGNOSING. Ask the question, take the answer in their own words,
 and pass it on. Never say what you think is wrong, never reassure them that it
 sounds minor, and never tell them it can wait. If they cannot answer, or the
