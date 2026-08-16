@@ -861,33 +861,70 @@ const officeLegDials = new Map<string, { openAiCallId: string; dialedNumber: str
  *  answers "did the office actually pick up, and which office was it?" — a
  *  question that had NO answer in the database before 2026-07-30, when an
  *  office manager found a routing bug that no dashboard could have shown. */
+/**
+ * The warm-transfer acceptance window. The operator's ladder (HOLD_LADDER in
+ * azulSchedulingAgent) speaks at 15s and 30s inside it and gives up at 45s, so
+ * these two numbers must agree: shortening this without moving the ladder
+ * would cut the caller off mid-reassurance.
+ */
+const WARM_TRANSFER_WINDOW_MS = 45_000;
+
 async function recordTransferOutcome(
   officeCallSid: string,
-  outcome: 'accepted' | 'no_answer' | 'busy' | 'failed' | 'canceled' | 'machine' | 'no_keypress',
-  extra: { acceptMethod?: 'keypress' | 'stay_on_line' | null; amdVerdict?: string | null } = {},
+  outcome: 'accepted' | 'no_answer' | 'busy' | 'failed' | 'canceled' | 'machine' | 'no_keypress' | 'timeout' | 'dial_failed',
+  extra: { acceptMethod?: 'keypress' | 'stay_on_line' | null; amdVerdict?: string | null; detail?: string } = {},
 ): Promise<void> {
   const dial = officeLegDials.get(officeCallSid);
+  // A second outcome for the same leg is normal — the 45s timeout and a late
+  // Twilio status callback race — and the FIRST one is the true one. Deleting
+  // on read makes this idempotent rather than last-write-wins.
   if (!dial) return;
   officeLegDials.delete(officeCallSid);
-  const callLogId = callMetadataForDB.get(dial.openAiCallId)?.dbCallLogId;
-  if (!callLogId) return;
+  const meta = callMetadataForDB.get(dial.openAiCallId);
+  const payload = {
+    officeCallSid,
+    dialedNumber: dial.dialedNumber,
+    queueLabel: dial.queueLabel,
+    outcome,
+    acceptMethod: extra.acceptMethod ?? null,
+    amdVerdict: extra.amdVerdict ?? null,
+    ...(extra.detail ? { detail: extra.detail } : {}),
+    ringSeconds: Math.round((Date.now() - dial.dialedAt) / 1000),
+    at: new Date().toISOString(),
+  };
   try {
     const { storage } = await import('../server/storage');
-    await storage.updateCallLog(callLogId, {
-      transferOutcome: {
-        officeCallSid,
-        dialedNumber: dial.dialedNumber,
-        queueLabel: dial.queueLabel,
-        outcome,
-        acceptMethod: extra.acceptMethod ?? null,
-        amdVerdict: extra.amdVerdict ?? null,
-        ringSeconds: Math.round((Date.now() - dial.dialedAt) / 1000),
-        at: new Date().toISOString(),
-      },
-    } as any);
-    console.info(`[WARM-TRANSFER] outcome recorded for ${callLogId}: ${outcome} — ${dial.queueLabel} (${dial.dialedNumber})`);
+    if (meta?.dbCallLogId) {
+      await storage.updateCallLog(meta.dbCallLogId, { transferOutcome: payload } as any);
+    } else if (meta?.twilioCallSid) {
+      /**
+       * THE SECOND HOLE, and it dropped outcomes silently.
+       *
+       * `dbCallLogId` is filled in by a BACKGROUND write. A transfer that
+       * resolves before that write lands had no id to update, so this returned
+       * — after already deleting the officeLegDials entry, which meant the
+       * outcome could never be recovered by a later call either.
+       *
+       * The same race is documented twenty lines down in the warm-transfer
+       * bookkeeping ("if that write had not landed yet, the mark was skipped
+       * silently"), and the timeline flush already solves it by resolving on
+       * callSid. Do the same here rather than losing the row.
+       */
+      const { callLogs: callLogsTable } = await import('../shared/schema');
+      const { db: database } = await import('../server/db');
+      const { eq: equals } = await import('drizzle-orm');
+      await database.update(callLogsTable)
+        .set({ transferOutcome: payload } as any)
+        .where(equals(callLogsTable.callSid, meta.twilioCallSid));
+    } else {
+      console.warn(`[WARM-TRANSFER] outcome ${outcome} for ${officeCallSid} has no call log to attach to (no id, no callSid)`);
+      return;
+    }
+    console.info(
+      `[WARM-TRANSFER] outcome recorded: ${outcome} after ${payload.ringSeconds}s — ${dial.queueLabel} (${dial.dialedNumber})`,
+    );
   } catch (err) {
-    console.error(`[WARM-TRANSFER] failed to record outcome for ${callLogId}:`, err);
+    console.error(`[WARM-TRANSFER] failed to record outcome for ${dial.openAiCallId}:`, err);
   }
 }
 
@@ -1986,8 +2023,22 @@ async function transferConferenceToNumber(
     // later and without hanging up on live people.
     timeoutId = setTimeout(() => {
       warmTransferAccepts.delete(dialedSid);
+      // THE DIAL THAT RAN OUT OF TIME USED TO RECORD NOTHING.
+      //
+      // recordTransferOutcome was called from exactly two places — the keypress
+      // accept and the AMD/no-keypress webhook — so the database only ever
+      // learned about transfers where the office DID something. A dial that
+      // simply rang out left no row at all.
+      //
+      // Measured 2026-08-16: of 278 azul-scheduling calls that dialled the
+      // office, only 104 carry a transfer_outcome. 37%. The question the
+      // column exists to answer — "does the office actually pick up, and which
+      // office" — was being answered from a sample biased entirely towards
+      // success, which is the worst possible sample to reason about answer
+      // rates from.
+      void recordTransferOutcome(dialedSid, 'timeout');
       rejectAccepted(new Error('Office did not accept the transfer within the window'));
-    }, 45_000);
+    }, WARM_TRANSFER_WINDOW_MS);
 
     officeLegBridges.set(dialedSid, { openAiCallId, label });
     // Office-leg telemetry (2026-07-30): remember what we dialed so the
@@ -2026,6 +2077,11 @@ async function transferConferenceToNumber(
       warmTransferAccepts.delete(officeCallSid);
       officeLegBridges.delete(officeCallSid);
       activeOfficeLegsByCall.get(openAiCallId)?.delete(officeCallSid);
+      // Every dial ends with a row. The timeout path records its own outcome
+      // above and deletes the entry, so this is a no-op there and only fires
+      // for the genuine failures — a Twilio error, a dropped leg — which
+      // previously vanished entirely.
+      await recordTransferOutcome(officeCallSid, 'dial_failed', { detail });
       try { await twilioClient.calls(officeCallSid).update({ status: 'completed' }); } catch { /* already terminal */ }
     }
     return { ok: false, detail };
