@@ -73,7 +73,12 @@ const AZUL_AGENT_VERSION = '2.28.0';
 // case — pilot call 10's awkward 5-8s silent chain), then every 15s.
 const HOLDING_FIRST_MS = 6_000;
 const HOLDING_UPDATE_MS = 15_000;
-const holdingCallbacks = new Map<string, (instructionOverride?: string) => void>();
+/**
+ * Returns whether the update was actually SENT. It is skipped when the agent
+ * is already speaking (there is no silence to fill), and the hold ladder needs
+ * to know that so it can try the beat again rather than lose it.
+ */
+const holdingCallbacks = new Map<string, (instructionOverride?: string) => boolean | void>();
 
 /**
  * Calls where verify_patient_identity came back verified. The server injects the
@@ -93,11 +98,18 @@ const handoffIdentityRefusals = new Map<string, number>();
  */
 const handoffOfferMade = new Set<string>();
 
-export function releaseAzulCallState(callId: string | undefined): void {
-  if (!callId) return;
-  azulVerifiedCalls.delete(callId);
-  handoffIdentityRefusals.delete(callId);
-  handoffOfferMade.delete(callId);
+/**
+ * `callSid` is accepted too because `handoffOfferMade` is keyed by
+ * `callId ?? callSid` — releasing only by callId leaked every callSid-keyed
+ * entry for the lifetime of the process. Third review pass, 2026-08-17.
+ */
+export function releaseAzulCallState(callId: string | undefined, callSid?: string): void {
+  for (const key of [callId, callSid]) {
+    if (!key) continue;
+    azulVerifiedCalls.delete(key);
+    handoffIdentityRefusals.delete(key);
+    handoffOfferMade.delete(key);
+  }
 }
 
 /**
@@ -142,7 +154,7 @@ function guardAppointmentOrdinal(
   const refusal = checkAppointmentOrdinal(appointmentCountForCall(callId), ordinal);
   return refusal ? refusalJson(tool, refusal) : null;
 }
-export function registerAzulHoldingCallback(callId: string, cb: (instructionOverride?: string) => void): void {
+export function registerAzulHoldingCallback(callId: string, cb: (instructionOverride?: string) => boolean | void): void {
   holdingCallbacks.set(callId, cb);
 }
 export function unregisterAzulHoldingCallback(callId: string): void {
@@ -1236,21 +1248,82 @@ export function createAzulSchedulingAgent(
        * every handoff that clears the ladder.
        */
       const ladderCallId = metadata?.callId;
+      /**
+       * NO callId MEANS NO LADDER, NOT AN ENDLESS ONE.
+       *
+       * The offer is spent by adding the callId to `handoffOfferMade`. Without
+       * one there is nowhere to record that it was spent, so
+       * `offerAlreadyMade` would be false on every call and a
+       * `patient_requested_human` + schedulable handoff would return
+       * `offer_first` forever and never transfer — a caller who asked for a
+       * person, permanently offered help instead. Fail OPEN: if we cannot
+       * track the ladder we do not run it. Caught in review, 2026-08-17.
+       */
+      /**
+       * The key the offer is spent against. callSid is the same fallback the
+       * transcript provider and the sweep already use a few lines up — a call
+       * always has one of the two.
+       *
+       * The first fix disabled the WHOLE ladder when callId was missing, which
+       * threw away the intent gate as well. That gate is stateless and cannot
+       * loop: it refuses only when `reasonForCall` is absent, and the fix for
+       * that is the model supplying one. Skipping it meant a handoff reaching
+       * the front desk with an empty briefing — the thing the warm transfer
+       * exists to prevent. Found on the second review pass, 2026-08-17.
+       */
+      const ladderKey = ladderCallId ?? metadata?.callSid;
       const verdict = ladderVerdict({
         handoffReason: String((rest as { handoffReason?: string }).handoffReason ?? ''),
         schedulableHere,
         reasonForCall,
-        offerAlreadyMade: ladderCallId ? handoffOfferMade.has(ladderCallId) : false,
+        // With no key at all we cannot record that the offer was spent, so we
+        // must not make it — that is the only part of the ladder that can loop.
+        offerAlreadyMade: ladderKey ? handoffOfferMade.has(ladderKey) : true,
       });
       if (!verdict.allow) {
         // Spend the single offer here, so a second ask cannot be refused even
         // if the model calls with the same arguments.
-        if (verdict.code === 'offer_first' && ladderCallId) handoffOfferMade.add(ladderCallId);
-        console.info(`[AZUL-SCHED] handoff ladder: ${verdict.code} for ${ladderCallId ?? 'unknown call'}`);
-        return JSON.stringify({
-          tool: 'sage_handoff',
-          result: { handoffCreated: false, error: verdict.code, say: verdict.say, guidance: verdict.guidance },
-        });
+        if (verdict.code === 'offer_first' && ladderKey) handoffOfferMade.add(ladderKey);
+        console.info(`[AZUL-SCHED] handoff ladder: ${verdict.code} for ${ladderKey ?? 'unkeyed call'}`);
+        /**
+         * THE GATE HAS TO BE MEASURABLE, or this is the same mistake twice.
+         *
+         * This work was justified by counting refusals in `tool_timeline` —
+         * 237 of 455 handoffs were `patient_requested_human`. Returning here
+         * without recording an event meant the NEW gate produced no rows at
+         * all, so the very measurement that argued for it could not be
+         * repeated against it. That is the measurement trap this repo has
+         * written up twice already. Caught in review, 2026-08-17.
+         */
+        const ladderOutcome = { handoffCreated: false, error: verdict.code, say: verdict.say, guidance: verdict.guidance };
+        try {
+          /**
+           * RECORDED UNDER ITS OWN NAME, NOT `sage_handoff`.
+           *
+           * Writing these as sage_handoff rows made the gate measurable and
+           * corrupted two things that read them:
+           *
+           *   classifyAzulCall takes the FIRST sage_handoff event, so a call
+           *   that really did transfer would persist as "Callback created" —
+           *   and that string is interpolated into the sweep's tier-3 ticket.
+           *
+           *   rubric_urgency_routing tests `e.tool === 'sage_handoff'` with no
+           *   outcome check, so an urgent call whose handoff was REFUSED and
+           *   never happened would score a clean 1.
+           *
+           * A distinct name keeps the refusal countable without pretending a
+           * handoff occurred. Third review pass, 2026-08-17.
+           */
+          recordAzulToolEvent(
+            ladderCallId ?? metadata?.callSid ?? "",
+            'sage_handoff_ladder',
+            { handoffReason: String((rest as { handoffReason?: string }).handoffReason ?? ''), schedulableHere },
+            JSON.stringify(ladderOutcome),
+            0,
+            { callSid: metadata?.callSid, callLogId: metadata?.callLogId },
+          );
+        } catch { /* telemetry must never break the call */ }
+        return JSON.stringify({ tool: 'sage_handoff', result: ladderOutcome });
       }
 
       // IDENTITY FOR THE PACKET. The server rejects an anonymous handoff with
@@ -1463,15 +1536,49 @@ export function createAzulSchedulingAgent(
       // TELLS the caller it is finite — "my last attempt" is the difference
       // between waiting and being strung along.
       const hb = holdingCallbacks.get(callId);
-      const holdTimers: Array<ReturnType<typeof setTimeout>> = [];
       const sayExactly = (line: string) =>
         `Say EXACTLY this to the caller, in their language, then stop and go quiet: "${line}" ` +
         'Add nothing, ask nothing, and do not rephrase it.';
-      if (hb) {
-        holdTimers.push(setTimeout(() => hb(sayExactly(HOLD_LADDER.stillTrying)), HOLD_LADDER_MS.stillTrying));
-        holdTimers.push(setTimeout(() => hb(sayExactly(HOLD_LADDER.lastAttempt)), HOLD_LADDER_MS.lastAttempt));
-      }
-      const clearHoldTimers = () => { for (const t of holdTimers) clearTimeout(t); holdTimers.length = 0; };
+      /**
+       * A SKIPPED BEAT MUST NOT BE A LOST BEAT.
+       *
+       * These were two one-shot setTimeouts. The holding callback SKIPS when
+       * the agent is mid-response — correctly, there is no silence to fill —
+       * and a one-shot that lands in that window is gone for good, leaving the
+       * caller in silence until the 45s giving-up line. The code this replaced
+       * used a repeating interval, so it retried by accident; the rewrite lost
+       * that without noticing. Caught in review, 2026-08-17.
+       *
+       * A 2s tick re-attempts the beat that is due until it actually lands, and
+       * never re-speaks one that already did. Cheap, and the ladder stays the
+       * ladder: at most one "still trying" and one "last attempt", in order.
+       */
+      const holdStartedAt = Date.now();
+      const spoken = { stillTrying: false, lastAttempt: false, stillTryingAt: 0 };
+      const holdTick = hb
+        ? setInterval(() => {
+            const elapsed = Date.now() - holdStartedAt;
+            if (elapsed >= HOLD_LADDER_MS.lastAttempt) {
+              /**
+               * KEEP THE BEATS APART. A `stillTrying` that only lands at ~28s,
+               * because the agent was mid-response until then, would otherwise
+               * be followed by "my last attempt" two seconds later and then
+               * fifteen seconds of silence — the opposite of the even 15/30/45
+               * pacing the ladder exists to give. Sixth review pass, 2026-08-17.
+               */
+              const tooSoon = spoken.stillTryingAt > 0 && Date.now() - spoken.stillTryingAt < 8_000;
+              if (!spoken.lastAttempt && !tooSoon && hb(sayExactly(HOLD_LADDER.lastAttempt)) !== false) {
+                spoken.lastAttempt = true;
+              }
+            } else if (elapsed >= HOLD_LADDER_MS.stillTrying) {
+              if (!spoken.stillTrying && hb(sayExactly(HOLD_LADDER.stillTrying)) !== false) {
+                spoken.stillTrying = true;
+                spoken.stillTryingAt = Date.now();
+              }
+            }
+          }, 2_000)
+        : undefined;
+      const clearHoldTimers = () => { if (holdTick) clearInterval(holdTick); };
       const startedAt = Date.now();
       // Warm-transfer briefing (ship gate): the staffer hears WHO is calling
       // and WHY before accepting — the patient never repeats themselves.

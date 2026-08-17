@@ -53,6 +53,7 @@
  */
 
 import type { PcpConversationState } from './director';
+import { getPcpCallPurpose } from './policy';
 
 /** Field names as the caller would hear them, for the spoken question. */
 export const REQUIRED_PROMPTS: Record<string, string> = {
@@ -88,14 +89,64 @@ export interface Readiness {
 }
 
 /**
+ * NOT EVERY CALL IS ABOUT A PATIENT.
+ *
+ * The first version of this asked for a patient's name on every purpose except
+ * `patient_caller`. `policy.ts` already knows better — seven purposes carry
+ * `patientContextRequired: false`, including `service_inquiry`,
+ * `plan_participation`, `provider_information` and
+ * `pharmaceutical_representative`. A drug rep has no patient.
+ *
+ * Left as it was, a rep would be asked "who is the call about — the patient's
+ * first and last name?" three times and then handed a ticket annotated "the
+ * caller was asked and did not provide it", which is a false statement about
+ * the caller on a durable record. Caught in review, 2026-08-17, before it took
+ * a call.
+ *
+ * The policy file is the single source of truth for this; do not re-encode it.
+ */
+function patientContextNeeded(state: PcpConversationState): boolean {
+  if (!state.callPurpose) return false; // nothing to judge from yet
+  /**
+   * KNOWN GAP, NOT CLOSED HERE. `patient_caller` covers "a patient OR THEIR
+   * FAMILY" and carries `patientContextRequired: false`, so a daughter ringing
+   * about her mother files under the daughter's name and the mother is never
+   * identified.
+   *
+   * I added a branch here to demand the patient's name in that case. The sixth
+   * review pass showed it was dead code — `patientIdentified` short-circuits on
+   * the same slug a few lines down and answers `Boolean(callerName)` regardless
+   * — and untangling the two safely means changing what department 16 is told
+   * about the requester, which is the CAP-clock decision deliberately left
+   * unshipped in pcpAgent. Removing the dead branch rather than leaving
+   * something that reads like a fix and is not one.
+   */
+  try {
+    return getPcpCallPurpose(state.callPurpose).patientContextRequired;
+  } catch {
+    // Unknown slug: ask, rather than silently skipping the field on a purpose
+    // nobody has classified. Failing towards MORE information is safe here
+    // because the block budget bounds it either way.
+    return true;
+  }
+}
+
+/**
  * Is the patient identified?
  *
  * When the caller IS the patient, their own name answers "who is the call
  * about" — asking a person ringing about their own eye drops for "the
  * patient's name" is the interrogation this line keeps being corrected for.
+ *
+ * `callerIsThePatient` is a STICKY flag on the director rather than a read of
+ * the current purpose, and that matters: the records tool reclassifies
+ * `callPurpose` to `patient_medical_records_request` before this runs, so a
+ * purpose check here could never fire for a patient asking for their own
+ * records — the exact interrogation this function exists to prevent, in the
+ * one place it was most likely to happen. Also caught in review.
  */
 function patientIdentified(state: PcpConversationState): boolean {
-  if (state.callPurpose === 'patient_caller') {
+  if (state.callPurpose === 'patient_caller' || state.callerIsThePatient) {
     return Boolean(state.callerName);
   }
   return Boolean(state.patientFirstName && state.patientLastName);
@@ -106,7 +157,8 @@ function isPresent(state: PcpConversationState, field: RequiredField): boolean {
     case 'callerName':
       return Boolean(state.callerName);
     case 'patientName':
-      return patientIdentified(state);
+      // Not required at all when the purpose has no patient behind it.
+      return !patientContextNeeded(state) || patientIdentified(state);
     case 'callbackNumber':
       return Boolean(state.callbackNumber);
   }

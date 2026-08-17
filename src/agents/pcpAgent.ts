@@ -192,6 +192,13 @@ If a caller is a PATIENT or their family, record callPurpose as patient_caller.
 They then get a much shorter intake, and you must never ask them a professional
 question — no role, no organization, no facility type.
 
+AND SEPARATELY: if the person ON THE PHONE is the patient themselves, set
+callerIsThePatient to true. Do it whatever else the call is about — someone
+ringing for their OWN records is still the patient, and without this you will
+end up asking them for "the patient's name" when you already have it. A family
+member calling about someone else is NOT the patient; leave it off, because we
+still need that person's name.
+
 If the caller has already given you something before you asked — a name in
 their opening sentence, an organization, why they are calling — record it and
 skip it. Asking for what you were just told is the fastest way to lose a
@@ -513,6 +520,25 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       callbackNumber: z.string().min(7).optional(),
       statedRelationship: z.string().min(1).optional(),
       callPurpose: z.enum(PCP_CALL_PURPOSE_SLUGS).optional(),
+      /**
+       * Is the person on the phone the patient themselves?
+       *
+       * A separate question from the purpose, and it has to be, because the
+       * purpose changes. A patient whose opening line is "I need my records"
+       * classifies as `patient_medical_records_request` and never as
+       * `patient_caller`, so inferring it from the slug misses them entirely
+       * — and they get asked for "the patient's first and last name" about
+       * themselves. Found on the second review pass, 2026-08-17.
+       *
+       * The model knows this from the conversation, which is the standing
+       * rule: classification is its job. The server owns what follows.
+       */
+      callerIsThePatient: z.boolean().optional().describe(
+        'TRUE only when the person ON THE PHONE is the patient themselves. False or omitted for a clinic, '
+        + 'a plan, a pharmacy — and also for a family member calling ABOUT a patient, because then the patient '
+        + 'is someone else and we still need their name. Set this as soon as you know; it decides whether we '
+        + 'ask "who is the call about".',
+      ),
       patientFirstName: z.string().min(1).optional(),
       patientLastName: z.string().min(1).optional(),
       patientDob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -643,7 +669,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       //
       // When the words match nothing, it lands on department 18's own
       // "Other - See Description" rather than being guessed at.
-      if (state.callPurpose === 'patient_caller') {
+      // The latch, not just the purpose — a patient whose call was later
+      // reclassified is still a patient, and their request still does not
+      // belong sitting in department 18. Same reason as director.next().
+      if (state.callPurpose === 'patient_caller' || state.callerIsThePatient) {
         const [{ detectCrossQueue }, { otherReasonFor }, { ticketingApiClient }, { sanitizeForSms }] =
           await Promise.all([
             import('../tools/queueRouting'),
@@ -709,10 +738,35 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
             callback_number: String(state.callbackNumber ?? metadata.callerPhone ?? ''),
             request_description: `Patient called the PCP Support line.\n\n${narrative}`,
             request_reason_id: String(recordsHit.requestReasonId),
-            // NOT inferred. The director established callPurpose ===
-            // 'patient_caller', which is the one place on this line where the
-            // requester is known rather than guessed — the whole reason this
-            // path is allowed into department 16 at all.
+            /**
+             * LEFT AS IT WAS, AND THAT IS A DECISION — see the warning below.
+             *
+             * `patient_caller` covers "a patient OR THEIR FAMILY", so this
+             * string tells department 16 that a daughter ringing about her
+             * mother IS the patient. That is a real defect and it is NOT fixed
+             * here.
+             *
+             * I did fix it, with a ternary on `callerIsThePatient`, and the
+             * fifth review pass caught what that actually did: the fallback
+             * wording "…calling on the patient's behalf" matches
+             * SPEAKING_FOR_ANOTHER in the records taxonomy, which suppresses
+             * the `patient` cue and resolves to requesterType `other`,
+             * pathway `third_party_other`, capClockApplies FALSE.
+             *
+             * Azul is under an HHS OCR Corrective Action Plan about LATE
+             * MEDICAL RECORDS. `callerIsThePatient` is a brand-new optional
+             * boolean, so every call where the model simply omits it would
+             * have moved a patient's own right-of-access request OFF the
+             * 15-day statutory clock — and `medicalRecordsTools` applies its
+             * deliver_to/date_range gate only when on-clock, so the case would
+             * also file with no destination and no date range.
+             *
+             * Trading a naming error for a compliance-clock error is not a
+             * trade I get to make at 5pm on the day this line goes back on the
+             * phone. The correct fix needs the taxonomy's own vocabulary and
+             * the ticketing team's confirmation of the personal-representative
+             * pathway. Flagged for the operator; deliberately unshipped.
+             */
             requester: `the patient themselves${state.callerName ? ` (${state.callerName})` : ''}`,
             ...(metadata.callSid ? { call_sid: metadata.callSid } : {}),
             ...(metadata.callerPhone ? { caller_phone: metadata.callerPhone } : {}),
@@ -1023,6 +1077,23 @@ export async function sweepPcpUnfiledCall(callId: string): Promise<void> {
   try {
     const state = pcpDirector.get(callId);
     if (state.dispositionRecorded) return; // something durable already exists
+    /**
+     * A CONNECTED TRANSFER IS NOT AN UNFILED CALL.
+     *
+     * `dispositionRecorded` alone is not enough. handoff_to_pcp files its
+     * durable ticket BEFORE it dials and updates the same ticket after, so a
+     * call that connected can reach teardown while that second write is still
+     * in flight — and this would file "CALLER HUNG UP BEFORE THE REQUEST WAS
+     * COMPLETE" for someone sitting on the line with a staffer.
+     *
+     * That is the same error azul's sweep made in the other direction on
+     * 2026-07-28: 9 of 12 spurious tickets were callbacks for patients who had
+     * already been helped. Caught in review here rather than in the queue.
+     */
+    if (state.handoffStatus === 'CONNECTED') {
+      console.info(`[PCP] SWEEP: ${callId} connected to a person — nothing to file`);
+      return;
+    }
 
     const toldUsSomething = Boolean(
       state.callPurpose &&

@@ -175,7 +175,124 @@ describe('every dial now leaves a row', () => {
      */
     const fn = routesSrc.slice(routesSrc.indexOf('async function recordTransferOutcome'), routesSrc.indexOf('function sendLoopGuardDirective'));
     expect(fn).toMatch(/meta\?\.dbCallLogId/);
-    expect(fn).toMatch(/meta\?\.twilioCallSid/);
+    // The caller's callSid rides on the DIAL record. CallMetadata.twilioCallSid
+    // is declared and never written, so reading it there was a no-op.
+    expect(fn).toMatch(/dial\.callerCallSid/);
     expect(fn, 'must not bail when only the callSid is known').not.toMatch(/if \(!callLogId\) return;/);
+  });
+});
+
+describe('a skipped hold beat is retried, not lost', () => {
+  /**
+   * Found in review, 2026-08-17. The two cut-ins were one-shot setTimeouts.
+   * The holding callback SKIPS when the agent is mid-response — correctly,
+   * there is no silence to fill — so a one-shot landing in that window was
+   * gone for good, leaving the caller silent until the 45s giving-up line.
+   *
+   * The code this replaced used a repeating interval and retried by accident;
+   * the rewrite lost that without noticing.
+   */
+  const src = readFileSync(new URL('./azulSchedulingAgent.ts', import.meta.url), 'utf8');
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  it('ticks until the beat lands', () => {
+    expect(code).toMatch(/setInterval\(/);
+    expect(code).toMatch(/const spoken = \{ stillTrying: false, lastAttempt: false, stillTryingAt: 0 \}/);
+    // And the two beats cannot bunch: a late stillTrying holds lastAttempt off.
+    expect(code).toMatch(/const tooSoon = spoken\.stillTryingAt > 0 &&/);
+  });
+
+  it('only marks a beat spoken when the callback actually sent it', () => {
+    // `hb()` returns false when it skipped. Marking spoken regardless is the
+    // bug wearing a retry loop.
+    expect(code).toMatch(/hb\(sayExactly\(HOLD_LADDER\.lastAttempt\)\) !== false/);
+    expect(code).toMatch(/hb\(sayExactly\(HOLD_LADDER\.stillTrying\)\) !== false/);
+  });
+
+  it('the callback contract reports whether it sent', () => {
+    const routes = readFileSync(new URL('../voiceAgentRoutes.ts', import.meta.url), 'utf8');
+    expect(code).toMatch(/\(instructionOverride\?: string\) => boolean \| void/);
+    expect(routes).toMatch(/registerAzulHoldingCallback\(callId, \(instructionOverride\?: string\): boolean =>/);
+  });
+
+  it('never speaks a beat twice, and stops at the window', () => {
+    const at = code.indexOf('const holdStartedAt');
+    const block = code.slice(at, at + 900);
+    expect(block).toMatch(/!spoken\.lastAttempt/);
+    expect(block).toMatch(/!spoken\.stillTrying/);
+    expect(code).toMatch(/clearInterval\(holdTick\)/);
+  });
+});
+
+describe('the handoff ladder fails open and stays measurable', () => {
+  const src = readFileSync(new URL('./azulSchedulingAgent.ts', import.meta.url), 'utf8');
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  it('keys the offer on callId, falling back to callSid', () => {
+    /**
+     * The offer is spent by adding a key to `handoffOfferMade`. With no key
+     * there is nowhere to record it, so `offerAlreadyMade` would be false
+     * forever and a patient_requested_human + schedulable handoff would return
+     * offer_first on every attempt and NEVER transfer.
+     *
+     * The FIRST fix disabled the whole ladder when callId was missing, which
+     * threw away the intent gate too. That gate is stateless and cannot loop;
+     * skipping it means a handoff reaching the front desk with an empty
+     * briefing — the thing the warm transfer exists to prevent. callSid is the
+     * same fallback the transcript provider and the sweep already use.
+     * Found on the second review pass, 2026-08-17.
+     */
+    expect(code).toMatch(/const ladderKey = ladderCallId \?\? metadata\?\.callSid;/);
+    expect(code, 'the ladder must still run without a callId').not.toMatch(/const verdict = ladderCallId\s*\?\s*ladderVerdict\(/);
+  });
+
+  it('only the loopable half is disabled when there is no key at all', () => {
+    // offerAlreadyMade: true means "do not offer" — the intent gate still runs.
+    expect(code).toMatch(/offerAlreadyMade: ladderKey \? handoffOfferMade\.has\(ladderKey\) : true/);
+  });
+
+  it('records a timeline row for every refusal', () => {
+    /**
+     * This work was justified by counting refusals in tool_timeline — 237 of
+     * 455 handoffs were patient_requested_human. Returning without recording
+     * meant the NEW gate produced no rows, so the measurement that argued for
+     * it could not be repeated against it. The measurement trap, a third time.
+     */
+    const at = code.indexOf('if (!verdict.allow)');
+    const block = code.slice(at, at + 1200);
+    expect(block).toMatch(/recordAzulToolEvent\(/);
+    expect(block).toMatch(/handoffReason/);
+    expect(block).toMatch(/schedulableHere/);
+  });
+
+  it('telemetry failure cannot break the call', () => {
+    const at = code.indexOf('if (!verdict.allow)');
+    const block = code.slice(at, at + 1200);
+    expect(block).toMatch(/try \{[\s\S]*recordAzulToolEvent[\s\S]*\} catch/);
+  });
+});
+
+describe('a transfer outcome that lands nowhere says so', () => {
+  /**
+   * Found in review, 2026-08-17. The by-callSid fallback logged "outcome
+   * recorded" even when the update matched ZERO rows — the call-log row not
+   * written yet — AFTER officeLegDials had already been deleted, so the
+   * outcome was unrecoverable and the log claimed success. A coverage fix that
+   * fails silently is worse than the gap it replaced.
+   */
+  const routes = readFileSync(new URL('../voiceAgentRoutes.ts', import.meta.url), 'utf8');
+
+  it('checks whether the update matched anything', () => {
+    const fn = routes.slice(routes.indexOf('async function recordTransferOutcome'), routes.indexOf('function sendLoopGuardDirective'));
+    expect(fn).toMatch(/\.returning\(\{ id: callLogsTable\.id \}\)/);
+    expect(fn).toMatch(/if \(!written\.length\)/);
+  });
+
+  it('and warns instead of claiming success', () => {
+    const fn = routes.slice(routes.indexOf('async function recordTransferOutcome'), routes.indexOf('function sendLoopGuardDirective'));
+    const lostAt = fn.indexOf('LOST for');
+    const recordedAt = fn.indexOf('outcome recorded:');
+    expect(lostAt, 'the miss must be logged').toBeGreaterThan(-1);
+    expect(lostAt, 'and must return before the success line').toBeLessThan(recordedAt);
   });
 });

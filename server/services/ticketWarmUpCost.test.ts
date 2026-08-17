@@ -41,7 +41,7 @@ describe('the probe is skipped when we already know the app is awake', () => {
      * A new one added later must use warmUpIfStale too — a direct
      * warmUpWithRetry call would silently reintroduce the cost.
      */
-    const direct = code.match(/await this\.warmUpWithRetry\(/g) ?? [];
+    const direct = code.match(/this\.warmUpWithRetry\(/g) ?? [];
     // Exactly one: the call INSIDE warmUpIfStale itself.
     expect(direct.length, 'a call site still probes unconditionally').toBe(1);
     const cached = code.match(/warmUpIfStale\(/g) ?? [];
@@ -51,18 +51,82 @@ describe('the probe is skipped when we already know the app is awake', () => {
 
   it('the cached call inside warmUpIfStale is the only unconditional one', () => {
     const fn = code.slice(code.indexOf('private async warmUpIfStale'), code.indexOf('private ensureInitialized'));
-    expect(fn).toMatch(/await this\.warmUpWithRetry\(maxRetries, delayMs\)/);
+    expect(fn).toMatch(/this\.warmUpWithRetry\(maxRetries, delayMs\)/);
   });
 
   it('liveness is recorded from a real response, not only from the probe', () => {
     // A successful create is better proof of life than any health check, and
     // it is the one that happens on every busy call.
-    expect(code).toMatch(/this\.markAlive\(\);\s*\n\s*return data as T;/);
+    expect(code).toMatch(/this\.markAlive\([^;]*\);\s*\n\s*return data as T;/);
   });
 
   it('the health check records liveness too', () => {
     const hc = code.slice(code.indexOf('async healthCheck'), code.indexOf('private async makeRequest'));
-    expect(hc).toMatch(/markAlive\(\)/);
+    expect(hc).toMatch(/markAlive\(/);
+  });
+});
+
+describe('liveness belongs to the host the probe would wake', () => {
+  /**
+   * Found in review, 2026-08-17, and it arms itself on a config change I had
+   * just recommended.
+   *
+   * `healthCheck` probes the DIRECT app when TICKETING_ENRICHMENT_URL is set,
+   * and the n8n gateway otherwise. The first version of the cache marked alive
+   * on ANY successful request — so with the enrichment URL configured, a call
+   * through the gateway would suppress the probe of the sleeping app for 60
+   * seconds. The create then pays the cold start anyway and the cache has
+   * bought nothing while hiding the reason.
+   *
+   * Not a live bug today (the URL is unset, so both are one host). It becomes
+   * one the moment the operator sets it.
+   */
+  /**
+   * SECOND REVIEW PASS, 2026-08-17. The first version of this fix compared
+   * INTENT flags — "was this request meant for the direct app?" against "does
+   * the probe use the direct app?". With TICKETING_ENRICHMENT_URL unset those
+   * are the same host, but the flags disagree, so `createPcpTicket` and
+   * `updateTicketCallData` (both pass useEnrichmentBase=true) had their proof
+   * of life discarded and the next create paid the full probe anyway — the
+   * cache silently doing nothing on the paths that use it most.
+   *
+   * Comparing the RESOLVED BASE is correct in both configurations and needs no
+   * reasoning about which flag means what.
+   */
+  it('markAlive takes the host that answered, not a flag', () => {
+    expect(code).toMatch(/private markAlive\(answeredBase: string \| null \| undefined\)/);
+  });
+
+  it('and compares it against the base the probe actually contacts', () => {
+    const fn = code.slice(code.indexOf('private markAlive('), code.indexOf('private async warmUpIfStale'));
+    expect(fn).toMatch(/if \(!answeredBase \|\| answeredBase !== this\.probeBase\(\)\) return;/);
+    // Never a flag comparison again — that is the bug this replaced.
+    expect(fn).not.toMatch(/fromDirectApp/);
+  });
+
+  it('probeBase mirrors the health check\'s own choice', () => {
+    const probe = code.slice(code.indexOf('private probesDirectApp'), code.indexOf('private markAlive('));
+    expect(probe).toMatch(/!!this\.enrichmentBaseUrl && this\.enrichmentBaseUrl !== this\.baseUrl/);
+    expect(probe).toMatch(/this\.probesDirectApp\(\) \? this\.enrichmentBaseUrl : this\.baseUrl/);
+  });
+
+  it('each call site passes the base it actually used', () => {
+    expect(code).toMatch(/this\.markAlive\(\(useEnrichmentBase && this\.enrichmentBaseUrl\) \|\| this\.baseUrl\)/);
+    expect(code).toMatch(/this\.markAlive\(useDirectApp \? this\.enrichmentBaseUrl : this\.baseUrl\)/);
+  });
+
+  it('the same host answering always counts, whatever the flag said', () => {
+    // The regression in one line: with one configured host, both call sites
+    // resolve to baseUrl and probeBase() is baseUrl, so liveness is recorded.
+    const fn = code.slice(code.indexOf('private markAlive('), code.indexOf('private async warmUpIfStale'));
+    expect(fn).toMatch(/answeredBase !== this\.probeBase\(\)/);
+  });
+
+  it('warmUpIfStale does not re-stamp liveness with the wrong default', () => {
+    // It used to call markAlive() bare after a successful probe, which would
+    // stamp fromDirectApp=false even when the probe hit the direct app.
+    const fn = code.slice(code.indexOf('private async warmUpIfStale'), code.indexOf('private ensureInitialized'));
+    expect(fn).not.toMatch(/this\.markAlive\(\)/);
   });
 });
 
