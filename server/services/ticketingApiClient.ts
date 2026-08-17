@@ -244,6 +244,67 @@ export class TicketingApiClient {
   private lastInitTime: number = 0;
   private static CONFIG_REFRESH_INTERVAL_MS = 60000; // Refresh config every 60 seconds
 
+  /**
+   * WHEN WE LAST HAD PROOF THE TICKETING APP WAS AWAKE.
+   *
+   * The warm-up probe fires before EVERY create and submit — healthCheck says
+   * so in its own comment — and it is the single largest cost on the ticket
+   * path. Measured across the fleet, 2026-08-17:
+   *
+   *     no-ivr             create_ticket   p50 8.3s  p90 19.2s  max 91.2s
+   *     answering-service  create_ticket   p50 5.0s  p90 11.1s  max 67.9s
+   *     optical / surgery  file_*_ticket   p50 ~4.0s p90 ~5.0s
+   *     check_open_tickets (SAME API)      p50 0.17s
+   *
+   * The API is not slow — reads answer in 170ms. What every create pays for
+   * first is `warmUpWithRetry(2, 500)`: a probe bounded at 3s, and on failure a
+   * 500ms sleep and a second probe. Worst case 6.5 seconds before the POST is
+   * even attempted.
+   *
+   * And the line that pays most is the one that can least afford it. The probe
+   * exists to wake a sleeping Replit deployment; the deployment sleeps at
+   * night; no-ivr is the after-hours line. Its p50 sits 3.3s above
+   * answering-service for precisely that reason.
+   *
+   * So: remember when the app last answered. Inside the window, skip the probe
+   * — we already know it is up, and asking again costs a caller seconds of
+   * silence while the agent holds the line.
+   *
+   * NOTHING ABOUT FAILURE HANDLING CHANGES. The warm-up is already documented
+   * as "ADVISORY, not a gate" and its failure never stopped a ticket. This only
+   * skips a question we have just had answered. The POST keeps its own 15s
+   * bound and reports its own error; the outbox still retries in the background.
+   *
+   * Sixty seconds is deliberately conservative — Replit deployments idle out in
+   * minutes, not seconds, so a request within a minute of the last successful
+   * one is certain to find the app awake. On a busy line that is nearly every
+   * ticket; on a quiet night it is at least the rest of the burst.
+   */
+  private lastAliveAt = 0;
+  private static LIVENESS_TTL_MS = 60_000;
+
+  /** Record proof of life, wherever the app actually answered us. */
+  private markAlive(): void {
+    this.lastAliveAt = Date.now();
+  }
+
+  /**
+   * Warm up ONLY when there is no recent proof the service is awake.
+   *
+   * Same contract as `warmUpWithRetry` — true means "believed live" — so call
+   * sites change by name only.
+   */
+  private async warmUpIfStale(maxRetries: number, delayMs: number): Promise<boolean> {
+    const since = Date.now() - this.lastAliveAt;
+    if (this.lastAliveAt > 0 && since < TicketingApiClient.LIVENESS_TTL_MS) {
+      console.info(`[TICKETING API] Warm-up skipped — service answered ${Math.round(since / 1000)}s ago`);
+      return true;
+    }
+    const ok = await this.warmUpWithRetry(maxRetries, delayMs);
+    if (ok) this.markAlive();
+    return ok;
+  }
+
   private ensureInitialized(): void {
     const now = Date.now();
     const shouldRefresh = now - this.lastInitTime > TicketingApiClient.CONFIG_REFRESH_INTERVAL_MS;
@@ -333,6 +394,7 @@ export class TicketingApiClient {
       }
       if (response.ok) {
         console.info("[TICKETING API] ✓ Health check passed");
+        this.markAlive();
         return { ok: true };
       } else {
         console.warn(`[TICKETING API] ⚠ Health check returned ${response.status}`);
@@ -422,6 +484,8 @@ export class TicketingApiClient {
       shadowTap.emit('n8n_workflow_completed', shadowSession, shadowAgent,
         { endpoint, method, viaGateway: shadowViaGateway, status: response.status, body: body ?? {}, response: data ?? {} },
         { sensitive: true, component: 'ticketingApiClient' });
+      // A real answer is better proof of life than any probe.
+      this.markAlive();
       return data as T;
     } catch (networkError) {
       clearTimeout(timeoutId);
@@ -491,7 +555,7 @@ export class TicketingApiClient {
     // synthetic "temporarily unavailable" instead of whatever the real endpoint
     // would have said, which is strictly less information. The request itself
     // is bounded at 15s by makeRequest and reports its own error.
-    if (!(await this.warmUpWithRetry(2, 500))) {
+    if (!(await this.warmUpIfStale(2, 500))) {
       console.warn("[TICKETING API] ⚠ Warm-up did not confirm liveness — sending anyway");
     }
 
@@ -599,7 +663,7 @@ export class TicketingApiClient {
 
     // Advisory, exactly as elsewhere: a probe that cannot answer must not stop
     // a ticket that would otherwise be filed.
-    await this.warmUpWithRetry(2, 500);
+    await this.warmUpIfStale(2, 500);
 
     const post = (payload: unknown) =>
       fetch(url, {
@@ -680,7 +744,7 @@ export class TicketingApiClient {
     });
 
     // Warm up the ticketing service before submitting (handles sleeping deployments)
-    const warmedUp = await this.warmUpWithRetry(3, 2000);
+    const warmedUp = await this.warmUpIfStale(3, 2000);
     if (!warmedUp) {
       console.error("[TICKETING API] ✗ Ticketing service unreachable after warm-up attempts");
       return {
