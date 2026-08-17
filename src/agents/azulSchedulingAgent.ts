@@ -35,6 +35,7 @@ import { callMetadataForDB } from '../services/callMetadataStore';
 import { callerSpeech, guardIdentityArgs, surnameDisagrees, lastIdentityAttempt } from '../services/identityArgGuard';
 // The prompt lives in its own module so a test can load it without a database.
 // See the header of azulSchedulingPrompt.ts for why that matters.
+import { ladderVerdict } from './azulHandoffLadder';
 import { buildAzulSchedulingPrompt } from './azulSchedulingPrompt';
 import type { AzulPrecontext, AzulSchedulingMetadata } from './azulSchedulingPrompt';
 export { buildAzulSchedulingPrompt } from './azulSchedulingPrompt';
@@ -82,11 +83,21 @@ const holdingCallbacks = new Map<string, (instructionOverride?: string) => void>
 const azulVerifiedCalls = new Set<string>();
 /** sage_handoff refusals for want of identity, per call. */
 const handoffIdentityRefusals = new Map<string, number>();
+/**
+ * Calls where the one permitted "I can do that for you" offer has been made.
+ *
+ * The operator's ladder allows exactly one push-back: *"on first iteration, we
+ * should at least push back to try to minimize those calls that are moving
+ * forward that shouldn't be."* A caller who asks again has told us the answer,
+ * so this flag is what makes the second ask unconditional.
+ */
+const handoffOfferMade = new Set<string>();
 
 export function releaseAzulCallState(callId: string | undefined): void {
   if (!callId) return;
   azulVerifiedCalls.delete(callId);
   handoffIdentityRefusals.delete(callId);
+  handoffOfferMade.delete(callId);
 }
 
 /**
@@ -1186,7 +1197,17 @@ export function createAzulSchedulingAgent(
       patientName: z.string().optional().describe('ONLY when identity could NOT be verified this call (e.g. caller gave a name but verification failed). For a VERIFIED caller, OMIT — the server injects the verified identity itself and re-collecting it from the caller is the loop this system is being hardened against.'),
       patientDob: z.string().optional().describe('ONLY for unverified callers, and only if already given. NEVER re-ask a verified caller for their date of birth at handoff.'),
       patientPhone: z.string().optional().describe('Only if the caller gave a DIFFERENT callback number — their caller ID is attached automatically.'),
-      reasonForCall: z.string().optional().describe('ALWAYS write in English, even if the caller speaks another language (forwarded to English-speaking staff).'),
+      reasonForCall: z.string().optional().describe('ALWAYS write in English, even if the caller speaks another language (forwarded to English-speaking staff). REQUIRED before any handoff — nothing reaches the front desk without it.'),
+      /**
+       * The model's judgement, not a regex's. Standing instruction: extraction
+       * and classification are the LLM's job. The server owns the LADDER built
+       * on this answer, never the answer itself.
+       */
+      schedulableHere: z.enum(['yes', 'no', 'not_established']).optional().describe(
+        "Can THIS line finish what the caller needs? 'yes' = booking, rescheduling, cancelling or confirming an appointment. "
+        + "'no' = billing, medical records, prescriptions, clinical questions, complaints, anything else. "
+        + "'not_established' = they have not said yet. Set this on every handoff.",
+      ),
       requestedLocation: z.string().optional(),
       requestedTimeframe: z.string().optional(),
       urgencyScreenResult: z.string().optional().describe('ALWAYS write in English regardless of the caller\'s language.'),
@@ -1195,7 +1216,42 @@ export function createAzulSchedulingAgent(
     execute: async (args) => {
       const { patientName, patientDob, patientPhone,
         reasonForCall, requestedLocation, requestedTimeframe,
-        urgencyScreenResult, patientResponse, ...rest } = args;
+        urgencyScreenResult, patientResponse, schedulableHere, ...rest } = args;
+
+      /**
+       * THE HANDOFF LADDER — gather the intent, then offer once.
+       *
+       * Operator, 2026-08-17: "Before we can pass any call onto the front desk,
+       * we gather the information patient, verify the intent, what's the call
+       * about... if it's a scheduling situation, that's where the agent needs
+       * to say, hey, I can get this done for you and probably a lot quicker
+       * than the front desk... But on first iteration, we should at least push
+       * back to try to minimize those calls that are moving forward that
+       * shouldn't be."
+       *
+       * Placed BEFORE the identity refusal deliberately: on a call where the
+       * intent has not been established there is nothing to hand over, and
+       * making the caller produce a date of birth first is the interrogation
+       * this line is being hardened against. The identity gate still runs on
+       * every handoff that clears the ladder.
+       */
+      const ladderCallId = metadata?.callId;
+      const verdict = ladderVerdict({
+        handoffReason: String((rest as { handoffReason?: string }).handoffReason ?? ''),
+        schedulableHere,
+        reasonForCall,
+        offerAlreadyMade: ladderCallId ? handoffOfferMade.has(ladderCallId) : false,
+      });
+      if (!verdict.allow) {
+        // Spend the single offer here, so a second ask cannot be refused even
+        // if the model calls with the same arguments.
+        if (verdict.code === 'offer_first' && ladderCallId) handoffOfferMade.add(ladderCallId);
+        console.info(`[AZUL-SCHED] handoff ladder: ${verdict.code} for ${ladderCallId ?? 'unknown call'}`);
+        return JSON.stringify({
+          tool: 'sage_handoff',
+          result: { handoffCreated: false, error: verdict.code, say: verdict.say, guidance: verdict.guidance },
+        });
+      }
 
       // IDENTITY FOR THE PACKET. The server rejects an anonymous handoff with
       // `identity_required` — 24 refusals between 07-24 and 08-03, every one of
