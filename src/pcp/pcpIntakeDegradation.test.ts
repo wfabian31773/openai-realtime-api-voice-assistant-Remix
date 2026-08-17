@@ -19,6 +19,25 @@
  *
  * These tests pin the property that prevents a repeat: the gap goes ON the
  * ticket, never in place of it.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * UPDATED 2026-08-17, because the operator reinstated blocking deliberately:
+ *
+ *   "we should not be filing tickets in 27 seconds... we should not create a
+ *    ticket unless we have enough information to do so, a ticket should be
+ *    blocked without required fields... the most important parts of a ticket
+ *    are who is calling, who is the call about and how do we contact you."
+ *
+ * The MECHANISM changed; the GUARANTEE did not. A request is still never
+ * discarded — it is asked about first, and the asking is BOUNDED. After
+ * MAX_BLOCKS questions the ticket files with the gaps written on it, exactly as
+ * these tests always demanded.
+ *
+ * The 08-06 defect was never "it asked a question". It was that the refusal
+ * carried no way out, so the agent retried the same call ten times and the
+ * caller heard nothing but apologies. Two things prevent that now, both tested
+ * below: the bounded budget, and a refusal that hands the agent the question to
+ * ask (src/pcp/refusals.ts).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -55,6 +74,26 @@ const build = (callId: string, callerPhone?: string) =>
     callerPhone,
   });
 
+/**
+ * Drive a filing tool until it files, the way a call actually goes: the tool
+ * asks for something, the caller does not supply it, the agent tries again.
+ *
+ * Bounded at six attempts and asserts it took FEWER — the whole point of
+ * MAX_BLOCKS is that a caller who answers nothing still gets a ticket in a
+ * handful of turns rather than the ten of e0384db1.
+ */
+async function fileAfterAsking(agent: any, tool: string, args: unknown): Promise<string[]> {
+  const asked: string[] = [];
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const raw = await call(agent, tool, args);
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const result = parsed?.result ?? parsed;
+    if (result?.success !== false) return asked;
+    if (typeof result?.say === 'string') asked.push(result.say);
+  }
+  throw new Error(`${tool} never filed after 6 attempts — the floor is broken`);
+}
+
 beforeEach(() => {
   filed.length = 0;
 });
@@ -63,20 +102,35 @@ describe('a records request survives an incomplete intake', () => {
   it('files even when the caller never gave a name, role or organization', async () => {
     // The 11:36 call: the caller said "Medical records. Patient's medical
     // record." and nothing else. Fifty seconds, no ticket.
+    //
+    // It is asked for now, and when it still does not come it files anyway.
     const callId = freshCall();
     const agent = build(callId, '+15624494183');
-    await call(agent, 'handle_patient_medical_records_request', {
+    const asked = await fileAfterAsking(agent, 'handle_patient_medical_records_request', {
       narrative: 'Caller is requesting a copy of a patient medical record.',
     });
 
     expect(filed).toHaveLength(1);
     expect(filed[0].callPurpose).toBe('patient_medical_records_request');
     expect(filed[0].disposition).toBe('CREATE_TASK');
+    // It asked, but it did not interrogate.
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.length, 'this is the e0384db1 shape if it grows').toBeLessThanOrEqual(3);
+  });
+
+  it('every question it asks is one a caller can answer out loud', async () => {
+    // The 08-06 failure was a slug the agent could only retry. Every hold now
+    // hands over a sentence.
+    const { REQUIRED_PROMPTS } = await import('./ticketRequirements');
+    for (const prompt of Object.values(REQUIRED_PROMPTS) as string[]) {
+      expect(prompt).toMatch(/\?$/);
+      expect(prompt).not.toMatch(/missing_required_field|callerName|patientName/);
+    }
   });
 
   it('names every gap on the ticket, so staff know what to ask for', async () => {
     const callId = freshCall();
-    await call(build(callId, '+15624494183'), 'handle_patient_medical_records_request', {
+    await fileAfterAsking(build(callId, '+15624494183'), 'handle_patient_medical_records_request', {
       narrative: 'Records request.',
     });
     // The caller ID supplied the callback number, so it is NOT a gap; the three
@@ -85,6 +139,8 @@ describe('a records request survives an incomplete intake', () => {
     for (const gap of ['caller name', 'caller role', 'organization']) {
       expect(filed[0].narrative).toContain(gap);
     }
+    // And the new annotation names the ones we actually held the ticket for.
+    expect(filed[0].narrative).toContain('NOT CAPTURED');
   });
 
   it('reports the PATIENT-context gaps too, not just the professional ones', async () => {
@@ -93,9 +149,9 @@ describe('a records request survives an incomplete intake', () => {
     // field the first pass at this fix did not account for. None of these
     // blocks filing, but "we do not know which patient" must be stated.
     const callId = freshCall();
-    const agent = build(callId, '+15626022508');
-    await call(agent, 'record_pcp_intake', { callerName: 'Edna', callerRole: 'receptionist' });
-    await call(agent, 'handle_patient_medical_records_request', { narrative: 'Records request.' });
+    const agent = build(callId, "+15626022508");
+    await call(agent, "record_pcp_intake", { callerName: "Edna", callerRole: "receptionist" });
+    await fileAfterAsking(agent, "handle_patient_medical_records_request", { narrative: "Records request." });
 
     expect(filed).toHaveLength(1);
     for (const gap of ['patient first name', 'patient last name', 'patient date of birth', 'relationship to the patient']) {
@@ -107,7 +163,7 @@ describe('a records request survives an incomplete intake', () => {
 
   it('never lets a placeholder read as something the caller said', async () => {
     const callId = freshCall();
-    await call(build(callId), 'handle_patient_medical_records_request', { narrative: 'Records request.' });
+    await fileAfterAsking(build(callId), "handle_patient_medical_records_request", { narrative: "Records request." });
     expect(filed[0].callerName).toBe('Not provided by caller');
     expect(filed[0].callerRole).toBe('Not provided');
     // Caller ID withheld — say so rather than inventing a number.
@@ -119,7 +175,7 @@ describe('a records request survives an incomplete intake', () => {
 describe('the callback number comes from the call itself', () => {
   it('seeds it from caller ID, which is what killed e0384db1', async () => {
     const callId = freshCall();
-    await call(build(callId, '+16263455967'), 'handle_patient_medical_records_request', { narrative: 'x' });
+    await fileAfterAsking(build(callId, "+16263455967"), "handle_patient_medical_records_request", { narrative: "x" });
     expect(filed[0].callerCallbackNumber).toBe('+16263455967');
     expect(filed[0].narrative).not.toContain('callback number');
   });
@@ -129,23 +185,36 @@ describe('the callback number comes from the call itself', () => {
     const callId = freshCall();
     const agent = build(callId, '+16263455967');
     await call(agent, 'record_pcp_intake', { callbackNumber: '+15625551234' });
-    await call(agent, 'handle_patient_medical_records_request', { narrative: 'x' });
-    expect(filed[0].callerCallbackNumber).toBe('+15625551234');
+    await fileAfterAsking(agent, "handle_patient_medical_records_request", { narrative: "x" });
+    expect(filed[0].callerCallbackNumber).toBe("+15625551234");
   });
 
   it('does not treat a withheld caller ID as a phone number', async () => {
     const callId = freshCall();
-    await call(build(callId, 'Anonymous'), 'handle_patient_medical_records_request', { narrative: 'x' });
+    await fileAfterAsking(build(callId, "Anonymous"), "handle_patient_medical_records_request", { narrative: "x" });
     expect(filed[0].callerCallbackNumber).toBe('NOT PROVIDED');
   });
 });
 
 describe('create_pcp_task no longer refuses a filable request', () => {
   it('files while the director still has a question outstanding', async () => {
+    /**
+     * THE DISTINCTION THE 2026-08-17 RULING TURNS ON.
+     *
+     * The director wants six fields from a professional. Only three of them
+     * hold a ticket: who is calling, who it is about, how to reach them. A
+     * director question about a ROLE or an ORGANISATION must never stop a
+     * filable request — that is the 08-06 defect, and it is still forbidden.
+     */
     const callId = freshCall();
     const agent = build(callId, '+17607769511');
-    await call(agent, 'record_pcp_intake', { callPurpose: 'notify_referral_approval' });
-    // Director still wants callerName/role/organization/facilityType.
+    await call(agent, 'record_pcp_intake', {
+      callPurpose: 'notify_referral_approval',
+      callerName: 'Edna Ruiz',
+      patientFirstName: 'Wayne',
+      patientLastName: 'Fabian',
+    });
+    // Director still wants callerRole / callerOrganization / callerFacilityType.
     expect(pcpDirector.next(callId).nextQuestion).toBeTruthy();
 
     const out = await call(agent, 'create_pcp_task', {

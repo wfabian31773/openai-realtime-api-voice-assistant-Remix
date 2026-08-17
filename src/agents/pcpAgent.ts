@@ -24,6 +24,7 @@ import {
   type PcpVerificationStatus,
 } from '../pcp/policy';
 import { refusePcp } from '../pcp/refusals';
+import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
 import { submitPcpTicket, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 
@@ -438,6 +439,15 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     pcpDirector.update(callId, { callbackNumber: metadata.callerPhone });
   }
 
+  /**
+   * How many times each required field has already blocked a filing THIS CALL.
+   *
+   * The floor that stops this becoming 2026-08-06 again: a field may hold the
+   * ticket twice, and after that it is annotated and the request goes through.
+   * Per call, so it cannot leak between callers.
+   */
+  let ticketBlocksUsed = 0;
+
   // Tool timeline. The fleet got this on 2026-08-01; the PCP agent was added
   // on 08-03 and never inherited it, so on 08-06 all 167 PCP calls recorded
   // ZERO tool events while every other agent recorded — which is exactly why
@@ -539,6 +549,41 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // The purpose is the one thing a ticket cannot be filed without — it is
       // what routes the request to the right desk. Everything else degrades.
       if (!state.callPurpose) return refusePcp('call_purpose_required');
+      /**
+       * WHO IS CALLING, WHO IT IS ABOUT, HOW TO REACH THEM.
+       *
+       * Operator, 2026-08-17: "we should not create a ticket unless we have
+       * enough information to do so, a ticket should be blocked without
+       * required fields... the most important parts of a ticket are who is
+       * calling, who is the call about and how do we contact you."
+       *
+       * Bounded at MAX_BLOCKS for the whole CALL — see the long note in
+       * ticketRequirements.ts for why that floor is not optional, and why it
+       * counts conversations rather than fields. A caller who will not answer
+       * must never lose their request.
+       */
+      const readiness = ticketReadiness(state, ticketBlocksUsed);
+      const ask = nextRequiredAsk(readiness);
+      if (ask) {
+        ticketBlocksUsed += 1;
+        const lastChance = ticketBlocksUsed >= MAX_BLOCKS;
+        return refusePcp(`missing_required_field:${ask.field}`, {
+          say: ask.prompt,
+          guidance:
+            'NOT AN ERROR — do not apologize, do not mention a system, and do not tell the caller anything is wrong. ' +
+            `Ask them: "${ask.prompt}" Then call create_pcp_task again with the answer recorded. ` +
+            (lastChance
+              ? 'If they will not or cannot give it, say so is fine — file anyway on the next attempt and it will go through with the gap noted.'
+              : 'If they decline, ask once more in different words before giving up on it.'),
+        });
+      }
+      // Struck out on something required: the ticket goes through, and says so
+      // plainly. A blank field must never read as something the caller said.
+      const gapNote = annotationFor(readiness.annotate);
+      if (gapNote) {
+        console.warn(`[PCP] filing with unanswered required field(s): ${readiness.annotate.join(', ')}`);
+        narrative = `${narrative}\n\n${gapNote}`;
+      }
       // Only the HAND_OFF direction is gated on the director. Filing a task is
       // always a safe floor, and refusing one because the director currently
       // prefers a transfer is how a request ends up as neither.
@@ -827,12 +872,43 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     parameters: z.object({ narrative: z.string().min(1).max(12000) }),
     execute: async ({ narrative }) => {
       pcpDirector.update(callId, { callPurpose: 'patient_medical_records_request' });
-      // Files with whatever intake produced. On 2026-08-06 this tool threw on a
-      // missing administrative field like every other, and 21 records requests
-      // reached this line with nothing filed behind them — including patients
-      // asking for their own records, and one caller who rang back eight
-      // minutes later and got nothing a second time. A records request is not
-      // discardable for want of a job title.
+      /**
+       * THE 27-SECOND TICKET, and why this tool now waits.
+       *
+       * On CA7a5f2bfa the records ticket filed 27 seconds in and the caller
+       * answered questions for the following minute — all of it discarded,
+       * because there is no amend path. Operator, 2026-08-17: "27 seconds is
+       * not enough to gather the right information, we should not create a
+       * ticket unless we have enough information to do so."
+       *
+       * It files EARLY today for a good reason, and that reason has to survive:
+       * on 2026-08-06 this tool threw on any missing administrative field and
+       * 21 records requests reached this line with nothing filed behind them —
+       * including patients asking for their own records, and one caller who
+       * rang back eight minutes later and got nothing a second time.
+       *
+       * So it now blocks on the three fields that matter and NOTHING else, with
+       * the same two-strike floor as create_pcp_task, and the hangup fallback
+       * (sweepPcpUnfiledCall) catches a caller who drops mid-intake. A records
+       * request is still not discardable for want of a job title — it is just
+       * no longer filed before we know whose records they are.
+       */
+      {
+        const { state: preState } = ticketState(callId);
+        const readiness = ticketReadiness(preState, ticketBlocksUsed);
+        const ask = nextRequiredAsk(readiness);
+        if (ask) {
+          ticketBlocksUsed += 1;
+          return refusePcp(`missing_required_field:${ask.field}`, {
+            say: ask.prompt,
+            guidance:
+              'NOT AN ERROR — say nothing about a system or a problem. A records request cannot be filed until we know ' +
+              `whose records these are and how to reach the requester. Ask: "${ask.prompt}" then call this tool again.`,
+          });
+        }
+        const gapNote = annotationFor(readiness.annotate);
+        if (gapNote) narrative = `${narrative}\n\n${gapNote}`;
+      }
       const { state, missing } = ticketState(callId);
       const response = await submitPcpTicket(
         buildPayload(metadata, state, 'CREATE_TASK', narrative, 'high', undefined, 'patient_medical_records_request_isolated', missing),
@@ -863,6 +939,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     },
   });
 
+  // The sweep runs after this closure is gone, so it needs the metadata that
+  // buildPayload depends on — the callSid and the transcript getter.
+  pcpCallMetadata.set(callId, metadata);
+
   const agent = new RealtimeAgent({
     name: pcpAgentConfig.name,
     handoffDescription: pcpAgentConfig.description,
@@ -871,4 +951,78 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
   });
   agent.outputGuardrails = pcpSafetyGuardrails;
   return agent;
+}
+
+/** Live PCP calls, so the teardown sweep can build a payload after the fact. */
+const pcpCallMetadata = new Map<string, PcpAgentMetadata>();
+
+/**
+ * THE HANGUP FALLBACK — what makes "file later" safe to do at all.
+ *
+ * Blocking a ticket until we know who is calling, who it is about and how to
+ * reach them (ticketRequirements.ts) is the operator's ruling, and on its own
+ * it would simply move the lost-request failure later: a caller who drops
+ * during the intake now leaves NOTHING, where before they left a thin ticket
+ * filed at 27 seconds. This closes that.
+ *
+ * If the call ends with no durable disposition recorded, file what was
+ * gathered, annotated so nobody mistakes a gap for something the caller said.
+ *
+ * THE GATE IS DELIBERATELY TIGHT, and the reason is on the record: azul's
+ * equivalent sweep ran for every call on 2026-07-30 and put ~30 false "call
+ * them back" tickets into the staff queue in two hours. A ghost call is not a
+ * request. So this files only when the caller actually told us something —
+ * a purpose AND some identity. `callbackNumber` is deliberately NOT enough on
+ * its own: it is seeded from caller ID before anyone speaks, so it is present
+ * on a silent call too.
+ *
+ * Never throws: the call is already over, and a failed sweep must not surface
+ * anywhere near the caller.
+ */
+export async function sweepPcpUnfiledCall(callId: string): Promise<void> {
+  const metadata = pcpCallMetadata.get(callId);
+  pcpCallMetadata.delete(callId);
+  try {
+    const state = pcpDirector.get(callId);
+    if (state.dispositionRecorded) return; // something durable already exists
+
+    const toldUsSomething = Boolean(
+      state.callPurpose &&
+        (state.callerName || state.patientFirstName || state.patientLastName || state.statedRelationship),
+    );
+    if (!toldUsSomething) {
+      console.info(`[PCP] SWEEP: ${callId} ended with nothing to file (no purpose or no identity) — no ticket`);
+      return;
+    }
+    if (!metadata) {
+      console.warn(`[PCP] SWEEP: ${callId} has intake but no metadata — cannot build a payload`);
+      return;
+    }
+
+    const { missing } = ticketState(callId);
+    const readiness = ticketReadiness(state, MAX_BLOCKS);
+    const gaps = annotationFor([...readiness.blocking, ...readiness.annotate]);
+    const narrative = [
+      'CALLER HUNG UP BEFORE THE REQUEST WAS COMPLETE. Filed from what was gathered on the call so it is not lost.',
+      gaps,
+      'Please call back to complete this request.',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    console.warn(`[PCP] SWEEP: ${callId} ended with no disposition — filing what we have`);
+    const response = await submitPcpTicket(
+      buildPayload(metadata, state, 'CREATE_TASK', narrative, 'high', undefined, 'caller_hung_up_before_completion', missing),
+    );
+    if (response.success) {
+      pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+      console.info(`[PCP] SWEEP: filed ${response.ticketNumber} for the incomplete call`);
+    } else {
+      console.error(`[PCP] SWEEP: could not file for ${callId}: ${response.error ?? 'unknown'}`);
+    }
+  } catch (e) {
+    console.error('[PCP] SWEEP failed (call already ended):', e);
+  } finally {
+    pcpDirector.clear(callId);
+  }
 }
