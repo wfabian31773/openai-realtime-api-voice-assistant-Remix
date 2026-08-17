@@ -4532,10 +4532,31 @@ async function observeCall(
     // and classify_request events answers a different question entirely, and
     // feeding it to this sweep would re-file the same false tickets from a
     // fresh direction. Fleet timelines are for diagnosis, not for sweeping.
+    /**
+     * PCP gets its own sweep, gated the same way and for the same reason.
+     *
+     * It reasons in PCP's vocabulary — did this call end with a durable
+     * disposition? — which is a different question from azul's, and feeding
+     * either one the other's timeline is exactly how the 2026-07-30 false
+     * tickets happened. Two narrow sweeps, never one broad one.
+     *
+     * Why it exists at all: create_pcp_task and the records tool now BLOCK
+     * until we know who is calling, who it is about and how to reach them
+     * (operator ruling 2026-08-17). Without this, a caller who hangs up during
+     * that intake leaves nothing — which is a worse failure than the thin
+     * 27-second ticket the blocking was introduced to prevent.
+     */
     void (agentConfig?.id === 'azul-scheduling'
       ? import('./agents/azulSchedulingAgent').then(({ sweepAzulUnresolvedCall }) =>
           Promise.race([
             sweepAzulUnresolvedCall(callId),
+            new Promise((resolve) => setTimeout(resolve, 25_000)),
+          ]),
+        )
+      : agentConfig?.id === 'pcp'
+      ? import('./agents/pcpAgent').then(({ sweepPcpUnfiledCall }) =>
+          Promise.race([
+            sweepPcpUnfiledCall(callId),
             new Promise((resolve) => setTimeout(resolve, 25_000)),
           ]),
         )
