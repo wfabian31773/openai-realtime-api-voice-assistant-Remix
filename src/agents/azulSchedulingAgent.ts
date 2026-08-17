@@ -29,7 +29,7 @@ import { z } from 'zod';
 import { getPacificTimeContext } from '../utils/timeAware';
 import { medicalSafetyGuardrails } from '../guardrails/medicalSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
-import { markCallConcluded } from '../services/callConclusion';
+import { markCallConcluded, getCallConclusion } from '../services/callConclusion';
 import { recordAzulToolEvent, getAzulTimeline, classifyAzulCall, type AzulToolEvent } from '../services/toolTimeline';
 import { callMetadataForDB } from '../services/callMetadataStore';
 import { callerSpeech, guardIdentityArgs, surnameDisagrees, lastIdentityAttempt } from '../services/identityArgGuard';
@@ -657,7 +657,34 @@ async function fileLocationQueueTicket(
 // ticketed / info answered / clean decline-or-junk end. Anything else
 // (mid-call hangup, model dead-end, crash) gets an automatic tier-3 ticket
 // so a human follows up. Self-gating: non-azul calls have no timeline.
-const CLEAN_END_REASONS = new Set(['ghost_call', 'robot_call', 'spam', 'caller_declined']);
+/**
+ * Reasons that mean NO HUMAN WAS EVER THERE, so there is nothing to file.
+ *
+ * `caller_declined` was on this list and was removed 2026-08-16 on the
+ * operator's instruction. It does not belong beside the other three: a ghost,
+ * a robot and a spam call had no patient behind them, while a caller who
+ * "declined" is a person who rang us and is still owed whatever we promised.
+ *
+ * The model reached for it loosely — for a caller who declined to give their
+ * DOB, or simply as a way to end a call. On CA880f3254 and CAadc456db it fired
+ * while the caller was ON HOLD for a transfer, and because this set made the
+ * call a clean end, the sweep returned without filing. Both patients had just
+ * been told, out loud, that the office would call them back:
+ *
+ *   "Thanks for holding—I wasn't able to reach them directly. Our team will
+ *    call you back at this number, usually within the hour."   Kathleen C.
+ *   "Thanks for holding — I wasn't able to reach them directly. The office
+ *    team will give you a call back as soon as possible."      David D.
+ *
+ * Neither has a ticket. Nobody knows they called.
+ *
+ * Measured before removing it: of 102 calls that used the reason, 69 already
+ * exited the sweep on some other resolved signal and 7 are exempt info calls,
+ * so this newly files 26 tickets across the whole corpus — roughly one a day.
+ * The operator's rule is absolute: "We never relinquish the patient until
+ * either of two things happen, we transfer or we create a ticket."
+ */
+const CLEAN_END_REASONS = new Set(['ghost_call', 'robot_call', 'spam']);
 const ANSWERED_PURPOSES = new Set(['Appointment question', 'General information']);
 
 /** Last-resort read of a timeline the flush already persisted. Only used when
@@ -791,7 +818,24 @@ export async function sweepAzulUnresolvedCall(callId: string): Promise<void> {
     const reschedulePartial = events.some(
       (e) => e.tool === 'sage_reschedule' && e.outcome.reschedule_status === 'cancelled_not_rebooked',
     );
-    const cleanEnd = events.some((e) => e.tool === 'terminate_call' && CLEAN_END_REASONS.has(String(e.args.reason)));
+    /**
+     * A DIAL THAT DID NOT CONNECT VETOES "CLEAN END".
+     *
+     * Belt to the braces of dropping `caller_declined` above. Whatever reason
+     * the model gives for ending, a call where we rang the office and nobody
+     * answered has almost certainly just promised the patient a callback —
+     * that is what the failure instruction tells the agent to say. It cannot
+     * also be a call with nothing to file.
+     *
+     * Written against `attemptedTransfer && !transferred` rather than against
+     * the reason list, so a future reason added to CLEAN_END_REASONS cannot
+     * reopen this hole.
+     */
+    const attemptedTransfer = events.some((e) => e.tool === 'transfer_to_office');
+    const dialWentUnanswered = attemptedTransfer && !transferred;
+    const cleanEnd =
+      !dialWentUnanswered &&
+      events.some((e) => e.tool === 'terminate_call' && CLEAN_END_REASONS.has(String(e.args.reason)));
 
     // FAILED TRANSFER — decided here, once, now that the call is over.
     //
@@ -1284,6 +1328,28 @@ export function createAzulSchedulingAgent(
       if (callId && transferredCalls.has(callId)) {
         return { transferred: true };
       }
+      /**
+       * WE RANG THE FRONT OFFICE FOR CALLS THAT HAD ALREADY ENDED.
+       *
+       * On CAed3c6b49 the agent called terminate_call at 22:19:01 and then
+       * dialled the office THREE more times — 40s, 40s and 41s — finishing at
+       * 22:19:29. Real phones rang at the Encinitas front desk for a patient
+       * who was no longer on the line, and a staffer picking one up would have
+       * heard a briefing for a call that did not exist.
+       *
+       * `markCallConcluded` is already set by terminate_call and by the
+       * deliberate-hangup path, and the SIP recovery logic already reads it for
+       * exactly this class of decision. Reuse it rather than inventing a second
+       * notion of "this call is over".
+       */
+      if (callId && getCallConclusion(callId)) {
+        console.warn(`[AZUL-SCHED] transfer_to_office refused — call ${callId} already concluded; not ringing the office`);
+        return {
+          transferred: false,
+          error: 'call_already_ended',
+          instruction: 'This call has already ended. Do not dial, do not speak, and do not call any further tools.',
+        };
+      }
       const target = callId ? transferTargets.get(callId) : undefined;
       if (!callId || !target) {
         return {
@@ -1301,6 +1367,23 @@ export function createAzulSchedulingAgent(
           instruction: 'Live transfer is not available on this call. Apologize and promise the callback — the office queue is notified automatically when the call ends.',
         };
       }
+      /**
+       * RECORDED WHEN THE DIAL STARTS, NOT WHEN IT FAILS.
+       *
+       * This used to be set only in the failure branch below — after the 45
+       * second await. The terminal sweep runs the moment the call ends, and
+       * the caller hangs up (or the model calls terminate_call) DURING that
+       * wait far more often than after it. On CA880f3254: terminate at
+       * 20:14:16, dial resolved at 20:14:30. The sweep looked for a failed
+       * attempt fourteen seconds before one was recorded, found nothing, and
+       * filed nothing — for a patient who had just been promised a callback.
+       *
+       * Setting it up front makes the record exist for the whole window it
+       * could be needed in. The success path deletes it, so "an attempt is on
+       * file" means exactly "a dial started and has not been confirmed
+       * connected" — which is the condition the sweep actually wants.
+       */
+      failedTransferAttempts.set(callId, { handoff: target.handoff, resultRaw: target.resultRaw });
       // THE HOLD IS A SCRIPT NOW, NOT AN IMPROVISATION.
       //
       // Operator, 2026-08-16: "45 seconds total before we give up, like this,
@@ -1360,6 +1443,11 @@ export function createAzulSchedulingAgent(
           // failure ticket when its own dial times out.
           markAzulTransferAccepted(callId);
           transferTargets.delete(callId);
+          // The attempt was recorded up front so a mid-dial teardown could
+          // still find it; a connected transfer is the one case where no
+          // callback is owed, so clear it here. The sweep's own
+          // `!transferred` check is the second line of defence.
+          failedTransferAttempts.delete(callId);
           // Accepted transfer = the promise is KEPT — resolve the console
           // callback so staff don't also call the patient back (Phase 1.5
           // double-callback fix). Fire-and-forget; the live call moves on.
@@ -1398,6 +1486,10 @@ export function createAzulSchedulingAgent(
         // someone who was already helped is the worse error.
         if (transferredCalls.has(callId)) {
           console.warn(`[AZUL-SCHED] tier-2 transfer errored (${detail}) but call already connected — suppressing failure ticket`);
+          // Clear the up-front record too: the patient IS with a human, and a
+          // stale attempt would have the sweep file a callback for someone who
+          // was already helped — the exact error this branch exists to prevent.
+          failedTransferAttempts.delete(callId);
           return { transferred: true };
         }
         console.warn(`[AZUL-SCHED] tier-2 transfer failed: ${detail} — deferring the ticket to the terminal sweep`);
