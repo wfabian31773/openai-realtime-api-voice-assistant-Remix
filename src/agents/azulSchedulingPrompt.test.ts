@@ -245,3 +245,36 @@ describe('it reads like the rest of the fleet', () => {
     expect(P.toLowerCase()).not.toContain('customer');
   });
 });
+
+describe('it must not write the caller\'s half of the conversation', () => {
+  /**
+   * CA66344af6, 2026-08-17. The agent asked for a date of birth and then, with
+   * no caller turn in between, thanked him for confirming it:
+   *
+   *   agent   "— just to confirm your identity, may I have your date of birth?"
+   *   agent   "Thank you for confirming that. Now we can move forward."   (+1,223ms)
+   *   caller  "Who told you to say thank you for confirming?"
+   *
+   * This prompt ALREADY said "one question at a time" and "STOP TALKING" —
+   * and the model did it anyway. A general rule it can read past is not a
+   * rule; the specific behaviour had to be named, with the words it hides
+   * behind.
+   */
+  const p = buildAzulSchedulingPrompt({} as never);
+
+  it('names the behaviour, not just "be concise"', () => {
+    expect(p).toMatch(/NEVER THANK SOMEONE FOR AN ANSWER THEY HAVE NOT GIVEN/);
+    expect(p).toMatch(/Do not write the caller's\s+half of the conversation/i);
+  });
+
+  it('names the words it hides behind', () => {
+    for (const word of ['Thanks', 'Great', 'Got it', 'Perfect', 'Understood']) {
+      expect(p, `"${word}" must be named as a reply, not an opener`).toContain(word);
+    }
+  });
+
+  it('says where the turn ends', () => {
+    expect(p).toMatch(/Your turn ends the moment the question mark lands/i);
+    expect(p).toMatch(/not after a follow-up\s*sentence/i);
+  });
+});
