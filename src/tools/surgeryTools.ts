@@ -116,7 +116,14 @@ registerTool({
       request_reason_id: { type: 'string', description: 'From classify_surgery_request. Omit if it could not classify.' },
       description_prefix: { type: 'string', description: 'From classify_surgery_request when it could not classify but recognised the kind of request.' },
       location: { type: 'string', description: 'The office or surgery centre, as returned by resolve_location.', askAs: 'Which office or surgery centre are you being seen at?' },
-      surgeon: { type: 'string', description: 'Their surgeon, if it came up. Optional — looked up if omitted.' },
+      surgeon: {
+        type: 'string',
+        description:
+          "The surgeon. Take it from lookup_patient's last_provider when the record has one; "
+          + 'ask only when it does not. This queue is ASSIGNED BY SURGEON, so a ticket without one '
+          + 'lands on a coordinator who cannot route it.',
+        askAs: 'And which surgeon are you seeing?',
+      },
       surgery_date: { type: 'string', description: 'The date of their surgery, if they gave one. Put it in the description too.' },
       urgent: { type: 'string', description: 'Pass "true" only when classify_surgery_request said urgent.' },
       email: { type: 'string', description: 'Optional — looked up if omitted.' },
@@ -192,13 +199,83 @@ registerTool({
     // tickets and only 3 of the 50 unassigned in 60 days were missing one.
     // Blocking a caller who cannot name their surgery centre would cost real
     // calls to prevent a failure this queue does not have.
+    /**
+     * THE SURGEON IS RESOLVED FROM THE RECORD, NOT FROM THE ARGUMENT LIST.
+     *
+     * This queue is assigned BY SURGEON. A ticket without one reaches nobody —
+     * it sits on a coordinator with no routing rule and no way to know whether
+     * the question was even asked.
+     *
+     * The provider was never coming from the caller. Measured over three days
+     * of transcripts, the agent asked "who is your surgeon" on 2 of 104 calls
+     * (08-13) and 2 of 126 (08-14) — and BOTH those days filed a provider on
+     * essentially every ticket. It came from `lookup_patient`'s `last_provider`,
+     * relayed by the model as `surgeon`. So the field only ever worked while the
+     * model happened to pass along a value it was never told to collect.
+     *
+     * On 08-17 it stopped passing it, and 66 of 74 tickets filed unrouted. The
+     * signature is `surgeryTools.ts` skipping the lookup ENTIRELY when neither
+     * name is supplied — which is why provider and location went null together
+     * on the same tickets (Gail Herrick: provider 51 / location 22 on 08-14,
+     * both NULL on 08-17, same patient, same code).
+     *
+     * A field this queue cannot route without must not depend on whether a
+     * model chose to include an optional argument. So: ask the schedule
+     * directly. `lastPhysicianSeen` is the same rule that reproduced the
+     * system's own historical assignments when the 08-17 tickets were
+     * backfilled — Vincent Medina resolved to 49, which is exactly what the
+     * pipeline had assigned him on 08-14.
+     *
+     * The model's answer still WINS when it has one: a caller who names their
+     * surgeon is better evidence than the last chart entry.
+     */
+    let surgeonName = cleanSurgeon;
+    let surgeonFromRecord = false;
+    if (!surgeonName) {
+      try {
+        const { scheduleLookupService } = await import('../services/scheduleLookupService');
+        const ctx = await scheduleLookupService.lookupPatient({
+          firstName: first,
+          lastName: last,
+          dateOfBirth: `${parts.year}-${parts.month}-${parts.day}`,
+          ...(phone ? { phone } : {}),
+        });
+        // Only when the lookup resolved to ONE person. `identity.unique` is
+        // false when a name or phone carries more than one patient, and
+        // attaching a stranger's surgeon to this ticket is worse than none.
+        if (ctx.patientFound && ctx.identity?.unique !== false && ctx.lastPhysicianSeen) {
+          surgeonName = sanitizeProviderName(ctx.lastPhysicianSeen).value;
+          surgeonFromRecord = true;
+          console.info('[surgery] surgeon resolved from the patient record');
+        }
+      } catch (error) {
+        // Never let this stop a ticket. A missing surgeon is a routing problem;
+        // a lost request is a patient problem.
+        console.warn('[surgery] surgeon lookup from schedule failed:', error);
+      }
+    }
+
     const lookup =
-      cleanLocation || cleanSurgeon
+      cleanLocation || surgeonName
         ? await ticketingApiClient.lookupProviderAndLocation({
             ...(cleanLocation ? { locationName: cleanLocation } : {}),
-            ...(cleanSurgeon ? { providerName: cleanSurgeon } : {}),
+            ...(surgeonName ? { providerName: surgeonName } : {}),
           })
         : { locationId: undefined, providerId: undefined, locationMatches: [] };
+
+    /**
+     * A LOOKUP THAT FAILS MUST NOT FAIL SILENTLY.
+     *
+     * `lookupProviderAndLocation` catches its own error and returns
+     * `{success:false}` — "don't fail ticket creation if lookup fails". That is
+     * the right call for the caller and the wrong one for us: it is why 66
+     * unrouted tickets left no trace anywhere except the null column itself.
+     */
+    if (surgeonName && !lookup.providerId) {
+      console.error(
+        `[surgery] ✗ SURGEON DID NOT RESOLVE — ticket will file unrouted (dept 2 routes by surgeon)`,
+      );
+    }
 
     const urgent = str(input.urgent).toLowerCase() === 'true' || cls?.urgent === true;
 
@@ -276,8 +353,31 @@ registerTool({
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
-      lastProviderSeen: cleanSurgeon || undefined,
-      description: filedDescription,
+      lastProviderSeen: surgeonName || undefined,
+      /**
+       * SAY SO WHEN THERE IS NO SURGEON ON IT.
+       *
+       * This queue is assigned BY SURGEON, and a ticket without one lands on a
+       * coordinator who has no way to route it and no way to know whether it
+       * was asked. Measured 2026-08-17: 54 of the 154 tickets this agent had
+       * filed since 08-12 — 35% — arrived with provider_id null, against 1 in
+       * 799 from the answering service. The gate I pointed at as protection
+       * lives in `validateTicketParams`, which `create_ticket` runs and this
+       * tool does not.
+       *
+       * Not blocked here on purpose: the framework's required-field refusal is
+       * UNBOUNDED, and an unbounded gate on this path is the 2026-08-06 shape
+       * that destroyed 21 records requests. The agent now asks (see step 5 of
+       * the prompt and the `askAs` on `surgeon`); when the answer genuinely is
+       * not available, the ticket files and states that plainly.
+       */
+      description: lookup.providerId
+        ? filedDescription
+        : `${filedDescription}\n\nNO SURGEON ON THIS TICKET — ${
+            surgeonName
+              ? `"${surgeonName}" did not match an active provider`
+              : 'the caller did not name one and the patient record shows no physician'
+          }. This queue routes by surgeon, so please assign one before working it.`,
       priority,
       callData: { agentUsed: 'surgery', ...(callSid ? { callSid } : {}) },
     });
@@ -306,6 +406,9 @@ registerTool({
       priority,
       location_id: lookup.locationId ?? null,
       provider_id: lookup.providerId ?? null,
+      // Where the surgeon came from, so a replay can tell "the caller named
+      // them" apart from "we read it off the chart" without guessing.
+      surgeon_source: surgeonName ? (surgeonFromRecord ? 'patient_record' : 'caller') : 'none',
       // Say the number back. Callers ask for it, and staff quote it.
       ...(redirect
         ? { routed_to: redirect.departmentName, routed_department_id: redirect.departmentId }

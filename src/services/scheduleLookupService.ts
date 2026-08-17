@@ -37,6 +37,22 @@ export interface PatientScheduleContext {
   upcomingAppointments: AppointmentSummary[];
   pastAppointments: AppointmentSummary[];
   lastProviderSeen?: string;
+  /**
+   * The last PHYSICIAN the patient saw — `DoctorType = 'MD'`, which covers DOs
+   * (Brett Tompkins, DO is typed MD on the schedule).
+   *
+   * Separate from `lastProviderSeen` because the two answer different
+   * questions. "Who did you last see?" is legitimately an optometrist. "Who is
+   * your surgeon?" never is, and department 2 is assigned BY SURGEON — a ticket
+   * without one lands on a coordinator with no way to route it.
+   *
+   * Measured 2026-08-17: of 51 surgery callers whose record resolved uniquely,
+   * `lastProviderSeen` was a piece of diagnostic EQUIPMENT for 12 of them
+   * (`A-Scan`, `OCT-VF`) and an optometrist for several more. Only 44 had a
+   * physician as their most recent past provider — and every one of the
+   * equipment cases had an obvious surgeon one row further down.
+   */
+  lastPhysicianSeen?: string;
   lastLocationSeen?: string;
   lastVisitDate?: string;
   /**
@@ -71,6 +87,14 @@ export interface AppointmentSummary {
   status: string;
   appointmentType?: string;
   category?: string;
+  /**
+   * `DoctorType` off the schedule row: 'MD' for physicians and surgeons (DOs
+   * included), 'OD' for optometrists, 'Equipment' for diagnostic resources.
+   *
+   * Carried through because `provider` alone cannot tell a surgeon from an
+   * A-Scan machine, and two callers of this data need to.
+   */
+  doctorType?: string;
 }
 
 function getPacificDate(): Date {
@@ -555,6 +579,7 @@ export class ScheduleLookupService {
         status: apt.appointmentStatus || 'Unknown',
         appointmentType: apt.serviceCategory1 || undefined,
         category: apt.serviceCategory1, // Using serviceCategory1 instead of removed appointmentCategory
+        doctorType: apt.doctorType || undefined,
       };
 
       const status = String(apt.appointmentStatus ?? '');
@@ -595,7 +620,32 @@ export class ScheduleLookupService {
             `${rows.length - appointments.length} row(s) belonging to someone else were excluded`),
     );
 
-    const lastProviderSeen = past[0]?.provider !== 'Unknown' ? past[0]?.provider : undefined;
+    /**
+     * A MACHINE IS NOT A PROVIDER.
+     *
+     * `past[0].provider` was taken raw, so the most recent visit being an
+     * A-Scan or a visual field made `A-Scan` / `OCT-VF` the patient's "last
+     * provider seen" — spoken to callers, and passed by the surgery agent as
+     * the surgeon, where it matched nothing and the ticket filed with
+     * provider_id NULL. Department 2 routes by surgeon, so those tickets
+     * reached no one.
+     *
+     * Equipment rows are skipped rather than blanked: the clinician the
+     * patient actually saw is nearly always the next row down. Rows with no
+     * DoctorType at all are kept — failing open preserves the previous answer
+     * for any row the schedule has not typed.
+     */
+    const isEquipment = (a: AppointmentSummary) => a.doctorType === 'Equipment';
+    const named = past.filter((a) => a.provider !== 'Unknown' && !isEquipment(a));
+    const lastProviderSeen = named[0]?.provider;
+
+    /**
+     * The surgeon, for the queue that is assigned by surgeon. 'MD' covers DOs.
+     */
+    const lastPhysicianSeen = past.find(
+      (a) => a.doctorType === 'MD' && a.provider !== 'Unknown',
+    )?.provider;
+
     const lastLocationSeen = past[0]?.location !== 'Unknown' ? past[0]?.location : undefined;
 
     const firstApt = appointments[0];
@@ -619,6 +669,7 @@ export class ScheduleLookupService {
       upcomingAppointments: upcoming.slice(0, 5),
       pastAppointments: past.slice(0, 5),
       lastProviderSeen,
+      lastPhysicianSeen,
       lastLocationSeen,
       lastVisitDate: past[0]?.date,
       identity,
