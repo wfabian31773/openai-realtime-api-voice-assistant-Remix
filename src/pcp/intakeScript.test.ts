@@ -1,27 +1,38 @@
 /**
- * THE PROMPT AND THE DIRECTOR MUST ASK THE SAME QUESTIONS, IN THE SAME ORDER.
+ * THE PROMPT MUST NOT CONTAIN THE LIST. IT REVERSED ITSELF ON 2026-08-17.
  *
- * Operator, 2026-08-14, after a live call: *"we should have maybe in the prompt
- * ask these questions in order and get a response and record them in order...
- * if it's a PCP you ask these questions, if it's a patient you do this, because
- * this shit sounds crazy."*
- *
- * He was right, and the cause was structural rather than a bad model. The
- * prompt said "ask only the single next question record_pcp_intake gives you"
- * and never showed it WHAT the order was. So the model invented a sequence and
- * the director corrected it a turn later — and the caller heard both:
+ * The original version of this file pinned the OPPOSITE property — that every
+ * director question appeared in the prompt, in order. That was written on
+ * 08-14, when the operator said the sequencing was "all over the place"
+ * because the model invented its own order:
  *
  *   agent   "May I have your name, please?"
  *   caller  "Yeah, it's Wayne Fabian."
  *   agent   "Thank you, Wayne. What is your role?"
- *   agent   "Of course — may I have your name and the office or medical group
- *            you're calling from?"
- *   caller  "he just asked me my name. I gave it to you. Now you ask me my name
- *            again and the medical group. Like this shit is all off."
+ *   agent   "Of course — may I have your name and the office or medical group?"
  *
- * The script is now generated from the director's own PROFESSIONAL_FIELDS /
- * PATIENT_INTAKE_ORDER and PROMPTS. These tests exist so it stays generated: a
- * hand-copied list in a prompt is a copy, and copies drift.
+ * Rendering the whole numbered intake into the prompt (#201) did stop the
+ * invention. It replaced it with something worse: the model could see every
+ * question, so it READ AHEAD and fired several per turn. From CAc88c6e9c on
+ * 08-17, with the turn table beside it —
+ *
+ *   agent  "Which organization are you calling from?"        12:16:30.887
+ *   agent  "Is this number ending in 7471 the best one?"     12:16:32.028  +1,141ms
+ *   caller "You didn't give me a chance to respond..."       12:16:50.528
+ *
+ * No caller turn and no tool call between them. Two different fields in one
+ * breath. The operator: "you gotta wait for a fucking answer. One answer at a
+ * time."
+ *
+ * THE LESSON, and it is why this file now tests the inverse: the director has
+ * ALWAYS handed over exactly one field at a time. `record_pcp_intake` returns
+ * `nextQuestion` and nothing else. The list in the prompt was redundant on the
+ * day it was written, and redundant context the model can act on is not
+ * harmless — it is an invitation.
+ *
+ * So: the prompt describes the PROTOCOL, never the contents. The order still
+ * lives in exactly one place (the director), and director.test.ts /
+ * gateRecovery.test.ts pin that it is right.
  */
 import { describe, it, expect } from 'vitest';
 
@@ -33,27 +44,73 @@ const { PROFESSIONAL_FIELDS, PATIENT_INTAKE_ORDER, PROMPTS, PcpDirector } = awai
 
 const prompt = buildPcpPrompt({ callerPhone: '+18455317471' } as never);
 
-describe('every question the director can ask appears in the prompt', () => {
-  it('lists the professional intake in the director\'s order', () => {
-    const asked = PROFESSIONAL_FIELDS.map((f) => PROMPTS[f]!);
-    for (const q of asked) expect(prompt, `missing: ${q}`).toContain(q);
-
-    // Order, not just presence — the sequencing was the complaint.
-    const positions = asked.map((q) => prompt.indexOf(q));
-    const sorted = [...positions].sort((a, b) => a - b);
-    expect(positions).toEqual(sorted);
+describe('the model cannot read ahead, because it is not given the list', () => {
+  it('no intake question appears in the prompt', () => {
+    /**
+     * The direct regression test for CAc88c6e9c. Every one of these in the
+     * prompt is a question the model can ask before the caller has answered
+     * the last one.
+     */
+    for (const f of PROFESSIONAL_FIELDS) {
+      const q = PROMPTS[f];
+      if (!q) continue;
+      expect(prompt, `prompt still contains "${q}" — the model can read ahead`).not.toContain(q);
+    }
   });
 
-  it('lists the patient intake, and it is SHORTER', () => {
-    for (const f of PATIENT_INTAKE_ORDER) {
-      expect(prompt, `missing patient question: ${f}`).toContain(PROMPTS[f]!);
-    }
-    // "What type of healthcare organization is that?" is not a question a
-    // person ringing about their own eye drops can answer.
+  it('the two fields it actually bundled are both absent', () => {
+    // "Which organization are you calling from?" + "What is the best callback
+    // number?" — asked 1,141ms apart with nothing in between.
+    expect(prompt).not.toContain(PROMPTS.callerOrganization!);
+    expect(prompt).not.toContain(PROMPTS.callbackNumber!);
+  });
+
+  it('states the one-question rule, and states it as the top rule', () => {
+    expect(prompt).toMatch(/Ask ONE question/);
+    expect(prompt).toMatch(/Wait for the caller to answer/i);
+    expect(prompt).toMatch(/then silence/i);
+    // Named explicitly, because a general "be concise" does not survive.
+    expect(prompt).toMatch(/Not a question plus/i);
+  });
+
+  it('tells the model where the next question comes from', () => {
+    expect(prompt).toMatch(/record_pcp_intake tells you/i);
+    expect(prompt).toMatch(/You do not have the list and you do not need it/i);
+  });
+
+  it('the patient intake is still shorter, and still excludes the professional fields', () => {
+    // The director owns this now; the prompt only says a patient gets a
+    // shorter one and must never be asked a professional question.
     expect(PATIENT_INTAKE_ORDER.length).toBeLessThan(PROFESSIONAL_FIELDS.length);
     expect(PATIENT_INTAKE_ORDER).not.toContain('callerRole');
     expect(PATIENT_INTAKE_ORDER).not.toContain('callerOrganization');
     expect(PATIENT_INTAKE_ORDER).not.toContain('callerFacilityType');
+    expect(prompt).toMatch(/no role, no organization, no facility type/i);
+  });
+
+  it('forbids acknowledging an answer the caller has not given', () => {
+    /**
+     * The sharpest symptom, from CA66344af6 on 08-17 — the agent asked for a
+     * date of birth and then, 1,223ms later with no caller turn, said "Thank
+     * you for confirming that." The operator: "It asks me a question and
+     * follows up with thanks. I haven't even gotten a chance to utter a word."
+     *
+     * A generic "be concise" does not reach this. The behaviour has to be
+     * named, along with the specific words it hides behind.
+     */
+    expect(prompt).toMatch(/NEVER THANK SOMEONE FOR AN ANSWER THEY HAVE NOT GIVEN/);
+    for (const word of ['Thanks', 'Great', 'Got it', 'Perfect', 'Understood']) {
+      expect(prompt, `the prompt should name "${word}" as a reply, not an opener`).toContain(word);
+    }
+    expect(prompt).toMatch(/Your turn ends the moment the question mark lands/i);
+  });
+
+  it('tells it that a one-word answer IS the purpose', () => {
+    // Measured over 364 PCP calls on 08-06/07: openings are terse —
+    // "Referrals." "Authorization." "Appointments." Asking them to elaborate
+    // is another question they did not need.
+    expect(prompt).toMatch(/Callers here are brief/i);
+    expect(prompt).toMatch(/Do not ask them to elaborate/i);
   });
 
   /**
@@ -117,14 +174,16 @@ describe('every question the director can ask appears in the prompt', () => {
 });
 
 describe('the rules that stop the sequence being improvised', () => {
-  it('says one question at a time, and never bundled', () => {
+  it('says one question at a time, and forbids the follow-on sentence', () => {
     expect(prompt).toMatch(/Ask ONE question/i);
-    expect(prompt).toMatch(/Never bundle two/i);
+    // "Never bundle two" was not enough — the model did not bundle, it added a
+    // SECOND turn. The rule has to name that shape.
+    expect(prompt).toMatch(/about to add another sentence after a question/i);
   });
 
   it('forbids re-asking something already answered', () => {
     // The single loudest complaint on the call.
-    expect(prompt).toMatch(/NEVER re-ask something the\s*caller has already answered/i);
+    expect(prompt).toMatch(/Asking for what you were just told/i);
   });
 
   it('tells it to skip a step the caller already volunteered', () => {
@@ -134,18 +193,33 @@ describe('the rules that stop the sequence being improvised', () => {
   });
 
   it('names record_pcp_intake as the authority on what is missing', () => {
-    expect(prompt).toMatch(/record_pcp_intake tells you which field is still missing/i);
+    expect(prompt).toMatch(/record_pcp_intake tells you/i);
+    expect(prompt).toMatch(/it names ONE missing field/i);
   });
 });
 
-describe('the script is generated, not copied', () => {
-  it('renders a field added to the director without touching the prompt', () => {
-    // Every professional question in the prompt comes from PROMPTS. If someone
-    // hand-writes a list later, this catches the copy the moment it diverges.
+describe('the order lives in exactly one place', () => {
+  /**
+   * It used to live in two — the director AND the rendered prompt — and the
+   * test here checked they matched. Now the prompt has no order at all, so
+   * there is nothing to drift. What must hold is that every field the director
+   * can ask still HAS wording, because the director speaks it via nextQuestion.
+   */
+  it('every director field has a prompt sentence to ask it with', () => {
     for (const f of PROFESSIONAL_FIELDS) {
-      const q = PROMPTS[f];
-      expect(q, `PROMPTS has no wording for ${String(f)}`).toBeTruthy();
-      expect(prompt).toContain(q!);
+      expect(PROMPTS[f], `PROMPTS has no wording for ${String(f)}`).toBeTruthy();
     }
+    for (const f of PATIENT_INTAKE_ORDER) {
+      expect(PROMPTS[f], `PROMPTS has no wording for ${String(f)}`).toBeTruthy();
+    }
+  });
+
+  it('and none of that wording leaks into the prompt', () => {
+    // The inverse of the old assertion, and the whole point of this change.
+    const leaked = [...PROFESSIONAL_FIELDS, ...PATIENT_INTAKE_ORDER]
+      .map((f) => PROMPTS[f])
+      .filter((q): q is string => Boolean(q))
+      .filter((q) => prompt.includes(q));
+    expect(leaked, `these questions are visible to the model: ${leaked.join(' | ')}`).toEqual([]);
   });
 });

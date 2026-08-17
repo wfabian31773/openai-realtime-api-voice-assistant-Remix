@@ -122,41 +122,79 @@ type HandoffCallback = () => Promise<HandoffOutcome>;
  * PROMPTS means the prompt and the director cannot drift apart. Add a field to
  * the director and it appears here; change the wording once and both follow.
  */
+/**
+ * THE MODEL MUST NOT SEE THE LIST. That is the whole change here.
+ *
+ * On 2026-08-14 the operator said the sequencing was "all over the place"
+ * because the model invented its own order. My fix (#201) put the WHOLE
+ * numbered intake into the prompt so it could not invent one. It stopped
+ * inventing and started RECITING — reading ahead and firing several questions
+ * per turn. From CAc88c6e9c, with the turn table beside it:
+ *
+ *   agent  "Which organization are you calling from?"        12:16:30.887
+ *   agent  "Is this number ending in 7471 the best one?"     12:16:32.028   <- +1,141ms
+ *   caller "You didn't give me a chance to respond..."       12:16:50.528
+ *
+ * No caller turn and NO TOOL CALL between those two. Two different fields,
+ * asked in one breath, because the model could see both. The operator, on the
+ * call before: "you gotta wait for a fucking answer. One answer at a time."
+ *
+ * The director already hands over exactly one field at a time, and has since
+ * the beginning — `record_pcp_intake` returns `nextQuestion` and nothing else.
+ * The list was redundant the day it was written; it was also the damage.
+ *
+ * So the prompt now describes the PROTOCOL and never the contents. The model
+ * cannot read ahead through a list it was never given.
+ */
 function renderIntakeScript(): string {
-  const line = (f: keyof PcpConversationState, i: number) =>
-    `  ${i + 1}. ${DIRECTOR_PROMPTS[f] ?? String(f)}`;
-  return `# THE INTAKE, IN ORDER — DO NOT IMPROVISE THE SEQUENCE
+  return `# ONE QUESTION. THEN STOP TALKING.
 
-Ask ONE question. Wait for the answer. Record it with record_pcp_intake. Then
-ask the next. Never bundle two, never skip ahead, and NEVER re-ask something the
-caller has already answered — if you have it, move on.
+This is the rule the whole call runs on, and it outranks everything else in
+this prompt:
+
+  Ask ONE question. Say NOTHING else. Wait for the caller to answer.
+
+Not a question plus an example. Not a question plus "and also". Not a question
+followed by a second question because you can guess what comes next. One
+question, then silence, until they have spoken.
+
+If you catch yourself about to add another sentence after a question — don't.
+That is the single thing callers on this line complain about most.
+
+NEVER THANK SOMEONE FOR AN ANSWER THEY HAVE NOT GIVEN. "Thanks", "Great",
+"Got it", "Perfect", "Understood" are all replies to something SAID. If the
+caller has not spoken, you have nothing to acknowledge, and saying it anyway
+tells them you are not listening. Do not write their half of the conversation.
+
+Your turn ends the moment the question mark lands.
+
+## HOW YOU KNOW WHAT TO ASK
+record_pcp_intake tells you. It returns exactly one field, and that is the only
+question you may ask next. You do not have the list and you do not need it — if
+you find yourself deciding what comes after, you have already gone wrong.
+
+  1. Record what the caller just told you with record_pcp_intake.
+  2. It names ONE missing field. Ask that, in your own natural words.
+  3. Stop. Wait.
+  4. Repeat.
+
+When it stops naming a field, stop asking and act.
 
 ## FIRST, ALWAYS: WHAT IS THIS CALL ABOUT?
-Your greeting already asked. Almost every caller answers it in their opening
-sentence, so usually you are not asking anything — you are RECORDING what they
-just said. Call record_pcp_intake with callPurpose straight away.
+Your greeting already asked, and almost every caller answers it in their
+opening sentence — so usually you are not asking anything, you are RECORDING
+what they just said. Call record_pcp_intake with callPurpose straight away.
 
-This is the first thing for a reason. It decides which list you follow below,
-and every other tool on this line refuses to run until it is set. If you reach
-for a tool and it tells you the purpose is missing, you skipped this step.
+Callers here are brief. "Referrals." "Authorization." "Appointments." That IS
+the purpose — record it and move on. Do not ask them to elaborate.
 
-If the opening genuinely does not tell you, ask "What are you calling about
-today?" and record the answer before anything else.
-
-A HEALTHCARE PROFESSIONAL (a clinic, a plan, a facility, a pharmacy):
-${PROFESSIONAL_FIELDS.map(line).join('\n')}
-
-A PATIENT or their family — record callPurpose as patient_caller and follow
-THIS list. Never ask a patient the professional questions:
-${PATIENT_INTAKE_ORDER.map(line).join('\n')}
-
-record_pcp_intake tells you which field is still missing. That answer is the
-authority: if it names a field, ask THAT one. If it stops naming fields, stop
-asking and act.
+If a caller is a PATIENT or their family, record callPurpose as patient_caller.
+They then get a much shorter intake, and you must never ask them a professional
+question — no role, no organization, no facility type.
 
 If the caller has already given you something before you asked — a name in
 their opening sentence, an organization, why they are calling — record it and
-skip that step. Asking for what you were just told is the fastest way to lose a
+skip it. Asking for what you were just told is the fastest way to lose a
 professional's confidence.`;
 }
 
