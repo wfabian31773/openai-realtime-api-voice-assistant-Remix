@@ -39,6 +39,19 @@ export interface PcpConversationState {
    * before connecting her is the behavior being removed.
    */
   callerRequestedHuman?: boolean;
+  /**
+   * THE CALLER IS THE PATIENT, and it stays true once established.
+   *
+   * `callPurpose` is not safe to read for this. The records tool reclassifies
+   * it to `patient_medical_records_request` the moment it runs, so a patient
+   * asking for their OWN records stops looking like a patient at exactly the
+   * point the ticket requirements check whether we know who the call is about
+   * — and they get asked separately for "the patient's name". Set ONLY by
+   * the model's explicit signal — `patient_caller` covers "a patient or their
+   * family", and a family member is not the patient. It survives a purpose
+   * change because nothing else writes it; the model may still correct it.
+   */
+  callerIsThePatient?: boolean;
 }
 
 export interface PcpDirectorDecision {
@@ -128,6 +141,27 @@ export class PcpDirector {
 
   update(callId: string, patch: Partial<Omit<PcpConversationState, 'toolFailures'>>): PcpConversationState {
     const state = this.get(callId);
+    /**
+     * A PLAIN ASSIGN, DELIBERATELY — and `callerIsThePatient` is the reason
+     * this comment exists.
+     *
+     * An ABSENT key leaves the flag alone, which is all the stickiness that
+     * was ever needed: the records tool patches only `callPurpose`, so the
+     * flag survives the reclassification that started all of this.
+     *
+     * An explicit `false` DOES clear it, and that is on purpose. I first made
+     * it refuse one, on the theory that a latch should never un-latch — but
+     * the tool schema actively tells the model to send false for a family
+     * member, so refusing the correction would make one early mis-classification
+     * unrecoverable for the rest of the call and name the caller as the patient
+     * on the ticket.
+     *
+     * IT NEVER COMES FROM THE PURPOSE. `patient_caller` covers "a patient OR
+     * THEIR FAMILY", so setting it from that slug would tell the ticket that a
+     * daughter calling about her mother IS the patient, and the mother's name
+     * would never be asked for. Only the model's explicit signal writes it —
+     * it is the one that knows which of the two is on the phone.
+     */
     Object.assign(state, patch);
     return state;
   }
@@ -175,10 +209,24 @@ export class PcpDirector {
     //
     // What a callback actually needs from a patient is a name, a number and
     // what they want. That is the whole list.
-    // One list, from PATIENT_INTAKE_ORDER — the prompt renders that same
-    // constant, so what the model is shown and what the director asks for can
-    // no longer drift apart.
-    const isPatient = state.callPurpose === 'patient_caller';
+    /**
+     * One list, from PATIENT_INTAKE_ORDER.
+     *
+     * READ THE LATCH, NOT JUST THE PURPOSE. `handle_patient_medical_records_request`
+     * reclassifies callPurpose to `patient_medical_records_request`, so a
+     * purpose-only test flips a patient back to the PROFESSIONAL list mid-call
+     * — and they get asked their role, their organisation, their facility type
+     * and "the patient's first name" about themselves. That is the bd89b226
+     * interrogation, arriving by a different door.
+     *
+     * It also matters for `askedForAPerson` below: with isPatient wrongly
+     * false, a patient who asked for a person becomes handoff-eligible into
+     * the PCP clinic queue, which policy.ts exists to prevent.
+     *
+     * Found on the SECOND review pass, 2026-08-17 — the first fix added the
+     * latch and then only read it in one of the three places that needed it.
+     */
+    const isPatient = state.callPurpose === 'patient_caller' || Boolean(state.callerIsThePatient);
     const required: Array<keyof PcpConversationState> = isPatient
       ? [...PATIENT_INTAKE_ORDER]
       : [...PROFESSIONAL_FIELDS];
@@ -191,7 +239,21 @@ export class PcpDirector {
     // a DOB the caller may not have to hand is how a scheduling request silently
     // became a task instead of a transfer.
     const connectsToHuman = purpose?.defaultDisposition === 'HAND_OFF';
-    if (purpose?.patientContextRequired && !connectsToHuman) required.push(...PATIENT_FIELDS);
+    /**
+     * AND NOT TO A PATIENT, EITHER.
+     *
+     * PATIENT_FIELDS is `statedRelationship, patientFirstName, patientLastName,
+     * patientDob` — the block a PROFESSIONAL supplies about someone else. Asked
+     * of the patient themselves it opens with "What is your professional
+     * relationship to this patient?", which is the bd89b226 interrogation
+     * verbatim.
+     *
+     * The first two attempts at this fixed the BASE list and left this line
+     * alone, so a latched patient whose purpose had been reclassified still
+     * walked straight into it. Caught on the third review pass by running the
+     * director rather than reading it, 2026-08-17.
+     */
+    if (!isPatient && purpose?.patientContextRequired && !connectsToHuman) required.push(...PATIENT_FIELDS);
     const missing = required.find((field) => !state[field]);
 
     let disposition = purpose?.defaultDisposition;
@@ -254,8 +316,28 @@ export class PcpDirector {
      */
     const eligibleByAsk = askedForAPerson && !handoffFailed && !lunchClosure;
     if (eligibleByAsk && disposition !== 'HAND_OFF') disposition = 'HAND_OFF';
+    /**
+     * A PATIENT IS NEVER DIALLED INTO THE PCP QUEUE — on either branch.
+     *
+     * `eligibleByAsk` has carried `&& !isPatient` since it was written. This
+     * branch did not, and it did not need to while `isPatient` was false for
+     * everyone whose purpose was not literally `patient_caller`: the long
+     * professional field list guaranteed `missing` was truthy, so the branch
+     * could not fire.
+     *
+     * Widening isPatient with `callerIsThePatient` (third review pass) removed
+     * that accident. A self-identified patient on a HAND_OFF purpose now
+     * completes the SHORT list, `missing` becomes undefined, and this branch
+     * flips true — dialling them into a queue staffed to talk to clinics,
+     * which the note on `patient_caller` in policy.ts exists to prevent.
+     *
+     * Caught on the fifth review pass by running the director rather than
+     * reading it: `{callerIsThePatient, callerName, callbackNumber,
+     * callPurpose:'reschedule_appointment'}` returned handoffEligible true
+     * where the parent commit returned false.
+     */
     const handoffEligible =
-      eligibleByAsk || Boolean(purpose && disposition === 'HAND_OFF' && !missing && !handoffFailed);
+      eligibleByAsk || Boolean(!isPatient && purpose && disposition === 'HAND_OFF' && !missing && !handoffFailed);
 
     return {
       nextQuestion: missing ? { field: missing, prompt: PROMPTS[missing] ?? `Please provide ${String(missing)}.` } : undefined,

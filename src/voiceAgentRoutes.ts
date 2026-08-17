@@ -855,7 +855,7 @@ async function flushLoopTelemetry(key: string, callLogId: string): Promise<LoopG
 
 /** What we dialed for a warm transfer, keyed by the OFFICE leg's CallSid, so
  *  the accept/status webhooks can attribute an outcome to it. */
-const officeLegDials = new Map<string, { openAiCallId: string; dialedNumber: string; queueLabel: string; dialedAt: number }>();
+const officeLegDials = new Map<string, { openAiCallId: string; dialedNumber: string; queueLabel: string; dialedAt: number; callerCallSid?: string }>();
 
 /** Persist the office leg's result onto the call log. This is the record that
  *  answers "did the office actually pick up, and which office was it?" — a
@@ -896,7 +896,7 @@ async function recordTransferOutcome(
     const { storage } = await import('../server/storage');
     if (meta?.dbCallLogId) {
       await storage.updateCallLog(meta.dbCallLogId, { transferOutcome: payload } as any);
-    } else if (meta?.twilioCallSid) {
+    } else if (dial.callerCallSid) {
       /**
        * THE SECOND HOLE, and it dropped outcomes silently.
        *
@@ -913,9 +913,22 @@ async function recordTransferOutcome(
       const { callLogs: callLogsTable } = await import('../shared/schema');
       const { db: database } = await import('../server/db');
       const { eq: equals } = await import('drizzle-orm');
-      await database.update(callLogsTable)
+      // RETURNING, so a miss reads as a miss. Without it this logged "outcome
+      // recorded" for an update that matched ZERO rows — the call-log row not
+      // written yet — after officeLegDials had already been deleted, so the
+      // outcome was unrecoverable and the log said it was fine. A coverage fix
+      // that fails silently is worse than the gap it replaced. Caught in
+      // review, 2026-08-17.
+      const written = await database.update(callLogsTable)
         .set({ transferOutcome: payload } as any)
-        .where(equals(callLogsTable.callSid, meta.twilioCallSid));
+        .where(equals(callLogsTable.callSid, dial.callerCallSid))
+        .returning({ id: callLogsTable.id });
+      if (!written.length) {
+        console.warn(
+          `[WARM-TRANSFER] outcome ${outcome} LOST for ${officeCallSid} — no call_logs row for callSid ${dial.callerCallSid}`,
+        );
+        return;
+      }
     } else {
       console.warn(`[WARM-TRANSFER] outcome ${outcome} for ${officeCallSid} has no call log to attach to (no id, no callSid)`);
       return;
@@ -2044,7 +2057,13 @@ async function transferConferenceToNumber(
     // Office-leg telemetry (2026-07-30): remember what we dialed so the
     // accept/status webhooks can record the OUTCOME against it. Without
     // this pair, nothing in the database says whether the office picked up.
-    officeLegDials.set(dialedSid, { openAiCallId, dialedNumber: toNumber, queueLabel: label, dialedAt: Date.now() });
+    officeLegDials.set(dialedSid, {
+      openAiCallId, dialedNumber: toNumber, queueLabel: label, dialedAt: Date.now(),
+      // The CALLER's leg, so a late outcome can still find the call_logs row
+      // when dbCallLogId has not been written yet. Taken from the conference
+      // rather than CallMetadata, whose twilioCallSid is never populated.
+      callerCallSid: getTwilioCallSid(conferenceName) ?? undefined,
+    });
 
     warmTransferAccepts.set(dialedSid, {
       resolve: (info) => {
@@ -3645,6 +3664,27 @@ async function observeCall(
     from,
     to,
     transferredToHuman: false,
+    /**
+     * NOT WRITING `twilioCallSid` HERE, DELIBERATELY.
+     *
+     * The field is declared on CallMetadata and has never been assigned, so
+     * every reader silently gets undefined — including azul's sweep, which
+     * files its tickets with `callSid: meta?.twilioCallSid`. Populating it is
+     * the obvious fix and I made it, then took it back out.
+     *
+     * The reason: writing it for the first time also ARMS two paths that have
+     * never executed — the post-call `updateTicketCallData` push and
+     * `retryTwilioCostFetch`. That push stamps `callDataSynced: true`, which
+     * is the exact column `ticketingSyncService` selects on to retry, so a
+     * push that lands before Twilio's duration and recording callbacks would
+     * permanently exclude the row from the sweeper that exists to repair it.
+     *
+     * Turning on dead code as a side effect of a one-line fix, on the day this
+     * agent goes back on the phone, is not a trade worth taking. The two
+     * places that actually needed a callSid now receive it explicitly.
+     * Fifth review pass, 2026-08-17. Populating this properly — with the
+     * sync-ordering question answered first — is its own piece of work.
+     */
     dbCallLogId: callLogId, // Store the call log ID we created earlier
     audioInputMs: 0,
     audioOutputMs: 0,
@@ -4129,7 +4169,7 @@ async function observeCall(
     // so an out-of-band response.create is protocol-safe (same mechanism as
     // the greeting trigger below).
     if ((agentConfig?.id === 'azul-scheduling' || agentConfig?.id === 'pcp') && callId) {
-      registerAzulHoldingCallback(callId, (instructionOverride?: string) => {
+      registerAzulHoldingCallback(callId, (instructionOverride?: string): boolean => {
         try {
           /**
            * NEVER SPEAK OVER A SENTENCE ALREADY IN PROGRESS.
@@ -4152,7 +4192,7 @@ async function observeCall(
            */
           if (responseInFlight.has(callId)) {
             console.info(`[SESSION] holding update skipped for ${callId} — agent is mid-response`);
-            return;
+            return false;
           }
           (session.transport as any).sendEvent({
             type: 'response.create',
@@ -4162,8 +4202,10 @@ async function observeCall(
                 "The system lookup you started is still running — that's normal. Say ONE short, warm holding update to the caller (vary the wording each time; never repeat the same sentence twice in a row), e.g. \"Still working on that for you — thanks for hanging with me.\" Say nothing else, ask nothing.",
             },
           });
+          return true;
         } catch (e) {
           console.error(`[SESSION] azul holding update failed for ${callId}:`, e);
+          return false;
         }
       });
 
@@ -4858,7 +4900,7 @@ async function observeCall(
     deadAirWatchdog.release(callId);
     conversationLoopGuard.releaseCall(callId);
     void import('./services/identityArgGuard').then(({ releaseIdentityGuard }) => releaseIdentityGuard(callId));
-    void import('./agents/azulSchedulingAgent').then(({ releaseAzulCallState }) => releaseAzulCallState(callId));
+    void import('./agents/azulSchedulingAgent').then(({ releaseAzulCallState }) => releaseAzulCallState(callId, twilioCallSid));
     director.release(callId);
     // Turn table: write before releasing, then free. Fire-and-forget — a
     // debugging record must never delay teardown.

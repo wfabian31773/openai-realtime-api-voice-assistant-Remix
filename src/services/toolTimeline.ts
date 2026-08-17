@@ -116,6 +116,19 @@ const SAFE_ARG_KEYS = new Set([
   // callerOrganization, callerRole, callbackNumber, statedRelationship,
   // patientFirstName, patientLastName, patientDob, patientMrn, narrative.
   'callPurpose', 'callerFacilityType',
+  /**
+   * azul handoff ladder, 2026-08-17. A closed enum — 'yes' | 'no' |
+   * 'not_established' — saying whether THIS LINE could have finished what the
+   * caller wanted. Same class as the two above: it names a capability, not a
+   * person.
+   *
+   * Without it the `sage_handoff_ladder` rows record only the handoff reason,
+   * so "how many deflections were things we could have done ourselves?" — the
+   * question the whole ladder was built to answer — stays unanswerable. Caught
+   * on the fourth review pass, which also noticed my test passed anyway
+   * because it only checked the source mentioned the field.
+   */
+  'schedulableHere',
 ]);
 
 /** Booleans derived from arguments we must NOT store verbatim. "Did the agent

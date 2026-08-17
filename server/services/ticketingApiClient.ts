@@ -283,8 +283,49 @@ export class TicketingApiClient {
   private lastAliveAt = 0;
   private static LIVENESS_TTL_MS = 60_000;
 
-  /** Record proof of life, wherever the app actually answered us. */
-  private markAlive(): void {
+  /**
+   * Which host the warm-up probe actually wakes.
+   *
+   * `healthCheck` probes the DIRECT app when an enrichment base is configured,
+   * and the n8n gateway otherwise. Liveness has to be recorded against the
+   * same host or the cache answers the wrong question.
+   */
+  private probesDirectApp(): boolean {
+    return !!this.enrichmentBaseUrl && this.enrichmentBaseUrl !== this.baseUrl;
+  }
+
+  /** The base the warm-up probe actually contacts. */
+  private probeBase(): string | null {
+    return this.probesDirectApp() ? this.enrichmentBaseUrl : this.baseUrl;
+  }
+
+  /**
+   * Record proof of life — but only from the host the probe would have woken.
+   *
+   * The first version marked alive on ANY successful request. With
+   * TICKETING_ENRICHMENT_URL set, that is wrong in the worst direction: a
+   * successful call through the n8n gateway would suppress the probe of the
+   * sleeping app for 60 seconds, so the create pays the cold start anyway and
+   * the cache has bought nothing while hiding the reason.
+   *
+   * Not a live bug today — the enrichment URL is unset, so both are the same
+   * host — but it arms itself the moment that secret is set, which is exactly
+   * what I recommended doing this morning. Caught in review, 2026-08-17.
+   */
+  private markAlive(answeredBase: string | null | undefined): void {
+    // COMPARE THE HOST, NOT THE INTENT.
+    //
+    // The first attempt compared boolean flags — "was this request meant for
+    // the direct app?" against "does the probe use the direct app?". With
+    // TICKETING_ENRICHMENT_URL unset those two are the SAME host, but the
+    // flags disagree, so every createPcpTicket and updateTicketCallData
+    // (which pass useEnrichmentBase=true) had its proof of life thrown away
+    // and the next create paid the full probe the cache exists to skip.
+    //
+    // Comparing the resolved base is right in both configurations and needs
+    // no reasoning about which flag means what. Found on the second review
+    // pass, 2026-08-17.
+    if (!answeredBase || answeredBase !== this.probeBase()) return;
     this.lastAliveAt = Date.now();
   }
 
@@ -300,9 +341,10 @@ export class TicketingApiClient {
       console.info(`[TICKETING API] Warm-up skipped — service answered ${Math.round(since / 1000)}s ago`);
       return true;
     }
-    const ok = await this.warmUpWithRetry(maxRetries, delayMs);
-    if (ok) this.markAlive();
-    return ok;
+    // healthCheck records liveness itself, against the host it actually
+    // probed. Marking again here would use the default `fromDirectApp=false`
+    // and stamp the wrong host whenever the enrichment URL is configured.
+    return this.warmUpWithRetry(maxRetries, delayMs);
   }
 
   private ensureInitialized(): void {
@@ -394,7 +436,7 @@ export class TicketingApiClient {
       }
       if (response.ok) {
         console.info("[TICKETING API] ✓ Health check passed");
-        this.markAlive();
+        this.markAlive(useDirectApp ? this.enrichmentBaseUrl : this.baseUrl);
         return { ok: true };
       } else {
         console.warn(`[TICKETING API] ⚠ Health check returned ${response.status}`);
@@ -484,8 +526,9 @@ export class TicketingApiClient {
       shadowTap.emit('n8n_workflow_completed', shadowSession, shadowAgent,
         { endpoint, method, viaGateway: shadowViaGateway, status: response.status, body: body ?? {}, response: data ?? {} },
         { sensitive: true, component: 'ticketingApiClient' });
-      // A real answer is better proof of life than any probe.
-      this.markAlive();
+      // A real answer is better proof of life than any probe — but only from
+      // the host the probe would have woken (see markAlive).
+      this.markAlive((useEnrichmentBase && this.enrichmentBaseUrl) || this.baseUrl);
       return data as T;
     } catch (networkError) {
       clearTimeout(timeoutId);
