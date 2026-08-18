@@ -199,3 +199,59 @@ describe('where the caller name lives, for anyone reading this context', () => {
     expect(ctx.patientName).toBe('Wayne Fabian');
   });
 });
+
+/**
+ * THE SURGEON IS USUALLY IN THE FUTURE.
+ *
+ * Surgery callers are pre-op: the operation is booked and has not happened, so
+ * the operating physician appears only on an UPCOMING appointment. A past-only
+ * rule returns nothing for them and the ticket files unrouted — which is what
+ * happened to Gail Herrick on 2026-08-17: no past appointments of any kind,
+ * one upcoming Laser with Samuel Asanad, MD, and a null provider on the ticket.
+ */
+describe('lastPhysicianSeen prefers the booked surgeon over the last visit', () => {
+  const base = { patientFirstName: 'Gail', patientLastName: 'Herrick', appointmentStart: '0800' };
+  const appt = (over: Record<string, unknown>) => ({ ...base, appointmentStatus: 'Active', ...over });
+
+  it('takes the upcoming physician over a more recent optometrist visit', () => {
+    const ctx = build([
+      appt({ appointmentDate: isoDaysFromToday(14), renderingPhysician: 'Samuel Asanad, MD', doctorType: 'MD' }),
+      appt({ appointmentDate: isoDaysFromToday(-3), renderingPhysician: 'Jennie Tran, OD', doctorType: 'OD' }),
+    ]);
+    expect(ctx.lastPhysicianSeen).toBe('Samuel Asanad, MD');
+    // And the OD remains the honest answer to "who did you last see".
+    expect(ctx.lastProviderSeen).toBe('Jennie Tran, OD');
+  });
+
+  it('a patient whose ONLY appointment is an upcoming surgery still yields a surgeon', () => {
+    // Gail Herrick's exact shape: nothing in the past at all.
+    const ctx = build([
+      appt({ appointmentDate: isoDaysFromToday(3), renderingPhysician: 'Samuel Asanad, MD', doctorType: 'MD' }),
+    ]);
+    expect(ctx.lastPhysicianSeen).toBe('Samuel Asanad, MD');
+  });
+
+  it('falls back to the last physician actually seen when nothing is booked', () => {
+    const ctx = build([
+      appt({ appointmentDate: isoDaysFromToday(-30), renderingPhysician: 'Dwayne Logan, MD', doctorType: 'MD' }),
+    ]);
+    expect(ctx.lastPhysicianSeen).toBe('Dwayne Logan, MD');
+  });
+
+  it('never returns equipment as a physician OR as the last provider', () => {
+    const ctx = build([
+      appt({ appointmentDate: isoDaysFromToday(-2), renderingPhysician: 'A-Scan', doctorType: 'Equipment' }),
+      appt({ appointmentDate: isoDaysFromToday(-30), renderingPhysician: 'Dwayne Logan, MD', doctorType: 'MD' }),
+    ]);
+    expect(ctx.lastPhysicianSeen).toBe('Dwayne Logan, MD');
+    expect(ctx.lastProviderSeen, 'a machine was reported as the provider').toBe('Dwayne Logan, MD');
+  });
+
+  it('a CANCELLED upcoming surgery is not a surgeon', () => {
+    const ctx = build([
+      appt({ appointmentDate: isoDaysFromToday(10), renderingPhysician: 'Samuel Asanad, MD', doctorType: 'MD', appointmentStatus: 'Removed' }),
+      appt({ appointmentDate: isoDaysFromToday(-30), renderingPhysician: 'Dwayne Logan, MD', doctorType: 'MD' }),
+    ]);
+    expect(ctx.lastPhysicianSeen).toBe('Dwayne Logan, MD');
+  });
+});

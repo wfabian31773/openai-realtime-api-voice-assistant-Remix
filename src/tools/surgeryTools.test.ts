@@ -7,7 +7,15 @@
  * classified ticket and the second looks like a filed one.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { runTool } from './registry';
+import { readFileSync } from 'node:fs';
+
+// The surgeon fallback reads the schedule, and that module opens a database
+// client at import time. Same guard the other suites use.
+process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+process.env.OPENAI_API_KEY ||= 'test-unused';
+vi.mock('../../server/db', () => ({ db: {} }));
+
+import { runTool, getTool } from './registry';
 import './sharedPatientTools';
 import './surgeryTools';
 
@@ -103,9 +111,15 @@ describe('every ticket carries a reason the request actually earned', () => {
     const create = vi
       .spyOn(api, 'createTicket')
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-4' } as never);
+    // A routed ticket, so the unrouted-surgeon note is not part of this case.
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({
+      success: true,
+      providerId: 49,
+    } as never);
 
     await runTool('file_surgery_ticket', {
       ...BASE,
+      surgeon: 'Logan',
       request_description: 'I need to move my surgery to a different day',
     });
 
@@ -247,5 +261,253 @@ describe('what it refuses, and what it does not', () => {
     expect(out.success).toBe(false);
     expect(String(out.error)).toMatch(/Validation failed/);
     expect(out.retryable).toBe(true);
+  });
+});
+
+describe('a surgery ticket with no surgeon says so', () => {
+  /**
+   * This queue is ASSIGNED BY SURGEON — a ticket without one reaches nobody.
+   *
+   * On 2026-08-17, 66 of 74 filed unrouted. The cause was NOT that the agent
+   * stopped asking: transcripts show it asked on 2 of 104 calls (08-13) and 2
+   * of 126 (08-14), both days that filed a provider on essentially every
+   * ticket. The value came from `lookup_patient`'s `last_provider`, relayed by
+   * the model as an OPTIONAL argument it was never told to collect. When the
+   * model stopped relaying it, `file_surgery_ticket` skipped the provider
+   * lookup entirely — which is why provider and location went null on the SAME
+   * tickets (Gail Herrick: 51/22 on 08-14, both null on 08-17).
+   *
+   * The fix is that the surgeon no longer depends on the argument list; see
+   * `resolves the surgeon from the patient record` below.
+   */
+  it('annotates the description when nothing resolved', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-NOSURG' } as never);
+
+    await runTool('file_surgery_ticket', { ...BASE, request_description: 'Question about my drops' });
+
+    const sent = create.mock.calls[0][0];
+    expect(sent.description).toMatch(/NO SURGEON ON THIS TICKET/);
+    expect(sent.description).toMatch(/routes by surgeon/i);
+    // Says WHY it is missing, so nobody reads the blank as an unasked question.
+    expect(sent.description).toMatch(/patient record shows no physician/);
+    // The caller's own words survive in front of it.
+    expect(sent.description).toMatch(/^Question about my drops/);
+  });
+
+  it('says nothing extra when a surgeon IS on it', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-SURG' } as never);
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({
+      success: true,
+      providerId: 49,
+    } as never);
+
+    await runTool('file_surgery_ticket', {
+      ...BASE,
+      surgeon: 'Logan',
+      request_description: 'Question about my drops',
+    });
+
+    expect(create.mock.calls[0][0].description).not.toMatch(/NO SURGEON ON THIS TICKET/);
+  });
+
+  it('a NAME that resolves to nobody is still called out — a name is not a route', async () => {
+    /**
+     * The annotation asks "will a coordinator be able to route this?", not
+     * "did anyone say a name?". `lastProviderSeen` free text does not assign a
+     * ticket; `provider_id` does. A name that matched no active provider is
+     * exactly as unrouted as no name at all, and saying otherwise on the
+     * ticket would hide it.
+     */
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-UNRES' } as never);
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({ success: true } as never);
+
+    await runTool('file_surgery_ticket', {
+      ...BASE,
+      surgeon: 'Nobody At All',
+      request_description: 'Question about my drops',
+    });
+
+    expect(create.mock.calls[0][0].description).toMatch(/NO SURGEON ON THIS TICKET/);
+    expect(create.mock.calls[0][0].description).toMatch(/did not match an active provider/);
+  });
+
+  /**
+   * THE REGRESSION TEST. The provider must not depend on whether the model
+   * chose to pass an optional argument — that dependency is what filed 66
+   * unrouted tickets in one day.
+   */
+  it('resolves the surgeon from the patient record when the model passes none', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-REC' } as never);
+    const lookup = vi
+      .spyOn(api, 'lookupProviderAndLocation')
+      .mockResolvedValueOnce({ success: true, providerId: 49 } as never);
+
+    const sched = await import('../services/scheduleLookupService');
+    vi.spyOn(sched.scheduleLookupService, 'lookupPatient').mockResolvedValueOnce({
+      patientFound: true,
+      identity: { unique: true },
+      lastProviderSeen: 'A-Scan',
+      lastPhysicianSeen: 'Dwayne Logan, MD',
+      upcomingAppointments: [],
+      pastAppointments: [],
+      totalAppointmentsFound: 3,
+    } as never);
+
+    const out = (await runTool('file_surgery_ticket', {
+      ...BASE,
+      request_description: 'Question about my drops',
+    })) as Record<string, unknown>;
+
+    // The chart's PHYSICIAN was used — never the A-Scan machine.
+    expect(lookup.mock.calls[0][0].providerName).toMatch(/Dwayne Logan/);
+    expect(create.mock.calls[0][0].providerId).toBe(49);
+    expect(out.provider_id).toBe(49);
+    expect(out.surgeon_source).toBe('patient_record');
+    expect(create.mock.calls[0][0].description).not.toMatch(/NO SURGEON ON THIS TICKET/);
+  });
+
+  it('will not borrow a surgeon when the lookup matched more than one person', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-AMBIG' } as never);
+
+    const sched = await import('../services/scheduleLookupService');
+    vi.spyOn(sched.scheduleLookupService, 'lookupPatient').mockResolvedValueOnce({
+      patientFound: true,
+      identity: { unique: false, candidateCount: 2 },
+      lastPhysicianSeen: 'Dwayne Logan, MD',
+      upcomingAppointments: [],
+      pastAppointments: [],
+      totalAppointmentsFound: 5,
+    } as never);
+
+    const out = (await runTool('file_surgery_ticket', {
+      ...BASE,
+      request_description: 'Question about my drops',
+    })) as Record<string, unknown>;
+
+    // A stranger's surgeon on this ticket is worse than none.
+    expect(out.surgeon_source).toBe('none');
+    expect(create.mock.calls[0][0].lastProviderSeen).toBeUndefined();
+  });
+
+  it('a surgeon the CALLER names beats the chart', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket').mockResolvedValueOnce({
+      success: true,
+      ticketNumber: 'VA-TEST-CALLER',
+    } as never);
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({
+      success: true,
+      providerId: 49,
+    } as never);
+    const sched = await import('../services/scheduleLookupService');
+    const spy = vi.spyOn(sched.scheduleLookupService, 'lookupPatient');
+
+    const out = (await runTool('file_surgery_ticket', {
+      ...BASE,
+      surgeon: 'Logan',
+      request_description: 'Question about my drops',
+    })) as Record<string, unknown>;
+
+    expect(out.surgeon_source).toBe('caller');
+    // No reason to query the schedule when the caller already answered.
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('the tool offers the model a way to ask, and stops calling it optional', () => {
+    const def = getTool('file_surgery_ticket')!;
+    const surgeon = (def.input_schema.properties as Record<string, { askAs?: string; description?: string }>).surgeon;
+    expect(surgeon.askAs, 'no askAs means the model has no sentence to ask with').toBeTruthy();
+    expect(surgeon.description).not.toMatch(/Optional/i);
+  });
+
+  /**
+   * AN OPTOMETRIST IS NOT A SURGEON, AND RELAYING last_provider MAKES ONE.
+   *
+   * My first version of this fix told the model to pass `last_provider` as the
+   * surgeon. `lastProviderSeen` deliberately still includes ODs — "who did you
+   * last see" is legitimately an optometrist — and a post-op check is very often
+   * the most recent visit. A non-empty `surgeon` argument SKIPS the
+   * physician-only fallback, so an active OD would resolve to a provider id and
+   * be handed the surgery ticket: worse than the null it replaced, because it
+   * looks routed. Found in review, 2026-08-18.
+   */
+  it('neither the prompt nor the schema tells the model to relay last_provider', () => {
+    const def = getTool('file_surgery_ticket')!;
+    const surgeon = (def.input_schema.properties as Record<string, { description?: string }>).surgeon;
+    expect(surgeon.description).toMatch(/do NOT pass|Do NOT pass/);
+    expect(surgeon.description).toMatch(/last_provider/);
+
+    const src = readFileSync(new URL('../agents/surgeryAgent.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/Do NOT pass last_provider/);
+    expect(src).toMatch(/assigned BY SURGEON|assigned by surgeon|by SURGEON/i);
+    // And still never with an unbounded hold.
+    expect(src).toMatch(/do NOT hold the call hostage over/i);
+  });
+
+  /**
+   * A REDIRECTED TICKET MUST NOT LECTURE ANOTHER DEPARTMENT ABOUT SURGEONS.
+   *
+   * detectCrossQueue can file this call into Optical or the HVA Hub. Those
+   * queues do not route by surgeon, and printing "this queue routes by surgeon"
+   * on their ticket is a false statement about their process. Found in the same
+   * review.
+   */
+  it('does not append the surgeon note to a ticket redirected off this queue', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-XQ' } as never);
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({ success: true } as never);
+
+    await runTool('file_surgery_ticket', {
+      ...BASE,
+      request_description: 'I need to schedule a routine eye exam for my son, he is a new patient',
+    });
+
+    const sent = create.mock.calls[0][0];
+    if (sent.departmentId !== 2) {
+      expect(sent.description, 'another queue was told it routes by surgeon').not.toMatch(
+        /NO SURGEON ON THIS TICKET/,
+      );
+    }
+  });
+
+  /**
+   * The note is appended AFTER sanitizeForSms ran on the caller's words, so it
+   * can re-introduce exactly what the sanitizer removed. One em dash turns a
+   * 160-char GSM-7 segment into a 70-char UCS-2 one.
+   */
+  it('the unrouted note cannot smuggle non-GSM-7 characters back into the body', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-GSM' } as never);
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({ success: true } as never);
+
+    await runTool('file_surgery_ticket', {
+      ...BASE,
+      request_description: 'Question about my drops',
+    });
+
+    const sent = create.mock.calls[0][0] as { description: string };
+    expect(sent.description).toMatch(/NO SURGEON ON THIS TICKET/);
+    for (const smart of ['—', '–', '‘', '’', '“', '”', '…']) {
+      expect(sent.description, `smart punctuation ${smart.charCodeAt(0)} survived`).not.toContain(smart);
+    }
   });
 });
