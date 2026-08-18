@@ -255,3 +255,35 @@ describe('lastPhysicianSeen prefers the booked surgeon over the last visit', () 
     expect(ctx.lastPhysicianSeen).toBe('Dwayne Logan, MD');
   });
 });
+
+/**
+ * RETINA IS A SURGEON.
+ *
+ * The schedule types appointments MD / Retina / OD / Equipment, and my first
+ * physician filter matched 'MD' alone — dropping every vitreoretinal surgeon,
+ * 192 appointments on 2026-08-18 against 606 MD. Terry Harper and Regino
+ * Marchan both have Samira Khan, MD on 2026-09-10 typed 'Retina'; both tickets
+ * filed with no provider because of that filter.
+ */
+describe('a retina surgeon counts as the physician', () => {
+  const base = { patientFirstName: 'Terry', patientLastName: 'Harper', appointmentStart: '0850' };
+  const appt = (over: Record<string, unknown>) => ({ ...base, appointmentStatus: 'Active', ...over });
+
+  it('resolves a Retina-typed physician', () => {
+    const ctx = build([
+      appt({ appointmentDate: isoDaysFromToday(24), renderingPhysician: 'Samira Khan, MD', doctorType: 'Retina' }),
+      appt({ appointmentDate: isoDaysFromToday(-60), renderingPhysician: 'Eriq Plechot, OD', doctorType: 'OD' }),
+    ]);
+    expect(ctx.lastPhysicianSeen).toBe('Samira Khan, MD');
+  });
+
+  it('still refuses optometry and equipment', () => {
+    const ctx = build([
+      appt({ appointmentDate: isoDaysFromToday(-1), renderingPhysician: 'DRS', doctorType: 'Equipment' }),
+      appt({ appointmentDate: isoDaysFromToday(-5), renderingPhysician: 'Eriq Plechot, OD', doctorType: 'OD' }),
+    ]);
+    expect(ctx.lastPhysicianSeen).toBeUndefined();
+    // The OD is still the honest answer to "who did you last see".
+    expect(ctx.lastProviderSeen).toBe('Eriq Plechot, OD');
+  });
+});

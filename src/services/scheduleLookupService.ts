@@ -38,8 +38,8 @@ export interface PatientScheduleContext {
   pastAppointments: AppointmentSummary[];
   lastProviderSeen?: string;
   /**
-   * The last PHYSICIAN the patient saw — `DoctorType = 'MD'`, which covers DOs
-   * (Brett Tompkins, DO is typed MD on the schedule).
+   * The last PHYSICIAN the patient saw — see SURGEON_DOCTOR_TYPES: `MD` (which
+   * covers DOs; Brett Tompkins, DO is typed MD) and `Retina`.
    *
    * Separate from `lastProviderSeen` because the two answer different
    * questions. "Who did you last see?" is legitimately an optometrist. "Who is
@@ -88,14 +88,37 @@ export interface AppointmentSummary {
   appointmentType?: string;
   category?: string;
   /**
-   * `DoctorType` off the schedule row: 'MD' for physicians and surgeons (DOs
-   * included), 'OD' for optometrists, 'Equipment' for diagnostic resources.
+   * `DoctorType` off the schedule row: 'MD' for ophthalmology (DOs included),
+   * 'Retina' for vitreoretinal surgeons, 'OD' for optometrists, and 'Equipment'
+   * for diagnostic resources. See SURGEON_DOCTOR_TYPES.
    *
    * Carried through because `provider` alone cannot tell a surgeon from an
    * A-Scan machine, and two callers of this data need to.
    */
   doctorType?: string;
 }
+
+/**
+ * WHICH DoctorType VALUES ARE SURGEONS.
+ *
+ * The schedule types every appointment, and there are four values, not two.
+ * Measured on 2026-08-18, one day of the book:
+ *
+ *     OD          1,455    optometry
+ *     MD            606    ophthalmology
+ *     Retina        192    vitreoretinal
+ *     Equipment     186    A-Scan, OCT-VF, DRS
+ *
+ * `Retina` is the one that bit us. My first version filtered on `MD` alone, so
+ * every retina surgeon was treated as no physician at all — 8.6% of the book.
+ * Terry Harper and Regino Marchan both have Samira Khan, MD on 2026-09-10 typed
+ * `Retina`, and both tickets filed unrouted because of that filter.
+ *
+ * OD is excluded on purpose: an optometrist is a clinician the patient really
+ * saw, and the honest answer to "who did you last see", but never the surgeon
+ * this queue assigns by. Equipment is not a person.
+ */
+const SURGEON_DOCTOR_TYPES = new Set(['MD', 'Retina']);
 
 function getPacificDate(): Date {
   const now = new Date();
@@ -660,7 +683,7 @@ export class ScheduleLookupService {
      * its first physician is the soonest.
      */
     const isPhysician = (a: AppointmentSummary) =>
-      a.doctorType === 'MD' && a.provider !== 'Unknown';
+      SURGEON_DOCTOR_TYPES.has(a.doctorType ?? '') && a.provider !== 'Unknown';
     const lastPhysicianSeen =
       upcoming.find(isPhysician)?.provider ?? past.find(isPhysician)?.provider;
 
