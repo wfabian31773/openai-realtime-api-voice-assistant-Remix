@@ -230,6 +230,8 @@ registerTool({
     const { detectCrossQueue } = await import('./queueRouting');
     const redirect = detectCrossQueue(description, SURGERY_DEPARTMENT_ID);
     const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
+    /** Only THIS queue routes by surgeon; a redirect changes what may be filed. */
+    const filedOnSurgeryQueue = filedDepartmentId === SURGERY_DEPARTMENT_ID;
     const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
     const filedDescription = redirect
@@ -243,55 +245,91 @@ registerTool({
     }
 
     /**
-     * THE SURGEON IS RESOLVED FROM THE RECORD, NOT FROM THE ARGUMENT LIST.
+     * NEVER FILE THIS TICKET UNASSIGNED IF THE RECORD HAS ANYONE ON IT.
      *
-     * This queue is assigned BY SURGEON. A ticket without one reaches nobody —
-     * it sits on a coordinator with no routing rule and no way to know whether
-     * the question was even asked.
+     * OPERATOR, 2026-08-18: "every ticket that doesn't have a provider ends up
+     * being a manual process that someone has to go through, go into NextGen,
+     * look up, and then assign to someone. Because nobody wants to work a
+     * ticket that's unassigned."
      *
-     * The provider was never coming from the caller. Measured over three days
-     * of transcripts, the agent asked "who is your surgeon" on 2 of 104 calls
-     * (08-13) and 2 of 126 (08-14) — and BOTH those days filed a provider on
-     * essentially every ticket. It came from `lookup_patient`'s `last_provider`,
-     * relayed by the model as `surgeon`. So the field only ever worked while the
-     * model happened to pass along a value it was never told to collect.
+     * That is the rule this ladder encodes, and it is the one I got wrong. On
+     * 08-13 and 08-14 this queue filed 92 and 96 tickets with a provider on
+     * every single one. What produced that was the model relaying
+     * `lookup_patient`'s `last_provider` — a value that INCLUDES optometrists.
+     * I then told it to stop, on the grounds that an optometrist is not a
+     * surgeon. Correct about the medicine, wrong about the operation: a ticket
+     * on the OD who actually saw the patient is workable, and a null is a
+     * NextGen lookup and a manual assign that nobody picks up.
      *
-     * On 08-17 it stopped passing it, and 66 of 74 tickets filed unrouted. The
-     * signature is `surgeryTools.ts` skipping the lookup ENTIRELY when neither
-     * name is supplied — which is why provider and location went null together
-     * on the same tickets (Gail Herrick: provider 51 / location 22 on 08-14,
-     * both NULL on 08-17, same patient, same code).
+     * So both things are true at once, in order of preference:
      *
-     * A field this queue cannot route without must not depend on whether a
-     * model chose to include an optional argument. So: ask the schedule
-     * directly. `lastPhysicianSeen` is the same rule that reproduced the
-     * system's own historical assignments when the 08-17 tickets were
-     * backfilled — Vincent Medina resolved to 49, which is exactly what the
-     * pipeline had assigned him on 08-14.
+     *   1. the surgeon the CALLER named
+     *   2. the physician the record shows — upcoming first, then last seen
+     *      (MD and Retina; see SURGEON_DOCTOR_TYPES)
+     *   3. ANY clinician the patient actually saw, optometrist included
      *
-     * The model's answer still WINS when it has one: a caller who names their
-     * surgeon is better evidence than the last chart entry.
+     * Only when the record holds nobody at all does this file unassigned, and
+     * then it is a fact about the patient rather than a failure of the call.
+     *
+     * Equipment never enters the ladder — `lastProviderSeen` already excludes
+     * it, and "A-Scan" matches no provider anyway, so it would spend an attempt
+     * to arrive back at null.
+     *
+     * THE LADDER RUNS ON THE RESULT, NOT THE ARGUMENT. Each rung is judged by
+     * whether it produced a real `providerId`, so a name the model invented, or
+     * one that matches nobody active, falls through to the next rung instead of
+     * blocking it. That is the defect this replaces: on 2026-08-18 Susan
+     * Warnholtz filed unassigned with David Choi, MD plainly on her chart,
+     * because a non-empty `surgeon` argument skipped the record entirely.
      */
+    const resolveWith = async (providerName?: string) =>
+      cleanLocation || providerName
+        ? await ticketingApiClient.lookupProviderAndLocation({
+            ...(cleanLocation ? { locationName: cleanLocation } : {}),
+            ...(providerName ? { providerName } : {}),
+          })
+        : { locationId: undefined, providerId: undefined, locationMatches: [] };
+
+    /**
+     * THE LADDER RUNS ON A BUDGET, BECAUSE FILING BEATS ROUTING.
+     *
+     * Each `/lookup` is bounded at 15s and this whole tool at 30s, and `runTool`
+     * RACES the handler rather than cancelling it. So three slow rungs would
+     * hand the agent a retryable timeout while this handler kept going and
+     * created the ticket anyway — a ticket number the caller never hears, or a
+     * duplicate when the agent retries. This queue has been bitten by duplicate
+     * filings before; an unassigned ticket is a manual step, a duplicate is two.
+     *
+     * So the rungs stop when the budget is spent, leaving the rest of the tool's
+     * 30s for the create that actually files the request. Found in review,
+     * 2026-08-18.
+     */
+    const RESOLVE_BUDGET_MS = 10_000;
+    const resolveStartedAt = Date.now();
+    const budgetLeft = () => Date.now() - resolveStartedAt < RESOLVE_BUDGET_MS;
+
     let surgeonName = cleanSurgeon;
-    let surgeonFromRecord = false;
-    if (!surgeonName && !redirect) {
+    let surgeonSource: 'caller' | 'patient_record' | 'last_clinician' | 'none' =
+      cleanSurgeon ? 'caller' : 'none';
+    let lookup = await resolveWith(surgeonName || undefined);
+
+    // Walk the patient's own record only while the ticket is still unrouted,
+    // and never on a request being redirected to a queue that does not route
+    // by surgeon.
+    if (!lookup.providerId && !redirect && budgetLeft()) {
       try {
         const { scheduleLookupService } = await import('../services/scheduleLookupService');
         /**
          * NAME AND DATE OF BIRTH, EXACTLY — never the phone fallback.
          *
          * `lookupPatient` tries name+DOB, then PHONE, then name alone. That
-         * chain is right for an agent trying to recognise a caller and wrong
-         * here. This code runs precisely BECAUSE something did not resolve, and
-         * the commonest reason is a mis-heard date of birth; the phone step
-         * would then match whoever else that number belongs to — a spouse, an
-         * adult child, the previous owner of a reassigned mobile — and
-         * `identity.unique` would be true, because it only describes the phone
-         * result. We would attach that person's surgeon and route the ticket to
-         * them. A confidently wrong surgeon is worse than a null one: the null
-         * shows up as unassigned, the wrong one looks handled.
-         *
-         * So: the exact lookup only. Found in review, 2026-08-18.
+         * chain is right for an agent recognising a caller and wrong here. This
+         * runs precisely BECAUSE something did not resolve, and the commonest
+         * reason is a mis-heard date of birth; the phone step would then match
+         * whoever else that number belongs to — a spouse, an adult child, the
+         * previous owner of a reassigned mobile — and `identity.unique` would
+         * still be true, because it only describes the phone result. We would
+         * attach that person's clinician. Found in review, 2026-08-18.
          */
         const ctx = await scheduleLookupService.lookupByNameAndDOB(
           first,
@@ -299,27 +337,34 @@ registerTool({
           `${parts.year}-${parts.month}-${parts.day}`,
           { logIdentifiers: false },
         );
-        // And only when it resolved to ONE person — a name and date of birth
-        // can still carry twins or a junior.
-        if (ctx.patientFound && ctx.identity?.unique !== false && ctx.lastPhysicianSeen) {
-          surgeonName = sanitizeProviderName(ctx.lastPhysicianSeen).value;
-          surgeonFromRecord = true;
-          console.info('[surgery] surgeon resolved from the patient record');
+        if (ctx.patientFound && ctx.identity?.unique !== false) {
+          const rungs: Array<['patient_record' | 'last_clinician', string | undefined]> = [
+            ['patient_record', ctx.lastPhysicianSeen],
+            ['last_clinician', ctx.lastProviderSeen],
+          ];
+          for (const [source, candidate] of rungs) {
+            if (!budgetLeft()) {
+              console.warn('[surgery] provider ladder stopped — resolve budget spent');
+              break;
+            }
+            const name = sanitizeProviderName(candidate ?? '').value;
+            if (!name || name === surgeonName) continue;
+            const attempt = await resolveWith(name);
+            if (attempt.providerId) {
+              lookup = attempt;
+              surgeonName = name;
+              surgeonSource = source;
+              console.info(`[surgery] provider resolved from the patient record (${source})`);
+              break;
+            }
+          }
         }
       } catch (error) {
-        // Never let this stop a ticket. A missing surgeon is a routing problem;
+        // Never let this stop a ticket. An unassigned ticket is a manual step;
         // a lost request is a patient problem.
-        console.warn('[surgery] surgeon lookup from schedule failed:', error);
+        console.warn('[surgery] provider lookup from schedule failed:', error);
       }
     }
-
-    const lookup =
-      cleanLocation || surgeonName
-        ? await ticketingApiClient.lookupProviderAndLocation({
-            ...(cleanLocation ? { locationName: cleanLocation } : {}),
-            ...(surgeonName ? { providerName: surgeonName } : {}),
-          })
-        : { locationId: undefined, providerId: undefined, locationMatches: [] };
 
     /**
      * A LOOKUP THAT FAILS MUST NOT FAIL SILENTLY.
@@ -399,12 +444,8 @@ registerTool({
        * no part in that request. The note below was already gated; the fields
        * themselves were not. Found in review, 2026-08-18.
        */
-      ...(filedDepartmentId === SURGERY_DEPARTMENT_ID && lookup.providerId
-        ? { providerId: lookup.providerId }
-        : {}),
-      ...(filedDepartmentId === SURGERY_DEPARTMENT_ID && surgeonName
-        ? { lastProviderSeen: surgeonName }
-        : {}),
+      ...(filedOnSurgeryQueue && lookup.providerId ? { providerId: lookup.providerId } : {}),
+      ...(filedOnSurgeryQueue && surgeonName ? { lastProviderSeen: surgeonName } : {}),
       description: filedDescription,
       priority,
       callData: { agentUsed: 'surgery', ...(callSid ? { callSid } : {}) },
@@ -433,10 +474,18 @@ registerTool({
       request_reason_id: filedReasonId,
       priority,
       location_id: lookup.locationId ?? null,
-      provider_id: lookup.providerId ?? null,
+      /**
+       * REPORT WHAT WAS FILED, not what resolved.
+       *
+       * A redirected ticket deliberately carries no surgeon (the receiving queue
+       * does not route by one), but the result used to report the provider that
+       * had resolved anyway — so timelines and replays would show a redirected
+       * ticket as assigned to a surgeon it never carried. Review, 2026-08-18.
+       */
+      provider_id: filedOnSurgeryQueue ? lookup.providerId ?? null : null,
       // Where the surgeon came from, so a replay can tell "the caller named
       // them" apart from "we read it off the chart" without guessing.
-      surgeon_source: surgeonName ? (surgeonFromRecord ? 'patient_record' : 'caller') : 'none',
+      surgeon_source: filedOnSurgeryQueue ? surgeonSource : 'none',
       // Say the number back. Callers ask for it, and staff quote it.
       ...(redirect
         ? { routed_to: redirect.departmentName, routed_department_id: redirect.departmentId }

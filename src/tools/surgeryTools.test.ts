@@ -366,6 +366,88 @@ describe('a surgery ticket without a surgeon', () => {
     expect(create.mock.calls[0][0].lastProviderSeen).toBeUndefined();
   });
 
+  /**
+   * OPERATOR, 2026-08-18: "every ticket that doesn't have a provider ends up
+   * being a manual process ... nobody wants to work a ticket that's unassigned."
+   *
+   * 08-13 and 08-14 filed 92 and 96 tickets with a provider on every one, and
+   * what produced that was the model relaying `last_provider` — optometrists
+   * included. Preferring the surgeon is right; preferring a NULL over the
+   * optometrist who actually saw the patient is not.
+   */
+  it('falls back to the last clinician when the record shows no physician', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-OD' } as never);
+    // With no location and no caller-named surgeon, the first resolve
+    // short-circuits without touching the API — only the clinician rung calls it.
+    const lookup = vi
+      .spyOn(api, 'lookupProviderAndLocation')
+      .mockResolvedValue({ success: true, providerId: 45 } as never);
+
+    const sched = await import('../services/scheduleLookupService');
+    vi.spyOn(sched.scheduleLookupService, 'lookupByNameAndDOB').mockResolvedValueOnce({
+      patientFound: true,
+      identity: { unique: true },
+      lastPhysicianSeen: undefined,
+      lastProviderSeen: 'Todd Mishima, OD',
+      upcomingAppointments: [],
+      pastAppointments: [],
+      totalAppointmentsFound: 2,
+    } as never);
+
+    const out = (await runTool('file_surgery_ticket', {
+      ...BASE,
+      request_description: 'Question about my drops',
+    })) as Record<string, unknown>;
+
+    const lastCall = lookup.mock.calls[lookup.mock.calls.length - 1];
+    expect(lastCall[0].providerName).toMatch(/Todd Mishima/);
+    expect(create.mock.calls[0][0].providerId).toBe(45);
+    expect(out.surgeon_source).toBe('last_clinician');
+  });
+
+  /**
+   * THE LADDER IS JUDGED ON THE RESULT, NOT THE ARGUMENT.
+   *
+   * Susan Warnholtz, 2026-08-18: filed unassigned with David Choi, MD plainly
+   * on her chart. A non-empty `surgeon` argument skipped the record entirely,
+   * so a name that matched nobody active blocked the rung that would have
+   * worked. A name is not a route; a providerId is.
+   */
+  it('a caller-named surgeon that resolves to nobody does not block the record', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-FALLTHRU' } as never);
+    const lookup = vi
+      .spyOn(api, 'lookupProviderAndLocation')
+      .mockResolvedValueOnce({ success: true } as never)               // the caller's name: nobody
+      .mockResolvedValueOnce({ success: true, providerId: 22 } as never); // the chart: David Choi
+
+    const sched = await import('../services/scheduleLookupService');
+    vi.spyOn(sched.scheduleLookupService, 'lookupByNameAndDOB').mockResolvedValueOnce({
+      patientFound: true,
+      identity: { unique: true },
+      lastPhysicianSeen: 'David Choi, MD',
+      lastProviderSeen: 'A-Scan-free clinician',
+      upcomingAppointments: [],
+      pastAppointments: [],
+      totalAppointmentsFound: 8,
+    } as never);
+
+    const out = (await runTool('file_surgery_ticket', {
+      ...BASE,
+      surgeon: 'somebody who does not work here',
+      request_description: 'Question about my drops before the procedure',
+    })) as Record<string, unknown>;
+
+    expect(create.mock.calls[0][0].providerId).toBe(22);
+    expect(out.surgeon_source).toBe('patient_record');
+    void lookup;
+  });
+
   it('a surgeon the CALLER names beats the chart', async () => {
     const api = await client();
     vi.spyOn(api, 'createTicket').mockResolvedValueOnce({
@@ -453,4 +535,48 @@ describe('a surgery ticket without a surgeon', () => {
     }
     void lookup;
   });
+});
+
+describe('the ladder cannot outrun the tool it lives in', () => {
+  /**
+   * Each /lookup is bounded at 15s and this tool at 30s, and runTool RACES the
+   * handler rather than cancelling it. Three slow rungs would hand the agent a
+   * retryable timeout while the handler kept going and filed anyway — a ticket
+   * number nobody hears, or a duplicate on retry. Review, 2026-08-18.
+   */
+  it('stops walking the record once the resolve budget is spent', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-BUDGET' } as never);
+    // Every lookup burns 6s and resolves nobody.
+    const lookup = vi.spyOn(api, 'lookupProviderAndLocation').mockImplementation(
+      (async () => {
+        await new Promise((r) => setTimeout(r, 6000));
+        return { success: true } as never;
+      }) as never,
+    );
+
+    const sched = await import('../services/scheduleLookupService');
+    vi.spyOn(sched.scheduleLookupService, 'lookupByNameAndDOB').mockResolvedValueOnce({
+      patientFound: true,
+      identity: { unique: true },
+      lastPhysicianSeen: 'David Choi, MD',
+      lastProviderSeen: 'Todd Mishima, OD',
+      upcomingAppointments: [],
+      pastAppointments: [],
+      totalAppointmentsFound: 4,
+    } as never);
+
+    await runTool('file_surgery_ticket', {
+      ...BASE,
+      surgeon: 'nobody at all',
+      request_description: 'Question about my drops before the procedure',
+    });
+
+    // Caller rung + one record rung, then the budget stops it — never all three.
+    expect(lookup.mock.calls.length).toBeLessThan(3);
+    // And the ticket still files.
+    expect(create).toHaveBeenCalledOnce();
+  }, 30000);
 });
