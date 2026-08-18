@@ -642,9 +642,27 @@ export class ScheduleLookupService {
     /**
      * The surgeon, for the queue that is assigned by surgeon. 'MD' covers DOs.
      */
-    const lastPhysicianSeen = past.find(
-      (a) => a.doctorType === 'MD' && a.provider !== 'Unknown',
-    )?.provider;
+    /**
+     * THE SURGEON IS USUALLY IN THE FUTURE, NOT THE PAST.
+     *
+     * A caller on the surgery line is typically PRE-operative: the operation is
+     * booked, it has not happened, and the physician who will do it appears
+     * only on an UPCOMING appointment. Looking backwards finds an optometrist,
+     * an A-Scan, or — for someone whose first ever visit is the surgery —
+     * nothing at all.
+     *
+     * Gail Herrick, 2026-08-17, is the whole case: no past appointments of any
+     * kind, one upcoming Laser with Samuel Asanad, MD. A past-only rule returns
+     * undefined and her ticket files unrouted, which is exactly what happened.
+     *
+     * So: the next physician they are BOOKED with, else the last physician they
+     * actually saw. `upcoming` is already Active-only and sorted ascending, so
+     * its first physician is the soonest.
+     */
+    const isPhysician = (a: AppointmentSummary) =>
+      a.doctorType === 'MD' && a.provider !== 'Unknown';
+    const lastPhysicianSeen =
+      upcoming.find(isPhysician)?.provider ?? past.find(isPhysician)?.provider;
 
     const lastLocationSeen = past[0]?.location !== 'Unknown' ? past[0]?.location : undefined;
 
