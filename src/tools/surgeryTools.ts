@@ -230,6 +230,8 @@ registerTool({
     const { detectCrossQueue } = await import('./queueRouting');
     const redirect = detectCrossQueue(description, SURGERY_DEPARTMENT_ID);
     const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
+    /** Only THIS queue routes by surgeon; a redirect changes what may be filed. */
+    const filedOnSurgeryQueue = filedDepartmentId === SURGERY_DEPARTMENT_ID;
     const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
     const filedDescription = redirect
@@ -288,6 +290,24 @@ registerTool({
           })
         : { locationId: undefined, providerId: undefined, locationMatches: [] };
 
+    /**
+     * THE LADDER RUNS ON A BUDGET, BECAUSE FILING BEATS ROUTING.
+     *
+     * Each `/lookup` is bounded at 15s and this whole tool at 30s, and `runTool`
+     * RACES the handler rather than cancelling it. So three slow rungs would
+     * hand the agent a retryable timeout while this handler kept going and
+     * created the ticket anyway — a ticket number the caller never hears, or a
+     * duplicate when the agent retries. This queue has been bitten by duplicate
+     * filings before; an unassigned ticket is a manual step, a duplicate is two.
+     *
+     * So the rungs stop when the budget is spent, leaving the rest of the tool's
+     * 30s for the create that actually files the request. Found in review,
+     * 2026-08-18.
+     */
+    const RESOLVE_BUDGET_MS = 10_000;
+    const resolveStartedAt = Date.now();
+    const budgetLeft = () => Date.now() - resolveStartedAt < RESOLVE_BUDGET_MS;
+
     let surgeonName = cleanSurgeon;
     let surgeonSource: 'caller' | 'patient_record' | 'last_clinician' | 'none' =
       cleanSurgeon ? 'caller' : 'none';
@@ -296,7 +316,7 @@ registerTool({
     // Walk the patient's own record only while the ticket is still unrouted,
     // and never on a request being redirected to a queue that does not route
     // by surgeon.
-    if (!lookup.providerId && !redirect) {
+    if (!lookup.providerId && !redirect && budgetLeft()) {
       try {
         const { scheduleLookupService } = await import('../services/scheduleLookupService');
         /**
@@ -323,6 +343,10 @@ registerTool({
             ['last_clinician', ctx.lastProviderSeen],
           ];
           for (const [source, candidate] of rungs) {
+            if (!budgetLeft()) {
+              console.warn('[surgery] provider ladder stopped — resolve budget spent');
+              break;
+            }
             const name = sanitizeProviderName(candidate ?? '').value;
             if (!name || name === surgeonName) continue;
             const attempt = await resolveWith(name);
@@ -420,12 +444,8 @@ registerTool({
        * no part in that request. The note below was already gated; the fields
        * themselves were not. Found in review, 2026-08-18.
        */
-      ...(filedDepartmentId === SURGERY_DEPARTMENT_ID && lookup.providerId
-        ? { providerId: lookup.providerId }
-        : {}),
-      ...(filedDepartmentId === SURGERY_DEPARTMENT_ID && surgeonName
-        ? { lastProviderSeen: surgeonName }
-        : {}),
+      ...(filedOnSurgeryQueue && lookup.providerId ? { providerId: lookup.providerId } : {}),
+      ...(filedOnSurgeryQueue && surgeonName ? { lastProviderSeen: surgeonName } : {}),
       description: filedDescription,
       priority,
       callData: { agentUsed: 'surgery', ...(callSid ? { callSid } : {}) },
@@ -454,10 +474,18 @@ registerTool({
       request_reason_id: filedReasonId,
       priority,
       location_id: lookup.locationId ?? null,
-      provider_id: lookup.providerId ?? null,
+      /**
+       * REPORT WHAT WAS FILED, not what resolved.
+       *
+       * A redirected ticket deliberately carries no surgeon (the receiving queue
+       * does not route by one), but the result used to report the provider that
+       * had resolved anyway — so timelines and replays would show a redirected
+       * ticket as assigned to a surgeon it never carried. Review, 2026-08-18.
+       */
+      provider_id: filedOnSurgeryQueue ? lookup.providerId ?? null : null,
       // Where the surgeon came from, so a replay can tell "the caller named
       // them" apart from "we read it off the chart" without guessing.
-      surgeon_source: surgeonSource,
+      surgeon_source: filedOnSurgeryQueue ? surgeonSource : 'none',
       // Say the number back. Callers ask for it, and staff quote it.
       ...(redirect
         ? { routed_to: redirect.departmentName, routed_department_id: redirect.departmentId }

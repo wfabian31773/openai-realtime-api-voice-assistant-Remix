@@ -536,3 +536,47 @@ describe('a surgery ticket without a surgeon', () => {
     void lookup;
   });
 });
+
+describe('the ladder cannot outrun the tool it lives in', () => {
+  /**
+   * Each /lookup is bounded at 15s and this tool at 30s, and runTool RACES the
+   * handler rather than cancelling it. Three slow rungs would hand the agent a
+   * retryable timeout while the handler kept going and filed anyway — a ticket
+   * number nobody hears, or a duplicate on retry. Review, 2026-08-18.
+   */
+  it('stops walking the record once the resolve budget is spent', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-BUDGET' } as never);
+    // Every lookup burns 6s and resolves nobody.
+    const lookup = vi.spyOn(api, 'lookupProviderAndLocation').mockImplementation(
+      (async () => {
+        await new Promise((r) => setTimeout(r, 6000));
+        return { success: true } as never;
+      }) as never,
+    );
+
+    const sched = await import('../services/scheduleLookupService');
+    vi.spyOn(sched.scheduleLookupService, 'lookupByNameAndDOB').mockResolvedValueOnce({
+      patientFound: true,
+      identity: { unique: true },
+      lastPhysicianSeen: 'David Choi, MD',
+      lastProviderSeen: 'Todd Mishima, OD',
+      upcomingAppointments: [],
+      pastAppointments: [],
+      totalAppointmentsFound: 4,
+    } as never);
+
+    await runTool('file_surgery_ticket', {
+      ...BASE,
+      surgeon: 'nobody at all',
+      request_description: 'Question about my drops before the procedure',
+    });
+
+    // Caller rung + one record rung, then the budget stops it — never all three.
+    expect(lookup.mock.calls.length).toBeLessThan(3);
+    // And the ticket still files.
+    expect(create).toHaveBeenCalledOnce();
+  }, 30000);
+});
