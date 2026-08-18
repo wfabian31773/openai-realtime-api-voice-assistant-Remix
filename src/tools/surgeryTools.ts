@@ -200,6 +200,48 @@ registerTool({
     // tickets and only 3 of the 50 unassigned in 60 days were missing one.
     // Blocking a caller who cannot name their surgery centre would cost real
     // calls to prevent a failure this queue does not have.
+
+    // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
+    //
+    // Not submit-ticket, ever. VA-50811 was filed by the OPTICAL agent through
+    // that fallback, its description said "a question about my account that
+    // fits no optical category", and it landed in department 8 — After Hours
+    // Call Service — with assigned_to_id NULL. submit-ticket re-derives the
+    // DEPARTMENT, not just the reason, and defaults to 8 when it cannot.
+    //
+    // create-ticket REQUIRES the (departmentId, requestTypeId, requestReasonId)
+    // triple: measured twice on 2026-08-12, requestTypeId 0 is rejected and
+    // omitting the fields is rejected identically. That used to mean an
+    // unclassifiable request had to borrow a reason from a procedure it was not
+    // about. It no longer does — request type 65, "Surgery Logistics", was
+    // added to department 2 with the six measured reasons and a catch-all, so
+    // `cls` is always a reason this request genuinely earned.
+    // A CALLER WHO PRESSED THE WRONG OPTION IS NOT SENT AWAY.
+    //
+    // Operator ruling 2026-08-13: these queues are forwarded, so a patient who
+    // pressed the medication option with an optical question must not be told
+    // to call back and dial again. If the words clearly belong to another
+    // department, the ticket is filed THERE, and the receiving team is told how
+    // it arrived. Scheduling goes to the HVA Hub from every queue.
+    //
+    // The detector stays silent unless the misroute is obvious — the line that
+    // rang is better evidence than a keyword, and a redirect on a guess would
+    // be worse than none.
+    const { detectCrossQueue } = await import('./queueRouting');
+    const redirect = detectCrossQueue(description, SURGERY_DEPARTMENT_ID);
+    const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
+    const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
+    const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
+    const filedDescription = redirect
+      ? `${redirect.note}\n\n${cleanDescription.value}`
+      : cleanDescription.value;
+    if (redirect) {
+      console.info(
+        `[surgery] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
+          `${redirect.requestReason}`,
+      );
+    }
+
     /**
      * THE SURGEON IS RESOLVED FROM THE RECORD, NOT FROM THE ARGUMENT LIST.
      *
@@ -232,18 +274,33 @@ registerTool({
      */
     let surgeonName = cleanSurgeon;
     let surgeonFromRecord = false;
-    if (!surgeonName) {
+    if (!surgeonName && !redirect) {
       try {
         const { scheduleLookupService } = await import('../services/scheduleLookupService');
-        const ctx = await scheduleLookupService.lookupPatient({
-          firstName: first,
-          lastName: last,
-          dateOfBirth: `${parts.year}-${parts.month}-${parts.day}`,
-          ...(phone ? { phone } : {}),
-        });
-        // Only when the lookup resolved to ONE person. `identity.unique` is
-        // false when a name or phone carries more than one patient, and
-        // attaching a stranger's surgeon to this ticket is worse than none.
+        /**
+         * NAME AND DATE OF BIRTH, EXACTLY — never the phone fallback.
+         *
+         * `lookupPatient` tries name+DOB, then PHONE, then name alone. That
+         * chain is right for an agent trying to recognise a caller and wrong
+         * here. This code runs precisely BECAUSE something did not resolve, and
+         * the commonest reason is a mis-heard date of birth; the phone step
+         * would then match whoever else that number belongs to — a spouse, an
+         * adult child, the previous owner of a reassigned mobile — and
+         * `identity.unique` would be true, because it only describes the phone
+         * result. We would attach that person's surgeon and route the ticket to
+         * them. A confidently wrong surgeon is worse than a null one: the null
+         * shows up as unassigned, the wrong one looks handled.
+         *
+         * So: the exact lookup only. Found in review, 2026-08-18.
+         */
+        const ctx = await scheduleLookupService.lookupByNameAndDOB(
+          first,
+          last,
+          `${parts.year}-${parts.month}-${parts.day}`,
+          { logIdentifiers: false },
+        );
+        // And only when it resolved to ONE person — a name and date of birth
+        // can still carry twins or a junior.
         if (ctx.patientFound && ctx.identity?.unique !== false && ctx.lastPhysicianSeen) {
           surgeonName = sanitizeProviderName(ctx.lastPhysicianSeen).value;
           surgeonFromRecord = true;
@@ -298,79 +355,27 @@ registerTool({
     const postOpSymptom = !urgent && isSurgeryPostOpSymptom(description);
     const priority = urgent ? 'urgent' : postOpSymptom ? 'high' : 'medium';
 
-    // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
-    //
-    // Not submit-ticket, ever. VA-50811 was filed by the OPTICAL agent through
-    // that fallback, its description said "a question about my account that
-    // fits no optical category", and it landed in department 8 — After Hours
-    // Call Service — with assigned_to_id NULL. submit-ticket re-derives the
-    // DEPARTMENT, not just the reason, and defaults to 8 when it cannot.
-    //
-    // create-ticket REQUIRES the (departmentId, requestTypeId, requestReasonId)
-    // triple: measured twice on 2026-08-12, requestTypeId 0 is rejected and
-    // omitting the fields is rejected identically. That used to mean an
-    // unclassifiable request had to borrow a reason from a procedure it was not
-    // about. It no longer does — request type 65, "Surgery Logistics", was
-    // added to department 2 with the six measured reasons and a catch-all, so
-    // `cls` is always a reason this request genuinely earned.
-    // A CALLER WHO PRESSED THE WRONG OPTION IS NOT SENT AWAY.
-    //
-    // Operator ruling 2026-08-13: these queues are forwarded, so a patient who
-    // pressed the medication option with an optical question must not be told
-    // to call back and dial again. If the words clearly belong to another
-    // department, the ticket is filed THERE, and the receiving team is told how
-    // it arrived. Scheduling goes to the HVA Hub from every queue.
-    //
-    // The detector stays silent unless the misroute is obvious — the line that
-    // rang is better evidence than a keyword, and a redirect on a guess would
-    // be worse than none.
-    const { detectCrossQueue } = await import('./queueRouting');
-    const redirect = detectCrossQueue(description, SURGERY_DEPARTMENT_ID);
-    const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
-    const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
-    const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
-    const filedDescription = redirect
-      ? `${redirect.note}\n\n${cleanDescription.value}`
-      : cleanDescription.value;
-    if (redirect) {
-      console.info(
-        `[surgery] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
-          `${redirect.requestReason}`,
-      );
-    }
-
     /**
-     * SAY SO WHEN THERE IS NO SURGEON ON IT — on the SURGERY queue only.
+     * THE UNROUTED TICKET SAYS NOTHING TO THE PATIENT.
      *
-     * A ticket without a surgeon lands on a coordinator with no way to route it
-     * and no way to know whether it was asked for. 66 of 74 filed that way on
-     * 2026-08-17.
+     * There was an annotation here — "NO SURGEON ON THIS TICKET ... please
+     * assign one before working it" — appended to `description`. Three lines
+     * above, this file documents what `description` is: "Free text we send
+     * becomes the body of a patient-facing SMS on the other side."
      *
-     * Two things this deliberately gets right, both found in review:
+     * So every unrouted ticket texted a patient an internal routing
+     * instruction, and told them their record shows no physician. Written by me,
+     * caught in review 2026-08-18, never shipped.
      *
-     *   1. GATED ON THE FILED DEPARTMENT. `detectCrossQueue` can send this call
-     *      to Optical or the HVA Hub, and those queues do NOT route by surgeon.
-     *      Telling department 9 that "this queue routes by surgeon" is a false
-     *      statement about someone else's process, printed on their ticket.
-     *   2. SANITISED AFTER COMPOSING. `sanitizeForSms` ran on the caller's words
-     *      further up, and appending to its output re-introduces the very
-     *      characters it removed — one em dash turns a 160-char GSM-7 segment
-     *      into a 70-char UCS-2 one and raises carrier-filtering exposure. The
-     *      note is written in plain ASCII and the composed string is sanitised
-     *      again, so neither half can smuggle Unicode back in.
+     * There is nowhere else to put it. `CreateTicketParams` carries no
+     * staff-only field — `unresolvedInfo` belongs to a different tool
+     * (createTicketTool) and never reaches this payload. So the note is gone,
+     * and the signal a coordinator actually works from is the one that was
+     * always there: `provider_id` is null, and the ticket shows as unassigned.
+     * The failure is also logged at error, above.
+     *
+     * A staff-notes field is the second ask in the ticketing change request.
      */
-    const needsSurgeonNote =
-      filedDepartmentId === SURGERY_DEPARTMENT_ID && !lookup.providerId;
-    const unroutedNote = needsSurgeonNote
-      ? sanitizeForSms(
-          `${filedDescription}\n\nNO SURGEON ON THIS TICKET - ${
-            surgeonName
-              ? `"${surgeonName}" did not match an active provider`
-              : 'the caller did not name one and the patient record shows no physician'
-          }. This queue routes by surgeon, so please assign one before working it.`,
-        ).value
-      : filedDescription;
-
     const res = await ticketingApiClient.createTicket({
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
@@ -385,9 +390,22 @@ registerTool({
       patientBirthYear: parts.year,
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
-      ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
-      lastProviderSeen: surgeonName || undefined,
-      description: unroutedNote,
+      /**
+       * THE SURGEON GOES ONLY ON A SURGERY TICKET.
+       *
+       * `detectCrossQueue` can file this call into Optical or the HVA Hub, and
+       * those queues do not route by surgeon. Attaching the patient's operating
+       * physician to a department-9 scheduling ticket assigns it to someone with
+       * no part in that request. The note below was already gated; the fields
+       * themselves were not. Found in review, 2026-08-18.
+       */
+      ...(filedDepartmentId === SURGERY_DEPARTMENT_ID && lookup.providerId
+        ? { providerId: lookup.providerId }
+        : {}),
+      ...(filedDepartmentId === SURGERY_DEPARTMENT_ID && surgeonName
+        ? { lastProviderSeen: surgeonName }
+        : {}),
+      description: filedDescription,
       priority,
       callData: { agentUsed: 'surgery', ...(callSid ? { callSid } : {}) },
     });

@@ -264,39 +264,31 @@ describe('what it refuses, and what it does not', () => {
   });
 });
 
-describe('a surgery ticket with no surgeon says so', () => {
+describe('a surgery ticket without a surgeon', () => {
   /**
-   * This queue is ASSIGNED BY SURGEON — a ticket without one reaches nobody.
+   * NOTHING INTERNAL REACHES THE PATIENT.
    *
-   * On 2026-08-17, 66 of 74 filed unrouted. The cause was NOT that the agent
-   * stopped asking: transcripts show it asked on 2 of 104 calls (08-13) and 2
-   * of 126 (08-14), both days that filed a provider on essentially every
-   * ticket. The value came from `lookup_patient`'s `last_provider`, relayed by
-   * the model as an OPTIONAL argument it was never told to collect. When the
-   * model stopped relaying it, `file_surgery_ticket` skipped the provider
-   * lookup entirely — which is why provider and location went null on the SAME
-   * tickets (Gail Herrick: 51/22 on 08-14, both null on 08-17).
-   *
-   * The fix is that the surgeon no longer depends on the argument list; see
-   * `resolves the surgeon from the patient record` below.
+   * `description` becomes the body of a patient-facing SMS — this file says so
+   * three lines above the sanitiser. An earlier version of this fix appended
+   * "NO SURGEON ON THIS TICKET ... please assign one before working it", which
+   * texted a patient an internal routing instruction and told them their record
+   * shows no physician. Caught in review before it shipped.
    */
-  it('annotates the description when nothing resolved', async () => {
+  it('sends the caller\'s words and nothing else when no surgeon resolved', async () => {
     const api = await client();
     const create = vi
       .spyOn(api, 'createTicket')
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-NOSURG' } as never);
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({ success: true } as never);
 
     await runTool('file_surgery_ticket', { ...BASE, request_description: 'Question about my drops' });
 
-    const sent = create.mock.calls[0][0];
-    expect(sent.description).toMatch(/NO SURGEON ON THIS TICKET/);
-    expect(sent.description).toMatch(/routes by surgeon/i);
-    // Says WHY it is missing, so nobody reads the blank as an unasked question.
-    expect(sent.description).toMatch(/patient record shows no physician/);
-    // The caller's own words survive in front of it.
-    expect(sent.description).toMatch(/^Question about my drops/);
+    const sent = create.mock.calls[0][0] as { description: string; providerId?: number };
+    expect(sent.description).toBe('Question about my drops');
+    expect(sent.description).not.toMatch(/NO SURGEON|assign one|routes by surgeon|no physician/i);
+    // The signal a coordinator works from is the empty field, not prose.
+    expect(sent.providerId).toBeUndefined();
   });
-
   it('says nothing extra when a surgeon IS on it', async () => {
     const api = await client();
     const create = vi
@@ -315,36 +307,6 @@ describe('a surgery ticket with no surgeon says so', () => {
 
     expect(create.mock.calls[0][0].description).not.toMatch(/NO SURGEON ON THIS TICKET/);
   });
-
-  it('a NAME that resolves to nobody is still called out — a name is not a route', async () => {
-    /**
-     * The annotation asks "will a coordinator be able to route this?", not
-     * "did anyone say a name?". `lastProviderSeen` free text does not assign a
-     * ticket; `provider_id` does. A name that matched no active provider is
-     * exactly as unrouted as no name at all, and saying otherwise on the
-     * ticket would hide it.
-     */
-    const api = await client();
-    const create = vi
-      .spyOn(api, 'createTicket')
-      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-UNRES' } as never);
-    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({ success: true } as never);
-
-    await runTool('file_surgery_ticket', {
-      ...BASE,
-      surgeon: 'Nobody At All',
-      request_description: 'Question about my drops',
-    });
-
-    expect(create.mock.calls[0][0].description).toMatch(/NO SURGEON ON THIS TICKET/);
-    expect(create.mock.calls[0][0].description).toMatch(/did not match an active provider/);
-  });
-
-  /**
-   * THE REGRESSION TEST. The provider must not depend on whether the model
-   * chose to pass an optional argument — that dependency is what filed 66
-   * unrouted tickets in one day.
-   */
   it('resolves the surgeon from the patient record when the model passes none', async () => {
     const api = await client();
     const create = vi
@@ -355,7 +317,7 @@ describe('a surgery ticket with no surgeon says so', () => {
       .mockResolvedValueOnce({ success: true, providerId: 49 } as never);
 
     const sched = await import('../services/scheduleLookupService');
-    vi.spyOn(sched.scheduleLookupService, 'lookupPatient').mockResolvedValueOnce({
+    vi.spyOn(sched.scheduleLookupService, 'lookupByNameAndDOB').mockResolvedValueOnce({
       patientFound: true,
       identity: { unique: true },
       lastProviderSeen: 'A-Scan',
@@ -385,7 +347,7 @@ describe('a surgery ticket with no surgeon says so', () => {
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-AMBIG' } as never);
 
     const sched = await import('../services/scheduleLookupService');
-    vi.spyOn(sched.scheduleLookupService, 'lookupPatient').mockResolvedValueOnce({
+    vi.spyOn(sched.scheduleLookupService, 'lookupByNameAndDOB').mockResolvedValueOnce({
       patientFound: true,
       identity: { unique: false, candidateCount: 2 },
       lastPhysicianSeen: 'Dwayne Logan, MD',
@@ -415,7 +377,7 @@ describe('a surgery ticket with no surgeon says so', () => {
       providerId: 49,
     } as never);
     const sched = await import('../services/scheduleLookupService');
-    const spy = vi.spyOn(sched.scheduleLookupService, 'lookupPatient');
+    const spy = vi.spyOn(sched.scheduleLookupService, 'lookupByNameAndDOB');
 
     const out = (await runTool('file_surgery_ticket', {
       ...BASE,
@@ -458,56 +420,37 @@ describe('a surgery ticket with no surgeon says so', () => {
     // And still never with an unbounded hold.
     expect(src).toMatch(/do NOT hold the call hostage over/i);
   });
-
   /**
-   * A REDIRECTED TICKET MUST NOT LECTURE ANOTHER DEPARTMENT ABOUT SURGEONS.
+   * A REDIRECTED TICKET CARRIES NO SURGEON — NOT THE NOTE, NOT THE FIELDS.
    *
-   * detectCrossQueue can file this call into Optical or the HVA Hub. Those
-   * queues do not route by surgeon, and printing "this queue routes by surgeon"
-   * on their ticket is a false statement about their process. Found in the same
-   * review.
+   * detectCrossQueue can file this call into Optical or the HVA Hub, and those
+   * queues do not route by surgeon. The note was gated on the department; the
+   * providerId and lastProviderSeen fields were not, so a redirected ticket
+   * could still be assigned to the patient's operating physician. Review, 08-18.
    */
-  it('does not append the surgeon note to a ticket redirected off this queue', async () => {
+  it('a redirected ticket carries no surgeon fields', async () => {
     const api = await client();
     const create = vi
       .spyOn(api, 'createTicket')
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-XQ' } as never);
-    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({ success: true } as never);
+    const lookup = vi
+      .spyOn(api, 'lookupProviderAndLocation')
+      .mockResolvedValue({ success: true, providerId: 49 } as never);
 
     await runTool('file_surgery_ticket', {
       ...BASE,
+      surgeon: 'Logan',
       request_description: 'I need to schedule a routine eye exam for my son, he is a new patient',
     });
 
-    const sent = create.mock.calls[0][0];
+    const sent = create.mock.calls[0][0] as {
+      departmentId: number; providerId?: number; lastProviderSeen?: string; description: string;
+    };
     if (sent.departmentId !== 2) {
-      expect(sent.description, 'another queue was told it routes by surgeon').not.toMatch(
-        /NO SURGEON ON THIS TICKET/,
-      );
+      expect(sent.providerId, 'a surgeon was attached to another queue').toBeUndefined();
+      expect(sent.lastProviderSeen).toBeUndefined();
+      expect(sent.description).not.toMatch(/routes by surgeon/i);
     }
-  });
-
-  /**
-   * The note is appended AFTER sanitizeForSms ran on the caller's words, so it
-   * can re-introduce exactly what the sanitizer removed. One em dash turns a
-   * 160-char GSM-7 segment into a 70-char UCS-2 one.
-   */
-  it('the unrouted note cannot smuggle non-GSM-7 characters back into the body', async () => {
-    const api = await client();
-    const create = vi
-      .spyOn(api, 'createTicket')
-      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-GSM' } as never);
-    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({ success: true } as never);
-
-    await runTool('file_surgery_ticket', {
-      ...BASE,
-      request_description: 'Question about my drops',
-    });
-
-    const sent = create.mock.calls[0][0] as { description: string };
-    expect(sent.description).toMatch(/NO SURGEON ON THIS TICKET/);
-    for (const smart of ['—', '–', '‘', '’', '“', '”', '…']) {
-      expect(sent.description, `smart punctuation ${smart.charCodeAt(0)} survived`).not.toContain(smart);
-    }
+    void lookup;
   });
 });
