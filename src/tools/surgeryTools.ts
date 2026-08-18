@@ -119,9 +119,10 @@ registerTool({
       surgeon: {
         type: 'string',
         description:
-          "The surgeon. Take it from lookup_patient's last_provider when the record has one; "
-          + 'ask only when it does not. This queue is ASSIGNED BY SURGEON, so a ticket without one '
-          + 'lands on a coordinator who cannot route it.',
+          'The surgeon, ONLY when the caller names one. Do NOT pass '
+          + "lookup_patient's last_provider — that is the last clinician seen, often an "
+          + 'optometrist doing a post-op check, and passing it here overrides the '
+          + "physician-only lookup this tool already runs against the patient's record.",
         askAs: 'And which surgeon are you seeing?',
       },
       surgery_date: { type: 'string', description: 'The date of their surgery, if they gave one. Put it in the description too.' },
@@ -338,6 +339,38 @@ registerTool({
       );
     }
 
+    /**
+     * SAY SO WHEN THERE IS NO SURGEON ON IT — on the SURGERY queue only.
+     *
+     * A ticket without a surgeon lands on a coordinator with no way to route it
+     * and no way to know whether it was asked for. 66 of 74 filed that way on
+     * 2026-08-17.
+     *
+     * Two things this deliberately gets right, both found in review:
+     *
+     *   1. GATED ON THE FILED DEPARTMENT. `detectCrossQueue` can send this call
+     *      to Optical or the HVA Hub, and those queues do NOT route by surgeon.
+     *      Telling department 9 that "this queue routes by surgeon" is a false
+     *      statement about someone else's process, printed on their ticket.
+     *   2. SANITISED AFTER COMPOSING. `sanitizeForSms` ran on the caller's words
+     *      further up, and appending to its output re-introduces the very
+     *      characters it removed — one em dash turns a 160-char GSM-7 segment
+     *      into a 70-char UCS-2 one and raises carrier-filtering exposure. The
+     *      note is written in plain ASCII and the composed string is sanitised
+     *      again, so neither half can smuggle Unicode back in.
+     */
+    const needsSurgeonNote =
+      filedDepartmentId === SURGERY_DEPARTMENT_ID && !lookup.providerId;
+    const unroutedNote = needsSurgeonNote
+      ? sanitizeForSms(
+          `${filedDescription}\n\nNO SURGEON ON THIS TICKET - ${
+            surgeonName
+              ? `"${surgeonName}" did not match an active provider`
+              : 'the caller did not name one and the patient record shows no physician'
+          }. This queue routes by surgeon, so please assign one before working it.`,
+        ).value
+      : filedDescription;
+
     const res = await ticketingApiClient.createTicket({
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
@@ -354,30 +387,7 @@ registerTool({
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       lastProviderSeen: surgeonName || undefined,
-      /**
-       * SAY SO WHEN THERE IS NO SURGEON ON IT.
-       *
-       * This queue is assigned BY SURGEON, and a ticket without one lands on a
-       * coordinator who has no way to route it and no way to know whether it
-       * was asked. Measured 2026-08-17: 54 of the 154 tickets this agent had
-       * filed since 08-12 — 35% — arrived with provider_id null, against 1 in
-       * 799 from the answering service. The gate I pointed at as protection
-       * lives in `validateTicketParams`, which `create_ticket` runs and this
-       * tool does not.
-       *
-       * Not blocked here on purpose: the framework's required-field refusal is
-       * UNBOUNDED, and an unbounded gate on this path is the 2026-08-06 shape
-       * that destroyed 21 records requests. The agent now asks (see step 5 of
-       * the prompt and the `askAs` on `surgeon`); when the answer genuinely is
-       * not available, the ticket files and states that plainly.
-       */
-      description: lookup.providerId
-        ? filedDescription
-        : `${filedDescription}\n\nNO SURGEON ON THIS TICKET — ${
-            surgeonName
-              ? `"${surgeonName}" did not match an active provider`
-              : 'the caller did not name one and the patient record shows no physician'
-          }. This queue routes by surgeon, so please assign one before working it.`,
+      description: unroutedNote,
       priority,
       callData: { agentUsed: 'surgery', ...(callSid ? { callSid } : {}) },
     });

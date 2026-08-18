@@ -433,14 +433,81 @@ describe('a surgery ticket with no surgeon says so', () => {
     const surgeon = (def.input_schema.properties as Record<string, { askAs?: string; description?: string }>).surgeon;
     expect(surgeon.askAs, 'no askAs means the model has no sentence to ask with').toBeTruthy();
     expect(surgeon.description).not.toMatch(/Optional/i);
-    expect(surgeon.description).toMatch(/last_provider/);
   });
 
-  it('the prompt tells the agent to get it', () => {
+  /**
+   * AN OPTOMETRIST IS NOT A SURGEON, AND RELAYING last_provider MAKES ONE.
+   *
+   * My first version of this fix told the model to pass `last_provider` as the
+   * surgeon. `lastProviderSeen` deliberately still includes ODs — "who did you
+   * last see" is legitimately an optometrist — and a post-op check is very often
+   * the most recent visit. A non-empty `surgeon` argument SKIPS the
+   * physician-only fallback, so an active OD would resolve to a provider id and
+   * be handed the surgery ticket: worse than the null it replaced, because it
+   * looks routed. Found in review, 2026-08-18.
+   */
+  it('neither the prompt nor the schema tells the model to relay last_provider', () => {
+    const def = getTool('file_surgery_ticket')!;
+    const surgeon = (def.input_schema.properties as Record<string, { description?: string }>).surgeon;
+    expect(surgeon.description).toMatch(/do NOT pass|Do NOT pass/);
+    expect(surgeon.description).toMatch(/last_provider/);
+
     const src = readFileSync(new URL('../agents/surgeryAgent.ts', import.meta.url), 'utf8');
-    expect(src).toMatch(/GET THE SURGEON/);
-    expect(src).toMatch(/assigned BY SURGEON|assigned by surgeon/i);
-    // And not with an unbounded hold.
+    expect(src).toMatch(/Do NOT pass last_provider/);
+    expect(src).toMatch(/assigned BY SURGEON|assigned by surgeon|by SURGEON/i);
+    // And still never with an unbounded hold.
     expect(src).toMatch(/do NOT hold the call hostage over/i);
+  });
+
+  /**
+   * A REDIRECTED TICKET MUST NOT LECTURE ANOTHER DEPARTMENT ABOUT SURGEONS.
+   *
+   * detectCrossQueue can file this call into Optical or the HVA Hub. Those
+   * queues do not route by surgeon, and printing "this queue routes by surgeon"
+   * on their ticket is a false statement about their process. Found in the same
+   * review.
+   */
+  it('does not append the surgeon note to a ticket redirected off this queue', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-XQ' } as never);
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({ success: true } as never);
+
+    await runTool('file_surgery_ticket', {
+      ...BASE,
+      request_description: 'I need to schedule a routine eye exam for my son, he is a new patient',
+    });
+
+    const sent = create.mock.calls[0][0];
+    if (sent.departmentId !== 2) {
+      expect(sent.description, 'another queue was told it routes by surgeon').not.toMatch(
+        /NO SURGEON ON THIS TICKET/,
+      );
+    }
+  });
+
+  /**
+   * The note is appended AFTER sanitizeForSms ran on the caller's words, so it
+   * can re-introduce exactly what the sanitizer removed. One em dash turns a
+   * 160-char GSM-7 segment into a 70-char UCS-2 one.
+   */
+  it('the unrouted note cannot smuggle non-GSM-7 characters back into the body', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-GSM' } as never);
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValueOnce({ success: true } as never);
+
+    await runTool('file_surgery_ticket', {
+      ...BASE,
+      request_description: 'Question about my drops',
+    });
+
+    const sent = create.mock.calls[0][0] as { description: string };
+    expect(sent.description).toMatch(/NO SURGEON ON THIS TICKET/);
+    for (const smart of ['—', '–', '‘', '’', '“', '”', '…']) {
+      expect(sent.description, `smart punctuation ${smart.charCodeAt(0)} survived`).not.toContain(smart);
+    }
   });
 });

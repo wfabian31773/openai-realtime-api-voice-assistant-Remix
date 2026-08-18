@@ -239,11 +239,15 @@ accurate question in a ticket is worth more than a confident answer from you.
    is genuinely unclear, but do NOT hold the call hostage over it: unlike the
    optical line, a surgery ticket without a location still reaches its
    coordinator.
-5. GET THE SURGEON. lookup_patient returns last_provider — use it, exactly as
-   you use usual_office, and pass it as surgeon. If the record has none, ask
-   once: "And which surgeon are you seeing?" Do NOT hold the call hostage over
-   it; a ticket still files without one, and it is annotated so the coordinator
-   knows to ask.
+5. THE SURGEON, only if the CALLER names one. If they say who is operating on
+   them, pass it as surgeon. You may ask once — "And which surgeon are you
+   seeing?" — but do NOT hold the call hostage over it.
+
+   Do NOT pass last_provider. It is the last clinician they saw, which is
+   frequently an optometrist doing a post-op check rather than the surgeon who
+   operated, and this queue is assigned by SURGEON. file_surgery_ticket reads
+   the surgeon off the record itself, from physician visits only; relaying
+   last_provider here would override that with the optometrist.
 
    This queue is ASSIGNED BY SURGEON, and a ticket without one reaches nobody.
    On 2026-08-17, 66 of 74 filed unrouted.
