@@ -356,6 +356,18 @@ export function str(v: unknown): string {
 }
 
 /**
+ * True only for a real Twilio Call SID. `metadata.callId` fallback values
+ * ("unknown", "latest", "none", "unknown_sid" — traced 2026-08-20 to
+ * `metadata.callSid ?? metadata.callId` in the four queue agents) satisfy a
+ * truthy check but are not call identity. Sent as an idempotency key, one of
+ * those sentinels would key on the literal string instead of the call, so a
+ * second caller's retry could read back a stranger's ticket number.
+ */
+export function isTwilioCallSid(v: string | undefined | null): v is string {
+  return typeof v === 'string' && /^CA[0-9a-f]{32}$/i.test(v);
+}
+
+/**
  * The first place in this list this queue can actually use.
  *
  * `locations` is already newest-first, so the first acceptable one is the most

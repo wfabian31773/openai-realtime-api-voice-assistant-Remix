@@ -67,6 +67,7 @@ interface CreateTicketParams {
   description: string;
   priority?: "low" | "normal" | "medium" | "high" | "urgent";
   callData?: CallData;
+  idempotencyKey?: string; // Undeclared here let a typo compile clean and send nothing — see PR #220.
 }
 
 interface CreateTicketResponse {

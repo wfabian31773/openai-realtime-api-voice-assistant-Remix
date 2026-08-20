@@ -27,7 +27,7 @@
  * NO HANDOFF. Operator ruling 2026-08-12: only PCP and Scheduling transfer.
  */
 import { registerTool, missing, type ToolResult } from './registry';
-import { str } from './sharedPatientTools';
+import { str, isTwilioCallSid } from './sharedPatientTools';
 
 // ---------------------------------------------------------------- what kind
 
@@ -234,6 +234,9 @@ registerTool({
       description: filedDescription,
       priority,
       callData: { agentUsed: 'tech', ...(callSid ? { callSid } : {}) },
+      // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
+      // a real Twilio SID, when the retry lands on someone else's key.
+      ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}` } : {}),
     });
 
     if (!res.success || !res.ticketNumber) {

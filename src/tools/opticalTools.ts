@@ -16,7 +16,7 @@ import { registerTool, missing, type ToolResult } from './registry';
 // lookup_patient, resolve_location and check_open_tickets are registered by the
 // shared module. Importing it here is what puts them in the registry for this
 // queue — the same three definitions Surgery uses, not copies of them.
-import { str } from './sharedPatientTools';
+import { str, isTwilioCallSid } from './sharedPatientTools';
 
 // ---------------------------------------------------------------- what kind
 
@@ -275,6 +275,9 @@ registerTool({
       description: filedDescription,
       priority: 'medium',
       callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
+      // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
+      // a real Twilio SID, when the retry lands on someone else's key.
+      ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}` } : {}),
     });
 
     if (!res.success || !res.ticketNumber) {
