@@ -18,6 +18,20 @@ session, and re-read before proposing any plan.** If you are about to say "I
 don't know why X" or "we should build Y" — check here first. It is probably
 written down.
 
+## Before touching the ticket path, read `docs/BACKEND_HANDOFF.md`
+
+Written 2026-08-20 after a week that made surgery routing WORSE — provider fill
+on department 2 went from ~98% to 49% across three merged PRs that all passed
+their tests. That document holds the traced architecture, the real API contract
+(which is wider than our TypeScript interfaces — three things were requested
+from another team that already existed), the measured state of each queue, the
+operator's standing rulings, and a list of changes that were tried and made
+things worse.
+
+The single rule it exists to enforce: **do not merge a change to the ticket path
+without measuring the production number it is meant to move, before and after.**
+Green tests did not prevent any of the regressions listed there.
+
 ---
 
 ## Wayne's standing instructions — these do not expire
