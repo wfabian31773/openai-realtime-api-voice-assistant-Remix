@@ -180,11 +180,47 @@ Contributing causes, in order of confidence:
 
 ### Duplicate filings
 
-Real and unfixed. On 19 Aug one surgery call filed **7 tickets**; two optical calls
-filed 2 each. `VA-52849` was filed three times in six minutes. Cause: the four queue
-tools (`opticalTools`, `surgeryTools`, `techTools`, `medicalRecordsTools`) call
-`createTicket` **without an `idempotencyKey`**, while `syncAgentService` and
-`ticketOutboxService` have sent one (`call-<callSid>`) all along.
+Real and unfixed. The four queue tools (`opticalTools`, `surgeryTools`, `techTools`,
+`medicalRecordsTools`) call `createTicket` **without an `idempotencyKey`**, while
+`syncAgentService` and `ticketOutboxService` have sent one (`call-<callSid>`) all
+along. The receiving side has a working `idempotency_keys` table with an expiry
+sweep — the route checks it on the way in and writes it on the way out. It is a live
+mechanism sitting unused because nothing calls it from these four tools.
+
+**Corrected 2026-08-20.** The first version of this section said "one surgery call
+filed 7 tickets" on 19 Aug. That was wrong, and wrong in an instructive way: those 7
+tickets share the literal `call_sid` string `'unknown'`, so a `GROUP BY call_sid`
+collapsed seven unrelated calls into one apparent duplicate. Verify the grouping key
+before believing a duplicate count.
+
+Measured properly — real Twilio SIDs (`CA...`) only, four queues, 14 days to 20 Aug:
+**4 duplicate incidents, 4 extra tickets.** Gaps of 48ms, 41s, 1m27s, 2m28s — the
+shape of a retry or a double tool-call, not two different patients.
+
+`VA-52849` is one ticket row, not three. The ticketing team's request log shows
+**three POSTs** (23:12:46, 23:12:49, 23:18:30) with consolidation absorbing the
+second and third. Both readings are correct; they measure different planes. This
+matters for the fix's metric: **the `tickets` table under-counts, because
+consolidation already hides duplicate requests.** Measure requests per `call_sid` in
+the ticketing side's `voice_agent_api_logs` as well, or an "after" number can look
+perfect while we still POST three times per call.
+
+### The sentinel `call_sid` — a precondition for the idempotency fix
+
+A significant number of tickets carry a literal placeholder in `call_sid` rather than
+a SID: `'unknown'`, `'latest'`, `'none'`, `'unknown_sid'`. 29 surgery and 13 optical
+tickets share `'unknown'` alone over 13-19 Aug.
+
+**This makes the obvious fix dangerous.** A naive `call-${callSid}` produces the key
+`call-unknown` for many unrelated calls, and the route returns the *cached result* on
+a key hit. So the second caller's ticket would never be created, and that caller
+would be read the first caller's ticket number. That is a lost request plus a
+cross-patient disclosure — strictly worse than the duplicate it replaces.
+
+Send `idempotencyKey` **only when the sid matches a real Twilio SID**
+(`^CA[0-9a-f]{32}$`); omit the field otherwise. Where the sentinel is written in the
+first place is a separate, unfixed item, related to `CallMetadata.twilioCallSid`
+being declared and never written.
 
 ### Call quality
 
@@ -205,9 +241,11 @@ It is testable in one hour by reverting the keyword source and measuring.
 
 ## 4. Work that is ready and not done
 
-1. **Send `idempotencyKey` from the four queue tools.** Add it to
-   `CreateTicketParams`, pass `call-<callSid>`. Fixes duplicate filings. The pattern
-   already exists in `syncAgentService`.
+1. **Send `idempotencyKey` from the four queue tools** — `call-<callSid>`, and
+   **only when the sid is a real Twilio SID.** See the sentinel note in §3: an
+   unguarded key loses tickets rather than de-duplicating them. The pattern already
+   exists in `syncAgentService`. Measure both the ticket-level and request-level
+   numbers; the ticket table alone under-counts.
 2. **Handle `consolidated: true`** as "appended to an existing ticket", not "filed".
 3. **Send `nextgenProviderId`** on lookup, and **use `providerMatches[]`** instead of
    discarding it. Their side is ready.
@@ -252,6 +290,7 @@ Recorded so they are not repeated.
 | Removing the phone fallback (#216) | Correct on the risk, unmeasured on the cost. Surgery fill 98% -> 49%. |
 | Annotating unrouted tickets in `description` | `description` becomes the body of a **patient-facing SMS**. Caught in review before shipping. |
 | Blaming n8n for the department override | There was no override. Staff transfers null the type. One `ticket_events` query would have shown it. |
+| Counting duplicates with `GROUP BY call_sid` | `call_sid` holds sentinel strings (`'unknown'`). Seven unrelated calls looked like one call filing seven tickets. Check the grouping key. |
 
 ---
 
