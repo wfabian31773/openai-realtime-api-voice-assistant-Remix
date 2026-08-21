@@ -91,21 +91,28 @@ in the four `*Agent.ts` files, itself unfixed). An unguarded key built from a
 shared sentinel would let one caller's retry read back a different patient's
 ticket number, since a key hit returns the cached ticket verbatim.
 
-Measured before/after on real traffic (2026-08-19 vs 2026-08-20 post-deploy,
-full days): duplicate-POST groups 22 → 7, uncaught duplicate tickets (two
-different ticket numbers for one call) 2 → 0. ~13% of daily create-ticket
-traffic still ships with no key at all (no callSid, or a sentinel) — that
-residual doesn't close until the sentinel/no-SID source does.
+**What I queried directly**, against `voice_agent_api_logs`/`tickets` in the
+Support Center DB (2026-08-19 vs 2026-08-20 post-deploy, same-day full-day
+comparison, real Twilio SIDs, four queues): duplicate-POST groups 22 → 7,
+uncaught duplicate tickets (two different ticket numbers for one call) 2 → 0,
+8 of 206 real-SID calls on the post-deploy day consolidated rather than
+filing fresh. ~13% of daily create-ticket traffic still ships with no key at
+all (no callSid, or a sentinel) — that residual doesn't close until the
+sentinel/no-SID source does.
 
-**Idempotency and consolidation coexist correctly, confirmed 2026-08-21.**
-Keyed requests still hit `consolidateIfDuplicate()` when the idempotency
-check doesn't match (a genuinely new call from a patient who already has an
-open ticket in that department) — the far side checked idempotency-key
-uniqueness first, then consolidation, so a keyed *retry* of the *same* call
-never falls through to consolidation. On the first measured post-deploy day,
-8 of 43 real-SID calls consolidated; each carried exactly one POST with its
-key, confirming these are distinct returning-patient calls, not the cache
-missing a duplicate.
+**What Wayne verified independently and corrected:** he re-ran the same
+comparison against the request logs directly (not the numbers above) and got
+different raw totals — pre-deploy 298 POSTs/0 cached/35 consolidated/298
+unkeyed, post-deploy 255 POSTs/6 cached/12 consolidated/33 unkeyed — which
+this file does not reconcile against the count above; treat his totals as the
+authoritative measurement of POST volume and the ones above as the
+duplicate-group/uncaught-ticket trace. He also checked, on the 8 consolidated
+calls found above, whether a keyed retry was leaking past the cache into
+consolidation (a TTL or key-mismatch bug) — it wasn't: each of the 8 carries
+exactly one POST bearing its key, confirming they are distinct
+returning-patient calls consolidating correctly, not the cache missing a
+duplicate. **Idempotency and consolidation coexist correctly** is his
+finding, verified against the trace, not mine alone.
 
 That is what makes it safe to release our local lock and retry — see
 [ticket-creation-lock.md](ticket-creation-lock.md).
@@ -123,6 +130,13 @@ location-lookup already hit and fixed on 2026-08-13 (nine retries, 236
 seconds) — that fix returned the `missing()` envelope instead, which the
 prompts are already trained to answer by speaking to the caller rather than
 retrying the tool. See `opticalTools.ts:166-186` for the precedent.
+
+**Status 2026-08-21:** the trigger for both observed instances (the
+`patientPhone` length rejection) has a fix in progress (PR #222) — send
+`normalizePhone()`'s last-10-digit form with a ceiling refusal instead of the
+raw string. The `retryable: true` classifier itself — the safety net for
+whatever schema constraint fires next — is still open, deliberately a
+separate piece.
 
 ## GSM-7 and the SMS on the other side
 
