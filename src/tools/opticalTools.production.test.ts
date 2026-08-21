@@ -276,6 +276,103 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     });
   });
 
+  it('sends patientPhone as the stripped digits, not the caller-formatted string', async () => {
+    // 3 calls / 32 POSTs over 14 days filed nothing across the four queue
+    // tools: patientPhone carried the raw callback_number string, unbounded,
+    // against a receiving schema capped at 20 chars, while the digits-only
+    // form was already extracted and validated (>=10) two lines above the
+    // old send. Traced 2026-08-21.
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation').mockResolvedValueOnce({
+      success: true,
+      locationId: 12,
+    });
+    const create = vi
+      .spyOn(ticketingApiClient, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-PHONE' });
+
+    await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471',
+      location: 'Eastvale',
+      request_description: 'my glasses broke at the hinge',
+    });
+
+    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+  });
+
+  it('drops a leading 1, not the area code', async () => {
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation').mockResolvedValueOnce({
+      success: true,
+      locationId: 12,
+    });
+    const create = vi
+      .spyOn(ticketingApiClient, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-PHONE-11' });
+
+    await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '1-845-531-7471',
+      location: 'Eastvale',
+      request_description: 'my glasses broke at the hinge',
+    });
+
+    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+  });
+
+  it('refuses 11 digits that do not start with 1, rather than dropping the first one', async () => {
+    // normalizePhone() is slice(-10) — correctly loose for the lookup use it
+    // was written for, but silently dropping a wrong leading digit here
+    // would produce a plausible, wrong, 10-digit number.
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    const lookup = vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation');
+    const create = vi.spyOn(ticketingApiClient, 'createTicket');
+
+    const out = (await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '2-845-531-7471',
+      location: 'Eastvale',
+      request_description: 'my glasses broke at the hinge',
+    })) as Record<string, unknown>;
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(out.success).toBe(false);
+    expect((out as { missingFields?: string[] }).missingFields).toContain('callback_number');
+  });
+
+  it('refuses a second number or an extension instead of filing a wrong one', async () => {
+    // The failure this ceiling exists to prevent: a raw digit count with no
+    // upper bound would have normalized a two-number or extension capture
+    // down to a plausible-looking (and wrong) 10 digits, filing a ticket
+    // with a callback number nobody could reach — worse than the loud 400
+    // it replaces, and invisible in a ticket-count metric.
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    const lookup = vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation');
+    const create = vi.spyOn(ticketingApiClient, 'createTicket');
+
+    const out = (await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471 ext 202',
+      location: 'Eastvale',
+      request_description: 'my glasses broke at the hinge',
+    })) as Record<string, unknown>;
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(out.success).toBe(false);
+    expect((out as { missingFields?: string[] }).missingFields).toContain('callback_number');
+  });
+
   it('never uses submit-ticket, even when it cannot classify', async () => {
     // THIS TEST USED TO ASSERT THE OPPOSITE, and it was wrong in production.
     //
