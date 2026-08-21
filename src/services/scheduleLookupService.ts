@@ -2,6 +2,7 @@ import { db } from '../../server/db';
 import { schedule } from '../../shared/schema';
 import { eq, or, desc, gte, and, sql } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
+import { normalizePhone } from '../utils/phone';
 
 /**
  * Who this lookup could have meant.
@@ -155,10 +156,6 @@ function formatDate(dateStr: string): string {
   } catch {
     return dateStr;
   }
-}
-
-function normalizePhone(phone: string): string {
-  return phone.replace(/\D/g, '').slice(-10);
 }
 
 function formatTimeString(timeStr: string | null | undefined): string | undefined {

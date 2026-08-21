@@ -367,6 +367,11 @@ export function isTwilioCallSid(v: string | undefined | null): v is string {
   return typeof v === 'string' && /^CA[0-9a-f]{32}$/i.test(v);
 }
 
+// Re-exported so the four queue tools only need one import line from here,
+// not a second import path into `utils/phone.ts`. See that file for what it
+// does and why it lives there rather than here or in scheduleLookupService.
+export { normalizePhone } from '../utils/phone';
+
 /**
  * The first place in this list this queue can actually use.
  *

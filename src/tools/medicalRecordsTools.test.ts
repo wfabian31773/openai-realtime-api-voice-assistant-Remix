@@ -36,6 +36,67 @@ beforeEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('patientPhone is the digits, not the raw string', () => {
+  // 3 calls / 32 POSTs over 14 days filed nothing: patientPhone carried the
+  // raw callback_number string, unbounded, against a receiving schema capped
+  // at 20 chars. digits was already extracted and validated (>=10) two lines
+  // above the old send — traced 2026-08-21.
+  it('sends the stripped digits, not the caller-formatted string', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-TEST-PHONE'));
+
+    await runTool('file_records_ticket', {
+      ...BASE,
+      request_description: 'I need a copy of my medical records',
+    });
+
+    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+  });
+
+  it('drops a leading 1, not the area code', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-TEST-PHONE-11'));
+
+    await runTool('file_records_ticket', {
+      ...BASE,
+      callback_number: '1-845-531-7471',
+      request_description: 'I need a copy of my medical records',
+    });
+
+    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+  });
+
+  it('refuses 11 digits that do not start with 1, rather than dropping the first one', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+
+    const out = (await runTool('file_records_ticket', {
+      ...BASE,
+      callback_number: '2-845-531-7471',
+      request_description: 'I need a copy of my medical records',
+    })) as Record<string, unknown>;
+
+    expect(create).not.toHaveBeenCalled();
+    expect(out.success).toBe(false);
+    expect((out as { missingFields?: string[] }).missingFields).toContain('callback_number');
+  });
+
+  it('refuses a second number or an extension instead of filing a wrong one', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+
+    const out = (await runTool('file_records_ticket', {
+      ...BASE,
+      callback_number: '845-531-7471 ext 202',
+      request_description: 'I need a copy of my medical records',
+    })) as Record<string, unknown>;
+
+    expect(create).not.toHaveBeenCalled();
+    expect(out.success).toBe(false);
+    expect((out as { missingFields?: string[] }).missingFields).toContain('callback_number');
+  });
+});
+
 describe('the department is never guessed', () => {
   it('uses create-ticket and never submit-ticket', async () => {
     // submit-ticket re-derives the DEPARTMENT server-side and defaults to 8.

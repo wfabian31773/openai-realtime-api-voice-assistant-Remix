@@ -31,7 +31,7 @@
  * NO HANDOFF. Operator ruling 2026-08-12: only PCP and Scheduling transfer.
  */
 import { registerTool, missing, type ToolResult } from './registry';
-import { str, isTwilioCallSid } from './sharedPatientTools';
+import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 
 // ---------------------------------------------------------------- what kind
 
@@ -148,6 +148,30 @@ registerTool({
     const digits = phone.replace(/\D/g, '');
     if (digits.length < 10) {
       return missing(['callback_number'], 'I only caught part of that number — can I get all ten digits?');
+    }
+    /**
+     * THE CEILING THAT WAS MISSING, NOT JUST THE WRONG VALUE SENT.
+     *
+     * A floor with no ceiling let a second number or an extension through as
+     * a plausible-looking phone. Sending it (even normalized) would have
+     * filed a ticket with a callback number nobody could reach — worse than
+     * the loud 400 it replaces, and invisible in the ticket count. 90-day
+     * distribution of real filed patient_phone digit lengths: 10 (180), 11
+     * (1219), 12 (1 — an outlier, not evidence to widen this). 11 covers
+     * >99.9% of real captures; refuse above it rather than guess.
+     *
+     * 11 digits not starting with 1 is refused too — normalizePhone() is
+     * slice(-10), correctly loose for the lookup use it was written for, but
+     * an 11-digit capture with a wrong leading digit (a mis-heard digit, a
+     * stray keypress) would silently drop that digit and produce a
+     * plausible, wrong, 10-digit number. Same failure shape as the raw
+     * string this fix replaced, one digit narrower.
+     */
+    if (digits.length > 11 || (digits.length === 11 && digits[0] !== '1')) {
+      return missing(
+        ['callback_number'],
+        "That's more digits than one phone number — can you give me just the callback number, without an extension or a second number?",
+      );
     }
 
     const { MEDICAL_RECORDS_DEPARTMENT_ID, recordsReasonById, classifyRecordsRequest,
@@ -289,7 +313,15 @@ registerTool({
       requestReasonId: filedReasonId,
       patientFirstName: first,
       patientLastName: last,
-      patientPhone: phone,
+      // Last ten digits, not the raw string and not all of `digits` — see
+      // normalizePhone() in utils/phone.ts. The floor+ceiling above already
+      // refused anything that isn't one plausible phone number, so this is
+      // exactly ten digits or it wasn't reached. Traced 2026-08-21: the raw
+      // string is what filed zero tickets across 3 calls / 32 POSTs over 14
+      // days (their schema caps patientPhone at 20 chars, the raw string has
+      // no upper bound). Safe format-wise: their own sendSMS() normalizer
+      // strips non-digits and re-derives this same string before dialing out.
+      patientPhone: normalizePhone(phone),
       patientEmail: str(input.email) || undefined,
       preferredContactMethod: 'phone',
       patientBirthMonth: parts.month,
