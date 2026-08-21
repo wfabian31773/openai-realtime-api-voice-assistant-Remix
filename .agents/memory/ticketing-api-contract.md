@@ -81,9 +81,48 @@ already declined for `no-ivr`.
 
 ## Idempotency
 
-Every submit carries `idempotencyKey: call-<callSid>`. The far side dedupes on
-it. That is what makes it safe to release our local lock and retry — see
+`syncAgentService`/`ticketOutboxService` carried `idempotencyKey: call-<callSid>`
+from the start. The four queue tools (optical/surgery/tech/records) did not —
+that gap shipped in PR #220 (2026-08-21), guarded to real Twilio SIDs
+(`isTwilioCallSid()` in `sharedPatientTools.ts`) because some calls carry a
+sentinel `callSid` (`"unknown"`, `"latest"`, `"none"`, `"unknown_sid"`,
+`"automated-call-unique-id"` — traced to `metadata.callSid ?? metadata.callId`
+in the four `*Agent.ts` files, itself unfixed). An unguarded key built from a
+shared sentinel would let one caller's retry read back a different patient's
+ticket number, since a key hit returns the cached ticket verbatim.
+
+Measured before/after on real traffic (2026-08-19 vs 2026-08-20 post-deploy,
+full days): duplicate-POST groups 22 → 7, uncaught duplicate tickets (two
+different ticket numbers for one call) 2 → 0. ~13% of daily create-ticket
+traffic still ships with no key at all (no callSid, or a sentinel) — that
+residual doesn't close until the sentinel/no-SID source does.
+
+**Idempotency and consolidation coexist correctly, confirmed 2026-08-21.**
+Keyed requests still hit `consolidateIfDuplicate()` when the idempotency
+check doesn't match (a genuinely new call from a patient who already has an
+open ticket in that department) — the far side checked idempotency-key
+uniqueness first, then consolidation, so a keyed *retry* of the *same* call
+never falls through to consolidation. On the first measured post-deploy day,
+8 of 43 real-SID calls consolidated; each carried exactly one POST with its
+key, confirming these are distinct returning-patient calls, not the cache
+missing a duplicate.
+
+That is what makes it safe to release our local lock and retry — see
 [ticket-creation-lock.md](ticket-creation-lock.md).
+
+**Separately, not fixed:** the four tools return `retryable: true`
+unconditionally on any failed `createTicket()` — including a permanent 4xx
+Zod rejection that will fail identically on every retry. `makeRequest()`
+(`server/services/ticketingApiClient.ts`) throws away `response.status` when
+it throws, so `createTicket()`'s catch block can't tell a permanent 400 from
+a transient timeout/5xx. Confirmed live twice in 14 days: a `patientPhone`
+too-long rejection retried 17 times over 11 minutes (2026-08-19) and 11 times
+over 5 minutes (2026-08-20), zero tickets filed either time. The
+`retryable: true` → loop is the same failure shape `opticalTools.ts`'s
+location-lookup already hit and fixed on 2026-08-13 (nine retries, 236
+seconds) — that fix returned the `missing()` envelope instead, which the
+prompts are already trained to answer by speaking to the caller rather than
+retrying the tool. See `opticalTools.ts:166-186` for the precedent.
 
 ## GSM-7 and the SMS on the other side
 
