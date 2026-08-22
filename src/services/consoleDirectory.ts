@@ -93,7 +93,7 @@ function getPool(): pg.Pool {
  * sides is the only way a comparison means anything.
  */
 /**
- * THE THREE OFFICES WHOSE NAME NOBODY AGREES ON.
+ * THE OFFICES WHOSE NAME NOBODY AGREES ON.
  *
  * Found 2026-08-13, from a live optical call that looped `resolve_location`
  * ten times. The caller said "Downtown LA". The operator's answer when I
@@ -123,6 +123,25 @@ function getPool(): pg.Pool {
  *      heard of "DTLA". That is the same class as the provider drift the
  *      ticketing agent measured across 11,296 appointments, and I only ever
  *      checked providers.
+ *
+ * A THIRD BREAK, added 2026-08-21: a RETIRED name. Two offices were renamed
+ * in NextGen a couple of months before this (Wayne, confirmed directly, not
+ * inferred): "North Valley Eye" -> Mission Hills, "Magan" -> Covina. Every
+ * appointment booked before the rename still carries the old name in
+ * `Schedule.OfficeLocation` — which is where `lookup_patient`'s `usual_clinic`
+ * reads from — so a longtime patient hears their own real office named back
+ * to them correctly, confirms it, and `resolve_location` still can't place
+ * it: the old name was never in `si_locations` to begin with (a rename, not
+ * a typo), so there was no live entry for it to be an alternate spelling OF.
+ * Traced from a real call, 2026-08-21: `lookup_patient` said "I have you at
+ * our North Valley Eye office," the caller confirmed it, and filing asked
+ * "which city is your optical office in?" as if nothing had been said —
+ * measured at 7 of 19 optical location-refusals that day, the single largest
+ * cause. `spoken` is exactly the right place for a retired name to live: it
+ * does not need to exist in the mirror, only the office it now points at
+ * does, and Covina needed a first entry here for it (it resolves natively by
+ * brand-stripping, same as Mission Hills' bare "Mission Hlls" would if it
+ * were not misspelled — the entry exists so "Magan" has somewhere to point).
  *
  * This table is deliberately small and explicit. It is NOT a fuzzy matcher —
  * a fuzzy matcher would paper over exactly the drift we want to keep visible,
@@ -154,7 +173,11 @@ export const LOCATION_ALIASES: Array<{
     fileAs: 'Mission Hills',
     // The mirror's own spelling is missing an 'i'. Index the correct spelling
     // so a caller who says it properly is not punished for NextGen's typo.
-    spoken: ['mission hills', 'mission hlls'],
+    // 'north valley eye' is the office's own RETIRED NextGen name (renamed a
+    // couple of months before 2026-08-21, per Wayne) — it never existed in
+    // si_locations under that name, so it can only ever be a spoken synonym,
+    // never a `mirror`. See the file header.
+    spoken: ['mission hills', 'mission hlls', 'north valley eye'],
   },
   {
     mirror: 'azul vision willow',
@@ -163,6 +186,18 @@ export const LOCATION_ALIASES: Array<{
     // Eyecare Long Beach, 9,241 a quarter). Aliasing it here would send those
     // callers to the wrong office, which is worse than not resolving.
     spoken: ['willow', 'long beach willow'],
+  },
+  {
+    mirror: 'azul vision covina',
+    // Already resolves natively by brand-stripping to "covina" — this entry
+    // exists only to carry the retired name below. fileAs is explicit (not
+    // relied on implicitly) because this entry is new, unlike Covina's own
+    // bare-strip match which predates it.
+    fileAs: 'Covina',
+    // 'magan' is Covina's own RETIRED NextGen name (renamed alongside North
+    // Valley Eye -> Mission Hills, per Wayne, 2026-08-21). Same shape as
+    // above: never a `mirror`, only ever a spoken synonym.
+    spoken: ['magan'],
   },
 ];
 
