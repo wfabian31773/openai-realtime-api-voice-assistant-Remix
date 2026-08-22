@@ -4,7 +4,7 @@
  * `si_locations` in the Patient Console, read 2026-08-11.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { directoryKey, isDirectoryConfigured } from './consoleDirectory';
+import { directoryKey, isDirectoryConfigured, LOCATION_ALIASES } from './consoleDirectory';
 import { resolveTicketLookupFields } from './ticketFieldSanitizers';
 
 describe('directoryKey normalises what NextGen actually stores', () => {
@@ -47,6 +47,42 @@ describe('directoryKey normalises what NextGen actually stores', () => {
     // No comma, no trailing-credential shape — must survive whole.
     expect(directoryKey('Dana Le')).toBe('dana le');
     expect(directoryKey('Vi Nguyen')).toBe('vi nguyen');
+  });
+});
+
+describe('LOCATION_ALIASES carries the two 2026-08-21 renames', () => {
+  // Traced from a real call: lookup_patient said "I have you at our North
+  // Valley Eye office," the caller confirmed it, and resolve_location still
+  // asked "which city is your office in?" — 7 of 19 optical location
+  // refusals that day. Confirmed by Wayne, not inferred: North Valley Eye
+  // was renamed to Mission Hills, Magan to Covina, both a couple of months
+  // before this fix.
+  it('points the retired "North Valley Eye" name at the live Mission Hills entry', () => {
+    const missionHills = LOCATION_ALIASES.find((a) => a.fileAs === 'Mission Hills');
+    expect(missionHills?.mirror).toBe('azul vision mission hlls');
+    expect(missionHills?.spoken).toContain('north valley eye');
+    // The mirror itself must be a name that exists in the live directory —
+    // only `spoken` entries are free to be retired names with nothing behind
+    // them. See the file header: a `mirror` with no live entry just warns
+    // and does nothing.
+    expect(directoryKey('Azul Vision Mission Hlls')).toBe(missionHills?.mirror);
+  });
+
+  it('points the retired "Magan" name at the live Covina entry', () => {
+    const covina = LOCATION_ALIASES.find((a) => a.fileAs === 'Covina');
+    expect(covina?.mirror).toBe('azul vision covina');
+    expect(covina?.spoken).toContain('magan');
+    expect(directoryKey('Azul Vision Covina')).toBe(covina?.mirror);
+  });
+
+  it('never lets a retired name double as a `mirror` — it would silently do nothing', () => {
+    // The load() loop only ever looks up `alias.mirror` in the live
+    // directory. A retired name that never existed there would hit the
+    // "not in the mirror" warning and the alias would resolve to nothing —
+    // exactly the mistake caught in review before this shipped.
+    const mirrors = LOCATION_ALIASES.map((a) => a.mirror);
+    expect(mirrors).not.toContain('north valley eye');
+    expect(mirrors).not.toContain('magan');
   });
 });
 
