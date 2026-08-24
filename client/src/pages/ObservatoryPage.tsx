@@ -219,6 +219,15 @@ interface LiveOpsCall {
   transcript: string | null
 }
 
+interface CarrierActiveCall {
+  conferenceSid: string
+  conferenceName: string
+  callSid: string | null
+  status: string
+  dateCreated: string
+  participantCount: number
+}
+
 interface GraderCheckStat {
   grader: string
   total: number
@@ -1606,15 +1615,32 @@ function CommandCenterTab({
       ).data,
     refetchInterval: 3000,
   })
+  const carrierLive = useQuery<{ success: boolean; calls: CarrierActiveCall[] }>({
+    queryKey: ['obs-carrier-live'],
+    queryFn: async () => (await apiClient.get('/monitoring/active-calls')).data,
+    refetchInterval: 3000,
+  })
   const today = useQuery<TodayOverview>({
     queryKey: ['obs-today'],
     queryFn: async () => (await apiClient.get('/observatory/today')).data,
     refetchInterval: 15_000,
   })
 
-  const activeOps = (live.data?.data ?? []).filter((c) =>
-    ['in_progress', 'ringing', 'initiated'].includes(c.status),
+  // "Live" must be confirmed by the carrier. A database row can miss its
+  // completion callback and remain in_progress indefinitely; that produced
+  // false 90-minute calls in Observatory on 2026-08-24.
+  const carrierLiveSids = new Set(
+    (carrierLive.data?.calls ?? [])
+      .filter((call) => call.participantCount > 0 && call.callSid)
+      .map((call) => call.callSid),
   )
+  const activeOps = carrierLive.data
+    ? (live.data?.data ?? []).filter(
+        (c) =>
+          ['in_progress', 'ringing', 'initiated'].includes(c.status) &&
+          Boolean(c.callSid && carrierLiveSids.has(c.callSid)),
+      )
+    : []
   const sage = today.data?.sage
   const sageOk = sage && !sage.error
   const totalLive = activeOps.length + (sageOk ? sage.activeNow : 0)
@@ -1627,9 +1653,12 @@ function CommandCenterTab({
           <span className={`h-3 w-3 rounded-full ${totalLive ? 'animate-pulse bg-red-500' : 'bg-gray-400'}`} />
           Live now — {totalLive} call{totalLive === 1 ? '' : 's'}
         </h2>
-        {live.isError && (
+        {(live.isError || carrierLive.isError) && (
           <p className="text-sm text-red-600">
-            Live feed failed: {(live.error as any)?.response?.data?.error ?? String(live.error)}
+            Live feed failed:{' '}
+            {(carrierLive.error as any)?.response?.data?.error ??
+              (live.error as any)?.response?.data?.error ??
+              String(carrierLive.error ?? live.error)}
           </p>
         )}
         <div className="space-y-2">
@@ -1664,7 +1693,7 @@ function CommandCenterTab({
                 </div>
               </div>
             ))}
-          {!totalLive && !live.isLoading && (
+          {!totalLive && !live.isLoading && !carrierLive.isLoading && (
             <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
               No calls in progress. This section lights up the moment any line rings — every agent, with live
               transcript and a listen-in button.

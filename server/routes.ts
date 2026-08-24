@@ -4061,13 +4061,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
         limit: 50
       });
       
-      const activeCalls = conferences.map(conf => ({
-        conferenceSid: conf.sid,
-        conferenceName: conf.friendlyName,
-        status: conf.status,
-        dateCreated: conf.dateCreated,
-        participantCount: 0 // Will be populated by participant query if needed
-      }));
+      /**
+       * The database status is not proof that a call is still live.
+       *
+       * On 2026-08-24 four completed calls missed their database completion
+       * update during a connection-pool outage. Observatory kept counting up
+       * from their start times and showed them as "Live now" for 90+ minutes.
+       * Twilio had ended every call. Return the actual participant count and
+       * caller CallSid so the live UI can require carrier confirmation.
+       *
+       * Empty conferences are excluded: Twilio can retain an old conference
+       * resource with status "in-progress" even though it has no participants.
+       */
+      const activeCalls = (
+        await Promise.all(
+          conferences.map(async (conf) => {
+            const participants = await twilioClient.conferences(conf.sid).participants.list({ limit: 20 });
+            const conferenceCallSid = conf.friendlyName?.replace(/^(outbound_|test_)?conf_/, '');
+            const callSid = conferenceCallSid?.startsWith('CA')
+              ? conferenceCallSid
+              : participants.find((participant) => participant.callSid?.startsWith('CA'))?.callSid ?? null;
+
+            return {
+              conferenceSid: conf.sid,
+              conferenceName: conf.friendlyName,
+              callSid,
+              status: conf.status,
+              dateCreated: conf.dateCreated,
+              participantCount: participants.length,
+            };
+          }),
+        )
+      ).filter((call) => call.participantCount > 0);
       
       res.json({ success: true, calls: activeCalls });
     } catch (error) {
