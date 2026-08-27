@@ -949,6 +949,13 @@ export interface SageToday {
 export interface TodayOverview {
   opsHub: OpsHubTodayAgent[];
   sage: SageToday | { error: string };
+  /** Epoch ms (UTC) of the newest call_logs row, null if the table is empty.
+   * The command center uses this to say "logging is DOWN" instead of showing
+   * silent zeros — on 2026-08-24 a Supabase restart wedged the voice
+   * process's DB writes and every agent card read 0 for two days with no
+   * explanation anywhere on the page. A zero must be distinguishable from
+   * "nothing recorded" (measurement-traps.md). */
+  lastCallLogAtMs: number | null;
 }
 
 export async function todayOverview(): Promise<TodayOverview> {
@@ -985,6 +992,14 @@ export async function todayOverview(): Promise<TodayOverview> {
     m[r.outcome] = r.n;
     outcomeMap.set(r.agent_id, m);
   }
+
+  // created_at is a timestamp-without-tz holding UTC wall time; EXTRACT(EPOCH)
+  // reads it as UTC, so this is directly comparable to Date.now().
+  const lastLog = await pool.query(
+    `SELECT (EXTRACT(EPOCH FROM MAX(created_at)) * 1000)::bigint AS last_ms FROM call_logs`,
+  );
+  const lastCallLogAtMs =
+    lastLog.rows[0]?.last_ms != null ? Number(lastLog.rows[0].last_ms) : null;
 
   let sage: TodayOverview['sage'];
   try {
@@ -1064,6 +1079,7 @@ export async function todayOverview(): Promise<TodayOverview> {
       outcomesToday: outcomeMap.get(r.agent_id) ?? {},
     })),
     sage,
+    lastCallLogAtMs,
   };
 }
 

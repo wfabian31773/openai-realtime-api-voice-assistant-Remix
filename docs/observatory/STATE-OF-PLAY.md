@@ -336,3 +336,43 @@ Details: **`.agents/memory/ticket-creation-lock.md`**.
   code**. Needs one.
 - `config/answeringServiceTicketing.ts` fallbacks are stale, and
   `validDepartments = [1,2,3,11,12]` is wrong — it omits the HVA Hub (9).
+
+---
+
+## 9. The 2026-08-24 logging blackout — zeros that were not zeros (written 08-27)
+
+Wayne, 08-26: four "Live now" calls at 52 hours, and every Hub agent card at
+0 calls / — quality while SAGE showed 339. Both symptoms were ONE event.
+
+**Measured chain (do not re-derive):**
+
+- Supabase Operations Hub Postgres **restarted 2026-08-24 20:19:49 UTC**
+  (pg_cron / pg_net / postgres_exporter backends all date from that second).
+- Last `call_logs` row ever written: **20:17:17** (last `call_turns` 20:18:23).
+  Zero rows on Aug 25–26 across every line — while OpenAI's Costs API billed a
+  **normal $174.26 realtime day on Aug 25** (weekdays run $150–190). Calls were
+  answered and billed; nothing was recorded. Quality monitoring was blind.
+- The four stale rows are the calls in flight at the restart (tech CA4227…,
+  optical CA25ce… + CA2ca6…, surgery CA813e…, 20:12–20:17). Their terminal
+  updates died with the voice process's DB layer, and every repair mechanism
+  (60s DB reconciler, lifecycle coordinator, dead-air bookkeeping) lives in
+  that same process. The dashboard process recovered (its 06:00 UTC cost cron
+  kept writing) but only swept stale rows at boot, and it had not rebooted.
+- **No merge caused this.** Last code on main was Aug 21 (#223); it ran fine
+  Aug 22–24. Nothing from the Aug-26 session was ever merged (#225 closed
+  unmerged).
+
+**Fixes (branch claude/dr-screening-discovery-3qo5r1):** keep-alive now
+escalates to a pool rebuild after 3 consecutive failed pings (`recyclePool` in
+`server/db.ts`, decision in `server/services/dbSelfHeal.logic.ts`); a
+stale-call sweeper runs in the DASHBOARD process at boot + every 5 min closing
+rows past a measured 30-min ceiling from Twilio truth, marking
+`call_disposition='stale_reaped'`, never inventing durations, never touching a
+call Twilio says is live (`server/services/staleCallSweeper.ts` + tested logic
+file); Live panels stop rendering rows older than 30 min; the command center
+shows an amber "logging is DOWN" banner when the newest call_logs row is >2h
+old, so all-zero cards can never again pass as quiet lines.
+
+**Deploy markers** (grep after republish):
+`[DB KEEP-ALIVE] self-heal armed (build 2026-08-27)` and
+`[StaleCallSweeper] armed (build 2026-08-27)`.
