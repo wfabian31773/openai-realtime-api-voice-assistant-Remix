@@ -204,71 +204,6 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static frontend files
 app.use(express.static("client/dist"));
 
-async function cleanupStaleCallsOnStartup() {
-  try {
-    const { storage } = await import('./storage');
-    const { getTwilioClient } = await import('../src/lib/twilioClient');
-    
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-    const staleCalls = await storage.getCallLogs({
-      status: 'in_progress,ringing,initiated',
-      endDate: fiveMinutesAgo,
-      limit: 100,
-    });
-    
-    if (staleCalls.data.length === 0) {
-      console.log("[STARTUP] No stale calls to cleanup");
-      return;
-    }
-    
-    console.log(`[STARTUP] Found ${staleCalls.data.length} stale calls, cleaning up...`);
-    
-    let cleanedCount = 0;
-    const twilioClient = await getTwilioClient();
-    
-    for (const call of staleCalls.data) {
-      const callTime = call.startTime || call.createdAt;
-      if (callTime && new Date(callTime) < fiveMinutesAgo) {
-        let finalStatus: 'completed' | 'busy' | 'no_answer' | 'failed' = 'completed';
-        let actualDuration: number | null = null;
-        
-        if (call.callSid) {
-          try {
-            const twilioCall = await twilioClient.calls(call.callSid).fetch();
-            const twilioStatus = twilioCall.status;
-            actualDuration = twilioCall.duration ? parseInt(twilioCall.duration) : null;
-            
-            if (twilioStatus === 'in-progress' || twilioStatus === 'ringing' || twilioStatus === 'queued') {
-              continue;
-            } else if (twilioStatus === 'busy') {
-              finalStatus = 'busy';
-            } else if (twilioStatus === 'no-answer') {
-              finalStatus = 'no_answer';
-            } else if (twilioStatus === 'failed' || twilioStatus === 'canceled') {
-              finalStatus = 'failed';
-            }
-          } catch (e) {
-            // Call not found in Twilio
-          }
-        }
-        
-        const duration = actualDuration ?? Math.max(0, Math.floor((fiveMinutesAgo.getTime() - new Date(callTime).getTime()) / 1000));
-        
-        await storage.updateCallLog(call.id, {
-          status: finalStatus,
-          endTime: call.endTime || fiveMinutesAgo,
-          duration: duration,
-        });
-        cleanedCount++;
-      }
-    }
-    
-    console.log(`[STARTUP] Cleaned up ${cleanedCount} stale calls`);
-  } catch (error) {
-    console.error("[STARTUP] Error cleaning up stale calls:", error);
-  }
-}
-
 async function backfillMissingReconciliations(): Promise<void> {
   const { backfillMissingReconciliations: doBackfill } = await import('../src/services/reconciliationBackfill');
   return doBackfill();
@@ -513,8 +448,14 @@ async function startServer() {
     healthState.isReady = true;
     console.log("[STARTUP] Server fully initialized");
 
-    // Cleanup stale calls from previous sessions
-    await cleanupStaleCallsOnStartup();
+    // Stale-call sweeper: boot + every 5 min, closes call rows stuck in a
+    // live status past the measured 30-min ceiling using Twilio's real
+    // status. Replaces the old boot-only cleanupStaleCallsOnStartup — on
+    // 2026-08-24 a Supabase restart wedged the voice process's DB layer and
+    // four rows sat "Live now" for 52 hours because this process had not
+    // rebooted. See server/services/staleCallSweep.logic.ts.
+    const { startStaleCallSweeper } = await import('./services/staleCallSweeper');
+    startStaleCallSweeper();
 
     // Backfill any missing reconciliation days (non-blocking)
     backfillMissingReconciliations().catch(err => {

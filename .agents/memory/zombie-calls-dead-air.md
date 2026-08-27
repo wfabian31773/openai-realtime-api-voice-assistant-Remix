@@ -69,3 +69,33 @@ group by 1 order by 2 desc;
 
 `duration` high with `total_turns` at 0–2 is the signature. Note `total_turns` is
 null on many older rows, so `coalesce` it rather than filtering on it.
+
+## The fourth gap: every mechanism above lives in ONE process (2026-08-24)
+
+All three mechanisms — SIP watchdog, DB reconciler, dead-air watchdog — run in
+the voice-agent process. When Supabase restarted Postgres (2026-08-24
+20:19:49 UTC) that process's pool wedged and NEVER recovered: no call_logs
+writes, no reconciler, no cost estimation for 2+ days, while calls kept being
+served (Twilio↔OpenAI audio never touches us; OpenAI billed a normal $174 day
+against our $0 estimate). Four in-flight rows sat in `in_progress` for 52
+hours and surfaced as "Live now" on the Observatory. The dashboard process's
+old `cleanupStaleCallsOnStartup` would have fixed them — but it ran at boot
+only, and the dashboard had not rebooted.
+
+Two additions close the gap:
+
+- **DB self-heal** — `databaseKeepAlive` escalates after 3 consecutive failed
+  pings to `recyclePool()` (`server/db.ts`), which rebuilds the pool with the
+  same live-rebinding pattern the pooler failover always used. Runs in BOTH
+  processes. Decision logic pure + tested: `server/services/dbSelfHeal.logic.ts`.
+- **Stale-call sweeper** — dashboard process, boot + every 5 min
+  (`server/services/staleCallSweeper.ts`). Rows in a live status past 30 min
+  (measured: p99 = 875s, p99.9 = 1,537s, coordinator absolute kill 25 min) are
+  closed from Twilio's REAL status, marked `call_disposition='stale_reaped'`,
+  durations never invented, and a call Twilio says is genuinely live is never
+  touched — it is reported loudly instead. The old startup cleanup that
+  defaulted unknowns to `completed` with an estimated duration is gone.
+
+Markers: `[DB KEEP-ALIVE] self-heal armed (build 2026-08-27)`,
+`[StaleCallSweeper] armed (build 2026-08-27)`. If either is absent after a
+republish, the fix is not live.

@@ -152,6 +152,59 @@ export const dbReady: Promise<void> = (async () => {
   }
 })();
 
+/**
+ * Rebuild the connection pool in place.
+ *
+ * Exists because of 2026-08-24: Supabase restarted Postgres at 20:19:49 UTC
+ * and the voice-agent process NEVER recovered its DB layer — every write
+ * (call_logs rows, lifecycle updates, the 60s reconciler) failed silently for
+ * 2+ days while calls kept being served, so the Observatory read zeros and
+ * four rows sat "live" for 52 hours. The dashboard process recovered; the
+ * voice process's pool stayed wedged. Nothing in the app could repair a pool
+ * once wedged — this is that repair.
+ *
+ * Uses the exact live-rebinding pattern the pooler-failover path above has
+ * always used (reassign `pool`/`db`, drain the old pool after a grace
+ * period), so importers holding `import { db }` bindings pick up the fresh
+ * pool automatically. Called by databaseKeepAlive after sustained ping
+ * failure; never on a single transient error.
+ */
+let poolRecycleCount = 0;
+let recycleInFlight = false;
+
+export async function recyclePool(reason: string): Promise<boolean> {
+  if (recycleInFlight) {
+    console.warn('[DB] recyclePool skipped — a recycle is already in flight');
+    return false;
+  }
+  recycleInFlight = true;
+  try {
+    const oldPool = pool as pg.Pool;
+    const fresh = initializeDatabase();
+    pool = fresh.pool;
+    db = fresh.db;
+    isSupabase = fresh.isSupabase;
+    isPgBouncer = fresh.isPgBouncer;
+    poolRecycleCount++;
+    console.warn(`[DB] Pool recycled (#${poolRecycleCount}) — reason: ${reason}`);
+    // Drain the old pool after a grace period so in-flight work isn't cut off
+    // (same grace the pooler failover uses).
+    setTimeout(() => {
+      Promise.resolve(oldPool.end()).catch(() => {});
+    }, 30000);
+    try {
+      await (pool as pg.Pool).query('SELECT 1');
+      console.info(`[DB] ✓ Recycled pool validated (#${poolRecycleCount})`);
+      return true;
+    } catch (err: any) {
+      console.error(`[DB] ✗ Recycled pool STILL FAILING (#${poolRecycleCount}):`, err?.message ?? err);
+      return false;
+    }
+  } finally {
+    recycleInFlight = false;
+  }
+}
+
 export function getPoolMetrics(): PoolMetrics {
   const pgPool = pool as pg.Pool;
   if (typeof pgPool.totalCount === 'number') {

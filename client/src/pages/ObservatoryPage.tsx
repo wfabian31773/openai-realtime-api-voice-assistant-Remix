@@ -157,6 +157,9 @@ interface SageToday {
 interface TodayOverview {
   opsHub: OpsHubTodayAgent[]
   sage: SageToday
+  /** Epoch ms of the newest call_logs row — null if none. Lets the page say
+   * "logging is down" instead of showing silent zeros on every card. */
+  lastCallLogAtMs?: number | null
 }
 interface BriefAgentMetric {
   agentId: string
@@ -1589,8 +1592,18 @@ function CommandCenterTab({
 }) {
   const live = useQuery<{ data: LiveOpsCall[] }>({
     queryKey: ['obs-live-ops'],
+    // startDate ceiling: a row still "live" after 30 min is stale bookkeeping,
+    // not a call — p99.9 call duration is ~26 min and the coordinator
+    // force-terminates at 25. Keeps zombie rows (e.g. the 52-hour ones from
+    // the 2026-08-24 DB restart) off the board even before the sweeper runs.
     queryFn: async () =>
-      (await apiClient.get('/call-logs?status=in_progress,ringing,initiated&limit=50')).data,
+      (
+        await apiClient.get(
+          `/call-logs?status=in_progress,ringing,initiated&limit=50&startDate=${new Date(
+            Date.now() - 30 * 60 * 1000,
+          ).toISOString()}`,
+        )
+      ).data,
     refetchInterval: 3000,
   })
   const today = useQuery<TodayOverview>({
@@ -1665,6 +1678,30 @@ function CommandCenterTab({
       {/* Today per agent */}
       <div>
         <h2 className="mb-2 text-lg font-semibold">Today — every agent at a glance</h2>
+        {(() => {
+          // Call-logging staleness guard (2026-08-24 incident: every card read
+          // zero for two days because the voice process stopped writing rows
+          // after a Supabase restart, and nothing on this page said so).
+          const lastMs = today.data?.lastCallLogAtMs
+          const STALE_LOGGING_MS = 2 * 60 * 60 * 1000
+          if (lastMs != null && Date.now() - lastMs > STALE_LOGGING_MS) {
+            const hours = Math.round((Date.now() - lastMs) / 3600000)
+            return (
+              <div className="mb-3 rounded-lg border border-amber-500/60 bg-amber-500/10 p-3 text-sm">
+                <p className="font-semibold text-amber-700 dark:text-amber-400">
+                  ⚠ No call has been logged in ~{hours} hour{hours === 1 ? '' : 's'} (last row:{' '}
+                  {new Date(lastMs).toLocaleString()})
+                </p>
+                <p className="mt-1 text-muted-foreground">
+                  The zeros below mean call logging is DOWN, not that the lines are quiet. Calls may
+                  still be answered while nothing is recorded. Check the deployment logs for{' '}
+                  <code>[DB KEEP-ALIVE]</code> and republish if needed.
+                </p>
+              </div>
+            )
+          }
+          return null
+        })()}
         {today.isError && (
           <p className="text-sm text-red-600">
             Today stats failed: {(today.error as any)?.response?.data?.error ?? String(today.error)}
