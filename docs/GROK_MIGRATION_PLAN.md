@@ -19,7 +19,7 @@ Pricing figures carry their source and date; verify before any budget commitment
 - **That transport is not a science project — it is already built, hardened
   through ~20 code-review rounds, and taking live test calls** on the
   ticketing-app answering-service lanes (surgery/optical/tech,
-  `grok-telephony-v2`) and the 5star DRS line (`drs-grok-telephony-v6`). The
+  `grok-telephony-v2`) and the 5star DRS line. The
   migration is a **port of a proven wire layer under the existing agents**, not
   new construction. Per standing instruction 2: *same exact agent, different
   voice pipeline*.
@@ -54,7 +54,7 @@ Pricing figures carry their source and date; verify before any budget commitment
   to carry it.
 - **Sequencing** (§8): prove answering-service on a test number against the
   Gate B replay corpus → cut over in a low-volume window → no-IVR/after-hours →
-  queue lines (a decision is owed on Remix-vs-ticketing ownership) → PCP/SD
+  queue lines (into the hub, per ADR-001) → PCP/SD
   migrate while OFF → outbound/Sage outreach as a later phase with the same
   recipe. Every cutover is a Twilio webhook re-point; every rollback is the
   same re-point in reverse.
@@ -77,8 +77,11 @@ Pricing figures carry their source and date; verify before any budget commitment
 **Already on Grok (the proven foundation, not part of this plan's work):**
 - ticketing-app answering-service lanes — surgery/optical/tech slugs, per-lane
   voice, marker `grok-telephony-v2`, live-tested 08-23/24.
-- 5star DRS scheduling line — marker `drs-grok-telephony-v6-sage-opening`,
-  merged 08-24, awaiting operator publish + test call.
+- 5star DRS scheduling line — marker now
+  `drs-grok-telephony-v10-cancel-race-absorbed`; has moved well past the 08-24
+  merge (language requests, caller questions, PSD eligibility). Note 5star #213:
+  a call-dropping cancel-race guard present in the ticketing adapter since
+  08-23 was **missing here** until 08-29 — the drift ADR-001 exists to stop.
 
 **Out of scope here:** the Claude-brain experiment (`src/standalone/claudeBrain.ts`
 — parallel R&D, unaffected); the 5star Sage outreach agents (inbound/outbound/
