@@ -387,6 +387,25 @@ async function startServer() {
     console.error('[STARTUP] Demo line failed to mount (rest of the server unaffected):', err);
   }
 
+  // The Grok voice runtime (src/runtime/). Same reasoning as the demo line,
+  // and for the same hard reason: it serves Twilio Media Streams, and the
+  // /api/voice proxy in front of the voice server speaks HTTP only — a
+  // WebSocket upgrade cannot reach it there. Mounted before listen so the
+  // upgrade handler is attached when the first call lands.
+  //
+  // Mounting is unconditional and safe: an unconfigured process still
+  // starts, still serves GET /voice/health with its deploy marker and the
+  // NAMES of whatever is missing, and its webhook fails closed with a
+  // controlled spoken line rather than a half-configured call. No number
+  // points at /voice/:slug until Wayne points one, so mounting it changes
+  // nothing for any live line.
+  try {
+    const [{ mountVoiceRuntime }] = await Promise.all([import('../src/runtime/voiceRuntime')]);
+    mountVoiceRuntime(app, earlyServer);
+  } catch (err) {
+    console.error('[STARTUP] Voice runtime failed to mount (rest of the server unaffected):', err);
+  }
+
   // The tool library's HTTP surface. Mounted here, before registerRoutes, for
   // the same reason as the demo line: nothing should be able to shadow
   // /api/tools/*, and a failure here must never stop the API server.

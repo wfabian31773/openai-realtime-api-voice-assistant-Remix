@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  decodeToolOutput,
   VoiceCallBridge,
   FINAL_MARK_GRACE_MS,
   MULAW_BYTES_PER_MS,
@@ -373,11 +374,33 @@ describe("VoiceCallBridge — tool dispatch", () => {
     h.handlers().onToolCall("call-9", "create_ticket", { reason: "refill" });
     await Promise.resolve();
     await Promise.resolve();
-    expect(h.session.sendToolResult).toHaveBeenCalledWith(
-      "call-9",
-      false,
-      '{"ok":false,"error":"tool_failed"}',
-    );
+    // The answer reaches the wire layer as an OBJECT, because that layer
+    // spreads it into the payload. Handing it the raw JSON string spreads
+    // the string's characters and the model receives garbage — the bug the
+    // end-to-end call test found.
+    expect(h.session.sendToolResult).toHaveBeenCalledWith("call-9", false, {
+      ok: false,
+      error: "tool_failed",
+    });
+  });
+
+  it("hands the wire layer an object, never the pre-encoded string", async () => {
+    const h = makeBridge();
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    await Promise.resolve();
+    await Promise.resolve();
+    const [, , output] = (h.session.sendToolResult as unknown as {
+      mock: { calls: [string, boolean, unknown][] };
+    }).mock.calls[0];
+    expect(typeof output).toBe("object");
+    expect(output).toEqual({ ticket: "VA-51121" });
+  });
+
+  it("gives a non-object tool answer a name rather than scattering it into characters", () => {
+    expect(decodeToolOutput('{"ticket":"VA-1"}')).toEqual({ ticket: "VA-1" });
+    expect(decodeToolOutput('"VA-1 filed"')).toEqual({ result: "VA-1 filed" });
+    expect(decodeToolOutput("[1,2]")).toEqual({ result: [1, 2] });
+    expect(decodeToolOutput("filed, no JSON")).toEqual({ result: "filed, no JSON" });
   });
 
   it("records the tool timeline by name and outcome — never by argument", async () => {

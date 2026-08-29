@@ -40,7 +40,12 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import { VoiceCallBridge, type CallOutcome } from "./mediaStreamBridge";
 import { CallSessionRegistry, type CallEntry } from "./sessionRegistry";
-import { GrokVoiceSession, WebSocketGrokTransport, buildSessionConfig } from "./grokSession";
+import {
+  GrokVoiceSession,
+  WebSocketGrokTransport,
+  buildSessionConfig,
+  type GrokTransport,
+} from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
 import { persistRuntimeCall } from "./callRecord";
 import {
@@ -71,6 +76,21 @@ export interface VoiceRuntimeOptions {
   /** Overridable so tests never import the agent tree. */
   laneSource?: LaneSource;
   registry?: CallSessionRegistry;
+  /**
+   * How to open the Grok connection. Injectable for one reason, and it is
+   * the standing rule rather than a convenience: a failing call goes into
+   * an offline test BEFORE any code changes, red then green, instead of
+   * asking Wayne to dial and find out. With a fake transport the whole
+   * path — webhook, token claim, lane resolve, binding, session, bridge,
+   * teardown, outcome, after-redirect — runs in milliseconds with no phone
+   * and no xAI account.
+   */
+  createTransport?: (config: { apiKey: string; model: string }) => RuntimeTransport;
+}
+
+/** A transport the runtime can open. WebSocketGrokTransport satisfies it. */
+export interface RuntimeTransport extends GrokTransport {
+  connect(): Promise<void>;
 }
 
 function toWebhookRequest(req: Request): WebhookRequest {
@@ -272,7 +292,9 @@ export function mountVoiceRuntime(
           );
         }
 
-        const transport = new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
+        const transport = options.createTransport
+          ? options.createTransport({ apiKey: lane.voice.apiKey, model: lane.voice.model })
+          : new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
         bridge = new VoiceCallBridge({
           context,
           agent: lane.agent,

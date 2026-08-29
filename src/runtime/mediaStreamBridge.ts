@@ -74,6 +74,29 @@ import type { BoundAgent } from "./agentBinding";
 import { CallTranscriptLog } from "./transcriptLog";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
 
+/**
+ * A tool's answer as an object the wire layer can spread into its payload.
+ *
+ * `dispatch` hands back the exact JSON string a tool produced, because that
+ * is the honest thing for a layer that must not interpret tool results. The
+ * wire layer spreads its output into `{ok, …}`. Spreading a STRING yields
+ * `{"0":"{","1":"\"", …}`, so the seam between them is here: parse once,
+ * and give a non-object answer a name rather than scattering it into
+ * characters. Never throws — an unanswered tool call stalls the turn.
+ */
+export function decodeToolOutput(output: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(output);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return { result: parsed };
+  } catch {
+    // A tool that answered in plain prose still answered.
+    return { result: output };
+  }
+}
+
 /** μ-law 8kHz mono = 8000 bytes/second = 8 bytes per millisecond. */
 export const MULAW_BYTES_PER_MS = 8;
 
@@ -156,7 +179,7 @@ export interface VoiceCallContext {
 export interface BridgeSession {
   appendAudio(base64Audio: string): void;
   cancelResponse(): void;
-  sendToolResult(callId: string, ok: boolean, output: unknown): void;
+  sendToolResult(callId: string, ok: boolean, output: Record<string, unknown>): void;
   speakNatural(instructions: string): void;
   close(): void;
   getResponseEpoch(): number;
@@ -558,12 +581,12 @@ export class VoiceCallBridge {
         ...(result.error ? { error: result.error } : {}),
       });
       if (this.ended) return;
-      this.session.sendToolResult(callId, result.ok, result.output);
+      this.session.sendToolResult(callId, result.ok, decodeToolOutput(result.output));
     })().catch(() => {
       // dispatch() is documented never to throw; if it somehow does, the
       // call still gets an answer rather than a stalled turn.
       if (!this.ended) {
-        this.session.sendToolResult(callId, false, '{"ok":false,"error":"dispatch_failed"}');
+        this.session.sendToolResult(callId, false, { error: "dispatch_failed" });
       }
     });
   }

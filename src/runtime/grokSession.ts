@@ -501,13 +501,23 @@ export class GrokVoiceSession {
     if (next !== undefined) this.sendSay(next);
   }
 
-  sendToolResult(callId: string, ok: boolean, output: unknown): void {
+  /**
+   * Answer one tool call. `output` is SPREAD into the payload, so it must
+   * be an object — typed as one rather than `unknown` because it was
+   * `unknown` that let the bridge hand this a pre-encoded JSON *string*,
+   * which spreads into `{"0":"{","1":"\"", …}` and reaches the model as
+   * garbage. Every tool call on every lane would have been answered with
+   * an unreadable result, and nothing in either layer's own tests could
+   * see it: each was correct against its own contract. The end-to-end
+   * call test found it; this type is what stops it coming back.
+   */
+  sendToolResult(callId: string, ok: boolean, output: Record<string, unknown>): void {
     this.send({
       type: "conversation.item.create",
       item: {
         type: "function_call_output",
         call_id: callId,
-        output: JSON.stringify({ ok, ...(output as Record<string, unknown>) }),
+        output: JSON.stringify({ ok, ...output }),
       },
     });
   }

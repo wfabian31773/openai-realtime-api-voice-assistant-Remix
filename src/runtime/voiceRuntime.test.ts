@@ -1,0 +1,431 @@
+/**
+ * One whole call, end to end, with no phone and no xAI account.
+ *
+ * This is the test the standing rule asks for: "a failing call goes into a
+ * replay test BEFORE any code changes — show red then green offline; do not
+ * ask him to dial to find out whether a guess was right." Everything below
+ * the Twilio socket and above the Grok socket is real code — the webhook,
+ * the token gate, the lane resolution, the agent binding, the session's
+ * wire handling, the bridge's barge-in and teardown, the outcome the
+ * post-stream TwiML reads. Only the two sockets are fakes.
+ */
+import { describe, it, expect, vi, afterEach } from "vitest";
+import express from "express";
+import http from "node:http";
+import { z } from "zod";
+import twilio from "twilio";
+import WebSocket from "ws";
+import { mountVoiceRuntime, type RuntimeTransport } from "./voiceRuntime";
+import { CallSessionRegistry } from "./sessionRegistry";
+import type { GrokServerEvent } from "./wireTypes";
+import type { LaneConfig, LaneSource } from "./laneRegistry";
+
+const AUTH_TOKEN = "test-auth-token";
+const ENV = {
+  TWILIO_AUTH_TOKEN: AUTH_TOKEN,
+  XAI_API_KEY: "xai-key",
+  DATABASE_URL: "postgres://x",
+};
+
+/** A fake Grok socket: records what the runtime sends and lets the test
+ * play server events back in wire order. */
+class FakeGrokTransport implements RuntimeTransport {
+  public sent: Array<Record<string, unknown>> = [];
+  public closed = false;
+  private onMsg: ((data: string) => void) | null = null;
+  private onErr: ((err: Error) => void) | null = null;
+  private onCls: (() => void) | null = null;
+
+  async connect(): Promise<void> {
+    // The handshake the real wire performs on open.
+    queueMicrotask(() => this.emit({ type: "session.created" } as GrokServerEvent));
+  }
+  send(data: string): void {
+    this.sent.push(JSON.parse(data));
+  }
+  close(): void {
+    this.closed = true;
+  }
+  onMessage(cb: (data: string) => void): void {
+    this.onMsg = cb;
+  }
+  onError(cb: (err: Error) => void): void {
+    this.onErr = cb;
+  }
+  onClose(cb: () => void): void {
+    this.onCls = cb;
+  }
+  emit(event: GrokServerEvent): void {
+    this.onMsg?.(JSON.stringify(event));
+  }
+  emitError(err: Error): void {
+    this.onErr?.(err);
+  }
+  emitClose(): void {
+    this.onCls?.();
+  }
+  ofType(type: string): Array<Record<string, unknown>> {
+    return this.sent.filter((e) => e.type === type);
+  }
+}
+
+const filedTickets: Array<Record<string, unknown>> = [];
+
+function laneSource(over: Partial<LaneConfig> = {}): LaneSource {
+  const config: LaneConfig = {
+    id: "optical",
+    enabled: true,
+    voice: "sage",
+    version: "v1.4.0",
+    factory: (async () => ({
+      instructions: "You are the optical queue agent. Take the request and file it.",
+      tools: [
+        {
+          name: "create_ticket",
+          description: "File a callback request.",
+          parameters: z.object({ reason: z.string(), callback_number: z.string() }),
+          invoke: async (_ctx: unknown, input: string) => {
+            filedTickets.push(JSON.parse(input));
+            return { ticket_number: "VA-51121" };
+          },
+        },
+      ],
+    })) as unknown as LaneConfig["factory"],
+    ...over,
+  };
+  return { getAgentConfig: (id) => (id === config.id ? config : undefined) };
+}
+
+interface Harness {
+  base: string;
+  wsUrl: string;
+  registry: CallSessionRegistry;
+  transports: FakeGrokTransport[];
+  close: () => Promise<void>;
+}
+
+const open: Harness[] = [];
+/** Every client socket a test opened. An upgraded WebSocket is detached
+ * from the HTTP server, so closeAllConnections() cannot reach it and
+ * server.close() would wait on it forever. */
+const clients: WebSocket[] = [];
+
+async function harness(over: { laneSource?: LaneSource } = {}): Promise<Harness> {
+  const app = express();
+  app.use(express.urlencoded({ extended: true }));
+  const server = http.createServer(app);
+  const registry = new CallSessionRegistry();
+  const transports: FakeGrokTransport[] = [];
+  mountVoiceRuntime(app, server, {
+    env: ENV,
+    registry,
+    laneSource: over.laneSource ?? laneSource(),
+    createTransport: () => {
+      const t = new FakeGrokTransport();
+      transports.push(t);
+      return t;
+    },
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const port = (server.address() as { port: number }).port;
+  const h: Harness = {
+    base: `http://127.0.0.1:${port}`,
+    wsUrl: `ws://127.0.0.1:${port}/voice/stream`,
+    registry,
+    transports,
+    close: () =>
+      new Promise<void>((resolve) => {
+        // A media stream left open would hold server.close() forever —
+        // which is exactly what a real hung call does, and not what this
+        // hook is for.
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+  open.push(h);
+  return h;
+}
+
+afterEach(async () => {
+  while (clients.length) clients.pop()!.terminate();
+  while (open.length) await open.pop()!.close();
+  filedTickets.length = 0;
+});
+
+/** POST a genuinely signed Twilio webhook. */
+async function post(
+  h: Harness,
+  path: string,
+  body: Record<string, string>,
+): Promise<{ status: number; text: string }> {
+  const url = `${h.base}${path}`;
+  const sig = (
+    twilio as unknown as {
+      getExpectedTwilioSignature: (t: string, u: string, p: Record<string, string>) => string;
+    }
+  ).getExpectedTwilioSignature(AUTH_TOKEN, url, body);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "x-twilio-signature": sig,
+      "x-forwarded-proto": "http",
+    },
+    body: new URLSearchParams(body).toString(),
+  });
+  return { status: res.status, text: await res.text() };
+}
+
+function tokenFrom(twiml: string): string {
+  return twiml.match(/name="token" value="([^"]+)"/)![1];
+}
+
+/** Open the media stream and send the start frame Twilio would send. */
+async function openStream(
+  h: Harness,
+  callSid: string,
+  token: string,
+): Promise<{ ws: WebSocket; frames: Array<Record<string, unknown>> }> {
+  const ws = new WebSocket(h.wsUrl);
+  clients.push(ws);
+  const frames: Array<Record<string, unknown>> = [];
+  ws.on("message", (raw) => frames.push(JSON.parse(raw.toString())));
+  await new Promise<void>((resolve, reject) => {
+    ws.once("open", () => resolve());
+    ws.once("error", reject);
+  });
+  ws.send(
+    JSON.stringify({
+      event: "start",
+      streamSid: "MZ1",
+      start: {
+        streamSid: "MZ1",
+        callSid,
+        customParameters: { callSid, token },
+      },
+    }),
+  );
+  return { ws, frames };
+}
+
+/** Let the event loop drain — the runtime builds the agent asynchronously. */
+async function settle(times = 8): Promise<void> {
+  for (let i = 0; i < times; i += 1) await new Promise((r) => setTimeout(r, 5));
+}
+
+describe("one whole call, end to end, offline", () => {
+  it("answers, configures the session with the agent's own prompt and tools, and files a ticket", async () => {
+    const h = await harness();
+
+    // 1. Twilio's Voice webhook.
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CA1",
+      From: "+15551234567",
+      To: "+15559876543",
+    });
+    expect(answered.status).toBe(200);
+    expect(answered.text).toContain("<Connect><Stream");
+
+    // 2. The media stream, with the token the webhook minted.
+    const { ws } = await openStream(h, "CA1", tokenFrom(answered.text));
+    await settle();
+    expect(h.transports).toHaveLength(1);
+    const grok = h.transports[0];
+
+    // 3. The session handshake: config BEFORE any audio (the rule that
+    //    cost a whole line when it was the other way round).
+    grok.emit({ type: "session.created" } as GrokServerEvent);
+    await settle();
+    const update = grok.ofType("session.update")[0] as {
+      session: { instructions: string; voice: string; tools: Array<{ name: string }> };
+    };
+    expect(update.session.voice).toBe("sage");
+    // The agent's own words, and the practice knowledge in front of them.
+    expect(update.session.instructions).toContain("You are the optical queue agent");
+    expect(update.session.instructions).toContain("YOU WORK FOR AZUL VISION");
+    // The agent's own tool, with its own schema and no strict mode.
+    expect(update.session.tools.map((t) => t.name)).toEqual(["create_ticket"]);
+    expect(JSON.stringify(update.session.tools)).not.toContain('"strict"');
+
+    // 4. Caller audio reaches Grok untouched.
+    ws.send(
+      JSON.stringify({ event: "media", streamSid: "MZ1", media: { payload: "QUJDRA==" } }),
+    );
+    await settle();
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    await settle();
+    expect(grok.ofType("input_audio_buffer.append").map((e) => e.audio)).toContain("QUJDRA==");
+
+    // 5. The model calls the agent's tool, and the agent's own code runs.
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({
+      type: "response.function_call_arguments.done",
+      call_id: "fc1",
+      name: "create_ticket",
+      arguments: JSON.stringify({ reason: "lens remake", callback_number: "+15551234567" }),
+    } as GrokServerEvent);
+    await settle();
+    expect(filedTickets).toEqual([
+      { reason: "lens remake", callback_number: "+15551234567" },
+    ]);
+    // Every tool call is answered, or the turn stalls forever.
+    const answer = grok.ofType("conversation.item.create").pop() as {
+      item: { type: string; call_id: string; output: string };
+    };
+    expect(answer.item.type).toBe("function_call_output");
+    expect(answer.item.call_id).toBe("fc1");
+    // `ok` is the wire layer's own flag; the tool's answer rides beside it.
+    expect(JSON.parse(answer.item.output)).toEqual({ ok: true, ticket_number: "VA-51121" });
+
+    ws.close();
+    await settle();
+  });
+
+  it("plays the agent's audio to the caller and records what was actually heard", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CA2",
+      From: "+15551234567",
+      To: "+15559876543",
+    });
+    const { ws, frames } = await openStream(h, "CA2", tokenFrom(answered.text));
+    await settle();
+    const grok = h.transports[0];
+    grok.emit({ type: "session.created" } as GrokServerEvent);
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({
+      type: "response.output_audio_transcript.delta",
+      delta: "Thanks for calling Azul Vision optical.",
+    } as GrokServerEvent);
+    grok.emit({
+      type: "response.output_audio.delta",
+      delta: Buffer.alloc(800, 0x7f).toString("base64"),
+    } as GrokServerEvent);
+    await settle();
+
+    const media = frames.filter((f) => f.event === "media");
+    expect(media).toHaveLength(1);
+    expect((media[0] as { media: { payload: string } }).media.payload).toBe(
+      Buffer.alloc(800, 0x7f).toString("base64"),
+    );
+
+    grok.emit({
+      type: "response.output_audio_transcript.done",
+      transcript: "Thanks for calling Azul Vision optical.",
+    } as GrokServerEvent);
+    await settle();
+    const mark = frames.find((f) => f.event === "mark") as { mark: { name: string } };
+    expect(mark).toBeTruthy();
+
+    // Twilio confirms the audio played. Only now is the line committed.
+    ws.send(JSON.stringify({ event: "mark", streamSid: "MZ1", mark: { name: mark.mark.name } }));
+    await settle();
+    ws.send(JSON.stringify({ event: "stop", streamSid: "MZ1" }));
+    await settle();
+    expect(h.registry.consumeOutcome("CA2")).toBe("caller_hangup");
+  });
+
+  it("barges in with BOTH signals when the caller talks over the agent", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CA3",
+      From: "+1",
+      To: "+2",
+    });
+    const { ws, frames } = await openStream(h, "CA3", tokenFrom(answered.text));
+    await settle();
+    const grok = h.transports[0];
+    grok.emit({ type: "session.created" } as GrokServerEvent);
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({
+      type: "response.output_audio.delta",
+      delta: Buffer.alloc(400, 0x7f).toString("base64"),
+    } as GrokServerEvent);
+    await settle();
+    grok.emit({ type: "input_audio_buffer.speech_started" } as GrokServerEvent);
+    await settle();
+
+    expect(grok.ofType("response.cancel")).toHaveLength(1);
+    expect(frames.filter((f) => f.event === "clear")).toHaveLength(1);
+    ws.close();
+    await settle();
+  });
+
+  it("survives Grok rejecting the cancel — the failure that used to hang up on a healthy caller", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA4", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA4", tokenFrom(answered.text));
+    await settle();
+    const grok = h.transports[0];
+    grok.emit({ type: "session.created" } as GrokServerEvent);
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({
+      type: "response.output_audio.delta",
+      delta: Buffer.alloc(400, 0x7f).toString("base64"),
+    } as GrokServerEvent);
+    await settle();
+    grok.emit({ type: "input_audio_buffer.speech_started" } as GrokServerEvent);
+    await settle();
+    // Grok finished the response first, so it rejects the cancel. That is
+    // the missing response.done, not a fault.
+    grok.emit({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "cancellation failed: no active response found",
+      },
+    } as GrokServerEvent);
+    await settle();
+    // The call is still up: no outcome recorded, socket not closed.
+    expect(h.registry.get("CA4")!.outcome).toBeNull();
+    ws.close();
+    await settle();
+  });
+
+  it("refuses a stream whose token was not minted by the webhook", async () => {
+    const h = await harness();
+    await post(h, "/voice/optical", { CallSid: "CA5", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA5", "not-the-token");
+    await settle();
+    // No session was ever opened for it.
+    expect(h.transports).toHaveLength(0);
+    expect(ws.readyState === ws.CLOSING || ws.readyState === ws.CLOSED).toBe(true);
+  });
+
+  it("refuses a SECOND stream for a call that already has one", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA6", From: "+1", To: "+2" });
+    const token = tokenFrom(answered.text);
+    await openStream(h, "CA6", token);
+    await settle();
+    expect(h.transports).toHaveLength(1);
+    await openStream(h, "CA6", token);
+    await settle();
+    expect(h.transports).toHaveLength(1);
+  });
+
+  it("ends a call whose lane turns out to be disabled, and explains it to the caller", async () => {
+    const h = await harness({ laneSource: laneSource({ enabled: false }) });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA7", From: "+1", To: "+2" });
+    // The webhook accepted an unseen slug rather than awaiting the agent
+    // tree on Twilio's clock; the stream is where it is resolved.
+    expect(answered.text).toContain("<Stream");
+    await openStream(h, "CA7", tokenFrom(answered.text));
+    await settle();
+    expect(h.transports).toHaveLength(0);
+    const after = await post(h, "/voice/optical/after", { CallSid: "CA7" });
+    expect(after.text).toContain("technical trouble");
+  });
+
+  it("serves the deploy marker, which is how a stale build is caught", async () => {
+    const h = await harness();
+    const res = await fetch(`${h.base}/voice/health`);
+    const body = (await res.json()) as { marker: string; liveReady: boolean; missing: string[] };
+    expect(body.marker).toMatch(/^voice-runtime-/);
+    expect(body.liveReady).toBe(true);
+    expect(body.missing).toEqual([]);
+  });
+});
