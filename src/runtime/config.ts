@@ -36,7 +36,14 @@ function envSuffix(slug: string): string {
   return slug.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
 }
 
-function pick(
+/**
+ * The per-lane env lookup: `<BASE>_<SLUG>` first, then plain `<BASE>`,
+ * then nothing. Exported because laneRegistry.ts needs to know whether a
+ * value was set EXPLICITLY — a default returned from here is
+ * indistinguishable from a real setting, and if the default won, a lane's
+ * own registered voice could never take effect.
+ */
+export function pickLaneEnv(
   env: Record<string, string | undefined>,
   base: string,
   slug: string | undefined,
@@ -55,12 +62,12 @@ export function loadGrokRuntimeVoiceConfig(
 ): GrokRuntimeVoiceConfig {
   // Only an explicit "none" disables reasoning; anything else keeps the
   // default high effort that the live lanes run on today.
-  const effortRaw = (pick(env, "XAI_VOICE_REASONING_EFFORT", slug) ?? "").toLowerCase();
+  const effortRaw = (pickLaneEnv(env, "XAI_VOICE_REASONING_EFFORT", slug) ?? "").toLowerCase();
   return {
     apiKey: env.XAI_API_KEY ?? "",
-    model: pick(env, "XAI_VOICE_MODEL", slug) ?? DEFAULT_MODEL,
-    voiceName: pick(env, "XAI_VOICE_NAME", slug) ?? DEFAULT_VOICE,
-    language: normalizeSpokenLanguage(pick(env, "XAI_VOICE_LANGUAGE", slug) ?? "en"),
+    model: pickLaneEnv(env, "XAI_VOICE_MODEL", slug) ?? DEFAULT_MODEL,
+    voiceName: pickLaneEnv(env, "XAI_VOICE_NAME", slug) ?? DEFAULT_VOICE,
+    language: normalizeSpokenLanguage(pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug) ?? "en"),
     reasoningEffort: effortRaw === "none" ? "none" : "high",
   };
 }
