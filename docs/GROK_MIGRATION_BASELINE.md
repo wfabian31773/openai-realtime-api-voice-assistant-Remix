@@ -99,6 +99,22 @@ Both zero-valued columns above were verified as *measured* rather than
   value these agents emit, so an abandonment rate cannot be read from it and is
   deliberately absent from the tables above.
 
+## Token cache baseline (OpenAI lanes only)
+
+| | Rate |
+|---|---|
+| Audio input cached | 51.9% |
+| Text input cached | 83.7% |
+| Text cached, calls of 1–4 turns | **30.6%** |
+| Text cached, calls of 40+ turns | 91.0% |
+
+Both rates climb monotonically with turn count — within-conversation prefix
+caching. The short-call text figure is the one to watch: it is where a
+busted static prefix shows up first. Analysis and the design rules it
+imposes are in `adr/ADR-001-centralized-voice-operations-hub.md`. Note these
+numbers stop mattering for cost on any lane that moves to Grok's flat
+per-minute pricing.
+
 ## How these gate the migration
 
 | Metric | Gate |
@@ -109,3 +125,4 @@ Both zero-valued columns above were verified as *measured* rather than
 | Median 1st transcript | latency reference; the plan's §6 gate is "not materially worse" |
 | Phone-ID % | answering-service only today; must not regress from 26.8% |
 | $/call-minute | $0.0918 baseline; Grok's flat $0.08 should show as a modest fall |
+| Short-call text cache % | OpenAI lanes only; a fall means a per-call value leaked into the static prompt prefix |

@@ -316,6 +316,12 @@ tool at all** (rule 9 — a tool the agent cannot see is a promise it cannot
 make). That enforcement is stronger than a prompt instruction on *any* model,
 and it is why the prompt got to shrink.
 
+**There is a cost dividend too.** A re-sent prompt is billed on every turn
+whether cached or not, so prompt size is the largest *addressable* line on
+the OpenAI bill — directionally worth more per month than either cache
+tuning or the entire Grok-vs-OpenAI delta (ADR-001, caching section). The
+ruling below is a quality decision that happens to pay for itself.
+
 **Method for each agent, therefore:** rewrite the prompt from the agent's
 business rules, not from its current text. Take the existing prompt, strip
 everything that exists because GPT misbehaved, keep (b) and (c), and promote
@@ -367,6 +373,12 @@ what proves the result — a short prompt that fails the corpus is not a win.
 | If PCP + SD return (+~35% min) | — | $1,691 vs $1,474 | −$217/mo |
 
 **Honest conclusions:**
+0. **This comparison is against a poorly-cached OpenAI — see ADR-001's
+   caching section.** Measured token caching is 51.9% on audio and 83.7% on
+   text, and only 30.6% on short calls' text, where the prompt dominates. A
+   well-cached, shorter-prompted OpenAI could close or reverse the gap below.
+   Treat the delta as "roughly a wash", and decide on control and
+   reliability, not price.
 1. **Grok is modestly CHEAPER — roughly 13%, about $160/month at today's
    volume.** This corrects the first draft of this document, which estimated
    OpenAI at $0.05–0.08/min from published token rates and concluded
