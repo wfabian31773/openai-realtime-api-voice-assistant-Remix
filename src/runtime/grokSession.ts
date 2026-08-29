@@ -1,0 +1,593 @@
+/**
+ * src/runtime/grokSession.ts
+ * ─────────────────────────────────────────────────────────────────────────────
+ * The voice runtime's realtime session: a thin wrapper around a
+ * GrokTransport owning the connection lifecycle (connecting -> connected ->
+ * configured -> closed/error) and the wire send/receive plumbing. It knows
+ * NOTHING about any agent's business logic — it is handed instructions and
+ * tool definitions and it emits tool calls. That is what makes one runtime
+ * able to serve every lane (ADR-001).
+ *
+ * PORTED from the 5Star DRS provider, which was itself ported from the
+ * ticketing answering-service adapter. Every rule below was paid for by a
+ * live call, and the port exists so it is never paid for a third time:
+ *
+ *   - **Session config ALWAYS precedes caller audio.** Audio arriving during
+ *     the handshake is held and drained only after the config lands, and
+ *     after the opener is queued — otherwise Grok locks its input pipeline
+ *     to the wrong format and the agent is permanently deaf (5Star #199).
+ *   - **Scripted lines are response-gated.** A `force_message` sent while a
+ *     response is open at the wire never plays. Scripted lines queue FIFO
+ *     and release one per `response.done`; tool answers are NEVER gated
+ *     (5Star #200).
+ *   - **Barge-in discards the queue.** The queue holds pre-rendered text,
+ *     stale by construction once the caller interrupts; a line flushed
+ *     afterwards is heard but absent from the transcript (5Star #200 r4).
+ *   - **At most ONE `response.cancel` per response cycle.** A stale audio
+ *     delta re-arms the bridge's playing flag, so a second barge-in can
+ *     re-enter with a response still open; a duplicate cancel draws a
+ *     second rejection and only one is absorbable (5Star #213 r2).
+ *   - **A rejected cancel is absorbed, not fatal.** "cancellation failed:
+ *     no active response found" means the response finished first — it IS
+ *     the missing `response.done`, and treating it as a provider error
+ *     hangs up on a healthy caller. `response.done` does NOT clear the
+ *     debt; the next `response.created` does (5Star #213).
+ *   - A tool call arrives as `response.function_call_arguments.done` with
+ *     `arguments` as a JSON STRING; its answer is a `function_call_output`
+ *     item. Every call must be answered or the turn stalls.
+ *   - There is no `response.output_audio.done`; the per-utterance
+ *     completion signal is `response.output_audio_transcript.done`, which
+ *     fires for force_messages too (surfaced as onAudioDone).
+ *   - There is no `session.close` handshake — closing the socket is the
+ *     close.
+ *
+ * `GrokTransport` is dependency-injected so the whole runtime is testable
+ * offline against a fake in-memory transport — no xAI connection and no
+ * real audio are ever required by the test suite.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+import { normalizeSpokenLanguage, type SpokenLanguage } from "./language";
+import type { GrokRuntimeVoiceConfig } from "./config";
+import type { GrokClientEvent, GrokServerEvent, GrokSessionConfig, GrokToolDefinition } from "./wireTypes";
+
+export interface GrokTransport {
+  send(data: string): void;
+  close(): void;
+  onMessage(cb: (data: string) => void): void;
+  onError(cb: (err: Error) => void): void;
+  onClose(cb: () => void): void;
+}
+
+export type GrokSessionState =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "configured"
+  | "closed"
+  | "error";
+
+export interface GrokVoiceSessionHandlers {
+  onToolCall: (callId: string, name: string, args: Record<string, unknown>) => void;
+  onError?: (err: Error) => void;
+  onClosed?: () => void;
+  /** Telephony-phase hooks (all optional). They expose, without changing,
+   * events this session already receives: the configured handshake,
+   * streamed assistant audio, the per-utterance completion signal, and the
+   * caller-started-speaking VAD signal the Twilio bridge uses for
+   * barge-in. */
+  onConfigured?: () => void;
+  onAudioDelta?: (base64Audio: string) => void;
+  /** One agent utterance finished streaming. Fired on
+   * `response.output_audio_transcript.done` — the real wire's only
+   * per-utterance completion signal, and it fires for force_messages too,
+   * which is what makes mark-gated hangup work for scripted lines. */
+  onAudioDone?: () => void;
+  onSpeechStarted?: () => void;
+  /** Caller finished a VAD turn. The bridge's dead-air watchdog arms on
+   * this: a caller who answered and then hears silence is stuck, and the
+   * max-duration ceiling is minutes away (hardening port from the sibling
+   * repo's production adapter). */
+  onSpeechStopped?: () => void;
+  /** One caller transcription completion — cumulative per turn, possibly
+   * re-emitted many times; the bridge's DrsTranscriptLog owns the
+   * correlation. Data for the call record only: never parsed, never able
+   * to influence a scheduling decision. */
+  onCallerTranscript?: (transcript: string, itemId?: string) => void;
+}
+
+/** Server-VAD tuning proven on live calls in the sibling repo: 0.85
+ * threshold against phone-line noise, 500ms of silence to end a caller
+ * turn, 333ms of pre-speech padding so first syllables are not clipped. */
+const TURN_DETECTION = {
+  type: "server_vad" as const,
+  threshold: 0.85,
+  silence_duration_ms: 500,
+  prefix_padding_ms: 333,
+};
+
+/** μ-law 8kHz on both legs — matches Twilio Media Streams exactly, so
+ * audio passes through the bridge with no transcoding. */
+const AUDIO_FORMAT = { type: "audio/pcmu", rate: 8000 };
+
+/** Builds the DR-screening session.update payload from env config + the
+ * (always the same, always narrow) report-tool list. Kept as its own
+ * function so grokProvider.ts and tests can inspect exactly what would be
+ * sent without needing a live transport. The model is NOT in this payload:
+ * it rides the connection URL query (see WebSocketGrokTransport). */
+export function buildSessionConfig(
+  config: GrokRuntimeVoiceConfig,
+  instructions: string,
+  tools: GrokToolDefinition[],
+): GrokSessionConfig {
+  return {
+    voice: config.voiceName,
+    instructions,
+    audio: {
+      input: {
+        format: AUDIO_FORMAT,
+        // The lane's configured language seeds the STT hint; a mid-call
+        // switch retargets it via setSpokenLanguage().
+        transcription: { language_hint: config.language },
+        transport: "json",
+      },
+      output: {
+        format: AUDIO_FORMAT,
+        transport: "json",
+      },
+    },
+    turn_detection: TURN_DETECTION,
+    reasoning: { effort: config.reasoningEffort },
+    tools,
+  };
+}
+
+/** Bound on caller-audio frames held while the session handshake is
+ * still completing (~10s of 20ms Twilio frames — the handshake itself is
+ * sub-second). Oldest frames drop first beyond it: stale audio is worth
+ * less than fresh on a live call. */
+const PRE_CONFIG_AUDIO_CAP = 500;
+
+type PendingSay =
+  | { mode: "scripted"; text: string }
+  | { mode: "natural"; instructions: string };
+
+export class GrokVoiceSession {
+  private state: GrokSessionState = "idle";
+  private sessionId: string | null = null;
+  /** Mutable copy — mid-call language switches send a fresh session.update
+   * with language_hint so Grok's STT follows the caller. */
+  private sessionConfig: GrokSessionConfig;
+  /** Caller audio that arrived before session.updated confirmed the
+   * config. THE SIBLING REPO'S HARD-WON WIRE RULE: the session
+   * configuration must ALWAYS precede the audio (ticketing 9fb0c83) —
+   * audio appended before the μ-law input format is configured locks
+   * Grok's input pipeline onto its default format, and every later
+   * frame decodes as noise: VAD never fires, transcription never fires,
+   * no error is raised — a permanently deaf agent (live DRS calls,
+   * 2026-08-24: greeting delivered, zero caller lines, caller_hangup).
+   * Buffered — not dropped — so the caller's earliest words survive the
+   * handshake, then drained in order on session.updated. */
+  private readonly preConfigAudio: string[] = [];
+  /** Scripted lines held because a response was open at the wire when
+   * they were requested. THE SIBLING ADAPTER'S SECOND HARD-WON WIRE RULE
+   * (its "response gates"): a force_message sent while a wire response
+   * is open never plays — and the post-tool-call line lands EXACTLY
+   * there, because the response that carried the tool call has not yet
+   * emitted response.done when dispatch speaks the next question. Live
+   * DRS calls 2026-08-24 (second round): the agent heard the caller's
+   * identity, the tool dispatched, and the next question never played —
+   * silence until hangup. The greeting worked only because no response
+   * was open at configured-time. Says now queue FIFO and flush one per
+   * processed response.done. */
+  private readonly pendingSays: PendingSay[] = [];
+  /** True from sending a force_message until the wire acknowledges a
+   * response.created — closes the window where a second say could slip
+   * out before the wire reports the first as active (mirrors the
+   * sibling's awaitingResponseStart). */
+  private awaitingSayStart = false;
+  /** True from sending `response.cancel` until the current response cycle
+   * ends (the next `response.created`) or the provider rejects the cancel
+   * outright. Only while this is owed may that specific rejection be
+   * absorbed instead of ending the call. Note a `response.done` does NOT
+   * clear it — see the `response.done` case for why. (Ported from the
+   * sibling adapter's cancelDoneOwed, 2026-08-23; the ordering hole was
+   * found by Codex review on PR #213.) */
+  private cancelDoneOwed = false;
+  /** True only while a response is actually open at the provider, updated
+   * synchronously in wire order. response.cancel is gated on THIS — see
+   * the module doc. */
+  private wireResponseActive = false;
+
+  constructor(
+    private readonly transport: GrokTransport,
+    sessionConfig: GrokSessionConfig,
+    private readonly handlers: GrokVoiceSessionHandlers,
+  ) {
+    this.sessionConfig = sessionConfig;
+    this.transport.onMessage((data) => this.handleServerEvent(data));
+    this.transport.onError((err) => {
+      this.state = "error";
+      this.handlers.onError?.(err);
+    });
+    this.transport.onClose(() => {
+      this.state = "closed";
+      this.handlers.onClosed?.();
+    });
+  }
+
+  getState(): GrokSessionState {
+    return this.state;
+  }
+
+  getSessionId(): string | null {
+    return this.sessionId;
+  }
+
+  /**
+   * Mid-call language switch: retarget Grok's STT `language_hint` and
+   * remind the model that spoken copy is now provided in that language.
+   * Sends a session.update when the handshake has already completed so
+   * the live wire picks it up; before configured the next handshake
+   * update carries the patched config.
+   */
+  setSpokenLanguage(language: SpokenLanguage): void {
+    const hint = normalizeSpokenLanguage(language);
+    // Agent-agnostic on purpose: the runtime serves every lane and cannot
+    // name any particular agent's tools here. Naming them was correct in
+    // the scheduling provider this was ported from and is wrong here.
+    const languageLine =
+      hint === "en"
+        ? " The caller is now speaking English. Continue using the same tools."
+        : ` The caller is now speaking ${hint}. Follow their language from now on. ` +
+          "Continue using the same tools, and keep tool ARGUMENTS in English " +
+          "(names, dates, yes/no) regardless of the spoken language.";
+    this.sessionConfig = {
+      ...this.sessionConfig,
+      instructions: this.sessionConfig.instructions + languageLine,
+      audio: {
+        ...this.sessionConfig.audio,
+        input: {
+          ...this.sessionConfig.audio.input,
+          transcription: {
+            ...this.sessionConfig.audio.input.transcription,
+            language_hint: hint,
+          },
+        },
+      },
+    };
+    if (this.state === "configured" || this.state === "connected") {
+      this.send({ type: "session.update", session: this.sessionConfig });
+    }
+  }
+
+  /** Marks the transport as connecting. Real transports call this
+   * themselves once their underlying socket opens; a fake transport in
+   * tests can call it directly to simulate that. */
+  markConnecting(): void {
+    if (this.state === "idle") this.state = "connecting";
+  }
+
+  private send(event: GrokClientEvent): void {
+    this.transport.send(JSON.stringify(event));
+  }
+
+  private handleServerEvent(raw: string): void {
+    let event: GrokServerEvent;
+    try {
+      event = JSON.parse(raw) as GrokServerEvent;
+    } catch {
+      this.state = "error";
+      this.handlers.onError?.(new Error(`GrokVoiceSession: unparseable server event: ${raw}`));
+      return;
+    }
+
+    switch (event.type) {
+      case "session.created":
+        this.state = "connected";
+        this.sessionId = event.conversation?.id ?? null;
+        this.send({ type: "session.update", session: this.sessionConfig });
+        break;
+      case "session.updated":
+        this.state = "configured";
+        // The opening scripted line goes on the wire FIRST (onConfigured
+        // -> provider.start() -> force_message), THEN the held caller
+        // audio: with server VAD live, releasing a buffered speech turn
+        // before the opener would let Grok respond free-form ahead of the
+        // scripted identity question (review finding, PR #199). This is
+        // also the sibling adapter's order — its open handling queues the
+        // greeting before the buffered sends drain (ticketing 9fb0c83).
+        this.handlers.onConfigured?.();
+        for (const audio of this.preConfigAudio.splice(0)) {
+          this.send({ type: "input_audio_buffer.append", audio });
+        }
+        break;
+      case "error":
+        // A barge-in cancel races the response's NATURAL completion: we saw
+        // response.created (so wireResponseActive is true) and sent a
+        // cancel, but Grok had already finished the response and its
+        // response.done is still in flight. Grok then rejects the cancel —
+        // there is nothing left to cancel. That is not a fault: it IS the
+        // missing response.done. Treating it as a provider error tears down
+        // a healthy caller's call (sibling repo, live, 2026-08-23), which on
+        // this line means teardown via handleProviderFailure. Absorbed only
+        // while a cancel is actually outstanding; every other error, and this
+        // same message with no cancel owed, stays fatal.
+        if (
+          this.cancelDoneOwed &&
+          event.error?.type === "invalid_request_error" &&
+          /cancellation failed:\s*no active response found/i.test(event.error.message ?? "")
+        ) {
+          this.cancelDoneOwed = false;
+          this.wireResponseActive = false;
+          // Same release the real response.done performs: a line queued
+          // after the barge-in would otherwise wait on a done that is never
+          // coming.
+          this.flushPendingSay();
+          break;
+        }
+        this.state = "error";
+        this.handlers.onError?.(
+          new Error(
+            `Grok provider error: ${event.error?.message ?? event.error?.type ?? "unknown"}`,
+          ),
+        );
+        break;
+      case "response.created":
+        this.wireResponseActive = true;
+        this.awaitingSayStart = false;
+        // A NEW response cycle settles whatever became of any earlier
+        // cancel, so the debt ends here rather than persisting for the
+        // rest of the call.
+        this.cancelDoneOwed = false;
+        break;
+      case "response.done":
+        this.wireResponseActive = false;
+        // Deliberately does NOT clear cancelDoneOwed (Codex review, PR
+        // #213): a response.done is not proof the cancel was honored — it
+        // is just as likely the NATURAL completion that raced it, in which
+        // case Grok's rejection of the cancel is still on its way and
+        // arrives after this. That ordering is in fact the likelier one
+        // (Grok finishes, emits done, then receives and rejects the
+        // cancel), so consuming the debt here would leave the common case
+        // tearing the call down.
+        this.flushPendingSay();
+        break;
+      case "response.function_call_arguments.done": {
+        // `arguments` is a JSON STRING on the wire. A payload that is not
+        // an OBJECT — unparseable, or valid JSON like `null`, an array or
+        // a bare string (review finding) — is a provider fault the tool
+        // loop cannot recover from silently: dispatched onward it would
+        // throw inside an async handler nobody awaits, and the swallowed
+        // rejection is a stalled call with no function_call_output and no
+        // error. Surface it instead.
+        let args: unknown;
+        try {
+          args = JSON.parse(event.arguments);
+        } catch {
+          this.handlers.onError?.(
+            new Error(
+              `GrokVoiceSession: unparseable function-call arguments for ${event.name}: ${event.arguments}`,
+            ),
+          );
+          break;
+        }
+        if (typeof args !== "object" || args === null || Array.isArray(args)) {
+          this.handlers.onError?.(
+            new Error(
+              `GrokVoiceSession: function-call arguments for ${event.name} are not an object: ${event.arguments}`,
+            ),
+          );
+          break;
+        }
+        this.handlers.onToolCall(event.call_id, event.name, args as Record<string, unknown>);
+        break;
+      }
+      case "input_audio_buffer.speech_started":
+        // Barge-in signal — forwarded to the optional hook (no hook = the
+        // exact prior ignored-on-purpose behavior).
+        this.handlers.onSpeechStarted?.();
+        break;
+      case "response.output_audio.delta":
+        this.handlers.onAudioDelta?.(event.delta);
+        break;
+      case "response.output_audio_transcript.done":
+        // The per-utterance completion signal (see module doc) — the
+        // bridge places its Twilio mark on this.
+        this.handlers.onAudioDone?.();
+        break;
+      case "input_audio_buffer.speech_stopped":
+        this.handlers.onSpeechStopped?.();
+        break;
+      case "conversation.item.input_audio_transcription.completed":
+        // Data for the call record only (see the handler doc). The
+        // `updated` variant below stays ignored: `completed` carries the
+        // cumulative line, and the record's correlation keys on it.
+        if (event.transcript) {
+          this.handlers.onCallerTranscript?.(event.transcript, event.item_id);
+        }
+        break;
+      // Transcription telemetry this adapter doesn't need to act on
+      // structurally; ignored deliberately rather than left unhandled by
+      // omission.
+      case "conversation.item.input_audio_transcription.updated":
+      case "response.output_audio_transcript.delta":
+        break;
+    }
+  }
+
+  /** Speak EXACTLY this text and nothing else — rendered as an
+   * interruptible force_message, so the model is bypassed and the line is
+   * spoken verbatim. The sole channel grokProvider.ts uses to get an
+   * authorized utterance out of the renderer and into Grok's mouth. */
+  speak(text: string): void {
+    this.enqueueSay({ mode: "scripted", text });
+  }
+
+  /**
+   * Constrained natural speech for a language without scripted medical
+   * copy. Queued on the same response gate as force_message so a
+   * post-tool-call line still plays after response.done.
+   */
+  speakNatural(instructions: string): void {
+    this.enqueueSay({ mode: "natural", instructions });
+  }
+
+  private enqueueSay(say: PendingSay): void {
+    if (this.state !== "configured" || this.wireResponseActive || this.awaitingSayStart) {
+      // Response-gated (see pendingSays): the line waits for the open
+      // response — typically the one that carried the tool call this
+      // line answers — to finish. FIFO, never replaced: the telephony
+      // bridge correlates completions to utterances in speak order.
+      this.pendingSays.push(say);
+      return;
+    }
+    this.sendSay(say);
+  }
+
+  private sendSay(say: PendingSay): void {
+    this.awaitingSayStart = true;
+    if (say.mode === "natural") {
+      this.send({
+        type: "response.create",
+        response: { instructions: say.instructions },
+      });
+      return;
+    }
+    this.send({
+      type: "conversation.item.create",
+      item: {
+        type: "force_message",
+        role: "assistant",
+        interruptible: true,
+        content: [{ type: "output_text", text: say.text }],
+      },
+    });
+  }
+
+  private flushPendingSay(): void {
+    if (this.state !== "configured" || this.wireResponseActive || this.awaitingSayStart) return;
+    const next = this.pendingSays.shift();
+    if (next !== undefined) this.sendSay(next);
+  }
+
+  sendToolResult(callId: string, ok: boolean, output: unknown): void {
+    this.send({
+      type: "conversation.item.create",
+      item: {
+        type: "function_call_output",
+        call_id: callId,
+        output: JSON.stringify({ ok, ...(output as Record<string, unknown>) }),
+      },
+    });
+  }
+
+  /** Forward one chunk of caller audio (base64 μ-law 8kHz, the input
+   * format buildSessionConfig declares) into the model's input buffer.
+   * Pass-through, no transcoding here. */
+  appendAudio(base64Audio: string): void {
+    if (this.state !== "configured") {
+      // Config-before-audio, always (see preConfigAudio). Held, not sent.
+      if (this.preConfigAudio.length >= PRE_CONFIG_AUDIO_CAP) {
+        this.preConfigAudio.shift();
+      }
+      this.preConfigAudio.push(base64Audio);
+      return;
+    }
+    this.send({ type: "input_audio_buffer.append", audio: base64Audio });
+  }
+
+  /** Cancel the in-flight response (barge-in). The wire cancel itself is
+   * a no-op unless a response is actually open — force-message playback
+   * past its response.done has nothing to cancel; the bridge's Twilio
+   * `clear` is the whole barge-in there, and sending a cancel anyway
+   * draws a provider error that tears the call down.
+   *
+   * The queued scripted lines are discarded EITHER WAY (Codex review,
+   * PR #200 round 4): this method is called exactly at a barge-in
+   * boundary, where the bridge writes off every outstanding utterance —
+   * but a cancelled response's own response.done would otherwise flush
+   * the next held line, speaking text the bridge has already abandoned
+   * (heard by the caller, absent from transcript/marks/final-action
+   * handling). Unlike the sibling adapter, whose queue holds core
+   * events re-rendered from CURRENT state at flush time, this queue
+   * holds pre-rendered text — stale by construction after a barge-in.
+   * Nothing is lost: the caller's turn produces a report and the
+   * provider speaks the then-current action; a turn that produces no
+   * accepted report is caught by the bridge's dead-air watchdog, which
+   * re-renders the current question. */
+  cancelResponse(): void {
+    // The queue discard happens on EVERY barge-in — it is about stale
+    // scripted speech, independent of whether a cancel goes out.
+    this.pendingSays.length = 0;
+    if (!this.wireResponseActive) return;
+    // At most ONE cancel per response cycle (Codex review, PR #213 r2). A
+    // stale audio delta re-arms the bridge's assistantAudioPlaying after a
+    // barge-in, so a second caller segment re-enters here with
+    // wireResponseActive still true. A duplicate cancel would draw a second
+    // rejection, and only one is absorbable — the extra would land in the
+    // fatal branch and tear down the call this change exists to save.
+    if (this.cancelDoneOwed) return;
+    this.send({ type: "response.cancel" });
+    // The provider now owes us a settlement for this cancel — see
+    // cancelDoneOwed and the `error` case.
+    this.cancelDoneOwed = true;
+  }
+
+  close(): void {
+    // No session.close handshake exists on this wire — closing the
+    // transport IS the close.
+    this.transport.close();
+    this.state = "closed";
+  }
+}
+
+/**
+ * Real transport. Connection URL and auth header are the sibling repo's
+ * production-proven ones: wss://api.x.ai/v1/realtime with the model as a
+ * query parameter and a Bearer key.
+ */
+export class WebSocketGrokTransport implements GrokTransport {
+  private ws: import("ws").WebSocket | null = null;
+  private messageHandler: ((data: string) => void) | null = null;
+  private errorHandler: ((err: Error) => void) | null = null;
+  private closeHandler: (() => void) | null = null;
+
+  constructor(private readonly apiKey: string, private readonly model: string) {}
+
+  async connect(): Promise<void> {
+    const { WebSocket } = await import("ws");
+    const url = `wss://api.x.ai/v1/realtime?model=${encodeURIComponent(this.model)}`;
+    this.ws = new WebSocket(url, {
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+    });
+    this.ws.on("message", (data: Buffer) => this.messageHandler?.(data.toString("utf8")));
+    this.ws.on("error", (err: Error) => this.errorHandler?.(err));
+    this.ws.on("close", () => this.closeHandler?.());
+
+    await new Promise<void>((resolve, reject) => {
+      this.ws!.once("open", () => resolve());
+      this.ws!.once("error", (err: Error) => reject(err));
+    });
+  }
+
+  send(data: string): void {
+    this.ws?.send(data);
+  }
+
+  close(): void {
+    this.ws?.close();
+  }
+
+  onMessage(cb: (data: string) => void): void {
+    this.messageHandler = cb;
+  }
+
+  onError(cb: (err: Error) => void): void {
+    this.errorHandler = cb;
+  }
+
+  onClose(cb: () => void): void {
+    this.closeHandler = cb;
+  }
+}
