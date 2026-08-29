@@ -176,6 +176,82 @@ export function toCallLogRow(
  * `call_sid` is UNIQUE, so a retry or a racing teardown updates the
  * existing row instead of failing the insert or duplicating the call.
  */
+/** The row opened when a call starts, before the agent can do anything. */
+export interface RuntimeCallOpenRow {
+  callSid: string;
+  direction: "inbound";
+  from: string;
+  to: string;
+  dialedNumber: string;
+  agentUsed: string;
+  agentVersion?: string;
+  status: "in_progress";
+  startTime: Date;
+  environment: string;
+}
+
+export type CallLogInsert = (row: RuntimeCallOpenRow) => Promise<void>;
+
+async function defaultOpenInsert(row: RuntimeCallOpenRow): Promise<void> {
+  const [{ db }, { callLogs }] = await Promise.all([
+    import("../../server/db"),
+    import("../../shared/schema"),
+  ]);
+  // A duplicate webhook or a reconnect must not fail the call.
+  await db.insert(callLogs).values(row).onConflictDoNothing({ target: callLogs.callSid });
+}
+
+/**
+ * Open the call's row at the START of the call, the way the SIP transport
+ * has always done (voiceAgentRoutes.ts creates it with status
+ * 'in_progress' before the agent runs).
+ *
+ * This is not bookkeeping — it is what makes every other writer work.
+ * `flushAzulTimeline` issues `UPDATE call_logs ... WHERE call_sid = ?` and
+ * then marks its events flushed whether or not a row was touched
+ * (toolTimeline.ts:559-569); `stampVerifiedIdentity` and the ticket number
+ * update the same row. With no row until teardown, each of those writes
+ * lands on nothing and the timeline in particular is lost permanently,
+ * because the reaper sees it as already flushed (Codex review, PR #227).
+ *
+ * Never throws and never blocks the call: a caller who cannot be logged is
+ * still a caller to be answered. Returns whether the row was opened so the
+ * runtime can say so honestly rather than assume.
+ */
+export async function openRuntimeCall(
+  context: {
+    callSid: string;
+    slug: string;
+    callerPhone: string;
+    dialedNumber: string;
+    agentVersion?: string | null;
+  },
+  insert: CallLogInsert = defaultOpenInsert,
+  env: Record<string, string | undefined> = process.env,
+): Promise<boolean> {
+  try {
+    await insert({
+      callSid: context.callSid,
+      direction: "inbound",
+      from: context.callerPhone,
+      to: context.dialedNumber,
+      dialedNumber: context.dialedNumber,
+      agentUsed: context.slug,
+      ...(context.agentVersion ? { agentVersion: context.agentVersion } : {}),
+      status: "in_progress",
+      startTime: new Date(),
+      environment: env.NODE_ENV === "production" ? "production" : "development",
+    });
+    return true;
+  } catch (error) {
+    console.error(
+      `[voice-runtime] could not open call_logs row for ${context.callSid}:`,
+      error instanceof Error ? error.message : String(error),
+    );
+    return false;
+  }
+}
+
 export type CallLogUpsert = (
   row: RuntimeCallLogRow,
   update: Partial<RuntimeCallLogRow>,

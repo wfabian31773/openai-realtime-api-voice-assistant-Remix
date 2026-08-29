@@ -109,6 +109,7 @@ function laneSource(over: Partial<LaneConfig> = {}): LaneSource {
 }
 
 interface Harness {
+  openedRows: Array<Record<string, unknown>>;
   base: string;
   wsUrl: string;
   registry: CallSessionRegistry;
@@ -135,6 +136,7 @@ async function harness(
   const server = http.createServer(app);
   const registry = new CallSessionRegistry();
   const transports: FakeGrokTransport[] = [];
+  const openedRows: Array<Record<string, unknown>> = [];
   mountVoiceRuntime(app, server, {
     env: ENV,
     // Short so the deadline test does not wait on a production-length one.
@@ -149,10 +151,12 @@ async function harness(
     },
     providerSetupDeadlineMs: over.providerSetupDeadlineMs,
     fetchPrecontext: over.fetchPrecontext,
+    openCallRow: async (row) => void openedRows.push(row as unknown as Record<string, unknown>),
   });
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const port = (server.address() as { port: number }).port;
   const h: Harness = {
+    openedRows,
     base: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/voice/stream`,
     registry,
@@ -255,6 +259,17 @@ describe("one whole call, end to end, offline", () => {
     await settle();
     expect(h.transports).toHaveLength(1);
     const grok = h.transports[0];
+
+    // 2b. The call's row exists BEFORE any tool can fire — the agents' own
+    //     telemetry updates it by call_sid and a flush landing on no row
+    //     marks itself done anyway, losing the timeline for good.
+    expect(h.openedRows).toHaveLength(1);
+    expect(h.openedRows[0]).toMatchObject({
+      callSid: "CA1",
+      status: "in_progress",
+      agentUsed: "optical",
+      direction: "inbound",
+    });
 
     // 3. The session handshake: config BEFORE any audio (the rule that
     //    cost a whole line when it was the other way round).

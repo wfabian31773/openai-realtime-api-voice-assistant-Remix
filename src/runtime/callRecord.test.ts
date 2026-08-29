@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { toCallLogRow, toConflictUpdate, persistRuntimeCall } from "./callRecord";
+import {
+  toCallLogRow,
+  toConflictUpdate,
+  persistRuntimeCall,
+  openRuntimeCall,
+} from "./callRecord";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 
 function record(over: Partial<VoiceCallRecord> = {}): VoiceCallRecord {
@@ -149,6 +154,57 @@ describe("persistRuntimeCall", () => {
       expect(ok).toBe(false);
       // A transcript in an error log is patient data somewhere nobody watches.
       expect(JSON.stringify(errors)).not.toContain("CALLER: Hi");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+
+describe("openRuntimeCall — the row has to exist while the call runs", () => {
+  it("creates the row before any tool can fire", async () => {
+    // flushAzulTimeline issues UPDATE ... WHERE call_sid = ?, then marks its
+    // events flushed regardless of rows affected (toolTimeline.ts:559-569).
+    // With no row yet, the per-tool flush hits nothing, the events are
+    // marked done, the reaper will not repair them, and the timeline is
+    // gone for good (Codex review, PR #227). The SIP path creates the row
+    // at call start for exactly this reason.
+    const insert = vi.fn(async () => {});
+    const ok = await openRuntimeCall(
+      {
+        callSid: "CA-1",
+        slug: "optical",
+        callerPhone: "+15551234567",
+        dialedNumber: "+15559876543",
+        agentVersion: "v1.4.0",
+      },
+      insert,
+    );
+    expect(ok).toBe(true);
+    const [row] = insert.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(row.callSid).toBe("CA-1");
+    expect(row.status).toBe("in_progress");
+    expect(row.direction).toBe("inbound");
+    expect(row.agentUsed).toBe("optical");
+    expect(row.agentVersion).toBe("v1.4.0");
+    expect(row.from).toBe("+15551234567");
+    expect(row.startTime).toBeInstanceOf(Date);
+    // It must NOT pre-empt anything a later writer owns.
+    expect("transcript" in row).toBe(false);
+    expect("toolTimeline" in row).toBe(false);
+    expect("patientName" in row).toBe(false);
+  });
+
+  it("never throws and never blocks the call when the insert fails", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const ok = await openRuntimeCall(
+        { callSid: "CA-2", slug: "optical", callerPhone: "", dialedNumber: "" },
+        async () => {
+          throw new Error("db down");
+        },
+      );
+      expect(ok).toBe(false);
     } finally {
       spy.mockRestore();
     }

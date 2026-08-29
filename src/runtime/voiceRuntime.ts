@@ -47,7 +47,7 @@ import {
   type GrokTransport,
 } from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
-import { persistRuntimeCall } from "./callRecord";
+import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
 import {
   handleAfterRedirect,
   handleVoiceWebhook,
@@ -128,6 +128,8 @@ export interface VoiceRuntimeOptions {
   /** Caller-ID pre-context lookup. Injected so tests need no network, and
    * so a lane that should not do one simply is not given it. */
   fetchPrecontext?: (phone: string) => Promise<unknown>;
+  /** Opens the call_logs row. Injected for tests. */
+  openCallRow?: CallLogInsert;
   /**
    * How to open the Grok connection. Injectable for one reason, and it is
    * the standing rule rather than a convenience: a failing call goes into
@@ -395,6 +397,23 @@ export function mountVoiceRuntime(
           return;
         }
         knownLanes.add(entry.slug);
+        // Open the call's row BEFORE the agent can run a tool. The agents'
+        // own telemetry, identity stamping and ticket number all UPDATE
+        // this row by call_sid, and a flush that lands on no row still
+        // marks itself done — so a row created only at teardown loses the
+        // tool timeline permanently (Codex review, PR #227). Awaited, and
+        // never fatal: a caller who cannot be logged is still answered.
+        await openRuntimeCall(
+          {
+            callSid: entry.callSid,
+            slug: entry.slug,
+            callerPhone: entry.callerPhone,
+            dialedNumber: entry.dialedNumber,
+            agentVersion: lane.version,
+          },
+          options.openCallRow,
+          env,
+        );
         if (socketGone) {
           // The caller hung up while the agent was being built. Nothing has
           // been opened yet, so there is nothing to tear down — just record
