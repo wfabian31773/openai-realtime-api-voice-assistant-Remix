@@ -81,13 +81,67 @@ function buildHandlers(over: {
   onToolCall?: GrokVoiceSessionHandlers["onToolCall"];
   onError?: NonNullable<GrokVoiceSessionHandlers["onError"]>;
   onAudioDone?: NonNullable<GrokVoiceSessionHandlers["onAudioDone"]>;
+  onAgentTranscriptDelta?: NonNullable<GrokVoiceSessionHandlers["onAgentTranscriptDelta"]>;
 }) {
   return {
     onToolCall: over.onToolCall ?? vi.fn(),
     onError: over.onError ?? vi.fn(),
     onAudioDone: over.onAudioDone ?? vi.fn(),
+    onAgentTranscriptDelta: over.onAgentTranscriptDelta ?? vi.fn(),
   } satisfies GrokVoiceSessionHandlers;
 }
+
+describe("GrokVoiceSession — what the bridge needs to attribute agent speech", () => {
+  it("counts response cycles, so a cancelled response's late events are identifiable", () => {
+    const { transport, session } = makeSession();
+    expect(session.getResponseEpoch()).toBe(0);
+    transport.emit({ type: "response.created" } as GrokServerEvent);
+    expect(session.getResponseEpoch()).toBe(1);
+    transport.emit({ type: "response.done" } as GrokServerEvent);
+    // A finished response does NOT open a new cycle — only response.created
+    // does, which is what makes the number usable as an epoch.
+    expect(session.getResponseEpoch()).toBe(1);
+    transport.emit({ type: "response.created" } as GrokServerEvent);
+    expect(session.getResponseEpoch()).toBe(2);
+  });
+
+  it("hands the completed utterance its spoken text — on this runtime the wire is the only source", () => {
+    const onAudioDone = vi.fn();
+    const { transport } = makeSession({ onAudioDone });
+    transport.emit({
+      type: "response.output_audio_transcript.done",
+      transcript: "Good afternoon, this is Azul Vision.",
+    } as GrokServerEvent);
+    expect(onAudioDone).toHaveBeenCalledWith("Good afternoon, this is Azul Vision.");
+  });
+
+  it("streams agent transcript deltas, so a line cut off by barge-in still has its words", () => {
+    const onAgentTranscriptDelta = vi.fn();
+    const { transport } = makeSession({ onAgentTranscriptDelta });
+    transport.emit({
+      type: "response.output_audio_transcript.delta",
+      delta: "Are you calling about ",
+    } as GrokServerEvent);
+    transport.emit({
+      type: "response.output_audio_transcript.delta",
+      delta: "your order",
+    } as GrokServerEvent);
+    expect(onAgentTranscriptDelta.mock.calls.map((c) => c[0])).toEqual([
+      "Are you calling about ",
+      "your order",
+    ]);
+  });
+
+  it("an empty transcript delta is not forwarded as a word the agent spoke", () => {
+    const onAgentTranscriptDelta = vi.fn();
+    const { transport } = makeSession({ onAgentTranscriptDelta });
+    transport.emit({
+      type: "response.output_audio_transcript.delta",
+      delta: "",
+    } as GrokServerEvent);
+    expect(onAgentTranscriptDelta).not.toHaveBeenCalled();
+  });
+});
 
 describe("GrokVoiceSession lifecycle", () => {
   it("starts idle", () => {
