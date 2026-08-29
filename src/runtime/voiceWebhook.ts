@@ -11,8 +11,9 @@
  * mode flag.
  *
  * SECURITY POSTURE, IN ORDER, ON EVERY POST:
- *   1. No TWILIO_AUTH_TOKEN -> fail CLOSED: controlled 503 unavailable
- *      TwiML. Never an unauthenticated accept.
+ *   1. No TWILIO_AUTH_TOKEN -> fail CLOSED: controlled unavailable TwiML,
+ *      served with status 200 so Twilio actually plays it. Never an
+ *      unauthenticated accept.
  *   2. Missing/invalid X-Twilio-Signature -> 403. The check is the twilio
  *      package's own validateRequest (HMAC-SHA1 over URL + params), the
  *      same primitive this repo's production webhook already uses.
@@ -152,8 +153,13 @@ function gateRequest(req: WebhookRequest, deps: WebhookDeps): WebhookResponse | 
   const sig = checkTwilioSignature(req, deps.env);
   if (sig === "no_auth_token") {
     // Without the auth token nothing can be authenticated, so nothing gets
-    // a stream — 503 so Twilio's own error handling sees it too.
-    return buildUnavailableTwiml(503, RUNTIME_UNAVAILABLE_LINE);
+    // a stream. Status 200, NOT 503: "Twilio treats ANY 5xx as failure
+    // regardless of content — must be 200 with valid TwiML"
+    // (server/index.ts:93). A 5xx here means the controlled line this
+    // branch exists to speak is never played, and the caller gets Twilio's
+    // own failure handling instead. The 503 was carried over from the
+    // sibling repo, which had not learned this one (Codex review, #227).
+    return buildUnavailableTwiml(200, RUNTIME_UNAVAILABLE_LINE);
   }
   if (sig === "invalid") {
     return { status: 403, contentType: "text/plain", body: "invalid signature" };

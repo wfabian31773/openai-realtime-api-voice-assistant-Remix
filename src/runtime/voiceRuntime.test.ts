@@ -125,6 +125,8 @@ async function harness(over: { laneSource?: LaneSource } = {}): Promise<Harness>
   const transports: FakeGrokTransport[] = [];
   mountVoiceRuntime(app, server, {
     env: ENV,
+    // Short so the deadline test does not wait on a production-length one.
+    streamClaimDeadlineMs: 300,
     registry,
     laneSource: over.laneSource ?? laneSource(),
     createTransport: () => {
@@ -246,7 +248,10 @@ describe("one whole call, end to end, offline", () => {
     const update = grok.ofType("session.update")[0] as {
       session: { instructions: string; voice: string; tools: Array<{ name: string }> };
     };
-    expect(update.session.voice).toBe("sage");
+    // The lane registers `voice: 'sage'` — an OpenAI voice. Grok must be
+    // configured with a Grok voice, or session setup fails on every lane.
+    expect(update.session.voice).not.toBe("sage");
+    expect(update.session.voice).toBe("eve");
     // The agent's own words, and the practice knowledge in front of them.
     expect(update.session.instructions).toContain("You are the optical queue agent");
     expect(update.session.instructions).toContain("YOU WORK FOR AZUL VISION");
@@ -505,6 +510,23 @@ describe("one whole call, end to end, offline", () => {
     expect(h.transports).toHaveLength(0);
     const after = await post(h, "/voice/after-hours/after", { CallSid: "CA10" });
     expect(after.text).toContain("technical trouble");
+  });
+
+  it("closes a socket that never claims a stream, so an anonymous client cannot accumulate them", async () => {
+    // /voice/stream accepts an upgrade before any token is seen — the gate
+    // runs on the start frame. Without a deadline a remote client can open
+    // sockets and send nothing, holding descriptors indefinitely (Codex
+    // review, PR #227).
+    const h = await harness();
+    const ws = new WebSocket(h.wsUrl);
+    clients.push(ws);
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve());
+      ws.once("error", reject);
+    });
+    const closed = new Promise<void>((resolve) => ws.once("close", () => resolve()));
+    await Promise.race([closed, new Promise((r) => setTimeout(r, 2500))]);
+    expect(ws.readyState === ws.CLOSING || ws.readyState === ws.CLOSED).toBe(true);
   });
 
   it("refuses a stream whose token was not minted by the webhook", async () => {

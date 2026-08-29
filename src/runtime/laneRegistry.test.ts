@@ -189,12 +189,18 @@ describe("factory contracts differ per agent (Codex review, PR #227)", () => {
 });
 
 describe("per-lane voice and language", () => {
-  it("uses the lane's registered voice when the environment says nothing", async () => {
+  it("NEVER sends the registry's OpenAI voice to Grok", async () => {
+    // Every supported inbound agent registers `voice: 'sage'` — an OpenAI
+    // voice name. Grok has no such voice, so passing it through fails
+    // session setup on every lane (Codex review, PR #227). The registry's
+    // voice field belongs to the other provider.
     const lane = await resolveLane("optical", META, {
       source: source({ id: "optical", voice: "sage", language: "es" }),
       env: {},
     });
-    expect(lane!.voice.voiceName).toBe("sage");
+    expect(lane!.voice.voiceName).not.toBe("sage");
+    expect(lane!.voice.voiceName).toBe("eve");
+    // Language IS provider-neutral, so the registry's value still counts.
     expect(lane!.voice.language).toBe("es");
   });
 
@@ -206,15 +212,12 @@ describe("per-lane voice and language", () => {
     expect(lane!.voice.voiceName).toBe("eve");
   });
 
-  it("does NOT let the built-in default beat the lane's registered voice", async () => {
-    // The trap this guards: loadGrokRuntimeVoiceConfig always returns a
-    // voice, so a naive read of it would make every lane's registered
-    // voice unreachable.
+  it("a per-lane env override is how a lane gets its own GROK voice", async () => {
     const lane = await resolveLane("optical", META, {
       source: source({ id: "optical", voice: "coral" }),
-      env: {},
+      env: { XAI_VOICE_NAME_OPTICAL: "nova" },
     });
-    expect(lane!.voice.voiceName).toBe("coral");
+    expect(lane!.voice.voiceName).toBe("nova");
   });
 
   it("falls back to the runtime default when neither says anything", async () => {

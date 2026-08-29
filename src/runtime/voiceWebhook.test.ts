@@ -66,7 +66,10 @@ describe("webhook security posture", () => {
   it("fails CLOSED with no auth token — never an unauthenticated accept", () => {
     const d = deps({ env: { XAI_API_KEY: "k", DATABASE_URL: "d" } });
     const res = handleVoiceWebhook("optical", signedRequest("/voice/optical", BODY), d);
-    expect(res.status).toBe(503);
+    // 200, not 503: "Twilio treats ANY 5xx as failure regardless of
+    // content" (server/index.ts:93) — a 5xx means the controlled line this
+    // branch exists to speak is never played to the caller.
+    expect(res.status).toBe(200);
     expect(spoken(res.body)).toBe(RUNTIME_UNAVAILABLE_LINE);
     expect(res.body).not.toContain("<Stream");
   });

@@ -226,11 +226,17 @@ export async function resolveLane(
     agent: bound,
     voice: {
       ...voice,
-      // A lane that names its own voice or language in the registry keeps
-      // it; the env override exists for the lanes that do not. The agents
-      // record these as part of their identity and callers notice when a
-      // familiar line changes voice.
-      voiceName: pickLaneEnv(env, "XAI_VOICE_NAME", slug) ?? config.voice ?? voice.voiceName,
+      // The registry's `voice` is deliberately NOT consulted. It holds an
+      // OpenAI voice name — every supported inbound agent registers
+      // 'sage' — and Grok has no such voice, so passing it through fails
+      // session setup on every one of them (Codex review, PR #227). Voice
+      // is provider-specific; a lane that wants its own Grok voice sets
+      // XAI_VOICE_NAME_<SLUG>. No mapping is invented between the two
+      // rosters: guessing which Grok voice 'sage' means is exactly the
+      // kind of gap-filling that produces a line nobody chose.
+      voiceName: pickLaneEnv(env, "XAI_VOICE_NAME", slug) ?? voice.voiceName,
+      // Language IS provider-neutral ('en', 'es'), so the lane's own
+      // registered value still counts.
       language: normalizeSpokenLanguage(
         pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug) ?? config.language ?? voice.language,
       ),

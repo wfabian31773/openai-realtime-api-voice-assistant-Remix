@@ -71,11 +71,25 @@ import {
  * 20ms frames, which is far longer than the build takes. */
 const PRE_BRIDGE_FRAME_CAP = 200;
 
+/**
+ * How long a socket may hold the media-stream endpoint without claiming a
+ * call. The upgrade itself carries no token — Twilio delivers the callSid
+ * and token in the `start` frame, so the gate cannot run any earlier — and
+ * without a deadline any remote client can open sockets, send nothing, and
+ * hold descriptors and memory indefinitely (Codex review, PR #227).
+ * Twilio sends `connected` and `start` immediately, so ten seconds is far
+ * more slack than a real call needs.
+ */
+const STREAM_CLAIM_DEADLINE_MS = 10_000;
+
 export interface VoiceRuntimeOptions {
   env?: Record<string, string | undefined>;
   /** Overridable so tests never import the agent tree. */
   laneSource?: LaneSource;
   registry?: CallSessionRegistry;
+  /** How long a media-stream socket may stay open without claiming a call.
+   * Defaults to STREAM_CLAIM_DEADLINE_MS. */
+  streamClaimDeadlineMs?: number;
   /**
    * How to open the Grok connection. Injectable for one reason, and it is
    * the standing rule rather than a convenience: a failing call goes into
@@ -191,6 +205,24 @@ export function mountVoiceRuntime(
   });
 
   wss.on("connection", (ws: WebSocket) => {
+    // Armed from the moment of upgrade and cleared the instant a call is
+    // claimed: an unauthenticated socket gets a bounded window, a real
+    // call is never touched by it.
+    let claimDeadline: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      claimDeadline = null;
+      console.warn("[voice-runtime] closing a stream socket that never claimed a call");
+      try {
+        ws.close();
+      } catch {
+        /* already gone */
+      }
+    }, options.streamClaimDeadlineMs ?? STREAM_CLAIM_DEADLINE_MS);
+    const clearClaimDeadline = () => {
+      if (claimDeadline !== null) {
+        clearTimeout(claimDeadline);
+        claimDeadline = null;
+      }
+    };
     let bridge: VoiceCallBridge | null = null;
     let starting = false;
     /**
@@ -242,6 +274,7 @@ export function mountVoiceRuntime(
           twilioSocket.close();
           return;
         }
+        clearClaimDeadline();
         void startCall(entry, frame.streamSid);
         return;
       }
@@ -257,10 +290,12 @@ export function mountVoiceRuntime(
     });
 
     ws.on("close", () => {
+      clearClaimDeadline();
       socketGone = true;
       bridge?.handleSocketClosed();
     });
     ws.on("error", () => {
+      clearClaimDeadline();
       socketGone = true;
       bridge?.handleSocketClosed();
     });
