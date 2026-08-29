@@ -679,9 +679,17 @@ describe("one whole call, end to end, offline", () => {
   it("serves the deploy marker, which is how a stale build is caught", async () => {
     const h = await harness();
     const res = await fetch(`${h.base}/voice/health`);
-    const body = (await res.json()) as { marker: string; liveReady: boolean; missing: string[] };
+    const body = (await res.json()) as {
+      marker: string;
+      knowledgePack: string;
+      liveReady: boolean;
+      missing: string[];
+    };
     expect(body.marker).toMatch(/^voice-runtime-/);
     expect(body.liveReady).toBe(true);
     expect(body.missing).toEqual([]);
+    // The shared cache prefix's version, so a cache-rate change can be
+    // attributed to a prefix change instead of guessed at.
+    expect(body.knowledgePack).toMatch(/^v\d+$/);
   });
 });

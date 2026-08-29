@@ -66,6 +66,7 @@ import {
   type TwilioInboundFrame,
   type TwilioOutboundFrame,
 } from "./twilioFrames";
+import { KNOWLEDGE_PACK_VERSION } from "./knowledgePack";
 
 /** Twilio media frames held while the agent is being built — ~4 seconds of
  * 20ms frames, which is far longer than the build takes. */
@@ -194,6 +195,11 @@ export function mountVoiceRuntime(
     const readiness = computeRuntimeReadiness(env);
     res.json({
       marker: VOICE_RUNTIME_DEPLOY_MARKER,
+      // The cached prefix every lane shares. Reported so a change in the
+      // fleet's cache-hit rate can be attributed to a prefix change rather
+      // than guessed at — which is the whole reason the constant exists,
+      // and it was doing none of it while nothing read it.
+      knowledgePack: KNOWLEDGE_PACK_VERSION,
       liveReady: readiness.liveReady,
       // NAMES only. A readiness endpoint that echoes a value is a
       // credential leak with a health check's URL.
