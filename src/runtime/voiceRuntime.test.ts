@@ -131,6 +131,7 @@ async function harness(
     providerSetupDeadlineMs?: number;
     fetchPrecontext?: (phone: string) => Promise<unknown>;
     openCallRow?: (row: unknown) => Promise<void>;
+    callRowDeadlineMs?: number;
   } = {},
 ): Promise<Harness> {
   const app = express();
@@ -153,6 +154,7 @@ async function harness(
       return t;
     },
     providerSetupDeadlineMs: over.providerSetupDeadlineMs,
+    callRowDeadlineMs: over.callRowDeadlineMs,
     fetchPrecontext: over.fetchPrecontext,
     openCallRow:
       over.openCallRow ??
@@ -694,6 +696,50 @@ describe("one whole call, end to end, offline", () => {
     expect(h.openedRows).toHaveLength(1);
     expect(h.persisted).toHaveLength(1);
     expect(h.persisted[0]).toMatchObject({ callSid: "CA16", outcome: "caller_hangup" });
+  });
+
+  it("finalizes the row even when the open timed out and landed late", async () => {
+    // withinOrNull gives up waiting; it does not cancel the insert. So the
+    // row can still commit `in_progress` a moment later, and gating the
+    // final upsert on the open having reported success leaves exactly that
+    // row for the stale sweep to misclassify (Codex review, PR #227).
+    // The upsert is safe in either order: the open does nothing on
+    // conflict, the finalize updates on conflict.
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const laneSrc: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: (async () => ({
+          instructions: "You are the optical queue agent.",
+          tools: [],
+        })) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const opened: unknown[] = [];
+    const h = await harness({
+      laneSource: laneSrc,
+      callRowDeadlineMs: 40,
+      // Exceeds the deadline, then succeeds anyway.
+      openCallRow: async (row) => {
+        await blocked;
+        opened.push(row);
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA17", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA17", tokenFrom(answered.text));
+    await settle(4);
+    ws.close();
+    await settle(6);
+    release();
+    await settle(6);
+    expect(opened).toHaveLength(1); // the insert did land, late
+    expect(h.persisted).toHaveLength(1);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA17", outcome: "caller_hangup" });
   });
 
   it("refuses a stream whose token was not minted by the webhook", async () => {

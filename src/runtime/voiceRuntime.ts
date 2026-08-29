@@ -144,6 +144,8 @@ export interface VoiceRuntimeOptions {
   openCallRow?: CallLogInsert;
   /** Persists the finished call. Injected for tests. */
   persistCall?: (record: VoiceCallRecord) => Promise<boolean>;
+  /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
+  callRowDeadlineMs?: number;
   /**
    * How to open the Grok connection. Injectable for one reason, and it is
    * the standing rule rather than a convenience: a failing call goes into
@@ -431,21 +433,25 @@ export function mountVoiceRuntime(
         // silence. Logging must never do that, so the call proceeds without
         // the row if it does not land in time; teardown's upsert inserts it
         // then instead.
-        const rowOpened =
-          (await withinOrNull(
-            openRuntimeCall(
-              {
-                callSid: entry.callSid,
-                slug: entry.slug,
-                callerPhone: entry.callerPhone,
-                dialedNumber: entry.dialedNumber,
-                agentVersion: lane.version,
-              },
-              options.openCallRow,
-              env,
-            ),
-            CALL_ROW_DEADLINE_MS,
-          )) === true;
+        // Its result is deliberately NOT kept. `withinOrNull` stops
+        // waiting; it does not cancel the insert, so a row can still
+        // commit `in_progress` a moment after the deadline — and gating
+        // the finalize below on "the open succeeded" leaves exactly that
+        // row for the stale sweep to misclassify (Codex review, PR #227).
+        await withinOrNull(
+          openRuntimeCall(
+            {
+              callSid: entry.callSid,
+              slug: entry.slug,
+              callerPhone: entry.callerPhone,
+              dialedNumber: entry.dialedNumber,
+              agentVersion: lane.version,
+            },
+            options.openCallRow,
+            env,
+          ),
+          options.callRowDeadlineMs ?? CALL_ROW_DEADLINE_MS,
+        );
         if (socketGone) {
           // The caller hung up while the agent was being built. No session
           // exists, so there is nothing to tear down — but a row opened a
@@ -453,24 +459,27 @@ export function mountVoiceRuntime(
           // swept as a stale call rather than the hangup it was. Finalize
           // it here, on the one path that never reaches the bridge.
           registry.recordOutcome(entry.callSid, "caller_hangup");
-          if (rowOpened) {
-            void persistCall({
-              callSid: entry.callSid,
-              streamSid,
-              slug: entry.slug,
-              callerPhone: entry.callerPhone,
-              dialedNumber: entry.dialedNumber,
-              outcome: "caller_hangup",
-              transcript: "",
-              toolEvents: [],
-              agentTurns: 0,
-              interruptions: 0,
-              startedAtMs: startedAtMs,
-              endedAtMs: Date.now(),
-            }).catch(() => {
-              // Losing the record must never break the hangup path.
-            });
-          }
+          // Finalized unconditionally. Both writes are safe in either
+          // order: the open does nothing on conflict, this updates on
+          // conflict. So whether the row landed before the deadline, after
+          // it, or never, the call is recorded as the hangup it was rather
+          // than swept as stale.
+          void persistCall({
+            callSid: entry.callSid,
+            streamSid,
+            slug: entry.slug,
+            callerPhone: entry.callerPhone,
+            dialedNumber: entry.dialedNumber,
+            outcome: "caller_hangup",
+            transcript: "",
+            toolEvents: [],
+            agentTurns: 0,
+            interruptions: 0,
+            startedAtMs,
+            endedAtMs: Date.now(),
+          }).catch(() => {
+            // Losing the record must never break the hangup path.
+          });
           return;
         }
         if (lane.agent.skipped.length > 0) {
