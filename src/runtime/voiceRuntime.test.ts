@@ -394,6 +394,43 @@ describe("one whole call, end to end, offline", () => {
     await settle();
   });
 
+  it("abandons setup when the caller hangs up while the agent is still being built", async () => {
+    // Building an agent takes real time. If Twilio disconnects during it,
+    // the continuation must not go on to open a Grok session against a
+    // socket that is already gone — that is a provider connection nobody
+    // owns and nobody closes (Codex review, PR #227).
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        factory: (async () => {
+          await blocked;
+          return {
+            instructions: "You are the optical queue agent.",
+            tools: [],
+          };
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({ laneSource: slow });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA8", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA8", tokenFrom(answered.text));
+    await settle(2);
+    // The caller hangs up mid-setup.
+    ws.close();
+    await settle(4);
+    release();
+    await settle(6);
+    expect(h.transports).toHaveLength(0);
+    expect(h.registry.get("CA8")?.outcome ?? h.registry.consumeOutcome("CA8")).toBe(
+      "caller_hangup",
+    );
+  });
+
   it("refuses a stream whose token was not minted by the webhook", async () => {
     const h = await harness();
     await post(h, "/voice/optical", { CallSid: "CA5", From: "+1", To: "+2" });

@@ -59,14 +59,37 @@
  *   the one thing a `clear` exists to prevent.
  *
  * TRANSPORT NOTE — TERMINATE_CALL. Every Remix agent's hangup tool ends the
- * call by POSTing to `api.openai.com/v1/realtime/calls/{id}/hangup`. That
- * is an OpenAI SIP mechanism: on this transport there is no OpenAI call id
- * and no OpenAI call, so the tool cannot end anything and the call would sit
- * until the max-duration ceiling. The runtime therefore INTERCEPTS the
- * hangup tool by name (`endCallToolNames`) and performs the hangup itself,
- * mark-gated like any other final utterance. The agent's intent is honored
- * exactly; only the mechanism is the transport's. Nothing in any agent file
- * changes.
+ * call by POSTing to `api.openai.com/v1/realtime/calls/{id}/hangup`. That is
+ * an OpenAI SIP mechanism: on this transport there is no OpenAI call, so the
+ * tool cannot end anything and the caller would sit in silence until the
+ * max-duration ceiling. The runtime supplies the hangup instead.
+ *
+ * But ONLY the hangup. The tool still RUNS, because the checks in front of
+ * that POST are not about transport at all and replacing the tool wholesale
+ * threw them away (Codex review, PR #227):
+ *
+ *   - `pcpAgent` refuses to terminate until the disposition is durably
+ *     recorded. Bypassed, a PCP caller is disconnected before their request
+ *     is saved.
+ *   - `noIvrAgent` refuses while an escalation is in flight, after a live
+ *     call on 2026-08-04 where the model escalated and called terminate one
+ *     second later. Its own comment: "the same second would hang up on
+ *     sudden vision loss."
+ *
+ * So the tool is dispatched like any other, and the hangup follows only if
+ * the agent's own guards let it through. Distinguishing the two is generic,
+ * not per-agent: in every one of these tools the business checks run BEFORE
+ * the fetch, so a result carrying an HTTP `status` (or `success: true`) is
+ * proof the guards passed and the transport step was reached. A refusal
+ * never carries one — it returns early with an `error`, and that result is
+ * handed back to the model verbatim, wording included, so the agent can act
+ * on its own refusal.
+ *
+ * Where the signal is ambiguous the bridge does NOT hang up. The asymmetry
+ * decides it: a call held open too long ends at the caller's hangup or the
+ * ceiling, and is recorded either way; a call hung up too early loses the
+ * patient's request, which is the exact thing those guards exist to
+ * prevent.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -95,6 +118,30 @@ export function decodeToolOutput(output: string): Record<string, unknown> {
     // A tool that answered in plain prose still answered.
     return { result: output };
   }
+}
+
+/**
+ * Did the agent's own terminate tool let the hangup through?
+ *
+ * Generic across every agent rather than a per-agent error list, because
+ * they all share one shape: the business checks return EARLY with an
+ * `error` and nothing else, and only after passing them does the tool
+ * attempt its HTTP call. So an HTTP `status` in the result — or an outright
+ * `success` — proves the guards ran and allowed it. `missing_api_key` and
+ * `missing_call_id` are counted the same way for the same structural
+ * reason: in every one of these tools they are checked AFTER the business
+ * guards, so reaching them is itself proof the guards passed. (Without
+ * that, a deployment with no OpenAI key could never hang up at all.)
+ *
+ * Anything else — an unrecognised error, a shape we do not understand — is
+ * treated as a refusal and the call stays up. See the asymmetry argument in
+ * the module doc: too long is recoverable, too early is not.
+ */
+export function guardsAllowedTermination(output: Record<string, unknown>): boolean {
+  if (output.success === true) return true;
+  if (typeof output.status === "number") return true;
+  const error = output.error;
+  return error === "missing_api_key" || error === "missing_call_id";
 }
 
 /** μ-law 8kHz mono = 8000 bytes/second = 8 bytes per millisecond. */
@@ -263,8 +310,12 @@ export class VoiceCallBridge {
   private finalFallbackTimer: unknown = null;
   /** Exposed for tests: the derived fallback duration that was armed. */
   public lastArmedFinalFallbackMs: number | null = null;
-  /** The agent called its hangup tool: end after the current line lands. */
+  /** The agent's hangup tool ran and its guards allowed the termination. */
   private endRequested = false;
+  /** Audio bytes of the most recently COMPLETED utterance, kept so a mark
+   * already in flight can be adopted as the final one with a fallback
+   * derived from its own audio rather than a constant. */
+  private lastCompletedUtteranceBytes = 0;
 
   private maxCallTimer: unknown = null;
   private deadAirTimer: unknown = null;
@@ -462,6 +513,7 @@ export class VoiceCallBridge {
     this.current = null;
     if (!done) return;
     this.agentTurns += 1;
+    this.lastCompletedUtteranceBytes = done.bytes;
 
     // The utterance is delivered: the agent owes nothing for IT, so a
     // caller taking their time over the question can never trip the
@@ -489,6 +541,43 @@ export class VoiceCallBridge {
       // the audio actually sent (bytes/8 = playback ms) plus jitter grace.
       this.armFinalMark(markName, done.bytes);
     }
+  }
+
+  /**
+   * The agent's guards allowed the termination: end the call, but only once
+   * the caller has actually heard the goodbye.
+   *
+   * Three states, because the tool result comes back asynchronously and the
+   * goodbye's audio may be anywhere by then:
+   *   - an utterance is still streaming -> its completion arms the hangup;
+   *   - an utterance finished and its mark is already in flight -> ADOPT
+   *     that mark. It was not final when it was sent (endRequested was
+   *     still false), so without this its echo would only clear playback
+   *     and the call would run to the ceiling — the ordering that is in
+   *     fact the normal one (Codex review, PR #227);
+   *   - nothing playing and nothing outstanding -> mint a fresh mark, so
+   *     the hangup still waits for a Twilio round trip rather than cutting
+   *     the line mid-buffer.
+   */
+  private requestHangup(): void {
+    if (this.ended || this.endRequested) return;
+    this.endRequested = true;
+    if (this.current !== null) return; // its completion will arm the mark
+    const outstanding = this.awaitingMark[this.awaitingMark.length - 1];
+    if (outstanding) {
+      this.armFinalMark(outstanding.name, this.lastCompletedUtteranceBytes);
+      return;
+    }
+    this.utteranceSeq += 1;
+    const markName = `utt-${this.utteranceSeq}`;
+    this.latestMarkName = markName;
+    this.mediaSinceLastMark = false;
+    this.sendFrame({
+      event: "mark",
+      streamSid: this.deps.context.streamSid,
+      mark: { name: markName },
+    });
+    this.armFinalMark(markName, 0);
   }
 
   private armFinalMark(markName: string, bytes: number): void {
@@ -548,33 +637,10 @@ export class VoiceCallBridge {
 
   private handleToolCall(callId: string, name: string, args: Record<string, unknown>): void {
     if (this.ended) return;
-    if (this.endCallToolNames.has(name)) {
-      // Intercepted, not dispatched — see the TRANSPORT NOTE in the module
-      // doc. The agent's implementation would POST to OpenAI's SIP hangup
-      // endpoint with a call id this transport does not have, fail, and
-      // leave the caller connected to silence until the ceiling.
-      this.toolEvents.push({ name, ok: true, atMs: Date.now() - this.startedAtMs });
-      this.endRequested = true;
-      this.session.sendToolResult(callId, true, { success: true, ended_by: "voice_runtime" });
-      // The goodbye may already be finished and marked. Nothing more is
-      // coming, so gate the hangup on a fresh mark instead of waiting for
-      // an utterance that will never arrive.
-      if (!this.assistantAudioPlaying && this.current === null) {
-        this.utteranceSeq += 1;
-        const markName = `utt-${this.utteranceSeq}`;
-        this.latestMarkName = markName;
-        this.mediaSinceLastMark = false;
-        this.sendFrame({
-          event: "mark",
-          streamSid: this.deps.context.streamSid,
-          mark: { name: markName },
-        });
-        this.armFinalMark(markName, 0);
-      }
-      return;
-    }
     // Every tool call must be answered or the turn stalls forever, so the
     // dispatch that answers it is the one that never throws (agentBinding).
+    // The hangup tool goes through this same path: its guards are the
+    // agent's, and only its transport step is ours (see the TRANSPORT NOTE).
     void (async () => {
       const result = await this.deps.agent.dispatch(name, args);
       this.toolEvents.push({
@@ -584,7 +650,11 @@ export class VoiceCallBridge {
         ...(result.error ? { error: result.error } : {}),
       });
       if (this.ended) return;
-      this.session.sendToolResult(callId, result.ok, decodeToolOutput(result.output));
+      const output = decodeToolOutput(result.output);
+      this.session.sendToolResult(callId, result.ok, output);
+      if (this.endCallToolNames.has(name) && guardsAllowedTermination(output)) {
+        this.requestHangup();
+      }
     })().catch(() => {
       // dispatch() is documented never to throw; if it somehow does, the
       // call still gets an answer rather than a stalled turn.

@@ -292,23 +292,29 @@ describe("VoiceCallBridge — marks are the only proof audio played", () => {
 });
 
 describe("VoiceCallBridge — agent-requested hangup", () => {
-  it("intercepts the OpenAI-SIP hangup tool instead of dispatching it to the agent", () => {
-    const h = makeBridge();
-    h.handlers().onToolCall("call-1", "terminate_call", { reason: "spam" });
-    expect(h.agent.dispatch).not.toHaveBeenCalled();
-    expect(h.session.sendToolResult).toHaveBeenCalledWith("call-1", true, {
-      success: true,
-      ended_by: "voice_runtime",
+  /** Guards passed: the agent reached its transport step, which 404s here. */
+  function permitting() {
+    return makeAgent({
+      dispatch: vi.fn(async () => ({
+        ok: true,
+        output: JSON.stringify({ success: false, reason: "completed", status: 404 }),
+      })),
     });
-  });
+  }
 
-  it("hangs up only when the goodbye's mark echoes back", () => {
-    const h = makeBridge();
+  async function terminate(h: ReturnType<typeof makeBridge>) {
+    h.handlers().onToolCall("call-1", "terminate_call", { reason: "completed" });
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  it("waits for the goodbye still streaming, then gates on its mark", async () => {
+    const h = makeBridge({ agent: permitting() });
     h.newResponse();
     h.handlers().onAgentTranscriptDelta("Thanks for calling. Goodbye.");
     h.handlers().onAudioDelta(b64(8000));
-    h.handlers().onToolCall("call-1", "terminate_call", { reason: "ghost_call" });
-    // Still speaking: no hangup yet.
+    await terminate(h);
+    // Still speaking: no hangup, and no mark invented mid-utterance.
     expect(h.outcomes).toEqual([]);
     h.handlers().onAudioDone("Thanks for calling. Goodbye.");
     const name = h.marks()[h.marks().length - 1].mark.name;
@@ -318,51 +324,168 @@ describe("VoiceCallBridge — agent-requested hangup", () => {
     expect(h.bridge.getTranscript()).toBe("AGENT: Thanks for calling. Goodbye.");
   });
 
-  it("derives the fallback from the audio actually sent, never a constant", () => {
-    const h = makeBridge();
+  it("derives the fallback from the audio actually sent, never a constant", async () => {
+    const h = makeBridge({ agent: permitting() });
     const bytes = 16_000; // 2 seconds of μ-law 8kHz
     h.newResponse();
     h.handlers().onAudioDelta(b64(bytes));
-    h.handlers().onToolCall("call-1", "terminate_call", { reason: "spam" });
+    await terminate(h);
     h.handlers().onAudioDone("Goodbye.");
     expect(h.bridge.lastArmedFinalFallbackMs).toBe(
       bytes / MULAW_BYTES_PER_MS + FINAL_MARK_GRACE_MS,
     );
   });
 
-  it("hangs up on the fallback when the mark never echoes", () => {
-    const h = makeBridge();
+  it("hangs up on the fallback when the mark never echoes", async () => {
+    const h = makeBridge({ agent: permitting() });
     h.newResponse();
     h.handlers().onAudioDelta(b64(800));
-    h.handlers().onToolCall("call-1", "terminate_call", { reason: "spam" });
+    await terminate(h);
     h.handlers().onAudioDone("Goodbye.");
     expect(h.timers.fire(h.bridge.lastArmedFinalFallbackMs!)).toBe(true);
     expect(h.outcomes).toEqual(["agent_ended"]);
   });
 
-  it("ends the call when the goodbye was already delivered before the tool call", () => {
-    const h = makeBridge();
-    const spoken = speakUtterance(h, "Take care now.");
-    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: spoken } });
-    // Nothing is playing and nothing is coming — the hangup must not wait
-    // on an utterance that will never arrive.
-    h.handlers().onToolCall("call-1", "terminate_call", { reason: "max_turns_exceeded" });
+  it("a barge-in over the goodbye REVOKES the hangup — the caller is still talking", async () => {
+    const h = makeBridge({ agent: permitting() });
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(8000));
+    await terminate(h);
+    h.handlers().onAudioDone("Goodbye.");
     const name = h.marks()[h.marks().length - 1].mark.name;
-    expect(name).not.toBe(spoken);
+    // The hangup really was armed, so revoking it is a real revocation.
+    expect(h.bridge.lastArmedFinalFallbackMs).not.toBeNull();
+    h.handlers().onSpeechStarted();
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } });
+    expect(h.outcomes).toEqual([]);
+  });
+});
+
+describe("VoiceCallBridge — the agent's own hangup guards (Codex review, PR #227)", () => {
+  /** An agent whose terminate_call REFUSES: noIvrAgent does this while an
+   * escalation is in flight, after a live 2026-08-04 call where the model
+   * escalated and hung up one second later. pcpAgent does it until the
+   * disposition is durably recorded. Both refusals are transport-
+   * independent — replacing the tool wholesale bypasses them. */
+  function refusingAgent() {
+    return makeAgent({
+      dispatch: vi.fn(async () => ({
+        ok: true,
+        output: JSON.stringify({
+          success: false,
+          error: "escalation_in_progress",
+          say: "Stay on the line — I am connecting you with someone now.",
+        }),
+      })),
+    });
+  }
+
+  /** Guards passed, so the agent reached its OpenAI POST — which 404s on
+   * this transport. An HTTP `status` in the result is the generic proof
+   * that the guards ran and let it through: in every agent the business
+   * checks come BEFORE the fetch. */
+  function permittingAgent() {
+    return makeAgent({
+      dispatch: vi.fn(async () => ({
+        ok: true,
+        output: JSON.stringify({ success: false, reason: "ghost_call", status: 404 }),
+      })),
+    });
+  }
+
+  it("runs the agent's terminate tool instead of replacing it", async () => {
+    const agent = permittingAgent();
+    const h = makeBridge({ agent });
+    h.handlers().onToolCall("c1", "terminate_call", { reason: "ghost_call" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(agent.dispatch).toHaveBeenCalledWith("terminate_call", { reason: "ghost_call" });
+  });
+
+  it("does NOT hang up when the agent refuses — an escalation outranks a hangup", async () => {
+    const h = makeBridge({ agent: refusingAgent() });
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onToolCall("c1", "terminate_call", { reason: "ghost_call" });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.handlers().onAudioDone("One moment.");
+    const name = h.marks()[h.marks().length - 1].mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } });
+    expect(h.outcomes).toEqual([]);
+  });
+
+  it("passes the agent's refusal back to the model, wording included", async () => {
+    const h = makeBridge({ agent: refusingAgent() });
+    h.handlers().onToolCall("c1", "terminate_call", { reason: "ghost_call" });
+    await Promise.resolve();
+    await Promise.resolve();
+    const [, , output] = (h.session.sendToolResult as unknown as {
+      mock: { calls: [string, boolean, Record<string, unknown>][] };
+    }).mock.calls[0];
+    expect(output.error).toBe("escalation_in_progress");
+    expect(output.say).toMatch(/Stay on the line/);
+  });
+
+  it("hangs up once the agent's guards let the termination through", async () => {
+    const h = makeBridge({ agent: permittingAgent() });
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onToolCall("c1", "terminate_call", { reason: "ghost_call" });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.handlers().onAudioDone("Goodbye.");
+    const name = h.marks()[h.marks().length - 1].mark.name;
     h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } });
     expect(h.outcomes).toEqual(["agent_ended"]);
   });
 
-  it("a barge-in over the goodbye REVOKES the hangup — the caller is still talking", () => {
-    const h = makeBridge();
+  it("adopts an ALREADY-SENT goodbye mark rather than waiting for an utterance that will never come", async () => {
+    // The normal ordering once the tool is dispatched: the goodbye's audio
+    // finishes and its mark goes out BEFORE the tool result comes back. The
+    // mark was not final when it was sent, so unless it is adopted its echo
+    // only clears playback and the call runs to the ceiling.
+    const h = makeBridge({ agent: permittingAgent() });
     h.newResponse();
+    h.handlers().onAgentTranscriptDelta("Thanks for calling. Goodbye.");
     h.handlers().onAudioDelta(b64(8000));
-    h.handlers().onToolCall("call-1", "terminate_call", { reason: "ghost_call" });
-    h.handlers().onAudioDone("Goodbye.");
+    h.handlers().onAudioDone("Thanks for calling. Goodbye.");
     const name = h.marks()[h.marks().length - 1].mark.name;
-    h.handlers().onSpeechStarted();
+    h.handlers().onToolCall("c1", "terminate_call", { reason: "completed" });
+    await Promise.resolve();
+    await Promise.resolve();
+    // No NEW mark invented — the one already in flight is the one to gate on.
+    expect(h.marks()[h.marks().length - 1].mark.name).toBe(name);
     h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } });
-    expect(h.outcomes).toEqual([]);
+    expect(h.outcomes).toEqual(["agent_ended"]);
+    expect(h.bridge.getTranscript()).toBe("AGENT: Thanks for calling. Goodbye.");
+  });
+
+  it("derives the adopted mark's fallback from that utterance's own audio", async () => {
+    const h = makeBridge({ agent: permittingAgent() });
+    const bytes = 16_000;
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(bytes));
+    h.handlers().onAudioDone("Goodbye.");
+    h.handlers().onToolCall("c1", "terminate_call", { reason: "completed" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.bridge.lastArmedFinalFallbackMs).toBe(
+      bytes / MULAW_BYTES_PER_MS + FINAL_MARK_GRACE_MS,
+    );
+  });
+
+  it("still ends a call whose goodbye already played and echoed", async () => {
+    const h = makeBridge({ agent: permittingAgent() });
+    const spoken = speakUtterance(h, "Take care now.");
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: spoken } });
+    h.handlers().onToolCall("c1", "terminate_call", { reason: "completed" });
+    await Promise.resolve();
+    await Promise.resolve();
+    const name = h.marks()[h.marks().length - 1].mark.name;
+    expect(name).not.toBe(spoken);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } });
+    expect(h.outcomes).toEqual(["agent_ended"]);
   });
 });
 

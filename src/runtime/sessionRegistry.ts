@@ -55,7 +55,22 @@ export class CallSessionRegistry {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
-  /** Called by the webhook when it issues <Connect><Stream> TwiML. */
+  /**
+   * Called by the webhook when it issues <Connect><Stream> TwiML.
+   *
+   * IDEMPOTENT PER CallSid (Codex review, PR #227). Twilio retries a
+   * webhook it considers unanswered, and the same CallSid can arrive more
+   * than once. Minting a fresh entry each time breaks the stream gate in
+   * both directions: a retry BEFORE the stream connects rotates the token,
+   * so the one already sitting in the first TwiML no longer works and the
+   * real call is refused; a retry AFTER it connects resets `streamStarted`,
+   * so a second token can be claimed and one call gets two bridges talking
+   * over each other.
+   *
+   * The first registration wins, and its token stays valid for the life of
+   * the entry. A Twilio CallSid identifies one call, so preserving is
+   * always the correct reading of a repeat.
+   */
   register(input: {
     callSid: string;
     slug: string;
@@ -63,6 +78,8 @@ export class CallSessionRegistry {
     dialedNumber: string;
   }): CallEntry {
     this.sweep();
+    const existing = this.entries.get(input.callSid);
+    if (existing) return existing;
     const entry: CallEntry = {
       callSid: input.callSid,
       slug: input.slug,

@@ -45,6 +45,47 @@ describe("the stream gate", () => {
   });
 });
 
+describe("duplicate webhook delivery (Codex review, PR #227)", () => {
+  it("a Twilio retry must not rotate the token already handed out in the first TwiML", () => {
+    const registry = new CallSessionRegistry();
+    const first = registered(registry);
+    const retry = registered(registry);
+    expect(retry.streamToken).toBe(first.streamToken);
+    // The real call arrives carrying the FIRST token. It has to still work.
+    expect(registry.claimStream("CA1", first.streamToken)).not.toBeNull();
+  });
+
+  it("a retry AFTER the stream started must not re-open the gate for a second bridge", () => {
+    const registry = new CallSessionRegistry();
+    const first = registered(registry);
+    expect(registry.claimStream("CA1", first.streamToken)).not.toBeNull();
+    const retry = registered(registry);
+    // Resetting streamStarted here would give one call two bridges talking
+    // over each other on the same socket.
+    expect(registry.claimStream("CA1", retry.streamToken)).toBeNull();
+  });
+
+  it("keeps the first registration's context rather than a retry's", () => {
+    const registry = new CallSessionRegistry();
+    registered(registry, "CA1", "optical");
+    const retry = registry.register({
+      callSid: "CA1",
+      slug: "surgery",
+      callerPhone: "+19998887777",
+      dialedNumber: "+10000000000",
+    });
+    expect(retry.slug).toBe("optical");
+    expect(retry.callerPhone).toBe("+15551234567");
+  });
+
+  it("still issues separate entries for genuinely different calls", () => {
+    const registry = new CallSessionRegistry();
+    const a = registered(registry, "CA1");
+    const b = registered(registry, "CA2");
+    expect(a.streamToken).not.toBe(b.streamToken);
+  });
+});
+
 describe("call context", () => {
   it("carries the lane and the caller from the webhook to the bridge", () => {
     const registry = new CallSessionRegistry();

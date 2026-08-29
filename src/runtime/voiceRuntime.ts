@@ -194,6 +194,15 @@ export function mountVoiceRuntime(
     let bridge: VoiceCallBridge | null = null;
     let starting = false;
     /**
+     * Twilio is gone. Set by the close and error handlers, which cannot
+     * report to a bridge that does not exist yet: building the agent is
+     * asynchronous, and a caller who hangs up during it would otherwise be
+     * forgotten while the continuation went on to open a Grok session
+     * against a dead socket — a provider connection nobody owns and nobody
+     * closes (Codex review, PR #227).
+     */
+    let socketGone = false;
+    /**
      * Caller audio that arrives between the `start` frame and the bridge
      * existing. Building the agent and opening the Grok socket takes real
      * time, and a caller who begins talking during it would otherwise be
@@ -248,9 +257,11 @@ export function mountVoiceRuntime(
     });
 
     ws.on("close", () => {
+      socketGone = true;
       bridge?.handleSocketClosed();
     });
     ws.on("error", () => {
+      socketGone = true;
       bridge?.handleSocketClosed();
     });
 
@@ -283,6 +294,13 @@ export function mountVoiceRuntime(
           return;
         }
         knownLanes.add(entry.slug);
+        if (socketGone) {
+          // The caller hung up while the agent was being built. Nothing has
+          // been opened yet, so there is nothing to tear down — just record
+          // the call and stop before a session exists.
+          registry.recordOutcome(entry.callSid, "caller_hangup");
+          return;
+        }
         if (lane.agent.skipped.length > 0) {
           // Reported, never silent: a tool that vanished is
           // indistinguishable from a model that would not call it.
@@ -308,16 +326,25 @@ export function mountVoiceRuntime(
           onOutcome: (outcome: CallOutcome) => registry.recordOutcome(entry.callSid, outcome),
           persistCallRecord: (record) => persistRuntimeCall(record).then(() => undefined),
         });
-        // Anything the caller said while the agent was being built goes in
-        // now, in order, before the socket is live — the session holds it
-        // through its own handshake and releases it after the config
-        // lands, which is the ordering its module doc requires.
-        for (const held of pendingFrames.splice(0)) bridge.handleTwilioFrame(held);
         // Connect AFTER the bridge exists: a connection that fails then has
         // somewhere to report to and the call tears down cleanly, instead
         // of leaving the caller on an open socket in silence.
         (bridge.getSession() as GrokVoiceSession).markConnecting();
         await transport.connect();
+        if (socketGone) {
+          // Twilio went away while the provider socket was opening. Route it
+          // through the bridge's own teardown so the transport is closed and
+          // exactly one outcome is recorded.
+          bridge.handleSocketClosed();
+          return;
+        }
+        // Only now replay what the caller said while the agent was being
+        // built — in order, and after the connect, so a queued `stop` frame
+        // tears the call down against a live transport instead of closing
+        // one that is about to be opened. The session holds this audio
+        // through its own handshake and releases it once the config lands,
+        // which is the ordering its module doc requires.
+        for (const held of pendingFrames.splice(0)) bridge.handleTwilioFrame(held);
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
         console.error(`[voice-runtime] call setup failed for ${entry.callSid}:`, err.message);
