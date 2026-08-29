@@ -547,6 +547,37 @@ describe("buildSessionConfig", () => {
   });
 });
 
+describe("GrokVoiceSession — asking the agent to take a turn", () => {
+  it("requestResponse() sends a response.create with NO instructions — the agent's own prompt writes the turn", () => {
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created" } as GrokServerEvent);
+    transport.emit({ type: "session.updated" } as GrokServerEvent);
+    session.requestResponse();
+    const creates = transport.sent.filter((e) => e.type === "response.create") as Array<{
+      response: Record<string, unknown>;
+    }>;
+    expect(creates).toHaveLength(1);
+    // The absence is the whole point: `response.instructions` OVERRIDES
+    // the session's instructions, so a single word here would generate
+    // this turn without the agent's prompt or the knowledge pack. On the
+    // opening turn that is the caller's first sentence.
+    expect(creates[0].response).toEqual({});
+    expect("instructions" in creates[0].response).toBe(false);
+  });
+
+  it("requestResponse() is response-gated like every other queued turn", () => {
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created" } as GrokServerEvent);
+    transport.emit({ type: "session.updated" } as GrokServerEvent);
+    transport.emit({ type: "response.created" } as GrokServerEvent);
+    session.requestResponse();
+    // A response is already open at the wire — the turn waits for it.
+    expect(transport.sent.filter((e) => e.type === "response.create")).toHaveLength(0);
+    transport.emit({ type: "response.done" } as GrokServerEvent);
+    expect(transport.sent.filter((e) => e.type === "response.create")).toHaveLength(1);
+  });
+});
+
 describe("GrokVoiceSession.setSpokenLanguage", () => {
   it("sends a mid-call session.update with language_hint=es after the handshake", () => {
     const { transport, session } = makeSession();

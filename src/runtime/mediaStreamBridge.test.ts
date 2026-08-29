@@ -82,7 +82,7 @@ function makeBridge(
     appendAudio: vi.fn(),
     cancelResponse: vi.fn(),
     sendToolResult: vi.fn(),
-    speakNatural: vi.fn(),
+    requestResponse: vi.fn(),
     close: vi.fn(),
     getResponseEpoch: () => epoch,
   } satisfies BridgeSession;
@@ -172,9 +172,14 @@ describe("VoiceCallBridge — audio path", () => {
   it("speaks no words of its own — the opening turn is requested, never scripted", () => {
     const h = makeBridge();
     h.handlers().onConfigured();
-    expect(h.session.speakNatural).toHaveBeenCalledTimes(1);
-    // Whatever the runtime says to the MODEL, it must never be handed to
-    // the caller as copy: no media frame exists before the model speaks.
+    // requestResponse(), not speakNatural(): per-response instructions
+    // OVERRIDE the session's, so any words here would generate the
+    // caller's first sentence with the agent's prompt and the knowledge
+    // pack switched off. The runtime supplies nothing at all.
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    expect(h.session.requestResponse).toHaveBeenCalledWith();
+    // Nothing is handed to the caller as copy either: no media frame
+    // exists before the model speaks.
     expect(h.media()).toHaveLength(0);
   });
 });

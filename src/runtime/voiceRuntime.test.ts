@@ -256,6 +256,15 @@ describe("one whole call, end to end, offline", () => {
     await settle();
     expect(grok.ofType("input_audio_buffer.append").map((e) => e.audio)).toContain("QUJDRA==");
 
+    // The opening turn is asked for with NO per-response instructions, so
+    // the caller's first sentence is generated from the session's
+    // instructions — the agent's prompt with the knowledge pack in front.
+    // `response.instructions` overrides those, so a single word here would
+    // silently switch both off for exactly that sentence.
+    const opening = grok.ofType("response.create") as Array<{ response: Record<string, unknown> }>;
+    expect(opening).toHaveLength(1);
+    expect(opening[0].response).toEqual({});
+
     // 5. The model calls the agent's tool, and the agent's own code runs.
     grok.emit({ type: "response.created" } as GrokServerEvent);
     grok.emit({

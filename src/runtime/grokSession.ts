@@ -161,7 +161,10 @@ const PRE_CONFIG_AUDIO_CAP = 500;
 
 type PendingSay =
   | { mode: "scripted"; text: string }
-  | { mode: "natural"; instructions: string };
+  | { mode: "natural"; instructions: string }
+  /** A turn the AGENT's own prompt writes — no per-response instructions
+   * at all. See requestResponse(). */
+  | { mode: "open" };
 
 export class GrokVoiceSession {
   private state: GrokSessionState = "idle";
@@ -463,6 +466,22 @@ export class GrokVoiceSession {
     this.enqueueSay({ mode: "natural", instructions });
   }
 
+  /**
+   * Ask the agent to take a turn in its OWN voice — the session's
+   * instructions, unmodified.
+   *
+   * This is not speakNatural with an empty string. speakNatural exists for
+   * the scheduling provider's case, where a renderer had already decided
+   * the content and handed the model a sentence to phrase ("Speak this
+   * meaning in Tagalog: …"); overriding the session prompt is the point
+   * there. Here the agent's prompt IS the content, so the response must
+   * carry no instructions of its own. Response-gated like every other
+   * queued turn.
+   */
+  requestResponse(): void {
+    this.enqueueSay({ mode: "open" });
+  }
+
   private enqueueSay(say: PendingSay): void {
     if (this.state !== "configured" || this.wireResponseActive || this.awaitingSayStart) {
       // Response-gated (see pendingSays): the line waits for the open
@@ -477,6 +496,16 @@ export class GrokVoiceSession {
 
   private sendSay(say: PendingSay): void {
     this.awaitingSayStart = true;
+    if (say.mode === "open") {
+      // NO `instructions` key. `response.instructions` OVERRIDES the
+      // session's instructions for that response, so sending any here
+      // would generate this turn from those words alone — with the
+      // agent's prompt and the practice knowledge pack switched off. On
+      // the opening turn that is every caller's first sentence, produced
+      // by a model that does not know it works for Azul Vision.
+      this.send({ type: "response.create", response: {} });
+      return;
+    }
     if (say.mode === "natural") {
       this.send({
         type: "response.create",

@@ -180,7 +180,7 @@ export interface BridgeSession {
   appendAudio(base64Audio: string): void;
   cancelResponse(): void;
   sendToolResult(callId: string, ok: boolean, output: Record<string, unknown>): void;
-  speakNatural(instructions: string): void;
+  requestResponse(): void;
   close(): void;
   getResponseEpoch(): number;
 }
@@ -384,10 +384,13 @@ export class VoiceCallBridge {
   private handleSessionConfigured(): void {
     if (this.ended) return;
     // The handshake landed. The agent's own prompt owns the opening line,
-    // so the runtime asks for a response and supplies no words: a greeting
-    // written here would be a second source of truth for what the practice
-    // says when it picks up the phone.
-    this.session.speakNatural("Greet the caller and begin.");
+    // so the runtime asks for a turn and supplies no words at all: a
+    // greeting written here would be a second source of truth for what the
+    // practice says when it picks up the phone, and — because
+    // `response.instructions` OVERRIDES the session's — it would also
+    // switch the agent's prompt and the knowledge pack off for exactly the
+    // sentence the caller hears first.
+    this.session.requestResponse();
     this.armDeadAir("response");
   }
 
