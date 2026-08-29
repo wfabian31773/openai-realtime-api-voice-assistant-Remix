@@ -37,6 +37,12 @@ Pricing figures carry their source and date; verify before any budget commitment
   watchdogs, fail-closed signed webhooks, per-lane voices, instant
   webhook-re-point rollback — none of which the SIP architecture can give us,
   because audio never passes through anything we run.
+- **Architecture decided (ADR-001):** one centralized voice runtime, agents as
+  configuration, business capabilities behind HTTP — **not** a voice pipeline per
+  application. See `docs/adr/ADR-001-centralized-voice-operations-hub.md`. This
+  makes the migration and the consolidation **the same project**: Phase 1
+  delivers the hub's one Grok runtime with answering-service as its first
+  agent-as-config row.
 - **Prompts do not migrate (operator ruling, §4.2).** The long prompts are
   largely GPT bandages; Grok does not need them, and our own DRS agent runs a
   full interview on a four-sentence prompt. Each agent's prompt gets rewritten
@@ -492,13 +498,12 @@ ticketing app — so they move up, not down, in priority.
 - These three carry 949 of 1,425 calls/week and produce 1,027 of the voice
   tickets. **tech alone is the largest line in the practice** (425 calls/week,
   quality 3.42) — and contrary to CLAUDE.md, its number is live.
-- **Decision owed (§10 Q1):** the ticketing-app Grok lanes already implement
-  all three, merged and green, with per-lane voice. One implementation should
-  own each queue (rule 11). **Recommendation: re-point the three queue numbers
-  at the ticketing-app voice server and retire this repo's queue agents**,
-  rather than porting them here a second time — the work is already done and
-  reviewed; what is missing is only the webhook re-point plus a Gate B parity
-  run against these lines' own call corpus.
+- **Settled by ADR-001:** the queues move **into the hub**, not into the
+  ticketing app. The ticketing implementation is the reference to port *from*
+  (it is built, reviewed and green), then it retires. Re-pointing the numbers
+  at the ticketing app would have been the locally cheaper move and would have
+  permanently split the fleet's observability — that app's voice stack writes
+  no call records, no quality scores and no cost telemetry at all.
 - Cut over **one queue at a time, smallest first: optical (180/wk) → surgery
   (344/wk) → tech (425/wk)**, each with its own before/after measurement
   (tickets filed, department routing accuracy, quality score, latency).
@@ -534,13 +539,12 @@ ticketing app — so they move up, not down, in priority.
 
 ## 10. Open questions — Wayne's calls, not ours (standing instruction 1)
 
-1. **Queue ownership** — *narrowed by data (§2.4): this repo's agents serve all
-   three queues today; the ticketing-app lanes serve nothing.* The question is
-   now only: re-point the three numbers at the ticketing-app voice server and
-   retire this repo's queue agents (recommended — that code is built, reviewed
-   and green), or port the Grok layer here and keep ownership in operations?
-   Weigh where you want call records and grading to live: the ops `call_logs`
-   pipeline (quality scores, cost telemetry, graders) is in **this** repo.
+1. ~~**Queue ownership**~~ — **RULED 2026-08-29, ADR-001:** the queues move
+   into the hub; the ticketing lanes serve as the port source and then retire.
+   Remaining operational sub-question for you: cut the three queues over
+   smallest-first (optical → surgery → tech) as planned, or hold tech until the
+   other two have a week of green history? (Recommended: hold tech — it is the
+   largest line and the highest-quality one at 3.42.)
 2. **Cutover windows** for answering-service and no-IVR (which low-volume
    window; who is watching).
 3. **PCP / SD:** migrate-while-off is free — but is reactivation even on the
