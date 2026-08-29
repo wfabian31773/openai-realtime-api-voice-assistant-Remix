@@ -570,6 +570,24 @@ describe("VoiceCallBridge — tool dispatch", () => {
 });
 
 describe("VoiceCallBridge — dead-air watchdog", () => {
+  it("covers the OPENING turn — a session that configures and never speaks is dead air", () => {
+    // Found by a mutation sweep: deleting the watchdog arm on the
+    // configured path left every test passing. Without it, an agent that
+    // handshakes and then never produces its greeting leaves the caller in
+    // silence until the ten-minute ceiling.
+    const h = makeBridge({ deadAirMs: 30_000 });
+    h.handlers().onConfigured();
+    expect(h.timers.fire(30_000)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
+
+  it("clears once the opening line is actually delivered", () => {
+    const h = makeBridge({ deadAirMs: 30_000 });
+    h.handlers().onConfigured();
+    speakUtterance(h, "Thank you for calling Azul Vision.");
+    expect([...h.timers.pending.values()].some((t) => t.ms === 30_000)).toBe(false);
+  });
+
   it("fires when the caller finishes a turn and nothing ever comes back", () => {
     const h = makeBridge({ deadAirMs: 30_000 });
     h.handlers().onSpeechStopped();

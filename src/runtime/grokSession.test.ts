@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { GrokVoiceSession, buildSessionConfig } from "./grokSession";
+import { GrokVoiceSession, buildSessionConfig, PRE_CONFIG_AUDIO_CAP } from "./grokSession";
 import type { GrokTransport, GrokVoiceSessionHandlers } from "./grokSession";
 import type { GrokClientEvent, GrokServerEvent } from "./wireTypes";
 import { loadGrokRuntimeVoiceConfig } from "./config";
@@ -544,6 +544,78 @@ describe("buildSessionConfig", () => {
     expect(sessionConfig.tools.every((t) => t.type === "function")).toBe(true);
     // The model rides the connection URL, never the session payload.
     expect("model" in sessionConfig).toBe(false);
+  });
+});
+
+describe("config ALWAYS precedes caller audio", () => {
+  /* The first rule in this module's doc and the one that cost a whole line
+   * (5Star #199): audio delivered during the handshake locks Grok's input
+   * pipeline to the wrong format and the agent is permanently deaf. It had
+   * no test — not here and not in the provider this was ported from — which
+   * a mutation sweep found by deleting the guard and watching every test
+   * still pass. */
+
+  it("HOLDS caller audio that arrives before the config lands", () => {
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created" } as GrokServerEvent);
+    session.appendAudio("QUJD");
+    session.appendAudio("REVG");
+    expect(transport.sent.filter((e) => e.type === "input_audio_buffer.append")).toHaveLength(0);
+  });
+
+  it("releases it once configured, in the order the caller spoke", () => {
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created" } as GrokServerEvent);
+    session.appendAudio("QUJD");
+    session.appendAudio("REVG");
+    transport.emit({ type: "session.updated" } as GrokServerEvent);
+    const appends = transport.sent.filter((e) => e.type === "input_audio_buffer.append") as Array<{
+      audio: string;
+    }>;
+    expect(appends.map((a) => a.audio)).toEqual(["QUJD", "REVG"]);
+  });
+
+  it("releases it AFTER the opening turn is queued, never before", () => {
+    // With server VAD live, draining a buffered speech turn ahead of the
+    // opener lets Grok answer free-form before the agent has spoken.
+    const transport = new TestTransport();
+    const config = loadGrokRuntimeVoiceConfig({});
+    const sessionConfig = buildSessionConfig(config, "instructions", [...FIXTURE_TOOLS]);
+    const session: GrokVoiceSession = new GrokVoiceSession(transport, sessionConfig, {
+      onToolCall: vi.fn(),
+      onConfigured: () => session.requestResponse(),
+    });
+    transport.emit({ type: "session.created" } as GrokServerEvent);
+    session.appendAudio("QUJD");
+    transport.emit({ type: "session.updated" } as GrokServerEvent);
+    const openerAt = transport.sent.findIndex((e) => e.type === "response.create");
+    const audioAt = transport.sent.findIndex((e) => e.type === "input_audio_buffer.append");
+    expect(openerAt).toBeGreaterThanOrEqual(0);
+    expect(audioAt).toBeGreaterThan(openerAt);
+  });
+
+  it("passes audio straight through once configured", () => {
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created" } as GrokServerEvent);
+    transport.emit({ type: "session.updated" } as GrokServerEvent);
+    session.appendAudio("QUJD");
+    const appends = transport.sent.filter((e) => e.type === "input_audio_buffer.append") as Array<{
+      audio: string;
+    }>;
+    expect(appends.map((a) => a.audio)).toEqual(["QUJD"]);
+  });
+
+  it("bounds the hold and drops the OLDEST frames — stale audio is worth less than fresh", () => {
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created" } as GrokServerEvent);
+    for (let i = 0; i < PRE_CONFIG_AUDIO_CAP + 10; i += 1) session.appendAudio(`f${i}`);
+    transport.emit({ type: "session.updated" } as GrokServerEvent);
+    const appends = transport.sent.filter((e) => e.type === "input_audio_buffer.append") as Array<{
+      audio: string;
+    }>;
+    expect(appends).toHaveLength(PRE_CONFIG_AUDIO_CAP);
+    expect(appends[0].audio).toBe("f10");
+    expect(appends[appends.length - 1].audio).toBe(`f${PRE_CONFIG_AUDIO_CAP + 9}`);
   });
 });
 

@@ -157,7 +157,7 @@ export function buildSessionConfig(
  * still completing (~10s of 20ms Twilio frames — the handshake itself is
  * sub-second). Oldest frames drop first beyond it: stale audio is worth
  * less than fresh on a live call. */
-const PRE_CONFIG_AUDIO_CAP = 500;
+export const PRE_CONFIG_AUDIO_CAP = 500;
 
 type PendingSay =
   | { mode: "scripted"; text: string }
