@@ -377,6 +377,9 @@ export function mountVoiceRuntime(
 
     async function startCall(entry: CallEntry, streamSid: string): Promise<void> {
       const startedAtMs = Date.now();
+      /** Filled in when the call_logs row lands; read through the metadata
+       * getter above for the rest of the call. */
+      let callLogId: string | undefined;
       const context = {
         callSid: entry.callSid,
         streamSid,
@@ -400,6 +403,16 @@ export function mountVoiceRuntime(
             callId: entry.callSid,
             callerPhone: entry.callerPhone,
             dialedNumber: entry.dialedNumber,
+            // A GETTER, because the agent is built before the row exists.
+            // answeringServiceAgent polls this for five seconds before
+            // writing what it recognised about the caller; a plain value
+            // captured here would be undefined forever and every
+            // recognised caller would be logged as unidentified — the very
+            // phone-ID metric the migration is measured on (Codex review,
+            // PR #227).
+            get callLogId(): string | undefined {
+              return callLogId;
+            },
             // The queue agents choose their opening from this: with a
             // unique match they confirm ("Am I speaking with…?") instead of
             // asking cold, which is the behaviour the SIP path already
@@ -438,7 +451,7 @@ export function mountVoiceRuntime(
         // commit `in_progress` a moment after the deadline — and gating
         // the finalize below on "the open succeeded" leaves exactly that
         // row for the stale sweep to misclassify (Codex review, PR #227).
-        await withinOrNull(
+        callLogId = (await withinOrNull(
           openRuntimeCall(
             {
               callSid: entry.callSid,
@@ -451,7 +464,7 @@ export function mountVoiceRuntime(
             env,
           ),
           options.callRowDeadlineMs ?? CALL_ROW_DEADLINE_MS,
-        );
+        )) ?? undefined;
         if (socketGone) {
           // The caller hung up while the agent was being built. No session
           // exists, so there is nothing to tear down — but a row opened a

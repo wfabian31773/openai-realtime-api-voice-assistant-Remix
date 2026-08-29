@@ -155,11 +155,18 @@ export interface LaneCallMetadata {
   callId: string;
   callerPhone: string;
   dialedNumber: string;
-  /** The call_logs row id, read through a getter by the agents that need
-   * it: the row does not exist when the factory runs, and destructuring a
-   * getter freezes `undefined` for the whole call. That bug is recorded in
-   * answeringServiceAgent.ts and it is why this is a function. */
-  callLogId?: () => string | undefined;
+  /**
+   * The call_logs row id.
+   *
+   * A PROPERTY, and on the live path a getter over a value filled in later:
+   * the agent is built before the row exists, and `answeringServiceAgent`
+   * polls `metadata.callLogId` for five seconds before writing
+   * `patientFound`, `patientName` and the last location/provider it
+   * recognised. Read it, never destructure it — destructuring evaluates a
+   * getter once and freezes `undefined` for the whole call, which is the
+   * bug recorded in that agent's own comments.
+   */
+  readonly callLogId?: string;
 }
 
 export interface ResolvedLane {

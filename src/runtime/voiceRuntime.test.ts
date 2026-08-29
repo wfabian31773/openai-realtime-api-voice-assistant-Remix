@@ -130,7 +130,7 @@ async function harness(
     stallHandshake?: boolean;
     providerSetupDeadlineMs?: number;
     fetchPrecontext?: (phone: string) => Promise<unknown>;
-    openCallRow?: (row: unknown) => Promise<void>;
+    openCallRow?: (row: unknown) => Promise<string | undefined>;
     callRowDeadlineMs?: number;
   } = {},
 ): Promise<Harness> {
@@ -158,7 +158,10 @@ async function harness(
     fetchPrecontext: over.fetchPrecontext,
     openCallRow:
       over.openCallRow ??
-      (async (row) => void openedRows.push(row as unknown as Record<string, unknown>)),
+      (async (row) => {
+        openedRows.push(row as unknown as Record<string, unknown>);
+        return undefined;
+      }),
     persistCall: async (record) => {
       persisted.push(record as unknown as Record<string, unknown>);
       return true;
@@ -658,7 +661,7 @@ describe("one whole call, end to end, offline", () => {
     // awaited insert that never settles blocks setup before the bridge
     // exists and before the provider deadline is armed — try/catch only
     // covers rejection (Codex review, PR #227).
-    const h = await harness({ openCallRow: () => new Promise<void>(() => {}) });
+    const h = await harness({ openCallRow: () => new Promise<string | undefined>(() => {}) });
     const answered = await post(h, "/voice/optical", { CallSid: "CA15", From: "+1", To: "+2" });
     await openStream(h, "CA15", tokenFrom(answered.text));
     await new Promise((r) => setTimeout(r, 2500));
@@ -728,6 +731,7 @@ describe("one whole call, end to end, offline", () => {
       openCallRow: async (row) => {
         await blocked;
         opened.push(row);
+        return "late-row";
       },
     });
     const answered = await post(h, "/voice/optical", { CallSid: "CA17", From: "+1", To: "+2" });
@@ -740,6 +744,70 @@ describe("one whole call, end to end, offline", () => {
     expect(opened).toHaveLength(1); // the insert did land, late
     expect(h.persisted).toHaveLength(1);
     expect(h.persisted[0]).toMatchObject({ callSid: "CA17", outcome: "caller_hangup" });
+  });
+
+  it("gives the agent the call-log id it polls for, after the row exists", async () => {
+    // answeringServiceAgent polls metadata.callLogId for 5s before writing
+    // patientFound / patientName / lastLocationSeen. Without it the poll
+    // times out and every recognized caller is logged as unidentified —
+    // the exact phone-ID metric the migration baseline is measured on
+    // (Codex review, PR #227). The agent is built BEFORE the row exists,
+    // so it has to be a getter, which is why the SIP transport uses one.
+    let captured: { callLogId?: string } | null = null;
+    const capturing: LaneSource = {
+      getAgentConfig: () => ({
+        id: "answering-service",
+        enabled: true,
+        agentType: "inbound",
+        factory: ((_h: unknown, metadata: { callLogId?: string }) => {
+          captured = metadata;
+          return Promise.resolve({ instructions: "answering service", tools: [] });
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({
+      laneSource: capturing,
+      openCallRow: async () => "call-log-row-1",
+    });
+    const answered = await post(h, "/voice/answering-service", {
+      CallSid: "CA18",
+      From: "+15551234567",
+      To: "+2",
+    });
+    await openStream(h, "CA18", tokenFrom(answered.text));
+    await settle();
+    expect(captured).not.toBeNull();
+    expect(captured!.callLogId).toBe("call-log-row-1");
+  });
+
+  it("leaves the call-log id undefined rather than inventing one when the row never opened", async () => {
+    let captured: { callLogId?: string } | null = null;
+    const capturing: LaneSource = {
+      getAgentConfig: () => ({
+        id: "answering-service",
+        enabled: true,
+        agentType: "inbound",
+        factory: ((_h: unknown, metadata: { callLogId?: string }) => {
+          captured = metadata;
+          return Promise.resolve({ instructions: "answering service", tools: [] });
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({
+      laneSource: capturing,
+      openCallRow: async () => {
+        throw new Error("db down");
+      },
+    });
+    const answered = await post(h, "/voice/answering-service", {
+      CallSid: "CA19",
+      From: "+1",
+      To: "+2",
+    });
+    await openStream(h, "CA19", tokenFrom(answered.text));
+    await settle();
+    expect(captured).not.toBeNull();
+    expect(captured!.callLogId).toBeUndefined();
   });
 
   it("refuses a stream whose token was not minted by the webhook", async () => {

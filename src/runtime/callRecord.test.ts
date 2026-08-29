@@ -169,8 +169,8 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
     // marked done, the reaper will not repair them, and the timeline is
     // gone for good (Codex review, PR #227). The SIP path creates the row
     // at call start for exactly this reason.
-    const insert = vi.fn(async () => {});
-    const ok = await openRuntimeCall(
+    const insert = vi.fn(async () => "row-1");
+    const id = await openRuntimeCall(
       {
         callSid: "CA-1",
         slug: "optical",
@@ -180,7 +180,8 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
       },
       insert,
     );
-    expect(ok).toBe(true);
+    // The id is returned, because the agents poll for it.
+    expect(id).toBe("row-1");
     const [row] = insert.mock.calls[0] as unknown as [Record<string, unknown>];
     expect(row.callSid).toBe("CA-1");
     expect(row.status).toBe("in_progress");
@@ -198,13 +199,13 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
   it("never throws and never blocks the call when the insert fails", async () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      const ok = await openRuntimeCall(
+      const id = await openRuntimeCall(
         { callSid: "CA-2", slug: "optical", callerPhone: "", dialedNumber: "" },
         async () => {
           throw new Error("db down");
         },
       );
-      expect(ok).toBe(false);
+      expect(id).toBeUndefined();
     } finally {
       spy.mockRestore();
     }

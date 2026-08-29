@@ -190,15 +190,29 @@ export interface RuntimeCallOpenRow {
   environment: string;
 }
 
-export type CallLogInsert = (row: RuntimeCallOpenRow) => Promise<void>;
+/** Returns the new row's id when the database supplies one. */
+export type CallLogInsert = (row: RuntimeCallOpenRow) => Promise<string | undefined>;
 
-async function defaultOpenInsert(row: RuntimeCallOpenRow): Promise<void> {
-  const [{ db }, { callLogs }] = await Promise.all([
+async function defaultOpenInsert(row: RuntimeCallOpenRow): Promise<string | undefined> {
+  const [{ db }, { callLogs }, { eq }] = await Promise.all([
     import("../../server/db"),
     import("../../shared/schema"),
+    import("drizzle-orm"),
   ]);
   // A duplicate webhook or a reconnect must not fail the call.
-  await db.insert(callLogs).values(row).onConflictDoNothing({ target: callLogs.callSid });
+  const inserted = await db
+    .insert(callLogs)
+    .values(row)
+    .onConflictDoNothing({ target: callLogs.callSid })
+    .returning({ id: callLogs.id });
+  if (inserted[0]?.id) return inserted[0].id;
+  // Conflict: the row already exists, so read back the id the agents need.
+  const existing = await db
+    .select({ id: callLogs.id })
+    .from(callLogs)
+    .where(eq(callLogs.callSid, row.callSid))
+    .limit(1);
+  return existing[0]?.id;
 }
 
 /**
@@ -215,8 +229,10 @@ async function defaultOpenInsert(row: RuntimeCallOpenRow): Promise<void> {
  * because the reaper sees it as already flushed (Codex review, PR #227).
  *
  * Never throws and never blocks the call: a caller who cannot be logged is
- * still a caller to be answered. Returns whether the row was opened so the
- * runtime can say so honestly rather than assume.
+ * still a caller to be answered. Returns the row's ID — the agents poll for
+ * it through `metadata.callLogId` before writing what they learned about the
+ * caller, and without it that write never happens — or undefined when the
+ * row could not be opened.
  */
 export async function openRuntimeCall(
   context: {
@@ -228,9 +244,9 @@ export async function openRuntimeCall(
   },
   insert: CallLogInsert = defaultOpenInsert,
   env: Record<string, string | undefined> = process.env,
-): Promise<boolean> {
+): Promise<string | undefined> {
   try {
-    await insert({
+    return await insert({
       callSid: context.callSid,
       direction: "inbound",
       from: context.callerPhone,
@@ -242,13 +258,12 @@ export async function openRuntimeCall(
       startTime: new Date(),
       environment: env.NODE_ENV === "production" ? "production" : "development",
     });
-    return true;
   } catch (error) {
     console.error(
       `[voice-runtime] could not open call_logs row for ${context.callSid}:`,
       error instanceof Error ? error.message : String(error),
     );
-    return false;
+    return undefined;
   }
 }
 
