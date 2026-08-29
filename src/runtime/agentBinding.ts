@@ -148,12 +148,52 @@ export function toGrokTools(tools: LiveTool[]): {
  * per lane, so the whole prefix caches (ADR-001's caching section); anything
  * that varies per call must be appended by the caller, never injected here.
  */
-export function bindAgent(
+/**
+ * The agent's prompt as TEXT, evaluating it when it is a closure.
+ *
+ * Several agents build their prompt with a function so a time-dependent
+ * tail stays fresh behind a stable cached prefix — `azulSchedulingAgent`
+ * (`instructions: () => buildAzulSchedulingPrompt(metadata)`) and
+ * `afterHoursAgent` both do. On the SIP path the SDK evaluates that closure
+ * inside `getSystemPrompt()`, reached from `connect()`. This runtime does
+ * not go through the SDK's session, so it has to do the same thing itself:
+ * stringifying the function instead sends Grok the literal source text
+ * `() => buildAzulSchedulingPrompt(metadata)` as the system prompt, and the
+ * lane loses its entire workflow and its safety rules while looking
+ * perfectly healthy (Codex review, PR #227).
+ *
+ * `String(fn)` is never a fallback here. A prompt that cannot be resolved
+ * throws, the lane is refused, and the caller hears the controlled
+ * unavailable line — the same reasoning as the empty-prompt guard below.
+ */
+async function resolveInstructions(agent: BorrowableAgent): Promise<string> {
+  const raw = (agent as { instructions?: unknown }).instructions;
+  if (typeof raw === 'string') return raw;
+
+  // The SDK's own contract first, since it is what the SIP transport relies
+  // on and what an agent's closure is written to be called by.
+  const viaSdk = (agent as { getSystemPrompt?: (ctx: unknown) => Promise<string | undefined> })
+    .getSystemPrompt;
+  if (typeof viaSdk === 'function') {
+    try {
+      const resolved = await viaSdk.call(agent, {});
+      if (typeof resolved === 'string' && resolved.trim()) return resolved;
+    } catch {
+      // Fall through to calling the closure directly.
+    }
+  }
+  if (typeof raw === 'function') {
+    const resolved = await (raw as () => unknown)();
+    if (typeof resolved === 'string') return resolved;
+  }
+  return '';
+}
+
+export async function bindAgent(
   agent: BorrowableAgent,
   opts: { instructionsPrefix?: string } = {},
-): BoundAgent {
-  const raw = agent.instructions;
-  const own = typeof raw === 'string' ? raw : String(raw ?? '');
+): Promise<BoundAgent> {
+  const own = await resolveInstructions(agent);
   if (!own.trim()) {
     // The agent's prompt IS the agent. Running without it would put a
     // nameless improviser on a patient line.

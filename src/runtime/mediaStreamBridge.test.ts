@@ -346,6 +346,28 @@ describe("VoiceCallBridge — agent-requested hangup", () => {
     expect(h.outcomes).toEqual(["agent_ended"]);
   });
 
+  it("a revoked goodbye cannot be inherited by the NEXT response", async () => {
+    // The barge-in cleared the final mark and its timer but left the
+    // termination request standing, so the answer to the caller's new
+    // question armed ITS mark as final and hung up on them (Codex review,
+    // PR #227).
+    const h = makeBridge({ agent: permitting() });
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(8000));
+    await terminate(h);
+    h.handlers().onAudioDone("Goodbye.");
+    h.handlers().onSpeechStarted(); // the caller cuts in with one more thing
+    h.handlers().onSpeechStopped();
+    // The agent answers the new question.
+    h.newResponse();
+    h.handlers().onAgentTranscriptDelta("Yes, we are open until five.");
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAudioDone("Yes, we are open until five.");
+    const name = h.marks()[h.marks().length - 1].mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } });
+    expect(h.outcomes).toEqual([]);
+  });
+
   it("a barge-in over the goodbye REVOKES the hangup — the caller is still talking", async () => {
     const h = makeBridge({ agent: permitting() });
     h.newResponse();

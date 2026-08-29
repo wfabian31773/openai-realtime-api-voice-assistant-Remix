@@ -615,6 +615,12 @@ export class VoiceCallBridge {
     this.current = null;
     // A barge-in also revokes a hangup armed for a line the caller just
     // talked over: the goodbye did not finish, so the call has not ended.
+    // `endRequested` is cleared WITH the mark and the timer — leaving it
+    // set let the answer to the caller's new question arm its own mark as
+    // final and hang up on them, which is the opposite of what a barge-in
+    // means (Codex review, PR #227). A fresh termination has to be
+    // requested by the agent again, through its own guards.
+    this.endRequested = false;
     this.finalMarkName = null;
     if (this.finalFallbackTimer !== null) {
       this.clearTimer(this.finalFallbackTimer);

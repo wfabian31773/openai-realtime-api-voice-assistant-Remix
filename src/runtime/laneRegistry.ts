@@ -89,12 +89,47 @@ const NON_UNIFORM_FACTORY_LANES: Record<string, string> = {
 };
 
 /**
+ * Lanes whose agents actually invoke the handoff callback.
+ *
+ * Counted in the source rather than assumed: `noIvrAgent` calls it in three
+ * places (a sanctioned emergency transfer among them), `azulSchedulingAgent`
+ * and `pcpAgent` once each. Optical, surgery, tech, records and
+ * answering-service never call it at all — which is precisely the
+ * operator's 2026-08-12 ruling that only PCP and Scheduling SD transfer and
+ * every other agent has no transfer tool to call.
+ *
+ * That ruling is why a callback that refuses is right for most lanes and
+ * wrong for these: for a lane that never calls it, throwing is a tripwire;
+ * for one that does, it turns a sanctioned emergency transfer into a
+ * guaranteed failure report (Codex review, PR #227).
+ *
+ * A real transfer on this transport means redirecting the caller's Twilio
+ * leg into a conference and ringing an agent ladder — a feature, not a
+ * detail, and one whose destinations are the operator's to set. Until it
+ * exists these lanes are refused rather than served with a transfer that
+ * cannot work.
+ */
+const TRANSFER_CAPABLE_LANES = new Set([
+  "no-ivr",
+  "no-ivr-v2",
+  "dev-no-ivr",
+  "azul-scheduling",
+  "pcp",
+]);
+
+/**
  * Why this runtime cannot serve a lane, or null when it can. Pure, so the
  * reason can be asserted and logged rather than discovered on a live call.
  */
 export function laneSupportStatus(config: LaneConfig): string | null {
   if (config.agentType && config.agentType !== "inbound") {
     return `lane '${config.id}' is an ${config.agentType} agent; this runtime answers inbound calls`;
+  }
+  if (TRANSFER_CAPABLE_LANES.has(config.id)) {
+    return (
+      `lane '${config.id}' performs a call transfer, which this transport cannot yet do; ` +
+      "serving it would turn a sanctioned transfer into a guaranteed failure"
+    );
   }
   const shape = NON_UNIFORM_FACTORY_LANES[config.id];
   if (shape) {
@@ -177,7 +212,7 @@ export async function resolveLane(
   const created = await factory(refuseHandoff, metadata);
   const agent = created as BorrowableAgent;
 
-  const bound = bindAgent(agent, {
+  const bound = await bindAgent(agent, {
     // The knowledge pack leads, byte-identical on every call and every
     // lane, so the cache prefix is shared across the whole fleet before
     // the agent's own instructions make it lane-specific (ADR-001).

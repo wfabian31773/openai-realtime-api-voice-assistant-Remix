@@ -153,8 +153,32 @@ describe("factory contracts differ per agent (Codex review, PR #227)", () => {
     ).toBeNull();
   });
 
+  it("refuses a lane whose agent actually performs a transfer", async () => {
+    // Measured, not assumed: noIvrAgent invokes the handoff callback in
+    // three places, azulSchedulingAgent and pcpAgent once each; optical,
+    // surgery, tech, records and answering-service never call it — which is
+    // exactly the operator's 2026-08-12 ruling. A callback that throws is
+    // right for the lanes that never call it and wrong for the ones that
+    // do: a sanctioned emergency transfer would always report failure.
+    for (const id of ["no-ivr", "no-ivr-v2", "dev-no-ivr", "azul-scheduling", "pcp"]) {
+      const factory = vi.fn(async () => fakeAgent());
+      const lane = await resolveLane(id, META, {
+        source: source({ id, agentType: "inbound", factory: factory as unknown as LaneConfig["factory"] }),
+        env: {},
+      });
+      expect(lane, `${id} should be refused until a transfer exists`).toBeNull();
+      expect(factory).not.toHaveBeenCalled();
+    }
+  });
+
+  it("says a transfer is why, not something vague", () => {
+    expect(
+      laneSupportStatus({ id: "pcp", enabled: true, agentType: "inbound", factory: () => undefined }),
+    ).toMatch(/transfer/i);
+  });
+
   it("still serves every lane that does use the uniform shape", async () => {
-    for (const id of ["optical", "surgery", "tech", "no-ivr", "answering-service", "pcp"]) {
+    for (const id of ["optical", "surgery", "tech", "records", "answering-service"]) {
       const lane = await resolveLane(id, META, {
         source: source({ id, agentType: "inbound" }),
         env: {},

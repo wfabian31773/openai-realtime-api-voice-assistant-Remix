@@ -13,18 +13,20 @@ function tool(over: Partial<LiveTool> = {}): LiveTool {
 }
 
 describe('bindAgent — borrows the real agent, changes nothing', () => {
-  it('takes the agent\'s own instructions verbatim', () => {
-    const bound = bindAgent({ instructions: 'You are Sage.', tools: [] });
+  it('takes the agent\'s own instructions verbatim', async () => {
+    const bound = await bindAgent({ instructions: 'You are Sage.', tools: [] });
     expect(bound.instructions).toBe('You are Sage.');
   });
 
-  it('refuses to run an agent with no instructions — that would put a nameless improviser on a patient line', () => {
-    expect(() => bindAgent({ instructions: '   ', tools: [] })).toThrow(/no instructions/);
-    expect(() => bindAgent({ tools: [] })).toThrow(/no instructions/);
+  it('refuses to run an agent with no instructions — that would put a nameless improviser on a patient line', async () => {
+    await expect(bindAgent({ instructions: '   ', tools: [] })).rejects.toThrow(
+      /no instructions/,
+    );
+    await expect(bindAgent({ tools: [] })).rejects.toThrow(/no instructions/);
   });
 
-  it('prepends the runtime prefix but leaves the agent\'s prompt intact and last', () => {
-    const bound = bindAgent(
+  it('prepends the runtime prefix but leaves the agent\'s prompt intact and last', async () => {
+    const bound = await bindAgent(
       { instructions: 'You are Sage.', tools: [] },
       { instructionsPrefix: 'PRACTICE KNOWLEDGE' },
     );
@@ -85,13 +87,50 @@ describe('tool schemas — .agents/memory/realtime-tool-schemas.md', () => {
   });
 });
 
+describe('instructions that are a FUNCTION (Codex review, PR #227)', () => {
+  it('evaluates the agent\'s prompt closure instead of stringifying it', async () => {
+    // azulSchedulingAgent.ts:1929 — `instructions: () => buildAzulSchedulingPrompt(metadata)`.
+    // Stringified, Grok receives the literal source text as its system
+    // prompt and the lane loses its whole workflow and safety rules.
+    const bound = await bindAgent({
+      instructions: (() => 'The real scheduling prompt.') as never,
+      tools: [tool()],
+    });
+    expect(bound.instructions).toContain('The real scheduling prompt.');
+    expect(bound.instructions).not.toContain('=>');
+  });
+
+  it('prefers the SDK getSystemPrompt contract when the agent exposes one', async () => {
+    const bound = await bindAgent({
+      instructions: (() => 'closure value') as never,
+      getSystemPrompt: async () => 'resolved via getSystemPrompt',
+      tools: [tool()],
+    } as never);
+    expect(bound.instructions).toContain('resolved via getSystemPrompt');
+  });
+
+  it('awaits an asynchronous prompt closure', async () => {
+    const bound = await bindAgent({
+      instructions: (async () => 'async prompt') as never,
+      tools: [tool()],
+    });
+    expect(bound.instructions).toContain('async prompt');
+  });
+
+  it('REFUSES rather than sending source text it could not evaluate', async () => {
+    await expect(
+      bindAgent({ instructions: (() => undefined) as never, tools: [tool()] }),
+    ).rejects.toThrow(/instructions/i);
+  });
+});
+
 describe('dispatch — every tool call must be answered, so it never throws', () => {
   it('calls the real implementation with the arguments as a JSON string', async () => {
     // Typed parameters, not a bare `vi.fn()`: the assertion below is about
     // the SECOND argument, and an untyped mock records a zero-length tuple
     // that the typecheck cannot index.
     const invoke = vi.fn(async (_ctx: unknown, _input: string) => ({ ticket: 'VA-51121' }));
-    const bound = bindAgent({ instructions: 'x', tools: [tool({ invoke })] });
+    const bound = await bindAgent({ instructions: 'x', tools: [tool({ invoke })] });
     const res = await bound.dispatch('create_ticket', { reason: 'refill' });
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(invoke.mock.calls[0][1]).toBe(JSON.stringify({ reason: 'refill' }));
@@ -100,7 +139,7 @@ describe('dispatch — every tool call must be answered, so it never throws', ()
   });
 
   it('a string result is passed through rather than double-encoded', async () => {
-    const bound = bindAgent({
+    const bound = await bindAgent({
       instructions: 'x',
       tools: [tool({ invoke: async () => 'VA-1 filed' })],
     });
@@ -109,7 +148,7 @@ describe('dispatch — every tool call must be answered, so it never throws', ()
   });
 
   it('an unknown tool returns a structured refusal — the turn still gets an answer', async () => {
-    const bound = bindAgent({ instructions: 'x', tools: [tool()] });
+    const bound = await bindAgent({ instructions: 'x', tools: [tool()] });
     const res = await bound.dispatch('book_appointment', {});
     expect(res.ok).toBe(false);
     expect(JSON.parse(res.output)).toEqual({ ok: false, error: 'unknown_tool' });
@@ -117,7 +156,7 @@ describe('dispatch — every tool call must be answered, so it never throws', ()
   });
 
   it('a THROWING tool is answered, not propagated — an unanswered call is dead air', async () => {
-    const bound = bindAgent({
+    const bound = await bindAgent({
       instructions: 'x',
       tools: [tool({ invoke: async () => { throw new Error('ticket API 500'); } })],
     });
@@ -128,7 +167,7 @@ describe('dispatch — every tool call must be answered, so it never throws', ()
   });
 
   it('a tool that was skipped cannot be dispatched — the allow-list is the offered set', async () => {
-    const bound = bindAgent({ instructions: 'x', tools: [tool({ invoke: undefined })] });
+    const bound = await bindAgent({ instructions: 'x', tools: [tool({ invoke: undefined })] });
     expect(bound.toolNames).toEqual([]);
     const res = await bound.dispatch('create_ticket', {});
     expect(res.ok).toBe(false);
