@@ -172,6 +172,107 @@ staged over months, it is worth doing early and on its own merits.
 
 ---
 
+## Practice knowledge and organizational identity belong to the runtime (added 2026-08-29, Wayne)
+
+**The ask.** Every agent should know the practice by heart — locations,
+addresses, phone and fax numbers, providers, services rendered, the public
+material anyone could read off the website — without that being injected into
+each agent separately. And each agent should know *where it sits*: that it is
+the Optical desk inside Azul Vision, what its own department handles, and what
+the neighbouring desks handle.
+
+**This is not a new build — it exists and is unevenly applied.**
+`src/config/azulVisionKnowledge.ts` (481 lines) already holds
+`AZUL_VISION_LOCATIONS`, `AZUL_VISION_SERVICES`, `AZUL_VISION_PROVIDERS`,
+`AZUL_VISION_KNOWLEDGE` and `COMMON_QUESTIONS`, with builders
+(`buildPracticeKnowledgePrompt`, `buildCompactLocationReference`,
+`buildServicesReference`, `buildProvidersReference`). Measured 2026-08-29:
+
+| Agents that import it | Agents that do NOT |
+|---|---|
+| answering-service, no-ivr, after-hours, pcp | **optical, surgery, tech**, azul-scheduling, records, drs-scheduler, no-ivr-v2, appointment-confirmation |
+
+**The three lines carrying 67% of all call volume — optical, surgery and tech
+— have no practice knowledge at all.** Worse, they carry *partial hand-copied
+knowledge instead*: office names appear as inline string literals in
+`surgeryAgent.ts` and `techAgent.ts`, which is duplication that can and does
+drift (commit #223 had to alias two retired NextGen office names, North Valley
+Eye → Mission Hills and Magan → Covina — proof this data churns and that stale
+names reach production).
+
+This is the ADR's thesis for the fourth time in one day: one behavior, spread
+across agent files, present in some and missing in the highest-volume ones.
+
+### Decision
+
+**Practice knowledge is assembled by the runtime and given to every agent
+automatically. No agent imports, copies, or hand-maintains it.**
+
+**1. One pack, in the cached prefix.** The runtime composes the knowledge pack
+from the single source and places it in the **static prompt prefix**, ahead of
+any per-call context. This is the ideal prefix content — large, identical on
+every call, never patient-specific — so it caches essentially for free (see the
+caching section above), and on flat per-minute pricing it costs nothing at all.
+It is also faster than a tool call: an agent that *knows* the Encinitas fax
+number answers instantly, where a lookup costs a round trip mid-conversation.
+
+**2. Organizational identity is part of every agent's config.** Each agent
+declares its own place: the practice it works for, which desk it is, what that
+desk handles, and what the neighbouring desks handle. This is not decoration —
+**cross-queue routing depends on it.** Standing instruction 10 requires a
+caller who reached the wrong queue to have their request taken and routed
+(schedule-related to the HVA Hub, except a surgery date). An agent cannot route
+correctly to a department it does not know exists.
+
+**3. The static/volatile boundary.** The same rule that governs caching governs
+this:
+
+| In the pack (static, public) | Behind a tool (volatile or private) |
+|---|---|
+| Locations, addresses, hours | This caller's appointments |
+| Phone and fax numbers | Slot availability |
+| Providers and specialties | Ticket status |
+| Services rendered | Anything patient-specific |
+| Insurance/payer participation, accessibility | |
+| Common questions; the org chart | |
+
+**4. Public-only, and that is a safety property.** The pack carries only what is
+already published. If it is on the website, reciting it to a caller cannot be a
+disclosure problem. Nothing patient-specific, and nothing internal-only, ever
+enters the pack — that keeps a large, freely-recited block of text inherently
+safe to speak.
+
+**5. Generated, never hand-maintained.** One source of truth, composed into the
+prefix at session start. Change a location once and every agent has it on the
+next call. Hand-editing N prompts is what produced the current split, and a
+hand-maintained pack would drift the same way.
+
+### The risk this creates, stated plainly
+
+"Knowing it by heart" means the model can also **recite it wrongly with
+confidence** — a plausible-looking fax number is worse than an admission of not
+knowing, and **a stale pack is worse than no pack** for exactly that reason.
+Three mitigations, all cheap:
+
+- Keep the pack terse and structured; long prose invites paraphrase.
+- Generate it from the source on every deploy, with a version/asof marker, so
+  the prefix cannot silently age.
+- For the highest-stakes specifics a caller will write down — fax numbers,
+  exact street addresses — prefer the renderer/scripted path over free
+  recitation, the same discipline the DRS line already uses for its authorized
+  lines.
+
+### Recommended now, independent of the migration
+
+Giving `optical`, `surgery` and `tech` the existing knowledge pack is a
+same-day change to 67% of call volume and does not depend on any of this
+migration. It touches production agents, so it is Wayne's call to authorize
+(standing instruction 5) — but the measurement discipline applies: baseline
+first, since "the agent knew the address" shows up in quality score and in
+callers not being told to call back.
+
+---
+
 ## Consequences
 
 **Accepted gains**

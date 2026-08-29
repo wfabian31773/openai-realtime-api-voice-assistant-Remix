@@ -304,7 +304,7 @@ text tangled together, and only the first kind is disposable:
 |---|---|---|
 | **(a) Model bandages** | "never repeat the greeting", the consecutive-turn ban, affirmation whitelists, "do not recite these instructions" | **Delete.** GPT-specific. |
 | **(b) Operator rulings** | capability boundary (cannot transfer or schedule — file a ticket); schedule-related routes to the HVA Hub from every queue *except* a surgery date; confirm the callback number *before* filing; no transfer tool at all on answering-service lines; nobody is told to call back | **Keep — these are Wayne's, not the model's.** |
-| **(c) Domain knowledge** | department taxonomy, reason codes, office and provider names | **Keep, verify currency.** |
+| **(c) Domain knowledge** | department taxonomy, reason codes, office and provider names | **Keep — but it moves to the runtime's knowledge pack, not the agent prompt.** See ADR-001's practice-knowledge section: the pack already exists and 8 of 12 agents, including the three busiest, do not use it. |
 
 **And the second reason the DRS prompt is four sentences** — worth naming
 because it compounds with Grok's capability rather than competing with it: we
