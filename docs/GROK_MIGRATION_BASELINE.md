@@ -76,20 +76,42 @@ the value.
 
 ## Two findings that need an operator decision
 
-1. **The queue lines resolve 0.0% of callers — but the capability is ENABLED,
-   so this is a failure, not an absence.** Corrected 2026-08-29: `optical`,
-   `surgery` and `tech` are all members of `PRECONTEXT_SLUGS`
-   (`src/voiceAgentRoutes.ts`), so caller-ID pre-context is switched on for
-   them. `patient_found` is written on 100% of their calls (1,356/1,356 for
-   tech) and is false every time, and `patient_name` is written on 0% —
-   against 26.8% for answering-service on the same code path.
-   **Most likely explanation, for Wayne to confirm:** these queues are
-   *forwarded* overflow (CLAUDE.md describes optical that way), so the number
-   presented is the forwarding source rather than the patient's, and there is
-   nothing useful to match. If that is right, 0% is correct behavior and the
-   hub's pre-context brings nothing to these lanes. If it is wrong, ~3,000
-   calls a week are missing an identification they were meant to get. Do not
-   design either way until it is answered.
+1. **The 0.0% phone-ID figure on the queue lines is a LOGGING GAP, not an
+   identification failure. Corrected twice; this is the version supported by
+   the code.** `surgeryAgent.ts`, `opticalAgent.ts` and `techAgent.ts` contain
+   **zero** calls to `updateCallLog`/`stampVerifiedIdentity` — they never write
+   `patient_found` or `patient_name` at all, so the column sits at its default
+   forever no matter what the agent knew. The column cannot measure these
+   lines, in either direction.
+
+   This is precisely the trap STATE-OF-PLAY §3 records ("a `false` can mean
+   *never written*"), and `answeringServiceAgent.ts:614` documents the same
+   bug being fixed for that agent: *"it is why `patient_found` was false on
+   every answering-service call in the log while the agent was plainly
+   recognising callers on the air."* Answering-service got the fix (hence its
+   26.8%); the queue agents never did.
+
+   **How the queue agents identify callers, then:** in conversation. The agent
+   asks for name and date of birth, the model extracts them, and the lookup
+   runs by name/DOB — `matchedBy` is `'phone' | 'name' | 'dob' |
+   'name_and_dob'`. The filing tool carries the result onto the ticket. None
+   of that path touches `call_logs.patient_found`, which is why tickets carry
+   patient details while the column reads false.
+
+   **no-ivr's 0% is a third, distinct case.** It *does* write the column
+   (`noIvrAgent.ts:886`) — but only inside the pre-answer **phone**-lookup
+   success branch, and only if `metadata.callLogId` already exists, which is
+   the same backfill-timing hazard the answering-service comment describes. So
+   its 0% means "no phone match logged", not "no caller identified".
+
+   **Consequence for the migration:** *there is currently no fleet-wide
+   measurement of caller identification.* The plan lists phone-ID rate as a
+   cutover gate; that gate is unmeasurable on 3 of 5 lines and unreliable on a
+   4th. Identity logging has to move into the runtime — written once for every
+   agent, with the match path recorded — before it can gate anything. This is
+   ADR-001's argument in miniature: one behavior implemented in five agent
+   files, fixed in one, half-fixed in another, absent in three.
+
 2. **tech halved week-over-week** (931 → 425 across comparable business days),
    with surgery and optical down similarly. Recorded as an observation, not a
    conclusion — the cause is operational (routing, volume, seasonality) and is
@@ -100,7 +122,10 @@ the value.
 Both zero-valued columns above were verified as *measured* rather than
 *never written*, because a `false` in this table has misled us before:
 
-- `patient_found`: **written on every call** for every line → the 0.0% is real.
+- `patient_found`: the column is non-null on every row, which is what misled
+  this document twice — a non-null default is not a measurement. Three of the
+  five agents never write it at all. **Checking that a column is populated is
+  not the same as checking that something writes it.**
 - `agent_outcome`: written on ~99.7% of calls; `abandoned` simply is not a
   value these agents emit, so an abandonment rate cannot be read from it and is
   deliberately absent from the tables above.
@@ -129,6 +154,6 @@ per-minute pricing.
 | Ticket % | the line's job; a drop is a regression regardless of quality |
 | Outcome mix | material shift = behavior change, investigate before proceeding |
 | Median 1st transcript | latency reference; the plan's §6 gate is "not materially worse" |
-| Phone-ID % | answering-service only today; must not regress from 26.8% |
+| Phone-ID % | **NOT USABLE as a gate yet** — see the logging gap above. Fix identity logging in the runtime first, then baseline it |
 | $/call-minute | $0.0918 baseline; Grok's flat $0.08 should show as a modest fall |
 | Short-call text cache % | OpenAI lanes only; a fall means a per-call value leaked into the static prompt prefix |
