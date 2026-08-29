@@ -76,14 +76,20 @@ the value.
 
 ## Two findings that need an operator decision
 
-1. **The queue lines do NO caller-ID identification — 0.0%, and that is real,
-   not a logging gap.** `patient_found` is written on 100% of their calls
-   (1,356/1,356 for tech), and `patient_name` on 0% — so they genuinely never
-   resolve the caller before answering, while answering-service does on 26.8%.
-   The hub's pre-context capability (the confirm-not-ask pattern hardened on
-   DRS) would therefore be a **behavior change** for these lines, not a port.
-   It is likely an improvement — but it is Wayne's call, not a detail to slip
-   in during a pipeline swap.
+1. **The queue lines resolve 0.0% of callers — but the capability is ENABLED,
+   so this is a failure, not an absence.** Corrected 2026-08-29: `optical`,
+   `surgery` and `tech` are all members of `PRECONTEXT_SLUGS`
+   (`src/voiceAgentRoutes.ts`), so caller-ID pre-context is switched on for
+   them. `patient_found` is written on 100% of their calls (1,356/1,356 for
+   tech) and is false every time, and `patient_name` is written on 0% —
+   against 26.8% for answering-service on the same code path.
+   **Most likely explanation, for Wayne to confirm:** these queues are
+   *forwarded* overflow (CLAUDE.md describes optical that way), so the number
+   presented is the forwarding source rather than the patient's, and there is
+   nothing useful to match. If that is right, 0% is correct behavior and the
+   hub's pre-context brings nothing to these lanes. If it is wrong, ~3,000
+   calls a week are missing an identification they were meant to get. Do not
+   design either way until it is answered.
 2. **tech halved week-over-week** (931 → 425 across comparable business days),
    with surgery and optical down similarly. Recorded as an observation, not a
    conclusion — the cause is operational (routing, volume, seasonality) and is
