@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { toCallLogRow } from "./callRecord";
+import { describe, it, expect, vi } from "vitest";
+import { toCallLogRow, toConflictUpdate, persistRuntimeCall } from "./callRecord";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 
 function record(over: Partial<VoiceCallRecord> = {}): VoiceCallRecord {
@@ -36,7 +36,6 @@ describe("toCallLogRow", () => {
     expect(row.telemetrySource).toBe("realtime_events");
     expect(row.totalTurns).toBe(3);
     expect(row.interruptionCount).toBe(1);
-    expect(row.toolCallCount).toBe(1);
   });
 
   it("records the runtime's own failures as failed calls, and hangups as completed", () => {
@@ -47,19 +46,21 @@ describe("toCallLogRow", () => {
     expect(toCallLogRow(record({ outcome: "max_duration" })).status).toBe("completed");
   });
 
-  it("keeps the outcome on the timeline, so a punt is visible without parsing notes", () => {
-    const row = toCallLogRow(record({ outcome: "max_duration" }));
-    expect(row.toolTimeline.outcome).toBe("max_duration");
-    expect(row.toolTimeline.source).toBe("voice_runtime");
+  it("still classifies a punt through the status column, without a timeline of its own", () => {
+    // The outcome used to ride on a toolTimeline the runtime wrote. That
+    // column belongs to the agents' telemetry, so the status column carries
+    // the distinction instead.
+    expect(toCallLogRow(record({ outcome: "max_duration" })).status).toBe("completed");
+    expect(toCallLogRow(record({ outcome: "dead_air" })).status).toBe("failed");
   });
 
-  it("leaves identity NULL when the runtime was not told it — never inferred from a tool result", () => {
+  it("writes NO identity when the runtime was not told it — never inferred from a tool result", () => {
     const row = toCallLogRow(
       record({ toolEvents: [{ name: "lookup_schedule", ok: true, atMs: 900 }] }),
-    );
-    expect(row.patientName).toBeNull();
-    expect(row.patientDob).toBeNull();
-    expect(row.patientFound).toBe(false);
+    ) as unknown as Record<string, unknown>;
+    expect(row.patientName).toBeUndefined();
+    expect(row.patientDob).toBeUndefined();
+    expect(row.patientFound).toBeUndefined();
   });
 
   it("writes identity when it IS supplied — the column the queue agents never wrote", () => {
@@ -78,6 +79,37 @@ describe("toCallLogRow", () => {
     expect(toCallLogRow(record(), {}, {}).environment).toBe("development");
   });
 
+  it("does NOT write the tool timeline — the agents' own telemetry owns it", () => {
+    // recordedTool writes {tool, args, outcome, ms} plus purpose/result via
+    // classifyForAgent, and dashboards read purpose/result for fulfillment
+    // metrics. A second, differently-shaped writer here would overwrite the
+    // richer record the agent persisted during the call and make filing
+    // outcomes unclassifiable (Codex review, PR #227).
+    const row = toCallLogRow(record()) as unknown as Record<string, unknown>;
+    expect('toolTimeline' in row).toBe(false);
+    expect('toolCallCount' in row).toBe(false);
+  });
+
+  it("omits identity columns entirely when it was not told them", () => {
+    // Writing nulls would erase what stampVerifiedIdentity had already set.
+    const row = toCallLogRow(record()) as unknown as Record<string, unknown>;
+    expect('patientName' in row).toBe(false);
+    expect('patientFound' in row).toBe(false);
+  });
+
+  it("never overwrites another writer's columns on a conflict", () => {
+    const row = toCallLogRow(record(), { patientName: 'Test Patient', patientFound: true });
+    const update = toConflictUpdate(row) as unknown as Record<string, unknown>;
+    // Runtime-owned facts about how the call ended are safe to refresh.
+    expect(update.endTime).toBeInstanceOf(Date);
+    expect(update.transcript).toBe("CALLER: Hi\nAGENT: Hello");
+    expect(update.duration).toBe(93);
+    // Anything another writer owns is not in the update at all.
+    expect('toolTimeline' in update).toBe(false);
+    expect('patientName' in update).toBe(false);
+    expect('ticketNumber' in update).toBe(false);
+  });
+
   it("carries the transcript through unchanged", () => {
     expect(toCallLogRow(record()).transcript).toBe("CALLER: Hi\nAGENT: Hello");
   });
@@ -85,5 +117,40 @@ describe("toCallLogRow", () => {
   it("never returns a negative duration when the clocks disagree", () => {
     const row = toCallLogRow(record({ startedAtMs: 2_000, endedAtMs: 1_000 }));
     expect(row.duration).toBe(0);
+  });
+});
+
+
+describe("persistRuntimeCall", () => {
+  it("sends the NARROW update to the database, not the whole row", async () => {
+    // Asserting toConflictUpdate on its own never proved the writer used
+    // it: a mutation restoring `set: row` passed all 205 tests.
+    const upsert = vi.fn(async () => {});
+    const ok = await persistRuntimeCall(record(), { patientName: "Test Patient" }, upsert);
+    expect(ok).toBe(true);
+    const [row, update] = upsert.mock.calls[0] as unknown as [
+      Record<string, unknown>,
+      Record<string, unknown>,
+    ];
+    // The insert carries identity; the conflict update must not.
+    expect(row.patientName).toBe("Test Patient");
+    expect("patientName" in update).toBe(false);
+    expect("toolTimeline" in update).toBe(false);
+    expect(update.transcript).toBe("CALLER: Hi\nAGENT: Hello");
+  });
+
+  it("reports failure instead of throwing, and never logs the transcript", async () => {
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a) => void errors.push(a));
+    try {
+      const ok = await persistRuntimeCall(record(), {}, async () => {
+        throw new Error("db down");
+      });
+      expect(ok).toBe(false);
+      // A transcript in an error log is patient data somewhere nobody watches.
+      expect(JSON.stringify(errors)).not.toContain("CALLER: Hi");
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

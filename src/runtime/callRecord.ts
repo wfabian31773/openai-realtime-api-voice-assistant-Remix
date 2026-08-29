@@ -69,15 +69,40 @@ export interface RuntimeCallLogRow {
   duration: number;
   localDurationSeconds: number;
   transcript: string;
-  toolTimeline: { events: VoiceCallRecord["toolEvents"]; outcome: string; source: "voice_runtime" };
-  toolCallCount: number;
   totalTurns: number;
   interruptionCount: number;
   telemetrySource: "realtime_events";
   environment: string;
-  patientName: string | null;
-  patientDob: string | null;
-  patientFound: boolean;
+  /** Present ONLY when the runtime was told — see RuntimeCallIdentity. */
+  patientName?: string;
+  patientDob?: string;
+  patientFound?: boolean;
+}
+
+/**
+ * The columns a SECOND write may refresh.
+ *
+ * `call_sid` is unique, so a retry or a racing teardown upserts. The update
+ * must therefore touch only what the runtime itself owns and knows at
+ * teardown. Everything else on the row belongs to another writer running
+ * DURING the call — the agents' own tool telemetry, `stampVerifiedIdentity`,
+ * the ticket number — and a blanket `set` overwrites all of it, which is
+ * how a green migration produces unclassifiable filing outcomes (Codex
+ * review, PR #227). Identity is deliberately excluded even when supplied:
+ * refreshing it can only ever replace a value someone better informed
+ * already wrote.
+ */
+export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLogRow> {
+  return {
+    status: row.status,
+    endTime: row.endTime,
+    duration: row.duration,
+    localDurationSeconds: row.localDurationSeconds,
+    transcript: row.transcript,
+    totalTurns: row.totalTurns,
+    interruptionCount: row.interruptionCount,
+    telemetrySource: row.telemetrySource,
+  };
 }
 
 /** A call that never reached a conversation is recorded as failed; every
@@ -114,21 +139,31 @@ export function toCallLogRow(
     // which is the point of keeping the column.
     localDurationSeconds: durationSeconds,
     transcript: record.transcript,
-    toolTimeline: {
-      events: record.toolEvents,
-      outcome: record.outcome,
-      source: "voice_runtime",
-    },
-    toolCallCount: record.toolEvents.length,
+    // `toolTimeline` and `toolCallCount` are deliberately NOT written here.
+    // The agents' own `recordedTool` telemetry already fills them, in a
+    // richer shape the dashboards read (`{tool, args, outcome, ms}` plus the
+    // purpose/result classification), and it runs on this transport exactly
+    // as it does on SIP. A second writer with a different shape would
+    // overwrite that record and make filing outcomes unclassifiable — which
+    // would corrupt the very measurement this migration is judged by
+    // (docs/BACKEND_HANDOFF.md). The runtime keeps its own view of the tool
+    // calls on VoiceCallRecord, for logs and tests, and off the row.
     totalTurns: record.agentTurns,
     interruptionCount: record.interruptions,
     // Counted from real wire events, not estimated from wall time — the
     // distinction the column exists to record.
     telemetrySource: "realtime_events",
     environment: env.NODE_ENV === "production" ? "production" : "development",
-    patientName: identity.patientName ?? null,
-    patientDob: identity.patientDob ?? null,
-    patientFound: identity.patientFound ?? false,
+    // Omitted entirely when unknown rather than written as null: the queue
+    // agents' own stampVerifiedIdentity may already have set these during
+    // the call, and a null would erase what it learned.
+    ...(identity.patientName !== undefined && identity.patientName !== null
+      ? { patientName: identity.patientName }
+      : {}),
+    ...(identity.patientDob !== undefined && identity.patientDob !== null
+      ? { patientDob: identity.patientDob }
+      : {}),
+    ...(identity.patientFound !== undefined ? { patientFound: identity.patientFound } : {}),
   };
 }
 
@@ -141,20 +176,37 @@ export function toCallLogRow(
  * `call_sid` is UNIQUE, so a retry or a racing teardown updates the
  * existing row instead of failing the insert or duplicating the call.
  */
+export type CallLogUpsert = (
+  row: RuntimeCallLogRow,
+  update: Partial<RuntimeCallLogRow>,
+) => Promise<void>;
+
+/** The real write. Kept separate and injectable so a test can prove the
+ * NARROW update is what reaches the database — asserting `toConflictUpdate`
+ * in isolation never showed that the writer actually used it, and a
+ * mutation putting the whole row back passed the entire suite. */
+async function defaultUpsert(
+  row: RuntimeCallLogRow,
+  update: Partial<RuntimeCallLogRow>,
+): Promise<void> {
+  const [{ db }, { callLogs }] = await Promise.all([
+    import("../../server/db"),
+    import("../../shared/schema"),
+  ]);
+  await db.insert(callLogs).values(row).onConflictDoUpdate({
+    target: callLogs.callSid,
+    set: update,
+  });
+}
+
 export async function persistRuntimeCall(
   record: VoiceCallRecord,
   identity: RuntimeCallIdentity = {},
+  upsert: CallLogUpsert = defaultUpsert,
 ): Promise<boolean> {
   const row = toCallLogRow(record, identity);
   try {
-    const [{ db }, { callLogs }] = await Promise.all([
-      import("../../server/db"),
-      import("../../shared/schema"),
-    ]);
-    await db
-      .insert(callLogs)
-      .values(row)
-      .onConflictDoUpdate({ target: callLogs.callSid, set: row });
+    await upsert(row, toConflictUpdate(row));
     return true;
   } catch (error) {
     // Log the failure rather than the record: a transcript in an error log

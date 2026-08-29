@@ -553,6 +553,33 @@ describe("VoiceCallBridge — tool dispatch", () => {
     expect(decodeToolOutput("filed, no JSON")).toEqual({ result: "filed, no JSON" });
   });
 
+  it("asks the agent to continue after a tool — a tool result does not start a turn by itself", async () => {
+    // Submitting function_call_output adds a conversation item; it does not
+    // make the model speak. Without an explicit request the caller hears
+    // nothing after create_ticket until the dead-air watchdog fires
+    // (Codex review, PR #227).
+    const h = makeBridge();
+    h.handlers().onToolCall("c1", "create_ticket", { reason: "refill" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT ask for another turn after a termination the guards allowed", async () => {
+    const h = makeBridge({
+      agent: makeAgent({
+        dispatch: vi.fn(async () => ({
+          ok: true,
+          output: JSON.stringify({ success: false, status: 404 }),
+        })),
+      }),
+    });
+    h.handlers().onToolCall("c1", "terminate_call", { reason: "completed" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+  });
+
   it("records the tool timeline by name and outcome — never by argument", async () => {
     const records: VoiceCallRecord[] = [];
     const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });

@@ -82,6 +82,38 @@ const PRE_BRIDGE_FRAME_CAP = 200;
  */
 const STREAM_CLAIM_DEADLINE_MS = 10_000;
 
+/**
+ * How long the provider has to connect and complete its handshake.
+ *
+ * The dead-air watchdog is armed by `onConfigured`, so nothing covers the
+ * window before it: a WebSocket that never settles, or one that opens and
+ * never emits `session.created`/`session.updated`, left the caller in
+ * billed silence until the ten-minute ceiling — and then recorded a clean
+ * `max_duration` rather than the provider failure it was (Codex review,
+ * PR #227). A real handshake is sub-second.
+ */
+const PROVIDER_SETUP_DEADLINE_MS = 15_000;
+
+/**
+ * Bound on the caller-ID lookup. The pre-context is what lets an agent say
+ * "Am I speaking with…?" instead of asking cold, but it is worth nothing if
+ * the caller is listening to silence while we fetch it: an unbounded
+ * lookup was a review finding on 5Star #200. Whatever has not arrived by
+ * the time the stream is ready is dropped.
+ */
+const PRECONTEXT_DEADLINE_MS = 1_500;
+
+/** Resolve within a bound, or null. Never throws. */
+async function withinOrNull<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  return Promise.race([
+    work.catch(() => null),
+    new Promise<null>((resolve) => {
+      const t = setTimeout(() => resolve(null), ms);
+      (t as unknown as { unref?: () => void }).unref?.();
+    }),
+  ]);
+}
+
 export interface VoiceRuntimeOptions {
   env?: Record<string, string | undefined>;
   /** Overridable so tests never import the agent tree. */
@@ -90,6 +122,12 @@ export interface VoiceRuntimeOptions {
   /** How long a media-stream socket may stay open without claiming a call.
    * Defaults to STREAM_CLAIM_DEADLINE_MS. */
   streamClaimDeadlineMs?: number;
+  /** How long the provider has to connect AND finish its handshake.
+   * Defaults to PROVIDER_SETUP_DEADLINE_MS. */
+  providerSetupDeadlineMs?: number;
+  /** Caller-ID pre-context lookup. Injected so tests need no network, and
+   * so a lane that should not do one simply is not given it. */
+  fetchPrecontext?: (phone: string) => Promise<unknown>;
   /**
    * How to open the Grok connection. Injectable for one reason, and it is
    * the standing rule rather than a convenience: a failing call goes into
@@ -291,14 +329,27 @@ export function mountVoiceRuntime(
 
     ws.on("close", () => {
       clearClaimDeadline();
+      clearSetupDeadline();
       socketGone = true;
       bridge?.handleSocketClosed();
     });
     ws.on("error", () => {
       clearClaimDeadline();
+      clearSetupDeadline();
       socketGone = true;
       bridge?.handleSocketClosed();
     });
+
+    /** Armed once the provider socket is being opened, cleared by the
+     * handshake. Declared out here because the bridge's session is
+     * constructed before the timer is armed. */
+    let setupDeadline: ReturnType<typeof setTimeout> | null = null;
+    const clearSetupDeadline = () => {
+      if (setupDeadline !== null) {
+        clearTimeout(setupDeadline);
+        setupDeadline = null;
+      }
+    };
 
     async function startCall(entry: CallEntry, streamSid: string): Promise<void> {
       const context = {
@@ -309,6 +360,14 @@ export function mountVoiceRuntime(
         dialedNumber: entry.dialedNumber,
       };
       try {
+        // Started BEFORE the agent is built so the two overlap, and bounded
+        // so it can never hold the call open on its own.
+        const precontext = options.fetchPrecontext
+          ? await withinOrNull(
+              options.fetchPrecontext(entry.callerPhone) as Promise<unknown>,
+              PRECONTEXT_DEADLINE_MS,
+            )
+          : null;
         const lane = await resolveLane(
           entry.slug,
           {
@@ -316,6 +375,13 @@ export function mountVoiceRuntime(
             callId: entry.callSid,
             callerPhone: entry.callerPhone,
             dialedNumber: entry.dialedNumber,
+            // The queue agents choose their opening from this: with a
+            // unique match they confirm ("Am I speaking with…?") instead of
+            // asking cold, which is the behaviour the SIP path already
+            // gives every one of these lanes. A match is a candidate to
+            // confirm, never an identity — the agent's own prompt decides
+            // what to do with it (Codex review, PR #227).
+            ...(precontext ? { precontext } : {}),
           },
           { source: await laneSource(), env },
         );
@@ -356,7 +422,17 @@ export function mountVoiceRuntime(
             new GrokVoiceSession(
               transport,
               buildSessionConfig(lane.voice, lane.agent.instructions, lane.agent.tools),
-              handlers,
+              {
+                ...handlers,
+                // The handshake landing is what stands the setup deadline
+                // down — the same event that arms the bridge's own dead-air
+                // watchdog, so the two windows meet with no gap between
+                // them and nothing to poll.
+                onConfigured: () => {
+                  clearSetupDeadline();
+                  handlers.onConfigured();
+                },
+              },
             ),
           onOutcome: (outcome: CallOutcome) => registry.recordOutcome(entry.callSid, outcome),
           persistCallRecord: (record) => persistRuntimeCall(record).then(() => undefined),
@@ -364,6 +440,15 @@ export function mountVoiceRuntime(
         // Connect AFTER the bridge exists: a connection that fails then has
         // somewhere to report to and the call tears down cleanly, instead
         // of leaving the caller on an open socket in silence.
+        // The handshake gets its own deadline: the dead-air watchdog only
+        // arms once the session is configured, so without this the window
+        // before that is covered by nothing but the ten-minute ceiling.
+        setupDeadline = setTimeout(() => {
+          setupDeadline = null;
+          console.error(`[voice-runtime] provider setup timed out for ${entry.callSid}`);
+          bridge?.failSession(new Error("provider setup timed out"));
+        }, options.providerSetupDeadlineMs ?? PROVIDER_SETUP_DEADLINE_MS);
+        (setupDeadline as unknown as { unref?: () => void }).unref?.();
         (bridge.getSession() as GrokVoiceSession).markConnecting();
         await transport.connect();
         if (socketGone) {

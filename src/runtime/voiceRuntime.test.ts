@@ -42,8 +42,13 @@ class FakeGrokTransport implements RuntimeTransport {
    * owning it. The order is the defect, so the fake records the order. */
   public connectedAfterClose = false;
 
+  /** Set to stall: connect resolves but the handshake never completes,
+   * which is the failure the setup deadline exists for. */
+  public stallHandshake = false;
+
   async connect(): Promise<void> {
     if (this.closed) this.connectedAfterClose = true;
+    if (this.stallHandshake) return;
     // The handshake the real wire performs on open.
     queueMicrotask(() => this.emit({ type: "session.created" } as GrokServerEvent));
   }
@@ -117,7 +122,14 @@ const open: Harness[] = [];
  * server.close() would wait on it forever. */
 const clients: WebSocket[] = [];
 
-async function harness(over: { laneSource?: LaneSource } = {}): Promise<Harness> {
+async function harness(
+  over: {
+    laneSource?: LaneSource;
+    stallHandshake?: boolean;
+    providerSetupDeadlineMs?: number;
+    fetchPrecontext?: (phone: string) => Promise<unknown>;
+  } = {},
+): Promise<Harness> {
   const app = express();
   app.use(express.urlencoded({ extended: true }));
   const server = http.createServer(app);
@@ -131,9 +143,12 @@ async function harness(over: { laneSource?: LaneSource } = {}): Promise<Harness>
     laneSource: over.laneSource ?? laneSource(),
     createTransport: () => {
       const t = new FakeGrokTransport();
+      t.stallHandshake = over.stallHandshake ?? false;
       transports.push(t);
       return t;
     },
+    providerSetupDeadlineMs: over.providerSetupDeadlineMs,
+    fetchPrecontext: over.fetchPrecontext,
   });
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const port = (server.address() as { port: number }).port;
@@ -527,6 +542,88 @@ describe("one whole call, end to end, offline", () => {
     const closed = new Promise<void>((resolve) => ws.once("close", () => resolve()));
     await Promise.race([closed, new Promise((r) => setTimeout(r, 2500))]);
     expect(ws.readyState === ws.CLOSING || ws.readyState === ws.CLOSED).toBe(true);
+  });
+
+  it("gives up on a provider that connects but never completes its handshake", async () => {
+    // The dead-air watchdog is armed by onConfigured, so nothing covered
+    // the window before it: the caller sat in billed silence to the
+    // ten-minute ceiling and it was recorded as a clean max_duration rather
+    // than the provider failure it was (Codex review, PR #227).
+    const h = await harness({ stallHandshake: true, providerSetupDeadlineMs: 200 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA11", From: "+1", To: "+2" });
+    await openStream(h, "CA11", tokenFrom(answered.text));
+    await settle(2);
+    expect(h.transports).toHaveLength(1);
+    expect(h.registry.get("CA11")?.outcome ?? null).toBeNull();
+    await new Promise((r) => setTimeout(r, 350));
+    expect(h.registry.consumeOutcome("CA11")).toBe("provider_failure");
+  });
+
+  it("does NOT fire the setup deadline on a healthy handshake", async () => {
+    const h = await harness({ providerSetupDeadlineMs: 200 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA12", From: "+1", To: "+2" });
+    await openStream(h, "CA12", tokenFrom(answered.text));
+    await settle(2);
+    h.transports[0].emit({ type: "session.created" } as GrokServerEvent);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await new Promise((r) => setTimeout(r, 350));
+    expect(h.registry.get("CA12")?.outcome ?? null).toBeNull();
+  });
+
+  it("hands the agent the caller-ID pre-context, bounded so it cannot hold the call open", async () => {
+    // The queue agents choose their opening from metadata.precontext: with
+    // a unique match they confirm rather than ask cold, which is what the
+    // SIP path already gives all four lanes.
+    const seen: Array<Record<string, unknown>> = [];
+    const laneSourceCapturing: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: ((_h: unknown, metadata: Record<string, unknown>) => {
+          seen.push(metadata);
+          return Promise.resolve({ instructions: "optical agent", tools: [] });
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({
+      laneSource: laneSourceCapturing,
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CA13",
+      From: "+15551234567",
+      To: "+2",
+    });
+    await openStream(h, "CA13", tokenFrom(answered.text));
+    await settle();
+    expect(seen).toHaveLength(1);
+    expect(seen[0].precontext).toEqual({ matched: true, firstName: "Wayne" });
+  });
+
+  it("proceeds without pre-context rather than waiting on a slow lookup", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const laneSourceCapturing: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: ((_h: unknown, metadata: Record<string, unknown>) => {
+          seen.push(metadata);
+          return Promise.resolve({ instructions: "optical agent", tools: [] });
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({
+      laneSource: laneSourceCapturing,
+      // Never settles: a caller must not listen to silence for it.
+      fetchPrecontext: () => new Promise(() => {}),
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA14", From: "+1", To: "+2" });
+    await openStream(h, "CA14", tokenFrom(answered.text));
+    await new Promise((r) => setTimeout(r, 1800));
+    expect(seen).toHaveLength(1);
+    expect(seen[0].precontext).toBeUndefined();
   });
 
   it("refuses a stream whose token was not minted by the webhook", async () => {

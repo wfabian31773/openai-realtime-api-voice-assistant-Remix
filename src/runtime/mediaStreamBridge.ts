@@ -228,6 +228,7 @@ export interface BridgeSession {
   cancelResponse(): void;
   sendToolResult(callId: string, ok: boolean, output: Record<string, unknown>): void;
   requestResponse(): void;
+  requestResponse(): void;
   close(): void;
   getResponseEpoch(): number;
 }
@@ -658,9 +659,19 @@ export class VoiceCallBridge {
       if (this.ended) return;
       const output = decodeToolOutput(result.output);
       this.session.sendToolResult(callId, result.ok, output);
-      if (this.endCallToolNames.has(name) && guardsAllowedTermination(output)) {
-        this.requestHangup();
+      if (this.endCallToolNames.has(name)) {
+        if (guardsAllowedTermination(output)) this.requestHangup();
+        // A refusal still needs the agent to speak — its `say` wording is
+        // in the result — so fall through to the request below.
+        else this.session.requestResponse();
+        return;
       }
+      // Submitting a function_call_output adds a conversation item; it does
+      // NOT make the model speak. Without this the caller hears nothing
+      // after a ticket is filed until the dead-air watchdog disconnects
+      // them (Codex review, PR #227). requestResponse is response-gated, so
+      // it is released only once the tool-carrying response finishes.
+      this.session.requestResponse();
     })().catch(() => {
       // dispatch() is documented never to throw; if it somehow does, the
       // call still gets an answer rather than a stalled turn.
