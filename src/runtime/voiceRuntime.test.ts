@@ -110,6 +110,7 @@ function laneSource(over: Partial<LaneConfig> = {}): LaneSource {
 
 interface Harness {
   openedRows: Array<Record<string, unknown>>;
+  persisted: Array<Record<string, unknown>>;
   base: string;
   wsUrl: string;
   registry: CallSessionRegistry;
@@ -129,6 +130,7 @@ async function harness(
     stallHandshake?: boolean;
     providerSetupDeadlineMs?: number;
     fetchPrecontext?: (phone: string) => Promise<unknown>;
+    openCallRow?: (row: unknown) => Promise<void>;
   } = {},
 ): Promise<Harness> {
   const app = express();
@@ -137,6 +139,7 @@ async function harness(
   const registry = new CallSessionRegistry();
   const transports: FakeGrokTransport[] = [];
   const openedRows: Array<Record<string, unknown>> = [];
+  const persisted: Array<Record<string, unknown>> = [];
   mountVoiceRuntime(app, server, {
     env: ENV,
     // Short so the deadline test does not wait on a production-length one.
@@ -151,12 +154,19 @@ async function harness(
     },
     providerSetupDeadlineMs: over.providerSetupDeadlineMs,
     fetchPrecontext: over.fetchPrecontext,
-    openCallRow: async (row) => void openedRows.push(row as unknown as Record<string, unknown>),
+    openCallRow:
+      over.openCallRow ??
+      (async (row) => void openedRows.push(row as unknown as Record<string, unknown>)),
+    persistCall: async (record) => {
+      persisted.push(record as unknown as Record<string, unknown>);
+      return true;
+    },
   });
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const port = (server.address() as { port: number }).port;
   const h: Harness = {
     openedRows,
+    persisted,
     base: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/voice/stream`,
     registry,
@@ -639,6 +649,51 @@ describe("one whole call, end to end, offline", () => {
     await new Promise((r) => setTimeout(r, 1800));
     expect(seen).toHaveLength(1);
     expect(seen[0].precontext).toBeUndefined();
+  });
+
+  it("does not let a wedged database hold the caller in silence", async () => {
+    // openRuntimeCall is documented as never blocking the call, but an
+    // awaited insert that never settles blocks setup before the bridge
+    // exists and before the provider deadline is armed — try/catch only
+    // covers rejection (Codex review, PR #227).
+    const h = await harness({ openCallRow: () => new Promise<void>(() => {}) });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA15", From: "+1", To: "+2" });
+    await openStream(h, "CA15", tokenFrom(answered.text));
+    await new Promise((r) => setTimeout(r, 2500));
+    // Setup went on without the row rather than waiting on it.
+    expect(h.transports).toHaveLength(1);
+  });
+
+  it("finalizes a row it opened when the caller hangs up during setup", async () => {
+    // The row is opened before the socketGone check, so an early hangup
+    // used to leave it `in_progress` until the 30-minute stale sweep
+    // classified it stale_reaped instead of caller_hangup.
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: (async () => {
+          await blocked;
+          return { instructions: "You are the optical queue agent.", tools: [] };
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({ laneSource: slow });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA16", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA16", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(4);
+    release();
+    await settle(8);
+    expect(h.openedRows).toHaveLength(1);
+    expect(h.persisted).toHaveLength(1);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA16", outcome: "caller_hangup" });
   });
 
   it("refuses a stream whose token was not minted by the webhook", async () => {

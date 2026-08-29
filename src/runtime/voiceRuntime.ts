@@ -38,7 +38,11 @@ import type { Express, Request, Response } from "express";
 import type { Server as HttpServer } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { VoiceCallBridge, type CallOutcome } from "./mediaStreamBridge";
+import {
+  VoiceCallBridge,
+  type CallOutcome,
+  type VoiceCallRecord,
+} from "./mediaStreamBridge";
 import { CallSessionRegistry, type CallEntry } from "./sessionRegistry";
 import {
   GrokVoiceSession,
@@ -104,6 +108,13 @@ const PROVIDER_SETUP_DEADLINE_MS = 15_000;
  */
 const PRECONTEXT_DEADLINE_MS = 1_500;
 
+/**
+ * Bound on opening the call's row. Generous against a healthy database and
+ * short against a wedged one: the row matters, but not more than the caller
+ * hearing something.
+ */
+const CALL_ROW_DEADLINE_MS = 2_000;
+
 /** Resolve within a bound, or null. Never throws. */
 async function withinOrNull<T>(work: Promise<T>, ms: number): Promise<T | null> {
   return Promise.race([
@@ -131,6 +142,8 @@ export interface VoiceRuntimeOptions {
   fetchPrecontext?: (phone: string) => Promise<unknown>;
   /** Opens the call_logs row. Injected for tests. */
   openCallRow?: CallLogInsert;
+  /** Persists the finished call. Injected for tests. */
+  persistCall?: (record: VoiceCallRecord) => Promise<boolean>;
   /**
    * How to open the Grok connection. Injectable for one reason, and it is
    * the standing rule rather than a convenience: a failing call goes into
@@ -176,6 +189,7 @@ export function mountVoiceRuntime(
   // Resolved lazily and cached: importing src/config/agents pulls in every
   // agent (and their database and API clients), which must not happen at
   // boot or in a health check.
+  const persistCall = options.persistCall ?? persistRuntimeCall;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -360,6 +374,7 @@ export function mountVoiceRuntime(
     };
 
     async function startCall(entry: CallEntry, streamSid: string): Promise<void> {
+      const startedAtMs = Date.now();
       const context = {
         callSid: entry.callSid,
         streamSid,
@@ -407,24 +422,55 @@ export function mountVoiceRuntime(
         // own telemetry, identity stamping and ticket number all UPDATE
         // this row by call_sid, and a flush that lands on no row still
         // marks itself done — so a row created only at teardown loses the
-        // tool timeline permanently (Codex review, PR #227). Awaited, and
-        // never fatal: a caller who cannot be logged is still answered.
-        await openRuntimeCall(
-          {
-            callSid: entry.callSid,
-            slug: entry.slug,
-            callerPhone: entry.callerPhone,
-            dialedNumber: entry.dialedNumber,
-            agentVersion: lane.version,
-          },
-          options.openCallRow,
-          env,
-        );
+        // tool timeline permanently (Codex review, PR #227).
+        //
+        // BOUNDED, not merely try/caught. A rejection was handled; an insert
+        // that never settles — a lock, a wedged pool — is not a rejection,
+        // and awaiting it here blocks before the bridge exists and before
+        // the provider deadline is armed, leaving the caller in billed
+        // silence. Logging must never do that, so the call proceeds without
+        // the row if it does not land in time; teardown's upsert inserts it
+        // then instead.
+        const rowOpened =
+          (await withinOrNull(
+            openRuntimeCall(
+              {
+                callSid: entry.callSid,
+                slug: entry.slug,
+                callerPhone: entry.callerPhone,
+                dialedNumber: entry.dialedNumber,
+                agentVersion: lane.version,
+              },
+              options.openCallRow,
+              env,
+            ),
+            CALL_ROW_DEADLINE_MS,
+          )) === true;
         if (socketGone) {
-          // The caller hung up while the agent was being built. Nothing has
-          // been opened yet, so there is nothing to tear down — just record
-          // the call and stop before a session exists.
+          // The caller hung up while the agent was being built. No session
+          // exists, so there is nothing to tear down — but a row opened a
+          // moment ago is now sitting `in_progress`, and left alone it is
+          // swept as a stale call rather than the hangup it was. Finalize
+          // it here, on the one path that never reaches the bridge.
           registry.recordOutcome(entry.callSid, "caller_hangup");
+          if (rowOpened) {
+            void persistCall({
+              callSid: entry.callSid,
+              streamSid,
+              slug: entry.slug,
+              callerPhone: entry.callerPhone,
+              dialedNumber: entry.dialedNumber,
+              outcome: "caller_hangup",
+              transcript: "",
+              toolEvents: [],
+              agentTurns: 0,
+              interruptions: 0,
+              startedAtMs: startedAtMs,
+              endedAtMs: Date.now(),
+            }).catch(() => {
+              // Losing the record must never break the hangup path.
+            });
+          }
           return;
         }
         if (lane.agent.skipped.length > 0) {
@@ -460,7 +506,7 @@ export function mountVoiceRuntime(
               },
             ),
           onOutcome: (outcome: CallOutcome) => registry.recordOutcome(entry.callSid, outcome),
-          persistCallRecord: (record) => persistRuntimeCall(record).then(() => undefined),
+          persistCallRecord: (record) => persistCall(record).then(() => undefined),
         });
         // Connect AFTER the bridge exists: a connection that fails then has
         // somewhere to report to and the call tears down cleanly, instead
