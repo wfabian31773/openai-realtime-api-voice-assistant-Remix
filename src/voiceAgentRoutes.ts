@@ -40,6 +40,7 @@ import { director, directorEnabledFor, type DirectorAction } from './director/di
 import { getEnvironmentConfig, resolveAppDomain } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 import { resolveHandoffDestination, resolvePcpDialSequence } from './services/handoffPolicy';
+import { buildPcpTransferBriefing, buildWarmTransferScript } from './services/warmTransferBriefing';
 import { pcpAgentConfig } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
@@ -1437,12 +1438,15 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     if (policy.policy === 'pcp' && envConfig.twilio.pcpRoutingMode === 'sequential') {
       abortedPcpHandoffs.delete(openAiCallId);
       if (pcpDialSequence.length === 0) return { ok: false, status: 'HANDOFF_UNAVAILABLE', reason: 'pcp_agent_dids_not_configured' };
-      const briefing = [
-        'This is the Azul Vision PCP support assistant with a live professional caller transfer.',
-        escalationDetails?.providerInfo ? `Caller organization and role: ${escalationDetails.providerInfo}.` : null,
-        escalationDetails?.reason ? `Reason: ${escalationDetails.reason}.` : null,
-        'Press any key to accept, or remain on the line to connect.',
-      ].filter(Boolean).join(' ');
+      // How to accept is the TwiML's PRESS_PROMPT, spoken before and after this
+      // text. The briefing used to repeat it as "press any key to accept, or
+      // remain on the line to connect" — and the accept handler hangs up on
+      // anything that is not a digit, so the second half was an instruction we
+      // would not honour, given to referring providers.
+      const briefing = buildPcpTransferBriefing({
+        providerInfo: escalationDetails?.providerInfo,
+        reason: escalationDetails?.reason,
+      });
       for (let index = 0; index < pcpDialSequence.length; index += 1) {
         if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected', destination: handoffDestination };
         const destination = pcpDialSequence[index];
@@ -1968,15 +1972,11 @@ async function transferConferenceToNumber(
     const say = escapeXml(briefing.slice(0, 800));
     // The second Gather uses actionOnEmptyResult so that staff who simply
     // listen to the briefing and say nothing are STILL connected. Previously
-    // both Gathers fell through to a "No confirmation received. Goodbye."
-    // hangup, so an office that answered but never pressed a key was recorded
-    // as an unanswered transfer and the caller — who was holding in silence —
-    // was dropped to a callback ticket. A keypress still connects instantly;
-    // staying on the line now connects too. Answering machines are filtered
-    // by the async AMD verdict in the accept handler rather than by relying
-    // on a human to press a digit.
-    // A KEYPRESS IS THE ONLY WAY TO ACCEPT, and the briefing says so before and
-    // after the details, so silence is never ambiguous.
+    // A KEYPRESS IS THE ONLY WAY TO ACCEPT, and the press prompt bookends the
+    // details, so silence is never ambiguous. (An earlier comment here still
+    // described the superseded design in which staying on the line also
+    // connected, gated on AMD — two contradictory rules stacked in one block.
+    // The paragraph below is the one that holds.)
     //
     // Staying on the line used to connect too, gated on the async AMD verdict. On a
     // staffed queue that inverted: staffers answered, listened, pressed nothing, and
@@ -1985,19 +1985,10 @@ async function transferConferenceToNumber(
     // transfers to +17149564300 came back `machine` this way. A keypress is positive
     // proof of a person and bypasses AMD entirely, so requiring one removes the
     // guesswork instead of tuning it.
-    const PRESS_PROMPT = 'Press any key to take this caller.';
-    const twiml =
-      `<?xml version="1.0" encoding="UTF-8"?><Response>` +
-      `<Gather input="dtmf" numDigits="1" timeout="8" action="${acceptUrl}" method="POST">` +
-      `<Say voice="Polly.Joanna">${PRESS_PROMPT}</Say>` +
-      `<Say voice="Polly.Joanna">${say}</Say>` +
-      `<Say voice="Polly.Joanna">${PRESS_PROMPT}</Say>` +
-      `</Gather>` +
-      `<Gather input="dtmf" numDigits="1" timeout="10" actionOnEmptyResult="true" action="${acceptUrl}" method="POST">` +
-      `<Say voice="Polly.Joanna">Repeating: ${say}</Say>` +
-      `<Say voice="Polly.Joanna">${PRESS_PROMPT}</Say>` +
-      `</Gather>` +
-      `</Response>`;
+    // Built and escaped in warmTransferBriefing.ts. `say` carries a caller's
+    // organisation and a free-text reason, so it was one ampersand — "Smith &
+    // Jones Medical Group" — away from malformed TwiML and a dead transfer.
+    const twiml = buildWarmTransferScript({ say, acceptUrl });
     const dialResult = await withResiliency(
       async () => twilioClient.calls.create({
         from: twilioPhoneNumber,
