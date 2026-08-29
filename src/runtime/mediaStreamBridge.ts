@@ -209,6 +209,13 @@ export interface VoiceCallRecord {
   interruptions: number;
   startedAtMs: number;
   endedAtMs: number;
+  /** When the caller's first transcribed word arrived, or undefined when
+   * nothing was ever transcribed. The cutover gate is measured on the delay
+   * from call start to this, so it has to be a real timestamp rather than
+   * inferred from the transcript's shape. */
+  firstTranscriptAtMs?: number;
+  /** When the last transcript of any kind arrived. */
+  lastTranscriptAtMs?: number;
 }
 
 export interface VoiceCallContext {
@@ -256,6 +263,17 @@ export interface VoiceCallBridgeDeps {
   endCallToolNames?: string[];
   maxCallMs?: number;
   deadAirMs?: number;
+  /**
+   * When the call actually began — the moment the stream was claimed.
+   *
+   * The bridge is constructed several steps later: after the bounded
+   * pre-context lookup, the agent factory's own lookups, and the call-row
+   * insert. Twilio is streaming and billing throughout all of it, so
+   * starting the clock at construction understates every duration and every
+   * tool offset by seconds, and manufactures duration mismatches on short
+   * calls (Codex review, PR #227). Defaults to now for direct construction.
+   */
+  startedAtMs?: number;
   /** Injectable timers for tests. Defaults to global setTimeout/clearTimeout. */
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -332,12 +350,16 @@ export class VoiceCallBridge {
   private readonly toolEvents: ToolEvent[] = [];
   private agentTurns = 0;
   private interruptions = 0;
-  private readonly startedAtMs = Date.now();
+  private readonly startedAtMs: number;
+  /** First and last transcript arrival, for the latency columns. */
+  private firstTranscriptAtMs: number | undefined;
+  private lastTranscriptAtMs: number | undefined;
 
   constructor(private readonly deps: VoiceCallBridgeDeps) {
     this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as NodeJS.Timeout));
     this.endCallToolNames = new Set(deps.endCallToolNames ?? DEFAULT_END_CALL_TOOL_NAMES);
+    this.startedAtMs = deps.startedAtMs ?? Date.now();
 
     this.session = deps.createSession({
       onToolCall: (callId, name, args) => this.handleToolCall(callId, name, args),
@@ -348,7 +370,9 @@ export class VoiceCallBridge {
       onSpeechStarted: () => this.handleCallerSpeechStarted(),
       onSpeechStopped: () => this.handleCallerSpeechStopped(),
       onCallerTranscript: (text, itemId) => {
-        if (!this.ended) this.transcriptLog.callerCompleted(text, itemId);
+        if (this.ended) return;
+        this.noteTranscript();
+        this.transcriptLog.callerCompleted(text, itemId);
       },
       onError: (err) => this.handleSessionFailure(err),
       onClosed: () => this.handleSessionClosed(),
@@ -501,8 +525,17 @@ export class VoiceCallBridge {
     });
   }
 
+  /** Stamp the first and last transcript arrival — the two ends of the
+   * window the latency and tail-safety graders measure. */
+  private noteTranscript(): void {
+    const now = Date.now();
+    if (this.firstTranscriptAtMs === undefined) this.firstTranscriptAtMs = now;
+    this.lastTranscriptAtMs = now;
+  }
+
   private handleAudioDone(transcript?: string): void {
     if (this.ended) return;
+    this.noteTranscript();
     const epoch = this.session.getResponseEpoch();
     if (this.cancelledEpoch !== null && epoch === this.cancelledEpoch) {
       // A cancelled utterance's late completion delivers nothing that was
@@ -773,6 +806,12 @@ export class VoiceCallBridge {
         interruptions: this.interruptions,
         startedAtMs: this.startedAtMs,
         endedAtMs: Date.now(),
+        ...(this.firstTranscriptAtMs !== undefined
+          ? {
+              firstTranscriptAtMs: this.firstTranscriptAtMs,
+              lastTranscriptAtMs: this.lastTranscriptAtMs,
+            }
+          : {}),
       };
       void persist(record).catch(() => {
         // Losing the record must never break teardown.

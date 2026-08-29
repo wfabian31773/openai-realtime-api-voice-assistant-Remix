@@ -439,32 +439,36 @@ export function mountVoiceRuntime(
         // marks itself done — so a row created only at teardown loses the
         // tool timeline permanently (Codex review, PR #227).
         //
-        // BOUNDED, not merely try/caught. A rejection was handled; an insert
-        // that never settles — a lock, a wedged pool — is not a rejection,
-        // and awaiting it here blocks before the bridge exists and before
-        // the provider deadline is armed, leaving the caller in billed
-        // silence. Logging must never do that, so the call proceeds without
-        // the row if it does not land in time; teardown's upsert inserts it
-        // then instead.
-        // Its result is deliberately NOT kept. `withinOrNull` stops
-        // waiting; it does not cancel the insert, so a row can still
-        // commit `in_progress` a moment after the deadline — and gating
-        // the finalize below on "the open succeeded" leaves exactly that
-        // row for the stale sweep to misclassify (Codex review, PR #227).
-        callLogId = (await withinOrNull(
-          openRuntimeCall(
-            {
-              callSid: entry.callSid,
-              slug: entry.slug,
-              callerPhone: entry.callerPhone,
-              dialedNumber: entry.dialedNumber,
-              agentVersion: lane.version,
-            },
-            options.openCallRow,
-            env,
-          ),
-          options.callRowDeadlineMs ?? CALL_ROW_DEADLINE_MS,
-        )) ?? undefined;
+        // BOUNDED, not merely try/caught. A rejection was handled; an
+        // insert that never settles — a lock, a wedged pool — is not a
+        // rejection, and awaiting it here blocks before the bridge exists
+        // and before the provider deadline is armed, leaving the caller in
+        // billed silence. Logging must never do that, so the call proceeds
+        // without the row if it does not land in time; teardown's upsert
+        // inserts it then instead.
+        const openRow = openRuntimeCall(
+          {
+            callSid: entry.callSid,
+            slug: entry.slug,
+            callerPhone: entry.callerPhone,
+            dialedNumber: entry.dialedNumber,
+            agentVersion: lane.version,
+          },
+          options.openCallRow,
+          env,
+        );
+        // Stopping the WAIT is not cancelling the insert. A row that lands
+        // a moment late still carries the id the answering-service agent is
+        // polling for — it polls for five seconds — so attach it whenever it
+        // arrives rather than discarding it along with the wait. Without
+        // this, transient database slowness puts a recognised caller back to
+        // being logged as unidentified (Codex review, PR #227).
+        void openRow.then((id) => {
+          if (id) callLogId = id;
+        });
+        callLogId =
+          (await withinOrNull(openRow, options.callRowDeadlineMs ?? CALL_ROW_DEADLINE_MS)) ??
+          undefined;
         if (socketGone) {
           // The caller hung up while the agent was being built. No session
           // exists, so there is nothing to tear down — but a row opened a
@@ -509,6 +513,7 @@ export function mountVoiceRuntime(
           : new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
         bridge = new VoiceCallBridge({
           context,
+          startedAtMs,
           agent: lane.agent,
           twilio: twilioSocket,
           createSession: (handlers) =>

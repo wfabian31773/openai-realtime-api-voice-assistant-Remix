@@ -1,4 +1,5 @@
 import { getTwilioClient } from '../lib/twilioClient';
+import { priceVoiceCall, OPENAI_COST_CENTS_PER_SECOND } from "./voiceCostRates";
 import { storage } from '../../server/storage';
 import OpenAI from 'openai';
 import { MODEL_PRICING, getModelPricing } from './modelPricing';
@@ -21,7 +22,12 @@ const OPENAI_REALTIME_PRICING = {
  * admin recalculate endpoint used 19 c/min — a units slip of this same
  * number. ALL duration estimates must use this constant.
  */
-export const OPENAI_COST_CENTS_PER_SECOND = 0.19;
+export {
+  OPENAI_COST_CENTS_PER_SECOND,
+  GROK_COST_CENTS_PER_SECOND,
+  isGrokServedCall,
+  priceVoiceCall,
+} from "./voiceCostRates";
 
 const OPENAI_AUDIO_INPUT_RATE = 6;
 const OPENAI_AUDIO_OUTPUT_RATE = 24;
@@ -468,16 +474,24 @@ export class CallCostService {
         console.info(`[COST] Duration correction: ${callLog.duration}s -> ${twilioResult.duration}s (from Twilio)`);
       }
       
-      // Recalculate OpenAI cost from duration ONLY when no token-based cost
-      // exists — a token-derived cost (inputAudioTokens set) is authoritative
-      // and must never be clobbered by an estimate.
-      if (callLog.inputAudioTokens == null) {
-        const openaiCostCents = Math.ceil(actualDuration * OPENAI_COST_CENTS_PER_SECOND);
-        updateData.openaiCostCents = openaiCostCents;
-        updateData.totalCostCents = twilioResult.costCents + openaiCostCents;
-      } else {
-        updateData.totalCostCents = twilioResult.costCents + (callLog.openaiCostCents ?? 0);
+      // Whose rate applies is decided in voiceCostRates.ts, which is pure so
+      // the decision can actually be tested — a Grok-served row's token
+      // columns are null exactly like an un-reconciled OpenAI row's, and
+      // pricing it at the OpenAI rate reports spend that never happened
+      // (Codex review, PR #227). The cost still lands in openaiCostCents,
+      // because that is the column every report reads; voiceProvider is
+      // what says whose rate produced it.
+      const pricing = priceVoiceCall({
+        voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
+        inputAudioTokens: callLog.inputAudioTokens,
+        existingOpenaiCostCents: callLog.openaiCostCents,
+        durationSeconds: actualDuration,
+        twilioCostCents: twilioResult.costCents,
+      });
+      if (pricing.providerCostCents !== undefined) {
+        updateData.openaiCostCents = pricing.providerCostCents;
       }
+      updateData.totalCostCents = pricing.totalCostCents;
 
       await storage.updateCallLog(callLogId, updateData);
       

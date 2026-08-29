@@ -115,6 +115,66 @@ describe("toCallLogRow", () => {
     expect('ticketNumber' in update).toBe(false);
   });
 
+  it("marks the row as Grok-served, so OpenAI cost estimation skips it", () => {
+    // Cost reconciliation prices any row with null token columns at the
+    // OpenAI per-second rate, and every runtime row has null token columns.
+    // Unmarked, a Grok call reports OpenAI spend that never happened —
+    // against the very comparison the migration exists to make.
+    expect(toCallLogRow(record()).voiceProvider).toBe("grok");
+  });
+
+  it("stores the exact outcome, which status cannot carry", () => {
+    // status maps six endings onto completed/failed, and the runtime's
+    // in-memory registry is consumed by the post-stream redirect. Without
+    // this column "was that dead air or a provider failure?" is
+    // unanswerable an hour later.
+    expect(toCallLogRow(record({ outcome: "dead_air" })).runtimeOutcome).toBe("dead_air");
+    expect(toCallLogRow(record({ outcome: "max_duration" })).runtimeOutcome).toBe("max_duration");
+    expect(toCallLogRow(record({ outcome: "agent_ended" })).runtimeOutcome).toBe("agent_ended");
+    // A ten-minute ceiling and a clean goodbye are both `completed` by
+    // status; only this column tells them apart.
+    expect(toCallLogRow(record({ outcome: "max_duration" })).status).toBe(
+      toCallLogRow(record({ outcome: "agent_ended" })).status,
+    );
+  });
+
+  it("writes the transcript timing the cutover gate is measured on", () => {
+    const row = toCallLogRow(
+      record({
+        startedAtMs: 1_000_000,
+        firstTranscriptAtMs: 1_003_500,
+        lastTranscriptAtMs: 1_090_000,
+        endedAtMs: 1_093_000,
+      }),
+    );
+    expect(row.firstTranscriptDelayMs).toBe(3_500);
+    expect(row.postTranscriptTailMs).toBe(3_000);
+    expect(row.transcriptWindowSeconds).toBe(87);
+  });
+
+  it("omits the timing columns when nothing was ever transcribed", () => {
+    const row = toCallLogRow(record()) as unknown as Record<string, unknown>;
+    expect("firstTranscriptDelayMs" in row).toBe(false);
+    expect("postTranscriptTailMs" in row).toBe(false);
+  });
+
+  it("refreshes provider, outcome and timing on a conflict — they are the runtime's own", () => {
+    const update = toConflictUpdate(
+      toCallLogRow(
+        record({
+          outcome: "dead_air",
+          startedAtMs: 1_000_000,
+          firstTranscriptAtMs: 1_002_000,
+          lastTranscriptAtMs: 1_005_000,
+          endedAtMs: 1_010_000,
+        }),
+      ),
+    ) as unknown as Record<string, unknown>;
+    expect(update.voiceProvider).toBe("grok");
+    expect(update.runtimeOutcome).toBe("dead_air");
+    expect(update.firstTranscriptDelayMs).toBe(2_000);
+  });
+
   it("carries the transcript through unchanged", () => {
     expect(toCallLogRow(record()).transcript).toBe("CALLER: Hi\nAGENT: Hello");
   });

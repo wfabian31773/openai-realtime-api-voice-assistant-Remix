@@ -69,6 +69,18 @@ export interface RuntimeCallLogRow {
   duration: number;
   localDurationSeconds: number;
   transcript: string;
+  /** Marks the row as this runtime's, so OpenAI cost estimation skips it. */
+  voiceProvider: "grok";
+  /** The runtime's own outcome, durably — `status` collapses six into two. */
+  runtimeOutcome: VoiceCallRecord["outcome"];
+  /** Ms from call start to the caller's first transcribed word. Null when
+   * the caller never said anything the transcriber returned. */
+  firstTranscriptDelayMs?: number;
+  /** Ms from the last transcript to the end of the call — the tail a caller
+   * spends listening to nothing. */
+  postTranscriptTailMs?: number;
+  /** Seconds between the first and last transcript. */
+  transcriptWindowSeconds?: number;
   totalTurns: number;
   interruptionCount: number;
   telemetrySource: "realtime_events";
@@ -102,6 +114,17 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
     totalTurns: row.totalTurns,
     interruptionCount: row.interruptionCount,
     telemetrySource: row.telemetrySource,
+    voiceProvider: row.voiceProvider,
+    runtimeOutcome: row.runtimeOutcome,
+    ...(row.firstTranscriptDelayMs !== undefined
+      ? { firstTranscriptDelayMs: row.firstTranscriptDelayMs }
+      : {}),
+    ...(row.postTranscriptTailMs !== undefined
+      ? { postTranscriptTailMs: row.postTranscriptTailMs }
+      : {}),
+    ...(row.transcriptWindowSeconds !== undefined
+      ? { transcriptWindowSeconds: row.transcriptWindowSeconds }
+      : {}),
   };
 }
 
@@ -139,6 +162,36 @@ export function toCallLogRow(
     // which is the point of keeping the column.
     localDurationSeconds: durationSeconds,
     transcript: record.transcript,
+    // Not an OpenAI call. Cost reconciliation estimates OpenAI spend from
+    // duration whenever the token columns are null, and they always are
+    // here, so without this every Grok call is priced at the OpenAI rate
+    // (Codex review, PR #227).
+    voiceProvider: "grok",
+    // The outcome, durably. `status` maps six endings onto two, and the
+    // registry copy is consumed by the post-stream redirect — so an hour
+    // later nothing could tell dead air from a provider failure, which is
+    // what the runbook tells an operator to check.
+    runtimeOutcome: record.outcome,
+    ...(record.firstTranscriptAtMs !== undefined
+      ? {
+          firstTranscriptDelayMs: Math.max(
+            0,
+            record.firstTranscriptAtMs - record.startedAtMs,
+          ),
+          postTranscriptTailMs: Math.max(
+            0,
+            record.endedAtMs - (record.lastTranscriptAtMs ?? record.firstTranscriptAtMs),
+          ),
+          transcriptWindowSeconds: Math.max(
+            0,
+            Math.round(
+              ((record.lastTranscriptAtMs ?? record.firstTranscriptAtMs) -
+                record.firstTranscriptAtMs) /
+                1000,
+            ),
+          ),
+        }
+      : {}),
     // `toolTimeline` and `toolCallCount` are deliberately NOT written here.
     // The agents' own `recordedTool` telemetry already fills them, in a
     // richer shape the dashboards read (`{tool, args, outcome, ms}` plus the

@@ -695,6 +695,71 @@ describe("VoiceCallBridge — exactly-once teardown", () => {
     expect(h.outcomes).toEqual(["max_duration"]);
   });
 
+  it("measures the call from when the stream was claimed, not from its own construction", async () => {
+    // The bridge is built after the pre-context lookup, the agent factory
+    // and the call-row insert — seconds during which Twilio is already
+    // streaming and billing (Codex review, PR #227).
+    const records: VoiceCallRecord[] = [];
+    const claimedAt = Date.now() - 5_000;
+    const timers = makeTimers();
+    let handlers!: BridgeSessionHandlers;
+    const bridge = new VoiceCallBridge({
+      context: {
+        callSid: "CA-clock",
+        streamSid: "MZ",
+        slug: "optical",
+        callerPhone: "+1",
+        dialedNumber: "+2",
+      },
+      startedAtMs: claimedAt,
+      agent: makeAgent(),
+      twilio: { sendFrame: () => {}, close: () => {} },
+      createSession: (h) => {
+        handlers = h;
+        return {
+          appendAudio: vi.fn(),
+          cancelResponse: vi.fn(),
+          sendToolResult: vi.fn(),
+          requestResponse: vi.fn(),
+          close: vi.fn(),
+          getResponseEpoch: () => 0,
+        };
+      },
+      onOutcome: () => {},
+      persistCallRecord: async (r) => void records.push(r),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+    void handlers;
+    bridge.handleSocketClosed();
+    await Promise.resolve();
+    expect(records).toHaveLength(1);
+    expect(records[0].startedAtMs).toBe(claimedAt);
+    // ~5s of real call, not ~0.
+    expect(records[0].endedAtMs - records[0].startedAtMs).toBeGreaterThanOrEqual(4_900);
+  });
+
+  it("stamps the first and last transcript, for the latency columns", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.handlers().onCallerTranscript("I need a refill", "item-1");
+    speakUtterance(h, "Let me file that for you.");
+    h.bridge.handleSocketClosed();
+    await Promise.resolve();
+    expect(records[0].firstTranscriptAtMs).toBeGreaterThan(0);
+    expect(records[0].lastTranscriptAtMs).toBeGreaterThanOrEqual(
+      records[0].firstTranscriptAtMs!,
+    );
+  });
+
+  it("leaves the transcript stamps unset when nothing was ever transcribed", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.bridge.handleSocketClosed();
+    await Promise.resolve();
+    expect(records[0].firstTranscriptAtMs).toBeUndefined();
+  });
+
   it("hands the persister the measured record", async () => {
     const records: VoiceCallRecord[] = [];
     const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
