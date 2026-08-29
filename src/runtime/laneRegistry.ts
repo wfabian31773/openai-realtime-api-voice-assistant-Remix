@@ -57,6 +57,53 @@ export interface LaneConfig {
   voice?: string;
   language?: string;
   version?: string;
+  agentType?: "inbound" | "outbound";
+}
+
+/**
+ * Agent factories whose argument layout is NOT `(handoff, metadata)`.
+ *
+ * Most lanes share that shape, but not all, and calling one of these with
+ * it silently mis-slots every argument (Codex review, PR #227). The
+ * after-hours case is the worst: `metadata` lands in the
+ * `recordPatientInfoCallback` slot, so the agent loses caller context AND
+ * later tries to invoke that plain object — reporting `system_error` after
+ * a ticket was already filed, which can draw a duplicate retry.
+ *
+ * The existing SIP transport handles this with an explicit per-slug switch
+ * (voiceAgentRoutes.ts). This runtime does not reproduce those adapters —
+ * `recordPatientInfoCallback` is a closure over request state and roughly
+ * fifty lines of database logic, and a second implementation of it would be
+ * a second behaviour to keep in step. So these lanes are REFUSED here, by
+ * name, until an adapter is written deliberately. Refusing is the honest
+ * failure: a caller hears the controlled unavailable line instead of
+ * reaching an agent that has been built wrong.
+ */
+const NON_UNIFORM_FACTORY_LANES: Record<string, string> = {
+  "after-hours": "createAfterHoursAgent(handoff, recordPatientInfoCallback, metadata)",
+  "drs-scheduler":
+    "createDRSSchedulerAgent(lookupPatient, markCompleted, computer, handoff, metadata)",
+  "appointment-confirmation":
+    "createAppointmentConfirmationAgent(getAppointment, confirm, reschedule, cancel, markConfirmed, handoff, metadata)",
+  "fantasy-football": "createFantasyFootballAgent(metadata)",
+};
+
+/**
+ * Why this runtime cannot serve a lane, or null when it can. Pure, so the
+ * reason can be asserted and logged rather than discovered on a live call.
+ */
+export function laneSupportStatus(config: LaneConfig): string | null {
+  if (config.agentType && config.agentType !== "inbound") {
+    return `lane '${config.id}' is an ${config.agentType} agent; this runtime answers inbound calls`;
+  }
+  const shape = NON_UNIFORM_FACTORY_LANES[config.id];
+  if (shape) {
+    return (
+      `lane '${config.id}' uses a different factory argument layout — ${shape} — ` +
+      "which this runtime does not model; it needs a per-lane adapter before it can be served"
+    );
+  }
+  return null;
 }
 
 /** The registry surface this module reads. `agentRegistry` satisfies it;
@@ -112,6 +159,15 @@ export async function resolveLane(
 ): Promise<ResolvedLane | null> {
   const config = deps.source.getAgentConfig(slug);
   if (!config || !config.enabled) return null;
+
+  const unsupported = laneSupportStatus(config);
+  if (unsupported) {
+    // Refused BEFORE the factory is called: an agent constructed with
+    // mis-slotted arguments is worse than one that never answered, because
+    // it answers and then fails halfway through a patient's request.
+    console.warn(`[voice-runtime] ${unsupported}`);
+    return null;
+  }
 
   // The factory's own shape, called exactly as the SIP transport calls it.
   const factory = config.factory as (

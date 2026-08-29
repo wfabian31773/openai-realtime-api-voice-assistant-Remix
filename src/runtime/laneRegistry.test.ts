@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
-import { resolveLane, type LaneConfig, type LaneSource } from "./laneRegistry";
+import { resolveLane, laneSupportStatus, type LaneConfig, type LaneSource } from "./laneRegistry";
 import { buildKnowledgePack } from "./knowledgePack";
 
 /** A stand-in for one of the real agents: an object with `instructions`
@@ -99,6 +99,68 @@ describe("resolving a lane through the registry that already exists", () => {
       env: {},
     });
     expect(lane).toBeNull();
+  });
+});
+
+describe("factory contracts differ per agent (Codex review, PR #227)", () => {
+  it("refuses a lane whose factory takes a different argument layout", async () => {
+    // createAfterHoursAgent(handoff, recordPatientInfoCallback, metadata).
+    // Called with the uniform shape, the metadata lands in the callback
+    // slot: the agent loses caller context and later tries to invoke that
+    // object, reporting system_error and risking a duplicate ticket.
+    const factory = vi.fn(async () => fakeAgent());
+    const lane = await resolveLane("after-hours", META, {
+      source: source({ id: "after-hours", factory: factory as unknown as LaneConfig["factory"] }),
+      env: {},
+    });
+    expect(lane).toBeNull();
+    // Refused BEFORE construction — never called with mangled arguments.
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("refuses an OUTBOUND agent — this runtime answers inbound calls", async () => {
+    const factory = vi.fn(async () => fakeAgent());
+    const lane = await resolveLane("fantasy-football", META, {
+      source: source({
+        id: "fantasy-football",
+        agentType: "outbound",
+        factory: factory as unknown as LaneConfig["factory"],
+      }),
+      env: {},
+    });
+    expect(lane).toBeNull();
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("names why a lane is unsupported rather than failing silently", () => {
+    expect(laneSupportStatus({ id: "after-hours", enabled: true, factory: () => undefined }))
+      .toMatch(/argument layout|contract/i);
+    expect(
+      laneSupportStatus({
+        id: "drs-scheduler",
+        enabled: true,
+        agentType: "outbound",
+        factory: () => undefined,
+      }),
+    ).toMatch(/outbound/i);
+    expect(
+      laneSupportStatus({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: () => undefined,
+      }),
+    ).toBeNull();
+  });
+
+  it("still serves every lane that does use the uniform shape", async () => {
+    for (const id of ["optical", "surgery", "tech", "no-ivr", "answering-service", "pcp"]) {
+      const lane = await resolveLane(id, META, {
+        source: source({ id, agentType: "inbound" }),
+        env: {},
+      });
+      expect(lane, `${id} should resolve`).not.toBeNull();
+    }
   });
 });
 

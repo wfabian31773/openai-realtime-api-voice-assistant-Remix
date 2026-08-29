@@ -36,7 +36,14 @@ class FakeGrokTransport implements RuntimeTransport {
   private onErr: ((err: Error) => void) | null = null;
   private onCls: (() => void) | null = null;
 
+  /** True when connect() ran AFTER close(). A `closed` flag alone cannot
+   * see this: teardown closes the transport, then a connect behind it
+   * opens a provider socket with every timer already cleared and nobody
+   * owning it. The order is the defect, so the fake records the order. */
+  public connectedAfterClose = false;
+
   async connect(): Promise<void> {
+    if (this.closed) this.connectedAfterClose = true;
     // The handshake the real wire performs on open.
     queueMicrotask(() => this.emit({ type: "session.created" } as GrokServerEvent));
   }
@@ -429,6 +436,75 @@ describe("one whole call, end to end, offline", () => {
     expect(h.registry.get("CA8")?.outcome ?? h.registry.consumeOutcome("CA8")).toBe(
       "caller_hangup",
     );
+  });
+
+  it("a stop frame queued during setup closes the provider socket instead of orphaning it", async () => {
+    // Twilio can send `stop` while the agent is still being built. That
+    // frame is held, and replaying it tears the bridge down — so it must be
+    // replayed only AFTER the provider socket exists, or teardown closes a
+    // transport that is then opened behind it and left live with every
+    // timer already cleared (Codex review, PR #227).
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: (async () => {
+          await blocked;
+          return { instructions: "You are the optical queue agent.", tools: [] };
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({ laneSource: slow });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA9", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA9", tokenFrom(answered.text));
+    await settle(2);
+    ws.send(JSON.stringify({ event: "stop", streamSid: "MZ1" }));
+    await settle(2);
+    release();
+    await settle(8);
+    expect(h.transports).toHaveLength(1);
+    // Opened, then closed by teardown — and crucially NOT opened behind a
+    // teardown that had already closed it.
+    expect(h.transports[0].connectedAfterClose).toBe(false);
+    expect(h.transports[0].closed).toBe(true);
+    expect(h.registry.consumeOutcome("CA9")).toBe("caller_hangup");
+  });
+
+  it("refuses a lane whose factory contract the runtime does not model", async () => {
+    // createAfterHoursAgent(handoff, recordPatientInfoCallback, metadata) —
+    // calling it with the uniform two-argument shape puts the metadata in
+    // the callback slot, so the agent loses caller context and later tries
+    // to CALL that object (Codex review, PR #227).
+    const afterHours: LaneSource = {
+      getAgentConfig: () => ({
+        id: "after-hours",
+        enabled: true,
+        agentType: "inbound",
+        // A perfectly good agent: the ONLY reason this lane is refused is
+        // its factory's argument layout. A stub returning undefined would
+        // fail binding anyway and prove nothing about the contract check.
+        factory: (async () => ({
+          instructions: "You are the after-hours agent.",
+          tools: [],
+        })) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({ laneSource: afterHours });
+    const answered = await post(h, "/voice/after-hours", {
+      CallSid: "CA10",
+      From: "+1",
+      To: "+2",
+    });
+    await openStream(h, "CA10", tokenFrom(answered.text));
+    await settle();
+    expect(h.transports).toHaveLength(0);
+    const after = await post(h, "/voice/after-hours/after", { CallSid: "CA10" });
+    expect(after.text).toContain("technical trouble");
   });
 
   it("refuses a stream whose token was not minted by the webhook", async () => {
