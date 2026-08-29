@@ -33,11 +33,19 @@ export interface GrokToolDefinition {
   type: "function";
   name: string;
   description: string;
-  parameters: {
-    type: "object";
-    properties: Record<string, unknown>;
-    required: string[];
-  };
+  /**
+   * The tool's own JSON Schema, passed through UNCHANGED.
+   *
+   * Deliberately typed loosely. The narrower `{type, properties, required}`
+   * shape this carried in the scheduling provider was fine there, where
+   * every tool was hand-written to fit it — but the runtime serves agents
+   * whose schemas already exist, and forcing them into a shape means
+   * translating them. Schema translation registered with strict mode is
+   * precisely what silently blocked every `file_surgery_ticket` call on
+   * 2026-08-12 (`.agents/memory/realtime-tool-schemas.md`). Carry what the
+   * agent has; never re-derive it.
+   */
+  parameters: Record<string, unknown>;
 }
 
 // ── Session configuration (client -> server) ────────────────────────────

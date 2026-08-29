@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { GrokVoiceSession, buildSessionConfig } from "./grokSession";
-import type { GrokTransport } from "./grokSession";
+import type { GrokTransport, GrokVoiceSessionHandlers } from "./grokSession";
 import type { GrokClientEvent, GrokServerEvent } from "./wireTypes";
 import { loadGrokRuntimeVoiceConfig } from "./config";
 import type { GrokToolDefinition } from "./wireTypes";
@@ -74,16 +74,19 @@ function makeSession(handlers: Partial<Parameters<typeof buildHandlers>[0]> = {}
   return { transport, session, ...built };
 }
 
+/** Typed against the real handler signatures rather than bare `vi.fn()`,
+ * so a change to the session's callback shape fails the typecheck here
+ * instead of silently passing a mock that no longer matches. */
 function buildHandlers(over: {
-  onToolCall?: ReturnType<typeof vi.fn>;
-  onError?: ReturnType<typeof vi.fn>;
-  onAudioDone?: ReturnType<typeof vi.fn>;
+  onToolCall?: GrokVoiceSessionHandlers["onToolCall"];
+  onError?: NonNullable<GrokVoiceSessionHandlers["onError"]>;
+  onAudioDone?: NonNullable<GrokVoiceSessionHandlers["onAudioDone"]>;
 }) {
   return {
     onToolCall: over.onToolCall ?? vi.fn(),
     onError: over.onError ?? vi.fn(),
     onAudioDone: over.onAudioDone ?? vi.fn(),
-  };
+  } satisfies GrokVoiceSessionHandlers;
 }
 
 describe("GrokVoiceSession lifecycle", () => {
@@ -501,14 +504,14 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
       session: { audio: { input: { transcription?: { language_hint?: string } } }; instructions: string };
     }>;
     expect(updates.length).toBe(before + 1);
-    expect(updates.at(-1)?.session.audio.input.transcription?.language_hint).toBe("es");
+    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es");
     // Agent-agnostic copy: the runtime names the language and holds tool
     // arguments to English, but never names a particular agent's tools —
     // the scheduling provider this was ported from did, and that was
     // correct there and wrong here.
-    expect(updates.at(-1)?.session.instructions).toMatch(/now speaking es/);
-    expect(updates.at(-1)?.session.instructions).toMatch(/ARGUMENTS in English/);
-    expect(updates.at(-1)?.session.instructions).not.toMatch(/report_\*/);
+    expect(updates[updates.length - 1]?.session.instructions).toMatch(/now speaking es/);
+    expect(updates[updates.length - 1]?.session.instructions).toMatch(/ARGUMENTS in English/);
+    expect(updates[updates.length - 1]?.session.instructions).not.toMatch(/report_\*/);
   });
 
   it("accepts a spoken language NAME, not just a code — callers say \"Spanish\"", () => {
@@ -519,7 +522,7 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
     const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
       session: { audio: { input: { transcription?: { language_hint?: string } } } };
     }>;
-    expect(updates.at(-1)?.session.audio.input.transcription?.language_hint).toBe("es");
+    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es");
   });
 
   it("an unknown language is passed through rather than forced to English", () => {
@@ -532,7 +535,7 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
     const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
       session: { audio: { input: { transcription?: { language_hint?: string } } } };
     }>;
-    expect(updates.at(-1)?.session.audio.input.transcription?.language_hint).toBe("ko");
+    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("ko");
   });
 
   it("language_hint follows Tagalog — not collapsed to English", () => {
@@ -543,8 +546,8 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
     const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
       session: { audio: { input: { transcription?: { language_hint?: string } } }; instructions: string };
     }>;
-    expect(updates.at(-1)?.session.audio.input.transcription?.language_hint).toBe("tl");
-    expect(updates.at(-1)?.session.instructions).toMatch(/speaking tl/i);
+    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("tl");
+    expect(updates[updates.length - 1]?.session.instructions).toMatch(/speaking tl/i);
   });
 
   it("speakNatural() sends a constrained response.create — not a force_message and not unconstrained free speech", () => {
