@@ -525,6 +525,25 @@ describe("one whole call, end to end, offline", () => {
     expect(h.registry.consumeOutcome("CA9")).toBe("caller_hangup");
   });
 
+  it("a claimed call whose lane resolves to NOTHING still leaves a durable failed record", async () => {
+    // The webhook deliberately admits every syntactically valid slug, so an
+    // unknown or disabled lane is discovered only here — and this early
+    // return sits BEFORE the catch that persists other setup failures
+    // (Codex, PR #227 round 18).
+    const noLane: LaneSource = {
+      getAgentConfig: () => undefined,
+    };
+    const h = await harness({ laneSource: noLane });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-nolane", From: "+1", To: "+2" });
+    await openStream(h, "CA-nolane", tokenFrom(answered.text));
+    await settle(8);
+
+    const record = h.persisted.find((r) => r.callSid === "CA-nolane");
+    expect(record).toBeDefined();
+    expect(record?.outcome).toBe("provider_failure");
+    await h.close();
+  });
+
   it("a setup failure BEFORE the bridge exists still leaves a durable failed record", async () => {
     // The registry copy is consumed by the post-stream redirect — without
     // this row, lane-resolution and agent-binding failures (exactly the
