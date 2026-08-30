@@ -9,16 +9,19 @@
  *
  * Resolution order:
  *
- *   1. Outside business hours (Mon-Fri 08:00-17:00 Pacific) → on-call.
+ *   1. Production no-IVR → its dedicated transfer number at every hour.
+ *      This line is the after-hours triage service; operator direction is that
+ *      its sanctioned transfers must never be diverted to an office queue.
+ *   2. Outside business hours (Mon-Fri 08:00-17:00 Pacific) → on-call.
  *      The office phones are not answered, so routing there would put a
  *      patient with vision loss into a voicemail box. Explicit operator
  *      decision, not an oversight.
- *   2. Inside business hours → ask the rules engine (sage_handoff) for the
+ *   3. Inside business hours → ask the rules engine (sage_handoff) for the
  *      office queue that owns this caller's location, exactly as azul's
  *      tier-2 transfer does. THE NUMBER IS NEVER MODEL-SUPPLIED: it comes
  *      back from the service, so the agent can only connect callers to
  *      numbers the routing rules chose.
- *   3. Rules engine returns nothing usable → on-call.
+ *   4. Rules engine returns nothing usable → on-call.
  *      This is the important one. `sage_handoff` may be pilot-fenced for
  *      locations outside the AI-enabled set, in which case it returns no
  *      transfer number at all. Degrading to today's behaviour is always
@@ -31,6 +34,7 @@
 import { isBusinessHours } from '../utils/timeAware';
 
 export type UrgentTransferSource =
+  | 'no_ivr_dedicated'       // production no-IVR always uses its fixed destination
   | 'office_queue'          // the rules engine routed us to an office
   | 'on_call_after_hours'   // outside business hours, by design
   | 'on_call_no_route'      // in hours, but the rules engine gave us nothing
@@ -141,6 +145,11 @@ export async function resolveUrgentTransferTarget(input: {
   // urgent — they were asking to schedule an appointment and whether we take
   // Blue Shield Medi-Cal.
   const onCall = ON_CALL_AUTHORIZED_AGENTS.has(input.agentSlug ?? '') ? configuredOnCall : '';
+
+  if (input.agentSlug === 'no-ivr') {
+    return onCall ? { number: onCall, source: 'no_ivr_dedicated' } : null;
+  }
+
   const inHours = input.businessHours ?? isBusinessHours();
 
   if (!inHours) {

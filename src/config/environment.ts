@@ -12,6 +12,7 @@ const sharedEnvSchema = z.object({
   // Falls back to TICKETING_SYSTEM_URL when unset, so behavior is unchanged by default.
   TICKETING_ENRICHMENT_URL: z.string().optional(),
   HUMAN_AGENT_NUMBER: z.string().optional(),
+  NO_IVR_HUMAN_AGENT_NUMBER: z.string().optional(),
   PCP_HUMAN_AGENT_NUMBER: z.string().optional(),
   PCP_AGENT_DIDS: z.string().optional(),
   PCP_ROUTING_MODE: z.enum(['queue', 'sequential']).default('queue'),
@@ -71,6 +72,7 @@ export interface EnvironmentConfig {
     authToken: string;
     phoneNumber: string | undefined;
     humanAgentNumber: string | undefined;
+    noIvrHumanAgentNumber: string | undefined;
     pcpHumanAgentNumber: string | undefined;
     pcpAgentDids: string[];
     pcpRoutingMode: 'queue' | 'sequential';
@@ -248,6 +250,7 @@ export function getEnvironmentConfig(): EnvironmentConfig {
       authToken: (env as any).TWILIO_AUTH_TOKEN || '',
       phoneNumber: env.TWILIO_PHONE_NUMBER,
       humanAgentNumber: env.HUMAN_AGENT_NUMBER,
+      noIvrHumanAgentNumber: env.NO_IVR_HUMAN_AGENT_NUMBER,
       pcpHumanAgentNumber: env.PCP_HUMAN_AGENT_NUMBER,
       pcpAgentDids: (env.PCP_AGENT_DIDS || '').split(',').map((number) => number.trim()).filter(Boolean),
       pcpRoutingMode: env.PCP_ROUTING_MODE,
@@ -319,6 +322,10 @@ export function validateProductionConfig(): void {
 
   if (!config.twilio.humanAgentNumber) {
     console.warn('[ENV] ⚠ HUMAN_AGENT_NUMBER not configured - handoffs will fail');
+  }
+
+  if (!config.twilio.noIvrHumanAgentNumber) {
+    errors.push('NO_IVR_HUMAN_AGENT_NUMBER is required for no-IVR handoffs');
   }
 
   if (errors.length > 0) {

@@ -1559,6 +1559,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
       console.info(`[HANDOFF] escalation sanctioned for ${callId} — basis: ${verdict.basis}`);
 
       const escalationDetails = {
+        agentSlug: 'no-ivr',
         reason: params.reason,
         callerType: params.caller_type,
         patientFirstName: params.patient_first_name,

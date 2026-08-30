@@ -89,6 +89,7 @@ SHADOW_MODEL_ROUTING_ENABLED = "true"
 SHADOW_MODEL_LOW = "gpt-5.6-luna"
 SHADOW_MODEL_MID = "gpt-5.6-terra"
 SHADOW_MODEL_HIGH = "gpt-5.6-sol"
+NO_IVR_HUMAN_AGENT_NUMBER = "+18455317471"
 # Production realtime A/B — DISABLED 2026-08-03 after an operator-reported bad
 # call following the first republish with the experiment live. Every call is
 # back on the control model (gpt-realtime); unset AB_MODEL_B = no experiment

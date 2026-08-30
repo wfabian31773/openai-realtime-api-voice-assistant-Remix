@@ -39,7 +39,11 @@ import { resolveAbAssignment } from './services/abCarriage';
 import { director, directorEnabledFor, type DirectorAction } from './director/director';
 import { getEnvironmentConfig, resolveAppDomain } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
-import { resolveHandoffDestination, resolvePcpDialSequence } from './services/handoffPolicy';
+import {
+  resolveClinicalTransferNumber,
+  resolveHandoffDestination,
+  resolvePcpDialSequence,
+} from './services/handoffPolicy';
 import { buildPcpTransferBriefing, buildWarmTransferScript } from './services/warmTransferBriefing';
 import { pcpAgentConfig } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
@@ -90,6 +94,7 @@ try {
       authToken: process.env.TWILIO_AUTH_TOKEN || '',
       phoneNumber: process.env.TWILIO_PHONE_NUMBER,
       humanAgentNumber: process.env.HUMAN_AGENT_NUMBER,
+      noIvrHumanAgentNumber: process.env.NO_IVR_HUMAN_AGENT_NUMBER,
       pcpHumanAgentNumber: process.env.PCP_HUMAN_AGENT_NUMBER,
       pcpAgentDids: (process.env.PCP_AGENT_DIDS || '').split(',').map((number) => number.trim()).filter(Boolean),
       pcpRoutingMode: process.env.PCP_ROUTING_MODE === 'sequential' ? 'sequential' : 'queue',
@@ -1330,13 +1335,20 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
 
   // Get escalation details for this call
   const escalationDetails = escalationDetailsMap.get(openAiCallId);
+  const handoffAgentSlug =
+    escalationDetails?.agentSlug ?? callMetadataForDB.get(openAiCallId)?.agentSlug;
+  const clinicalDestination = resolveClinicalTransferNumber({
+    agentSlug: handoffAgentSlug,
+    clinicalNumber: HUMAN_AGENT_NUMBER,
+    noIvrNumber: envConfig.twilio.noIvrHumanAgentNumber,
+  });
   
   const callerType = escalationDetails?.callerType;
   const policy = resolveHandoffDestination({
-    agentSlug: escalationDetails?.agentSlug,
+    agentSlug: handoffAgentSlug,
     callerType,
     callerRequestedHuman: escalationDetails?.callerRequestedHuman,
-    clinicalNumber: HUMAN_AGENT_NUMBER,
+    clinicalNumber: clinicalDestination,
     pcpNumber: envConfig.twilio.pcpHumanAgentNumber,
   });
 
@@ -1396,7 +1408,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       onCallNumber: handoffDestination,
       // Only an authorized agent may be handed the on-call phone. Without
       // this, an office-less result fell back to it from ANY agent.
-      agentSlug: escalationDetails?.agentSlug,
+      agentSlug: handoffAgentSlug,
     });
     if (target?.number) {
       handoffDestination = target.number;
@@ -1648,6 +1660,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     const callMeta = callMetadataForDB.get(openAiCallId);
     if (callMeta) {
       callMeta.transferredToHuman = true;
+      callMeta.transferTargetNumber = handoffDestination;
       
       // CRITICAL: Also mark in callLifecycleCoordinator to prevent it from overwriting
       // the transferredToHuman flag when it finalizes the call
@@ -1865,7 +1878,26 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
       return;
     }
 
-    const fallbackNumber = HUMAN_AGENT_NUMBER || '+18186021567';
+    const fallbackNumber = resolveClinicalTransferNumber({
+      agentSlug:
+        escalation.agentSlug ??
+        (recoveredCallId ? callMetadataForDB.get(recoveredCallId)?.agentSlug : undefined),
+      clinicalNumber: HUMAN_AGENT_NUMBER,
+      noIvrNumber: envConfig.twilio.noIvrHumanAgentNumber,
+    });
+    if (!fallbackNumber) {
+      console.error(
+        `[SIP-RECOVERY] ${conferenceName}: urgent transfer destination is not configured — ending caller leg without dialing`,
+      );
+      await client.calls(callerCallSid).update({
+        twiml: `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">We apologize, but we are unable to complete the transfer. Please call back or dial nine one one if this is a medical emergency. Goodbye.</Say>
+  <Hangup/>
+</Response>`,
+      });
+      return;
+    }
     const callerIdAttribute = envConfig.twilio.phoneNumber
       ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
       : '';

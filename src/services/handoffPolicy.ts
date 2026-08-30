@@ -73,6 +73,23 @@ export function toE164(raw: string | undefined): string | undefined {
 }
 
 /**
+ * The production no-IVR line has its own fixed handoff destination. Keeping
+ * this selection at the policy boundary prevents the global clinical number
+ * or office-routing logic from silently diverting an after-hours triage call.
+ */
+export function resolveClinicalTransferNumber(params: {
+  agentSlug?: string;
+  clinicalNumber?: string;
+  noIvrNumber?: string;
+}): string | undefined {
+  return toE164(
+    params.agentSlug === 'no-ivr'
+      ? params.noIvrNumber
+      : params.clinicalNumber,
+  );
+}
+
+/**
  * The PCP queue is the SINGLE recipient of every PCP transfer.
  *
  * `sequential` mode — ringing each PCP_AGENT_DIDS entry one at a time — was a

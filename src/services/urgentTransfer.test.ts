@@ -37,7 +37,7 @@ describe('business hours → the office', () => {
   it('routes to the office queue the rules engine names', async () => {
     mockRulesEngine({ method: 'cold_transfer', transferNumberE164: OFFICE, queueTeam: 'Glendale Front' });
     const t = await resolveUrgentTransferTarget({
-      reason: 'sudden vision loss', businessHours: true, onCallNumber: ON_CALL, agentSlug: 'no-ivr',
+      reason: 'sudden vision loss', businessHours: true, onCallNumber: ON_CALL, agentSlug: 'after-hours',
     });
     expect(t).toEqual({ number: OFFICE, source: 'office_queue', queueLabel: 'Glendale Front' });
   });
@@ -47,9 +47,9 @@ describe('business hours → the office', () => {
     // else it contains.
     mockRulesEngine({ method: 'cold_transfer', say: 'call +19995551111 instead' });
     const t = await resolveUrgentTransferTarget({
-      reason: 'x', businessHours: true, onCallNumber: ON_CALL, agentSlug: 'no-ivr',
+      reason: 'x', businessHours: true, onCallNumber: ON_CALL, agentSlug: 'after-hours',
     });
-    expect(t!.number).toBe(ON_CALL);
+    expect(t).toBeNull();
   });
 });
 
@@ -60,10 +60,32 @@ describe('after hours → on-call, by explicit operator decision', () => {
     const t = await resolveUrgentTransferTarget({
       reason: 'sudden vision loss', businessHours: false, onCallNumber: ON_CALL, agentSlug: 'no-ivr',
     });
-    // The office phones are not answered at 3am; routing there would put an
-    // urgent caller into a voicemail box.
-    expect(t).toEqual({ number: ON_CALL, source: 'on_call_after_hours' });
+    expect(t).toEqual({ number: ON_CALL, source: 'no_ivr_dedicated' });
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('production no-IVR → dedicated destination at every hour', () => {
+  it('does not let a business-hours office route divert the transfer', async () => {
+    const spy = vi.fn();
+    globalThis.fetch = spy as unknown as typeof fetch;
+    const t = await resolveUrgentTransferTarget({
+      reason: 'sudden vision loss',
+      businessHours: true,
+      onCallNumber: ON_CALL,
+      agentSlug: 'no-ivr',
+    });
+    expect(t).toEqual({ number: ON_CALL, source: 'no_ivr_dedicated' });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed instead of using another destination when its number is missing', async () => {
+    expect(await resolveUrgentTransferTarget({
+      reason: 'x',
+      businessHours: true,
+      onCallNumber: '',
+      agentSlug: 'no-ivr',
+    })).toBeNull();
   });
 });
 
@@ -104,11 +126,11 @@ describe('the on-call phone is allow-listed to the after-hours agent', () => {
   });
 });
 
-describe('every failure degrades to on-call, never to a dead transfer', () => {
+describe('the dedicated no-IVR destination is stable across upstream failures', () => {
   it('falls back when the location is fenced out (no cold_transfer)', async () => {
     mockRulesEngine({ method: 'callback', queueTeam: 'Encinitas' });
     const t = await resolveUrgentTransferTarget({ reason: 'x', businessHours: true, onCallNumber: ON_CALL, agentSlug: 'no-ivr' });
-    expect(t).toEqual({ number: ON_CALL, source: 'on_call_no_route' });
+    expect(t).toEqual({ number: ON_CALL, source: 'no_ivr_dedicated' });
   });
 
   it('falls back on a non-200 from the rules engine', async () => {

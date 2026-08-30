@@ -12,7 +12,11 @@
  * `lunchClosure.test.ts`, which pins it in both directions.
  */
 import { describe, expect, it } from 'vitest';
-import { resolveHandoffDestination, resolvePcpDialSequence } from './handoffPolicy';
+import {
+  resolveClinicalTransferNumber,
+  resolveHandoffDestination,
+  resolvePcpDialSequence,
+} from './handoffPolicy';
 import { PCP_CALL_PURPOSES } from '../pcp/policy';
 
 const QUEUE = '+17149564300';
@@ -62,6 +66,31 @@ describe('slug-aware handoff policy', () => {
  * reaches Twilio verbatim and fails the dial mid-call, so normalize at the boundary.
  */
 describe('destination normalization', () => {
+  it('always selects the dedicated no-IVR destination for the production no-IVR agent', () => {
+    expect(resolveClinicalTransferNumber({
+      agentSlug: 'no-ivr',
+      clinicalNumber: '+15550000001',
+      noIvrNumber: '845-531-7471',
+    })).toBe('+18455317471');
+  });
+
+  it('does not apply the no-IVR destination to another agent or the dev test line', () => {
+    for (const agentSlug of ['after-hours', 'azul-scheduling', 'dev-no-ivr']) {
+      expect(resolveClinicalTransferNumber({
+        agentSlug,
+        clinicalNumber: '+15550000001',
+        noIvrNumber: '+18455317471',
+      })).toBe('+15550000001');
+    }
+  });
+
+  it('fails closed when the dedicated no-IVR destination is missing', () => {
+    expect(resolveClinicalTransferNumber({
+      agentSlug: 'no-ivr',
+      clinicalNumber: '+15550000001',
+    })).toBeUndefined();
+  });
+
   it('accepts the PCP queue however it was written', () => {
     for (const written of ['714-956-4300', '(714) 956-4300', '7149564300', '1-714-956-4300', ' +17149564300 ']) {
       expect(resolvePcpDialSequence({ mode: 'queue', queueNumber: written, agentDids: [] }))
