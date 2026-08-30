@@ -725,6 +725,70 @@ describe("VoiceCallBridge — dead-air watchdog", () => {
     speakUtterance(h, "How can I help?");
     expect([...h.timers.pending.values()].some((t) => t.ms === 30_000)).toBe(false);
   });
+
+  it("a tool call RESTARTS the clock — the tool's budget is not billed against the model's", () => {
+    // The window armed at speech-stop was for the model to ACT, and a
+    // function-call event is the model acting. The queue filing tools are
+    // allowed up to 30 seconds of their own — the same span as this
+    // watchdog — so a clock still ticking from speech-stop tears down a
+    // valid dispatch as dead_air moments before its result lands
+    // (Codex, PR #227 round 19).
+    const h = makeBridge({
+      deadAirMs: 30_000,
+      agent: makeAgent({ dispatch: () => new Promise(() => {}) as never }),
+    });
+    h.handlers().onSpeechStopped();
+    const before = [...h.timers.pending.entries()].filter(([, t]) => t.ms === 30_000);
+    expect(before).toHaveLength(1);
+    h.newResponse();
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    const after = [...h.timers.pending.entries()].filter(([, t]) => t.ms === 30_000);
+    expect(after).toHaveLength(1);
+    // A FRESH window, not the caller-turn clock still ticking.
+    expect(after[0][0]).not.toBe(before[0][0]);
+    // And a fresh window is a budget, never immunity: a dispatch that
+    // exhausts even its own full span is still dead air.
+    expect(h.timers.fire(30_000)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
+
+  it("an utterance completing while its response's tool still runs leaves the watchdog armed", () => {
+    // "Let me file that for you" and create_ticket in ONE response, the
+    // function-call event first: the spoken line completes, but the TURN
+    // is not delivered until the tool settles and its follow-up speaks.
+    // Clearing on the utterance left the hung tool bounded only by the
+    // ten-minute ceiling (Codex, PR #227 round 19).
+    const h = makeBridge({
+      deadAirMs: 30_000,
+      agent: makeAgent({ dispatch: () => new Promise(() => {}) as never }),
+    });
+    h.newResponse();
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    h.handlers().onAgentTranscriptDelta("Let me file that for you.");
+    h.handlers().onAudioDelta(b64(400));
+    h.handlers().onAudioDone("Let me file that for you.");
+    expect(h.timers.fire(30_000)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
+
+  it("the follow-up after a tool gets its own window, not the tail of the tool's", async () => {
+    const h = makeBridge({ deadAirMs: 30_000 });
+    h.newResponse();
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    await new Promise((r) => setTimeout(r, 0));
+    // Dispatch settled; the boundary has not been seen, so the pending
+    // 30s clock is still the one armed at the function-call event.
+    const beforeBoundary = [...h.timers.pending.entries()].filter(([, t]) => t.ms === 30_000);
+    expect(beforeBoundary).toHaveLength(1);
+    h.handlers().onResponseDone();
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    const afterFollowUp = [...h.timers.pending.entries()].filter(([, t]) => t.ms === 30_000);
+    expect(afterFollowUp).toHaveLength(1);
+    expect(afterFollowUp[0][0]).not.toBe(beforeBoundary[0][0]);
+    // A follow-up the model never answers is dead air, not a ceiling wait.
+    expect(h.timers.fire(30_000)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
 });
 
 describe("VoiceCallBridge — exactly-once teardown", () => {

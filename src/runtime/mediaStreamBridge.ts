@@ -678,7 +678,15 @@ export class VoiceCallBridge {
     // watchdog. A response-owed clock is different and stays armed: it
     // means the caller answered while this line's tail was still landing,
     // so a NEW reply is owed and this completion did not deliver it.
-    if (this.deadAirCause !== "response") this.clearDeadAir();
+    // And a spoken line is not the whole TURN when the same response also
+    // carried a tool whose dispatch is still running — the follow-up owes
+    // the caller words. Clearing here left that hung tool bounded only by
+    // the ten-minute ceiling whenever its function-call event arrived
+    // before the line's completion (Codex review, PR #227 round 19).
+    if (this.deadAirCause !== "response") {
+      if (this.pendingToolCalls > 0) this.armDeadAir("response");
+      else this.clearDeadAir();
+    }
 
     // Prefer the wire's own completed transcript over the accumulated
     // deltas: it is the authoritative text and it arrives whole.
@@ -852,7 +860,13 @@ export class VoiceCallBridge {
     this.followUpOwed = false;
     // A termination the guards allowed is already arming the hangup on
     // the goodbye's mark; a follow-up would speak over that gate.
-    if (!this.endRequested) this.session.requestResponse();
+    if (!this.endRequested) {
+      this.session.requestResponse();
+      // The follow-up is a response owed ANEW: it gets its own window,
+      // not whatever remains of the tool's (Codex review, PR #227
+      // round 19).
+      this.armDeadAir("response");
+    }
   }
 
   private handleToolCall(callId: string, name: string, args: Record<string, unknown>): void {
@@ -862,6 +876,14 @@ export class VoiceCallBridge {
     // delivering — arm the boundary wait for this turn.
     this.awaitingToolResponseDone = true;
     this.pendingToolCalls += 1;
+    // This event IS the model acting on the caller's turn, and the
+    // dispatch it starts has a budget of its own — the queue filing tools
+    // are allowed up to 30 seconds, the same span as this watchdog. A
+    // clock still ticking from speech-stop bills the tool's whole budget
+    // against the model's and tears down a valid dispatch as dead_air
+    // moments before its result lands (Codex review, PR #227 round 19).
+    // Restart the window: a fresh budget for the tool, never immunity.
+    this.armDeadAir("response");
     // Every tool call must be answered or the turn stalls forever, so the
     // dispatch that answers it is the one that never throws (agentBinding).
     // The hangup tool goes through this same path: its guards are the
