@@ -522,6 +522,29 @@ export const callLogs = pgTable("call_logs", {
   ticketingSyncRetries: integer("ticketing_sync_retries").default(0), // Number of sync attempts made
   
   // Environment tracking - identifies which server processed the call
+  /**
+   * Which voice stack served this call: 'grok' for the Media Streams runtime
+   * (src/runtime), NULL for the OpenAI SIP core.
+   *
+   * Cost reconciliation reads this. `retryTwilioCostFetch` estimates OpenAI
+   * spend from duration whenever `inputAudioTokens` is NULL, and every
+   * runtime row has NULL token columns — so without this discriminator every
+   * Grok call was priced at the OpenAI rate, reporting spend that never
+   * happened against the very comparison the migration exists to make.
+   */
+  voiceProvider: varchar("voice_provider"),
+  /**
+   * The voice runtime's own outcome for the call: completed, caller_hangup,
+   * agent_ended, provider_failure, dead_air, max_duration. NULL for calls it
+   * did not serve.
+   *
+   * `status` cannot carry this — it collapses six endings into two — and the
+   * runtime's in-memory registry is consumed and deleted by the post-stream
+   * redirect. Without a column, "was that dead air or a provider failure?"
+   * is unanswerable an hour later, which is exactly what the runbook tells
+   * an operator to go and check.
+   */
+  runtimeOutcome: varchar("runtime_outcome"),
   environment: varchar("environment"), // 'development' or 'production' based on DOMAIN
   agentUsed: varchar("agent_used"), // Actual agent slug used (e.g., 'no-ivr', 'greeter') even if agentId is null
   agentVersion: varchar("agent_version"), // Version string of the agent that handled this call (e.g., 'v1.3.3')

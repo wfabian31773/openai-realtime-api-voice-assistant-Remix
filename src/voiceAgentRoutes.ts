@@ -1130,7 +1130,7 @@ import { escalationDetailsMap, type EscalationDetails } from './services/escalat
 import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
 import { filesTickets } from './config/agentCapabilities';
 import { recordCallerSpeech, releaseCallerSpeech } from './services/symptomCorroboration';
-import { OPENAI_COST_CENTS_PER_SECOND } from './services/callCostService';
+import { priceVoiceCall } from './services/callCostService';
 
 
 
@@ -7752,15 +7752,26 @@ export function setupVoiceAgentRoutes(app: Express): void {
        * It also had no token guard and set costIsEstimated:false below,
        * stamping a blended-rate guess as authoritative.
        *
-       * Now: the shared constant, and only when there is nothing better. A row
-       * carrying real token counts keeps the cost derived from them.
+       * Now: the shared decision, and only when there is nothing better. A
+       * row carrying real token counts keeps the cost derived from them.
        */
       const twilioCostCents = actualTwilioCostCents ?? callLog.twilioCostCents ?? 0;
-      const hasTokenDerivedCost = callLog.inputAudioTokens != null;
-      const openaiCostCents = hasTokenDerivedCost
-        ? (callLog.openaiCostCents ?? 0)
-        : Math.ceil(duration * OPENAI_COST_CENTS_PER_SECOND);
-      const totalCostCents = twilioCostCents + openaiCostCents;
+      // The shared DECISION now, not only the shared constant: a Grok-served
+      // row's token columns are null exactly like an un-reconciled OpenAI
+      // row's, so a status callback pointed at this handler for a runtime
+      // number would overwrite the correct Grok charge with an OpenAI
+      // estimate (Codex, PR #227 round 14). Token-derived costs are still
+      // kept — that guard lives inside priceVoiceCall.
+      const pricing = priceVoiceCall({
+        voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
+        inputAudioTokens: callLog.inputAudioTokens,
+        existingOpenaiCostCents: callLog.openaiCostCents,
+        durationSeconds: duration,
+        twilioCostCents,
+      });
+      const hasTokenDerivedCost = pricing.basis === "openai_tokens";
+      const openaiCostCents = pricing.providerCostCents ?? callLog.openaiCostCents ?? 0;
+      const totalCostCents = pricing.totalCostCents;
 
       // Update call log with comprehensive tracking data
       // ONLY mark as authoritative (costIsEstimated: false) if Twilio provided CallDuration
