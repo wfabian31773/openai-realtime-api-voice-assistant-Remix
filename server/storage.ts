@@ -1065,6 +1065,33 @@ export class DatabaseStorage implements IStorage {
     return Number(result[0]?.totalCents) || 0;
   }
 
+  /**
+   * The day's per-call cost total for calls OpenAI actually billed.
+   *
+   * `getEstimatedOpenaiCostForDate` above sums every call's voice-AI cost —
+   * the right number for a budget guard or a spend dashboard, where a Grok
+   * call's charge is still money spent. This one exists for the OTHER
+   * meaning: anywhere the sum is compared against OpenAI's own Usage API or
+   * billing CSV, a Grok-served call's xAI charge must not be counted, or the
+   * comparison reports a phantom discrepancy against OpenAI on exactly the
+   * days the migration is being judged (Codex, PR #227 round 11).
+   */
+  async getOpenaiBilledEstimateForDate(date: string): Promise<number> {
+    const startOfDay = new Date(date + 'T00:00:00Z');
+    const endOfDay = new Date(date + 'T23:59:59.999Z');
+
+    const result = await db
+      .select({ totalCents: sql`COALESCE(SUM(openai_cost_cents), 0)` })
+      .from(callLogs)
+      .where(and(
+        gte(callLogs.createdAt, startOfDay),
+        lte(callLogs.createdAt, endOfDay),
+        sql`(voice_provider IS DISTINCT FROM 'grok')`
+      ));
+
+    return Number(result[0]?.totalCents) || 0;
+  }
+
   /** SD Pilot: aggregate stats for one agent slug (default azul-scheduling). */
   async getAgentPilotStats(agentUsed: string, startDate?: Date) {
     const conditions = [eq(callLogs.agentUsed, agentUsed)];
