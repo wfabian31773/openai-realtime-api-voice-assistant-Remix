@@ -520,6 +520,13 @@ export function mountVoiceRuntime(
                       // (Codex, PR #230 round 2).
                       onCallerRedirectStarting: () => bridge?.noteTransferStarting(),
                       onCallerRedirectFailed: () => bridge?.noteTransferFailed(),
+                      // The watchdog must span the accept window while the
+                      // office is being dialed and briefed, or the caller
+                      // is torn down as dead_air at the tool budget and
+                      // the office leg abandoned mid-briefing (Codex,
+                      // PR #230 round 3).
+                      onAttemptStarting: (waitMs) => bridge?.noteTransferWaitStarting(waitMs),
+                      onAttemptSettled: () => bridge?.noteTransferWaitSettled(),
                     }),
                 }),
           },

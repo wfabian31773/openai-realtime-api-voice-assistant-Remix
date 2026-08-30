@@ -46,6 +46,15 @@ export const TRANSFER_STATUS_PATH = "/voice/transfer-status";
 export interface TransferLifecycleHooks {
   onCallerRedirectStarting?: () => void;
   onCallerRedirectFailed?: () => void;
+  /** The attempt is starting: the dial plus the briefing-and-keypress
+   * wait legitimately runs up to `expectedWaitMs` (the accept window),
+   * far past any tool budget — the bridge must widen its dead-air
+   * watchdog or it tears the caller down mid-wait and the office leg is
+   * abandoned under a staffer hearing the briefing (Codex, PR #230
+   * round 3). */
+  onAttemptStarting?: (expectedWaitMs: number) => void;
+  /** The attempt settled either way; normal watchdog budgets apply. */
+  onAttemptSettled?: () => void;
 }
 
 export interface RuntimeTransferOptions {
@@ -224,6 +233,11 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
     ): () => Promise<unknown> {
       const attempt = async (): Promise<TransferOutcome> => {
         try {
+          // Before anything dials: the whole attempt — dial, briefing,
+          // keypress — is bounded by the accept window, and the bridge's
+          // watchdog needs that budget, not the tool dispatch's 45
+          // seconds (Codex, PR #230 round 3).
+          hooks?.onAttemptStarting?.(ACCEPT_WINDOW_MS);
           // Read at INVOKE time, not build time: the agent's escalate tool
           // writes the side channel during the call, after the factory ran.
           const details = escalationDetailsMap.get(metadata.callId);
@@ -278,6 +292,10 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           // the entry before invoking the callback again, so deleting per
           // attempt loses nothing.
           escalationDetailsMap.delete(metadata.callId);
+          // Restore the normal watchdog budget whatever way the attempt
+          // ended. On a success the redirect is already ending the
+          // stream, and the bridge ignores the re-arm once torn down.
+          hooks?.onAttemptSettled?.();
         }
       };
       if (slug === "pcp") {
