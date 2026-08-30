@@ -5,6 +5,7 @@ import { TransferAcceptError, TransferAcceptRegistry } from "./transferAccepts";
 function registry(windowMs = 45_000) {
   const timers = new Map<number, () => void>();
   let next = 1;
+  let nowMs = 1_000_000;
   const reg = new TransferAcceptRegistry({
     windowMs,
     setTimer: (fn) => {
@@ -14,8 +15,14 @@ function registry(windowMs = 45_000) {
     },
     clearTimer: (h) => void timers.delete(h as unknown as number),
     log: () => undefined,
+    now: () => nowMs,
   });
-  return { reg, fire: () => [...timers.values()].forEach((f) => f()), timers };
+  return {
+    reg,
+    fire: () => [...timers.values()].forEach((f) => f()),
+    timers,
+    advance: (ms: number) => void (nowMs += ms),
+  };
 }
 
 async function settled(p: Promise<void>): Promise<string> {
@@ -125,6 +132,42 @@ describe("the caller hanging up while the office rings", () => {
     const waiting = reg.waitFor("CAoffice");
     expect(reg.abandon("CAoffice")).toBe(true);
     expect(await settled(waiting)).toBe("abandoned");
+  });
+});
+
+describe("a terminal status that beats the wait's registration", () => {
+  it("still settles the wait, instead of holding the caller the full window", async () => {
+    // Twilio can POST busy/failed for the office leg before calls.create()
+    // resolves on our side — the abandon finds nothing, and unremembered
+    // the wait that registers moments later has no callback left to
+    // settle it early (Codex, PR #230 round 5).
+    const { reg } = registry();
+    expect(reg.abandon("CAoffice")).toBe(false); // nothing pending YET
+    const waiting = reg.waitFor("CAoffice");
+    expect(await settled(waiting)).toBe("abandoned");
+    expect(reg.pendingCount()).toBe(0);
+  });
+
+  it("consumes the memory — it cannot kill an unrelated later wait", async () => {
+    const { reg } = registry();
+    reg.abandon("CAoffice");
+    await settled(reg.waitFor("CAoffice"));
+    // A fresh wait on the same sid (not a thing Twilio does, but the
+    // memory must not linger) survives to a real accept.
+    const second = reg.waitFor("CAoffice");
+    reg.recordDigits("CAoffice", "1");
+    expect(await settled(second)).toBe("resolved");
+  });
+
+  it("forgets a status older than the window — it cannot belong to a wait registering now", async () => {
+    const { reg, fire, advance } = registry(45_000);
+    reg.abandon("CAstale");
+    advance(46_000);
+    // The prune runs on the next abandon; the stale sid is dropped.
+    reg.abandon("CAother");
+    const waiting = reg.waitFor("CAstale");
+    fire(); // only the window timer remains to settle it
+    expect(await settled(waiting)).toBe("timeout");
   });
 });
 
