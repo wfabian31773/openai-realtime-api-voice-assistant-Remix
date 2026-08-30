@@ -271,3 +271,54 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
     }
   });
 });
+
+describe("a greeting-only call keeps its tail", () => {
+  /**
+   * The bridge fix that made firstTranscriptAtMs caller-only left this row
+   * builder still dropping the tail one layer downstream: with no caller
+   * transcript, postTranscriptTailMs vanished and gradeTailSafety fell back
+   * to its no-data score (Codex, PR #227 round 12). The tail measures
+   * silence after the final words, whoever spoke them.
+   */
+  it("derives postTranscriptTailMs from the last transcript alone", () => {
+    const row = toCallLogRow({
+      callSid: "CA1",
+      slug: "optical",
+      outcome: "caller_hangup",
+      transcript: "AGENT: Hello? Is anyone there?",
+      toolEvents: [],
+      agentTurns: 1,
+      interruptions: 0,
+      startedAtMs: 1_000,
+      endedAtMs: 61_000,
+      lastTranscriptAtMs: 21_000,
+      // No caller transcript ever arrived.
+      firstTranscriptAtMs: undefined,
+    } as never);
+
+    expect(row.postTranscriptTailMs).toBe(40_000);
+    // And no caller-latency number is fabricated for a caller who never spoke.
+    expect(row.firstTranscriptDelayMs).toBeUndefined();
+    expect(row.transcriptWindowSeconds).toBeUndefined();
+  });
+
+  it("keeps all three when the caller did speak", () => {
+    const row = toCallLogRow({
+      callSid: "CA1",
+      slug: "optical",
+      outcome: "completed",
+      transcript: "CALLER: hi",
+      toolEvents: [],
+      agentTurns: 1,
+      interruptions: 0,
+      startedAtMs: 1_000,
+      endedAtMs: 61_000,
+      firstTranscriptAtMs: 5_000,
+      lastTranscriptAtMs: 21_000,
+    } as never);
+
+    expect(row.firstTranscriptDelayMs).toBe(4_000);
+    expect(row.postTranscriptTailMs).toBe(40_000);
+    expect(row.transcriptWindowSeconds).toBe(16);
+  });
+});
