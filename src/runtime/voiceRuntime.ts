@@ -51,7 +51,7 @@ import {
   type GrokTransport,
 } from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
-import { createRuntimeTransfer, TRANSFER_ACCEPT_PATH } from "./runtimeTransfer";
+import { createRuntimeTransfer, TRANSFER_ACCEPT_PATH, TRANSFER_STATUS_PATH } from "./runtimeTransfer";
 import { releaseCallHandoff } from "../tools/handoffBroker";
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
@@ -274,6 +274,10 @@ export function mountVoiceRuntime(
 
   app.post(TRANSFER_ACCEPT_PATH, (req: Request, res: Response) => {
     send(res, transfer.handleAccept(toWebhookRequest(req)));
+  });
+
+  app.post(TRANSFER_STATUS_PATH, (req: Request, res: Response) => {
+    send(res, transfer.handleStatus(toWebhookRequest(req)));
   });
 
   app.get("/voice/health", (_req: Request, res: Response) => {
@@ -506,7 +510,19 @@ export function mountVoiceRuntime(
             // mount — never a handoff that dials nothing.
             ...(transfer.unavailableReason
               ? {}
-              : { handoff: (md) => transfer.handoffFor(entry.slug, md) }),
+              : {
+                  handoff: (md) =>
+                    transfer.handoffFor(entry.slug, md, {
+                      // Late-bound on purpose: the handoff is built before
+                      // the bridge exists, and invoked mid-call when it
+                      // does. The mark is what records a successful
+                      // transfer as `transferred` rather than the
+                      // caller_hangup the stream's death looks like
+                      // (Codex, PR #230 round 2).
+                      onCallerRedirectStarting: () => bridge?.noteTransferStarting(),
+                      onCallerRedirectFailed: () => bridge?.noteTransferFailed(),
+                    }),
+                }),
           },
         );
         if (!lane) {
@@ -647,6 +663,12 @@ export function mountVoiceRuntime(
             // with the call — an entry outliving its call would let a later
             // call's tool dial a dead leg.
             releaseCallHandoff(entry.callSid);
+            // The call is over, whatever ended it: any office leg still
+            // ringing for this caller is abandoned NOW, not after the
+            // accept window — the staffer must not keep ringing toward,
+            // or accept into, a completed leg (Codex, PR #230 round 2).
+            // A successful transfer has no pending legs left; no-op then.
+            transfer.abandonFor(entry.callSid);
           },
           persistCallRecord: (record) => persistCall(record).then(() => undefined),
         });

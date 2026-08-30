@@ -204,7 +204,63 @@ describe("what the office hears", () => {
     // 35,35,35,40,40,41s — ten of twelve over twenty seconds.
     expect(seconds).toBe(OFFICE_DIAL_TIMEOUT_SECONDS);
     expect(seconds).toBeGreaterThanOrEqual(41);
-    expect(ACCEPT_WINDOW_MS / 1000).toBeGreaterThanOrEqual(41);
+    // The accept window must EXCEED the full ring window, not equal it:
+    // the clock starts at the dial, so an office answering at the
+    // measured 40-41s otherwise had seconds or nothing to hear the
+    // briefing and press a key (Codex, PR #230 round 2).
+    expect(ACCEPT_WINDOW_MS).toBeGreaterThan(OFFICE_DIAL_TIMEOUT_SECONDS * 1000);
+    expect(ACCEPT_WINDOW_MS - OFFICE_DIAL_TIMEOUT_SECONDS * 1000).toBeGreaterThanOrEqual(60_000);
+  });
+
+  it("marks the call transferred BEFORE the redirect, and unmarks on a failed one", async () => {
+    // The redirect ends the Media Stream, and the resulting close can race
+    // the redirect's own resolution — an unmarked close records a
+    // successful transfer as caller_hangup with transferred_to_human=false
+    // (Codex, PR #230 round 2).
+    const order: string[] = [];
+    const { ops } = fakeTwilio({
+      redirectCallerToConference: async () => {
+        order.push("redirect");
+      },
+    });
+    await performWarmTransfer(request, {
+      ...deps({ twilio: ops }),
+      onCallerRedirectStarting: () => order.push("marked"),
+      onCallerRedirectFailed: () => order.push("unmarked"),
+    });
+    expect(order).toEqual(["marked", "redirect"]);
+
+    const failing = fakeTwilio({
+      redirectCallerToConference: async () => {
+        order.push("redirect-fails");
+        throw new Error("redirect failed");
+      },
+    });
+    order.length = 0;
+    const outcome = await performWarmTransfer(request, {
+      ...deps({ twilio: failing.ops }),
+      onCallerRedirectStarting: () => order.push("marked"),
+      onCallerRedirectFailed: () => order.push("unmarked"),
+    });
+    expect(outcome.ok).toBe(false);
+    // Unmarked FIRST in the failure path: the caller never moved, and a
+    // later genuine hangup must not be mislabeled a transfer.
+    expect(order).toEqual(["marked", "redirect-fails", "unmarked"]);
+  });
+
+  it("hands the office leg the status URL, so a dead dial settles early", async () => {
+    let statusCallbackUrl: string | undefined;
+    const { ops } = fakeTwilio({
+      createOfficeLeg: async (input) => {
+        statusCallbackUrl = input.statusCallbackUrl;
+        return { sid: "CAoffice" };
+      },
+    });
+    await performWarmTransfer(request, {
+      ...deps({ twilio: ops }),
+      statusUrl: "https://runtime.example.test/voice/transfer-status",
+    });
+    expect(statusCallbackUrl).toBe("https://runtime.example.test/voice/transfer-status");
   });
 });
 

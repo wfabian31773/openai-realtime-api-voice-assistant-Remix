@@ -798,6 +798,27 @@ describe("VoiceCallBridge — dead-air watchdog", () => {
   });
 });
 
+describe("VoiceCallBridge — a transfer is not a hangup", () => {
+  it("records `transferred` when the stream dies after the redirect mark", () => {
+    // The warm transfer's redirect ENDS the Media Stream; the resulting
+    // stop/close looked exactly like a caller hangup, so every successful
+    // runtime handoff persisted with transferred_to_human=false (Codex,
+    // PR #230 round 2).
+    const h = makeBridge();
+    h.bridge.noteTransferStarting();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    expect(h.outcomes).toEqual(["transferred"]);
+  });
+
+  it("a FAILED redirect unmarks it — the caller never moved", () => {
+    const h = makeBridge();
+    h.bridge.noteTransferStarting();
+    h.bridge.noteTransferFailed();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    expect(h.outcomes).toEqual(["caller_hangup"]);
+  });
+});
+
 describe("VoiceCallBridge — exactly-once teardown", () => {
   it("records one outcome however many triggers race", () => {
     const h = makeBridge();

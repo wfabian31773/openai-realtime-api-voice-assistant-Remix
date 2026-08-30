@@ -70,6 +70,11 @@ export interface TransferTwilioOps {
     from: string;
     twiml: string;
     timeoutSeconds: number;
+    /** Posted the leg's terminal status, so a dial that ends without ever
+     * accepting — no-answer, busy, failed — settles the wait immediately
+     * instead of running out the whole widened window (Codex, PR #230
+     * round 2). */
+    statusCallbackUrl?: string;
   }): Promise<{ sid: string }>;
   /** Move the caller's live leg into the conference. Ends the media stream. */
   redirectCallerToConference(input: {
@@ -93,10 +98,23 @@ export interface WarmTransferDeps {
   awaitAccept: AcceptSignal;
   /** Absolute URL the office leg's `<Gather>` posts its digit to. */
   acceptUrl: string;
+  /** Absolute URL the office leg posts its terminal status to, so a dial
+   * that dies without accepting settles the wait early. Optional — the
+   * window is still a hard backstop without it. */
+  statusUrl?: string;
   /** The number the office sees as the caller. */
   fromNumber: string;
   /** Caller ID to present when the caller is redirected, if the lane sets one. */
   callerId?: string;
+  /** Invoked immediately BEFORE the caller's leg is redirected — the
+   * redirect ends the Media Stream, and the resulting close must be
+   * recorded as a transfer, not a caller hangup; the close can race the
+   * redirect's own resolution, so the mark has to precede it (Codex,
+   * PR #230 round 2). */
+  onCallerRedirectStarting?: () => void;
+  /** Invoked FIRST in the redirect's failure path, so a later genuine
+   * hangup on the still-live call is not mislabeled as a transfer. */
+  onCallerRedirectFailed?: () => void;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -116,14 +134,26 @@ export interface WarmTransferRequest {
 export const OFFICE_DIAL_TIMEOUT_SECONDS = 45;
 
 /**
- * 45 seconds, matching the dial timeout.
- *
- * Measured on the real PCP queue: of twelve accepted transfers, ring-to-accept
- * ran 17, 20, 27, 28, 29, 30, 35, 35, 35, 40, 40 and 41 seconds. **Ten of the
- * twelve took longer than twenty seconds.** A shorter window would time out on
- * most of the transfers that actually work.
+ * Time budgeted for the office to HEAR the briefing and press a key once
+ * it answers: the press prompt, the briefing (≤800 chars spoken), the
+ * first Gather's 8s, and most of the repeat cycle.
  */
-export const ACCEPT_WINDOW_MS = 45_000;
+export const BRIEFING_BUDGET_MS = 75_000;
+
+/**
+ * The accept window: the full ring window PLUS the briefing budget.
+ *
+ * Measured on the real PCP queue, ring-to-accept ran 17, 20, 27, 28, 29,
+ * 30, 35, 35, 35, 40, 40 and 41 seconds — ten of twelve longer than
+ * twenty. The window used to EQUAL the 45s dial timeout, and it starts
+ * when the dial is created: an office answering at the measured 40–41s
+ * had seconds or nothing left to hear the briefing and press before the
+ * registry expired its leg (Codex, PR #230 round 2). The window is a
+ * hard backstop only — a keypress, a decline, and (via the status
+ * webhook) a dial that dies unanswered all settle it early, so widening
+ * it costs nothing on the paths that resolve.
+ */
+export const ACCEPT_WINDOW_MS = OFFICE_DIAL_TIMEOUT_SECONDS * 1000 + BRIEFING_BUDGET_MS;
 
 export function conferenceNameFor(callerCallSid: string): string {
   return `runtime_xfer_${callerCallSid}`;
@@ -163,6 +193,7 @@ export async function performWarmTransfer(
       from: deps.fromNumber,
       twiml,
       timeoutSeconds: OFFICE_DIAL_TIMEOUT_SECONDS,
+      ...(deps.statusUrl ? { statusCallbackUrl: deps.statusUrl } : {}),
     });
     officeCallSid = created.sid;
   } catch (err) {
@@ -192,12 +223,20 @@ export async function performWarmTransfer(
 
   // A human is on the line and has pressed a key. Only now does the caller move.
   try {
+    // Marked BEFORE the redirect: the redirect ends the Media Stream, and
+    // the resulting close can race this await's own resolution — an
+    // unmarked close records the transfer as a caller hangup (Codex,
+    // PR #230 round 2).
+    deps.onCallerRedirectStarting?.();
     await deps.twilio.redirectCallerToConference({
       callerCallSid: request.callerCallSid,
       conferenceName,
       callerId: deps.callerId,
     });
   } catch (err) {
+    // FIRST: the caller never moved, so a later genuine hangup on this
+    // still-live call must not be mislabeled as a transfer.
+    deps.onCallerRedirectFailed?.();
     // The office is holding an empty conference and the caller never left the
     // agent. Ending the office leg is what stops a staffer sitting in silence.
     log(

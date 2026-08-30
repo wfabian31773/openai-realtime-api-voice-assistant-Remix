@@ -5,6 +5,7 @@ import {
   createRuntimeTransfer,
   transferUnavailableReason,
   TRANSFER_ACCEPT_PATH,
+  TRANSFER_STATUS_PATH,
 } from "./runtimeTransfer";
 import { conferenceNameFor, type TransferTwilioOps } from "./warmTransfer";
 import { escalationDetailsMap } from "../services/escalationStore";
@@ -62,6 +63,22 @@ function signedAccept(body: Record<string, string>): WebhookRequest {
     },
     body,
     originalUrl: TRANSFER_ACCEPT_PATH,
+  };
+}
+
+function signedStatus(body: Record<string, string>): WebhookRequest {
+  return {
+    headers: {
+      host: DOMAIN,
+      "x-forwarded-proto": "https",
+      "x-twilio-signature": twilio.getExpectedTwilioSignature(
+        AUTH_TOKEN,
+        `https://${DOMAIN}${TRANSFER_STATUS_PATH}`,
+        body,
+      ),
+    },
+    body,
+    originalUrl: TRANSFER_STATUS_PATH,
   };
 }
 
@@ -221,6 +238,62 @@ describe("per-lane handoff contracts (Codex, PR #230)", () => {
     transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
     await outcome;
     expect(escalationDetailsMap.has("CAcaller")).toBe(false);
+  });
+});
+
+describe("the caller ending abandons the office leg (Codex, PR #230 round 2)", () => {
+  it("hangs up an office leg still ringing when the caller's call ends", async () => {
+    const { ops, ended, redirected } = fakeOps();
+    const transfer = transferWith(ops);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+
+    // The caller hung up. Without this, the office keeps ringing for the
+    // whole window and can even accept into a completed leg.
+    transfer.abandonFor("CAcaller");
+    await expect(outcome).rejects.toThrow(/handoff_failed/);
+    expect(ended).toEqual(["CAoffice"]);
+    expect(redirected).toEqual([]);
+    expect(transfer.pendingAccepts()).toBe(0);
+    expect(transfer.pendingConferences()).toBe(0);
+  });
+
+  it("abandoning a caller with nothing pending is a no-op", () => {
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    expect(() => transfer.abandonFor("CAnobody")).not.toThrow();
+  });
+
+  it("a terminal office status settles a dial that died without accepting", async () => {
+    // no-answer/busy/failed never post the Gather action, so without the
+    // status webhook the wait ran out the whole widened window before the
+    // caller's agent learned anything.
+    const { ops, ended } = fakeOps();
+    const transfer = transferWith(ops);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+
+    const res = transfer.handleStatus(
+      signedStatus({ CallSid: "CAoffice", CallStatus: "no-answer" }),
+    );
+    expect(res.status).toBe(200);
+    await expect(outcome).rejects.toThrow(/handoff_failed/);
+    expect(ended).toEqual(["CAoffice"]);
+  });
+
+  it("refuses a forged status post", () => {
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    const res = transfer.handleStatus({
+      headers: { host: DOMAIN, "x-forwarded-proto": "https" },
+      body: { CallSid: "CAoffice", CallStatus: "completed" },
+      originalUrl: "/voice/transfer-status",
+    });
+    expect(res.status).toBe(403);
   });
 });
 

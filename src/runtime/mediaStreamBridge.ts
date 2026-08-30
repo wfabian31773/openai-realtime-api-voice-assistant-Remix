@@ -190,6 +190,7 @@ export type CallOutcome =
   | "completed"
   | "caller_hangup"
   | "agent_ended"
+  | "transferred"
   | "provider_failure"
   | "dead_air"
   | "max_duration";
@@ -985,9 +986,33 @@ export class VoiceCallBridge {
 
   // ── Exactly-once teardown ────────────────────────────────────────────
 
+  /**
+   * A warm transfer is about to replace the caller's stream. The redirect
+   * ENDS the Media Stream, and the resulting stop/close was recorded as
+   * caller_hangup — every successful runtime handoff persisted as an
+   * ordinary hangup with transferred_to_human=false, corrupting exactly
+   * the transfer metrics the migration is judged by (Codex, PR #230
+   * round 2). Armed BEFORE the redirect, because the close can race the
+   * redirect's own resolution; cleared when a redirect fails, so a later
+   * genuine hangup is not mislabeled.
+   */
+  noteTransferStarting(): void {
+    this.transferInFlight = true;
+  }
+
+  noteTransferFailed(): void {
+    this.transferInFlight = false;
+  }
+
+  private transferInFlight = false;
+
   private teardown(outcome: CallOutcome): void {
     if (this.ended) return;
     this.ended = true;
+    // Whatever close event won the race — Twilio's stop frame, the socket
+    // closing, the provider session dying as the stream ends — the caller
+    // was moved to a human on purpose. That is the outcome.
+    if (this.transferInFlight) outcome = "transferred";
 
     if (this.finalFallbackTimer !== null) {
       this.clearTimer(this.finalFallbackTimer);
