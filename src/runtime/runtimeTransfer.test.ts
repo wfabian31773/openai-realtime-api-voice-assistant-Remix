@@ -303,6 +303,37 @@ describe("the caller ending abandons the office leg (Codex, PR #230 round 2)", (
     expect(transfer.pendingConferences()).toBe(0);
   });
 
+  it("a caller that ends while the office leg is still being created abandons it on registration", async () => {
+    // The teardown can win the race against calls.create(): at that
+    // moment nothing is registered, so abandonFor alone is a no-op and
+    // the leg that materializes afterwards would ring toward a dead call
+    // for the full window (Codex, PR #230 round 5).
+    let resolveCreate!: (v: { sid: string }) => void;
+    const created = new Promise<{ sid: string }>((r) => (resolveCreate = r));
+    const ended: string[] = [];
+    const ops: TransferTwilioOps = {
+      createOfficeLeg: async () => created,
+      redirectCallerToConference: async () => {
+        throw new Error("must not redirect");
+      },
+      endCall: async (sid) => void ended.push(sid),
+    };
+    const transfer = transferWith(ops);
+    escalationDetailsMap.set("CAcaller", {
+      agentSlug: "no-ivr",
+      callerType: "patient_urgent",
+      reason: "Sudden vision loss",
+    });
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await Promise.resolve(); // let the attempt enter createOfficeLeg
+    transfer.abandonFor("CAcaller"); // teardown — nothing registered yet
+    resolveCreate({ sid: "CAoffice" });
+    await expect(outcome).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    expect(ended).toEqual(["CAoffice"]);
+    expect(transfer.pendingAccepts()).toBe(0);
+    expect(transfer.pendingConferences()).toBe(0);
+  });
+
   it("abandoning a caller with nothing pending is a no-op", () => {
     const { ops } = fakeOps();
     const transfer = transferWith(ops);
