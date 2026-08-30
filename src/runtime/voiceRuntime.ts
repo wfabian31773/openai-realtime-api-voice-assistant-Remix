@@ -765,6 +765,17 @@ export function mountVoiceRuntime(
           }).catch(() => undefined);
           twilioSocket.close();
         }
+      } finally {
+        // No bridge means no `onOutcome`, and `onOutcome` holds the only
+        // release of this call's brokered transfer. The proving lane
+        // registers that entry inside `resolveLane` — the factory runs
+        // before this function has a bridge — so every exit above between
+        // the factory and the bridge (the caller hanging up during the
+        // call-row wait, a transport or binding failure) would strand a
+        // closure over a dead leg until the broker's 200-entry cap evicted
+        // it (Codex review, PR #237). Keyed by callSid and idempotent, so
+        // it is a no-op for the lanes that never registered one.
+        if (!bridge) releaseCallHandoff(entry.callSid);
       }
     }
   });

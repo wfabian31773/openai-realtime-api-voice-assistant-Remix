@@ -20,6 +20,7 @@ import { CallSessionRegistry } from "./sessionRegistry";
 import { transferDestinationStatus, transferUnavailableReason } from "./runtimeTransfer";
 import type { GrokServerEvent } from "./wireTypes";
 import type { LaneConfig, LaneSource } from "./laneRegistry";
+import { registerCallHandoff, registeredHandoffCount } from "../tools/handoffBroker";
 
 const AUTH_TOKEN = "test-auth-token";
 const ENV = {
@@ -752,6 +753,76 @@ describe("one whole call, end to end, offline", () => {
     expect(h.openedRows).toHaveLength(1);
     expect(h.persisted).toHaveLength(1);
     expect(h.persisted[0]).toMatchObject({ callSid: "CA16", outcome: "caller_hangup" });
+  });
+
+  it("releases the brokered transfer when the caller hangs up before the bridge exists", async () => {
+    // The proving lane registers its per-call transfer inside the factory
+    // (createRuntimeProofAgent), and the ONLY release is the bridge's
+    // onOutcome. An early hangup returns before the bridge is built, so the
+    // closure — over a Twilio leg for a call that is already over — used to
+    // sit in the broker until the 200-entry cap evicted it, and every
+    // pre-bridge setup failure leaked the same way (Codex review, PR #237).
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const brokering: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        // Registers first, then builds — the proving agent's own order.
+        // Registration is not undone by the build stalling or the caller
+        // leaving while it does.
+        factory: ((_handoff: unknown, metadata: { callId?: string }) => {
+          registerCallHandoff(String(metadata.callId), async () => undefined);
+          return blocked.then(() => ({
+            instructions: "You are the proving agent.",
+            tools: [],
+          }));
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const before = registeredHandoffCount();
+    const h = await harness({ laneSource: brokering });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA31", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA31", tokenFrom(answered.text));
+    await settle(4);
+    // The leak the fix is about only exists once the factory has registered.
+    expect(registeredHandoffCount()).toBe(before + 1);
+    ws.close();
+    await settle(4);
+    release();
+    await settle(8);
+    expect(registeredHandoffCount()).toBe(before);
+  });
+
+  it("keeps the brokered transfer for the whole call, releasing it only at teardown", async () => {
+    // The other direction, and the reason the release is guarded rather
+    // than unconditional: request_human_handoff finds this entry by
+    // call_sid mid-call. Releasing it once the bridge exists would make
+    // every real transfer refuse with transfer_unavailable.
+    const brokering: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: ((_handoff: unknown, metadata: { callId?: string }) => {
+          registerCallHandoff(String(metadata.callId), async () => undefined);
+          return Promise.resolve({ instructions: "You are the proving agent.", tools: [] });
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const before = registeredHandoffCount();
+    const h = await harness({ laneSource: brokering });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA32", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA32", tokenFrom(answered.text));
+    await settle(8);
+    // Mid-call: the tool must still be able to find it.
+    expect(registeredHandoffCount()).toBe(before + 1);
+    ws.close();
+    await settle(8);
+    expect(registeredHandoffCount()).toBe(before);
   });
 
   it("finalizes the row even when the open timed out and landed late", async () => {
