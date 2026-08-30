@@ -172,15 +172,25 @@ export function toCallLogRow(
     // later nothing could tell dead air from a provider failure, which is
     // what the runbook tells an operator to check.
     runtimeOutcome: record.outcome,
+    // Split by what each column MEANS (Codex, PR #227 round 12 — the
+    // greeting-only case fixed in the bridge was still dropped here, one
+    // layer downstream, and gradeTailSafety fell back to its no-data score):
+    // the tail measures silence after the final words, WHOEVER spoke them,
+    // so it derives from the last transcript alone; the caller-latency delay
+    // and the caller-anchored window exist only once a caller has spoken.
+    ...(record.lastTranscriptAtMs !== undefined
+      ? {
+          postTranscriptTailMs: Math.max(
+            0,
+            record.endedAtMs - record.lastTranscriptAtMs,
+          ),
+        }
+      : {}),
     ...(record.firstTranscriptAtMs !== undefined
       ? {
           firstTranscriptDelayMs: Math.max(
             0,
             record.firstTranscriptAtMs - record.startedAtMs,
-          ),
-          postTranscriptTailMs: Math.max(
-            0,
-            record.endedAtMs - (record.lastTranscriptAtMs ?? record.firstTranscriptAtMs),
           ),
           transcriptWindowSeconds: Math.max(
             0,
