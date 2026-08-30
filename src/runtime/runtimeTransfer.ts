@@ -114,8 +114,13 @@ export function transferUnavailableReason(
   const missing: string[] = [];
   if (!opts.hasInjectedOps) {
     if (!env.TWILIO_ACCOUNT_SID) missing.push("TWILIO_ACCOUNT_SID");
-    if (!env.TWILIO_AUTH_TOKEN) missing.push("TWILIO_AUTH_TOKEN");
   }
+  // The auth token is NOT a dialing credential: the accept webhook
+  // validates Twilio's signature with it, so injected ops replace the
+  // account SID but never this. Without it every office keypress gets the
+  // expired-transfer hangup and every attempt times out or declines —
+  // transfers must stay refused instead (Codex, PR #230 round 4).
+  if (!env.TWILIO_AUTH_TOKEN) missing.push("TWILIO_AUTH_TOKEN");
   if (!env.TWILIO_PHONE_NUMBER) missing.push("TWILIO_PHONE_NUMBER");
   if (!opts.domain) missing.push("DOMAIN (or REPLIT_DOMAINS)");
   return missing.length > 0 ? `transfer unavailable: missing ${missing.join(", ")}` : null;

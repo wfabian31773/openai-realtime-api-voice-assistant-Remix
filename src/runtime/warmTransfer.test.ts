@@ -3,6 +3,7 @@ import {
   ACCEPT_WINDOW_MS,
   conferenceNameFor,
   handoffCallbackFor,
+  MAX_BRIEFING_CHARS,
   OFFICE_DIAL_TIMEOUT_SECONDS,
   performWarmTransfer,
   type TransferTwilioOps,
@@ -188,6 +189,32 @@ describe("what the office hears", () => {
     expect(twiml).toContain("Reason: refill.");
     const spoken = [...twiml.matchAll(/<Say[^>]*>([^<]*)<\/Say>/g)].map((m) => m[1]).join(" ");
     expect(describesNonKeypressAccept(spoken)).toBeNull();
+  });
+
+  it("caps a runaway briefing at the length the accept window budgets for", async () => {
+    // Escalation reasons are model-written and the schemas allow
+    // narratives far past the budget's 800-character assumption (PCP up
+    // to 12,000): unclipped, the staffer is still hearing details when
+    // the registry's fixed window expires and hangs up their leg (Codex,
+    // PR #230 round 4). Same slice the SIP path applies, and on the RAW
+    // text — the builder escapes after, so no entity is cut in half.
+    let twiml = "";
+    const { ops } = fakeTwilio({
+      createOfficeLeg: async (input) => {
+        twiml = input.twiml;
+        return { sid: "CAoffice" };
+      },
+    });
+    const runaway = `Reason: chest pain and ${"a very long narrative ".repeat(600)}TAIL-SENTINEL-NEVER-SPOKEN`;
+    await performWarmTransfer({ ...request, briefing: runaway }, deps({ twilio: ops }));
+    const says = [...twiml.matchAll(/<Say[^>]*>([^<]*)<\/Say>/g)].map((m) => m[1]);
+    // The head survives; the tail is gone. The script speaks the briefing
+    // in BOTH Gather cycles, so the bound is per utterance: no single Say
+    // may exceed the cap (plus prompt wording), where the raw narrative
+    // runs past 12,000 characters.
+    expect(says.join(" ")).toContain("Reason: chest pain");
+    expect(Math.max(...says.map((s) => s.length))).toBeLessThan(MAX_BRIEFING_CHARS + 200);
+    expect(twiml).not.toContain("TAIL-SENTINEL-NEVER-SPOKEN");
   });
 
   it("rings for the full window, because most real accepts take over 20 seconds", async () => {
