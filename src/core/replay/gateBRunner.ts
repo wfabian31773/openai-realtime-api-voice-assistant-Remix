@@ -15,8 +15,12 @@
  *  - Only transcript/outcome graders are compared (COMPARABLE set). Audio
  *    plumbing metrics (latency, interruptions, coverage, duration mismatch)
  *    cannot be reproduced by a text replay and are excluded on BOTH sides.
- *  - The old side's verdicts are its STORED production grader results — not
- *    re-derived — so the old core is judged by what actually happened.
+ *  - The old side is RE-GRADED with the same current referee, not read from
+ *    its stored results, so grader improvements apply to both cores
+ *    identically (replayCall.ts). An earlier version of this comment said
+ *    the opposite — it described a design that was never what the code did,
+ *    and it misdescribed the methodology behind every recorded Gate B
+ *    number.
  *  - Approximation (recorded on every tape): replayed callers answered the
  *    OLD core's questions; where the new core asks in a different order the
  *    turn pairing is approximate. The harvester makes most answers land
@@ -92,7 +96,7 @@ async function main() {
       const values = batch
         .map(
           (t) =>
-            `(${sqlLit(t.call_log_id)}, 'answering-service', ${sqlLit(t.new_transcript)}, ${sqlLit(
+            `(${sqlLit(t.call_log_id)}, ${sqlLit(AGENT)}, ${sqlLit(t.new_transcript)}, ${sqlLit(
               JSON.stringify(t.new_grader_results),
             )}::jsonb, ${t.new_critical.length}, ${t.old_critical.length}, ${sqlLit(t.verdict)}, ${sqlLit(
               JSON.stringify(t.approximations),
