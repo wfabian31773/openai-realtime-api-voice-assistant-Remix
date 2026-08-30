@@ -569,6 +569,35 @@ describe("VoiceCallBridge — tool dispatch", () => {
     expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
   });
 
+  it("a response carrying TWO tool calls gets exactly ONE follow-up, after both outputs", async () => {
+    // A request per tool did two wrong things: each extra queued request
+    // released another unsolicited reply after the first one's
+    // response.done, and a slower tool saw the first reply begin before its
+    // output existed (Codex, PR #227 round 14).
+    let releaseSlow!: (v: { ok: boolean; output: string }) => void;
+    const slow = new Promise<{ ok: boolean; output: string }>((r) => (releaseSlow = r));
+    const h = makeBridge({
+      agent: makeAgent({
+        dispatch: async (name: string) =>
+          name === "slow_lookup" ? slow : { ok: true, output: '{"ok":1}' },
+      }),
+    });
+    h.newResponse();
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    h.handlers().onToolCall("c2", "slow_lookup", {});
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The fast tool's output is in, but the reply must WAIT for the slow
+    // one — speaking now would answer with half the facts.
+    expect(h.session.sendToolResult).toHaveBeenCalledTimes(1);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+
+    releaseSlow({ ok: true, output: '{"ok":2}' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.session.sendToolResult).toHaveBeenCalledTimes(2);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
   it("does NOT ask for another turn after a termination the guards allowed", async () => {
     const h = makeBridge({
       agent: makeAgent({
@@ -1062,5 +1091,31 @@ describe("VoiceCallBridge — transcript timing is caller-anchored", () => {
 
     expect(persisted[0]?.transcript).toContain("[interrupted]");
     expect(persisted[0]?.lastTranscriptAtMs).toBeDefined();
+  });
+
+  it("a cancelled response's LATE completion does not move the clock", async () => {
+    // The interrupted line was stamped when the barge-in committed it. Its
+    // late `transcript.done` delivers no words, so stamping there would
+    // move `lastTranscriptAtMs` forward and understate the tail for every
+    // interrupted call (Codex, PR #227 round 14).
+    vi.useFakeTimers({ now: 1_000_000, toFake: ["Date"] });
+    try {
+      const persisted: VoiceCallRecord[] = [];
+      const h = makeBridge({ persistCallRecord: async (r) => void persisted.push(r) });
+
+      h.newResponse();
+      h.handlers().onAgentTranscriptDelta("Thank you for ");
+      h.handlers().onAudioDelta(b64(400));
+      h.handlers().onSpeechStarted(); // barge-in commits + stamps at t=1,000,000
+
+      vi.setSystemTime(1_060_000); // a minute later the discarded completion lands
+      h.handlers().onAudioDone("Thank you for calling.");
+      h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+      await Promise.resolve();
+
+      expect(persisted[0]?.lastTranscriptAtMs).toBe(1_000_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

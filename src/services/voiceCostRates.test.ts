@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   GROK_COST_CENTS_PER_SECOND,
   OPENAI_COST_CENTS_PER_SECOND,
@@ -7,36 +9,77 @@ import {
   priceVoiceCall,
 } from "./voiceCostRates";
 
-describe("callCostService prices durations only through the provider-aware decision", () => {
+describe("every duration price goes through the provider-aware decision", () => {
   /**
    * The bug kept coming back one consumer at a time: retryTwilioCostFetch
-   * (round 11), then the five-minute fixSuspiciousDurations sweep via
-   * reconcileTwilioCallData, then recalculateOpenAICostFromDuration — each
-   * still multiplying a duration by the OpenAI rate on rows whose null token
-   * columns look exactly like a Grok row's (Codex, PR #227 rounds 11-13).
-   * So the guard is structural: the raw rate may price nothing in
-   * callCostService except the explicitly OpenAI-named estimator, which no
-   * production code calls. Everything else must go through priceVoiceCall,
-   * which checks the provider BEFORE the token test.
+   * (round 11), the five-minute fixSuspiciousDurations sweep and
+   * recalculateOpenAICostFromDuration (round 13), then the admin backfill
+   * and recalculate routes plus the Twilio status callback (round 14) —
+   * each still multiplying a duration by the OpenAI rate on rows whose
+   * null token columns look exactly like a Grok row's. A guard that read
+   * one file missed the next module over, so this one walks the whole
+   * tree: the raw rate may multiply a duration ONLY inside priceVoiceCall
+   * itself and the explicitly OpenAI-named estimator no production code
+   * calls. Any new site fails here until it routes through the decision.
    */
-  it("the raw OpenAI per-second rate survives only in the named estimator", () => {
-    const src = readFileSync(new URL("./callCostService.ts", import.meta.url), "utf8");
-    const sites = [...src.matchAll(/\* OPENAI_COST_CENTS_PER_SECOND/g)].map(
-      (m) => m.index ?? -1,
-    );
-    const estimatorStart = src.indexOf(
-      "estimateOpenAICostFromDuration(durationSeconds: number)",
-    );
-    expect(estimatorStart).toBeGreaterThan(-1);
-    const estimatorEnd = src.indexOf("}", src.indexOf("isEstimated: true", estimatorStart));
-    expect(estimatorEnd).toBeGreaterThan(estimatorStart);
-    for (const site of sites) {
-      expect(
-        site > estimatorStart && site < estimatorEnd,
-        "a duration is priced at the OpenAI rate outside estimateOpenAICostFromDuration — route it through priceVoiceCall",
-      ).toBe(true);
+  it("the raw OpenAI per-second rate multiplies nothing outside the decision module and the named estimator", () => {
+    const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+    const offenders: string[] = [];
+    let estimatorSites = 0;
+    let decisionSites = 0;
+
+    for (const dir of ["src", "server"]) {
+      const entries = readdirSync(join(repoRoot, dir), {
+        recursive: true,
+        withFileTypes: true,
+      });
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (!entry.name.endsWith(".ts") || entry.name.endsWith(".test.ts")) continue;
+        const path = join(entry.parentPath, entry.name);
+        const src = readFileSync(path, "utf8");
+        // A multiplication has an operand before the star ON THE SAME LINE —
+        // a doc comment's leading `* OPENAI_…` has only a newline, and must
+        // not count ([^\S\n] is whitespace that cannot cross lines).
+        const sites = [
+          ...src.matchAll(/[\w)\]][^\S\n]*\*[^\S\n]*OPENAI_COST_CENTS_PER_SECOND/g),
+        ];
+        if (sites.length === 0) continue;
+
+        if (entry.name === "voiceCostRates.ts") {
+          decisionSites += sites.length; // priceVoiceCall's own branch
+          continue;
+        }
+        if (entry.name === "callCostService.ts") {
+          const estimatorStart = src.indexOf(
+            "estimateOpenAICostFromDuration(durationSeconds: number)",
+          );
+          const estimatorEnd = src.indexOf(
+            "}",
+            src.indexOf("isEstimated: true", estimatorStart),
+          );
+          for (const m of sites) {
+            const at = m.index ?? -1;
+            if (estimatorStart !== -1 && at > estimatorStart && at < estimatorEnd) {
+              estimatorSites += 1;
+            } else {
+              offenders.push(path);
+            }
+          }
+          continue;
+        }
+        offenders.push(...sites.map(() => path));
+      }
     }
-    expect(sites).toHaveLength(1);
+
+    expect(
+      offenders,
+      "a duration is priced at the OpenAI rate outside priceVoiceCall — route it through the provider-aware decision",
+    ).toEqual([]);
+    // Both allowlisted sites still exist — proves the scan reads real code
+    // rather than passing vacuously on a renamed constant.
+    expect(decisionSites).toBe(1);
+    expect(estimatorSites).toBe(1);
   });
 });
 

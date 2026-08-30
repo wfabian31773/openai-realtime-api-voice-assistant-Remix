@@ -9,7 +9,7 @@ import { authRouter, requireRole, requireManager } from "./auth";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { getTwilioClient, getTwilioFromPhoneNumber } from "../src/lib/twilioClient";
-import { OPENAI_COST_CENTS_PER_SECOND } from '../src/services/callCostService';
+import { priceVoiceCall } from '../src/services/callCostService';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -2013,20 +2013,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
             else if (twilioStatus === 'failed' || twilioStatus === 'canceled') finalStatus = 'failed';
             
             const finalDuration = actualDuration ?? call.duration ?? 0;
-            // The shared constant, not a copy of its value.
-            // The old formula here (19 c/min) was a 12x units slip vs the
-            // live pipeline's rate — and token-derived costs must be kept.
-            const openaiCostCents = call.inputAudioTokens != null
-              ? (call.openaiCostCents ?? 0)
-              : Math.ceil(finalDuration * OPENAI_COST_CENTS_PER_SECOND);
             const finalTwilioCostCents = actualTwilioCostCents ?? call.twilioCostCents ?? 0;
-            
+            // The shared DECISION, not a copy of the rate: token-derived
+            // costs are kept, and a Grok-served row is priced at xAI's
+            // rate — its token columns are null exactly like an
+            // un-reconciled OpenAI row's (Codex, PR #227 round 14).
+            const pricing = priceVoiceCall({
+              voiceProvider: (call as { voiceProvider?: string | null }).voiceProvider,
+              inputAudioTokens: call.inputAudioTokens,
+              existingOpenaiCostCents: call.openaiCostCents,
+              durationSeconds: finalDuration,
+              twilioCostCents: finalTwilioCostCents,
+            });
+            const openaiCostCents = pricing.providerCostCents ?? call.openaiCostCents ?? 0;
+
             await storage.updateCallLog(call.id, {
               duration: finalDuration,
               status: finalStatus,
               twilioCostCents: finalTwilioCostCents,
               openaiCostCents,
-              totalCostCents: finalTwilioCostCents + openaiCostCents,
+              totalCostCents: pricing.totalCostCents,
             });
             
             results.push({ 
@@ -3267,6 +3273,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           duration: callLogs.duration,
           twilioCostCents: callLogs.twilioCostCents,
           openaiCostCents: callLogs.openaiCostCents,
+          // Both feed priceVoiceCall: without them every backfilled row
+          // reads as an un-reconciled OpenAI call (Codex, PR #227 round 14).
+          inputAudioTokens: callLogs.inputAudioTokens,
+          voiceProvider: callLogs.voiceProvider,
         })
         .from(callLogs)
         .where(and(
@@ -3295,17 +3305,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           if (needsUpdate) {
             const finalDuration = twilioDuration ?? call.duration ?? 0;
-            // ONE RATE. This was 15c/min — a third value for the same quantity,
-            // alongside 19c/min in the status callback and 11.4c/min everywhere
-            // else. See OPENAI_COST_CENTS_PER_SECOND.
-            const openaiCostCents = Math.ceil(finalDuration * OPENAI_COST_CENTS_PER_SECOND);
+            // ONE RATE, through the one DECISION. This was 15c/min — a third
+            // value for the same quantity, alongside 19c/min in the status
+            // callback and 11.4c/min everywhere else. priceVoiceCall also
+            // keeps a token-derived cost and prices a Grok-served row at
+            // xAI's rate instead of inventing OpenAI spend
+            // (Codex, PR #227 round 14).
+            const pricing = priceVoiceCall({
+              voiceProvider: call.voiceProvider,
+              inputAudioTokens: call.inputAudioTokens,
+              existingOpenaiCostCents: call.openaiCostCents,
+              durationSeconds: finalDuration,
+              twilioCostCents: twilioCostCents ?? call.twilioCostCents ?? 0,
+            });
 
             if (!dryRun) {
               await storage.updateCallLog(call.id, {
                 duration: finalDuration,
                 twilioCostCents: twilioCostCents ?? call.twilioCostCents,
-                openaiCostCents,
-                costIsEstimated: true,
+                ...(pricing.providerCostCents !== undefined
+                  ? { openaiCostCents: pricing.providerCostCents, costIsEstimated: true }
+                  : {}),
               });
             }
             results.twilioUpdated++;
@@ -3332,7 +3352,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // STEP 3: Add missing OpenAI costs
       console.log('[BACKFILL] Step 3: Adding missing OpenAI costs...');
       const callsMissingCost = await db
-        .select({ id: callLogs.id, duration: callLogs.duration })
+        .select({
+          id: callLogs.id,
+          duration: callLogs.duration,
+          voiceProvider: callLogs.voiceProvider,
+        })
         .from(callLogs)
         .where(and(
           isNull(callLogs.openaiCostCents),
@@ -3342,13 +3366,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       for (const call of callsMissingCost) {
         if (!call.duration) continue;
-        // Same consolidation as above. This path only ever runs on rows with no
-        // cost at all, so there is no measurement here to protect — but it must
-        // still agree with every other duration estimate in the codebase.
-        const openaiCostCents = Math.ceil(call.duration * OPENAI_COST_CENTS_PER_SECOND);
+        // Same consolidation as above. This path only ever runs on rows with
+        // no cost at all, so there is no measurement to protect — but WHOSE
+        // duration rate applies is still the provider's to decide: a Grok
+        // row here priced as OpenAI invents spend that never happened
+        // (Codex, PR #227 round 14).
+        const pricing = priceVoiceCall({
+          voiceProvider: call.voiceProvider,
+          inputAudioTokens: null,
+          existingOpenaiCostCents: null,
+          durationSeconds: call.duration,
+          twilioCostCents: 0,
+        });
         if (!dryRun) {
-          await db.update(callLogs).set({ 
-            openaiCostCents,
+          await db.update(callLogs).set({
+            openaiCostCents: pricing.providerCostCents ?? 0,
             costIsEstimated: true,
           }).where(eq(callLogs.id, call.id));
         }
