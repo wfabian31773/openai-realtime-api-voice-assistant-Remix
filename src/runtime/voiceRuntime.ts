@@ -54,6 +54,7 @@ import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry"
 import { createRuntimeTransfer, TRANSFER_ACCEPT_PATH } from "./runtimeTransfer";
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
+import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
 import {
   handleAfterRedirect,
@@ -202,6 +203,31 @@ function send(res: Response, out: WebhookResponse): void {
  * never blocks startup on configuration — an unconfigured process still
  * starts, still serves health, and still fails closed at the webhook.
  */
+/**
+ * The public domain transfers may build their accept URL on, or undefined
+ * when this deployment has none.
+ *
+ * `resolveAppDomain` ALWAYS answers, falling back to `localhost:8000` —
+ * which is not a public domain: Twilio can never reach an accept URL on
+ * it, so treating the fallback as proof of a domain marked a deployment
+ * with credentials but no domain transfer-ready, and every transfer
+ * dialled an office leg that timed out instead of the lane being refused
+ * as intended (Codex, PR #230). Production preference uses the same
+ * signal set as the rest of the runtime (callEnvironment), not NODE_ENV
+ * alone (Codex, PR #227 round 21).
+ */
+export function publicTransferDomain(
+  env: Record<string, string | undefined>,
+): string | undefined {
+  const resolved = resolveAppDomain({
+    domain: env.DOMAIN,
+    replitDomains: env.REPLIT_DOMAINS,
+    replitDevDomain: env.REPLIT_DEV_DOMAIN,
+    isProduction: callEnvironment(env) === "production",
+  });
+  return resolved.source === "fallback" ? undefined : resolved.domain;
+}
+
 export function mountVoiceRuntime(
   app: Express,
   server: HttpServer,
@@ -233,12 +259,7 @@ export function mountVoiceRuntime(
   // live call. resolveAppDomain is the same resolution the SIP path uses
   // for its callback URLs, called with raw env so this module never pulls
   // in the full config (which requires DATABASE_URL at import).
-  const transferDomain = resolveAppDomain({
-    domain: env.DOMAIN,
-    replitDomains: env.REPLIT_DOMAINS,
-    replitDevDomain: env.REPLIT_DEV_DOMAIN,
-    isProduction: env.NODE_ENV === "production",
-  }).domain;
+  const transferDomain = publicTransferDomain(env);
   const transfer = createRuntimeTransfer({
     env,
     ops: options.transferOps,
