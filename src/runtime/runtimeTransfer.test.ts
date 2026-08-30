@@ -349,13 +349,28 @@ describe("availability is decided by configuration, not hope", () => {
     expect(reason).toContain("DOMAIN");
   });
 
-  it("is satisfied by injected ops plus a number and a domain", () => {
+  it("is satisfied by injected ops plus the auth token, a number and a domain", () => {
+    expect(
+      transferUnavailableReason(
+        { TWILIO_PHONE_NUMBER: "+15550000000", TWILIO_AUTH_TOKEN: AUTH_TOKEN },
+        { hasInjectedOps: true, domain: DOMAIN },
+      ),
+    ).toBeNull();
+  });
+
+  it("requires the auth token EVEN WITH injected ops — the accept webhook verifies signatures with it", () => {
+    // Injected ops replace the dialing client, not the webhook secret:
+    // without the token every office keypress gets the expired-transfer
+    // hangup, so a transfer offered in this configuration always times
+    // out or declines after a human already pressed a key (Codex,
+    // PR #230 round 4). Refusing up front keeps the lanes on their
+    // honest side-channel message instead.
     expect(
       transferUnavailableReason(
         { TWILIO_PHONE_NUMBER: "+15550000000" },
         { hasInjectedOps: true, domain: DOMAIN },
       ),
-    ).toBeNull();
+    ).toContain("TWILIO_AUTH_TOKEN");
   });
 
   it("still requires credentials when no ops are injected", () => {
