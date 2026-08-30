@@ -796,3 +796,41 @@ describe("VoiceCallBridge — exactly-once teardown", () => {
     expect(h.session.appendAudio).not.toHaveBeenCalled();
   });
 });
+
+describe("VoiceCallBridge — transcript timing is caller-anchored", () => {
+  /**
+   * `first_transcript_delay_ms` is defined as "Ms from session start to first
+   * CALLER transcript" (shared/schema.ts). On every normal call the agent's
+   * greeting completes before the caller says a word, so stamping the first
+   * timestamp from the agent's completion scores greeting generation instead
+   * of caller transcription — making the documented cutover metric
+   * systematically optimistic (Codex, PR #227 round 11).
+   */
+  it("the caller's first line opens the window", async () => {
+    const persisted: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void persisted.push(r) });
+
+    // Greeting first, as on every call — then the caller speaks.
+    speakUtterance(h, "Thank you for calling Azul Vision.");
+    h.handlers().onCallerTranscript("I need a refill.", "item-1");
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+
+    expect(persisted[0]?.firstTranscriptAtMs).toBeDefined();
+    expect(persisted[0]?.lastTranscriptAtMs).toBeDefined();
+  });
+
+  it("a call where the caller never speaks records no first-transcript time at all", async () => {
+    const persisted: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void persisted.push(r) });
+    speakUtterance(h, "Hello? Is anyone there?");
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+
+    // No caller transcript ever arrived: a greeting-only call must not
+    // fabricate a caller-latency number.
+    expect(persisted[0]?.firstTranscriptAtMs).toBeUndefined();
+    // But the tail window still knows when the last words were spoken.
+    expect(persisted[0]?.lastTranscriptAtMs).toBeDefined();
+  });
+});
