@@ -52,6 +52,7 @@ import {
 } from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
 import { createRuntimeTransfer, TRANSFER_ACCEPT_PATH, TRANSFER_STATUS_PATH } from "./runtimeTransfer";
+import { releaseCallHandoff } from "../tools/handoffBroker";
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
@@ -665,6 +666,10 @@ export function mountVoiceRuntime(
           guardrailMode: env.RUNTIME_GUARDRAIL_MODE === "log" ? "log" : "enforce",
           onOutcome: (outcome: CallOutcome) => {
             registry.recordOutcome(entry.callSid, outcome);
+            // The per-call transfer the proving agent may have brokered dies
+            // with the call — an entry outliving its call would let a later
+            // call's tool dial a dead leg.
+            releaseCallHandoff(entry.callSid);
             // The call is over, whatever ended it: any office leg still
             // ringing for this caller is abandoned NOW, not after the
             // accept window — the staffer must not keep ringing toward,

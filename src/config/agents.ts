@@ -12,6 +12,7 @@ import { createOpticalAgent, opticalAgentConfig } from '../agents/opticalAgent';
 import { createSurgeryAgent, surgeryAgentConfig } from '../agents/surgeryAgent';
 import { createTechAgent, techAgentConfig } from '../agents/techAgent';
 import { createRecordsAgent, recordsAgentConfig } from '../agents/recordsAgent';
+import { createRuntimeProofAgent, runtimeProofAgentConfig } from '../agents/runtimeProofAgent';
 
 export type AgentFactory = (...args: any[]) => RealtimeAgent | Promise<RealtimeAgent>;
 
@@ -160,6 +161,23 @@ export class AgentRegistry {
       voice: recordsAgentConfig.voice,
       language: recordsAgentConfig.language,
       greeting: recordsAgentConfig.greeting,
+    });
+
+    // The operator's proving lane: every registry capability on one agent,
+    // for live-testing the voice runtime end to end. Reachable only by
+    // pointing a number at /voice/runtime-proof, and refused by the runtime
+    // unless a transfer is configured (it holds the handoff tool).
+    this.register({
+      id: runtimeProofAgentConfig.slug,
+      factory: createRuntimeProofAgent as AgentFactory,
+      enabled: true,
+      description: runtimeProofAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'inbound',
+      version: runtimeProofAgentConfig.version,
+      voice: runtimeProofAgentConfig.voice,
+      language: runtimeProofAgentConfig.language,
+      greeting: runtimeProofAgentConfig.greeting,
     });
 
     // Azul Vision NextGen scheduling line (San Diego pilot).
