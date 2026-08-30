@@ -144,7 +144,11 @@ export class DailyOpenaiReconciliationService {
         };
       }
 
-      const estimatedCostCents = await storage.getEstimatedOpenaiCostForDate(dateStr);
+      // OpenAI-only: this total is compared against OpenAI's realtime API
+      // costs below, so a Grok-served call's xAI charge must not be in it
+      // (Codex, PR #227 round 12 — this scheduled job was the fourth
+      // comparison path, missed when the consumer list was truncated).
+      const estimatedCostCents = await storage.getOpenaiBilledEstimateForDate(dateStr);
       
       // actualCostCents = realtime API costs only (voice agents)
       // This is intentional - the Ops Hub only tracks voice agent costs, not GPT-4 grading etc.
