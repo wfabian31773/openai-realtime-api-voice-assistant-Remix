@@ -135,10 +135,22 @@ export const OFFICE_DIAL_TIMEOUT_SECONDS = 45;
 
 /**
  * Time budgeted for the office to HEAR the briefing and press a key once
- * it answers: the press prompt, the briefing (≤800 chars spoken), the
- * first Gather's 8s, and most of the repeat cycle.
+ * it answers: the press prompt, the briefing (≤MAX_BRIEFING_CHARS
+ * spoken), the first Gather's 8s, and most of the repeat cycle.
  */
 export const BRIEFING_BUDGET_MS = 75_000;
+
+/**
+ * The budget above ASSUMES a briefing this long — the cap is what makes
+ * the assumption true. Escalation reasons are model-written and the
+ * schemas allow narratives far past it (PCP up to 12,000 characters), and
+ * a briefing that long still had the staffer listening to details when
+ * the accept window expired and hung up their leg (Codex, PR #230
+ * round 4). Same 800 the SIP path slices to (voiceAgentRoutes) — the
+ * head of the briefing carries the identity and the reason; the tail is
+ * detail the humans exchange once bridged.
+ */
+export const MAX_BRIEFING_CHARS = 800;
 
 /**
  * The accept window: the full ring window PLUS the briefing budget.
@@ -181,8 +193,10 @@ export async function performWarmTransfer(
   }
 
   const conferenceName = request.conferenceName ?? conferenceNameFor(request.callerCallSid);
+  // RAW slice, before the script builder escapes it — slicing escaped text
+  // could cut an entity in half, and the budget is about SPOKEN length.
   const twiml = buildWarmTransferScript({
-    say: request.briefing,
+    say: request.briefing.slice(0, MAX_BRIEFING_CHARS),
     acceptUrl: deps.acceptUrl,
   });
 
