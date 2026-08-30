@@ -30,12 +30,23 @@ import { ACCEPT_WINDOW_MS, conferenceNameFor, performWarmTransfer } from "./warm
 import type { TransferOutcome, TransferTwilioOps } from "./warmTransfer";
 import { TransferAcceptRegistry } from "./transferAccepts";
 import { createTransferTwilioOps, type MinimalTwilioClient } from "./transferTwilioOps";
-import { handleTransferAccept } from "./transferAcceptWebhook";
+import { handleTransferAccept, handleTransferStatus } from "./transferAcceptWebhook";
 import type { LaneCallMetadata } from "./laneRegistry";
 import type { WebhookRequest, WebhookResponse } from "./voiceWebhook";
 
 /** The path the office leg's <Gather> posts to. Mounted by voiceRuntime. */
 export const TRANSFER_ACCEPT_PATH = "/voice/transfer-accept";
+
+/** The path the office leg's terminal status posts to. Mounted by voiceRuntime. */
+export const TRANSFER_STATUS_PATH = "/voice/transfer-status";
+
+/** Per-call hooks the runtime supplies so the CALL's own record survives
+ * the transfer — see WarmTransferDeps for why the mark precedes the
+ * redirect (Codex, PR #230 round 2). */
+export interface TransferLifecycleHooks {
+  onCallerRedirectStarting?: () => void;
+  onCallerRedirectFailed?: () => void;
+}
 
 export interface RuntimeTransferOptions {
   env: Record<string, string | undefined>;
@@ -58,9 +69,21 @@ export interface RuntimeTransfer {
    * the ticket either way, a throw skips that post-dial update, and a
    * bare void resolve reads as `ok: false` and records an
    * already-connected caller as FAILED (Codex, PR #230). */
-  handoffFor(slug: string, metadata: LaneCallMetadata): () => Promise<unknown>;
+  handoffFor(
+    slug: string,
+    metadata: LaneCallMetadata,
+    hooks?: TransferLifecycleHooks,
+  ): () => Promise<unknown>;
   /** The accept webhook body, for voiceRuntime to mount at TRANSFER_ACCEPT_PATH. */
   handleAccept(req: WebhookRequest): WebhookResponse;
+  /** The office leg's terminal-status webhook, for TRANSFER_STATUS_PATH:
+   * settles a dial that died without accepting the moment Twilio knows. */
+  handleStatus(req: WebhookRequest): WebhookResponse;
+  /** The caller's call ended. Abandon any office leg still ringing for it —
+   * without this the office rings up to the full window after the caller
+   * is gone, and can even accept into a completed leg (Codex, PR #230
+   * round 2). The abandoned wait's own failure path hangs the leg up. */
+  abandonFor(callerCallSid: string): void;
   /** For health reporting. */
   pendingAccepts(): number;
   /** Office legs whose conference mapping is still held. Tracks
@@ -184,13 +207,21 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
    * the wait begins, read by the accept webhook BEFORE the settle, dropped
    * after the wait ends either way. */
   const officeConferences = new Map<string, string>();
+  /** callerCallSid -> the office legs currently ringing for that caller,
+   * so the caller ending can abandon them (Codex, PR #230 round 2). */
+  const pendingByCaller = new Map<string, Set<string>>();
 
   const acceptUrl = `https://${options.domain}${TRANSFER_ACCEPT_PATH}`;
+  const statusUrl = `https://${options.domain}${TRANSFER_STATUS_PATH}`;
 
   return {
     unavailableReason,
 
-    handoffFor(slug: string, metadata: LaneCallMetadata): () => Promise<unknown> {
+    handoffFor(
+      slug: string,
+      metadata: LaneCallMetadata,
+      hooks?: TransferLifecycleHooks,
+    ): () => Promise<unknown> {
       const attempt = async (): Promise<TransferOutcome> => {
         try {
           // Read at INVOKE time, not build time: the agent's escalate tool
@@ -216,13 +247,25 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               twilio: ops,
               awaitAccept: (officeCallSid) => {
                 officeConferences.set(officeCallSid, conferenceNameFor(metadata.callSid));
-                return accepts
-                  .waitFor(officeCallSid)
-                  .finally(() => officeConferences.delete(officeCallSid));
+                let forCaller = pendingByCaller.get(metadata.callSid);
+                if (!forCaller) {
+                  forCaller = new Set();
+                  pendingByCaller.set(metadata.callSid, forCaller);
+                }
+                forCaller.add(officeCallSid);
+                return accepts.waitFor(officeCallSid).finally(() => {
+                  officeConferences.delete(officeCallSid);
+                  const remaining = pendingByCaller.get(metadata.callSid);
+                  remaining?.delete(officeCallSid);
+                  if (remaining && remaining.size === 0) pendingByCaller.delete(metadata.callSid);
+                });
               },
               acceptUrl,
+              statusUrl,
               fromNumber: env.TWILIO_PHONE_NUMBER ?? "",
               callerId: env.TWILIO_PHONE_NUMBER,
+              onCallerRedirectStarting: hooks?.onCallerRedirectStarting,
+              onCallerRedirectFailed: hooks?.onCallerRedirectFailed,
               log,
             },
           );
@@ -259,6 +302,24 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
         conferenceFor: (officeCallSid) => officeConferences.get(officeCallSid),
         log,
       });
+    },
+
+    handleStatus(req: WebhookRequest): WebhookResponse {
+      return handleTransferStatus(req, { env, accepts, log });
+    },
+
+    abandonFor(callerCallSid: string): void {
+      const legs = pendingByCaller.get(callerCallSid);
+      if (!legs || legs.size === 0) return;
+      // Abandoning settles each wait; performWarmTransfer's own failure
+      // path then hangs the office leg up — the caller is gone, and a
+      // staffer must not keep ringing toward (or accept into) a
+      // completed leg (Codex, PR #230 round 2). Copy first: settling
+      // mutates the set through the wait's finally.
+      for (const officeCallSid of [...legs]) {
+        log(`[runtime-xfer] caller ${callerCallSid} ended; abandoning office leg ${officeCallSid}`);
+        accepts.abandon(officeCallSid);
+      }
     },
 
     pendingAccepts: () => accepts.pendingCount(),

@@ -51,7 +51,7 @@ import {
   type GrokTransport,
 } from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
-import { createRuntimeTransfer, TRANSFER_ACCEPT_PATH } from "./runtimeTransfer";
+import { createRuntimeTransfer, TRANSFER_ACCEPT_PATH, TRANSFER_STATUS_PATH } from "./runtimeTransfer";
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
@@ -273,6 +273,10 @@ export function mountVoiceRuntime(
 
   app.post(TRANSFER_ACCEPT_PATH, (req: Request, res: Response) => {
     send(res, transfer.handleAccept(toWebhookRequest(req)));
+  });
+
+  app.post(TRANSFER_STATUS_PATH, (req: Request, res: Response) => {
+    send(res, transfer.handleStatus(toWebhookRequest(req)));
   });
 
   app.get("/voice/health", (_req: Request, res: Response) => {
@@ -505,7 +509,19 @@ export function mountVoiceRuntime(
             // mount — never a handoff that dials nothing.
             ...(transfer.unavailableReason
               ? {}
-              : { handoff: (md) => transfer.handoffFor(entry.slug, md) }),
+              : {
+                  handoff: (md) =>
+                    transfer.handoffFor(entry.slug, md, {
+                      // Late-bound on purpose: the handoff is built before
+                      // the bridge exists, and invoked mid-call when it
+                      // does. The mark is what records a successful
+                      // transfer as `transferred` rather than the
+                      // caller_hangup the stream's death looks like
+                      // (Codex, PR #230 round 2).
+                      onCallerRedirectStarting: () => bridge?.noteTransferStarting(),
+                      onCallerRedirectFailed: () => bridge?.noteTransferFailed(),
+                    }),
+                }),
           },
         );
         if (!lane) {
@@ -640,7 +656,15 @@ export function mountVoiceRuntime(
           // lane must not lose its safety rules by moving transports. "log"
           // exists to measure a rule's false-positive rate first.
           guardrailMode: env.RUNTIME_GUARDRAIL_MODE === "log" ? "log" : "enforce",
-          onOutcome: (outcome: CallOutcome) => registry.recordOutcome(entry.callSid, outcome),
+          onOutcome: (outcome: CallOutcome) => {
+            registry.recordOutcome(entry.callSid, outcome);
+            // The call is over, whatever ended it: any office leg still
+            // ringing for this caller is abandoned NOW, not after the
+            // accept window — the staffer must not keep ringing toward,
+            // or accept into, a completed leg (Codex, PR #230 round 2).
+            // A successful transfer has no pending legs left; no-op then.
+            transfer.abandonFor(entry.callSid);
+          },
           persistCallRecord: (record) => persistCall(record).then(() => undefined),
         });
         // Connect AFTER the bridge exists: a connection that fails then has

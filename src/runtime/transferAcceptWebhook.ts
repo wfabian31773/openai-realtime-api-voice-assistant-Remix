@@ -92,3 +92,39 @@ export function handleTransferAccept(
 
   return xml(buildOfficeAcceptTwiml({ conferenceName }));
 }
+
+/**
+ * The office leg's terminal-status callback.
+ *
+ * A dial that dies without ever accepting — no-answer, busy, failed —
+ * used to run out the entire accept window before the caller's agent
+ * learned anything; with the window widened past the ring time (so a
+ * late answer still gets its briefing), that silence would have grown to
+ * two minutes. The terminal status settles the wait the moment Twilio
+ * knows (Codex, PR #230 round 2). A status for a leg that already
+ * settled — accepted, declined, or ended by us — is a no-op.
+ */
+export function handleTransferStatus(
+  req: WebhookRequest,
+  deps: Pick<TransferAcceptDeps, "env" | "accepts" | "log">,
+): WebhookResponse {
+  const log = deps.log ?? ((line: string) => console.log(line));
+  const sig = checkTwilioSignature(req, deps.env);
+  if (sig === "no_auth_token" || sig === "invalid") {
+    // A forged status can only abandon a pending wait early — the caller
+    // keeps the agent and gets the ticket fallback — but there is no
+    // reason to accept one. Status callbacks ignore the body; 403 either
+    // way except the unconfigured case, which stays a controlled 200
+    // like every runtime webhook.
+    log(`[runtime-xfer] status webhook refused: ${sig}`);
+    return xml("<Response/>", sig === "invalid" ? 403 : 200);
+  }
+  const officeCallSid = String(req.body.CallSid ?? "").trim();
+  const status = String(req.body.CallStatus ?? "").trim();
+  if (officeCallSid && ["completed", "busy", "failed", "no-answer", "canceled"].includes(status)) {
+    if (deps.accepts.abandon(officeCallSid)) {
+      log(`[runtime-xfer] office leg ${officeCallSid} ended (${status}) before accepting`);
+    }
+  }
+  return xml("<Response/>");
+}
