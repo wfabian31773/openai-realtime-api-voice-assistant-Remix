@@ -137,3 +137,12 @@ twilio-inventory.json
 
 # Shadow observer spool (session records; never committed)
 .shadow-spool/
+
+# Replay corpora and Gate B output — these carry FULL call transcripts
+# (names, dates of birth, phone numbers, what the patient said was wrong).
+# scripts/build-replay-corpus.ts refuses to write anywhere git does not
+# ignore, and checks via `git check-ignore` — so these rules are the guard,
+# not documentation of one. PHI never in git.
+replay-corpus/
+replay-out/
+*.jsonl
