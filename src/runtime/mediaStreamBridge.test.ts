@@ -4,6 +4,7 @@ import {
   VoiceCallBridge,
   FINAL_MARK_GRACE_MS,
   MULAW_BYTES_PER_MS,
+  TOOL_DISPATCH_GRACE_MS,
   type BridgeSession,
   type BridgeSessionHandlers,
   type CallOutcome,
@@ -722,29 +723,33 @@ describe("VoiceCallBridge — dead-air watchdog", () => {
     expect([...h.timers.pending.values()].some((t) => t.ms === 30_000)).toBe(false);
   });
 
-  it("a tool call RESTARTS the clock — the tool's budget is not billed against the model's", () => {
+  it("a tool call RESTARTS the clock with headroom — the tool's budget is not billed against the model's", () => {
     // The window armed at speech-stop was for the model to ACT, and a
     // function-call event is the model acting. The queue filing tools are
     // allowed up to 30 seconds of their own — the same span as this
     // watchdog — so a clock still ticking from speech-stop tears down a
-    // valid dispatch as dead_air moments before its result lands
-    // (Codex, PR #227 round 19).
+    // valid dispatch as dead_air moments before its result lands (Codex,
+    // PR #227 round 19). And an EQUAL fresh window still loses the race
+    // to a tool that legitimately exhausts its own timeout, because it is
+    // armed before dispatch reaches the tool — hence the grace
+    // (round 21).
     const h = makeBridge({
       deadAirMs: 30_000,
       agent: makeAgent({ dispatch: () => new Promise(() => {}) as never }),
     });
     h.handlers().onSpeechStopped();
-    const before = [...h.timers.pending.entries()].filter(([, t]) => t.ms === 30_000);
-    expect(before).toHaveLength(1);
+    expect([...h.timers.pending.values()].filter((t) => t.ms === 30_000)).toHaveLength(1);
     h.newResponse();
     h.handlers().onToolCall("c1", "create_ticket", {});
-    const after = [...h.timers.pending.entries()].filter(([, t]) => t.ms === 30_000);
-    expect(after).toHaveLength(1);
-    // A FRESH window, not the caller-turn clock still ticking.
-    expect(after[0][0]).not.toBe(before[0][0]);
-    // And a fresh window is a budget, never immunity: a dispatch that
-    // exhausts even its own full span is still dead air.
-    expect(h.timers.fire(30_000)).toBe(true);
+    // The caller-turn clock is GONE; the tool holds a longer fresh window.
+    expect(h.timers.fire(30_000)).toBe(false);
+    const toolWindow = [...h.timers.pending.values()].filter(
+      (t) => t.ms === 30_000 + TOOL_DISPATCH_GRACE_MS,
+    );
+    expect(toolWindow).toHaveLength(1);
+    // A longer bound is a budget, never immunity: a dispatch that
+    // exhausts window AND grace is still dead air.
+    expect(h.timers.fire(30_000 + TOOL_DISPATCH_GRACE_MS)).toBe(true);
     expect(h.outcomes).toEqual(["dead_air"]);
   });
 
@@ -763,24 +768,26 @@ describe("VoiceCallBridge — dead-air watchdog", () => {
     h.handlers().onAgentTranscriptDelta("Let me file that for you.");
     h.handlers().onAudioDelta(b64(400));
     h.handlers().onAudioDone("Let me file that for you.");
-    expect(h.timers.fire(30_000)).toBe(true);
+    expect(h.timers.fire(30_000 + TOOL_DISPATCH_GRACE_MS)).toBe(true);
     expect(h.outcomes).toEqual(["dead_air"]);
   });
 
-  it("the follow-up after a tool gets its own window, not the tail of the tool's", async () => {
+  it("the follow-up after a tool gets the MODEL's window, not the tail of the tool's", async () => {
     const h = makeBridge({ deadAirMs: 30_000 });
     h.newResponse();
     h.handlers().onToolCall("c1", "create_ticket", {});
     await new Promise((r) => setTimeout(r, 0));
     // Dispatch settled; the boundary has not been seen, so the pending
-    // 30s clock is still the one armed at the function-call event.
-    const beforeBoundary = [...h.timers.pending.entries()].filter(([, t]) => t.ms === 30_000);
+    // clock is still the tool window armed at the function-call event.
+    const beforeBoundary = [...h.timers.pending.entries()].filter(
+      ([, t]) => t.ms === 30_000 + TOOL_DISPATCH_GRACE_MS,
+    );
     expect(beforeBoundary).toHaveLength(1);
     h.handlers().onResponseDone();
     expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    // The follow-up waits on the MODEL, so its window is the plain span.
     const afterFollowUp = [...h.timers.pending.entries()].filter(([, t]) => t.ms === 30_000);
     expect(afterFollowUp).toHaveLength(1);
-    expect(afterFollowUp[0][0]).not.toBe(beforeBoundary[0][0]);
     // A follow-up the model never answers is dead air, not a ceiling wait.
     expect(h.timers.fire(30_000)).toBe(true);
     expect(h.outcomes).toEqual(["dead_air"]);
