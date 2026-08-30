@@ -285,6 +285,31 @@ describe("a lane that transfers is served only when a handoff is injected", () =
     expect(reason).toBeNull();
   });
 
+  it("still refuses azul-scheduling even WITH a handoff — its transfers use a different side channel", async () => {
+    // Its ordinary cold_transfer flow never invokes the factory handoff:
+    // transfer_to_office reads officeTransferCallbacks, registered per call
+    // only by voiceAgentRoutes. Served "transfer-ready" through the factory
+    // callback alone, every ordinary scheduling transfer returns
+    // transfer_unavailable and files a callback ticket instead of dialing
+    // (Codex, PR #230).
+    const reason = laneSupportStatus(
+      { id: "azul-scheduling", enabled: true, agentType: "inbound" } as LaneConfig,
+      { transferAvailable: true },
+    );
+    expect(reason).toMatch(/side channel/);
+
+    const factory = vi.fn(async () => fakeAgent());
+    const lane = await resolveLane("azul-scheduling", META, {
+      source: {
+        getAgentConfig: () =>
+          ({ id: "azul-scheduling", enabled: true, agentType: "inbound", factory }) as LaneConfig,
+      },
+      handoff: () => async () => undefined,
+    });
+    expect(lane).toBeNull();
+    expect(factory).not.toHaveBeenCalled();
+  });
+
   it("an injected handoff does not excuse a non-uniform factory layout", () => {
     // after-hours is (handoff, recordPatientInfoCallback, metadata) — a
     // transfer being available says nothing about argument slots.

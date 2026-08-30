@@ -119,6 +119,21 @@ const TRANSFER_CAPABLE_LANES = new Set([
 ]);
 
 /**
+ * The transfer-capable lanes whose factory-handoff contract the injected
+ * transfer actually satisfies: the no-ivr family awaits a void callback
+ * that throws on failure, and pcp receives a structured outcome adapter
+ * (runtimeTransfer.ts). azul-scheduling is transfer-capable but its
+ * ORDINARY cold_transfer flow never invokes the factory handoff at all —
+ * `transfer_to_office` reads `officeTransferCallbacks`, a per-call side
+ * channel registered only by voiceAgentRoutes — so treating it as
+ * transfer-ready through the factory callback alone made every ordinary
+ * scheduling transfer return transfer_unavailable and file a callback
+ * ticket instead of dialing the office (Codex, PR #230). It stays
+ * refused until that side channel is wired on this runtime.
+ */
+const RUNTIME_TRANSFER_READY_LANES = new Set(["no-ivr", "no-ivr-v2", "dev-no-ivr", "pcp"]);
+
+/**
  * Why this runtime cannot serve a lane, or null when it can. Pure, so the
  * reason can be asserted and logged rather than discovered on a live call.
  */
@@ -133,6 +148,14 @@ export function laneSupportStatus(
     return (
       `lane '${config.id}' performs a call transfer and no handoff is configured for this ` +
       "deployment; serving it would turn a sanctioned transfer into a guaranteed failure"
+    );
+  }
+  if (TRANSFER_CAPABLE_LANES.has(config.id) && !RUNTIME_TRANSFER_READY_LANES.has(config.id)) {
+    return (
+      `lane '${config.id}' transfers through its own per-call side channel ` +
+      "(registerAzulOfficeTransferCallback), which this runtime does not wire yet; " +
+      "serving it through the factory handoff alone turns every ordinary transfer into " +
+      "transfer_unavailable and a callback ticket (Codex, PR #230)"
     );
   }
   const shape = NON_UNIFORM_FACTORY_LANES[config.id];
@@ -210,8 +233,11 @@ export async function resolveLane(
      * Injected rather than imported so `resolveLane` stays testable without a
      * Twilio client, and so a deployment with no transfer configured keeps
      * refusing the lanes that need one instead of serving a broken promise.
+     * The promise's resolved value is per-lane — void for the no-ivr family,
+     * PCP's structured HandoffOutcome for pcp (Codex, PR #230) — so the
+     * type is the union every factory accepts.
      */
-    handoff?: (metadata: LaneCallMetadata) => () => Promise<void>;
+    handoff?: (metadata: LaneCallMetadata) => () => Promise<unknown>;
   },
 ): Promise<ResolvedLane | null> {
   const config = deps.source.getAgentConfig(slug);
@@ -230,14 +256,16 @@ export async function resolveLane(
 
   // The factory's own shape, called exactly as the SIP transport calls it.
   const factory = config.factory as (
-    handoff: () => Promise<void>,
+    handoff: () => Promise<unknown>,
     metadata: LaneCallMetadata,
   ) => unknown;
   // A lane that transfers gets the real callback; every other lane keeps the
   // refusing one, which stays a tripwire it should never trip (optical,
   // surgery, tech, records and answering-service invoked it 0 times across
-  // the corpus — operator ruling 2026-08-12, standing instruction 9).
-  const handoff = deps.handoff && TRANSFER_CAPABLE_LANES.has(config.id)
+  // the corpus — operator ruling 2026-08-12, standing instruction 9). Only
+  // the lanes whose handoff CONTRACT the runtime satisfies get the real one
+  // — laneSupportStatus already refused the rest above.
+  const handoff = deps.handoff && RUNTIME_TRANSFER_READY_LANES.has(config.id)
     ? deps.handoff(metadata)
     : refuseHandoff;
   const created = await factory(handoff, metadata);
