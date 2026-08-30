@@ -136,6 +136,12 @@ export function parseTwilioInboundFrame(raw: string): TwilioInboundFrame | null 
     case "connected":
       return parsed as unknown as TwilioConnectedFrame;
     case "start": {
+      // The top-level streamSid is the address every OUTBOUND frame will
+      // carry. A start frame without it would still consume the one-time
+      // stream claim, and the authenticated call could then never play
+      // audio — media, marks, and clears all sent with an invalid stream
+      // SID (Codex review, PR #227 round 16).
+      if (typeof parsed.streamSid !== "string") return null;
       const start = parsed.start;
       if (!isRecord(start)) return null;
       if (typeof start.callSid !== "string") return null;
