@@ -23,6 +23,8 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
+import { callEnvironment } from "./callRecord";
+
 export const VOICE_RUNTIME_DEPLOY_MARKER = "voice-runtime-v1-bridge-and-binding";
 
 export interface RuntimeReadiness {
@@ -36,7 +38,14 @@ export interface RuntimeReadiness {
 export function computeRuntimeReadiness(
   env: Record<string, string | undefined> = process.env,
 ): RuntimeReadiness {
-  const isProduction = env.NODE_ENV === "production" || env.REPLIT_DEPLOYMENT === "1";
+  // The SAME non-throwing production detection the call record uses —
+  // APP_ENV, NODE_ENV, REPLIT_DEPLOYMENT, published .replit.app domain.
+  // Testing only NODE_ENV/REPLIT_DEPLOYMENT here classified a published
+  // deployment (which the shared resolver treats as production, selecting
+  // PRODUCTION_DATABASE_URL) as development and reported DATABASE_URL
+  // missing — so the webhook served the unavailable TwiML for every call
+  // of a completely configured deployment (Codex, PR #227 round 21).
+  const isProduction = callEnvironment(env) === "production";
   // Mirrors getEnvironmentConfig() exactly, including its fallback: in
   // production PRODUCTION_DATABASE_URL is preferred and DATABASE_URL is
   // accepted with a warning. Readiness must agree with the code that
