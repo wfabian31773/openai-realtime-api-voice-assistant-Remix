@@ -82,12 +82,14 @@ function buildHandlers(over: {
   onError?: NonNullable<GrokVoiceSessionHandlers["onError"]>;
   onAudioDone?: NonNullable<GrokVoiceSessionHandlers["onAudioDone"]>;
   onAgentTranscriptDelta?: NonNullable<GrokVoiceSessionHandlers["onAgentTranscriptDelta"]>;
+  onResponseDone?: NonNullable<GrokVoiceSessionHandlers["onResponseDone"]>;
 }) {
   return {
     onToolCall: over.onToolCall ?? vi.fn(),
     onError: over.onError ?? vi.fn(),
     onAudioDone: over.onAudioDone ?? vi.fn(),
     onAgentTranscriptDelta: over.onAgentTranscriptDelta ?? vi.fn(),
+    onResponseDone: over.onResponseDone ?? vi.fn(),
   } satisfies GrokVoiceSessionHandlers;
 }
 
@@ -193,6 +195,18 @@ describe("GrokVoiceSession lifecycle", () => {
     expect(transport.closed).toBe(true);
     // No session.close exists on this wire; closing the socket IS the close.
     expect(transport.sent).toHaveLength(0);
+  });
+
+  it("announces every response.done — the boundary the bridge's tool follow-up waits on", () => {
+    // If the wire stopped emitting this, every post-tool follow-up would
+    // starve behind an awaiting flag nothing clears, and the caller would
+    // sit in silence until the dead-air watchdog kills the call (Codex,
+    // PR #227 round 17).
+    const onResponseDone = vi.fn();
+    const { transport } = makeSession({ onResponseDone });
+    transport.emit({ type: "response.created" } as GrokServerEvent);
+    transport.emit({ type: "response.done" } as GrokServerEvent);
+    expect(onResponseDone).toHaveBeenCalledTimes(1);
   });
 
   it("dispatches response.function_call_arguments.done to onToolCall with the JSON-string arguments parsed", () => {

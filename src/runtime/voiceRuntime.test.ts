@@ -525,6 +525,38 @@ describe("one whole call, end to end, offline", () => {
     expect(h.registry.consumeOutcome("CA9")).toBe("caller_hangup");
   });
 
+  it("a setup failure BEFORE the bridge exists still leaves a durable failed record", async () => {
+    // The registry copy is consumed by the post-stream redirect — without
+    // this row, lane-resolution and agent-binding failures (exactly the
+    // setup problems operators need to diagnose) would vanish entirely
+    // (Codex review, PR #227 round 17).
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failing: LaneSource = {
+        getAgentConfig: () => ({
+          id: "optical",
+          enabled: true,
+          agentType: "inbound",
+          factory: (async () => {
+            throw new Error("agent tree exploded");
+          }) as unknown as LaneConfig["factory"],
+        }),
+      };
+      const h = await harness({ laneSource: failing });
+      const answered = await post(h, "/voice/optical", { CallSid: "CA-fail", From: "+1", To: "+2" });
+      await openStream(h, "CA-fail", tokenFrom(answered.text));
+      await settle(8);
+
+      const record = h.persisted.find((r) => r.callSid === "CA-fail");
+      expect(record).toBeDefined();
+      expect(record?.outcome).toBe("provider_failure");
+      expect(record?.slug).toBe("optical");
+      await h.close();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("refuses a lane whose factory contract the runtime does not model", async () => {
     // createAfterHoursAgent(handoff, recordPatientInfoCallback, metadata) —
     // calling it with the uniform two-argument shape puts the metadata in
