@@ -50,20 +50,38 @@ export interface TransferAcceptRegistryOptions {
   setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   clearTimer?: (handle: ReturnType<typeof setTimeout>) => void;
   log?: (line: string) => void;
+  /** Clock for the terminal-status tombstones; injectable for tests. */
+  now?: () => number;
 }
 
 export class TransferAcceptRegistry {
   private readonly pending = new Map<string, Pending>();
+  /**
+   * Terminal statuses that arrived BEFORE their wait registered.
+   *
+   * Twilio can POST a busy/failed status for the office leg before
+   * `calls.create()` has even resolved on our side — the wait for that
+   * CallSid does not exist yet, the abandon finds nothing to settle, and
+   * without a memory of it the wait that registers moments later would
+   * hold the caller in the transfer tool's silence for the full accept
+   * window (Codex, PR #230 round 5). Entries are sid -> recorded-at and
+   * are consumed by the wait's registration or pruned after windowMs —
+   * a status older than the window could not belong to a wait that is
+   * only being registered now.
+   */
+  private readonly terminalBeforeWait = new Map<string, number>();
   private readonly windowMs: number;
   private readonly setTimer: NonNullable<TransferAcceptRegistryOptions["setTimer"]>;
   private readonly clearTimer: NonNullable<TransferAcceptRegistryOptions["clearTimer"]>;
   private readonly log: (line: string) => void;
+  private readonly now: () => number;
 
   constructor(opts: TransferAcceptRegistryOptions) {
     this.windowMs = opts.windowMs;
     this.setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h));
     this.log = opts.log ?? ((line) => console.log(line));
+    this.now = opts.now ?? (() => Date.now());
   }
 
   /**
@@ -82,12 +100,20 @@ export class TransferAcceptRegistry {
       this.settle(officeCallSid, "abandoned");
     }
 
-    return new Promise<void>((resolve, reject) => {
+    const promise = new Promise<void>((resolve, reject) => {
       const timer = this.setTimer(() => {
         this.settle(officeCallSid, "timeout");
       }, this.windowMs);
       this.pending.set(officeCallSid, { resolve, reject, timer });
     });
+    // A terminal status already arrived for this leg — the dial died
+    // before the wait even existed. Settle immediately instead of holding
+    // the caller for the full window on a leg Twilio has already buried.
+    if (this.terminalBeforeWait.delete(officeCallSid)) {
+      this.log(`[runtime-xfer] ${officeCallSid} was terminal before its wait registered`);
+      this.settle(officeCallSid, "abandoned");
+    }
+    return promise;
   }
 
   /**
@@ -109,9 +135,19 @@ export class TransferAcceptRegistry {
     return this.settle(officeCallSid, pressed ? "accepted" : "declined");
   }
 
-  /** The caller hung up while the office was ringing. Nothing to bridge into. */
+  /** The caller hung up while the office was ringing, or the leg died a
+   * terminal death (busy/failed/no-answer via the status webhook).
+   * Nothing to bridge into. Returns whether a pending wait was settled;
+   * when none exists yet, the event is remembered so a wait that
+   * registers within the window still settles instantly. */
   abandon(officeCallSid: string): boolean {
-    return this.settle(officeCallSid, "abandoned");
+    if (this.settle(officeCallSid, "abandoned")) return true;
+    const cutoff = this.now() - this.windowMs;
+    for (const [sid, at] of this.terminalBeforeWait) {
+      if (at < cutoff) this.terminalBeforeWait.delete(sid);
+    }
+    this.terminalBeforeWait.set(officeCallSid, this.now());
+    return false;
   }
 
   /** Pending legs, for a health endpoint. Never contains caller content. */

@@ -224,6 +224,14 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
   /** callerCallSid -> the office legs currently ringing for that caller,
    * so the caller ending can abandon them (Codex, PR #230 round 2). */
   const pendingByCaller = new Map<string, Set<string>>();
+  /** Callers whose teardown already ran, sid -> ended-at. A caller can
+   * disconnect while createOfficeLeg() is still awaiting Twilio: at that
+   * moment pendingByCaller holds nothing, abandonFor is a no-op, and the
+   * wait that registers when the create resolves would ring an orphaned
+   * office leg toward a dead call for the full window (Codex, PR #230
+   * round 5). Entries are pruned after the accept window — no create
+   * started before the teardown can still be in flight by then. */
+  const endedCallers = new Map<string, number>();
 
   const acceptUrl = `https://${options.domain}${TRANSFER_ACCEPT_PATH}`;
   const statusUrl = `https://${options.domain}${TRANSFER_STATUS_PATH}`;
@@ -272,12 +280,24 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                   pendingByCaller.set(metadata.callSid, forCaller);
                 }
                 forCaller.add(officeCallSid);
-                return accepts.waitFor(officeCallSid).finally(() => {
+                const wait = accepts.waitFor(officeCallSid).finally(() => {
                   officeConferences.delete(officeCallSid);
                   const remaining = pendingByCaller.get(metadata.callSid);
                   remaining?.delete(officeCallSid);
                   if (remaining && remaining.size === 0) pendingByCaller.delete(metadata.callSid);
                 });
+                // The caller's teardown can beat this registration — it
+                // found nothing to abandon while the create was still in
+                // flight. Abandon NOW; the failure path hangs the office
+                // leg up rather than ringing it toward a dead call
+                // (Codex, PR #230 round 5).
+                if (endedCallers.has(metadata.callSid)) {
+                  log(
+                    `[runtime-xfer] caller ${metadata.callSid} ended before office leg ${officeCallSid} registered; abandoning`,
+                  );
+                  accepts.abandon(officeCallSid);
+                }
+                return wait;
               },
               acceptUrl,
               statusUrl,
@@ -332,6 +352,15 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
     },
 
     abandonFor(callerCallSid: string): void {
+      // Remember the teardown FIRST, whether or not any leg is registered
+      // yet: a createOfficeLeg still awaiting Twilio registers its wait
+      // after this runs, and only this memory stops that orphaned leg
+      // from ringing toward a dead call (Codex, PR #230 round 5).
+      const nowMs = Date.now();
+      for (const [sid, at] of endedCallers) {
+        if (nowMs - at > ACCEPT_WINDOW_MS) endedCallers.delete(sid);
+      }
+      endedCallers.set(callerCallSid, nowMs);
       const legs = pendingByCaller.get(callerCallSid);
       if (!legs || legs.size === 0) return;
       // Abandoning settles each wait; performWarmTransfer's own failure
