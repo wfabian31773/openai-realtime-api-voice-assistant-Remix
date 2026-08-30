@@ -128,6 +128,32 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
   };
 }
 
+/**
+ * The environment tag reporting filters on.
+ *
+ * Production is declared by ANY of the signals this repo actually deploys
+ * with, because none implies the others: `.replit` deployments set
+ * `APP_ENV=production` — the value the SIP path stores in this same
+ * column — the shared resolver recognizes `REPLIT_DEPLOYMENT=1` and a
+ * published `.replit.app` domain, and none of those sets `NODE_ENV`.
+ * Testing `NODE_ENV` alone tagged every live Replit call 'development',
+ * so environment-scoped reporting and the migration measurements omitted
+ * exactly the calls they exist to count (Codex review, PR #227 round 20).
+ * `getEnvironmentConfig()` is deliberately NOT reused here: it validates
+ * the full secret schema and throws on a missing one, and a logging path
+ * must never be the thing that dies over configuration.
+ */
+export function callEnvironment(env: Record<string, string | undefined>): string {
+  const domains = env.REPLIT_DOMAINS ?? "";
+  const publishedDomain = domains.includes(".replit.app") && !domains.includes(".replit.dev");
+  return env.APP_ENV === "production" ||
+    env.NODE_ENV === "production" ||
+    env.REPLIT_DEPLOYMENT === "1" ||
+    publishedDomain
+    ? "production"
+    : "development";
+}
+
 /** A call that never reached a conversation is recorded as failed; every
  * other ending is a call that happened. `dead_air` and `provider_failure`
  * are the two the runtime itself caused. */
@@ -216,7 +242,7 @@ export function toCallLogRow(
     // Counted from real wire events, not estimated from wall time — the
     // distinction the column exists to record.
     telemetrySource: "realtime_events",
-    environment: env.NODE_ENV === "production" ? "production" : "development",
+    environment: callEnvironment(env),
     // Omitted entirely when unknown rather than written as null: the queue
     // agents' own stampVerifiedIdentity may already have set these during
     // the call, and a null would erase what it learned.
@@ -251,6 +277,13 @@ export interface RuntimeCallOpenRow {
   status: "in_progress";
   startTime: Date;
   environment: string;
+  /** The pricing discriminator, from call START. Twilio's completion
+   * callback can race the teardown upsert; `priceVoiceCall` reads the
+   * row's provider, and an open row without it priced the call as OpenAI
+   * — a wrong charge `toConflictUpdate` deliberately never repairs,
+   * because cost columns belong to other writers (Codex review, PR #227
+   * round 20). */
+  voiceProvider: "grok";
 }
 
 /** Returns the new row's id when the database supplies one. */
@@ -327,7 +360,8 @@ export async function openRuntimeCall(
       // permanent row where endTime - startTime is short by the whole
       // setup delay (Codex review, PR #227 round 13).
       startTime: new Date(context.startedAtMs),
-      environment: env.NODE_ENV === "production" ? "production" : "development",
+      environment: callEnvironment(env),
+      voiceProvider: "grok",
     });
   } catch (error) {
     console.error(
