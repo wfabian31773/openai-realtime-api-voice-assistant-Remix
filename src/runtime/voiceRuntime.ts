@@ -51,7 +51,12 @@ import {
   type GrokTransport,
 } from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
-import { createRuntimeTransfer, TRANSFER_ACCEPT_PATH, TRANSFER_STATUS_PATH } from "./runtimeTransfer";
+import {
+  createRuntimeTransfer,
+  transferDestinationStatus,
+  TRANSFER_ACCEPT_PATH,
+  TRANSFER_STATUS_PATH,
+} from "./runtimeTransfer";
 import { releaseCallHandoff } from "../tools/handoffBroker";
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
@@ -282,6 +287,7 @@ export function mountVoiceRuntime(
 
   app.get("/voice/health", (_req: Request, res: Response) => {
     const readiness = computeRuntimeReadiness(env);
+    const destinations = transferDestinationStatus(env);
     res.json({
       marker: VOICE_RUNTIME_DEPLOY_MARKER,
       // The cached prefix every lane shares. Reported so a change in the
@@ -302,8 +308,21 @@ export function mountVoiceRuntime(
       // one line in the boot log, which meant checking whether a warm
       // transfer could possibly succeed required shell access to the
       // running deployment. Names only here too.
-      transferReady: transfer.unavailableReason === null,
-      transferBlockedBy: transfer.unavailableReason,
+      //
+      // TRANSPORT is not the whole answer: the transport can be armed
+      // while no destination number is configured, in which case every
+      // transfer still fails at resolveHandoffDestination. Ready means a
+      // transfer can actually complete — transport AND somewhere to dial
+      // (Codex, PR #236).
+      transferReady: transfer.unavailableReason === null && destinations.missing.length < 2,
+      transferBlockedBy:
+        transfer.unavailableReason ??
+        (destinations.missing.length === 2
+          ? `transfer unavailable: no destination configured (${destinations.missing.join(", ")})`
+          : null),
+      // Per LANE, because the two use different numbers and one can work
+      // while the other does not. Booleans, never the numbers themselves.
+      transferDestinations: { clinical: destinations.clinical, pcp: destinations.pcp },
       activeCalls: registry.activeCount(),
     });
   });

@@ -126,6 +126,35 @@ export function transferUnavailableReason(
   return missing.length > 0 ? `transfer unavailable: missing ${missing.join(", ")}` : null;
 }
 
+/**
+ * Which lanes actually have somewhere to dial.
+ *
+ * DELIBERATELY separate from transferUnavailableReason, which gates
+ * whether the transfer-capable lanes are served at all. The destination
+ * numbers are per-POLICY, not per-transport: the no-IVR family dials
+ * HUMAN_AGENT_NUMBER and pcp dials PCP_HUMAN_AGENT_NUMBER
+ * (resolveHandoffDestination). A deployment with only one of them set has
+ * one working lane and one that refuses at the destination — folding that
+ * into the mount-time gate would take the WORKING lane down too.
+ *
+ * So this is reporting only, and it exists because the health endpoint
+ * said `transferReady: true` for a deployment where every transfer fails
+ * with destination-not-configured — the exact partial deployment the
+ * endpoint was added to catch (Codex, PR #236).
+ */
+export function transferDestinationStatus(env: Record<string, string | undefined>): {
+  clinical: boolean;
+  pcp: boolean;
+  missing: string[];
+} {
+  const clinical = Boolean(env.HUMAN_AGENT_NUMBER?.trim());
+  const pcp = Boolean(env.PCP_HUMAN_AGENT_NUMBER?.trim());
+  const missing: string[] = [];
+  if (!clinical) missing.push("HUMAN_AGENT_NUMBER");
+  if (!pcp) missing.push("PCP_HUMAN_AGENT_NUMBER");
+  return { clinical, pcp, missing };
+}
+
 function defaultOps(
   env: Record<string, string | undefined>,
   log: (line: string) => void,
