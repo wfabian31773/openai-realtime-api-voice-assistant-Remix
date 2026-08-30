@@ -230,6 +230,7 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
     // gone for good (Codex review, PR #227). The SIP path creates the row
     // at call start for exactly this reason.
     const insert = vi.fn(async () => "row-1");
+    const claimedAtMs = Date.now() - 4_000; // stream claimed 4s before this insert runs
     const id = await openRuntimeCall(
       {
         callSid: "CA-1",
@@ -237,6 +238,7 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
         callerPhone: "+15551234567",
         dialedNumber: "+15559876543",
         agentVersion: "v1.4.0",
+        startedAtMs: claimedAtMs,
       },
       insert,
     );
@@ -249,7 +251,12 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
     expect(row.agentUsed).toBe("optical");
     expect(row.agentVersion).toBe("v1.4.0");
     expect(row.from).toBe("+15551234567");
-    expect(row.startTime).toBeInstanceOf(Date);
+    // The CLAIM time, not the insert time: this insert runs after the
+    // precontext lookup and lane factory, and teardown derives `duration`
+    // from the claim while never updating startTime on conflict — an
+    // insertion-time startTime leaves endTime - startTime short by the
+    // whole setup delay (Codex, PR #227 round 13).
+    expect((row.startTime as Date).getTime()).toBe(claimedAtMs);
     // It must NOT pre-empt anything a later writer owns.
     expect("transcript" in row).toBe(false);
     expect("toolTimeline" in row).toBe(false);
@@ -260,7 +267,7 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const id = await openRuntimeCall(
-        { callSid: "CA-2", slug: "optical", callerPhone: "", dialedNumber: "" },
+        { callSid: "CA-2", slug: "optical", callerPhone: "", dialedNumber: "", startedAtMs: Date.now() },
         async () => {
           throw new Error("db down");
         },

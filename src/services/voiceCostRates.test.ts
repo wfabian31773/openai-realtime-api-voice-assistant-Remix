@@ -1,10 +1,44 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   GROK_COST_CENTS_PER_SECOND,
   OPENAI_COST_CENTS_PER_SECOND,
   isGrokServedCall,
   priceVoiceCall,
 } from "./voiceCostRates";
+
+describe("callCostService prices durations only through the provider-aware decision", () => {
+  /**
+   * The bug kept coming back one consumer at a time: retryTwilioCostFetch
+   * (round 11), then the five-minute fixSuspiciousDurations sweep via
+   * reconcileTwilioCallData, then recalculateOpenAICostFromDuration — each
+   * still multiplying a duration by the OpenAI rate on rows whose null token
+   * columns look exactly like a Grok row's (Codex, PR #227 rounds 11-13).
+   * So the guard is structural: the raw rate may price nothing in
+   * callCostService except the explicitly OpenAI-named estimator, which no
+   * production code calls. Everything else must go through priceVoiceCall,
+   * which checks the provider BEFORE the token test.
+   */
+  it("the raw OpenAI per-second rate survives only in the named estimator", () => {
+    const src = readFileSync(new URL("./callCostService.ts", import.meta.url), "utf8");
+    const sites = [...src.matchAll(/\* OPENAI_COST_CENTS_PER_SECOND/g)].map(
+      (m) => m.index ?? -1,
+    );
+    const estimatorStart = src.indexOf(
+      "estimateOpenAICostFromDuration(durationSeconds: number)",
+    );
+    expect(estimatorStart).toBeGreaterThan(-1);
+    const estimatorEnd = src.indexOf("}", src.indexOf("isEstimated: true", estimatorStart));
+    expect(estimatorEnd).toBeGreaterThan(estimatorStart);
+    for (const site of sites) {
+      expect(
+        site > estimatorStart && site < estimatorEnd,
+        "a duration is priced at the OpenAI rate outside estimateOpenAICostFromDuration — route it through priceVoiceCall",
+      ).toBe(true);
+    }
+    expect(sites).toHaveLength(1);
+  });
+});
 
 describe("who served the call decides whose rate applies", () => {
   it("recognises a runtime-served row", () => {

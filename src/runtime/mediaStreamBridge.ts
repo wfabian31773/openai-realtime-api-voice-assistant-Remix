@@ -653,8 +653,16 @@ export class VoiceCallBridge {
     this.awaitingMark.length = 0;
     if (heardPartial) {
       this.transcriptLog.agentLine(`${heardPartial.text} [interrupted]`);
+      // Committing words the caller heard stamps the transcript clock: a
+      // cancelled response may never emit its transcript.done, so this is
+      // the interrupted line's ONLY chance to move `lastTranscriptAtMs`.
+      // Without it the tail is measured from an older line — or, for a
+      // greeting interrupted before anything completed, not at all
+      // (Codex review, PR #227 round 13).
+      this.noteTranscript("agent");
     } else if (this.current && this.current.text.trim()) {
       this.transcriptLog.agentLine(`${this.current.text.trim()} [interrupted]`);
+      this.noteTranscript("agent");
     }
     // Everything this response emits from here is stale.
     this.cancelledEpoch = this.session.getResponseEpoch();
@@ -791,8 +799,14 @@ export class VoiceCallBridge {
       const heardPartial = this.awaitingMark.shift();
       if (heardPartial) {
         this.transcriptLog.agentLine(`${heardPartial.text} [interrupted]`);
+        // Same invariant as the barge-in commit: audio was playing right up
+        // to the end of the call, so the tail from these words is ~zero —
+        // truthful, where measuring from an older line overstates dead air
+        // and a caller who hung up mid-greeting got no tail at all.
+        this.noteTranscript("agent");
       } else if (this.current && this.current.text.trim()) {
         this.transcriptLog.agentLine(`${this.current.text.trim()} [interrupted]`);
+        this.noteTranscript("agent");
       }
     }
     this.awaitingMark.length = 0;

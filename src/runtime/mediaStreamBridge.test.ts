@@ -833,4 +833,45 @@ describe("VoiceCallBridge — transcript timing is caller-anchored", () => {
     // But the tail window still knows when the last words were spoken.
     expect(persisted[0]?.lastTranscriptAtMs).toBeDefined();
   });
+
+  it("an INTERRUPTED line stamps the clock when it is committed", async () => {
+    // A cancelled response may never emit its transcript.done, so the
+    // barge-in commit is the interrupted line's only chance to move
+    // `lastTranscriptAtMs`. Without it, a greeting interrupted before any
+    // completed transcript produced a transcript with no tail metric at
+    // all, and later interruptions measured the tail from an older line
+    // (Codex, PR #227 round 13).
+    const persisted: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void persisted.push(r) });
+
+    h.newResponse();
+    h.handlers().onAgentTranscriptDelta("Thank you for calling ");
+    h.handlers().onAudioDelta(b64(400));
+    h.handlers().onSpeechStarted(); // barge-in mid-greeting, nothing completed yet
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+
+    expect(persisted[0]?.transcript).toContain("[interrupted]");
+    expect(persisted[0]?.lastTranscriptAtMs).toBeDefined();
+    // Still no caller line — the interrupted AGENT words must not open
+    // the caller-latency window.
+    expect(persisted[0]?.firstTranscriptAtMs).toBeUndefined();
+  });
+
+  it("a caller who hangs up mid-greeting still gets a tail measurement", async () => {
+    // Same invariant on the teardown commit: audio was playing right up to
+    // the hangup, so the line committed there stamps the clock too.
+    const persisted: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void persisted.push(r) });
+
+    h.newResponse();
+    h.handlers().onAgentTranscriptDelta("Hello? Is anyone ");
+    h.handlers().onAudioDelta(b64(400));
+    // No onAudioDone, no barge-in — the caller just hangs up.
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+
+    expect(persisted[0]?.transcript).toContain("[interrupted]");
+    expect(persisted[0]?.lastTranscriptAtMs).toBeDefined();
+  });
 });
