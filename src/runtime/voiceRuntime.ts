@@ -51,6 +51,9 @@ import {
   type GrokTransport,
 } from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
+import { createRuntimeTransfer, TRANSFER_ACCEPT_PATH } from "./runtimeTransfer";
+import type { TransferTwilioOps } from "./warmTransfer";
+import { resolveAppDomain } from "../config/environment";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
 import {
   handleAfterRedirect,
@@ -156,6 +159,15 @@ export interface VoiceRuntimeOptions {
    * and no xAI account.
    */
   createTransport?: (config: { apiKey: string; model: string }) => RuntimeTransport;
+  /**
+   * Twilio operations for the warm transfer. Injected for tests; when
+   * omitted, a client is built lazily from TWILIO_ACCOUNT_SID/AUTH_TOKEN.
+   * Whether transfers are OFFERED at all is decided by
+   * `transferUnavailableReason` — a deployment missing credentials, a
+   * from-number or a public domain keeps refusing the transfer-capable
+   * lanes exactly as before, with the reason logged once at mount.
+   */
+  transferOps?: TransferTwilioOps;
 }
 
 /** A transport the runtime can open. WebSocketGrokTransport satisfies it. */
@@ -206,6 +218,32 @@ export function mountVoiceRuntime(
   for (const line of formatReadinessLines(computeRuntimeReadiness(env))) {
     console.log(line);
   }
+
+  // The warm transfer. Its availability is decided once, here, and logged —
+  // so "why is no-ivr still refused?" is answered by the boot log, not a
+  // live call. resolveAppDomain is the same resolution the SIP path uses
+  // for its callback URLs, called with raw env so this module never pulls
+  // in the full config (which requires DATABASE_URL at import).
+  const transferDomain = resolveAppDomain({
+    domain: env.DOMAIN,
+    replitDomains: env.REPLIT_DOMAINS,
+    replitDevDomain: env.REPLIT_DEV_DOMAIN,
+    isProduction: env.NODE_ENV === "production",
+  }).domain;
+  const transfer = createRuntimeTransfer({
+    env,
+    ops: options.transferOps,
+    domain: transferDomain,
+  });
+  console.log(
+    transfer.unavailableReason
+      ? `[voice-runtime] ${transfer.unavailableReason} — transfer-capable lanes stay refused`
+      : `[voice-runtime] warm transfer armed (accept: https://${transferDomain}${TRANSFER_ACCEPT_PATH})`,
+  );
+
+  app.post(TRANSFER_ACCEPT_PATH, (req: Request, res: Response) => {
+    send(res, transfer.handleAccept(toWebhookRequest(req)));
+  });
 
   app.get("/voice/health", (_req: Request, res: Response) => {
     const readiness = computeRuntimeReadiness(env);
@@ -421,7 +459,16 @@ export function mountVoiceRuntime(
             // what to do with it (Codex review, PR #227).
             ...(precontext ? { precontext } : {}),
           },
-          { source: await laneSource(), env },
+          {
+            source: await laneSource(),
+            env,
+            // Only when this deployment can actually transfer. Otherwise the
+            // transfer-capable lanes keep their refusal, reason logged at
+            // mount — never a handoff that dials nothing.
+            ...(transfer.unavailableReason
+              ? {}
+              : { handoff: (md) => transfer.handoffFor(entry.slug, md) }),
+          },
         );
         if (!lane) {
           // The webhook let this through unseen and it turned out to be

@@ -15,27 +15,19 @@
  * hangup rather than a 5xx, because Twilio treats ANY 5xx as a failure and
  * plays its own error handling instead of ours.
  */
-import twilio from "twilio";
 import {
   buildDeclinedTransferTwiml,
   buildExpiredTransferTwiml,
   buildOfficeAcceptTwiml,
 } from "./transferTwilioOps";
 import type { TransferAcceptRegistry } from "./transferAccepts";
-import type { WebhookRequest, WebhookResponse } from "./voiceWebhook";
+import { checkTwilioSignature, type WebhookRequest, type WebhookResponse } from "./voiceWebhook";
 
 export interface TransferAcceptDeps {
   env: Record<string, string | undefined>;
   accepts: TransferAcceptRegistry;
   /** The conference this office leg was dialled for. */
   conferenceFor: (officeCallSid: string) => string | undefined;
-  /** Injected so the signature check is testable without minting real ones. */
-  validateSignature?: (
-    authToken: string,
-    signature: string,
-    url: string,
-    params: Record<string, string>,
-  ) => boolean;
   log?: (line: string) => void;
 }
 
@@ -50,20 +42,18 @@ export function handleTransferAccept(
   deps: TransferAcceptDeps,
 ): WebhookResponse {
   const log = deps.log ?? ((line: string) => console.log(line));
-  const authToken = deps.env.TWILIO_AUTH_TOKEN;
 
-  // 200 with a controlled hangup, never a 5xx: Twilio treats any 5xx as a
-  // failure regardless of content and plays its own handling instead of ours
-  // (server/index.ts:93).
-  if (!authToken) {
+  // The same gate every runtime webhook uses (voiceWebhook.ts) — one
+  // signature implementation, not two that can drift.
+  const sig = checkTwilioSignature(req, deps.env);
+  if (sig === "no_auth_token") {
+    // 200 with a controlled hangup, never a 5xx: Twilio treats any 5xx as a
+    // failure regardless of content and plays its own handling instead of
+    // ours (server/index.ts:93).
     log("[runtime-xfer] accept webhook refused: no TWILIO_AUTH_TOKEN configured");
     return xml(buildExpiredTransferTwiml());
   }
-
-  const signature = String(req.headers["x-twilio-signature"] ?? "");
-  const validate = deps.validateSignature ?? twilio.validateRequest;
-  const publicUrl = `${deps.env.PUBLIC_BASE_URL ?? ""}${req.originalUrl}`;
-  if (!signature || !validate(authToken, signature, publicUrl, req.body)) {
+  if (sig === "invalid") {
     // A forged accept would bridge a stranger into a live conference.
     log("[runtime-xfer] accept webhook refused: bad or missing signature");
     return xml(buildExpiredTransferTwiml(), 403);

@@ -1,23 +1,40 @@
 import { describe, it, expect } from "vitest";
+import twilio from "twilio";
 import { handleTransferAccept, type TransferAcceptDeps } from "./transferAcceptWebhook";
 import { TransferAcceptRegistry } from "./transferAccepts";
 import type { WebhookRequest } from "./voiceWebhook";
 
-function req(over: Partial<WebhookRequest> = {}): WebhookRequest {
+const AUTH_TOKEN = "test-auth-token";
+const HOST = "example.test";
+const PATH = "/voice/transfer-accept";
+
+/**
+ * A genuinely signed request — the webhook runs the same validateRequest the
+ * production gate runs, so the tests mint real signatures rather than
+ * injecting a validator that would let the check itself drift untested.
+ */
+function req(over: { body?: Record<string, string>; sign?: boolean } = {}): WebhookRequest {
+  const body = over.body ?? { CallSid: "CAoffice", Digits: "1" };
+  const signature =
+    over.sign === false
+      ? "not-a-real-signature"
+      : twilio.getExpectedTwilioSignature(AUTH_TOKEN, `https://${HOST}${PATH}`, body);
   return {
-    headers: { "x-twilio-signature": "sig" },
-    body: { CallSid: "CAoffice", Digits: "1" },
-    originalUrl: "/voice/transfer-accept",
-    ...over,
+    headers: {
+      host: HOST,
+      "x-forwarded-proto": "https",
+      "x-twilio-signature": signature,
+    },
+    body,
+    originalUrl: PATH,
   };
 }
 
 function deps(over: Partial<TransferAcceptDeps> = {}): TransferAcceptDeps {
   return {
-    env: { TWILIO_AUTH_TOKEN: "token", PUBLIC_BASE_URL: "https://example.test" },
+    env: { TWILIO_AUTH_TOKEN: AUTH_TOKEN },
     accepts: new TransferAcceptRegistry({ windowMs: 45_000, log: () => undefined }),
     conferenceFor: () => "runtime_xfer_CAcaller",
-    validateSignature: () => true,
     log: () => undefined,
     ...over,
   };
@@ -34,38 +51,29 @@ function waiting(reg: TransferAcceptRegistry, sid = "CAoffice") {
 
 describe("a forged accept must not bridge a stranger into a live call", () => {
   it("refuses a bad signature with 403 and no conference", () => {
-    const d = deps({ validateSignature: () => false });
-    const out = handleTransferAccept(req(), d);
+    const out = handleTransferAccept(req({ sign: false }), deps());
     expect(out.status).toBe(403);
     expect(out.body).not.toContain("<Conference");
   });
 
-  it("refuses a missing signature", () => {
-    const out = handleTransferAccept(req({ headers: {} }), deps());
+  it("refuses a request whose params were tampered with after signing", () => {
+    // Signed over one CallSid, delivered with another — the HMAC covers the
+    // params, so swapping the leg invalidates the signature.
+    const signed = req({ body: { CallSid: "CAoffice", Digits: "1" } });
+    const tampered = { ...signed, body: { CallSid: "CAother", Digits: "1" } };
+    const out = handleTransferAccept(tampered, deps());
     expect(out.status).toBe(403);
     expect(out.body).not.toContain("<Conference");
   });
 
   it("does not settle the pending transfer when the signature is bad", async () => {
-    const d = deps({ validateSignature: () => false });
+    const d = deps();
     const settled = waiting(d.accepts);
-    handleTransferAccept(req(), d);
+    handleTransferAccept(req({ sign: false }), d);
     // Still pending — a forged request must not consume the real accept.
     expect(d.accepts.pendingCount()).toBe(1);
     d.accepts.abandon("CAoffice");
     expect(await settled).toBe("abandoned");
-  });
-
-  it("validates against the public URL, not the raw path", () => {
-    const seen: string[] = [];
-    const d = deps({
-      validateSignature: (_t, _s, url) => {
-        seen.push(url);
-        return true;
-      },
-    });
-    handleTransferAccept(req(), d);
-    expect(seen[0]).toBe("https://example.test/voice/transfer-accept");
   });
 });
 
