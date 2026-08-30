@@ -122,3 +122,40 @@ describe('the warm-transfer script the office actually hears', () => {
     expect(buildWarmTransferScript({ say: 'x', acceptUrl })).toContain('actionOnEmptyResult="true"');
   });
 });
+
+describe('the briefing is escaped exactly once', () => {
+  /**
+   * Codex round 1 on this PR: the call site pre-escaped the briefing
+   * (`escapeXml(briefing.slice(...))`) and buildWarmTransferScript escaped it
+   * again, so "Smith & Jones" reached the office as the spoken words
+   * "Smith amp; Jones". The pure-builder test above could not see it — the
+   * bug lived at the call site. voiceAgentRoutes cannot be imported without
+   * a database, so this is a source assertion, with the limits that implies
+   * (it proves the source says the right thing, not that it does it): the
+   * briefing must reach the builder RAW.
+   */
+  it('is not pre-escaped before buildWarmTransferScript at the call site', () => {
+    const { readFileSync } = require('fs') as typeof import('fs');
+    const { join } = require('path') as typeof import('path');
+    const src = readFileSync(join(__dirname, '..', 'voiceAgentRoutes.ts'), 'utf8');
+    // lastIndexOf: the first occurrence is the IMPORT line, which sits in a
+    // window full of other imports and matches nothing — this assertion
+    // itself passed vacuously against the import until the window moved.
+    const callSite = src.slice(
+      Math.max(0, src.lastIndexOf('buildWarmTransferScript') - 2000),
+      src.lastIndexOf('buildWarmTransferScript') + 200,
+    );
+    expect(callSite).not.toMatch(/say = escapeXml\(/);
+    expect(callSite).toMatch(/say = briefing\.slice/);
+  });
+
+  it('double-escaping is what the builder would faithfully preserve — the reason the input must be raw', () => {
+    const twiml = buildWarmTransferScript({
+      say: 'Smith &amp; Jones', // what a pre-escaped briefing looks like
+      acceptUrl: 'https://example.test/accept',
+    });
+    // The builder correctly escapes the literal text it was given — which is
+    // exactly why handing it pre-escaped text corrupts what is spoken.
+    expect(twiml).toContain('Smith &amp;amp; Jones');
+  });
+});
