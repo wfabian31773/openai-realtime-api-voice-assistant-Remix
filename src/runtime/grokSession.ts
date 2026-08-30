@@ -356,6 +356,12 @@ export class GrokVoiceSession {
           // after the barge-in would otherwise wait on a done that is never
           // coming.
           this.flushPendingSay();
+          // And the same BOUNDARY announcement: this absorbed error stands
+          // in for the response.done that will never arrive, and a
+          // tool-bearing response interrupted here would otherwise leave
+          // the bridge's awaiting flag set forever — no follow-up, silence
+          // until the dead-air watchdog (Codex review, PR #227 round 18).
+          this.handlers.onResponseDone?.();
           break;
         }
         this.state = "error";

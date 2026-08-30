@@ -493,6 +493,24 @@ export function mountVoiceRuntime(
           // whose handler speaks the controlled line.
           console.warn(`[voice-runtime] no available lane for slug ${entry.slug}`);
           registry.recordOutcome(entry.callSid, "provider_failure");
+          // Same durable record the catch below writes: this early return
+          // sits BEFORE that catch, and the registry copy is consumed by
+          // the redirect — a claimed call for an unknown or disabled lane
+          // would otherwise vanish (Codex review, PR #227 round 18).
+          void persistCall({
+            callSid: entry.callSid,
+            streamSid,
+            slug: entry.slug,
+            callerPhone: entry.callerPhone,
+            dialedNumber: entry.dialedNumber,
+            outcome: "provider_failure",
+            transcript: "",
+            toolEvents: [],
+            agentTurns: 0,
+            interruptions: 0,
+            startedAtMs,
+            endedAtMs: Date.now(),
+          }).catch(() => undefined);
           twilioSocket.close();
           return;
         }
