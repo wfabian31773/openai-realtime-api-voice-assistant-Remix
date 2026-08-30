@@ -105,9 +105,25 @@ export type TwilioOutboundFrame =
   | TwilioOutboundMarkFrame
   | TwilioOutboundClearFrame;
 
-/** Parses one raw WebSocket text message into a known inbound frame, or
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/**
+ * Parses one raw WebSocket text message into a known inbound frame, or
  * null for unparseable/unknown-event messages (Twilio adds events over
- * time — unknown ones are ignored, never a crash). */
+ * time — unknown ones are ignored, never a crash).
+ *
+ * Each event's REQUIRED nested shape is validated, not just the event
+ * name: the stream endpoint is reachable before any token is claimed, so
+ * an unauthenticated client could send `{"event":"start"}` and have the
+ * connection handler dereference `frame.start.customParameters` — a throw
+ * from the WebSocket message callback that lands in the process-wide
+ * uncaughtException handler, repeatable at will (Codex review, PR #227
+ * round 15). A structurally incomplete frame is null, same as an unknown
+ * event. Only the fields consumers actually dereference are required;
+ * everything optional in Twilio's reference stays optional here.
+ */
 export function parseTwilioInboundFrame(raw: string): TwilioInboundFrame | null {
   let parsed: unknown;
   try {
@@ -115,16 +131,33 @@ export function parseTwilioInboundFrame(raw: string): TwilioInboundFrame | null 
   } catch {
     return null;
   }
-  if (typeof parsed !== "object" || parsed === null) return null;
-  const event = (parsed as { event?: unknown }).event;
-  if (
-    event === "connected" ||
-    event === "start" ||
-    event === "media" ||
-    event === "mark" ||
-    event === "stop"
-  ) {
-    return parsed as TwilioInboundFrame;
+  if (!isRecord(parsed)) return null;
+  switch (parsed.event) {
+    case "connected":
+      return parsed as unknown as TwilioConnectedFrame;
+    case "start": {
+      const start = parsed.start;
+      if (!isRecord(start)) return null;
+      if (typeof start.callSid !== "string") return null;
+      if (start.customParameters !== undefined && !isRecord(start.customParameters)) {
+        return null;
+      }
+      return parsed as unknown as TwilioStartFrame;
+    }
+    case "media": {
+      const media = parsed.media;
+      if (!isRecord(media) || typeof media.payload !== "string") return null;
+      return parsed as unknown as TwilioMediaFrame;
+    }
+    case "mark": {
+      const mark = parsed.mark;
+      if (!isRecord(mark) || typeof mark.name !== "string") return null;
+      return parsed as unknown as TwilioMarkFrame;
+    }
+    case "stop":
+      // `stop` carries no nested field any consumer dereferences.
+      return parsed as unknown as TwilioStopFrame;
+    default:
+      return null;
   }
-  return null;
 }
