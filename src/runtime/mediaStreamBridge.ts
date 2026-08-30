@@ -168,6 +168,19 @@ export const DEFAULT_MAX_CALL_MS = 10 * 60 * 1000;
  * cleanly, and disarmed while the caller speaks. */
 export const DEFAULT_DEAD_AIR_MS = 30_000;
 
+/**
+ * Extra headroom the dead-air window gets while a tool dispatch is in
+ * flight. The filing tools' own timeouts are 30 seconds — the exact span
+ * of this watchdog — and the window is armed before dispatch() reaches
+ * the tool, so an EQUAL window always loses the race to a tool that
+ * legitimately exhausts its own timeout: teardown fired first, and the
+ * tool's controlled timeout result was discarded by the ended check
+ * instead of reaching the model (Codex, PR #227 round 21). Half the
+ * budget again covers the dispatch overhead around the tool's own clock
+ * plus its settle — a longer bound, still never immunity.
+ */
+export const TOOL_DISPATCH_GRACE_MS = 15_000;
+
 /** The hangup tools shipped by the Remix agents. Intercepted rather than
  * dispatched — see the TRANSPORT NOTE in the module doc. */
 export const DEFAULT_END_CALL_TOOL_NAMES = ["terminate_call", "end_call"];
@@ -580,7 +593,7 @@ export class VoiceCallBridge {
     // the ten-minute ceiling whenever its function-call event arrived
     // before the line's completion (Codex review, PR #227 round 19).
     if (this.deadAirCause !== "response") {
-      if (this.pendingToolCalls > 0) this.armDeadAir("response");
+      if (this.pendingToolCalls > 0) this.armDeadAir("response", TOOL_DISPATCH_GRACE_MS);
       else this.clearDeadAir();
     }
 
@@ -778,8 +791,9 @@ export class VoiceCallBridge {
     // clock still ticking from speech-stop bills the tool's whole budget
     // against the model's and tears down a valid dispatch as dead_air
     // moments before its result lands (Codex review, PR #227 round 19).
-    // Restart the window: a fresh budget for the tool, never immunity.
-    this.armDeadAir("response");
+    // Restart the window with headroom past the tool's own timeout
+    // (round 21): a fresh budget for the tool, never immunity.
+    this.armDeadAir("response", TOOL_DISPATCH_GRACE_MS);
     // Every tool call must be answered or the turn stalls forever, so the
     // dispatch that answers it is the one that never throws (agentBinding).
     // The hangup tool goes through this same path: its guards are the
@@ -826,12 +840,12 @@ export class VoiceCallBridge {
 
   // ── Dead-air watchdog ────────────────────────────────────────────────
 
-  private armDeadAir(cause: "utterance" | "response"): void {
+  private armDeadAir(cause: "utterance" | "response", extraMs = 0): void {
     this.clearDeadAir();
     this.deadAirCause = cause;
     this.deadAirTimer = this.setTimer(
       () => this.teardown("dead_air"),
-      this.deps.deadAirMs ?? DEFAULT_DEAD_AIR_MS,
+      (this.deps.deadAirMs ?? DEFAULT_DEAD_AIR_MS) + extraMs,
     );
   }
 
