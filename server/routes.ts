@@ -2553,7 +2553,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         typeof d.date === 'string' ? d.date : new Date(d.date).toISOString().split('T')[0]
       ));
       if (!reconciledDates.has(today) && today >= startDate && today <= endDate) {
-        const todayEstimateCents = await storage.getEstimatedOpenaiCostForDate(today);
+        // OpenAI-only: today's cell stands in for a RECONCILED OpenAI figure
+        // in this series, so it must mean the same thing the other cells mean.
+        const todayEstimateCents = await storage.getOpenaiBilledEstimateForDate(today);
         opsHubCostByDate[today] = todayEstimateCents / 100;
         totalReconciledCents += todayEstimateCents;
       }
