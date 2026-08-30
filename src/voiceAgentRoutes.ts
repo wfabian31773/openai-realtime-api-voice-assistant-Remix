@@ -1885,14 +1885,30 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
       clinicalNumber: HUMAN_AGENT_NUMBER,
       noIvrNumber: envConfig.twilio.noIvrHumanAgentNumber,
     });
+    // Heads-up SMS BEFORE the operator's phone rings, and before the
+    // no-destination branch below. This path fires only for a mid-call drop on
+    // an already-escalated (urgent) call, so the operator has to hear about it
+    // whether or not we can dial — the caller we CANNOT transfer is the one
+    // who most needs somebody told. Sending it after the branch meant that
+    // caller was the only one nobody was paged about.
+    sendUrgentTransferSms({
+      callerNumber: getCallerNumber(conferenceName) || callerCall.from,
+      escalationDetails: escalation,
+      note: fallbackNumber
+        ? 'TECH FALLBACK — assistant disconnected during an URGENT call; caller transferred directly'
+        : 'TECH FALLBACK — assistant disconnected during an URGENT call and NO transfer destination is configured. The caller was told someone will call them back. CALL THEM.',
+    });
     if (!fallbackNumber) {
       console.error(
         `[SIP-RECOVERY] ${conferenceName}: urgent transfer destination is not configured — ending caller leg without dialing`,
       );
+      // We call them; they are never told to call us (operator ruling
+      // 2026-08-13, standing instruction 10). The urgent ticket and the SMS
+      // above are what make that promise good.
       await client.calls(callerCallSid).update({
         twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">We apologize, but we are unable to complete the transfer. Please call back or dial nine one one if this is a medical emergency. Goodbye.</Say>
+  <Say voice="Polly.Joanna">I'm sorry, I could not connect you just now. Our on-call team has your request and will call you back. If this is a medical emergency, please hang up and dial nine one one.</Say>
   <Hangup/>
 </Response>`,
       });
@@ -1901,13 +1917,6 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
     const callerIdAttribute = envConfig.twilio.phoneNumber
       ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
       : '';
-    // Heads-up SMS BEFORE the operator's phone rings. This path fires only for
-    // a mid-call drop on an already-escalated (urgent) call.
-    sendUrgentTransferSms({
-      callerNumber: getCallerNumber(conferenceName) || callerCall.from,
-      escalationDetails: escalation,
-      note: 'TECH FALLBACK — assistant disconnected during an URGENT call; caller transferred directly',
-    });
     await client.calls(callerCallSid).update({
       twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -1915,7 +1924,7 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
   <Dial${callerIdAttribute}>
     <Number>${escapeXml(fallbackNumber)}</Number>
   </Dial>
-  <Say voice="Polly.Joanna">We were unable to complete your call. Please try again later or call back during regular business hours. Goodbye.</Say>
+  <Say voice="Polly.Joanna">I'm sorry, I could not reach anyone just now. Our on-call team has your request and will call you back. If this is a medical emergency, please hang up and dial nine one one.</Say>
   <Hangup/>
 </Response>`,
     });

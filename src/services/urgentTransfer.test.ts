@@ -37,7 +37,7 @@ describe('business hours → the office', () => {
   it('routes to the office queue the rules engine names', async () => {
     mockRulesEngine({ method: 'cold_transfer', transferNumberE164: OFFICE, queueTeam: 'Glendale Front' });
     const t = await resolveUrgentTransferTarget({
-      reason: 'sudden vision loss', businessHours: true, onCallNumber: ON_CALL, agentSlug: 'after-hours',
+      reason: 'sudden vision loss', businessHours: true, onCallNumber: ON_CALL, agentSlug: 'no-ivr',
     });
     expect(t).toEqual({ number: OFFICE, source: 'office_queue', queueLabel: 'Glendale Front' });
   });
@@ -47,9 +47,9 @@ describe('business hours → the office', () => {
     // else it contains.
     mockRulesEngine({ method: 'cold_transfer', say: 'call +19995551111 instead' });
     const t = await resolveUrgentTransferTarget({
-      reason: 'x', businessHours: true, onCallNumber: ON_CALL, agentSlug: 'after-hours',
+      reason: 'x', businessHours: true, onCallNumber: ON_CALL, agentSlug: 'no-ivr',
     });
-    expect(t).toBeNull();
+    expect(t!.number).toBe(ON_CALL);
   });
 });
 
@@ -60,32 +60,10 @@ describe('after hours → on-call, by explicit operator decision', () => {
     const t = await resolveUrgentTransferTarget({
       reason: 'sudden vision loss', businessHours: false, onCallNumber: ON_CALL, agentSlug: 'no-ivr',
     });
-    expect(t).toEqual({ number: ON_CALL, source: 'no_ivr_dedicated' });
+    // The office phones are not answered at 3am; routing there would put an
+    // urgent caller into a voicemail box.
+    expect(t).toEqual({ number: ON_CALL, source: 'on_call_after_hours' });
     expect(spy).not.toHaveBeenCalled();
-  });
-});
-
-describe('production no-IVR → dedicated destination at every hour', () => {
-  it('does not let a business-hours office route divert the transfer', async () => {
-    const spy = vi.fn();
-    globalThis.fetch = spy as unknown as typeof fetch;
-    const t = await resolveUrgentTransferTarget({
-      reason: 'sudden vision loss',
-      businessHours: true,
-      onCallNumber: ON_CALL,
-      agentSlug: 'no-ivr',
-    });
-    expect(t).toEqual({ number: ON_CALL, source: 'no_ivr_dedicated' });
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  it('fails closed instead of using another destination when its number is missing', async () => {
-    expect(await resolveUrgentTransferTarget({
-      reason: 'x',
-      businessHours: true,
-      onCallNumber: '',
-      agentSlug: 'no-ivr',
-    })).toBeNull();
   });
 });
 
@@ -126,11 +104,11 @@ describe('the on-call phone is allow-listed to the after-hours agent', () => {
   });
 });
 
-describe('the dedicated no-IVR destination is stable across upstream failures', () => {
+describe('every failure degrades to on-call, never to a dead transfer', () => {
   it('falls back when the location is fenced out (no cold_transfer)', async () => {
     mockRulesEngine({ method: 'callback', queueTeam: 'Encinitas' });
     const t = await resolveUrgentTransferTarget({ reason: 'x', businessHours: true, onCallNumber: ON_CALL, agentSlug: 'no-ivr' });
-    expect(t).toEqual({ number: ON_CALL, source: 'no_ivr_dedicated' });
+    expect(t).toEqual({ number: ON_CALL, source: 'on_call_no_route' });
   });
 
   it('falls back on a non-200 from the rules engine', async () => {
@@ -163,5 +141,48 @@ describe('the dedicated no-IVR destination is stable across upstream failures', 
     mockRulesEngine({ method: 'callback' });
     const t = await resolveUrgentTransferTarget({ reason: 'x', businessHours: true, onCallNumber: '', agentSlug: 'no-ivr' });
     expect(t).toBeNull();
+  });
+});
+
+/**
+ * The clock rule itself, exercised through the REAL `isBusinessHours()` rather
+ * than the injected `businessHours` flag every test above uses.
+ *
+ * Operator ruling 2026-08-30, asked and answered directly: urgent no-IVR calls
+ * reach the on-call phone "after hours + weekends" — a Saturday at ten in the
+ * morning is a weekend first and a business hour never. `isBusinessHours()`
+ * already excludes Sat/Sun by default, so this holds today; it is pinned here
+ * because nothing else in the repo tests that default, and a change to it
+ * would silently route weekend urgents into an office nobody is sitting in.
+ */
+describe("the operator's clock: weekends are after hours", () => {
+  afterEach(() => vi.useRealTimers());
+
+  const atPacific = (iso: string) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(iso));
+  };
+
+  it('sends a Saturday-morning urgent call to on-call, not the office queue', async () => {
+    const spy = vi.fn();
+    globalThis.fetch = spy as unknown as typeof fetch;
+    atPacific('2026-08-29T17:00:00Z'); // Sat 10:00 Pacific (PDT, UTC-7)
+    const t = await resolveUrgentTransferTarget({
+      reason: 'sudden vision loss', onCallNumber: ON_CALL, agentSlug: 'no-ivr',
+    });
+    expect(t).toEqual({ number: ON_CALL, source: 'on_call_after_hours' });
+    // The rules engine is never even asked on a weekend.
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('still sends the same call on a Monday morning to the office queue', async () => {
+    // The control. Without it, a function that always returned on-call would
+    // pass the test above and the weekend assertion would prove nothing.
+    mockRulesEngine({ method: 'cold_transfer', transferNumberE164: OFFICE, queueTeam: 'Glendale Front' });
+    atPacific('2026-08-31T17:00:00Z'); // Mon 10:00 Pacific
+    const t = await resolveUrgentTransferTarget({
+      reason: 'sudden vision loss', onCallNumber: ON_CALL, agentSlug: 'no-ivr',
+    });
+    expect(t).toEqual({ number: OFFICE, source: 'office_queue', queueLabel: 'Glendale Front' });
   });
 });
