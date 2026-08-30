@@ -104,10 +104,11 @@ const NON_UNIFORM_FACTORY_LANES: Record<string, string> = {
  * guaranteed failure report (Codex review, PR #227).
  *
  * A real transfer on this transport means redirecting the caller's Twilio
- * leg into a conference and ringing an agent ladder — a feature, not a
- * detail, and one whose destinations are the operator's to set. Until it
- * exists these lanes are refused rather than served with a transfer that
- * cannot work.
+ * leg into a conference — a feature, not a detail, and one whose destinations
+ * are the operator's to set. That feature now exists (`warmTransfer.ts`), so
+ * these lanes are refused only when no handoff is INJECTED. A deployment that
+ * supplies one serves them; one that does not still refuses, rather than
+ * offering a transfer that cannot work.
  */
 const TRANSFER_CAPABLE_LANES = new Set([
   "no-ivr",
@@ -121,14 +122,17 @@ const TRANSFER_CAPABLE_LANES = new Set([
  * Why this runtime cannot serve a lane, or null when it can. Pure, so the
  * reason can be asserted and logged rather than discovered on a live call.
  */
-export function laneSupportStatus(config: LaneConfig): string | null {
+export function laneSupportStatus(
+  config: LaneConfig,
+  opts: { transferAvailable?: boolean } = {},
+): string | null {
   if (config.agentType && config.agentType !== "inbound") {
     return `lane '${config.id}' is an ${config.agentType} agent; this runtime answers inbound calls`;
   }
-  if (TRANSFER_CAPABLE_LANES.has(config.id)) {
+  if (TRANSFER_CAPABLE_LANES.has(config.id) && !opts.transferAvailable) {
     return (
-      `lane '${config.id}' performs a call transfer, which this transport cannot yet do; ` +
-      "serving it would turn a sanctioned transfer into a guaranteed failure"
+      `lane '${config.id}' performs a call transfer and no handoff is configured for this ` +
+      "deployment; serving it would turn a sanctioned transfer into a guaranteed failure"
     );
   }
   const shape = NON_UNIFORM_FACTORY_LANES[config.id];
@@ -197,12 +201,25 @@ async function refuseHandoff(): Promise<void> {
 export async function resolveLane(
   slug: string,
   metadata: LaneCallMetadata,
-  deps: { source: LaneSource; env?: Record<string, string | undefined> },
+  deps: {
+    source: LaneSource;
+    env?: Record<string, string | undefined>;
+    /**
+     * The real transfer, when this deployment has one wired.
+     *
+     * Injected rather than imported so `resolveLane` stays testable without a
+     * Twilio client, and so a deployment with no transfer configured keeps
+     * refusing the lanes that need one instead of serving a broken promise.
+     */
+    handoff?: (metadata: LaneCallMetadata) => () => Promise<void>;
+  },
 ): Promise<ResolvedLane | null> {
   const config = deps.source.getAgentConfig(slug);
   if (!config || !config.enabled) return null;
 
-  const unsupported = laneSupportStatus(config);
+  const unsupported = laneSupportStatus(config, {
+    transferAvailable: Boolean(deps.handoff),
+  });
   if (unsupported) {
     // Refused BEFORE the factory is called: an agent constructed with
     // mis-slotted arguments is worse than one that never answered, because
@@ -216,7 +233,14 @@ export async function resolveLane(
     handoff: () => Promise<void>,
     metadata: LaneCallMetadata,
   ) => unknown;
-  const created = await factory(refuseHandoff, metadata);
+  // A lane that transfers gets the real callback; every other lane keeps the
+  // refusing one, which stays a tripwire it should never trip (optical,
+  // surgery, tech, records and answering-service invoked it 0 times across
+  // the corpus — operator ruling 2026-08-12, standing instruction 9).
+  const handoff = deps.handoff && TRANSFER_CAPABLE_LANES.has(config.id)
+    ? deps.handoff(metadata)
+    : refuseHandoff;
+  const created = await factory(handoff, metadata);
   const agent = created as BorrowableAgent;
 
   const bound = await bindAgent(agent, {

@@ -264,3 +264,83 @@ describe("the cache prefix the whole fleet shares", () => {
     );
   });
 });
+
+describe("a lane that transfers is served only when a handoff is injected", () => {
+  /**
+   * The refusal was never about these lanes being unsuitable — it was that the
+   * transport could not transfer, so serving them would turn a sanctioned
+   * transfer into a guaranteed failure. Now that `warmTransfer.ts` exists, the
+   * refusal has to key on whether THIS deployment wired one, not on the lane.
+   */
+  it("still refuses a transfer-capable lane when no handoff is configured", () => {
+    const reason = laneSupportStatus({ id: "pcp", enabled: true, agentType: "inbound" } as LaneConfig);
+    expect(reason).toMatch(/no handoff is configured/);
+  });
+
+  it("serves the same lane once a handoff is available", () => {
+    const reason = laneSupportStatus(
+      { id: "pcp", enabled: true, agentType: "inbound" } as LaneConfig,
+      { transferAvailable: true },
+    );
+    expect(reason).toBeNull();
+  });
+
+  it("an injected handoff does not excuse a non-uniform factory layout", () => {
+    // after-hours is (handoff, recordPatientInfoCallback, metadata) — a
+    // transfer being available says nothing about argument slots.
+    const reason = laneSupportStatus(
+      { id: "after-hours", enabled: true, agentType: "inbound" } as LaneConfig,
+      { transferAvailable: true },
+    );
+    expect(reason).toMatch(/factory argument layout/);
+  });
+
+  it("an injected handoff does not make an outbound agent inbound", () => {
+    const reason = laneSupportStatus(
+      { id: "fantasy-football", enabled: true, agentType: "outbound" } as LaneConfig,
+      { transferAvailable: true },
+    );
+    expect(reason).toMatch(/answers inbound calls/);
+  });
+
+  it("hands the REAL callback to a transfer-capable lane", async () => {
+    const factory = vi.fn(async (_handoff: () => Promise<void>, _meta: unknown) => fakeAgent());
+    const realHandoff = vi.fn(async () => undefined);
+    await resolveLane("pcp", META, {
+      source: { getAgentConfig: () => ({ id: "pcp", enabled: true, agentType: "inbound", factory }) as LaneConfig },
+      handoff: () => realHandoff,
+    });
+    const passed = factory.mock.calls[0][0];
+    await passed();
+    expect(realHandoff).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the REFUSING callback for a lane that must never transfer", async () => {
+    // Standing instruction 9: optical, surgery, tech, records and
+    // answering-service get no transfer tool at all. The throwing callback is
+    // a tripwire that should never trip — injecting a real transfer for the
+    // whole deployment must not arm it for them.
+    const factory = vi.fn(async (_handoff: () => Promise<void>, _meta: unknown) => fakeAgent());
+    const realHandoff = vi.fn(async () => undefined);
+    await resolveLane("optical", META, {
+      source: { getAgentConfig: () => ({ id: "optical", enabled: true, agentType: "inbound", factory }) as LaneConfig },
+      handoff: () => realHandoff,
+    });
+    const passed = factory.mock.calls[0][0];
+    await expect(passed()).rejects.toThrow(/performs no call transfer/);
+    expect(realHandoff).not.toHaveBeenCalled();
+  });
+
+  it("builds the handoff with this call's metadata, not a shared one", async () => {
+    const seen: unknown[] = [];
+    const factory = vi.fn(async () => fakeAgent());
+    await resolveLane("pcp", META, {
+      source: { getAgentConfig: () => ({ id: "pcp", enabled: true, agentType: "inbound", factory }) as LaneConfig },
+      handoff: (metadata) => {
+        seen.push(metadata);
+        return async () => undefined;
+      },
+    });
+    expect(seen).toEqual([META]);
+  });
+});
