@@ -1967,6 +1967,31 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
     const callerIdAttribute = envConfig.twilio.phoneNumber
       ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
       : '';
+    // The urgent record is filed on this path too — operator mandate
+    // 2026-07-25, every urgent outcome leaves a ticket somebody works — but
+    // fire-and-forget, deliberately. Awaiting it would put silence in front of
+    // "please hold" on a transfer that is already recovering from a dropped
+    // leg, and this helper's own contract is that it must never delay a dial.
+    void fileUrgentHandoffFallbackTicket(
+      recoveredCallId!,
+      escalation,
+      getCallerNumber(conferenceName) || callerCall.from,
+      {
+        why: 'URGENT call lost its assistant leg; caller was dialled directly to the on-call destination.',
+        dialTarget: fallbackNumber,
+      },
+    );
+    // …which is exactly why the line AFTER <Dial> must not promise a callback.
+    // Twilio runs that <Say> on its own side when nobody answers, with this
+    // server out of the loop, so at the moment it is spoken nothing here has
+    // confirmed the ticket landed — the file above is unawaited by design and
+    // the heads-up SMS can no-op silently. `followUpFiled: false` is therefore
+    // the honest input, not a placeholder: say only what is known, and never
+    // tell the caller to call us (Codex review, PR #238; standing
+    // instruction 10). The previous wording here made no promise either — it
+    // told them to call back during business hours, which is the other half of
+    // the same rule.
+    const unansweredSay = urgentTransferFailureLine({ followUpFiled: false });
     await client.calls(callerCallSid).update({
       twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -1974,7 +1999,7 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
   <Dial${callerIdAttribute}>
     <Number>${escapeXml(fallbackNumber)}</Number>
   </Dial>
-  <Say voice="Polly.Joanna">I'm sorry, I could not reach anyone just now. Our on-call team has your request and will call you back. If this is a medical emergency, please hang up and dial nine one one.</Say>
+  <Say voice="Polly.Joanna">${escapeXml(unansweredSay)}</Say>
   <Hangup/>
 </Response>`,
     });
