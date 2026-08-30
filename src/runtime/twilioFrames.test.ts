@@ -21,7 +21,16 @@ describe("parseTwilioInboundFrame — shape, not just event name", () => {
     // customParameters, when present, must be an object.
     expect(
       parseTwilioInboundFrame(
-        '{"event":"start","start":{"callSid":"CA1","customParameters":"tok"}}',
+        '{"event":"start","streamSid":"MZ1","start":{"callSid":"CA1","customParameters":"tok"}}',
+      ),
+    ).toBeNull();
+    // A start with valid credentials but NO top-level streamSid would
+    // consume the one-time claim and then leave every outbound frame
+    // addressed to an invalid stream — an authenticated call that can
+    // never play audio (Codex, PR #227 round 16).
+    expect(
+      parseTwilioInboundFrame(
+        '{"event":"start","start":{"callSid":"CA1","customParameters":{"token":"t"}}}',
       ),
     ).toBeNull();
   });
