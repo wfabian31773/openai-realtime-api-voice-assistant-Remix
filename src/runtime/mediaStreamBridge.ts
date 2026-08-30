@@ -190,6 +190,7 @@ export type CallOutcome =
   | "completed"
   | "caller_hangup"
   | "agent_ended"
+  | "transferred"
   | "provider_failure"
   | "dead_air"
   | "max_duration";
@@ -845,7 +846,10 @@ export class VoiceCallBridge {
     this.deadAirCause = cause;
     this.deadAirTimer = this.setTimer(
       () => this.teardown("dead_air"),
-      (this.deps.deadAirMs ?? DEFAULT_DEAD_AIR_MS) + extraMs,
+      // transferWaitExtraMs joins EVERY window while a transfer attempt is
+      // open — see noteTransferWaitStarting for why it is a state and not
+      // a one-shot extension.
+      (this.deps.deadAirMs ?? DEFAULT_DEAD_AIR_MS) + extraMs + this.transferWaitExtraMs,
     );
   }
 
@@ -881,9 +885,66 @@ export class VoiceCallBridge {
 
   // ── Exactly-once teardown ────────────────────────────────────────────
 
+  /**
+   * A warm transfer is about to replace the caller's stream. The redirect
+   * ENDS the Media Stream, and the resulting stop/close was recorded as
+   * caller_hangup — every successful runtime handoff persisted as an
+   * ordinary hangup with transferred_to_human=false, corrupting exactly
+   * the transfer metrics the migration is judged by (Codex, PR #230
+   * round 2). Armed BEFORE the redirect, because the close can race the
+   * redirect's own resolution; cleared when a redirect fails, so a later
+   * genuine hangup is not mislabeled.
+   */
+  noteTransferStarting(): void {
+    this.transferInFlight = true;
+  }
+
+  noteTransferFailed(): void {
+    this.transferInFlight = false;
+  }
+
+  private transferInFlight = false;
+
+  /**
+   * A transfer attempt began: the handoff runs as an ordinary tool
+   * dispatch, but its legitimate span is the office dial plus the
+   * briefing-and-keypress wait — the accept window, far past any tool
+   * budget. On the tool budget alone the watchdog tore the caller down as
+   * dead_air at 45 seconds and onOutcome abandoned the office leg, so a
+   * staffer who answered near the 40-45s ring limit was disconnected
+   * mid-briefing before they could press a key (Codex, PR #230 round 3).
+   *
+   * The added budget is a STATE, not a one-shot re-arm: the spoken
+   * "connecting you now" line completes mid-wait and its utterance-done
+   * re-arms the watchdog (as does a caller remark), which would shrink
+   * the window straight back to the tool budget. While the wait is open,
+   * every armed window carries the wait's span on top of its own.
+   */
+  noteTransferWaitStarting(expectedWaitMs: number): void {
+    if (this.ended) return;
+    this.transferWaitExtraMs = expectedWaitMs;
+    this.armDeadAir("response", TOOL_DISPATCH_GRACE_MS);
+  }
+
+  /** The attempt settled — accepted, failed, or abandoned. Normal budgets
+   * apply again, and the tool window re-arms fresh: the agent owes the
+   * caller its next words (the failure line, or nothing if the redirect
+   * is already tearing the stream down). */
+  noteTransferWaitSettled(): void {
+    if (this.ended) return;
+    this.transferWaitExtraMs = 0;
+    this.armDeadAir("response", TOOL_DISPATCH_GRACE_MS);
+  }
+
+  private transferWaitExtraMs = 0;
+
   private teardown(outcome: CallOutcome): void {
     if (this.ended) return;
     this.ended = true;
+    // Whatever close event won the race — Twilio's stop frame, the socket
+    // closing, the provider session dying as the stream ends — the caller
+    // was moved to a human on purpose. That is the outcome.
+    if (this.transferInFlight) outcome = "transferred";
 
     if (this.finalFallbackTimer !== null) {
       this.clearTimer(this.finalFallbackTimer);

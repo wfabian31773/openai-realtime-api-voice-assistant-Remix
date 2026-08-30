@@ -15,7 +15,7 @@ import http from "node:http";
 import { z } from "zod";
 import twilio from "twilio";
 import WebSocket from "ws";
-import { mountVoiceRuntime, type RuntimeTransport } from "./voiceRuntime";
+import { mountVoiceRuntime, publicTransferDomain, type RuntimeTransport } from "./voiceRuntime";
 import { CallSessionRegistry } from "./sessionRegistry";
 import type { GrokServerEvent } from "./wireTypes";
 import type { LaneConfig, LaneSource } from "./laneRegistry";
@@ -911,5 +911,23 @@ describe("one whole call, end to end, offline", () => {
     // The shared cache prefix's version, so a cache-rate change can be
     // attributed to a prefix change instead of guessed at.
     expect(body.knowledgePack).toMatch(/^v\d+$/);
+  });
+});
+
+describe("the transfer's public domain", () => {
+  it("a fallback domain is NO domain — localhost can never answer an accept webhook", () => {
+    // resolveAppDomain always answers, falling back to localhost:8000. A
+    // deployment with Twilio credentials but no domain was therefore marked
+    // transfer-ready and dialled office legs whose accept URL Twilio could
+    // never reach — every transfer timed out instead of the lane being
+    // refused (Codex, PR #230).
+    expect(publicTransferDomain({})).toBeUndefined();
+  });
+
+  it("a configured or Replit domain arms it — dev domains are publicly reachable too", () => {
+    expect(publicTransferDomain({ REPLIT_DOMAINS: "azul.replit.app" })).toBe("azul.replit.app");
+    expect(publicTransferDomain({ REPLIT_DEV_DOMAIN: "azul.spock.replit.dev" })).toBe(
+      "azul.spock.replit.dev",
+    );
   });
 });

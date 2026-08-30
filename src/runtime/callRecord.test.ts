@@ -51,6 +51,19 @@ describe("toCallLogRow", () => {
     expect(toCallLogRow(record({ outcome: "max_duration" })).status).toBe("completed");
   });
 
+  it("a transferred call sets transferred_to_human — and ONLY a transferred call", () => {
+    // The column the SIP path writes and the dashboards read; a runtime
+    // handoff recorded as a plain hangup corrupted exactly the transfer
+    // metrics the migration is judged by (Codex, PR #230 round 2).
+    const transferred = toCallLogRow(record({ outcome: "transferred" }));
+    expect(transferred.status).toBe("completed");
+    expect(transferred.transferredToHuman).toBe(true);
+    // Omitted — never false — so this writer cannot erase a transfer a
+    // racing writer recorded.
+    const hangup = toCallLogRow(record({ outcome: "caller_hangup" }));
+    expect("transferredToHuman" in hangup).toBe(false);
+  });
+
   it("still classifies a punt through the status column, without a timeline of its own", () => {
     // The outcome used to ride on a toolTimeline the runtime wrote. That
     // column belongs to the agents' telemetry, so the status column carries

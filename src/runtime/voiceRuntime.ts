@@ -51,6 +51,10 @@ import {
   type GrokTransport,
 } from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
+import { createRuntimeTransfer, TRANSFER_ACCEPT_PATH, TRANSFER_STATUS_PATH } from "./runtimeTransfer";
+import type { TransferTwilioOps } from "./warmTransfer";
+import { resolveAppDomain } from "../config/environment";
+import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
 import {
   handleAfterRedirect,
@@ -165,6 +169,15 @@ export interface VoiceRuntimeOptions {
    * and no xAI account.
    */
   createTransport?: (config: { apiKey: string; model: string }) => RuntimeTransport;
+  /**
+   * Twilio operations for the warm transfer. Injected for tests; when
+   * omitted, a client is built lazily from TWILIO_ACCOUNT_SID/AUTH_TOKEN.
+   * Whether transfers are OFFERED at all is decided by
+   * `transferUnavailableReason` — a deployment missing credentials, a
+   * from-number or a public domain keeps refusing the transfer-capable
+   * lanes exactly as before, with the reason logged once at mount.
+   */
+  transferOps?: TransferTwilioOps;
 }
 
 /** A transport the runtime can open. WebSocketGrokTransport satisfies it. */
@@ -190,6 +203,31 @@ function send(res: Response, out: WebhookResponse): void {
  * never blocks startup on configuration — an unconfigured process still
  * starts, still serves health, and still fails closed at the webhook.
  */
+/**
+ * The public domain transfers may build their accept URL on, or undefined
+ * when this deployment has none.
+ *
+ * `resolveAppDomain` ALWAYS answers, falling back to `localhost:8000` —
+ * which is not a public domain: Twilio can never reach an accept URL on
+ * it, so treating the fallback as proof of a domain marked a deployment
+ * with credentials but no domain transfer-ready, and every transfer
+ * dialled an office leg that timed out instead of the lane being refused
+ * as intended (Codex, PR #230). Production preference uses the same
+ * signal set as the rest of the runtime (callEnvironment), not NODE_ENV
+ * alone (Codex, PR #227 round 21).
+ */
+export function publicTransferDomain(
+  env: Record<string, string | undefined>,
+): string | undefined {
+  const resolved = resolveAppDomain({
+    domain: env.DOMAIN,
+    replitDomains: env.REPLIT_DOMAINS,
+    replitDevDomain: env.REPLIT_DEV_DOMAIN,
+    isProduction: callEnvironment(env) === "production",
+  });
+  return resolved.source === "fallback" ? undefined : resolved.domain;
+}
+
 export function mountVoiceRuntime(
   app: Express,
   server: HttpServer,
@@ -215,6 +253,31 @@ export function mountVoiceRuntime(
   for (const line of formatReadinessLines(computeRuntimeReadiness(env))) {
     console.log(line);
   }
+
+  // The warm transfer. Its availability is decided once, here, and logged —
+  // so "why is no-ivr still refused?" is answered by the boot log, not a
+  // live call. resolveAppDomain is the same resolution the SIP path uses
+  // for its callback URLs, called with raw env so this module never pulls
+  // in the full config (which requires DATABASE_URL at import).
+  const transferDomain = publicTransferDomain(env);
+  const transfer = createRuntimeTransfer({
+    env,
+    ops: options.transferOps,
+    domain: transferDomain,
+  });
+  console.log(
+    transfer.unavailableReason
+      ? `[voice-runtime] ${transfer.unavailableReason} — transfer-capable lanes stay refused`
+      : `[voice-runtime] warm transfer armed (accept: https://${transferDomain}${TRANSFER_ACCEPT_PATH})`,
+  );
+
+  app.post(TRANSFER_ACCEPT_PATH, (req: Request, res: Response) => {
+    send(res, transfer.handleAccept(toWebhookRequest(req)));
+  });
+
+  app.post(TRANSFER_STATUS_PATH, (req: Request, res: Response) => {
+    send(res, transfer.handleStatus(toWebhookRequest(req)));
+  });
 
   app.get("/voice/health", (_req: Request, res: Response) => {
     const readiness = computeRuntimeReadiness(env);
@@ -438,7 +501,35 @@ export function mountVoiceRuntime(
             // what to do with it (Codex review, PR #227).
             ...(precontext ? { precontext } : {}),
           },
-          { source: await laneSource(), env },
+          {
+            source: await laneSource(),
+            env,
+            // Only when this deployment can actually transfer. Otherwise the
+            // transfer-capable lanes keep their refusal, reason logged at
+            // mount — never a handoff that dials nothing.
+            ...(transfer.unavailableReason
+              ? {}
+              : {
+                  handoff: (md) =>
+                    transfer.handoffFor(entry.slug, md, {
+                      // Late-bound on purpose: the handoff is built before
+                      // the bridge exists, and invoked mid-call when it
+                      // does. The mark is what records a successful
+                      // transfer as `transferred` rather than the
+                      // caller_hangup the stream's death looks like
+                      // (Codex, PR #230 round 2).
+                      onCallerRedirectStarting: () => bridge?.noteTransferStarting(),
+                      onCallerRedirectFailed: () => bridge?.noteTransferFailed(),
+                      // The watchdog must span the accept window while the
+                      // office is being dialed and briefed, or the caller
+                      // is torn down as dead_air at the tool budget and
+                      // the office leg abandoned mid-briefing (Codex,
+                      // PR #230 round 3).
+                      onAttemptStarting: (waitMs) => bridge?.noteTransferWaitStarting(waitMs),
+                      onAttemptSettled: () => bridge?.noteTransferWaitSettled(),
+                    }),
+                }),
+          },
         );
         if (!lane) {
           // The webhook let this through unseen and it turned out to be
@@ -568,7 +659,15 @@ export function mountVoiceRuntime(
                 },
               },
             ),
-          onOutcome: (outcome: CallOutcome) => registry.recordOutcome(entry.callSid, outcome),
+          onOutcome: (outcome: CallOutcome) => {
+            registry.recordOutcome(entry.callSid, outcome);
+            // The call is over, whatever ended it: any office leg still
+            // ringing for this caller is abandoned NOW, not after the
+            // accept window — the staffer must not keep ringing toward,
+            // or accept into, a completed leg (Codex, PR #230 round 2).
+            // A successful transfer has no pending legs left; no-op then.
+            transfer.abandonFor(entry.callSid);
+          },
           persistCallRecord: (record) => persistCall(record).then(() => undefined),
         });
         // Connect AFTER the bridge exists: a connection that fails then has
