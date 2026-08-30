@@ -85,6 +85,11 @@ export interface RuntimeCallLogRow {
   interruptionCount: number;
   telemetrySource: "realtime_events";
   environment: string;
+  /** Set ONLY when the outcome is `transferred`: the caller was moved to
+   * a human who accepted. Written as true or omitted — never false — so
+   * a racing writer that recorded a transfer is not overwritten by this
+   * one's omission (Codex, PR #230 round 2). */
+  transferredToHuman?: true;
   /** Present ONLY when the runtime was told — see RuntimeCallIdentity. */
   patientName?: string;
   patientDob?: string;
@@ -116,6 +121,7 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
     telemetrySource: row.telemetrySource,
     voiceProvider: row.voiceProvider,
     runtimeOutcome: row.runtimeOutcome,
+    ...(row.transferredToHuman ? { transferredToHuman: row.transferredToHuman } : {}),
     ...(row.firstTranscriptDelayMs !== undefined
       ? { firstTranscriptDelayMs: row.firstTranscriptDelayMs }
       : {}),
@@ -243,6 +249,10 @@ export function toCallLogRow(
     // distinction the column exists to record.
     telemetrySource: "realtime_events",
     environment: callEnvironment(env),
+    // The transfer column the SIP path writes and the dashboards read.
+    // Omitted (never false) except on a transferred outcome, so this
+    // writer cannot erase a transfer someone else recorded.
+    ...(record.outcome === "transferred" ? { transferredToHuman: true as const } : {}),
     // Omitted entirely when unknown rather than written as null: the queue
     // agents' own stampVerifiedIdentity may already have set these during
     // the call, and a null would erase what it learned.
