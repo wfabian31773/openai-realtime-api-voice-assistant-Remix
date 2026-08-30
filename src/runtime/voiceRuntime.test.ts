@@ -17,6 +17,7 @@ import twilio from "twilio";
 import WebSocket from "ws";
 import { mountVoiceRuntime, publicTransferDomain, type RuntimeTransport } from "./voiceRuntime";
 import { CallSessionRegistry } from "./sessionRegistry";
+import { transferDestinationStatus, transferUnavailableReason } from "./runtimeTransfer";
 import type { GrokServerEvent } from "./wireTypes";
 import type { LaneConfig, LaneSource } from "./laneRegistry";
 
@@ -132,6 +133,7 @@ async function harness(
     fetchPrecontext?: (phone: string) => Promise<unknown>;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
     callRowDeadlineMs?: number;
+    env?: Record<string, string | undefined>;
   } = {},
 ): Promise<Harness> {
   const app = express();
@@ -142,7 +144,7 @@ async function harness(
   const openedRows: Array<Record<string, unknown>> = [];
   const persisted: Array<Record<string, unknown>> = [];
   mountVoiceRuntime(app, server, {
-    env: ENV,
+    env: over.env ?? ENV,
     // Short so the deadline test does not wait on a production-length one.
     streamClaimDeadlineMs: 300,
     registry,
@@ -904,6 +906,8 @@ describe("one whole call, end to end, offline", () => {
       knowledgePack: string;
       liveReady: boolean;
       missing: string[];
+      transferReady: boolean;
+      transferBlockedBy: string | null;
     };
     expect(body.marker).toMatch(/^voice-runtime-/);
     expect(body.liveReady).toBe(true);
@@ -911,6 +915,107 @@ describe("one whole call, end to end, offline", () => {
     // The shared cache prefix's version, so a cache-rate change can be
     // attributed to a prefix change instead of guessed at.
     expect(body.knowledgePack).toMatch(/^v\d+$/);
+  });
+
+  it("reports transfer readiness separately, and names what blocks it", async () => {
+    // liveReady covers answering a call, NOT transferring one — a
+    // deployment with no transfer config is genuinely ready for every
+    // non-transfer lane. But `liveReady: true` reads as "everything
+    // works", and the difference used to appear only in the boot log, so
+    // checking whether a warm transfer could succeed at all needed shell
+    // access to the running deployment.
+    const h = await harness();
+    const res = await fetch(`${h.base}/voice/health`);
+    const body = (await res.json()) as {
+      liveReady: boolean;
+      transferReady: boolean;
+      transferBlockedBy: string | null;
+    };
+    // The harness configures no Twilio number or domain, so transfers are
+    // unavailable even though the runtime is otherwise live-ready.
+    expect(body.liveReady).toBe(true);
+    expect(body.transferReady).toBe(false);
+    // NAMES, never values — the same rule `missing` follows.
+    expect(body.transferBlockedBy).toContain("missing");
+    expect(body.transferBlockedBy).not.toMatch(/AC[0-9a-f]{6,}|\+1\d{10}/);
+  });
+
+  it("an armed transport with nowhere to dial reports NOT ready, through the endpoint", async () => {
+    // The scenario end to end, not just the pure helpers: transport fully
+    // configured, no destination number anywhere. The boot log says
+    // "warm transfer armed" in this state, so health is the only place
+    // that can tell you every transfer will still fail (Codex, PR #236).
+    const h = await harness({
+      env: {
+        ...ENV,
+        TWILIO_ACCOUNT_SID: "ACxxx",
+        TWILIO_PHONE_NUMBER: "+15550000000",
+        DOMAIN: "runtime.example.test",
+      },
+    });
+    const body = (await (await fetch(`${h.base}/voice/health`)).json()) as {
+      transferReady: boolean;
+      transferBlockedBy: string | null;
+      transferDestinations: { clinical: boolean; pcp: boolean };
+    };
+    expect(body.transferReady).toBe(false);
+    expect(body.transferBlockedBy).toContain("no destination configured");
+    expect(body.transferBlockedBy).toContain("HUMAN_AGENT_NUMBER");
+    expect(body.transferDestinations).toEqual({ clinical: false, pcp: false });
+  });
+
+  it("an armed transport WITH a destination is transfer-ready", async () => {
+    const h = await harness({
+      env: {
+        ...ENV,
+        TWILIO_ACCOUNT_SID: "ACxxx",
+        TWILIO_PHONE_NUMBER: "+15550000000",
+        DOMAIN: "runtime.example.test",
+        HUMAN_AGENT_NUMBER: "+18185551234",
+      },
+    });
+    const body = (await (await fetch(`${h.base}/voice/health`)).json()) as {
+      transferReady: boolean;
+      transferBlockedBy: string | null;
+      transferDestinations: { clinical: boolean; pcp: boolean };
+    };
+    expect(body.transferReady).toBe(true);
+    expect(body.transferBlockedBy).toBeNull();
+    // Per lane: clinical can dial, pcp still cannot — and that is a
+    // working deployment for the no-IVR family, not a broken one.
+    expect(body.transferDestinations).toEqual({ clinical: true, pcp: false });
+    // Still names only, never the numbers.
+    expect(JSON.stringify(body)).not.toContain("8185551234");
+  });
+
+  it("an armed transport with nowhere to dial is NOT transfer-ready", () => {
+    // The transport can be fully configured while no destination number
+    // is set, and then every transfer still fails at
+    // resolveHandoffDestination. Reporting that as ready defeats the
+    // whole point of the field — it is exactly the partial deployment it
+    // exists to catch (Codex, PR #236).
+    const armed = { TWILIO_ACCOUNT_SID: "ACx", TWILIO_AUTH_TOKEN: "t", TWILIO_PHONE_NUMBER: "+15550000000" };
+    expect(transferUnavailableReason(armed, { hasInjectedOps: false, domain: "host.test" })).toBeNull();
+
+    const none = transferDestinationStatus(armed);
+    expect(none).toMatchObject({ clinical: false, pcp: false });
+    expect(none.missing).toEqual(["HUMAN_AGENT_NUMBER", "PCP_HUMAN_AGENT_NUMBER"]);
+  });
+
+  it("reports destinations per LANE, because one can work while the other cannot", () => {
+    // The no-IVR family dials HUMAN_AGENT_NUMBER and pcp dials
+    // PCP_HUMAN_AGENT_NUMBER. Folding these into the mount-time gate
+    // would take a WORKING lane down because the other lane's number is
+    // absent, so this is reporting only.
+    const clinicalOnly = transferDestinationStatus({ HUMAN_AGENT_NUMBER: "+18185551234" });
+    expect(clinicalOnly).toMatchObject({ clinical: true, pcp: false });
+    expect(clinicalOnly.missing).toEqual(["PCP_HUMAN_AGENT_NUMBER"]);
+
+    const pcpOnly = transferDestinationStatus({ PCP_HUMAN_AGENT_NUMBER: "+17149564300" });
+    expect(pcpOnly).toMatchObject({ clinical: false, pcp: true });
+
+    // Whitespace is not a number.
+    expect(transferDestinationStatus({ HUMAN_AGENT_NUMBER: "   " }).clinical).toBe(false);
   });
 });
 
