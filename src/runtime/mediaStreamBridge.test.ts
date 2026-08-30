@@ -796,6 +796,64 @@ describe("VoiceCallBridge — dead-air watchdog", () => {
     expect(h.timers.fire(30_000)).toBe(true);
     expect(h.outcomes).toEqual(["dead_air"]);
   });
+
+  it("a transfer wait widens the watchdog to span the accept window — 45s tears down a live dial", () => {
+    // The handoff runs as an ordinary tool dispatch, but its legitimate
+    // span is the office dial plus the briefing-and-keypress wait. On the
+    // tool budget alone the bridge recorded dead_air at 45 seconds and
+    // onOutcome abandoned the office leg — a staffer who answered near
+    // the 40-45s ring limit was disconnected mid-briefing before they
+    // could press a key (Codex, PR #230 round 3).
+    const h = makeBridge({
+      deadAirMs: 30_000,
+      agent: makeAgent({ dispatch: () => new Promise(() => {}) as never }),
+    });
+    h.handlers().onSpeechStopped();
+    h.newResponse();
+    h.handlers().onToolCall("c1", "transfer_to_office", {});
+    h.bridge.noteTransferWaitStarting(120_000);
+    // The tool window alone must NOT fire…
+    expect(h.timers.fire(30_000 + TOOL_DISPATCH_GRACE_MS)).toBe(false);
+    // …the armed window carries the wait's span on top of the tool's.
+    expect(h.timers.fire(30_000 + TOOL_DISPATCH_GRACE_MS + 120_000)).toBe(true);
+    // A budget, never immunity: a wait that exhausts even that is dead air.
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
+
+  it("the widened budget survives the spoken 'connecting you' line completing mid-wait", () => {
+    // The utterance-done re-arm for a still-pending tool would otherwise
+    // shrink the window straight back to the 45-second tool budget — the
+    // wait's span must be a state on the bridge, not a one-shot re-arm.
+    const h = makeBridge({
+      deadAirMs: 30_000,
+      agent: makeAgent({ dispatch: () => new Promise(() => {}) as never }),
+    });
+    h.newResponse();
+    h.handlers().onToolCall("c1", "transfer_to_office", {});
+    h.bridge.noteTransferWaitStarting(120_000);
+    h.handlers().onAgentTranscriptDelta("One moment while I connect you.");
+    h.handlers().onAudioDelta(b64(400));
+    h.handlers().onAudioDone("One moment while I connect you.");
+    expect(h.timers.fire(30_000 + TOOL_DISPATCH_GRACE_MS)).toBe(false);
+    expect(h.timers.fire(30_000 + TOOL_DISPATCH_GRACE_MS + 120_000)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
+
+  it("a settled attempt restores the normal budget — the failure line is owed on the model's clock", () => {
+    const h = makeBridge({
+      deadAirMs: 30_000,
+      agent: makeAgent({ dispatch: () => new Promise(() => {}) as never }),
+    });
+    h.newResponse();
+    h.handlers().onToolCall("c1", "transfer_to_office", {});
+    h.bridge.noteTransferWaitStarting(120_000);
+    h.bridge.noteTransferWaitSettled();
+    // The wait is over: the widened window is gone and the plain tool
+    // window is what stands between the caller and dead air again.
+    expect(h.timers.fire(30_000 + TOOL_DISPATCH_GRACE_MS + 120_000)).toBe(false);
+    expect(h.timers.fire(30_000 + TOOL_DISPATCH_GRACE_MS)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
 });
 
 describe("VoiceCallBridge — a transfer is not a hangup", () => {
