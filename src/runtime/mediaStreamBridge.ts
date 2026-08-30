@@ -300,6 +300,9 @@ export interface BridgeSessionHandlers {
   onAudioDone: (transcript?: string) => void;
   onSpeechStarted: () => void;
   onSpeechStopped: () => void;
+  /** The carrying response finished delivering everything — the boundary
+   * the post-tool follow-up waits for. */
+  onResponseDone: () => void;
   onCallerTranscript: (transcript: string, itemId?: string) => void;
   onError: (err: Error) => void;
   onClosed: () => void;
@@ -380,6 +383,7 @@ export class VoiceCallBridge {
       onAudioDone: (transcript) => this.handleAudioDone(transcript),
       onSpeechStarted: () => this.handleCallerSpeechStarted(),
       onSpeechStopped: () => this.handleCallerSpeechStopped(),
+      onResponseDone: () => this.handleResponseDone(),
       onCallerTranscript: (text, itemId) => {
         if (this.ended) return;
         this.noteTranscript("caller");
@@ -810,27 +814,53 @@ export class VoiceCallBridge {
    * two wrong things: each extra queued request released another
    * unsolicited reply after the first one's `response.done`, and a slower
    * tool could see the first reply begin before its output existed
-   * (Codex review, PR #227 round 14). Responses are serial on this wire, so
-   * the counter only ever tracks one turn's calls.
+   * (Codex review, PR #227 round 14).
+   *
+   * Counting settled dispatches is NOT enough on its own: a fast first
+   * tool can settle before the wire has even delivered the next
+   * function-call event of the SAME response, so the count touches zero
+   * twice and queues two follow-ups again (Codex review, PR #227
+   * round 17). The response boundary is the only proof everything the
+   * response carries has arrived — so the follow-up also waits for the
+   * carrying response's `response.done`. Responses are serial on this
+   * wire, so one flag and one counter only ever describe one turn.
    */
   private pendingToolCalls = 0;
   private followUpOwed = false;
+  private awaitingToolResponseDone = false;
 
-  /** One tool answered. When it was the LAST one outstanding and any of
-   * them owed a reply, ask for exactly one follow-up. */
+  /** One tool answered. Records what is owed; the request itself fires
+   * only when the LAST outstanding tool has settled AND the carrying
+   * response has finished delivering. */
   private toolCallSettled(owesFollowUp: boolean): void {
     this.pendingToolCalls = Math.max(0, this.pendingToolCalls - 1);
     if (owesFollowUp) this.followUpOwed = true;
-    if (this.pendingToolCalls === 0 && this.followUpOwed) {
-      this.followUpOwed = false;
-      // A termination the guards allowed is already arming the hangup on
-      // the goodbye's mark; a follow-up would speak over that gate.
-      if (!this.endRequested) this.session.requestResponse();
-    }
+    this.maybeRequestFollowUp();
+  }
+
+  /** The wire finished delivering a response — every function call it
+   * carried has been observed by now. */
+  private handleResponseDone(): void {
+    if (this.ended) return;
+    this.awaitingToolResponseDone = false;
+    this.maybeRequestFollowUp();
+  }
+
+  private maybeRequestFollowUp(): void {
+    if (this.pendingToolCalls !== 0 || !this.followUpOwed) return;
+    if (this.awaitingToolResponseDone) return;
+    this.followUpOwed = false;
+    // A termination the guards allowed is already arming the hangup on
+    // the goodbye's mark; a follow-up would speak over that gate.
+    if (!this.endRequested) this.session.requestResponse();
   }
 
   private handleToolCall(callId: string, name: string, args: Record<string, unknown>): void {
     if (this.ended) return;
+    // Function-call events precede their response's `response.done` on the
+    // ordered wire, so at this moment the carrying response is still
+    // delivering — arm the boundary wait for this turn.
+    this.awaitingToolResponseDone = true;
     this.pendingToolCalls += 1;
     // Every tool call must be answered or the turn stalls forever, so the
     // dispatch that answers it is the one that never throws (agentBinding).
