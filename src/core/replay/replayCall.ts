@@ -124,27 +124,11 @@ function simulatedSchedulingServices(
   };
 }
 
-const COMPARABLE = new Set([
-  'handoff_expected_vs_actual',
-  'ticket_required_vs_created',
-  'question_repetition',
-  'human_request_deflection',
-  'language_config_fault',
-  'emergency_handling',
-  'medical_advice_guardrail',
-  'provider_must_escalate',
-  'actionable_request_needs_ticket',
-  'callback_fields_completeness',
-  'tail_safety',
-]);
-
-
-function criticalsOf(graders: GraderResult[] | undefined | null): string[] {
-  return (graders ?? [])
-    .filter((g) => COMPARABLE.has(g.grader))
-    .filter((g) => g.pass === false && ((g as { severity?: string }).severity === 'critical' || (g.metadata as { critical?: boolean } | undefined)?.critical === true))
-    .map((g) => g.grader);
-}
+// Moved to ./comparable so the list is importable without the database this
+// module (via CallGradingService) opens at load. Re-exported for existing
+// importers.
+import { COMPARABLE, criticalsOf } from './comparable';
+export { COMPARABLE, criticalsOf };
 
 function simulatedServices(row: CorpusRow, filed: TicketInput[]): TicketLineServices {
   return {
