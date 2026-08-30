@@ -70,11 +70,37 @@ export interface ToolDispatchResult {
   error?: string;
 }
 
+/**
+ * An output guardrail as the agents declare them — structurally identical to
+ * the SDK's `RealtimeOutputGuardrail`, typed locally so the runtime does not
+ * import agent-SDK types. Each is a pure predicate over the agent's spoken
+ * text; `execute` never sees audio and never touches the wire.
+ */
+export interface OutputGuardrail {
+  name: string;
+  /** Guidance for the corrective turn when this trips. Never spoken verbatim. */
+  policyHint?: string;
+  execute(input: {
+    agentOutput: string;
+  }): Promise<{ tripwireTriggered: boolean; outputInfo?: unknown }>;
+}
+
 export interface BoundAgent {
   /** The agent's own system prompt, verbatim. */
   instructions: string;
   /** The agent's tools in Grok wire form. */
   tools: GrokToolDefinition[];
+  /**
+   * The agent's own output guardrails, verbatim — the same objects the SDK
+   * would run on the SIP path. Four agents set them (pcpAgent: no diagnosis /
+   * no medication advice / no unverified disclosure; noIvrAgent, noIvrAgentV2,
+   * azulSchedulingAgent: medicalSafetyGuardrails), and every one of those is
+   * a transfer-capable lane — exactly the lanes the transfer work makes
+   * servable. Borrowing instructions and tools but not these would put the
+   * medical-facing agents on a transport where their safety rules silently
+   * do not exist.
+   */
+  guardrails: OutputGuardrail[];
   /** Names offered to the model — the allow-list `dispatch` enforces. */
   toolNames: string[];
   /** Tools the agent declared but that cannot be offered (no name, or no
@@ -207,9 +233,25 @@ export async function bindAgent(
   const byName = new Map<string, LiveTool>();
   for (const t of live) if (t?.name && typeof t.invoke === 'function') byName.set(t.name, t);
 
+  // Borrowed exactly as declared — a malformed entry is dropped rather than
+  // crashing the call, but never silently: it is the same "surfaced, not
+  // swallowed" rule the skipped-tools list follows.
+  const declaredGuardrails = (agent as { outputGuardrails?: unknown }).outputGuardrails;
+  const guardrails: OutputGuardrail[] = (
+    Array.isArray(declaredGuardrails) ? declaredGuardrails : []
+  ).filter((g): g is OutputGuardrail => {
+    const ok =
+      Boolean(g) &&
+      typeof (g as OutputGuardrail).name === 'string' &&
+      typeof (g as OutputGuardrail).execute === 'function';
+    if (!ok) console.warn('[agentBinding] dropped a malformed output guardrail', g);
+    return ok;
+  });
+
   return {
     instructions,
     tools: defs,
+    guardrails,
     toolNames: defs.map((d) => d.name),
     skipped,
     async dispatch(name: string, args: Record<string, unknown>): Promise<ToolDispatchResult> {
