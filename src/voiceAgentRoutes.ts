@@ -1969,7 +1969,11 @@ async function transferConferenceToNumber(
     const acceptUrl = `https://${envConfig.domain}/api/voice/warm-transfer-accept`;
     const statusUrl = `https://${envConfig.domain}/api/voice/warm-transfer-status`;
     const amdUrl = `https://${envConfig.domain}/api/voice/warm-transfer-amd`;
-    const say = escapeXml(briefing.slice(0, 800));
+    // RAW, not escapeXml'd: buildWarmTransferScript escapes its `say`
+    // itself, and escaping here too turned "Smith & Jones" into
+    // "&amp;amp;" — Twilio then SPEAKS the entity text in the briefing
+    // (Codex, PR #230).
+    const say = briefing.slice(0, 800);
     // The second Gather uses actionOnEmptyResult so that staff who simply
     // listen to the briefing and say nothing are STILL connected. Previously
     // A KEYPRESS IS THE ONLY WAY TO ACCEPT, and the press prompt bookends the

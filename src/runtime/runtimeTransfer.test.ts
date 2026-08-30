@@ -166,6 +166,64 @@ describe("the whole transfer, side channel to bridge", () => {
   });
 });
 
+describe("per-lane handoff contracts (Codex, PR #230)", () => {
+  it("pcp resolves a STRUCTURED success — createPcpAgent reads outcome.ok, and a void resolve records a connected caller as FAILED", async () => {
+    // Pin the clock to 10:00 Pacific: the pcp policy branch has a
+    // wall-clock lunch-closure gate, and this test is about the outcome
+    // shape, not the hour.
+    vi.useFakeTimers({ now: new Date("2026-08-30T17:00:00Z"), toFake: ["Date"] });
+    try {
+      const { ops, redirected } = fakeOps();
+      const transfer = transferWith(ops);
+      escalationDetailsMap.set("CAcaller", {
+        agentSlug: "pcp",
+        callerRequestedHuman: true,
+        providerInfo: "Care coordinator at Optum Clinic",
+        reason: "Peer to peer",
+      });
+      const outcome = transfer.handoffFor("pcp", META)();
+      await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+      transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
+      await expect(outcome).resolves.toMatchObject({
+        ok: true,
+        destination: "+17149564300",
+      });
+      expect(redirected).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("pcp gets a failure as DATA, never a throw — a throw skips the post-dial ticket update", async () => {
+    const { ops, dialed } = fakeOps();
+    const transfer = transferWith(ops);
+    // No side-channel entry: the pcp policy refuses, nothing is dialled,
+    // and the tool still needs the structured refusal to record.
+    const outcome = await transfer.handoffFor("pcp", META)();
+    expect(outcome).toMatchObject({ ok: false, status: "HANDOFF_UNAVAILABLE" });
+    expect(dialed).toEqual([]);
+  });
+
+  it("clears the escalation side channel after the attempt, win or lose", async () => {
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    // Lose: the policy refuses, and the entry is still cleared — call IDs
+    // are unique, so a kept entry retains name, DOB, callback number and
+    // symptoms in a process-wide map forever (Codex, PR #230).
+    escalationDetailsMap.set("CAcaller", { reason: "kept PHI" });
+    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow(/handoff_failed/);
+    expect(escalationDetailsMap.has("CAcaller")).toBe(false);
+
+    // Win: cleared after the bridge too.
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+    expect(escalationDetailsMap.has("CAcaller")).toBe(false);
+  });
+});
+
 describe("availability is decided by configuration, not hope", () => {
   it("names every missing piece", () => {
     const reason = transferUnavailableReason({}, { hasInjectedOps: false });

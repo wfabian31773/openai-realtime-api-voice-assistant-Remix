@@ -26,8 +26,8 @@
 import { escalationDetailsMap } from "../services/escalationStore";
 import { resolveHandoffDestination } from "../services/handoffPolicy";
 import { buildPcpTransferBriefing } from "../services/warmTransferBriefing";
-import { ACCEPT_WINDOW_MS, conferenceNameFor, handoffCallbackFor } from "./warmTransfer";
-import type { TransferTwilioOps } from "./warmTransfer";
+import { ACCEPT_WINDOW_MS, conferenceNameFor, performWarmTransfer } from "./warmTransfer";
+import type { TransferOutcome, TransferTwilioOps } from "./warmTransfer";
 import { TransferAcceptRegistry } from "./transferAccepts";
 import { createTransferTwilioOps, type MinimalTwilioClient } from "./transferTwilioOps";
 import { handleTransferAccept } from "./transferAcceptWebhook";
@@ -51,8 +51,14 @@ export interface RuntimeTransfer {
    * non-null, voiceRuntime must NOT pass a handoff to resolveLane, so the
    * transfer-capable lanes keep being refused rather than served broken. */
   unavailableReason: string | null;
-  /** Builds the per-call handoff for a transfer-capable lane. */
-  handoffFor(slug: string, metadata: LaneCallMetadata): () => Promise<void>;
+  /** Builds the per-call handoff for a transfer-capable lane, in that
+   * lane's OWN contract: the no-ivr family awaits a void callback that
+   * throws a fixed slug on failure, while pcp receives a STRUCTURED
+   * HandoffOutcome and no throw at all — its tool records the result on
+   * the ticket either way, a throw skips that post-dial update, and a
+   * bare void resolve reads as `ok: false` and records an
+   * already-connected caller as FAILED (Codex, PR #230). */
+  handoffFor(slug: string, metadata: LaneCallMetadata): () => Promise<unknown>;
   /** The accept webhook body, for voiceRuntime to mount at TRANSFER_ACCEPT_PATH. */
   handleAccept(req: WebhookRequest): WebhookResponse;
   /** For health reporting. */
@@ -109,6 +115,39 @@ function defaultOps(
   };
 }
 
+/**
+ * PCP's `HandoffCallback` result vocabulary (pcpAgent.ts), mapped from the
+ * transfer's own. NO_ANSWER and DECLINED both mean nobody accepted the
+ * office leg; UNAVAILABLE (policy refused, or no destination configured)
+ * is PCP's HANDOFF_UNAVAILABLE. The destination rides along on failure
+ * too — 46 of 46 failed PCP handoffs in the 90 days to 2026-08-13
+ * recorded no destination, which is why "were we dialling the retired
+ * roster?" is unanswerable from the data (pcpAgent's own comment).
+ */
+export function toPcpHandoffOutcome(
+  outcome: TransferOutcome,
+):
+  | { ok: true; destination?: string }
+  | {
+      ok: false;
+      status: "HANDOFF_UNAVAILABLE" | "NO_ANSWER" | "FAILED";
+      reason?: string;
+      destination?: string;
+    } {
+  if (outcome.ok) return { ok: true, destination: outcome.destination };
+  return {
+    ok: false,
+    status:
+      outcome.status === "UNAVAILABLE"
+        ? "HANDOFF_UNAVAILABLE"
+        : outcome.status === "FAILED"
+          ? "FAILED"
+          : "NO_ANSWER",
+    reason: outcome.reason,
+    destination: outcome.destination,
+  };
+}
+
 /** Who is calling and why, from the agent's own side-channel write. */
 export function briefingFor(
   slug: string,
@@ -151,9 +190,9 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
   return {
     unavailableReason,
 
-    handoffFor(slug: string, metadata: LaneCallMetadata): () => Promise<void> {
-      return handoffCallbackFor(
-        () => {
+    handoffFor(slug: string, metadata: LaneCallMetadata): () => Promise<unknown> {
+      const attempt = async (): Promise<TransferOutcome> => {
+        try {
           // Read at INVOKE time, not build time: the agent's escalate tool
           // writes the side channel during the call, after the factory ran.
           const details = escalationDetailsMap.get(metadata.callId);
@@ -167,26 +206,50 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           if (!policy.allowed) {
             log(`[runtime-xfer] policy refused ${slug}/${metadata.callId}: ${policy.reason}`);
           }
-          return {
-            callerCallSid: metadata.callSid,
-            destination: policy.allowed ? policy.destination : null,
-            briefing: briefingFor(slug, metadata, details),
-          };
-        },
-        {
-          twilio: ops,
-          awaitAccept: (officeCallSid) => {
-            officeConferences.set(officeCallSid, conferenceNameFor(metadata.callSid));
-            return accepts
-              .waitFor(officeCallSid)
-              .finally(() => officeConferences.delete(officeCallSid));
-          },
-          acceptUrl,
-          fromNumber: env.TWILIO_PHONE_NUMBER ?? "",
-          callerId: env.TWILIO_PHONE_NUMBER,
-          log,
-        },
-      );
+          return await performWarmTransfer(
+            {
+              callerCallSid: metadata.callSid,
+              destination: policy.allowed ? policy.destination : null,
+              briefing: briefingFor(slug, metadata, details),
+            },
+            {
+              twilio: ops,
+              awaitAccept: (officeCallSid) => {
+                officeConferences.set(officeCallSid, conferenceNameFor(metadata.callSid));
+                return accepts
+                  .waitFor(officeCallSid)
+                  .finally(() => officeConferences.delete(officeCallSid));
+              },
+              acceptUrl,
+              fromNumber: env.TWILIO_PHONE_NUMBER ?? "",
+              callerId: env.TWILIO_PHONE_NUMBER,
+              log,
+            },
+          );
+        } finally {
+          // The SIP path clears its side channel after the attempt; the
+          // runtime must too. Call IDs are unique, so a kept entry retains
+          // the caller's name, DOB, callback number and symptoms in a
+          // process-wide map FOREVER — unbounded growth and long-lived PHI
+          // in one leak (Codex, PR #230). A retried escalation rewrites
+          // the entry before invoking the callback again, so deleting per
+          // attempt loses nothing.
+          escalationDetailsMap.delete(metadata.callId);
+        }
+      };
+      if (slug === "pcp") {
+        // See handoffFor's interface doc: PCP records the STRUCTURED
+        // outcome on its ticket, success or failure — never a throw.
+        return async () => toPcpHandoffOutcome(await attempt());
+      }
+      return async () => {
+        const outcome = await attempt();
+        if (!outcome.ok) {
+          // A fixed slug, because the text reaches the model — the
+          // detailed reason stays in the server log (warmTransfer.ts).
+          throw new Error(`handoff_failed:${outcome.status}`);
+        }
+      };
     },
 
     handleAccept(req: WebhookRequest): WebhookResponse {
