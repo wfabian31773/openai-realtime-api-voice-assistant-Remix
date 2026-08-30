@@ -22,6 +22,9 @@ export interface MinimalTwilioClient {
       from: string;
       twiml: string;
       timeout?: number;
+      statusCallback?: string;
+      statusCallbackMethod?: string;
+      statusCallbackEvent?: string[];
     }): Promise<{ sid: string }>;
     (sid: string): {
       update(opts: { twiml?: string; status?: string }): Promise<unknown>;
@@ -43,8 +46,24 @@ export function createTransferTwilioOps(
 ): TransferTwilioOps {
   const log = opts.log ?? ((line: string) => console.log(line));
   return {
-    async createOfficeLeg({ to, from, twiml, timeoutSeconds }) {
-      const created = await client.calls.create({ to, from, twiml, timeout: timeoutSeconds });
+    async createOfficeLeg({ to, from, twiml, timeoutSeconds, statusCallbackUrl }) {
+      const created = await client.calls.create({
+        to,
+        from,
+        twiml,
+        timeout: timeoutSeconds,
+        // The terminal status is what settles a dial that dies without
+        // ever accepting — no-answer, busy, failed — so the caller's
+        // agent learns immediately instead of waiting out the whole
+        // accept window (Codex, PR #230 round 2).
+        ...(statusCallbackUrl
+          ? {
+              statusCallback: statusCallbackUrl,
+              statusCallbackMethod: "POST",
+              statusCallbackEvent: ["completed"],
+            }
+          : {}),
+      });
       return { sid: created.sid };
     },
 
