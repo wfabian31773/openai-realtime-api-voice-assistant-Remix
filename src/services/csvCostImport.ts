@@ -460,7 +460,7 @@ export async function generateAuditReport(csvContent: string): Promise<AuditRepo
   let perCallTotalCents = 0;
   const perCallByDate: Record<string, number> = {};
   for (const dateStr of dates) {
-    const cents = await storage.getEstimatedOpenaiCostForDate(dateStr);
+    const cents = await storage.getOpenaiBilledEstimateForDate(dateStr);
     perCallByDate[dateStr] = cents / 100;
     perCallTotalCents += cents;
   }

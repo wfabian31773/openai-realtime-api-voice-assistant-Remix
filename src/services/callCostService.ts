@@ -1,5 +1,5 @@
 import { getTwilioClient } from '../lib/twilioClient';
-import { priceVoiceCall, OPENAI_COST_CENTS_PER_SECOND } from "./voiceCostRates";
+import { priceVoiceCall, isGrokServedCall, OPENAI_COST_CENTS_PER_SECOND } from "./voiceCostRates";
 import { storage } from '../../server/storage';
 import OpenAI from 'openai';
 import { MODEL_PRICING, getModelPricing } from './modelPricing';
@@ -894,12 +894,13 @@ export class CallCostService {
       console.info(`[RECONCILIATION] Starting daily reconciliation for ${dateStr}`);
 
       // 1. Sum our calculated OpenAI costs for the day
-      const calls = await db
+      const allCalls = await db
         .select({
           id: callLogs.id,
           openaiCostCents: callLogs.openaiCostCents,
           costIsEstimated: callLogs.costIsEstimated,
           duration: callLogs.duration,
+          voiceProvider: callLogs.voiceProvider,
         })
         .from(callLogs)
         .where(
@@ -911,6 +912,11 @@ export class CallCostService {
           )
         );
 
+      // This total is compared against OpenAI's Usage API below, so a
+      // Grok-served call's xAI charge must not be in it — it would read as a
+      // phantom OpenAI discrepancy on exactly the days the migration is
+      // judged (Codex, PR #227 round 11). Same predicate pricing uses.
+      const calls = allCalls.filter((c) => !isGrokServedCall(c));
       const ourTotalCents = calls.reduce((sum, c) => sum + (c.openaiCostCents || 0), 0);
 
       // 2. Fetch OpenAI's reported costs for the day

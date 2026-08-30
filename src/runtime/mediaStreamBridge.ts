@@ -382,7 +382,7 @@ export class VoiceCallBridge {
       onSpeechStopped: () => this.handleCallerSpeechStopped(),
       onCallerTranscript: (text, itemId) => {
         if (this.ended) return;
-        this.noteTranscript();
+        this.noteTranscript("caller");
         this.transcriptLog.callerCompleted(text, itemId);
       },
       onError: (err) => this.handleSessionFailure(err),
@@ -629,17 +629,29 @@ export class VoiceCallBridge {
     });
   }
 
-  /** Stamp the first and last transcript arrival — the two ends of the
-   * window the latency and tail-safety graders measure. */
-  private noteTranscript(): void {
+  /**
+   * Stamp the transcript-timing window the latency and tail graders read.
+   *
+   * FIRST is caller-only: `first_transcript_delay_ms` is defined as "ms from
+   * session start to first CALLER transcript" (shared/schema.ts), and on
+   * every normal call the agent's greeting completes before the caller says
+   * a word — so letting the greeting open the window scores greeting
+   * generation instead of caller transcription, and the documented cutover
+   * metric reads systematically optimistic (Codex, PR #227 round 11).
+   * LAST is any-kind: the tail window measures silence after the final
+   * words, whoever spoke them.
+   */
+  private noteTranscript(source: "caller" | "agent"): void {
     const now = Date.now();
-    if (this.firstTranscriptAtMs === undefined) this.firstTranscriptAtMs = now;
+    if (source === "caller" && this.firstTranscriptAtMs === undefined) {
+      this.firstTranscriptAtMs = now;
+    }
     this.lastTranscriptAtMs = now;
   }
 
   private handleAudioDone(transcript?: string): void {
     if (this.ended) return;
-    this.noteTranscript();
+    this.noteTranscript("agent");
     const epoch = this.session.getResponseEpoch();
     if (this.cancelledEpoch !== null && epoch === this.cancelledEpoch) {
       // A cancelled utterance's late completion delivers nothing that was
@@ -910,11 +922,14 @@ export class VoiceCallBridge {
         interruptions: this.interruptions,
         startedAtMs: this.startedAtMs,
         endedAtMs: Date.now(),
+        // Independently: a greeting-only call has no caller-latency number
+        // (first stays absent, never fabricated) but its tail window — from
+        // the last words spoken to session end — is still real.
         ...(this.firstTranscriptAtMs !== undefined
-          ? {
-              firstTranscriptAtMs: this.firstTranscriptAtMs,
-              lastTranscriptAtMs: this.lastTranscriptAtMs,
-            }
+          ? { firstTranscriptAtMs: this.firstTranscriptAtMs }
+          : {}),
+        ...(this.lastTranscriptAtMs !== undefined
+          ? { lastTranscriptAtMs: this.lastTranscriptAtMs }
           : {}),
       };
       void persist(record).catch(() => {
