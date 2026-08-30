@@ -52,6 +52,7 @@ import {
 } from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
 import { createRuntimeTransfer, TRANSFER_ACCEPT_PATH } from "./runtimeTransfer";
+import { releaseCallHandoff } from "../tools/handoffBroker";
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
@@ -583,7 +584,13 @@ export function mountVoiceRuntime(
           // lane must not lose its safety rules by moving transports. "log"
           // exists to measure a rule's false-positive rate first.
           guardrailMode: env.RUNTIME_GUARDRAIL_MODE === "log" ? "log" : "enforce",
-          onOutcome: (outcome: CallOutcome) => registry.recordOutcome(entry.callSid, outcome),
+          onOutcome: (outcome: CallOutcome) => {
+            registry.recordOutcome(entry.callSid, outcome);
+            // The per-call transfer the proving agent may have brokered dies
+            // with the call — an entry outliving its call would let a later
+            // call's tool dial a dead leg.
+            releaseCallHandoff(entry.callSid);
+          },
           persistCallRecord: (record) => persistCall(record).then(() => undefined),
         });
         // Connect AFTER the bridge exists: a connection that fails then has

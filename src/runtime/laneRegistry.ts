@@ -116,6 +116,9 @@ const TRANSFER_CAPABLE_LANES = new Set([
   "dev-no-ivr",
   "azul-scheduling",
   "pcp",
+  // The proving lane holds request_human_handoff, so serving it without a
+  // configured transfer would hand the operator a tool that cannot work.
+  "runtime-proof",
 ]);
 
 /**
