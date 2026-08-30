@@ -249,7 +249,10 @@ export interface BridgeSession {
   cancelResponse(): void;
   sendToolResult(callId: string, ok: boolean, output: Record<string, unknown>): void;
   requestResponse(): void;
-  requestResponse(): void;
+  /** A response-gated turn whose content the RUNTIME decides and the model
+   * phrases — the guardrail correction is exactly that case. Not used for
+   * ordinary turns, where the agent's own prompt must drive. */
+  speakNatural(instructions: string): void;
   close(): void;
   getResponseEpoch(): number;
 }
@@ -275,6 +278,14 @@ export interface VoiceCallBridgeDeps {
   persistCallRecord?: (record: VoiceCallRecord) => Promise<void>;
   /** Hangup tools to intercept. Defaults to DEFAULT_END_CALL_TOOL_NAMES. */
   endCallToolNames?: string[];
+  /**
+   * What a tripped output guardrail does. "enforce" (default) cuts the line
+   * mid-air and requests a safe replacement — the same interruption the SDK
+   * performs on the SIP path, so moving a lane here does not weaken its
+   * rules. "log" records the trip and lets the audio play, for measuring a
+   * rule's false-positive rate before trusting it with live interruptions.
+   */
+  guardrailMode?: "enforce" | "log";
   maxCallMs?: number;
   deadAirMs?: number;
   /**
@@ -517,6 +528,99 @@ export class VoiceCallBridge {
     // render time, when the renderer handed it the line; here the wire is
     // the first sign a response exists at all.
     this.armDeadAir("utterance");
+    this.checkGuardrails(current);
+  }
+
+  /** Utterance sequences already checked-and-tripped, so one violation is
+   * one interruption, not one per remaining delta. */
+  private trippedUtterances = new Set<number>();
+
+  /**
+   * Run the agent's own output guardrails over the text spoken so far.
+   *
+   * Checked on every delta rather than at completion because audio streams
+   * AHEAD of this transcript: by the time the line is complete the caller
+   * has heard most of it. Each check sees the full accumulated text, so a
+   * violation that spans deltas is still caught.
+   *
+   * The verdict is asynchronous, so it is epoch-guarded like everything
+   * else on this wire: a verdict landing after a barge-in already cancelled
+   * the response — or after the next response began — must not cancel the
+   * NEW line. Same stale-utterance discipline as audio and completions.
+   */
+  private checkGuardrails(current: { seq: number; epoch: number; text: string }): void {
+    const guardrails = this.deps.agent.guardrails;
+    if (guardrails.length === 0 || this.trippedUtterances.has(current.seq)) return;
+    const { seq, epoch, text } = current;
+    for (const guardrail of guardrails) {
+      void guardrail
+        .execute({ agentOutput: text })
+        .then((verdict) => {
+          if (!verdict.tripwireTriggered || this.ended) return;
+          if (this.trippedUtterances.has(seq)) return;
+          if (this.current?.seq !== seq || this.current.epoch !== epoch) return;
+          this.trippedUtterances.add(seq);
+          this.handleGuardrailTrip(guardrail);
+        })
+        .catch((err) => {
+          // A broken guardrail must not take the call down — but a rule that
+          // stopped running is a silent safety regression, so it is loud.
+          console.error(
+            `[bridge] output guardrail '${guardrail.name}' threw and is NOT protecting this call:`,
+            err,
+          );
+        });
+    }
+  }
+
+  /**
+   * The line the caller was hearing violated one of the agent's own safety
+   * rules. In "enforce" (the default), this is the SIP path's behaviour on
+   * this transport: cut it mid-air and ask the agent for a safe replacement.
+   *
+   * The cut reuses the barge-in's exact bookkeeping — cancel the epoch,
+   * clear Twilio's buffer, mark what was partially heard — because it IS an
+   * interruption; the only difference is who interrupted.
+   */
+  private handleGuardrailTrip(guardrail: { name: string; policyHint?: string }): void {
+    if (this.deps.guardrailMode === "log") {
+      console.error(`[bridge] GUARDRAIL TRIPPED (log mode, audio not cut): ${guardrail.name}`);
+      return;
+    }
+    console.error(`[bridge] GUARDRAIL TRIPPED, cutting the line: ${guardrail.name}`);
+    const heardPartial = this.awaitingMark.shift();
+    this.awaitingMark.length = 0;
+    if (heardPartial) {
+      this.transcriptLog.agentLine(`${heardPartial.text} [cut by guardrail: ${guardrail.name}]`);
+    } else if (this.current && this.current.text.trim()) {
+      this.transcriptLog.agentLine(
+        `${this.current.text.trim()} [cut by guardrail: ${guardrail.name}]`,
+      );
+    }
+    this.cancelledEpoch = this.session.getResponseEpoch();
+    this.current = null;
+    // A goodbye that violated a safety rule did not finish either: the armed
+    // hangup is revoked exactly as a barge-in revokes it, and the agent must
+    // re-request termination through its own guards.
+    this.endRequested = false;
+    this.finalMarkName = null;
+    if (this.finalFallbackTimer !== null) {
+      this.clearTimer(this.finalFallbackTimer);
+      this.finalFallbackTimer = null;
+    }
+    this.session.cancelResponse();
+    this.sendFrame({ event: "clear", streamSid: this.deps.context.streamSid });
+    this.assistantAudioPlaying = false;
+    // The replacement turn. Content decided here, phrasing left to the
+    // model — the case speakNatural exists for. The rule's own policyHint
+    // is the instruction, so each guardrail corrects in its own terms.
+    this.session.speakNatural(
+      `Your previous reply was stopped by a safety rule: ${
+        guardrail.policyHint ?? guardrail.name
+      } Give the caller a brief, safe replacement for what you were saying — do not repeat the ` +
+        `removed statement or mention that anything was blocked; offer to take their request ` +
+        `for the care team instead.`,
+    );
   }
 
   private handleAudioDelta(base64Audio: string): void {

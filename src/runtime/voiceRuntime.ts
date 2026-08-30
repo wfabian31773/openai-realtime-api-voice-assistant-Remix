@@ -659,6 +659,10 @@ export function mountVoiceRuntime(
                 },
               },
             ),
+          // Enforce by default — the SDK interrupts on the SIP path, and a
+          // lane must not lose its safety rules by moving transports. "log"
+          // exists to measure a rule's false-positive rate first.
+          guardrailMode: env.RUNTIME_GUARDRAIL_MODE === "log" ? "log" : "enforce",
           onOutcome: (outcome: CallOutcome) => {
             registry.recordOutcome(entry.callSid, outcome);
             // The call is over, whatever ended it: any office leg still

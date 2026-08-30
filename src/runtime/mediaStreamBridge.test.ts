@@ -53,6 +53,7 @@ function makeAgent(over: Partial<BoundAgent> = {}): BoundAgent {
   return {
     instructions: "agent prompt",
     tools: [],
+    guardrails: [],
     toolNames: ["create_ticket"],
     skipped: [],
     dispatch: vi.fn(async () => ({ ok: true, output: '{"ticket":"VA-51121"}' })),
@@ -71,6 +72,7 @@ function makeBridge(
     endCallToolNames?: string[];
     maxCallMs?: number;
     deadAirMs?: number;
+    guardrailMode?: "enforce" | "log";
   } = {},
 ) {
   const timers = makeTimers();
@@ -84,6 +86,7 @@ function makeBridge(
     cancelResponse: vi.fn(),
     sendToolResult: vi.fn(),
     requestResponse: vi.fn(),
+    speakNatural: vi.fn(),
     close: vi.fn(),
     getResponseEpoch: () => epoch,
   } satisfies BridgeSession;
@@ -110,6 +113,7 @@ function makeBridge(
     onOutcome: (o) => outcomes.push(o),
     persistCallRecord: over.persistCallRecord,
     endCallToolNames: over.endCallToolNames,
+    guardrailMode: over.guardrailMode,
     maxCallMs: over.maxCallMs ?? 600_000,
     deadAirMs: over.deadAirMs ?? 30_000,
     setTimer: timers.setTimer,
@@ -927,6 +931,7 @@ describe("VoiceCallBridge — exactly-once teardown", () => {
           cancelResponse: vi.fn(),
           sendToolResult: vi.fn(),
           requestResponse: vi.fn(),
+          speakNatural: vi.fn(),
           close: vi.fn(),
           getResponseEpoch: () => 0,
         };
@@ -1000,6 +1005,190 @@ describe("VoiceCallBridge — exactly-once teardown", () => {
       media: { payload: "AAAA" },
     });
     expect(h.session.appendAudio).not.toHaveBeenCalled();
+  });
+});
+
+describe("VoiceCallBridge — output guardrails", () => {
+  /** The shape the agents actually declare: a regex predicate over the text. */
+  function diagnosisGuardrail() {
+    return {
+      name: "No diagnosis",
+      policyHint: "Do not diagnose or clinically interpret symptoms.",
+      execute: async ({ agentOutput }: { agentOutput: string }) => ({
+        tripwireTriggered: /you have glaucoma/i.test(agentOutput),
+        outputInfo: {},
+      }),
+    };
+  }
+
+  function guarded(mode?: "enforce" | "log") {
+    return makeBridge({
+      agent: makeAgent({ guardrails: [diagnosisGuardrail()] }),
+      guardrailMode: mode,
+    });
+  }
+
+  /** Guardrail verdicts land on the microtask queue; flush them. */
+  const verdicts = () => Promise.resolve().then(() => Promise.resolve());
+
+  it("cuts a violating line mid-air: cancel, clear, and a safe replacement turn", async () => {
+    const h = guarded();
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800)); // the caller is already hearing it
+    h.handlers().onAgentTranscriptDelta("Based on that, you have glaucoma");
+    await verdicts();
+
+    expect(h.session.cancelResponse).toHaveBeenCalledTimes(1);
+    expect(h.clears()).toHaveLength(1);
+    expect(h.session.speakNatural).toHaveBeenCalledTimes(1);
+    const instruction = (h.session.speakNatural as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as string;
+    // The rule corrects in its own terms, and never invites a repeat.
+    expect(instruction).toContain("Do not diagnose");
+    expect(instruction).toContain("do not repeat");
+    // The record says what was heard and why it stopped.
+    expect(h.bridge.getTranscript()).toContain("[cut by guardrail: No diagnosis]");
+  });
+
+  it("lets clean text play untouched", async () => {
+    const h = guarded();
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAgentTranscriptDelta("Let me file that request for the care team.");
+    await verdicts();
+
+    expect(h.session.cancelResponse).not.toHaveBeenCalled();
+    expect(h.clears()).toHaveLength(0);
+    expect(h.session.speakNatural).not.toHaveBeenCalled();
+  });
+
+  it("interrupts once per utterance, however many deltas follow the violation", async () => {
+    const h = guarded();
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAgentTranscriptDelta("you have glaucoma");
+    h.handlers().onAgentTranscriptDelta(" and it is serious");
+    h.handlers().onAgentTranscriptDelta(" so you should worry");
+    await verdicts();
+
+    expect(h.session.cancelResponse).toHaveBeenCalledTimes(1);
+    expect(h.session.speakNatural).toHaveBeenCalledTimes(1);
+  });
+
+  it("in log mode records the trip and cuts nothing", async () => {
+    const h = guarded("log");
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAgentTranscriptDelta("you have glaucoma");
+    await verdicts();
+
+    expect(h.session.cancelResponse).not.toHaveBeenCalled();
+    expect(h.clears()).toHaveLength(0);
+    expect(h.session.speakNatural).not.toHaveBeenCalled();
+  });
+
+  it("in log mode a tripped utterance is not re-checked on every later delta", async () => {
+    // In enforce mode the cut itself stops further checks (the utterance is
+    // gone). In log mode the utterance keeps streaming, so without the
+    // dedup every subsequent delta would re-run the rule and re-log the
+    // same violation — dozens of times per line. The first mutation sweep
+    // missed this: the enforce-mode test could not see it.
+    let executions = 0;
+    const counting = {
+      name: "No diagnosis",
+      execute: async ({ agentOutput }: { agentOutput: string }) => {
+        executions += 1;
+        return { tripwireTriggered: /glaucoma/.test(agentOutput) };
+      },
+    };
+    const h = makeBridge({
+      agent: makeAgent({ guardrails: [counting] }),
+      guardrailMode: "log",
+    });
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAgentTranscriptDelta("you have glaucoma");
+    await verdicts();
+    expect(executions).toBe(1);
+
+    h.handlers().onAgentTranscriptDelta(" which is a serious condition");
+    h.handlers().onAgentTranscriptDelta(" of the optic nerve");
+    await verdicts();
+    // Already tripped: the later deltas do not re-run the rule.
+    expect(executions).toBe(1);
+  });
+
+  it("ignores a verdict that lands after a barge-in already cancelled the line", async () => {
+    // The caller interrupted while the guardrail was still deciding. Acting
+    // on the late verdict would cancel the NEXT line — the same stale-epoch
+    // hazard as late audio, handled with the same discipline.
+    let release!: (v: { tripwireTriggered: boolean }) => void;
+    const slow = {
+      name: "Slow rule",
+      execute: () =>
+        new Promise<{ tripwireTriggered: boolean }>((resolve) => {
+          release = resolve;
+        }),
+    };
+    const h = makeBridge({ agent: makeAgent({ guardrails: [slow] }) });
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAgentTranscriptDelta("anything at all");
+    h.handlers().onSpeechStarted(); // barge-in: cancels this epoch
+    expect(h.session.cancelResponse).toHaveBeenCalledTimes(1);
+
+    release({ tripwireTriggered: true });
+    await verdicts();
+
+    // The late verdict changed nothing: no second cancel, no correction.
+    expect(h.session.cancelResponse).toHaveBeenCalledTimes(1);
+    expect(h.session.speakNatural).not.toHaveBeenCalled();
+  });
+
+  it("a guardrail that throws does not take the call down — and the next check still runs", async () => {
+    const throwing = {
+      name: "Broken rule",
+      execute: async () => {
+        throw new Error("regex engine on fire");
+      },
+    };
+    const h = makeBridge({
+      agent: makeAgent({ guardrails: [throwing, diagnosisGuardrail()] }),
+    });
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAgentTranscriptDelta("you have glaucoma");
+    await verdicts();
+
+    // The broken rule died alone; the working one still cut the line.
+    expect(h.session.cancelResponse).toHaveBeenCalledTimes(1);
+    expect(h.session.speakNatural).toHaveBeenCalledTimes(1);
+  });
+
+  it("a trip during the goodbye revokes the armed hangup", async () => {
+    const permitting = makeAgent({
+      guardrails: [diagnosisGuardrail()],
+      dispatch: vi.fn(async () => ({
+        ok: true,
+        output: JSON.stringify({ success: true }),
+      })),
+    });
+    const h = makeBridge({ agent: permitting });
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(8000));
+    h.handlers().onToolCall("call-1", "terminate_call", { reason: "completed" });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.handlers().onAgentTranscriptDelta("Goodbye — and remember, you have glaucoma");
+    await verdicts();
+    const marks = h.marks();
+    if (marks.length > 0) {
+      const name = marks[marks.length - 1].mark.name;
+      h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } });
+    }
+    // The goodbye violated a safety rule mid-air; the hangup it carried is
+    // revoked exactly as a barge-in revokes one.
+    expect(h.outcomes).toEqual([]);
   });
 });
 

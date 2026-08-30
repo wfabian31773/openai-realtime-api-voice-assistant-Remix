@@ -173,3 +173,42 @@ describe('dispatch — every tool call must be answered, so it never throws', ()
     expect(res.ok).toBe(false);
   });
 });
+
+describe("output guardrails are borrowed with instructions and tools", () => {
+  const base = {
+    instructions: "You are the no-ivr agent.",
+    tools: [],
+  };
+
+  it("carries the agent's own guardrails through, verbatim", async () => {
+    const guardrail = {
+      name: "No diagnosis",
+      policyHint: "Do not diagnose.",
+      execute: async () => ({ tripwireTriggered: false, outputInfo: {} }),
+    };
+    const bound = await bindAgent({ ...base, outputGuardrails: [guardrail] } as never, {});
+    // The same OBJECT, not a copy — the SDK's rules run unmodified.
+    expect(bound.guardrails).toHaveLength(1);
+    expect(bound.guardrails[0]).toBe(guardrail);
+  });
+
+  it("binds to an empty list when the agent declares none — queue agents have none", async () => {
+    const bound = await bindAgent({ ...base } as never, {});
+    expect(bound.guardrails).toEqual([]);
+  });
+
+  it("drops a malformed entry rather than crashing the call, but keeps the rest", async () => {
+    const good = {
+      name: "No prescribing",
+      execute: async () => ({ tripwireTriggered: false }),
+    };
+    const bound = await bindAgent(
+      {
+        ...base,
+        outputGuardrails: [null, { name: "no execute" }, { execute: async () => ({}) }, good],
+      } as never,
+      {},
+    );
+    expect(bound.guardrails).toEqual([good]);
+  });
+});
