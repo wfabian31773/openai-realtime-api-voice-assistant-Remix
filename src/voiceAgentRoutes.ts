@@ -1969,18 +1969,13 @@ async function transferConferenceToNumber(
     const acceptUrl = `https://${envConfig.domain}/api/voice/warm-transfer-accept`;
     const statusUrl = `https://${envConfig.domain}/api/voice/warm-transfer-status`;
     const amdUrl = `https://${envConfig.domain}/api/voice/warm-transfer-amd`;
-    // RAW, not escapeXml'd: buildWarmTransferScript escapes its `say`
-    // itself, and escaping here too turned "Smith & Jones" into
-    // "&amp;amp;" — Twilio then SPEAKS the entity text in the briefing
-    // (Codex, PR #230).
+    // RAW, not pre-escaped: buildWarmTransferScript escapes it, and escaping
+    // twice turns "Smith & Jones" into the spoken words "Smith amp; Jones"
+    // (Codex, round 1 of this PR — the pre-escape here survived the
+    // extraction and doubled with the builder's).
     const say = briefing.slice(0, 800);
-    // The second Gather uses actionOnEmptyResult so that staff who simply
-    // listen to the briefing and say nothing are STILL connected. Previously
     // A KEYPRESS IS THE ONLY WAY TO ACCEPT, and the press prompt bookends the
-    // details, so silence is never ambiguous. (An earlier comment here still
-    // described the superseded design in which staying on the line also
-    // connected, gated on AMD — two contradictory rules stacked in one block.
-    // The paragraph below is the one that holds.)
+    // details, so silence is never ambiguous.
     //
     // Staying on the line used to connect too, gated on the async AMD verdict. On a
     // staffed queue that inverted: staffers answered, listened, pressed nothing, and
@@ -1989,9 +1984,6 @@ async function transferConferenceToNumber(
     // transfers to +17149564300 came back `machine` this way. A keypress is positive
     // proof of a person and bypasses AMD entirely, so requiring one removes the
     // guesswork instead of tuning it.
-    // Built and escaped in warmTransferBriefing.ts. `say` carries a caller's
-    // organisation and a free-text reason, so it was one ampersand — "Smith &
-    // Jones Medical Group" — away from malformed TwiML and a dead transfer.
     const twiml = buildWarmTransferScript({ say, acceptUrl });
     const dialResult = await withResiliency(
       async () => twilioClient.calls.create({
