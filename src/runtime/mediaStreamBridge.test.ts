@@ -559,7 +559,9 @@ describe("VoiceCallBridge — tool dispatch", () => {
     // nothing after create_ticket until the dead-air watchdog fires
     // (Codex review, PR #227).
     const h = makeBridge();
+    h.newResponse();
     h.handlers().onToolCall("c1", "create_ticket", { reason: "refill" });
+    h.handlers().onResponseDone(); // the carrying response finished delivering
     await Promise.resolve();
     await Promise.resolve();
     expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
@@ -581,6 +583,7 @@ describe("VoiceCallBridge — tool dispatch", () => {
     h.newResponse();
     h.handlers().onToolCall("c1", "create_ticket", {});
     h.handlers().onToolCall("c2", "slow_lookup", {});
+    h.handlers().onResponseDone();
     await new Promise((r) => setTimeout(r, 0));
 
     // The fast tool's output is in, but the reply must WAIT for the slow
@@ -591,6 +594,30 @@ describe("VoiceCallBridge — tool dispatch", () => {
     releaseSlow({ ok: true, output: '{"ok":2}' });
     await new Promise((r) => setTimeout(r, 0));
     expect(h.session.sendToolResult).toHaveBeenCalledTimes(2);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it("a fast tool settling BEFORE its sibling's event arrives still yields one follow-up", async () => {
+    // The round-14 counter alone touched zero twice here — the wire had
+    // not yet delivered the second function-call event of the SAME
+    // response when the first dispatch settled — queuing two follow-ups
+    // and recreating the unsolicited reply (Codex, PR #227 round 17).
+    // Only the carrying response's done event proves the turn is whole.
+    const h = makeBridge();
+    h.newResponse();
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    await new Promise((r) => setTimeout(r, 0));
+    // First dispatch fully settled; its sibling has not even arrived.
+    expect(h.session.sendToolResult).toHaveBeenCalledTimes(1);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+
+    h.handlers().onToolCall("c2", "create_ticket", {});
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.session.sendToolResult).toHaveBeenCalledTimes(2);
+    // Still nothing: the response boundary has not been seen.
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+
+    h.handlers().onResponseDone();
     expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
   });
 

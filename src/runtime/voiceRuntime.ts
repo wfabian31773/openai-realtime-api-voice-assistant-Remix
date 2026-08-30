@@ -72,9 +72,18 @@ import {
 } from "./twilioFrames";
 import { KNOWLEDGE_PACK_VERSION } from "./knowledgePack";
 
-/** Twilio media frames held while the agent is being built — ~4 seconds of
- * 20ms frames, which is far longer than the build takes. */
-const PRE_BRIDGE_FRAME_CAP = 200;
+/**
+ * Twilio media frames held while the agent is being built — 10 seconds of
+ * 20ms frames. Sized against the WORST case of the bounded setup steps
+ * run in sequence, not the typical build: the precontext lookup (1.5s),
+ * the lane factory's own context lookups (the answering-service factory
+ * waits up to ~2s), and the call-row insert (2s) can all legitimately run
+ * to their deadlines back to back, and a 4-second cap was dropping the
+ * start of what the caller said during that window even though every
+ * dependency finished inside its allowance (Codex review, PR #227
+ * round 17). 500 frames of ~1KB JSON is at most ~0.5 MB per call.
+ */
+const PRE_BRIDGE_FRAME_CAP = 500;
 
 /**
  * How long a socket may hold the media-stream endpoint without claiming a
@@ -253,7 +262,15 @@ export function mountVoiceRuntime(
     );
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  // maxPayload: /voice/stream is PUBLIC until a start frame's token is
+  // claimed, and ws's default cap is 100 MiB — an unauthenticated client
+  // could make the message handler materialize and parse huge strings
+  // before any check runs (Codex review, PR #227 round 17). Real Twilio
+  // frames are tiny: a 20ms μ-law media frame is ~216 base64 chars in
+  // under 1 KB of JSON, and start frames with customParameters are smaller
+  // still. 64 KiB is orders of magnitude of headroom; anything larger is
+  // not Twilio and the socket is closed by ws itself (1009).
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 
   server.on("upgrade", (req, socket, head) => {
     let path = "";
@@ -571,6 +588,26 @@ export function mountVoiceRuntime(
           bridge.failSession(err);
         } else {
           registry.recordOutcome(entry.callSid, "provider_failure");
+          // The registry copy is consumed by the post-stream redirect, so
+          // without a durable row the setup failures operators most need
+          // to diagnose — lane resolution or agent binding rejecting —
+          // would vanish entirely (Codex review, PR #227 round 17).
+          // Minimal record, fire-and-forget: failing to log a failure
+          // must not block closing the caller's socket.
+          void persistCall({
+            callSid: entry.callSid,
+            streamSid,
+            slug: entry.slug,
+            callerPhone: entry.callerPhone,
+            dialedNumber: entry.dialedNumber,
+            outcome: "provider_failure",
+            transcript: "",
+            toolEvents: [],
+            agentTurns: 0,
+            interruptions: 0,
+            startedAtMs,
+            endedAtMs: Date.now(),
+          }).catch(() => undefined);
           twilioSocket.close();
         }
       }
