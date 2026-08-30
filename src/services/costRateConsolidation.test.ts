@@ -40,9 +40,16 @@ describe('step 3 — one duration rate, everywhere', () => {
     }
   });
 
-  it('both files route through the exported constant', () => {
+  it('both files route through the shared pricing decision', () => {
+    // Consolidation moved one step further (Codex, PR #227 round 14): the
+    // shared CONSTANT was still the wrong rate for a Grok-served row, so
+    // both files now call priceVoiceCall — which keeps token-derived costs
+    // and picks the provider's rate — instead of multiplying the raw
+    // OpenAI rate themselves. The repo-wide scan in voiceCostRates.test.ts
+    // enforces the absence of raw multiplications; this pins the presence
+    // of the decision.
     for (const f of files) {
-      expect(read(f), `${f} must import the shared rate`).toMatch(/OPENAI_COST_CENTS_PER_SECOND/);
+      expect(read(f), `${f} must price through priceVoiceCall`).toMatch(/priceVoiceCall\(\{/);
     }
   });
 
@@ -55,7 +62,9 @@ describe('step 3 — one duration rate, everywhere', () => {
      */
     const src = read('../voiceAgentRoutes.ts');
     expect(src).toMatch(/updateData\.costIsEstimated = !hasTokenDerivedCost/);
-    expect(src).toMatch(/const hasTokenDerivedCost = callLog\.inputAudioTokens != null/);
+    // Token-derived is now what priceVoiceCall says it is, not a re-derived
+    // null check that could drift from the decision.
+    expect(src).toMatch(/const hasTokenDerivedCost = pricing\.basis === "openai_tokens"/);
   });
 });
 

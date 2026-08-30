@@ -651,14 +651,18 @@ export class VoiceCallBridge {
 
   private handleAudioDone(transcript?: string): void {
     if (this.ended) return;
-    this.noteTranscript("agent");
     const epoch = this.session.getResponseEpoch();
     if (this.cancelledEpoch !== null && epoch === this.cancelledEpoch) {
       // A cancelled utterance's late completion delivers nothing that was
       // owed: it must not disarm a watchdog it does not own, not send a
-      // mark, and not arm a hangup for audio that never played.
+      // mark, not arm a hangup for audio that never played — and not stamp
+      // the transcript clock. The interrupted line was stamped when the
+      // barge-in committed it; stamping here would move `lastTranscriptAtMs`
+      // forward with no words delivered, understating the tail
+      // (Codex review, PR #227 round 14).
       return;
     }
+    this.noteTranscript("agent");
     const done = this.current;
     this.current = null;
     if (!done) return;
@@ -799,8 +803,35 @@ export class VoiceCallBridge {
 
   // ── Tool dispatch ────────────────────────────────────────────────────
 
+  /**
+   * Tool calls of the current turn still awaiting their output, and whether
+   * a follow-up response is owed once the last one lands. One response can
+   * carry SEVERAL function calls, and a `requestResponse()` per tool did
+   * two wrong things: each extra queued request released another
+   * unsolicited reply after the first one's `response.done`, and a slower
+   * tool could see the first reply begin before its output existed
+   * (Codex review, PR #227 round 14). Responses are serial on this wire, so
+   * the counter only ever tracks one turn's calls.
+   */
+  private pendingToolCalls = 0;
+  private followUpOwed = false;
+
+  /** One tool answered. When it was the LAST one outstanding and any of
+   * them owed a reply, ask for exactly one follow-up. */
+  private toolCallSettled(owesFollowUp: boolean): void {
+    this.pendingToolCalls = Math.max(0, this.pendingToolCalls - 1);
+    if (owesFollowUp) this.followUpOwed = true;
+    if (this.pendingToolCalls === 0 && this.followUpOwed) {
+      this.followUpOwed = false;
+      // A termination the guards allowed is already arming the hangup on
+      // the goodbye's mark; a follow-up would speak over that gate.
+      if (!this.endRequested) this.session.requestResponse();
+    }
+  }
+
   private handleToolCall(callId: string, name: string, args: Record<string, unknown>): void {
     if (this.ended) return;
+    this.pendingToolCalls += 1;
     // Every tool call must be answered or the turn stalls forever, so the
     // dispatch that answers it is the one that never throws (agentBinding).
     // The hangup tool goes through this same path: its guards are the
@@ -817,23 +848,30 @@ export class VoiceCallBridge {
       const output = decodeToolOutput(result.output);
       this.session.sendToolResult(callId, result.ok, output);
       if (this.endCallToolNames.has(name)) {
-        if (guardsAllowedTermination(output)) this.requestHangup();
-        // A refusal still needs the agent to speak — its `say` wording is
-        // in the result — so fall through to the request below.
-        else this.session.requestResponse();
+        if (guardsAllowedTermination(output)) {
+          this.requestHangup();
+          this.toolCallSettled(false);
+        } else {
+          // A refusal still needs the agent to speak — its `say` wording
+          // is in the result.
+          this.toolCallSettled(true);
+        }
         return;
       }
       // Submitting a function_call_output adds a conversation item; it does
-      // NOT make the model speak. Without this the caller hears nothing
-      // after a ticket is filed until the dead-air watchdog disconnects
-      // them (Codex review, PR #227). requestResponse is response-gated, so
-      // it is released only once the tool-carrying response finishes.
-      this.session.requestResponse();
+      // NOT make the model speak. Without a follow-up the caller hears
+      // nothing after a ticket is filed until the dead-air watchdog
+      // disconnects them (Codex review, PR #227). requestResponse is
+      // response-gated, so it is released only once the tool-carrying
+      // response finishes — and coalesced above, so it fires once however
+      // many tools that response carried.
+      this.toolCallSettled(true);
     })().catch(() => {
       // dispatch() is documented never to throw; if it somehow does, the
       // call still gets an answer rather than a stalled turn.
       if (!this.ended) {
         this.session.sendToolResult(callId, false, { error: "dispatch_failed" });
+        this.toolCallSettled(true);
       }
     });
   }
