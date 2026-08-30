@@ -25,7 +25,7 @@
 
 import { callEnvironment } from "./callRecord";
 
-export const VOICE_RUNTIME_DEPLOY_MARKER = "voice-runtime-v1-bridge-and-binding";
+export const VOICE_RUNTIME_DEPLOY_MARKER = "voice-runtime-v2-transfer-guardrails-tools";
 
 export interface RuntimeReadiness {
   liveReady: boolean;
