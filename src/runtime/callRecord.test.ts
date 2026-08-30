@@ -79,8 +79,24 @@ describe("toCallLogRow", () => {
     expect(row.patientFound).toBe(true);
   });
 
-  it("stamps the environment from NODE_ENV so dev traffic never counts as production", () => {
+  it("recognizes every production signal this repo deploys with — none implies the others", () => {
+    // `.replit` deployments set APP_ENV=production (the value the SIP path
+    // stores in this column), the shared resolver recognizes
+    // REPLIT_DEPLOYMENT=1 and a published .replit.app domain, and none of
+    // them sets NODE_ENV — testing NODE_ENV alone tagged every live Replit
+    // call 'development' and dropped it from environment-scoped reporting
+    // (Codex, PR #227 round 20).
     expect(toCallLogRow(record(), {}, { NODE_ENV: "production" }).environment).toBe("production");
+    expect(toCallLogRow(record(), {}, { APP_ENV: "production" }).environment).toBe("production");
+    expect(toCallLogRow(record(), {}, { REPLIT_DEPLOYMENT: "1" }).environment).toBe("production");
+    expect(
+      toCallLogRow(record(), {}, { REPLIT_DOMAINS: "azul.replit.app" }).environment,
+    ).toBe("production");
+    // A dev workspace domain is NOT production, even though it contains
+    // ".replit." — and no signal at all stays development.
+    expect(
+      toCallLogRow(record(), {}, { REPLIT_DOMAINS: "azul.spock.replit.dev" }).environment,
+    ).toBe("development");
     expect(toCallLogRow(record(), {}, {}).environment).toBe("development");
   });
 
@@ -257,10 +273,35 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
     // insertion-time startTime leaves endTime - startTime short by the
     // whole setup delay (Codex, PR #227 round 13).
     expect((row.startTime as Date).getTime()).toBe(claimedAtMs);
+    // The pricing discriminator from call START: Twilio's completion
+    // callback can race the teardown upsert, and an open row without the
+    // provider priced the call as OpenAI — a wrong charge the conflict
+    // update deliberately never repairs (Codex, PR #227 round 20).
+    expect(row.voiceProvider).toBe("grok");
     // It must NOT pre-empt anything a later writer owns.
     expect("transcript" in row).toBe(false);
     expect("toolTimeline" in row).toBe(false);
     expect("patientName" in row).toBe(false);
+  });
+
+  it("tags the open row's environment from the deployment's real signals", async () => {
+    // The open-row mapper repeated the NODE_ENV-only check, so on Replit
+    // (APP_ENV=production, NODE_ENV unset) the row was born 'development'
+    // (Codex, PR #227 round 20).
+    const insert = vi.fn(async () => "row-1");
+    await openRuntimeCall(
+      {
+        callSid: "CA-3",
+        slug: "optical",
+        callerPhone: "+15551234567",
+        dialedNumber: "+15559876543",
+        startedAtMs: Date.now(),
+      },
+      insert,
+      { APP_ENV: "production" },
+    );
+    const [row] = insert.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(row.environment).toBe("production");
   });
 
   it("never throws and never blocks the call when the insert fails", async () => {
