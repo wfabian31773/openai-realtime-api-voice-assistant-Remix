@@ -392,6 +392,29 @@ describe("response.cancel gating (production lesson: cancelling a non-open respo
     expect(forceMessages()).toHaveLength(1);
   });
 
+  it("the absorbed cancellation ALSO announces the response boundary", () => {
+    // It stands in for the response.done that is never coming, and the
+    // bridge's post-tool follow-up waits on that boundary: without this, a
+    // tool-bearing response interrupted here leaves the awaiting flag set
+    // forever — no follow-up, silence until the dead-air watchdog (Codex,
+    // PR #227 round 18).
+    const onResponseDone = vi.fn();
+    const { transport, session } = makeSession({ onResponseDone });
+    transport.emit({ type: "session.created", conversation: { id: "s1" } });
+    transport.emit({ type: "session.updated" });
+    transport.emit({ type: "response.created" });
+    session.cancelResponse();
+
+    transport.emit({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "cancellation failed: no active response found",
+      },
+    });
+    expect(onResponseDone).toHaveBeenCalledTimes(1);
+  });
+
   it("only absorbs that error while a cancel is actually outstanding — every other provider error stays fatal", () => {
     const onError = vi.fn();
     const { transport, session } = makeSession({ onError });
