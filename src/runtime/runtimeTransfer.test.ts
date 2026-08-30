@@ -7,7 +7,7 @@ import {
   TRANSFER_ACCEPT_PATH,
   TRANSFER_STATUS_PATH,
 } from "./runtimeTransfer";
-import { conferenceNameFor, type TransferTwilioOps } from "./warmTransfer";
+import { ACCEPT_WINDOW_MS, conferenceNameFor, type TransferTwilioOps } from "./warmTransfer";
 import { escalationDetailsMap } from "../services/escalationStore";
 import type { WebhookRequest } from "./voiceWebhook";
 
@@ -238,6 +238,49 @@ describe("per-lane handoff contracts (Codex, PR #230)", () => {
     transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
     await outcome;
     expect(escalationDetailsMap.has("CAcaller")).toBe(false);
+  });
+});
+
+describe("the attempt tells the bridge how long it may run (Codex, PR #230 round 3)", () => {
+  it("announces the accept-window budget BEFORE dialing, and settles after a failure", async () => {
+    // Without this the bridge's dead-air watchdog holds the handoff to
+    // the 45-second tool budget and tears the caller down while an
+    // office that answered late is still hearing the briefing.
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    const events: Array<string | number> = [];
+    const handoff = transfer.handoffFor(
+      "no-ivr",
+      META,
+      {
+        onAttemptStarting: (waitMs) => events.push("starting", waitMs),
+        onAttemptSettled: () => events.push("settled"),
+      },
+    );
+    // No escalation entry -> UNAVAILABLE; the hooks still bracket the
+    // attempt so the widened window never outlives it.
+    await expect(handoff()).rejects.toThrow(/handoff_failed:UNAVAILABLE/);
+    expect(events).toEqual(["starting", ACCEPT_WINDOW_MS, "settled"]);
+  });
+
+  it("settles the budget after a success too — the bracket holds on every path", async () => {
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    const events: string[] = [];
+    escalationDetailsMap.set("CAcaller", {
+      agentSlug: "no-ivr",
+      callerType: "patient_urgent",
+      reason: "Sudden vision loss",
+    });
+    const outcome = transfer.handoffFor("no-ivr", META, {
+      onAttemptStarting: () => events.push("starting"),
+      onAttemptSettled: () => events.push("settled"),
+    })();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(events).toEqual(["starting"]); // still open while the office rings
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+    expect(events).toEqual(["starting", "settled"]);
   });
 });
 

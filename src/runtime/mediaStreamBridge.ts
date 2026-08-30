@@ -846,7 +846,10 @@ export class VoiceCallBridge {
     this.deadAirCause = cause;
     this.deadAirTimer = this.setTimer(
       () => this.teardown("dead_air"),
-      (this.deps.deadAirMs ?? DEFAULT_DEAD_AIR_MS) + extraMs,
+      // transferWaitExtraMs joins EVERY window while a transfer attempt is
+      // open — see noteTransferWaitStarting for why it is a state and not
+      // a one-shot extension.
+      (this.deps.deadAirMs ?? DEFAULT_DEAD_AIR_MS) + extraMs + this.transferWaitExtraMs,
     );
   }
 
@@ -901,6 +904,39 @@ export class VoiceCallBridge {
   }
 
   private transferInFlight = false;
+
+  /**
+   * A transfer attempt began: the handoff runs as an ordinary tool
+   * dispatch, but its legitimate span is the office dial plus the
+   * briefing-and-keypress wait — the accept window, far past any tool
+   * budget. On the tool budget alone the watchdog tore the caller down as
+   * dead_air at 45 seconds and onOutcome abandoned the office leg, so a
+   * staffer who answered near the 40-45s ring limit was disconnected
+   * mid-briefing before they could press a key (Codex, PR #230 round 3).
+   *
+   * The added budget is a STATE, not a one-shot re-arm: the spoken
+   * "connecting you now" line completes mid-wait and its utterance-done
+   * re-arms the watchdog (as does a caller remark), which would shrink
+   * the window straight back to the tool budget. While the wait is open,
+   * every armed window carries the wait's span on top of its own.
+   */
+  noteTransferWaitStarting(expectedWaitMs: number): void {
+    if (this.ended) return;
+    this.transferWaitExtraMs = expectedWaitMs;
+    this.armDeadAir("response", TOOL_DISPATCH_GRACE_MS);
+  }
+
+  /** The attempt settled — accepted, failed, or abandoned. Normal budgets
+   * apply again, and the tool window re-arms fresh: the agent owes the
+   * caller its next words (the failure line, or nothing if the redirect
+   * is already tearing the stream down). */
+  noteTransferWaitSettled(): void {
+    if (this.ended) return;
+    this.transferWaitExtraMs = 0;
+    this.armDeadAir("response", TOOL_DISPATCH_GRACE_MS);
+  }
+
+  private transferWaitExtraMs = 0;
 
   private teardown(outcome: CallOutcome): void {
     if (this.ended) return;
