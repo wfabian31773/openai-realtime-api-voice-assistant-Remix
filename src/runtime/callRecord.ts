@@ -304,6 +304,8 @@ export async function openRuntimeCall(
     callerPhone: string;
     dialedNumber: string;
     agentVersion?: string | null;
+    /** When the stream was claimed — NOT when this insert runs. */
+    startedAtMs: number;
   },
   insert: CallLogInsert = defaultOpenInsert,
   env: Record<string, string | undefined> = process.env,
@@ -318,7 +320,13 @@ export async function openRuntimeCall(
       agentUsed: context.slug,
       ...(context.agentVersion ? { agentVersion: context.agentVersion } : {}),
       status: "in_progress",
-      startTime: new Date(),
+      // The claim time, not `new Date()`: this insert runs only after the
+      // precontext lookup and the lane factory, while teardown derives
+      // `duration` from the earlier claim and deliberately never updates
+      // startTime on conflict — so an insertion-time startTime leaves a
+      // permanent row where endTime - startTime is short by the whole
+      // setup delay (Codex review, PR #227 round 13).
+      startTime: new Date(context.startedAtMs),
       environment: env.NODE_ENV === "production" ? "production" : "development",
     });
   } catch (error) {
