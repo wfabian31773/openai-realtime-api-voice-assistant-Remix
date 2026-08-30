@@ -294,6 +294,16 @@ export function mountVoiceRuntime(
       // credential leak with a health check's URL.
       missing: readiness.missing,
       requiredDbEnvVar: readiness.requiredDbEnvVar,
+      // Transfer readiness is SEPARATE from liveReady on purpose: a
+      // deployment with no transfer configuration still serves every
+      // non-transfer lane correctly, so it is ready — it just refuses the
+      // transfer-capable ones. But `liveReady: true` was being read as
+      // "everything works", and the only place the difference showed was
+      // one line in the boot log, which meant checking whether a warm
+      // transfer could possibly succeed required shell access to the
+      // running deployment. Names only here too.
+      transferReady: transfer.unavailableReason === null,
+      transferBlockedBy: transfer.unavailableReason,
       activeCalls: registry.activeCount(),
     });
   });

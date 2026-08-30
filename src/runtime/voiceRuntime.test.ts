@@ -904,6 +904,8 @@ describe("one whole call, end to end, offline", () => {
       knowledgePack: string;
       liveReady: boolean;
       missing: string[];
+      transferReady: boolean;
+      transferBlockedBy: string | null;
     };
     expect(body.marker).toMatch(/^voice-runtime-/);
     expect(body.liveReady).toBe(true);
@@ -911,6 +913,29 @@ describe("one whole call, end to end, offline", () => {
     // The shared cache prefix's version, so a cache-rate change can be
     // attributed to a prefix change instead of guessed at.
     expect(body.knowledgePack).toMatch(/^v\d+$/);
+  });
+
+  it("reports transfer readiness separately, and names what blocks it", async () => {
+    // liveReady covers answering a call, NOT transferring one — a
+    // deployment with no transfer config is genuinely ready for every
+    // non-transfer lane. But `liveReady: true` reads as "everything
+    // works", and the difference used to appear only in the boot log, so
+    // checking whether a warm transfer could succeed at all needed shell
+    // access to the running deployment.
+    const h = await harness();
+    const res = await fetch(`${h.base}/voice/health`);
+    const body = (await res.json()) as {
+      liveReady: boolean;
+      transferReady: boolean;
+      transferBlockedBy: string | null;
+    };
+    // The harness configures no Twilio number or domain, so transfers are
+    // unavailable even though the runtime is otherwise live-ready.
+    expect(body.liveReady).toBe(true);
+    expect(body.transferReady).toBe(false);
+    // NAMES, never values — the same rule `missing` follows.
+    expect(body.transferBlockedBy).toContain("missing");
+    expect(body.transferBlockedBy).not.toMatch(/AC[0-9a-f]{6,}|\+1\d{10}/);
   });
 });
 
