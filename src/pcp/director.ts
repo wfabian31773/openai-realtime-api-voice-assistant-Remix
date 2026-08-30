@@ -374,3 +374,27 @@ export class PcpDirector {
 export const pcpDirector = new PcpDirector({
   pharmaHandoffEnabled: process.env.PCP_PHARMA_HANDOFF_ENABLED === 'true',
 });
+
+/**
+ * Deploy marker — printed once when this module loads.
+ *
+ * `callPurpose` moving to the front of both intake orders is the fix for the
+ * refusal storm that took this line off the air: over 2026-08-06/07,
+ * `handoff_to_pcp` was called 230 times and refused 199 (86.5%), 148 of them on
+ * `call_purpose_required`, with another 34 across `create_pcp_task` and
+ * `lookup_patient_appointments`. `record_pcp_intake` itself refused nothing —
+ * the intake worked, and everything downstream of it was blocked.
+ *
+ * That fix is invisible from the outside: a build without it answers the phone
+ * and sounds normal for one turn. Wayne republishes by pulling on Replit, and a
+ * failed pull looks exactly like a failed fix (2026-08-11, a GitHub rate limit
+ * at 00:34 cost a whole round of analysis on stale code).
+ *
+ * So this prints the order it actually resolved, not a version string. If the
+ * line reads `callPurpose` first, the fix is live. If it reads `callerName`
+ * first, the build is stale and no call on it proves anything.
+ */
+console.log(
+  `[PcpDirector] intake order — professional: ${PROFESSIONAL_FIELDS.join(' -> ')}; ` +
+    `patient: ${PATIENT_INTAKE_ORDER.join(' -> ')}`,
+);
