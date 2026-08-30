@@ -43,6 +43,7 @@ import {
   resolveClinicalTransferNumber,
   resolveHandoffDestination,
   resolvePcpDialSequence,
+  urgentTransferFailureLine,
 } from './services/handoffPolicy';
 import { buildPcpTransferBriefing, buildWarmTransferScript } from './services/warmTransferBriefing';
 import { pcpAgentConfig } from './agents/pcpAgent';
@@ -1200,13 +1201,19 @@ function logHistoryItem(item: RealtimeItem, callId?: string): void {
  * answer"; a dial that THREW — Twilio down, circuit breaker open, an
  * unroutable number — returned silently and left the urgent caller existing
  * nowhere but a console line. Same net under both.
+ *
+ * Returns whether a ticket actually landed. Still never throws — the callers
+ * that fire it alongside a dial must not be broken by a ticketing outage —
+ * but a caller that is about to PROMISE the patient a callback has to be able
+ * to tell the difference between a filed request and a console line
+ * (Codex review, PR #238).
  */
 async function fileUrgentHandoffFallbackTicket(
   openAiCallId: string,
   escalationDetails: { reason?: string; symptomsSummary?: string; patientFirstName?: string; patientLastName?: string } | undefined,
   callerID: string | null | undefined,
   ctx: { why: string; dialTarget?: string },
-): Promise<void> {
+): Promise<boolean> {
   console.warn(`[HANDOFF] Creating urgent fallback ticket — ${ctx.why}`);
   try {
     const { SyncAgentService } = await import('./services/syncAgentService');
@@ -1246,11 +1253,13 @@ async function fileUrgentHandoffFallbackTicket(
 
     if (ticketResult.success) {
       console.log('[HANDOFF] ✓ Urgent fallback ticket created:', ticketResult.ticketNumber);
-    } else {
-      console.error('[HANDOFF] ✗ Urgent fallback ticket creation failed:', ticketResult.error);
+      return true;
     }
+    console.error('[HANDOFF] ✗ Urgent fallback ticket creation failed:', ticketResult.error);
+    return false;
   } catch (ticketErr) {
     console.error('[HANDOFF] ✗ Exception creating urgent fallback ticket:', ticketErr);
+    return false;
   }
 }
 
@@ -1274,6 +1283,17 @@ function sendUrgentTransferSms(opts: {
   escalationDetails?: EscalationDetails;
   /** Extra context line for fallback paths, e.g. why this is a direct dial. */
   note?: string;
+  /**
+   * What this alert is actually announcing.
+   *
+   * 'transfer' (default) — a leg is being dialled; the operator's phone is
+   * about to ring and they should pick up.
+   * 'callback' — nothing was dialled and nothing will be. The operator has to
+   * call out. Sending the 'transfer' wording here told them to expect an
+   * inbound call that was never coming, so they would wait instead of dialling
+   * the urgent patient (Codex review, PR #238).
+   */
+  kind?: 'transfer' | 'callback';
 }): void {
   const to = envConfig.twilio.urgentNotificationNumber;
   const from = envConfig.twilio.phoneNumber;
@@ -1287,7 +1307,10 @@ function sendUrgentTransferSms(opts: {
       const callTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/Los_Angeles' });
       const d = opts.escalationDetails;
 
-      let smsBody = `📞 INCOMING TRANSFER - ${callTime}\n`;
+      const callbackOnly = opts.kind === 'callback';
+      let smsBody = callbackOnly
+        ? `📵 NO TRANSFER — CALL THIS PATIENT - ${callTime}\n`
+        : `📞 INCOMING TRANSFER - ${callTime}\n`;
       smsBody += `From: ${opts.callerNumber || 'Unknown'}\n`;
       if (opts.note) {
         smsBody += `\n⚠️ ${opts.note}\n`;
@@ -1304,7 +1327,9 @@ function sendUrgentTransferSms(opts: {
         if (d.reason) smsBody += `\nReason: ${d.reason}\n`;
         if (d.symptomsSummary) smsBody += `Symptoms: ${d.symptomsSummary}\n`;
       }
-      smsBody += `\n📱 Connecting patient to you now...`;
+      smsBody += callbackOnly
+        ? `\n📱 Nobody is being connected to you. Please call this patient back now.`
+        : `\n📱 Connecting patient to you now...`;
 
       await client.messages.create({ body: smsBody, from, to });
       console.log('[HANDOFF] ✓ SMS notification sent to', to);
@@ -1894,21 +1919,46 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
     sendUrgentTransferSms({
       callerNumber: getCallerNumber(conferenceName) || callerCall.from,
       escalationDetails: escalation,
+      kind: fallbackNumber ? 'transfer' : 'callback',
       note: fallbackNumber
         ? 'TECH FALLBACK — assistant disconnected during an URGENT call; caller transferred directly'
-        : 'TECH FALLBACK — assistant disconnected during an URGENT call and NO transfer destination is configured. The caller was told someone will call them back. CALL THEM.',
+        : 'TECH FALLBACK — assistant disconnected during an URGENT call and NO transfer destination is configured. Nobody was dialled.',
     });
     if (!fallbackNumber) {
       console.error(
         `[SIP-RECOVERY] ${conferenceName}: urgent transfer destination is not configured — ending caller leg without dialing`,
       );
-      // We call them; they are never told to call us (operator ruling
-      // 2026-08-13, standing instruction 10). The urgent ticket and the SMS
-      // above are what make that promise good.
+      // A callback is PROMISED to this caller below, so something durable has
+      // to exist before it is spoken. The heads-up SMS is not that: it no-ops
+      // silently when URGENT_NOTIFICATION_NUMBER or TWILIO_PHONE_NUMBER is
+      // unset, and swallows delivery failures inside a detached task — so a
+      // caller could hang up believing somebody was told when nobody was
+      // (Codex review, PR #238). The ticket is the durable record, and unlike
+      // the other two callers of this helper there is no dial here for the
+      // await to delay: the next thing that happens is a hangup.
+      const filed = await fileUrgentHandoffFallbackTicket(
+        // Non-null holds by construction: `escalation` is only ever read as
+        // `recoveredCallId ? escalationDetailsMap.get(recoveredCallId) : undefined`,
+        // and the guard above returns when it is falsy. The helper keys the
+        // conference and agent slug off this id, so substituting the
+        // conference name would file a ticket with neither.
+        recoveredCallId!,
+        escalation,
+        getCallerNumber(conferenceName) || callerCall.from,
+        {
+          why:
+            'URGENT call lost its assistant leg and NO transfer destination is configured — ' +
+            'nobody was dialled and the caller was told to expect a call back.',
+        },
+      );
+      // The wording lives in handoffPolicy so the rule it encodes is testable
+      // without booting this module: promise a callback only when one is
+      // backed, and never tell the caller to call us.
+      const say = urgentTransferFailureLine({ followUpFiled: filed });
       await client.calls(callerCallSid).update({
         twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">I'm sorry, I could not connect you just now. Our on-call team has your request and will call you back. If this is a medical emergency, please hang up and dial nine one one.</Say>
+  <Say voice="Polly.Joanna">${escapeXml(say)}</Say>
   <Hangup/>
 </Response>`,
       });

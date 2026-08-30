@@ -16,6 +16,7 @@ import {
   resolveClinicalTransferNumber,
   resolveHandoffDestination,
   resolvePcpDialSequence,
+  urgentTransferFailureLine,
 } from './handoffPolicy';
 import { PCP_CALL_PURPOSES } from '../pcp/policy';
 
@@ -153,5 +154,31 @@ describe('PCP transfer eligibility tracks the purpose table', () => {
   it('still fails closed on an unknown caller type', () => {
     expect(resolveHandoffDestination({ agentSlug: 'pcp', lunchClosure: false, callerType: 'not_a_purpose', pcpNumber: QUEUE }))
       .toEqual({ allowed: false, reason: 'pcp_reason_not_allowed' });
+  });
+});
+
+describe('what an urgent caller is told when the transfer fails outright', () => {
+  it('promises a callback only when a durable follow-up was actually filed', () => {
+    expect(urgentTransferFailureLine({ followUpFiled: true })).toMatch(/will call you back/i);
+  });
+
+  it('makes no callback promise when nothing was filed', () => {
+    // The failure this guards: an SMS that no-ops silently is not somebody
+    // being told, so a caller could hang up believing a callback is coming
+    // when no record of them exists anywhere.
+    const line = urgentTransferFailureLine({ followUpFiled: false });
+    expect(line).not.toMatch(/call you back/i);
+    expect(line).not.toMatch(/on-call team has your request/i);
+  });
+
+  it('never tells the caller to call us, filed or not — standing instruction 10', () => {
+    for (const followUpFiled of [true, false]) {
+      const line = urgentTransferFailureLine({ followUpFiled });
+      expect(line).not.toMatch(/call (us )?back during/i);
+      expect(line).not.toMatch(/please call (us|back)/i);
+      expect(line).not.toMatch(/try again later/i);
+      // The emergency route survives in both branches.
+      expect(line).toMatch(/nine one one/);
+    }
   });
 });

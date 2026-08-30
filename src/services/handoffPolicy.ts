@@ -152,3 +152,29 @@ export function resolveHandoffDestination(params: Params): HandoffPolicyResult {
   if (!clinicalDestination) return { allowed: false, reason: 'clinical_destination_not_configured' };
   return { allowed: true, destination: clinicalDestination, policy: 'clinical' };
 }
+
+/**
+ * What an urgent caller is told when the transfer could not happen at all.
+ *
+ * Two operator rules meet here and the second one bounds the first.
+ *
+ * Standing instruction 10 (2026-08-13): *"We can't just tell the patient call
+ * back, call the wrong extension."* Nobody is told to call us. We call them.
+ *
+ * But a promise to call back is only ours to make when something durable will
+ * carry it — a filed ticket somebody works. The heads-up SMS is not that: it
+ * no-ops silently when its numbers are unset and swallows delivery failures in
+ * a detached task, so "someone will call you" said on the strength of an SMS
+ * can be said to a caller nobody was told about (Codex review, PR #238).
+ *
+ * So: promise the callback when the follow-up is filed, and when it is not,
+ * say only what is true and leave the emergency route. Never "call us back"
+ * in either branch — that is the one thing ruled out outright.
+ */
+export function urgentTransferFailureLine(params: { followUpFiled: boolean }): string {
+  const emergency = 'If this is a medical emergency, please hang up and dial nine one one.';
+  return params.followUpFiled
+    ? `I'm sorry, I could not connect you just now. Our on-call team has your request ` +
+        `and will call you back. ${emergency}`
+    : `I'm sorry, I could not connect you to anyone just now. ${emergency}`;
+}
