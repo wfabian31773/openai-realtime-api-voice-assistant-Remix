@@ -38,8 +38,13 @@ describe('defect 1 — the duration estimate destroyed the token cost', () => {
     );
     expect(fn, 'the duration estimator must not overwrite a token-derived cost')
       .toMatch(/if \(callLog\.inputAudioTokens != null\)/);
-    // And it must bail BEFORE computing or writing anything.
-    expect(fn.indexOf('inputAudioTokens != null')).toBeLessThan(fn.indexOf('OPENAI_COST_CENTS_PER_SECOND'));
+    // And it must bail BEFORE pricing or writing anything. The rate itself
+    // now lives behind priceVoiceCall — provider-aware, so a Grok row is
+    // never priced as OpenAI (Codex, PR #227 round 13) — but the early
+    // return is still what keeps a token-derived cost from being touched.
+    const priceIdx = fn.indexOf('priceVoiceCall');
+    expect(priceIdx).toBeGreaterThan(-1);
+    expect(fn.indexOf('inputAudioTokens != null')).toBeLessThan(priceIdx);
   });
 
   it('still estimates when there are genuinely no tokens', () => {

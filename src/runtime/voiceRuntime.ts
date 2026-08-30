@@ -501,6 +501,7 @@ export function mountVoiceRuntime(
             callerPhone: entry.callerPhone,
             dialedNumber: entry.dialedNumber,
             agentVersion: lane.version,
+            startedAtMs,
           },
           options.openCallRow,
           env,

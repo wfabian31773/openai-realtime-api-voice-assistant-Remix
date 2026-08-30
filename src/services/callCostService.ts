@@ -637,15 +637,23 @@ export class CallCostService {
       if (costCents > 0) {
         updateData.twilioCostCents = costCents;
 
-        // Duration estimate ONLY when no token-based cost exists — never
-        // clobber an authoritative token-derived OpenAI cost.
-        if (existing?.inputAudioTokens == null) {
-          const openaiCostCents = Math.ceil(actualDuration * OPENAI_COST_CENTS_PER_SECOND);
-          updateData.openaiCostCents = openaiCostCents;
-          updateData.totalCostCents = costCents + openaiCostCents;
-        } else {
-          updateData.totalCostCents = costCents + (existing.openaiCostCents ?? 0);
+        // Same provider-aware decision as retryTwilioCostFetch. This path is
+        // the five-minute fixSuspiciousDurations sweep, and a Grok row's null
+        // token columns look exactly like an un-reconciled OpenAI row's — so
+        // this branch was overwriting the correct Grok charge with an OpenAI
+        // estimate on schedule (Codex review, PR #227). Token-derived costs
+        // are still never clobbered; that guard lives in priceVoiceCall.
+        const pricing = priceVoiceCall({
+          voiceProvider: (existing as { voiceProvider?: string | null } | undefined)?.voiceProvider,
+          inputAudioTokens: existing?.inputAudioTokens,
+          existingOpenaiCostCents: existing?.openaiCostCents,
+          durationSeconds: actualDuration,
+          twilioCostCents: costCents,
+        });
+        if (pricing.providerCostCents !== undefined) {
+          updateData.openaiCostCents = pricing.providerCostCents;
         }
+        updateData.totalCostCents = pricing.totalCostCents;
         updateData.costCalculatedAt = new Date();
       }
       
@@ -734,20 +742,32 @@ export class CallCostService {
       }
 
       const durationSeconds = callLog.duration;
-      
-      // Use calibrated rate from actual billing data
-      const openaiCostCents = Math.ceil(durationSeconds * OPENAI_COST_CENTS_PER_SECOND);
-      
       const twilioCostCents = callLog.twilioCostCents || 0;
-      const totalCostCents = twilioCostCents + openaiCostCents;
-      
+
+      // Whose duration rate applies is decided in voiceCostRates.ts — a
+      // Grok-served row's null token columns look exactly like an
+      // un-reconciled OpenAI row's, and this function re-runs whenever
+      // Twilio corrects a duration, repeating the wrong-rate overwrite
+      // (Codex review, PR #227). The tokens case never reaches here; the
+      // guard above already returned.
+      const pricing = priceVoiceCall({
+        voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
+        inputAudioTokens: callLog.inputAudioTokens,
+        existingOpenaiCostCents: callLog.openaiCostCents,
+        durationSeconds,
+        twilioCostCents,
+      });
+      const openaiCostCents = pricing.providerCostCents ?? callLog.openaiCostCents ?? 0;
+
       await storage.updateCallLog(callLogId, {
         openaiCostCents,
-        totalCostCents,
+        totalCostCents: pricing.totalCostCents,
         costCalculatedAt: new Date(),
       });
-      
-      console.info(`[COST] Recalculated for ${callLogId} (${durationSeconds}s): OpenAI $${(openaiCostCents/100).toFixed(2)}`);
+
+      console.info(
+        `[COST] Recalculated for ${callLogId} (${durationSeconds}s, ${pricing.basis}): $${(openaiCostCents / 100).toFixed(2)}`,
+      );
       return true;
     } catch (error) {
       console.error(`[COST] Recalculation failed for ${callLogId}:`, error);
