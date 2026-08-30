@@ -134,7 +134,21 @@ const TRANSFER_CAPABLE_LANES = new Set([
  * ticket instead of dialing the office (Codex, PR #230). It stays
  * refused until that side channel is wired on this runtime.
  */
-const RUNTIME_TRANSFER_READY_LANES = new Set(["no-ivr", "no-ivr-v2", "dev-no-ivr", "pcp"]);
+const RUNTIME_TRANSFER_READY_LANES = new Set([
+  "no-ivr",
+  "no-ivr-v2",
+  "dev-no-ivr",
+  "pcp",
+  // The proving lane transfers through the handoff BROKER, which this
+  // runtime does wire: createRuntimeProofAgent registers the per-call
+  // callback under its callId and voiceRuntime releases it at teardown.
+  // It was left out when this set was introduced to refuse
+  // azul-scheduling (PR #230 round 1) and only added to the registry
+  // afterwards (PR #232), so the one lane built for live-testing the
+  // runtime end to end was the one lane the runtime refused — and with
+  // the azul side-channel reason, which was never true of it.
+  "runtime-proof",
+]);
 
 /**
  * Why this runtime cannot serve a lane, or null when it can. Pure, so the

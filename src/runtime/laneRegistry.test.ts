@@ -285,6 +285,31 @@ describe("a lane that transfers is served only when a handoff is injected", () =
     expect(reason).toBeNull();
   });
 
+  it("SERVES the proving lane with a handoff — it transfers through the broker the runtime wires", () => {
+    // runtime-proof is the one lane built for live-testing the runtime end
+    // to end, and it was the one lane the runtime refused: it landed in
+    // TRANSFER_CAPABLE_LANES but never in the ready set, which was written
+    // to refuse azul-scheduling (PR #230 round 1) before this lane existed
+    // (PR #232). It was therefore rejected with azul's side-channel reason,
+    // which was never true of it — createRuntimeProofAgent registers its
+    // per-call handoff in the BROKER, and voiceRuntime releases it at
+    // teardown.
+    expect(
+      laneSupportStatus({ id: "runtime-proof", enabled: true, agentType: "inbound" } as LaneConfig, {
+        transferAvailable: true,
+      }),
+    ).toBeNull();
+
+    // And still refused when nothing is configured to dial with — it holds
+    // the handoff tool, so serving it unconfigured would hand the operator
+    // a tool that cannot work.
+    expect(
+      laneSupportStatus({ id: "runtime-proof", enabled: true, agentType: "inbound" } as LaneConfig, {
+        transferAvailable: false,
+      }),
+    ).toMatch(/no handoff is configured/);
+  });
+
   it("still refuses azul-scheduling even WITH a handoff — its transfers use a different side channel", async () => {
     // Its ordinary cold_transfer flow never invokes the factory handoff:
     // transfer_to_office reads officeTransferCallbacks, registered per call
