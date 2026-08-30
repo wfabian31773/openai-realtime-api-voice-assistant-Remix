@@ -76,6 +76,38 @@ describe("runtime readiness", () => {
     expect(r.liveReady).toBe(true);
   });
 
+  it("recognizes EVERY production signal the deployment sets — none implies the others", () => {
+    // A published deployment can present only APP_ENV=production (from
+    // .replit) or only a published .replit.app domain. The shared resolver
+    // treats both as production and selects PRODUCTION_DATABASE_URL, while
+    // this function tested only NODE_ENV/REPLIT_DEPLOYMENT — classifying
+    // the process as development, reporting DATABASE_URL missing, and
+    // serving the unavailable TwiML for every call of a completely
+    // configured deployment (Codex, PR #227 round 21).
+    for (const signal of [
+      { APP_ENV: "production" },
+      { REPLIT_DOMAINS: "azul.replit.app" },
+    ]) {
+      const r = computeRuntimeReadiness({
+        XAI_API_KEY: "k",
+        TWILIO_AUTH_TOKEN: "t",
+        PRODUCTION_DATABASE_URL: "postgres://prod",
+        ...signal,
+      });
+      expect(r.liveReady).toBe(true);
+      expect(r.requiredDbEnvVar).toBe("PRODUCTION_DATABASE_URL (or DATABASE_URL)");
+    }
+    // A dev workspace domain stays development: DATABASE_URL is required.
+    const dev = computeRuntimeReadiness({
+      XAI_API_KEY: "k",
+      TWILIO_AUTH_TOKEN: "t",
+      PRODUCTION_DATABASE_URL: "postgres://prod",
+      REPLIT_DOMAINS: "azul.spock.replit.dev",
+    });
+    expect(dev.liveReady).toBe(false);
+    expect(dev.missing).toContain("DATABASE_URL");
+  });
+
   it("prints the marker and the reason, which is how a stale build is caught", () => {
     const lines = formatReadinessLines(computeRuntimeReadiness({}));
     expect(lines[0]).toBe(`[voice-runtime] ${VOICE_RUNTIME_DEPLOY_MARKER}`);
