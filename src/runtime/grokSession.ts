@@ -95,6 +95,12 @@ export interface GrokVoiceSessionHandlers {
    * words the caller actually heard would be absent from the record. */
   onAgentTranscriptDelta?: (delta: string) => void;
   onSpeechStarted?: () => void;
+  /** The wire's `response.done` — the only proof a response has delivered
+   * EVERYTHING it carries, tool calls included. The bridge coalesces its
+   * post-tool follow-up on this boundary: settled dispatches alone cannot
+   * say whether more function-call events from the same response are still
+   * in flight (Codex review, PR #227 round 17). */
+  onResponseDone?: () => void;
   /** Caller finished a VAD turn. The bridge's dead-air watchdog arms on
    * this: a caller who answered and then hears silence is stuck, and the
    * max-duration ceiling is minutes away (hardening port from the sibling
@@ -379,6 +385,7 @@ export class GrokVoiceSession {
         // cancel), so consuming the debt here would leave the common case
         // tearing the call down.
         this.flushPendingSay();
+        this.handlers.onResponseDone?.();
         break;
       case "response.function_call_arguments.done": {
         // `arguments` is a JSON STRING on the wire. A payload that is not
