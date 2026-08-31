@@ -87,8 +87,18 @@ function makeBridge(
     cancelResponse: vi.fn(),
     sendToolResult: vi.fn(),
     requestResponse: vi.fn(),
-    speakNatural: vi.fn(),
-    speak: vi.fn(),
+    // A guardrail's safe replacement creates a response of its own, so the
+    // cut line's epoch is genuinely behind it.
+    speakNatural: vi.fn(() => {
+      epoch += 1;
+    }),
+    // A scripted say creates a response, and GrokVoiceSession advances the
+    // epoch on its `response.created`. The greeting's line is bound to that
+    // epoch, so a fake that never advanced it modelled the greeting as
+    // arriving on the response BEFORE its own.
+    speak: vi.fn(() => {
+      epoch += 1;
+    }),
     close: vi.fn(),
     getResponseEpoch: () => epoch,
   } satisfies BridgeSession;
@@ -1740,15 +1750,16 @@ describe("the practice greets the caller before the agent takes a turn", () => {
   });
 
   it("records no greeting line when its audio never reached the caller", () => {
-    // No audio, no line — the rule every other utterance follows. And the
-    // pending text must not survive to claim a LATER utterance's first delta,
-    // which would put the greeting in the record on top of a line the model
-    // actually spoke.
+    // No audio, no line — the rule every other utterance follows.
+    //
+    // Deliberately WITHOUT a new response: a second utterance of the same one
+    // carries the same epoch, so this is the single case the epoch bind
+    // cannot see. The pending text has to be dropped at the completion, or
+    // the greeting's line lands on top of a line the model actually spoke.
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
     h.handlers().onAudioDone(GREETING); // the response ended without audio
 
-    h.newResponse();
     h.handlers().onAgentTranscriptDelta("Sorry about that.");
     h.handlers().onAudioDelta("ZmFrZQ==");
     h.handlers().onAudioDone("Sorry about that.");
@@ -1808,7 +1819,8 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     h.handlers().onAgentTranscriptDelta(BAD_GREETING); // no audio yet
     await verdicts();
 
-    h.newResponse();
+    // No manual response bump: `speakNatural` creates the replacement's own,
+    // which is exactly what puts it past the greeting's epoch.
     h.handlers().onAgentTranscriptDelta("Thank you for calling. How can I help?");
     h.handlers().onAudioDelta("ZmFrZQ==");
     h.handlers().onAudioDone("Thank you for calling. How can I help?");
@@ -1819,6 +1831,33 @@ describe("the practice greets the caller before the agent takes a turn", () => {
       `AGENT: ${BAD_GREETING} [cut by guardrail: No diagnosis]`,
       "AGENT: Thank you for calling. How can I help?",
     ]);
+  });
+
+  it("stamps the tail from a greeting a guardrail cut, when nothing else can", async () => {
+    // The cancelled response's own completion is discarded by the epoch
+    // check, and the safe replacement never completes either — the caller
+    // hangs up on it, and the guardrail already cleared `assistantAudioPlaying`
+    // so teardown's cut does not run. Without a stamp at the cut, a
+    // transcript with plainly caller-audible agent words in it carries no
+    // tail measurement at all. Codex, #243.
+    const persisted: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      greeting: BAD_GREETING,
+      agent: makeAgent({ guardrails: [diagnosisGuardrail()] }),
+      persistCallRecord: async (r) => void persisted.push(r),
+    });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAgentTranscriptDelta(BAD_GREETING);
+    await verdicts();
+
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await Promise.resolve();
+
+    expect(persisted[0]?.transcript.split("\n")).toEqual([
+      `AGENT: ${BAD_GREETING} [cut by guardrail: No diagnosis]`,
+    ]);
+    expect(persisted[0]?.lastTranscriptAtMs).toBeDefined();
   });
 
   it("refines a caller line that straddles the start of the greeting", () => {
@@ -1890,11 +1929,34 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     expect(persisted[0]?.lastTranscriptAtMs).toBeDefined();
   });
 
+  it("a greeting whose response emits NOTHING leaves no line behind", () => {
+    // Codex, #243. Superseded before a single delta, that response never
+    // opened an utterance — so the branch in openOrGetCurrent that drops a
+    // pending greeting has nothing to match on. Unbound, the REPLACEMENT's
+    // first audio writes the greeting's line, and then swallows the
+    // replacement's own transcript at its mark, because that line is marked
+    // as already committed. The greeting is the first response created after
+    // the handshake, and only that one may write it.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured(); // the greeting's response
+
+    h.newResponse(); // a later one — the greeting's produced nothing at all
+    h.handlers().onAgentTranscriptDelta("Sorry about that, how can I help?");
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone("Sorry about that, how can I help?");
+    const markName = lastMarkName(h);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "AGENT: Sorry about that, how can I help?",
+    ]);
+  });
+
   it("a greeting superseded before it played leaves no line behind", () => {
-    // openOrGetCurrent drops an utterance the wire moved past without ever
-    // completing. The greeting's pending text goes with it, for the same
-    // reason as the guardrail case: otherwise the NEXT utterance's first
-    // delta writes the greeting, and that utterance's real words are lost.
+    // The greeting opened an utterance but never reached audio, and the wire
+    // moved past it. The replacement rides a later response, so the epoch
+    // bind refuses it the greeting's line — otherwise that utterance's first
+    // delta writes the greeting and its own real words are lost.
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
     h.handlers().onAgentTranscriptDelta("Thank you for calling"); // greeting opens

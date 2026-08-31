@@ -419,6 +419,22 @@ export class VoiceCallBridge {
    */
   private greetingPending: string | null = null;
   /**
+   * The response epoch whose audio may write the greeting's line.
+   *
+   * `handleSessionConfigured` speaks the greeting and requests nothing else,
+   * and at the handshake `speak()` sends immediately rather than queueing —
+   * so the greeting IS the first response created after it, one past the
+   * epoch observed there. Comparing against that is the only way to tell the
+   * greeting's own audio from a later response's.
+   *
+   * `openOrGetCurrent` drops a pending greeting whose utterance is
+   * superseded, but a response that is superseded before emitting a SINGLE
+   * delta never opens an utterance at all — there is nothing for that branch
+   * to match on, and the replacement's first audio would write the greeting's
+   * line and swallow its own transcript at its mark (Codex, #243).
+   */
+  private greetingEpoch: number | null = null;
+  /**
    * The greeting's line once written: which utterance it belongs to, where it
    * sits in the record, and the exact words it claims.
    *
@@ -649,8 +665,11 @@ export class VoiceCallBridge {
       // should not be barge-able (2026-08-31).
       this.greetingLocked = true;
       // Its words are known NOW, so the record does not have to wait for
-      // them — see `greetingPending` and the module doc.
+      // them — see `greetingPending` and the module doc. Read the epoch
+      // BEFORE speaking: the response `speak()` is about to create is the
+      // next one, and only its audio may write that line.
       this.greetingPending = this.deps.greeting;
+      this.greetingEpoch = this.session.getResponseEpoch() + 1;
       this.session.speak(this.deps.greeting, { interruptible: false });
     } else {
       // No per-response instructions: `response.instructions` OVERRIDES the
@@ -689,9 +708,6 @@ export class VoiceCallBridge {
         this.noteTranscript("agent");
       }
       this.current = null;
-      // And with it a greeting that never got as far as audio: only the
-      // utterance that was carrying it may write its line.
-      this.greetingPending = null;
     }
     if (!this.current) {
       this.utteranceSeq += 1;
@@ -770,14 +786,18 @@ export class VoiceCallBridge {
       return;
     }
     console.error(`[bridge] GUARDRAIL TRIPPED, cutting the line: ${guardrail.name}`);
-    this.recordCutLine(`[cut by guardrail: ${guardrail.name}]`);
+    // Same invariant as the barge-in and teardown cuts: words the caller
+    // heard, committed, move the clock. The cancelled response's own
+    // completion cannot — it is discarded by the epoch check — and if the
+    // safe replacement never completes either (the caller hangs up on it),
+    // nothing else in the call would stamp a transcript that plainly has
+    // caller-audible agent words in it (Codex, #243).
+    if (this.recordCutLine(`[cut by guardrail: ${guardrail.name}]`)) {
+      this.noteTranscript("agent");
+    }
     this.awaitingMark.length = 0;
     this.cancelledEpoch = this.session.getResponseEpoch();
     this.current = null;
-    // The cut response is abandoned. A greeting stopped before it reached
-    // audio has no line, and must not claim the replacement turn's first
-    // delta as its own.
-    this.greetingPending = null;
     // A goodbye that violated a safety rule did not finish either: the armed
     // hangup is revoked exactly as a barge-in revokes it, and the agent must
     // re-request termination through its own guards.
@@ -818,12 +838,24 @@ export class VoiceCallBridge {
     // because for every other line the mark is the only proof the words were
     // spoken at all.
     if (this.greetingPending !== null) {
-      const text = this.greetingPending;
-      this.greetingPending = null;
-      // `openingLine`, not `agentLine`: it must not close a caller turn that
-      // is still open, or a cumulative re-emission of that same turn appends
-      // on the far side of the greeting instead of refining in place.
-      this.greetingLine = { seq: current.seq, index: this.transcriptLog.openingLine(text), text };
+      if (current.epoch !== this.greetingEpoch) {
+        // A response past the greeting's is speaking, so the greeting's own
+        // never reached audio: drop it rather than let these bytes write its
+        // line and swallow the words they are actually carrying.
+        this.greetingPending = null;
+      } else {
+        const text = this.greetingPending;
+        this.greetingPending = null;
+        // `openingLine`, not `agentLine`: it must not close a caller turn
+        // that is still open, or a cumulative re-emission of that same turn
+        // appends on the far side of the greeting instead of refining in
+        // place.
+        this.greetingLine = {
+          seq: current.seq,
+          index: this.transcriptLog.openingLine(text),
+          text,
+        };
+      }
     }
     this.assistantAudioPlaying = true;
     this.mediaSinceLastMark = true;
@@ -876,10 +908,14 @@ export class VoiceCallBridge {
     this.noteTranscript("agent");
     // A greeting whose response completed without ever sending audio never
     // reached the caller, so it gets no line — the rule every utterance
-    // follows — and it must not survive to claim a LATER utterance's first
-    // delta as its own. Before the `!done` return, because a completion that
-    // opened no utterance at all has to drop it too. (If the greeting did
-    // play, its first delta already cleared this when it wrote the line.)
+    // follows. Before the `!done` return, because a completion that opened no
+    // utterance at all has to drop it too.
+    //
+    // `greetingEpoch` does NOT cover this one: a second utterance of the SAME
+    // response carries the same epoch, so without this clear the greeting's
+    // line would be written over the words that utterance actually carried.
+    // Every other way a pending greeting can go stale ends up on a later
+    // response, which the epoch bind refuses on its own.
     this.greetingPending = null;
     const done = this.current;
     this.current = null;
