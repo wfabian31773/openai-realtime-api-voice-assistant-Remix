@@ -1112,19 +1112,27 @@ export class VoiceCallBridge {
     // and a replay puts them back in the wrong order (PR #241).
     this.clearDeadAir();
     this.transcriptLog.callerBoundary();
-    // The greeting is not barge-able — that is what the lock is for. Their
-    // audio keeps arriving and is still transcribed, so nothing about the
-    // caller is dropped and the provider answers them once the line
+    // The greeting is not barge-able WHILE IT PLAYS — that is what the lock
+    // is for. Their audio keeps arriving and is still transcribed, so nothing
+    // about the caller is dropped and the provider answers them once the line
     // finishes; but the cancel and the `clear` below do not run, and the rest
     // of the opening plays. Not counted as an interruption either: nothing
     // was interrupted.
     //
-    // The lock is tested EXPLICITLY. It used to be implied by a buffering
-    // branch that returned here first, and that branch answered its question
-    // once per utterance and never re-answered it — so a caller who spoke
-    // before the greeting started and again over it arrived with the answer
-    // already "no" and fell straight through to the barge-in below, cutting
-    // the very line the lock exists to protect.
+    // The lock is tested EXPLICITLY here. It used to be implied by a
+    // buffering branch that returned before this point, and that branch
+    // answered its question ONCE per utterance and never re-answered it — so
+    // a caller who spoke before the greeting started and again over it
+    // arrived with the answer already "no" and fell straight through to the
+    // barge-in below, cutting the very line the lock exists to protect.
+    //
+    // PR #242 fixed that same defect inside the buffering, by splitting the
+    // two questions it had conflated: where this utterance's line belongs
+    // (answered once, carried) versus whether the greeting may be interrupted
+    // (answered live). Here only the second question survives — the first has
+    // no answer to carry, because a line written when its audio starts is
+    // already in its place. This guard is #242's `greetingPlaying` return and
+    // its `assistantAudioPlaying` return, which together are exactly this.
     if (this.greetingLocked || !this.assistantAudioPlaying) return;
     this.interruptions += 1;
     // BARGE-IN: both signals, always together (see module doc). The line

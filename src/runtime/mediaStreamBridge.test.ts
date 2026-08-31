@@ -1940,6 +1940,45 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     ]);
   });
 
+  it("cannot be barged by a SECOND utterance after speaking before the greeting", () => {
+    // From #242, which found this defect independently while this PR was open
+    // and fixed it inside the buffering. The lock's whole purpose, and the
+    // case that defeated it: a caller who speaks before playback recorded "do
+    // not hold my transcript line" — correct, their words come first — and
+    // that same decision was then read to answer "may the greeting be
+    // interrupted?", letting a LATER utterance cancel the greeting and clear
+    // Twilio's buffer mid-sentence. On the after-hours line that can cut the
+    // 911 direction or the recording disclosure.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted(); // before any audio — caller is first
+    h.handlers().onAudioDelta("ZmFrZQ=="); // greeting starts
+    h.handlers().onSpeechStarted(); // talks again, OVER the greeting
+
+    expect(h.session.cancelResponse).not.toHaveBeenCalled();
+    expect(h.clears()).toEqual([]);
+
+    // #242's ORDERING half asserted the reverse of what follows, and the
+    // difference is this PR's one deliberate behaviour change. There, the
+    // per-utterance carry held this caller's line so it landed ahead of a
+    // greeting they began speaking before. That carry is gone: it is the very
+    // decision whose staleness defeated the lock above, and Codex found two
+    // more faults in it on this PR. A line written when its own audio starts
+    // needs no such decision — so the greeting sits where its audio began,
+    // and words transcribed after that point follow it. See "puts the
+    // greeting where its audio began, even mid-utterance".
+    h.handlers().onCallerTranscript("hello? are you there?", "item-1");
+    h.handlers().onAudioDone(GREETING);
+    const markName2 = lastMarkName(h);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName2 } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      `AGENT: ${GREETING}`,
+      "CALLER: hello? are you there?",
+    ]);
+  });
+
   it("starts a new caller line once the greeting is fully delivered", () => {
     // Codex, #243. `openingLine` leaves the caller's turn open on purpose —
     // the greeting's audio is only STARTING, and a turn straddling that
