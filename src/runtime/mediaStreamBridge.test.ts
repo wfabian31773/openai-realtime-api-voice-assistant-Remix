@@ -1519,6 +1519,44 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     expect(h.timers.fire(30_000)).toBe(false);
   });
 
+  it("keeps the opening in order when a caller talks over the greeting", () => {
+    // The greeting is held in awaitingMark until Twilio echoes, but a caller
+    // completion used to write straight through — so the record read
+    // CALLER-then-AGENT for an exchange that happened the other way round.
+    // Worse, agentLine() closes the open caller line, so the NEXT cumulative
+    // re-emission of the same caller item appended a duplicate instead of
+    // replacing it. Barge-in used to prevent both by committing the agent's
+    // partial line the moment the caller spoke; the lock removed that.
+    // Codex, #240, after merge.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("hello", "item-1");
+    // Cumulative re-emission of the SAME item — must refine, not duplicate.
+    h.handlers().onCallerTranscript("hello are you there", "item-1");
+
+    h.handlers().onAudioDone(GREETING);
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    const lines = h.bridge.getTranscript().split("\n");
+    expect(lines).toEqual([`AGENT: ${GREETING}`, "CALLER: hello are you there"]);
+  });
+
+  it("does not lose what a caller said before hanging up on the greeting", () => {
+    // Held lines are committed at teardown or they never reach the record.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onCallerTranscript("wrong number sorry", "item-1");
+
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+
+    expect(h.bridge.getTranscript()).toContain("CALLER: wrong number sorry");
+  });
+
   it("still barges in normally on a lane with no greeting", () => {
     // The lock must not leak into lanes that never take it.
     const h = makeBridge({ greeting: null });

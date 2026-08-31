@@ -393,6 +393,23 @@ export class VoiceCallBridge {
    * debt across it. Raised by Codex on #240.
    */
   private responseOwedFromGreeting = false;
+  /**
+   * Caller transcript completions that arrived while the greeting was
+   * locked and still uncommitted.
+   *
+   * The greeting's line is held in `awaitingMark` until Twilio echoes, but a
+   * caller completion writes straight through — so a caller who talks over
+   * the greeting lands in the record BEFORE it, reversing the opening. Worse,
+   * `agentLine()` closes the open caller line, so the next cumulative
+   * re-emission of that same caller item appends a duplicate instead of
+   * replacing it: the caller's words appear twice, once on each side of the
+   * greeting.
+   *
+   * Barge-in used to prevent this by committing the agent's partial line the
+   * instant the caller spoke. The lock removed that, so the ordering has to
+   * be preserved here instead. Raised by Codex on #240, after merge.
+   */
+  private greetingHeldCallerLines: Array<{ text: string; itemId?: string }> = [];
   /** The most recent mark sent, and whether media went out AFTER it: an
    * OLDER mark's echo must not clear the playback flag, or the next
    * barge-in early-returns and the caller is talked over. */
@@ -452,7 +469,13 @@ export class VoiceCallBridge {
       onResponseDone: () => this.handleResponseDone(),
       onCallerTranscript: (text, itemId) => {
         if (this.ended) return;
+        // The clock is stamped either way — the caller DID speak, and dead-air
+        // timing must not wait on a mark echo.
         this.noteTranscript("caller");
+        if (this.greetingLocked) {
+          this.greetingHeldCallerLines.push({ text, itemId });
+          return;
+        }
         this.transcriptLog.callerCompleted(text, itemId);
       },
       onError: (err) => this.handleSessionFailure(err),
@@ -900,6 +923,17 @@ export class VoiceCallBridge {
       this.clearTimer(this.greetingLockTimer);
       this.greetingLockTimer = null;
     }
+    // Whatever the caller said over the greeting, in the order they said it.
+    // On the echo path the greeting's own line is already committed by the
+    // loop above, so these land after it and the opening reads correctly.
+    // On the timeout path the greeting may still be held — the order can
+    // still be wrong there, but that is a degraded path, and losing the
+    // caller's words outright would be worse than misordering them.
+    const held = this.greetingHeldCallerLines;
+    this.greetingHeldCallerLines = [];
+    for (const line of held) {
+      this.transcriptLog.callerCompleted(line.text, line.itemId);
+    }
   }
 
   private handleCallerSpeechStarted(): void {
@@ -1198,6 +1232,9 @@ export class VoiceCallBridge {
   private teardown(outcome: CallOutcome): void {
     if (this.ended) return;
     this.ended = true;
+    // A caller who hung up over the greeting still said something. Held
+    // lines are committed before the record is rendered, or they are lost.
+    if (this.greetingHeldCallerLines.length > 0) this.releaseGreetingLock();
     // Whatever close event won the race — Twilio's stop frame, the socket
     // closing, the provider session dying as the stream ends — the caller
     // was moved to a human on purpose. That is the outcome.
