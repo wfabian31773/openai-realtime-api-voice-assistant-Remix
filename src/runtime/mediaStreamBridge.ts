@@ -985,25 +985,37 @@ export class VoiceCallBridge {
     // The caller is talking: not dead air, and any open caller line in the
     // record crossed a speech boundary (transcript correlation only).
     this.clearDeadAir();
-    // Answered once per utterance, here, and read again at its completion.
+    // TWO DIFFERENT QUESTIONS, and conflating them defeated the lock.
+    //
+    //  1. Where does THIS utterance's transcript line belong? Answered once,
+    //     when the caller started, and carried to its completion.
+    //  2. May the greeting be interrupted right now? Answered LIVE, every
+    //     time, because it is about the greeting and not about the caller.
+    //
+    // A caller who spoke before playback began recorded `false` for (1) —
+    // correctly, their words come first. Reading that same `false` for (2)
+    // on a LATER utterance let the barge-in below cancel the greeting and
+    // clear Twilio's buffer mid-sentence, which on the after-hours line can
+    // cut the 911 direction or the recording disclosure. The lock exists to
+    // make that impossible. Raised by Codex on #241, after merge.
+    const greetingPlaying = this.greetingHoldsTranscript();
     if (this.callerUtteranceHeld === null) {
-      this.callerUtteranceHeld = this.greetingHoldsTranscript();
+      this.callerUtteranceHeld = greetingPlaying;
     }
     if (this.callerUtteranceHeld) {
       // Buffered IN SEQUENCE with the completions it separates — applying it
       // now would mark a log that is still empty, which is nothing at all.
       this.greetingHeldCallerLines.push({ kind: "boundary" });
-      return;
+    } else {
+      this.transcriptLog.callerBoundary();
     }
-    this.transcriptLog.callerBoundary();
-    // Reaching here while the greeting is still locked means it has not
-    // started playing, and `assistantAudioPlaying` below already returns for
-    // that — a separate guard would be a branch no test could distinguish.
-    // The greeting is not barge-able. Their audio keeps arriving and is
-    // still transcribed — nothing about the caller is dropped, and the
-    // provider will answer them once the line finishes — but the cancel
-    // and the `clear` below do not run, so the rest of the greeting plays.
-    // Not counted as an interruption either: nothing was interrupted.
+    // The greeting is not barge-able WHILE IT PLAYS, whatever this utterance
+    // decided about its own transcript line. Their audio keeps arriving and
+    // is still transcribed — nothing about the caller is dropped, and the
+    // provider answers them once the line finishes — but the cancel and the
+    // `clear` below do not run, so the rest of the greeting plays. Not
+    // counted as an interruption either: nothing was interrupted.
+    if (greetingPlaying) return;
     if (!this.assistantAudioPlaying) return;
     this.interruptions += 1;
     // BARGE-IN: both signals, always together (see module doc). The line
