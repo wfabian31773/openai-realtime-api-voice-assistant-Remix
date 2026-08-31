@@ -9,19 +9,16 @@
  *
  * Resolution order:
  *
- *   1. Production no-IVR → its dedicated transfer number at every hour.
- *      This line is the after-hours triage service; operator direction is that
- *      its sanctioned transfers must never be diverted to an office queue.
- *   2. Outside business hours (Mon-Fri 08:00-17:00 Pacific) → on-call.
+ *   1. Outside business hours (Mon-Fri 08:00-17:00 Pacific) → on-call.
  *      The office phones are not answered, so routing there would put a
  *      patient with vision loss into a voicemail box. Explicit operator
  *      decision, not an oversight.
- *   3. Inside business hours → ask the rules engine (sage_handoff) for the
+ *   2. Inside business hours → ask the rules engine (sage_handoff) for the
  *      office queue that owns this caller's location, exactly as azul's
  *      tier-2 transfer does. THE NUMBER IS NEVER MODEL-SUPPLIED: it comes
  *      back from the service, so the agent can only connect callers to
  *      numbers the routing rules chose.
- *   4. Rules engine returns nothing usable → on-call.
+ *   3. Rules engine returns nothing usable → on-call.
  *      This is the important one. `sage_handoff` may be pilot-fenced for
  *      locations outside the AI-enabled set, in which case it returns no
  *      transfer number at all. Degrading to today's behaviour is always
@@ -34,7 +31,6 @@
 import { isBusinessHours } from '../utils/timeAware';
 
 export type UrgentTransferSource =
-  | 'no_ivr_dedicated'       // production no-IVR always uses its fixed destination
   | 'office_queue'          // the rules engine routed us to an office
   | 'on_call_after_hours'   // outside business hours, by design
   | 'on_call_no_route'      // in hours, but the rules engine gave us nothing
@@ -145,9 +141,24 @@ export async function resolveUrgentTransferTarget(input: {
   // urgent — they were asking to schedule an appointment and whether we take
   // Blue Shield Medi-Cal.
   const onCall = ON_CALL_AUTHORIZED_AGENTS.has(input.agentSlug ?? '') ? configuredOnCall : '';
-
+  // The no-IVR agent never sees an open office, so the clock is not its
+  // decision to make. Calls reach it only because the phone system forwarded
+  // them: the operator sets the hours in Nextiva and everything lands here
+  // when the phones are off. Arrival at this agent IS the closed signal,
+  // already decided upstream by the schedule that actually governs.
+  //
+  // Deferring to isBusinessHours() here would second-guess that schedule with
+  // a worse copy of it. This one knows the hour and the weekend and nothing
+  // else — no holidays, and no awareness when the operator changes the hours
+  // in Nextiva without touching this repo. On Thanksgiving morning it reads
+  // "business hours" and would route an urgent caller to a front desk that is
+  // closed, which is a ring-out into silence by that queue's own contract
+  // (Codex review + operator confirmation, PR #238).
+  //
+  // Every other agent still asks, because they take calls while offices are
+  // staffed and the office queue is a real destination for them.
   if (input.agentSlug === 'no-ivr') {
-    return onCall ? { number: onCall, source: 'no_ivr_dedicated' } : null;
+    return onCall ? { number: onCall, source: 'on_call_after_hours' } : null;
   }
 
   const inHours = input.businessHours ?? isBusinessHours();

@@ -40,9 +40,11 @@ import { director, directorEnabledFor, type DirectorAction } from './director/di
 import { getEnvironmentConfig, resolveAppDomain } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 import {
+  preferredCallbackNumber,
   resolveClinicalTransferNumber,
   resolveHandoffDestination,
   resolvePcpDialSequence,
+  urgentTransferFailureLine,
 } from './services/handoffPolicy';
 import { buildPcpTransferBriefing, buildWarmTransferScript } from './services/warmTransferBriefing';
 import { pcpAgentConfig } from './agents/pcpAgent';
@@ -1203,7 +1205,7 @@ function logHistoryItem(item: RealtimeItem, callId?: string): void {
  */
 async function fileUrgentHandoffFallbackTicket(
   openAiCallId: string,
-  escalationDetails: { reason?: string; symptomsSummary?: string; patientFirstName?: string; patientLastName?: string } | undefined,
+  escalationDetails: { reason?: string; symptomsSummary?: string; patientFirstName?: string; patientLastName?: string; callbackNumber?: string } | undefined,
   callerID: string | null | undefined,
   ctx: { why: string; dialTarget?: string },
 ): Promise<void> {
@@ -1215,7 +1217,18 @@ async function fileUrgentHandoffFallbackTicket(
     const urgentMapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // generic urgent
     const patientFirst = escalationDetails?.patientFirstName || 'Unknown';
     const patientLast = escalationDetails?.patientLastName || 'Caller';
-    const rawPhone = callerID || '';
+    // The number to CALL BACK is the one the patient gave, when they gave one
+    // AND it is dialable. It is frequently not the phone they are calling from
+    // — a spouse's mobile, a nurse's station, a caller on a landline who wants
+    // their cell — but it arrives as free text, so an unvalidated preference
+    // can swap a good caller ID for a fragment. The policy decides; see
+    // preferredCallbackNumber (standing instruction 12; Codex review, PR #238).
+    // `callData.callerPhone` below keeps the true inbound number regardless, so
+    // nothing loses the provenance.
+    const rawPhone = preferredCallbackNumber({
+      collected: escalationDetails?.callbackNumber,
+      callerId: callerID,
+    }) || '';
     const digits = rawPhone.replace(/\D/g, '');
     const formattedPhone = digits.length === 10
       ? `+1${digits}`
@@ -1274,6 +1287,24 @@ function sendUrgentTransferSms(opts: {
   escalationDetails?: EscalationDetails;
   /** Extra context line for fallback paths, e.g. why this is a direct dial. */
   note?: string;
+  /**
+   * What this alert is actually announcing.
+   *
+   * 'transfer' (default) — a leg is being dialled TO THIS RECIPIENT; their
+   * phone is about to ring and they should pick up.
+   * 'callback' — nothing was dialled and nothing will be. The recipient has to
+   * call out. Sending the 'transfer' wording here told them to expect an
+   * inbound call that was never coming, so they would wait instead of dialling
+   * the urgent patient (Codex review, PR #238).
+   * 'routed' — the call is ringing SOMEWHERE ELSE, at the office queue the
+   * rules engine chose. The recipient is being kept informed, not summoned:
+   * during business hours the office takes it, and telling the on-call phone
+   * "connecting patient to you now" left it waiting on a call ringing in
+   * another building (Codex review, PR #238).
+   */
+  kind?: 'transfer' | 'callback' | 'routed';
+  /** For 'routed': where it actually went, e.g. "Glendale Front". */
+  routedTo?: string;
 }): void {
   const to = envConfig.twilio.urgentNotificationNumber;
   const from = envConfig.twilio.phoneNumber;
@@ -1287,7 +1318,13 @@ function sendUrgentTransferSms(opts: {
       const callTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/Los_Angeles' });
       const d = opts.escalationDetails;
 
-      let smsBody = `📞 INCOMING TRANSFER - ${callTime}\n`;
+      const callbackOnly = opts.kind === 'callback';
+      const routedElsewhere = opts.kind === 'routed';
+      let smsBody = callbackOnly
+        ? `📵 NO TRANSFER — CALL THIS PATIENT - ${callTime}\n`
+        : routedElsewhere
+          ? `🏥 URGENT — ROUTED TO OFFICE - ${callTime}\n`
+          : `📞 INCOMING TRANSFER - ${callTime}\n`;
       smsBody += `From: ${opts.callerNumber || 'Unknown'}\n`;
       if (opts.note) {
         smsBody += `\n⚠️ ${opts.note}\n`;
@@ -1304,7 +1341,12 @@ function sendUrgentTransferSms(opts: {
         if (d.reason) smsBody += `\nReason: ${d.reason}\n`;
         if (d.symptomsSummary) smsBody += `Symptoms: ${d.symptomsSummary}\n`;
       }
-      smsBody += `\n📱 Connecting patient to you now...`;
+      smsBody += callbackOnly
+        ? `\n📱 Nobody is being connected to you. Please call this patient back now.`
+        : routedElsewhere
+          ? `\n📱 Ringing ${opts.routedTo || 'the office queue'} — not your phone. ` +
+            `For your awareness; no action needed unless they do not pick it up.`
+          : `\n📱 Connecting patient to you now...`;
 
       await client.messages.create({ body: smsBody, from, to });
       console.log('[HANDOFF] ✓ SMS notification sent to', to);
@@ -1400,6 +1442,12 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
   // routing one into an office front desk would be wrong. So the office queue
   // only ever replaces the CLINICAL destination.
   let dialSource = 'policy';
+  // Hoisted out of the block below so the heads-up SMS can tell the on-call
+  // phone which of two different things is happening. Without it, an office
+  // routed call sent the same "connecting patient to you now" as a call that
+  // really was ringing that phone (Codex review, PR #238).
+  let urgentSource: string | null = null;
+  let urgentQueueLabel: string | undefined;
   if (policy.policy !== 'pcp') {
     const { resolveUrgentTransferTarget } = await import('./services/urgentTransfer');
     const target = await resolveUrgentTransferTarget({
@@ -1413,6 +1461,8 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     if (target?.number) {
       handoffDestination = target.number;
       dialSource = target.source + (target.queueLabel ? ` — ${target.queueLabel}` : '');
+      urgentSource = target.source;
+      urgentQueueLabel = target.queueLabel;
     }
   }
   console.log(`[HANDOFF] Dialing ${handoffDestination} (${dialSource})`);
@@ -1441,9 +1491,19 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       : [];
     
     // STEP 1: Send SMS notification immediately (fire and forget)
-    // Provider gets heads-up while we're dialing them
+    // Provider gets heads-up while we're dialing them — but only the recipient
+    // whose phone is ACTUALLY about to ring is told to pick up. In business
+    // hours a no-IVR escalation goes to the office queue the rules engine
+    // chose, and this alert still lands on the on-call mobile; sending the
+    // "connecting patient to you now" wording there left it waiting on a call
+    // ringing in another building (Codex review, PR #238).
     if (policy.policy !== 'pcp') {
-      sendUrgentTransferSms({ callerNumber: callerID, escalationDetails });
+      const routedToOffice = urgentSource === 'office_queue';
+      sendUrgentTransferSms({
+        callerNumber: callerID,
+        escalationDetails,
+        ...(routedToOffice ? { kind: 'routed' as const, routedTo: urgentQueueLabel } : {}),
+      });
     }
     
     let sequentialPcpAnswered = false;
@@ -1885,14 +1945,50 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
       clinicalNumber: HUMAN_AGENT_NUMBER,
       noIvrNumber: envConfig.twilio.noIvrHumanAgentNumber,
     });
+    // Heads-up SMS BEFORE the operator's phone rings, and before the
+    // no-destination branch below. This path fires only for a mid-call drop on
+    // an already-escalated (urgent) call, so the operator has to hear about it
+    // whether or not we can dial — the caller we CANNOT transfer is the one
+    // who most needs somebody told. Sending it after the branch meant that
+    // caller was the only one nobody was paged about.
+    sendUrgentTransferSms({
+      callerNumber: getCallerNumber(conferenceName) || callerCall.from,
+      escalationDetails: escalation,
+      kind: fallbackNumber ? 'transfer' : 'callback',
+      note: fallbackNumber
+        ? 'TECH FALLBACK — assistant disconnected during an URGENT call; caller transferred directly'
+        : 'TECH FALLBACK — assistant disconnected during an URGENT call and NO transfer destination is configured. Nobody was dialled.',
+    });
     if (!fallbackNumber) {
       console.error(
         `[SIP-RECOVERY] ${conferenceName}: urgent transfer destination is not configured — ending caller leg without dialing`,
       );
+      // Filed, not awaited. Operator ruling 2026-08-30: this caller is NOT
+      // promised a callback, so nothing spoken below depends on the ticket
+      // having landed — and awaiting it would hold an already-distressed
+      // caller in silence through a database lock, an outbox write, an
+      // external send and, on a contended claim, a deliberate three-second
+      // wait (Codex review, PR #238). The record still gets written; its
+      // latency just stops being the caller's problem.
+      void fileUrgentHandoffFallbackTicket(
+        // Non-null holds by construction: `escalation` is only ever read as
+        // `recoveredCallId ? escalationDetailsMap.get(recoveredCallId) : undefined`,
+        // and the guard above returns when it is falsy. The helper keys the
+        // conference and agent slug off this id, so substituting the
+        // conference name would file a ticket with neither.
+        recoveredCallId!,
+        escalation,
+        getCallerNumber(conferenceName) || callerCall.from,
+        {
+          why:
+            'URGENT call lost its assistant leg and NO transfer destination is configured — ' +
+            'nobody was dialled. Call this patient back.',
+        },
+      );
       await client.calls(callerCallSid).update({
         twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">We apologize, but we are unable to complete the transfer. Please call back or dial nine one one if this is a medical emergency. Goodbye.</Say>
+  <Say voice="Polly.Joanna">${escapeXml(urgentTransferFailureLine())}</Say>
   <Hangup/>
 </Response>`,
       });
@@ -1901,13 +1997,20 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
     const callerIdAttribute = envConfig.twilio.phoneNumber
       ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
       : '';
-    // Heads-up SMS BEFORE the operator's phone rings. This path fires only for
-    // a mid-call drop on an already-escalated (urgent) call.
-    sendUrgentTransferSms({
-      callerNumber: getCallerNumber(conferenceName) || callerCall.from,
-      escalationDetails: escalation,
-      note: 'TECH FALLBACK — assistant disconnected during an URGENT call; caller transferred directly',
-    });
+    // No ticket is filed here, deliberately. It would have to be written
+    // BEFORE the dial — the outcome is not known on this side until Twilio
+    // reports it — and this helper's description always carries "Please call
+    // the patient back immediately." So a caller the on-call phone answers
+    // would generate an urgent callback task for a patient who is at that
+    // moment talking to the person named on it, on the after-hours queue the
+    // operator works himself (Codex review, PR #238).
+    //
+    // Nothing is lost by leaving it out: the escalation that led here already
+    // files its own record through the agent, and addHumanAgent files the
+    // urgent fallback ticket on the paths where a transfer actually failed.
+    // This function's job is to get the caller to a person, not to duplicate
+    // that bookkeeping with a worse copy of it.
+    const unansweredSay = urgentTransferFailureLine();
     await client.calls(callerCallSid).update({
       twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -1915,7 +2018,7 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
   <Dial${callerIdAttribute}>
     <Number>${escapeXml(fallbackNumber)}</Number>
   </Dial>
-  <Say voice="Polly.Joanna">We were unable to complete your call. Please try again later or call back during regular business hours. Goodbye.</Say>
+  <Say voice="Polly.Joanna">${escapeXml(unansweredSay)}</Say>
   <Hangup/>
 </Response>`,
     });

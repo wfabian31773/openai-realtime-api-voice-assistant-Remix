@@ -152,3 +152,60 @@ export function resolveHandoffDestination(params: Params): HandoffPolicyResult {
   if (!clinicalDestination) return { allowed: false, reason: 'clinical_destination_not_configured' };
   return { allowed: true, destination: clinicalDestination, policy: 'clinical' };
 }
+
+/**
+ * What an urgent caller is told when the transfer could not happen at all.
+ *
+ * Operator ruling 2026-08-30, asked directly: do NOT promise a callback here.
+ * The honest line costs nothing and the promise costs either a lie or a wait —
+ * backing it means filing a ticket and awaiting it before speaking, which
+ * leaves an already-distressed caller in silence for seconds while a database
+ * lock, an outbox write and an external send complete (Codex review, PR #238).
+ * The record is still filed, in the background, where its latency is nobody's
+ * problem.
+ *
+ * Standing instruction 10 (2026-08-13) sets the other bound: *"We can't just
+ * tell the patient call back, call the wrong extension."* Nobody is told to
+ * call us. So this says what is true, points at the one route that always
+ * works in an emergency, and promises nothing.
+ */
+export function urgentTransferFailureLine(): string {
+  return (
+    "I'm sorry, I could not connect you to anyone just now. " +
+    'If this is a medical emergency, please hang up and dial nine one one.'
+  );
+}
+
+/** A number Twilio can actually dial: normalized to E.164 and long enough to
+ * be a real subscriber number rather than a fragment. */
+function isDialableE164(value: string): boolean {
+  if (!value.startsWith('+')) return false;
+  const digits = value.slice(1).replace(/\D/g, '');
+  return digits.length >= 10 && digits.length <= 15;
+}
+
+/**
+ * Which number belongs on a ticket that promises the patient a call back.
+ *
+ * The collected callback number wins when there is one — it is the phone the
+ * patient actually asked to be reached on, and it is frequently not the one
+ * they are calling from (standing instruction 12). But only when it is
+ * DIALABLE. The escalation tool takes it as free text, so a caller who trails
+ * off mid-number can leave a seven-digit fragment behind, and preferring that
+ * over a valid inbound caller ID swaps a number that works for one that does
+ * not — on the exact path that has just promised to ring it back (Codex
+ * review, PR #238).
+ *
+ * `toE164` normalizes but deliberately does not validate: it returns anything
+ * it cannot place untouched rather than guessing, so a fragment comes back
+ * without a '+' and is rejected here. Caller ID is the fallback, never the
+ * silent default.
+ */
+export function preferredCallbackNumber(params: {
+  collected?: string;
+  callerId?: string | null;
+}): string | undefined {
+  const collected = toE164(params.collected);
+  if (collected && isDialableE164(collected)) return collected;
+  return params.callerId?.trim() || undefined;
+}
