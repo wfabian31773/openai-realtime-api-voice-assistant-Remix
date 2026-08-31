@@ -256,7 +256,9 @@ export interface BridgeSession {
   /** Speak EXACTLY these words. The greeting uses this rather than
    * speakNatural so the practice's opening line is identical on every call
    * and the model has no opportunity to reword it. */
-  speak(text: string): void;
+  /** Scripted, verbatim. `interruptible: false` protects a line the caller
+   * must hear whole — see `greetingLocked`. */
+  speak(text: string, opts?: { interruptible?: boolean }): void;
   close(): void;
   getResponseEpoch(): number;
 }
@@ -351,6 +353,29 @@ export class VoiceCallBridge {
   private cancelledEpoch: number | null = null;
 
   private assistantAudioPlaying = false;
+  /**
+   * The greeting is playing and may not be cut short.
+   *
+   * `interruptible: false` on the force_message tells the PROVIDER not to
+   * stop generating, but the truncation this guards against is ours: on
+   * caller speech the bridge cancels the response and sends Twilio a
+   * `clear`, which discards whatever of the greeting is still buffered.
+   * The provider flag cannot prevent that; only this can.
+   *
+   * Held until Twilio ECHOES the greeting's mark, because a mark echo is
+   * the only ground truth that audio actually reached the caller —
+   * `onAudioDone` means the provider finished sending, with the tail still
+   * buffered. Unlocking there would leave the last seconds of the greeting
+   * discardable, which on the after-hours line is exactly where the
+   * recording disclosure sits.
+   *
+   * Bounded without a timer of its own: the dead-air watchdog is armed
+   * across this window, so a greeting whose mark never returns ends the
+   * call rather than holding the lock forever. Raised by Codex on #240.
+   */
+  private greetingLocked = false;
+  /** The mark whose echo releases `greetingLocked`. */
+  private greetingMarkName: string | null = null;
   /** The most recent mark sent, and whether media went out AFTER it: an
    * OLDER mark's echo must not clear the playback flag, or the next
    * barge-in early-returns and the caller is talked over. */
@@ -488,6 +513,12 @@ export class VoiceCallBridge {
     if (name === this.latestMarkName && !this.mediaSinceLastMark) {
       this.assistantAudioPlaying = false;
     }
+    // The greeting reached the caller in full. Barge-in works normally from
+    // here — this protects the opening, not the conversation.
+    if (this.greetingMarkName !== null && name === this.greetingMarkName) {
+      this.greetingLocked = false;
+      this.greetingMarkName = null;
+    }
     if (this.finalMarkName !== null && name === this.finalMarkName) {
       // Ground truth: the final utterance actually played to the caller.
       this.teardown(this.endRequested ? "agent_ended" : "completed");
@@ -529,7 +560,14 @@ export class VoiceCallBridge {
     // Only a lane with NO greeting needs the agent to open, and it gets the
     // turn it always got.
     if (this.deps.greeting) {
-      this.session.speak(this.deps.greeting);
+      // LOCKED. A caller who says "hello" over the opening must not be able
+      // to truncate it: on the after-hours line it carries the closed-office
+      // notice, the 911 direction and the recording disclosure, and
+      // noIvrAgent requires the whole thing before anything else. The
+      // operator asked for the same thing in the same words — the greeting
+      // should not be barge-able (2026-08-31).
+      this.greetingLocked = true;
+      this.session.speak(this.deps.greeting, { interruptible: false });
     } else {
       // No per-response instructions: `response.instructions` OVERRIDES the
       // session's, so words here would switch the agent's prompt and the
@@ -746,6 +784,10 @@ export class VoiceCallBridge {
     // deltas: it is the authoritative text and it arrives whole.
     const text = (transcript ?? done.text).trim();
     const markName = `utt-${done.seq}`;
+    // The greeting's own mark: its echo is what releases the lock.
+    if (this.greetingLocked && this.greetingMarkName === null) {
+      this.greetingMarkName = markName;
+    }
     if (text) this.awaitingMark.push({ name: markName, text });
     this.latestMarkName = markName;
     this.mediaSinceLastMark = false;
@@ -815,6 +857,12 @@ export class VoiceCallBridge {
     // record crossed a speech boundary (transcript correlation only).
     this.clearDeadAir();
     this.transcriptLog.callerBoundary();
+    // The greeting is not barge-able. Their audio keeps arriving and is
+    // still transcribed — nothing about the caller is dropped, and the
+    // provider will answer them once the line finishes — but the cancel
+    // and the `clear` below do not run, so the rest of the greeting plays.
+    // Not counted as an interruption either: nothing was interrupted.
+    if (this.greetingLocked) return;
     if (!this.assistantAudioPlaying) return;
     this.interruptions += 1;
     // BARGE-IN: both signals, always together (see module doc). The line

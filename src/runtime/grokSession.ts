@@ -166,7 +166,7 @@ export function buildSessionConfig(
 export const PRE_CONFIG_AUDIO_CAP = 500;
 
 type PendingSay =
-  | { mode: "scripted"; text: string }
+  | { mode: "scripted"; text: string; interruptible?: boolean }
   | { mode: "natural"; instructions: string }
   /** A turn the AGENT's own prompt writes — no per-response instructions
    * at all. See requestResponse(). */
@@ -466,8 +466,12 @@ export class GrokVoiceSession {
    * interruptible force_message, so the model is bypassed and the line is
    * spoken verbatim. The sole channel grokProvider.ts uses to get an
    * authorized utterance out of the renderer and into Grok's mouth. */
-  speak(text: string): void {
-    this.enqueueSay({ mode: "scripted", text });
+  speak(text: string, opts?: { interruptible?: boolean }): void {
+    this.enqueueSay({
+      mode: "scripted",
+      text,
+      interruptible: opts?.interruptible !== false,
+    });
   }
 
   /**
@@ -531,7 +535,12 @@ export class GrokVoiceSession {
       item: {
         type: "force_message",
         role: "assistant",
-        interruptible: true,
+        // Interruptible unless the caller explicitly asked otherwise. The
+        // greeting is the one line that is not: it carries the practice's
+        // mandatory copy — on the after-hours line the closed-office
+        // notice, the 911 direction and the recording disclosure — and a
+        // caller saying "hello" over it must not be able to cut it short.
+        interruptible: say.interruptible !== false,
         content: [{ type: "output_text", text: say.text }],
       },
     });

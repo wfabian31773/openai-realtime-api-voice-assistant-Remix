@@ -274,6 +274,32 @@ describe("GrokVoiceSession lifecycle", () => {
     }
   });
 
+  it("speak({ interruptible: false }) tells the provider the line may not be cut", () => {
+    // The greeting uses this. The bridge stops ITS own truncation (cancel +
+    // Twilio `clear`), but the provider has to be told too, or it stops
+    // generating the moment the caller speaks. Nothing else asserted this
+    // flag reached the wire, so it was a payload field with no test behind
+    // it — found by mutation, not review.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "s1" } });
+    transport.emit({ type: "session.updated" });
+    session.speak("If this is a medical emergency, please dial 911.", {
+      interruptible: false,
+    });
+    const sent = transport.sent.find((e) => e.type === "conversation.item.create");
+    expect(sent).toBeDefined();
+    if (sent && sent.type === "conversation.item.create") {
+      expect(sent.item).toEqual({
+        type: "force_message",
+        role: "assistant",
+        interruptible: false,
+        content: [
+          { type: "output_text", text: "If this is a medical emergency, please dial 911." },
+        ],
+      });
+    }
+  });
+
   it("sendToolResult() answers the call with a function_call_output item carrying a JSON-string payload", () => {
     const { transport, session } = makeSession();
     session.sendToolResult("call-1", false, { reason: "unknown_tool" });

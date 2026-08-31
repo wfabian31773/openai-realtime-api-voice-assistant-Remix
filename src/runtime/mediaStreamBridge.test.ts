@@ -1319,7 +1319,7 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
 
-    expect(h.session.speak).toHaveBeenCalledWith(GREETING);
+    expect(h.session.speak).toHaveBeenCalledWith(GREETING, { interruptible: false });
     // The greeting ends in a question. Taking a turn here speaks a second
     // opening over one already asked — and on PCP it answers before the
     // call purpose the greeting just requested has been given.
@@ -1360,6 +1360,60 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
     expect(h.session.speakNatural).not.toHaveBeenCalled();
+  });
+
+  it("does not let a caller talk over the greeting", () => {
+    // The operator asked for this in these words — the opening should not be
+    // barge-able — and it is a safety rule on the after-hours line, whose
+    // greeting carries the closed-office notice, the 911 direction and the
+    // recording disclosure. noIvrAgent requires all of it before anything
+    // else. A caller saying "hello" over it used to cancel the response and
+    // send Twilio a `clear`, discarding whatever was still buffered.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+
+    h.handlers().onSpeechStarted(); // "hello?" over the opening
+
+    // The two things that truncate it, neither of which may happen here.
+    expect(h.session.cancelResponse).not.toHaveBeenCalled();
+    expect(h.clears()).toEqual([]);
+  });
+
+  it("takes the lock off once Twilio confirms the greeting played", () => {
+    // Released on the MARK ECHO, not on onAudioDone: audio-done means the
+    // provider finished sending, with the tail still in Twilio's buffer.
+    // Unlocking there would leave the last seconds discardable, which on the
+    // after-hours line is exactly where the recording disclosure sits.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+
+    // Still locked: sent, not yet played.
+    h.handlers().onSpeechStarted();
+    expect(h.clears()).toEqual([]);
+
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    // Played. Barge-in is ordinary from here — this protects the opening,
+    // not the conversation.
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onSpeechStarted();
+    expect(h.session.cancelResponse).toHaveBeenCalled();
+    expect(h.clears()).toHaveLength(1);
+  });
+
+  it("still barges in normally on a lane with no greeting", () => {
+    // The lock must not leak into lanes that never take it.
+    const h = makeBridge({ greeting: null });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onSpeechStarted();
+
+    expect(h.session.cancelResponse).toHaveBeenCalled();
+    expect(h.clears()).toHaveLength(1);
   });
 
   it("opens on the agent's own words when the lane has no greeting", () => {
