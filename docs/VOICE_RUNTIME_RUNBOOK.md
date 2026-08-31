@@ -59,6 +59,24 @@ refused, with the reason logged at mount:
 
 Numbers are read from env by policy; **the model never supplies a number.**
 
+And for a **queue lane that greets a caller by name** (§6c). These are the
+ones readiness does NOT check, which is the trap:
+
+| Variable | Why |
+|---|---|
+| `EYECARE_AGENT_API_KEY` | bearer token for `callEyecareTool`. Without it `sage_precontext` returns an error on every call, so **every caller opens cold** — the agent asks who is calling instead of confirming. |
+| `EYECARE_SCHEDULING_BASE_URL` | optional. Defaults to the Vercel deployment; set it only to point at another service. Note the name — `EYECARE_BASE_URL` is a *different* variable, read by the urgent-transfer path, and setting it does nothing here. |
+
+**`computeRuntimeReadiness` does not look at either of these.** It checks
+`XAI_API_KEY`, `TWILIO_AUTH_TOKEN` and the database, and nothing else — so a
+deployment can satisfy every prerequisite above it, report `liveReady: true`,
+boot with both startup lines clean, and still have pre-context dead on every
+call. That is deliberate, not an oversight: a missing key degrades the opening
+but does not stop the lane taking requests and filing tickets, and refusing
+calls over it would be worse. But it means readiness cannot be the thing that
+tells you, so **check the key before the cutover, not after the first cold
+call.** Raised by Codex on #239.
+
 Optional, per lane: `XAI_VOICE_NAME_<SLUG>`, `XAI_VOICE_LANGUAGE_<SLUG>`.
 The registry's `voice` field is **not** used — it holds OpenAI voice names
 (`sage`), which Grok does not have.
@@ -227,10 +245,11 @@ with…?" — instead of asking cold. On this runtime that opening depends on a
 lookup that can fail silently three different ways:
 
 `server/index.ts` wires `fetchPrecontext` to `fetchAzulPrecontext`, which is an
-**HTTP call** — `callEyecareTool('sage_precontext')` against `EYECARE_BASE_URL`
-with `EYECARE_AGENT_API_KEY`. The runtime bounds it at 1.5s and drops it if
-slower, and `fetchAzulPrecontext` normalizes every failure to `null`. So the
-agent asks cold for several different reasons.
+**HTTP call** — `callEyecareTool('sage_precontext')` against
+`EYECARE_SCHEDULING_BASE_URL` (which has a default) with
+`EYECARE_AGENT_API_KEY` (which does not; see §2). The runtime bounds it at
+1.5s and drops it if slower, and `fetchAzulPrecontext` normalizes every
+failure to `null`. So the agent asks cold for several different reasons.
 
 **The returned value is indistinguishable; the logs are not.** `callEyecareTool`
 says which it was, and this is the first thing to grep when an opening goes
