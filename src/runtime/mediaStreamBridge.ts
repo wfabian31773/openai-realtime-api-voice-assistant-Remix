@@ -418,6 +418,22 @@ export class VoiceCallBridge {
    * the caller said. The boundary is what tells those two cases apart, so it
    * has to travel with them. Raised by Codex on #241.
    */
+  /**
+   * Whether the caller's words must wait for the greeting's line.
+   *
+   * The lock is taken at the handshake, but the greeting does not START
+   * PLAYING until the provider generates it. A caller who speaks in that
+   * window genuinely spoke FIRST — nothing had reached them yet — so holding
+   * their line and letting the mark echo commit the greeting ahead of it
+   * would manufacture the very reversal this buffering exists to prevent,
+   * just pointing the other way. `assistantAudioPlaying` is precisely "bytes
+   * have gone to Twilio", which is the question being asked. Raised by Codex
+   * on #241.
+   */
+  private greetingHoldsTranscript(): boolean {
+    return this.greetingLocked && this.assistantAudioPlaying;
+  }
+
   private greetingHeldCallerLines: Array<
     { kind: "line"; text: string; itemId?: string } | { kind: "boundary" }
   > = [];
@@ -483,7 +499,7 @@ export class VoiceCallBridge {
         // The clock is stamped either way — the caller DID speak, and dead-air
         // timing must not wait on a mark echo.
         this.noteTranscript("caller");
-        if (this.greetingLocked) {
+        if (this.greetingHoldsTranscript()) {
           this.greetingHeldCallerLines.push({ kind: "line", text, itemId });
           return;
         }
@@ -953,13 +969,16 @@ export class VoiceCallBridge {
     // The caller is talking: not dead air, and any open caller line in the
     // record crossed a speech boundary (transcript correlation only).
     this.clearDeadAir();
-    if (this.greetingLocked) {
+    if (this.greetingHoldsTranscript()) {
       // Buffered IN SEQUENCE with the completions it separates — applying it
       // now would mark a log that is still empty, which is nothing at all.
       this.greetingHeldCallerLines.push({ kind: "boundary" });
       return;
     }
     this.transcriptLog.callerBoundary();
+    // Reaching here while the greeting is still locked means it has not
+    // started playing, and `assistantAudioPlaying` below already returns for
+    // that — a separate guard would be a branch no test could distinguish.
     // The greeting is not barge-able. Their audio keeps arriving and is
     // still transcribed — nothing about the caller is dropped, and the
     // provider will answer them once the line finishes — but the cancel

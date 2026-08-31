@@ -1594,6 +1594,35 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     ]);
   });
 
+  it("leaves the caller first when they speak before the greeting plays", () => {
+    // The lock is taken at the handshake, but the greeting does not start
+    // playing until the provider generates it. A caller who speaks in THAT
+    // window really did speak first — nothing had reached them. Holding
+    // their line and letting the mark echo commit the greeting ahead of it
+    // manufactures the same reversal this buffering exists to prevent,
+    // pointing the other way.
+    //
+    // Note the absent onAudioDelta before the caller speaks: every other
+    // ordering test here sends one, which is exactly why none of them could
+    // see this. Codex, #241.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("hello? anyone there?", "item-1");
+
+    // NOW the greeting starts and finishes.
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: hello? anyone there?",
+      `AGENT: ${GREETING}`,
+    ]);
+  });
+
   it("still barges in normally on a lane with no greeting", () => {
     // The lock must not leak into lanes that never take it.
     const h = makeBridge({ greeting: null });
