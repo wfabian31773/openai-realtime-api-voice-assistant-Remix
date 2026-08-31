@@ -141,6 +141,26 @@ export async function resolveUrgentTransferTarget(input: {
   // urgent — they were asking to schedule an appointment and whether we take
   // Blue Shield Medi-Cal.
   const onCall = ON_CALL_AUTHORIZED_AGENTS.has(input.agentSlug ?? '') ? configuredOnCall : '';
+  // The no-IVR agent never sees an open office, so the clock is not its
+  // decision to make. Calls reach it only because the phone system forwarded
+  // them: the operator sets the hours in Nextiva and everything lands here
+  // when the phones are off. Arrival at this agent IS the closed signal,
+  // already decided upstream by the schedule that actually governs.
+  //
+  // Deferring to isBusinessHours() here would second-guess that schedule with
+  // a worse copy of it. This one knows the hour and the weekend and nothing
+  // else — no holidays, and no awareness when the operator changes the hours
+  // in Nextiva without touching this repo. On Thanksgiving morning it reads
+  // "business hours" and would route an urgent caller to a front desk that is
+  // closed, which is a ring-out into silence by that queue's own contract
+  // (Codex review + operator confirmation, PR #238).
+  //
+  // Every other agent still asks, because they take calls while offices are
+  // staffed and the office queue is a real destination for them.
+  if (input.agentSlug === 'no-ivr') {
+    return onCall ? { number: onCall, source: 'on_call_after_hours' } : null;
+  }
+
   const inHours = input.businessHours ?? isBusinessHours();
 
   if (!inHours) {
