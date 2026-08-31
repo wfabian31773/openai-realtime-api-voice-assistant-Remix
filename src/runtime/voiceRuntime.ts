@@ -179,6 +179,19 @@ export interface VoiceRuntimeOptions {
   /** Caller-ID pre-context lookup. Injected so tests need no network, and
    * so a lane that should not do one simply is not given it. */
   fetchPrecontext?: (phone: string) => Promise<unknown>;
+  /**
+   * The admin-configured `agents.welcome_greeting`, or null when there is
+   * none. Injected for the same reason as `fetchPrecontext`: the resolver
+   * reaches the database, and the runtime's tests must not.
+   *
+   * The DB value is the source of truth for how every agent opens — that is
+   * what `greetingResolver` exists to enforce, and what the admin UI and the
+   * Observatory display. Playing the registry string instead means an
+   * operator edits the greeting, sees it change everywhere, and hears the old
+   * one on the line (Codex review, PR #240). The registry string stays as the
+   * fallback, which is also the SIP path's arrangement.
+   */
+  resolveGreeting?: (slug: string) => Promise<string | null>;
   /** Opens the call_logs row. Injected for tests. */
   openCallRow?: CallLogInsert;
   /** Persists the finished call. Injected for tests. */
@@ -520,12 +533,23 @@ export function mountVoiceRuntime(
       try {
         // Started BEFORE the agent is built so the two overlap, and bounded
         // so it can never hold the call open on its own.
-        const precontext = options.fetchPrecontext
-          ? await withinOrNull(
-              options.fetchPrecontext(entry.callerPhone) as Promise<unknown>,
-              PRECONTEXT_DEADLINE_MS,
-            )
-          : null;
+        // Both together: the greeting resolver is a warm Map read after
+        // boot, but on a cold miss it can wait on the database, and that
+        // must overlap the pre-context lookup rather than follow it.
+        const [precontext, configuredGreeting] = await Promise.all([
+          options.fetchPrecontext
+            ? withinOrNull(
+                options.fetchPrecontext(entry.callerPhone) as Promise<unknown>,
+                PRECONTEXT_DEADLINE_MS,
+              )
+            : Promise.resolve(null),
+          options.resolveGreeting
+            ? withinOrNull(
+                options.resolveGreeting(entry.slug),
+                PRECONTEXT_DEADLINE_MS,
+              )
+            : Promise.resolve(null),
+        ]);
         const lane = await resolveLane(
           entry.slug,
           {
@@ -706,8 +730,11 @@ export function mountVoiceRuntime(
           //
           // No name, or no match, returns the greeting untouched: whether
           // recognition happened is not a decision this makes.
+          // The configured greeting outranks the registry string, exactly as
+          // it does on the SIP path — an admin edit must be what the caller
+          // hears, not what the code was shipped with.
           greeting: personaliseGreeting(
-            lane.greeting ?? "",
+            configuredGreeting ?? lane.greeting ?? "",
             recognisedFirstName(precontext),
             greetingStyleFor(entry.slug),
           ) || null,

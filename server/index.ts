@@ -400,16 +400,24 @@ async function startServer() {
   // points at /voice/:slug until Wayne points one, so mounting it changes
   // nothing for any live line.
   try {
-    const [{ mountVoiceRuntime }, { fetchAzulPrecontext }] = await Promise.all([
-      import('../src/runtime/voiceRuntime'),
-      import('../src/agents/azulSchedulingAgent'),
-    ]);
+    const [{ mountVoiceRuntime }, { fetchAzulPrecontext }, { resolveConfiguredGreeting }] =
+      await Promise.all([
+        import('../src/runtime/voiceRuntime'),
+        import('../src/agents/azulSchedulingAgent'),
+        import('../src/services/greetingResolver'),
+      ]);
     mountVoiceRuntime(app, earlyServer, {
       // The queue agents pick their opening from metadata.precontext: with a
       // unique caller-ID match they confirm ("Am I speaking with…?") rather
       // than ask cold, which is what the SIP path already gives them. The
       // runtime bounds this lookup itself and drops it if late.
       fetchPrecontext: (phone: string) => fetchAzulPrecontext(phone),
+      // `agents.welcome_greeting` is the source of truth for how an agent
+      // opens — the value the admin UI and the Observatory show. The SIP path
+      // already resolves it; without this the runtime would play the registry
+      // string and an operator's edit would be visible everywhere except on
+      // the line (Codex review, PR #240).
+      resolveGreeting: (slug: string) => resolveConfiguredGreeting(slug),
     });
   } catch (err) {
     console.error('[STARTUP] Voice runtime failed to mount (rest of the server unaffected):', err);

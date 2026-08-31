@@ -53,7 +53,15 @@ export type GreetingStyle = 'replace' | 'append';
  *   greeting already asked... you are RECORDING what they just said"). Ask
  *   "Am I speaking with Wayne?" instead and the purpose recorded is "yes".
  *
- * Both raised by Codex on #240. A slug belongs in this map once someone has
+ * Both raised by Codex on #240, as was the converse: **answering-service**
+ * belongs in the map. Its prompt carries the same matched-caller block the
+ * queue lines do — "YOUR GREETING HAS ALREADY PLAYED. Do NOT greet again...
+ * Go straight to the confirmation" — and its greeting is the same shape,
+ * pre-empting the ask for a human ("all of our operators are currently on
+ * the phone assisting other patients") and ending in a question. Leaving it
+ * out would have given it the defect this whole module exists to remove:
+ * a prompt certain the greeting was personalised, and a greeting that was
+ * not. A slug belongs in this map once someone has
  * read its greeting and its prompt and decided what personalising it costs.
  *
  * The queue lines append: their greeting does a second job besides saying
@@ -63,6 +71,7 @@ export type GreetingStyle = 'replace' | 'append';
  * costs. azul-scheduling keeps the wholesale replacement it has always had.
  */
 const GREETING_STYLES: Readonly<Record<string, GreetingStyle>> = {
+  'answering-service': 'append',
   optical: 'append',
   surgery: 'append',
   tech: 'append',
@@ -88,7 +97,31 @@ export function greetingStyleFor(agentSlug: string | undefined): GreetingStyle |
  * confirm question then stands alone. That is correct.
  */
 export function stripTrailingQuestion(greeting: string): string {
-  return String(greeting ?? '').replace(/\s*[^.!?]*\?\s*$/, '').trim();
+  const text = String(greeting ?? '').trim();
+  const bySentence = text.replace(/\s*[^.!?]*\?\s*$/, '').trim();
+  if (bySentence) return bySentence;
+
+  // Nothing left, and the greeting was not itself one short question: it is a
+  // chain of comma-joined clauses ending in its question, so the sentence rule
+  // has no boundary to stop at and takes the whole line. The answering
+  // service's greeting is exactly this shape —
+  //
+  //   "Hello, thank you for calling Azul Vision, all of our operators are
+  //    currently on the phone assisting other patients, how may I help you
+  //    today?"
+  //
+  // — and appending to an empty stem would have thrown away the
+  // busy-operators line, which is the half that pre-empts the ask for a
+  // human. The last comma is where such a greeting joins its question.
+  //
+  // Reached ONLY when the sentence rule returned nothing, so no greeting that
+  // already produced a stem can change: the live queue lines are untouched.
+  // Raised by Codex on #240.
+  const comma = text.lastIndexOf(',');
+  if (text.endsWith('?') && comma > 0) {
+    return `${text.slice(0, comma).trim()}.`;
+  }
+  return bySentence;
 }
 
 /**

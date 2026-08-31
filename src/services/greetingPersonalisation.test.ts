@@ -82,6 +82,21 @@ describe('which lines append, which replace, and which are left alone', () => {
     expect(greetingStyleFor('records')).toBe('append');
   });
 
+  it('appends for the answering service, whose prompt is certain it did', () => {
+    // "YOUR GREETING HAS ALREADY PLAYED... Go straight to the confirmation."
+    // Its greeting is the same shape as a queue line's — it pre-empts the ask
+    // for a human — but comma-joined throughout, which is why the strip needed
+    // a comma boundary before this slug could be added. Codex, #240.
+    const AS =
+      'Hello, thank you for calling Azul Vision, all of our operators are ' +
+      'currently on the phone assisting other patients, how may I help you today?';
+    expect(greetingStyleFor('answering-service')).toBe('append');
+    expect(personaliseGreeting(AS, 'Wayne', greetingStyleFor('answering-service'))).toBe(
+      'Hello, thank you for calling Azul Vision, all of our operators are ' +
+        'currently on the phone assisting other patients. Am I speaking with Wayne?',
+    );
+  });
+
   it('replaces on azul-scheduling, the one line that has always replaced', () => {
     expect(greetingStyleFor('azul-scheduling')).toBe('replace');
     expect(personaliseGreeting(SURGERY, 'Wayne', 'replace')).toBe(
@@ -96,7 +111,6 @@ describe('which lines append, which replace, and which are left alone', () => {
     // caller. Codex, #240.
     expect(greetingStyleFor('no-ivr')).toBeNull();
     expect(greetingStyleFor('pcp')).toBeNull();
-    expect(greetingStyleFor('answering-service')).toBeNull();
     expect(greetingStyleFor('after-hours')).toBeNull();
     expect(greetingStyleFor(undefined)).toBeNull();
     expect(greetingStyleFor('')).toBeNull();

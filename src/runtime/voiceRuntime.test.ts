@@ -132,6 +132,7 @@ async function harness(
     stallHandshake?: boolean;
     providerSetupDeadlineMs?: number;
     fetchPrecontext?: (phone: string) => Promise<unknown>;
+    resolveGreeting?: (slug: string) => Promise<string | null>;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
     callRowDeadlineMs?: number;
     env?: Record<string, string | undefined>;
@@ -159,6 +160,7 @@ async function harness(
     providerSetupDeadlineMs: over.providerSetupDeadlineMs,
     callRowDeadlineMs: over.callRowDeadlineMs,
     fetchPrecontext: over.fetchPrecontext,
+    resolveGreeting: over.resolveGreeting,
     openCallRow:
       over.openCallRow ??
       (async (row) => {
@@ -1183,6 +1185,92 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     await settle(4);
 
     expect(spokenText(h)).toEqual([GREETING]);
+    ws.close();
+  });
+
+  it("plays the greeting an administrator configured, not the shipped one", async () => {
+    // `agents.welcome_greeting` is the source of truth — it is what the admin
+    // UI and the Observatory display, and what the SIP path resolves. Playing
+    // the registry string means an operator edits the greeting, sees it
+    // change everywhere, and hears the old one on the line (Codex, PR #240).
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      resolveGreeting: async () =>
+        "Good afternoon, Azul Vision optical here. What can I do for you?",
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA43", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA43", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    // The configured copy, and personalised — both, not one or the other.
+    expect(spokenText(h)).toEqual([
+      "Good afternoon, Azul Vision optical here. Am I speaking with Wayne?",
+    ]);
+    ws.close();
+  });
+
+  it("falls back to the registry greeting when nothing is configured", async () => {
+    // The resolver returns null both when the column is empty and when the
+    // database cannot be reached. Neither may cost the caller their opening.
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      resolveGreeting: async () => null,
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA44", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA44", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([
+      "Thank you for calling Azul Vision optical. Am I speaking with Wayne?",
+    ]);
+    ws.close();
+  });
+
+  it("personalises the answering service, whose prompt is certain it did", async () => {
+    // answeringServiceAgent's matched-caller block: "YOUR GREETING HAS
+    // ALREADY PLAYED. Do NOT greet again... Go straight to the confirmation."
+    // Left out of the style map, that prompt would be certain of something
+    // untrue — the exact defect the module exists to remove (Codex, PR #240).
+    const AS_GREETING =
+      "Hello, thank you for calling Azul Vision, all of our operators are " +
+      "currently on the phone assisting other patients, how may I help you today?";
+    const h = await harness({
+      laneSource: {
+        getAgentConfig: () => ({
+          id: "answering-service",
+          enabled: true,
+          agentType: "inbound",
+          greeting: AS_GREETING,
+          factory: (async () => ({
+            instructions: "You are the answering service agent.",
+            tools: [],
+          })) as unknown as LaneConfig["factory"],
+        }),
+      },
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+    });
+    const answered = await post(h, "/voice/answering-service", {
+      CallSid: "CA45",
+      From: "+1",
+      To: "+2",
+    });
+    const { ws } = await openStream(h, "CA45", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    // The busy-operators line survives — it pre-empts the ask for a human,
+    // same as the queue lines — and only the closing question is swapped.
+    expect(spokenText(h)).toEqual([
+      "Hello, thank you for calling Azul Vision, all of our operators are " +
+        "currently on the phone assisting other patients. Am I speaking with Wayne?",
+    ]);
     ws.close();
   });
 
