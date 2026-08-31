@@ -1249,9 +1249,6 @@ export class VoiceCallBridge {
   private teardown(outcome: CallOutcome): void {
     if (this.ended) return;
     this.ended = true;
-    // A caller who hung up over the greeting still said something. Held
-    // lines are committed before the record is rendered, or they are lost.
-    if (this.greetingHeldCallerLines.length > 0) this.releaseGreetingLock();
     // Whatever close event won the race — Twilio's stop frame, the socket
     // closing, the provider session dying as the stream ends — the caller
     // was moved to a human on purpose. That is the outcome.
@@ -1286,6 +1283,13 @@ export class VoiceCallBridge {
       }
     }
     this.awaitingMark.length = 0;
+    // A caller who hung up over the greeting still said something, and it is
+    // committed here or lost — but AFTER the block above, never before it.
+    // Flushing at the top of teardown put those lines in front of the
+    // greeting that was still playing, which is the reversal this whole
+    // change exists to remove, reproduced in every hangup and
+    // provider-failure record from that window. Raised by Codex on #241.
+    if (this.greetingHeldCallerLines.length > 0) this.releaseGreetingLock();
     this.transcriptLog.close();
 
     // Record the outcome BEFORE closing the socket: closing is what

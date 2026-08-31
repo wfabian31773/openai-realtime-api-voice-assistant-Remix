@@ -1577,12 +1577,21 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     // Held lines are committed at teardown or they never reach the record.
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
+    h.handlers().onAgentTranscriptDelta?.(GREETING);
     h.handlers().onAudioDelta("ZmFrZQ==");
     h.handlers().onCallerTranscript("wrong number sorry", "item-1");
 
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
 
-    expect(h.bridge.getTranscript()).toContain("CALLER: wrong number sorry");
+    // Asserted on the WHOLE transcript, not with toContain. The first version
+    // of this test used toContain and so could not see order at all — it
+    // passed while teardown was flushing these lines in FRONT of the greeting
+    // still playing, reproducing the reversal in every hangup record from
+    // that window. Codex, #241.
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      `AGENT: ${GREETING} [interrupted]`,
+      "CALLER: wrong number sorry",
+    ]);
   });
 
   it("still barges in normally on a lane with no greeting", () => {
