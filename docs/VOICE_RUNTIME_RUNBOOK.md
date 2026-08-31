@@ -312,8 +312,17 @@ than guessing:
   timeout; `no_match` is the commoner cause and it looks identical.
 - The `[AZUL-SCHED]` lines still separate an unset key, an HTTP status and a
   fetch failure. If one is present, that is your answer and it is complete.
-- If none is present, the remaining two — a valid `no_match` and a lookup
-  that answered too late — are **not distinguishable from this side.** Only
+- **A third mode is silent too:** HTTP 200 carrying a body we cannot use.
+  `fetchAzulPrecontext` wraps the whole thing in a bare `catch { return
+  null }`, so a `JSON.parse` failure vanishes, and a parsed body whose
+  `matched` is not a boolean returns `null` as well. `callEyecareTool` logs
+  nothing for either — it saw a 200. A service-contract break therefore
+  looks exactly like a valid negative. If the service log shows a 200
+  answered inside 1.5s and the agent still opened cold, read the response
+  BODY before concluding the number simply did not match. Raised by Codex
+  on #239.
+- If none of that is present, the remaining two — a valid `no_match` and a
+  lookup that answered too late — are **not distinguishable from this side.** Only
   the Eye Care service's own log separates them, and **a request entry alone
   does not.** `withinOrNull` races a timer against the lookup and does not
   cancel it, so a request that took 3s still reaches the service, is still
@@ -405,13 +414,38 @@ model talked its way through without calling `file_optical_ticket`, and the
 caller was told something that did not happen. That is invisible from the
 audio and obvious from the row.
 
-**Use a DIFFERENT phone number for each of the two calls** — or close the
-first ticket before placing the second. `check_open_tickets` searches by
-phone alone, across every department, and the optical prompt says: *"If they
-already have one open, tell them where it stands instead of opening a
-second."* Call from the same handset twice and call 2 finds call 1's fresh
-ticket and correctly declines to file, so the department-9 check fails and a
-working deployment looks broken. Raised by Codex on #239.
+### Before you dial: clear the test numbers
+
+**Both test numbers must start with NO open ticket, and a different number
+per call.** `check_open_tickets` searches by phone alone, across every
+department, and the optical prompt says: *"If they already have one open,
+tell them where it stands instead of opening a second."*
+
+So the agent correctly files nothing when the caller already has an open
+request — and the mandatory `file_optical_ticket` check below then fails on a
+deployment that is working perfectly. Two different numbers is not enough on
+its own: it only rules out call 1 colliding with call 2, not a ticket either
+number was already carrying.
+
+```sql
+-- run against the ticketing database for EACH test number
+select ticket_number, department_id, status, created_at
+from tickets
+where patient_phone like '%<last 10 digits>%' and status = 'open'
+order by created_at desc;
+```
+
+Close what comes back, or use a number with nothing open. **This is not
+hypothetical for the first cutover:** VA-56007 (department 1) and VA-56008
+(department 9) were filed from the operator's own number on the morning of
+2026-08-31 and were still `open` hours later. Calling from that number
+without closing them first scores a working deployment as a failure.
+
+**If you do call with a ticket already open**, the pass mark is different and
+you should know which test you are running: the agent should *report the open
+ticket and not file a second one*. That is correct behaviour and worth
+seeing — but it proves nothing about filing, so it does not substitute for
+the calls below. Raised by Codex on #239, twice.
 
 **This is not hypothetical, and it is worth reading precisely.** On
 2026-08-31 an optical call ran `lookup_patient > lookup_patient >
