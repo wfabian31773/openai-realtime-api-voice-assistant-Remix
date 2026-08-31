@@ -229,14 +229,29 @@ lookup that can fail silently three different ways:
 `server/index.ts` wires `fetchPrecontext` to `fetchAzulPrecontext`, which is an
 **HTTP call** — `callEyecareTool('sage_precontext')` against `EYECARE_BASE_URL`
 with `EYECARE_AGENT_API_KEY`. The runtime bounds it at 1.5s and drops it if
-slower; the function itself catches everything and returns `null`. So a slow
-service, a stale key, or any error all produce the same thing: no pre-context,
-and an agent that asks cold. None of the three logs a distinguishable reason.
+slower, and `fetchAzulPrecontext` normalizes every failure to `null`. So the
+agent asks cold for several different reasons.
+
+**The returned value is indistinguishable; the logs are not.** `callEyecareTool`
+says which it was, and this is the first thing to grep when an opening goes
+cold:
+
+```
+[AZUL-SCHED] EYECARE_AGENT_API_KEY is not set          ← unset key
+[AZUL-SCHED] sage_precontext HTTP <status>: <body>     ← service returned non-OK
+[AZUL-SCHED] sage_precontext failed: <message>         ← fetch, abort or timeout
+```
+
+401/403 take a richer path (`noteAuthFailure`, with a count and an outage
+alarm) rather than that middle line. **Only one mode is genuinely quiet:** the
+lookup that succeeds but arrives after the runtime's 1.5s deadline. Nothing
+logs that from the runtime side — the call simply proceeds without
+pre-context. If the greeting is cold and none of the lines above appear, that
+is the case you are in.
 
 **How to tell, in one call:** dial from a number that exists in the mirror. If
 the agent opens by confirming a name, pre-context worked. If it asks who you
-are, it did not — and that is worth fixing before the live number moves, not
-after.
+are, check the log lines above before concluding anything.
 
 The durable fix is to read the mirror directly. `patients_master` is mirrored
 in the Patient-Console project precisely so this is a fast indexed read, and
@@ -252,8 +267,23 @@ Point a number you do not mind breaking at `POST https://<host>/voice/optical`
 — **not** the live optical number.
 
 1. **An ordinary optical request.** Give a name and date of birth, ask about a
-   glasses or contacts order. Watch for: does it verify against the mirror,
-   take the request, and say it is filing something?
+   glasses or contacts order. Watch for: does it find the patient, take the
+   request, and say it is filing something?
+
+   **Pick this caller deliberately, and know what the call can and cannot
+   prove.** `lookup_patient` still goes to `scheduleLookupService`, which
+   queries the Operations Hub `schedule` table — so this step does **not**
+   exercise the Console mirror, whatever standing instruction 14 says should
+   happen eventually. Two consequences:
+
+   - Use someone with **real appointment history**. A patient who exists only
+     in `patients_master` will fail this lookup, and that failure is the known
+     pre-existing gap, not a runtime defect. Chasing it during a cutover
+     wastes the window.
+   - A caller present in *both* the mirror and the schedule will appear to
+     pass **without proving anything about which source answered.** So treat a
+     green result here as "the tool ran and the ticket landed", never as
+     "verification is on the mirror". It is not, yet.
 2. **A request this queue does not own.** Ask to schedule an appointment. It
    must take the request and route it to the HVA Hub. It must not tell you to
    call back or send you to another extension (standing instruction 10). A

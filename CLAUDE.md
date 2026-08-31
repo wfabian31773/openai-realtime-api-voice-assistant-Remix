@@ -127,10 +127,14 @@ Green tests did not prevent any of the regressions listed there.
       the shared queue tool.**
     - Caller-ID pre-context on the runtime goes through
       `fetchAzulPrecontext` → the `sage_precontext` HTTP tool. That is Console
-      data (`si_persons`) but over the network, bounded at 1.5s, and it
-      swallows its own errors — a slow service, a stale
-      `EYECARE_AGENT_API_KEY` and a thrown error all degrade to the same
-      silent `null` and an agent that asks cold.
+      data (`si_persons`) but over the network and bounded at 1.5s, and every
+      failure is normalized to `null`, so the agent asks cold for several
+      different reasons. The RETURN VALUE is indistinguishable; the logs are
+      not — `callEyecareTool` writes `[AZUL-SCHED]` lines naming an unset key,
+      an HTTP status, or a fetch/abort, and 401/403 go through
+      `noteAuthFailure`. The one genuinely silent mode is a lookup that
+      succeeds after the 1.5s deadline: nothing logs that, the call just
+      proceeds without pre-context.
 
     `lookup_patient` is not only verification — it also returns the offices
     and providers a patient was actually seen at, which is how optical
