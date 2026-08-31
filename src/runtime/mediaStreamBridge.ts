@@ -408,8 +408,19 @@ export class VoiceCallBridge {
    * Barge-in used to prevent this by committing the agent's partial line the
    * instant the caller spoke. The lock removed that, so the ordering has to
    * be preserved here instead. Raised by Codex on #240, after merge.
+   *
+   * VAD BOUNDARIES are buffered with the lines, not applied as they arrive.
+   * `callerBoundary()` only marks an OPEN line, so against a log that has
+   * nothing in it yet it is a no-op and the boundary is simply lost. Replayed
+   * without it, a second utterance that happens to be a prefix of the first
+   * ("yes this is Wayne", then "yes") scores as `keep` — the shorter
+   * re-emission of one turn — and is dropped, when it was a separate thing
+   * the caller said. The boundary is what tells those two cases apart, so it
+   * has to travel with them. Raised by Codex on #241.
    */
-  private greetingHeldCallerLines: Array<{ text: string; itemId?: string }> = [];
+  private greetingHeldCallerLines: Array<
+    { kind: "line"; text: string; itemId?: string } | { kind: "boundary" }
+  > = [];
   /** The most recent mark sent, and whether media went out AFTER it: an
    * OLDER mark's echo must not clear the playback flag, or the next
    * barge-in early-returns and the caller is talked over. */
@@ -473,7 +484,7 @@ export class VoiceCallBridge {
         // timing must not wait on a mark echo.
         this.noteTranscript("caller");
         if (this.greetingLocked) {
-          this.greetingHeldCallerLines.push({ text, itemId });
+          this.greetingHeldCallerLines.push({ kind: "line", text, itemId });
           return;
         }
         this.transcriptLog.callerCompleted(text, itemId);
@@ -931,8 +942,9 @@ export class VoiceCallBridge {
     // caller's words outright would be worse than misordering them.
     const held = this.greetingHeldCallerLines;
     this.greetingHeldCallerLines = [];
-    for (const line of held) {
-      this.transcriptLog.callerCompleted(line.text, line.itemId);
+    for (const event of held) {
+      if (event.kind === "boundary") this.transcriptLog.callerBoundary();
+      else this.transcriptLog.callerCompleted(event.text, event.itemId);
     }
   }
 
@@ -941,13 +953,18 @@ export class VoiceCallBridge {
     // The caller is talking: not dead air, and any open caller line in the
     // record crossed a speech boundary (transcript correlation only).
     this.clearDeadAir();
+    if (this.greetingLocked) {
+      // Buffered IN SEQUENCE with the completions it separates — applying it
+      // now would mark a log that is still empty, which is nothing at all.
+      this.greetingHeldCallerLines.push({ kind: "boundary" });
+      return;
+    }
     this.transcriptLog.callerBoundary();
     // The greeting is not barge-able. Their audio keeps arriving and is
     // still transcribed — nothing about the caller is dropped, and the
     // provider will answer them once the line finishes — but the cancel
     // and the `clear` below do not run, so the rest of the greeting plays.
     // Not counted as an interruption either: nothing was interrupted.
-    if (this.greetingLocked) return;
     if (!this.assistantAudioPlaying) return;
     this.interruptions += 1;
     // BARGE-IN: both signals, always together (see module doc). The line

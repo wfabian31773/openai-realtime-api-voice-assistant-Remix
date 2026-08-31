@@ -1545,6 +1545,34 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     expect(lines).toEqual([`AGENT: ${GREETING}`, "CALLER: hello are you there"]);
   });
 
+  it("keeps two separate things the caller said over the greeting", () => {
+    // Buffering the completions dropped the VAD boundaries between them:
+    // callerBoundary() only marks an OPEN line, so against a log that is
+    // still empty it is a no-op. Replayed without it, a second utterance
+    // that happens to be a PREFIX of the first scores as `keep` — the
+    // shorter re-emission of one turn — and is discarded. The boundary is
+    // the only thing separating that from a genuinely new utterance.
+    // Codex, #241.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("yes this is Wayne"); // no itemId
+    h.handlers().onSpeechStarted(); // a NEW utterance, not a refinement
+    h.handlers().onCallerTranscript("yes");
+
+    h.handlers().onAudioDone(GREETING);
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      `AGENT: ${GREETING}`,
+      "CALLER: yes this is Wayne",
+      "CALLER: yes",
+    ]);
+  });
+
   it("does not lose what a caller said before hanging up on the greeting", () => {
     // Held lines are committed at teardown or they never reach the record.
     const h = makeBridge({ greeting: GREETING });
