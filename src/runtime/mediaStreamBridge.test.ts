@@ -68,6 +68,7 @@ function b64(bytes: number): string {
 function makeBridge(
   over: {
     agent?: BoundAgent;
+    greeting?: string | null;
     persistCallRecord?: (r: VoiceCallRecord) => Promise<void>;
     endCallToolNames?: string[];
     maxCallMs?: number;
@@ -87,6 +88,7 @@ function makeBridge(
     sendToolResult: vi.fn(),
     requestResponse: vi.fn(),
     speakNatural: vi.fn(),
+    speak: vi.fn(),
     close: vi.fn(),
     getResponseEpoch: () => epoch,
   } satisfies BridgeSession;
@@ -102,6 +104,7 @@ function makeBridge(
       dialedNumber: "+15559876543",
     },
     agent,
+    greeting: over.greeting,
     twilio: {
       sendFrame: (f) => frames.push(f),
       close: twilioClose,
@@ -932,6 +935,7 @@ describe("VoiceCallBridge — exactly-once teardown", () => {
           sendToolResult: vi.fn(),
           requestResponse: vi.fn(),
           speakNatural: vi.fn(),
+    speak: vi.fn(),
           close: vi.fn(),
           getResponseEpoch: () => 0,
         };
@@ -1294,5 +1298,47 @@ describe("VoiceCallBridge — transcript timing is caller-anchored", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("the practice greets the caller before the agent takes a turn", () => {
+  /**
+   * Why this is a bridge concern and not the agent's.
+   *
+   * The queue prompts are written for the SIP path, where the greeting has
+   * already played by the time the agent is handed the call. Optical's says
+   * so outright: "Your greeting has already played. Do NOT greet again. Go
+   * straight to confirming: Am I speaking with …?". This runtime never
+   * played it, so the agent followed an instruction whose premise was false
+   * and opened cold on the caller's own first name — three live calls,
+   * 2026-08-31, before anyone worked out it was not the model's doing.
+   */
+  it("speaks the greeting verbatim, then asks the agent for its own turn", () => {
+    const h = makeBridge({ greeting: "Thank you for calling Azul Vision optical." });
+    h.handlers().onConfigured();
+
+    expect(h.session.speak).toHaveBeenCalledWith("Thank you for calling Azul Vision optical.");
+    // Order is the whole point: greeting first, agent second. Asserted on the
+    // invocation clock rather than call counts, because both being called is
+    // exactly what the broken version would also look like.
+    const greetingAt = h.session.speak.mock.invocationCallOrder[0];
+    const agentTurnAt = h.session.requestResponse.mock.invocationCallOrder[0];
+    expect(greetingAt).toBeLessThan(agentTurnAt);
+  });
+
+  it("speaks it scripted, never as an instruction the model rephrases", () => {
+    // speakNatural hands the model a meaning to phrase; speak hands it words.
+    // A greeting that varies call to call is the thing being fixed, so the
+    // distinction is the fix, not a detail.
+    const h = makeBridge({ greeting: "Thank you for calling Azul Vision optical." });
+    h.handlers().onConfigured();
+    expect(h.session.speakNatural).not.toHaveBeenCalled();
+  });
+
+  it("opens on the agent's own words when the lane has no greeting", () => {
+    const h = makeBridge({ greeting: null });
+    h.handlers().onConfigured();
+    expect(h.session.speak).not.toHaveBeenCalled();
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
   });
 });

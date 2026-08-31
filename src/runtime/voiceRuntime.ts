@@ -672,6 +672,10 @@ export function mountVoiceRuntime(
           context,
           startedAtMs,
           agent: lane.agent,
+          // The practice's own line, spoken before the agent's first turn.
+          // The queue prompts assume it has already played; on this
+          // transport nothing played it until now.
+          greeting: lane.greeting,
           twilio: twilioSocket,
           createSession: (handlers) =>
             new GrokVoiceSession(

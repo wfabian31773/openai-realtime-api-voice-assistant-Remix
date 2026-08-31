@@ -58,6 +58,9 @@ export interface LaneConfig {
   language?: string;
   version?: string;
   agentType?: "inbound" | "outbound";
+  /** The line the practice answers with. Present on every registered
+   * inbound agent; the SIP path plays it and the prompts assume it. */
+  greeting?: string;
 }
 
 /**
@@ -219,6 +222,21 @@ export interface ResolvedLane {
   voice: GrokRuntimeVoiceConfig;
   /** The agent's own version string, for the call record and health. */
   version: string | null;
+  /**
+   * The line the practice answers with, from the agent's own config.
+   *
+   * The SIP path plays this before the agent takes over, and every queue
+   * prompt is written on that assumption — optical's says, in as many words,
+   * "Your greeting has already played. Do NOT greet again." This runtime
+   * never read it, so the agent obeyed an instruction whose premise was
+   * false and opened cold with "Am I speaking with …?" (operator, three
+   * calls, 2026-08-31).
+   *
+   * Carried here rather than written into the runtime so there is still one
+   * source of truth for what the practice says when it picks up the phone,
+   * and so a lane that has no greeting simply has none.
+   */
+  greeting: string | null;
 }
 
 /** The handoff callback every factory's first parameter expects. It is a
@@ -318,6 +336,7 @@ export async function resolveLane(
       ),
     },
     version: config.version ?? null,
+    greeting: config.greeting?.trim() || null,
   };
 }
 

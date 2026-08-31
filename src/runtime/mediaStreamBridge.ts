@@ -253,6 +253,10 @@ export interface BridgeSession {
    * phrases — the guardrail correction is exactly that case. Not used for
    * ordinary turns, where the agent's own prompt must drive. */
   speakNatural(instructions: string): void;
+  /** Speak EXACTLY these words. The greeting uses this rather than
+   * speakNatural so the practice's opening line is identical on every call
+   * and the model has no opportunity to reword it. */
+  speak(text: string): void;
   close(): void;
   getResponseEpoch(): number;
 }
@@ -265,6 +269,12 @@ export interface TwilioSocket {
 export interface VoiceCallBridgeDeps {
   context: VoiceCallContext;
   agent: BoundAgent;
+  /**
+   * The line the practice answers with, spoken verbatim before the agent
+   * takes its first turn. Optional: a lane without one simply opens on the
+   * agent's own words, which is what every lane did before this existed.
+   */
+  greeting?: string | null;
   twilio: TwilioSocket;
   /** The bridge hands its handlers to this factory and the factory returns
    * the session wired to them — the only way the two can be constructed
@@ -488,13 +498,27 @@ export class VoiceCallBridge {
 
   private handleSessionConfigured(): void {
     if (this.ended) return;
-    // The handshake landed. The agent's own prompt owns the opening line,
-    // so the runtime asks for a turn and supplies no words at all: a
-    // greeting written here would be a second source of truth for what the
-    // practice says when it picks up the phone, and — because
-    // `response.instructions` OVERRIDES the session's — it would also
-    // switch the agent's prompt and the knowledge pack off for exactly the
-    // sentence the caller hears first.
+    // The handshake landed. Two turns, in this order.
+    //
+    // First the practice's own greeting, spoken VERBATIM — scripted, not
+    // generated, so it is the same sentence on every call and the model
+    // cannot reword it. It comes from the agent's config rather than from
+    // here, so there is still one source of truth for what the practice
+    // says when it picks up the phone.
+    //
+    // This is not a nicety. The SIP path plays that greeting before the
+    // agent takes over, and the queue prompts are written on that premise —
+    // optical's says "Your greeting has already played. Do NOT greet again.
+    // Go straight to confirming: Am I speaking with …?". This runtime never
+    // played it, so the agent obeyed an instruction whose premise was false
+    // and every call opened cold on the caller's own name (operator, three
+    // calls, 2026-08-31). The greeting also covers the caller-ID lookup:
+    // it is speaking while the 1.5s pre-context window runs.
+    if (this.deps.greeting) this.session.speak(this.deps.greeting);
+    // THEN the agent's own turn, with no per-response instructions at all —
+    // `response.instructions` OVERRIDES the session's, so supplying words
+    // here would switch the agent's prompt and the knowledge pack off for
+    // exactly the sentence that follows the greeting.
     this.session.requestResponse();
     this.armDeadAir("response");
   }
