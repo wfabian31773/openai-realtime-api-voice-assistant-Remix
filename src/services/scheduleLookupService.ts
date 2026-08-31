@@ -228,7 +228,14 @@ const MONTH_MAP: Record<string, string> = {
   'dec': '12', 'december': '12',
 };
 
-function normalizeDOB(dob: string): string {
+/**
+ * Exported for testing. The mirror's equivalent
+ * (patientVerification.normalizeDob) is exported for the same reason: a date
+ * parser that only runs behind a database call is a parser nobody can prove
+ * anything about, and this one silently returned '' for the commonest spoken
+ * form in production for as long as it has existed.
+ */
+export function normalizeDOB(dob: string): string {
   if (!dob) return '';
   
   const cleaned = dob.trim();
@@ -272,8 +279,20 @@ function normalizeDOB(dob: string): string {
     }
   }
   
-  // Natural language: "March 12, 1975" or "March 12 1975" or "Mar 12, 1975"
-  const naturalLang = cleaned.match(/^([a-zA-Z]+)\s+(\d{1,2}),?\s+(\d{4})$/i);
+  // Natural language: "March 12, 1975", "Mar 12 1975", "March 17th, 1973".
+  //
+  // The ordinal suffix is not a nicety — it is how people SAY a date, so it
+  // is what the transcriber writes down. Without `(?:st|nd|rd|th)?` this
+  // matched "17" and then demanded a comma or a space and found the "t" of
+  // "17th", so every spoken date fell through to the warn and verification
+  // silently degraded to the caller-ID match. Observed on both live optical
+  // calls, 2026-08-31: "[normalizeDOB] Unable to parse date: March 17th, 1973".
+  //
+  // The mirror's own normalizer (patientVerification.normalizeDob) has always
+  // had this. This is the appointment-book copy catching up — and the fact
+  // that there are two of these is the argument for standing instruction 14,
+  // not an argument for keeping them in step by hand.
+  const naturalLang = cleaned.match(/^([a-zA-Z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$/i);
   if (naturalLang) {
     const [, monthName, day, year] = naturalLang;
     const month = MONTH_MAP[monthName.toLowerCase()];
@@ -283,7 +302,7 @@ function normalizeDOB(dob: string): string {
   }
   
   // Natural language: "12 March 1975" or "12 Mar 1975"
-  const naturalLangReverse = cleaned.match(/^(\d{1,2})\s+([a-zA-Z]+),?\s+(\d{4})$/i);
+  const naturalLangReverse = cleaned.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]+),?\s+(\d{4})$/i);
   if (naturalLangReverse) {
     const [, day, monthName, year] = naturalLangReverse;
     const month = MONTH_MAP[monthName.toLowerCase()];
@@ -293,7 +312,7 @@ function normalizeDOB(dob: string): string {
   }
   
   // Natural language with 2-digit year: "March 12, 75" or "Mar 12 75"
-  const naturalLang2Digit = cleaned.match(/^([a-zA-Z]+)\s+(\d{1,2}),?\s+(\d{2})$/i);
+  const naturalLang2Digit = cleaned.match(/^([a-zA-Z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{2})$/i);
   if (naturalLang2Digit) {
     const [, monthName, day, shortYear] = naturalLang2Digit;
     const month = MONTH_MAP[monthName.toLowerCase()];
