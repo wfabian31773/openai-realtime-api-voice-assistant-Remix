@@ -1997,30 +1997,19 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
     const callerIdAttribute = envConfig.twilio.phoneNumber
       ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
       : '';
-    // The urgent record is filed on this path too — operator mandate
-    // 2026-07-25, every urgent outcome leaves a ticket somebody works — but
-    // fire-and-forget, deliberately. Awaiting it would put silence in front of
-    // "please hold" on a transfer that is already recovering from a dropped
-    // leg, and this helper's own contract is that it must never delay a dial.
-    void fileUrgentHandoffFallbackTicket(
-      recoveredCallId!,
-      escalation,
-      getCallerNumber(conferenceName) || callerCall.from,
-      {
-        why: 'URGENT call lost its assistant leg; caller was dialled directly to the on-call destination.',
-        dialTarget: fallbackNumber,
-      },
-    );
-    // …which is exactly why the line AFTER <Dial> must not promise a callback.
-    // Twilio runs that <Say> on its own side when nobody answers, with this
-    // server out of the loop, so at the moment it is spoken nothing here has
-    // confirmed the ticket landed — the file above is unawaited by design and
-    // the heads-up SMS can no-op silently. `followUpFiled: false` is therefore
-    // the honest input, not a placeholder: say only what is known, and never
-    // tell the caller to call us (Codex review, PR #238; standing
-    // instruction 10). The previous wording here made no promise either — it
-    // told them to call back during business hours, which is the other half of
-    // the same rule.
+    // No ticket is filed here, deliberately. It would have to be written
+    // BEFORE the dial — the outcome is not known on this side until Twilio
+    // reports it — and this helper's description always carries "Please call
+    // the patient back immediately." So a caller the on-call phone answers
+    // would generate an urgent callback task for a patient who is at that
+    // moment talking to the person named on it, on the after-hours queue the
+    // operator works himself (Codex review, PR #238).
+    //
+    // Nothing is lost by leaving it out: the escalation that led here already
+    // files its own record through the agent, and addHumanAgent files the
+    // urgent fallback ticket on the paths where a transfer actually failed.
+    // This function's job is to get the caller to a person, not to duplicate
+    // that bookkeeping with a worse copy of it.
     const unansweredSay = urgentTransferFailureLine();
     await client.calls(callerCallSid).update({
       twiml: `<?xml version="1.0" encoding="UTF-8"?>
