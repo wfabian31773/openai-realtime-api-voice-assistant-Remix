@@ -1313,24 +1313,56 @@ describe("the practice greets the caller before the agent takes a turn", () => {
    * and opened cold on the caller's own first name — three live calls,
    * 2026-08-31, before anyone worked out it was not the model's doing.
    */
-  it("speaks the greeting verbatim, then asks the agent for its own turn", () => {
-    const h = makeBridge({ greeting: "Thank you for calling Azul Vision optical." });
+  const GREETING = "Thank you for calling Azul Vision optical.";
+
+  it("speaks the greeting first and does not take the agent's turn yet", () => {
+    const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
 
-    expect(h.session.speak).toHaveBeenCalledWith("Thank you for calling Azul Vision optical.");
-    // Order is the whole point: greeting first, agent second. Asserted on the
-    // invocation clock rather than call counts, because both being called is
-    // exactly what the broken version would also look like.
+    expect(h.session.speak).toHaveBeenCalledWith(GREETING);
+    // The agent's turn is OWED, not requested now: it belongs after the
+    // greeting's own response completes.
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+  });
+
+  it("takes the agent's turn once the greeting's response completes", () => {
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onResponseDone();
+
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
     const greetingAt = h.session.speak.mock.invocationCallOrder[0];
     const agentTurnAt = h.session.requestResponse.mock.invocationCallOrder[0];
     expect(greetingAt).toBeLessThan(agentTurnAt);
+  });
+
+  it("still owes the caller a dead-air window on that first agent turn", () => {
+    // The reason the turn goes through the follow-up path rather than the
+    // session's own say queue. Queueing it orders correctly and loses the
+    // clock: the greeting's deltas move the watchdog cause to "utterance",
+    // its completion clears the window, and the released turn would have no
+    // deadline at all — a provider stalling on the caller's first real
+    // sentence would sit silent until the ten-minute ceiling.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    // The greeting speaks, then completes: exactly the sequence that used
+    // to leave the call unwatched.
+    h.handlers().onAgentTranscriptDelta?.("Thank you for calling");
+    h.handlers().onAudioDone("Thank you for calling Azul Vision optical.");
+    h.handlers().onResponseDone();
+
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    expect([...h.timers.pending.values()].some((t) => t.ms === 30_000)).toBe(true);
+    expect(h.timers.fire(30_000)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
   });
 
   it("speaks it scripted, never as an instruction the model rephrases", () => {
     // speakNatural hands the model a meaning to phrase; speak hands it words.
     // A greeting that varies call to call is the thing being fixed, so the
     // distinction is the fix, not a detail.
-    const h = makeBridge({ greeting: "Thank you for calling Azul Vision optical." });
+    const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
     expect(h.session.speakNatural).not.toHaveBeenCalled();
   });
