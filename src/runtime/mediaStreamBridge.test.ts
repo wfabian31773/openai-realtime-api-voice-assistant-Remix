@@ -1647,6 +1647,41 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     ]);
   });
 
+  it("cannot be barged by a SECOND utterance after speaking before the greeting", () => {
+    // The lock's whole purpose, and the case that defeated it. A caller who
+    // speaks before playback records "do not hold my transcript line" —
+    // correct, their words come first. Reading that same decision to answer
+    // "may the greeting be interrupted?" let a LATER utterance cancel the
+    // greeting and clear Twilio's buffer mid-sentence, which on the
+    // after-hours line can cut the 911 direction or the recording
+    // disclosure. Codex, #241, after merge.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted(); // before any audio — caller is first
+    h.handlers().onAudioDelta("ZmFrZQ=="); // greeting starts
+    h.handlers().onSpeechStarted(); // talks again, OVER the greeting
+
+    expect(h.session.cancelResponse).not.toHaveBeenCalled();
+    expect(h.clears()).toEqual([]);
+
+    // And the SAME utterance keeps the decision it started with. The second
+    // speech-start must not re-decide it to "held" — that would order this
+    // caller after a greeting they began speaking before. Without this the
+    // per-utterance carry is untested: every other ordering test has only
+    // ONE speech-start, so a mutation making the decision unconditional
+    // reddens nothing.
+    h.handlers().onCallerTranscript("hello? are you there?", "item-1");
+    h.handlers().onAudioDone(GREETING);
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: hello? are you there?",
+      `AGENT: ${GREETING}`,
+    ]);
+  });
+
   it("still barges in normally on a lane with no greeting", () => {
     // The lock must not leak into lanes that never take it.
     const h = makeBridge({ greeting: null });
