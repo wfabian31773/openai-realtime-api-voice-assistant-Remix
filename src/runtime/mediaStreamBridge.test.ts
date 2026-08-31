@@ -87,8 +87,18 @@ function makeBridge(
     cancelResponse: vi.fn(),
     sendToolResult: vi.fn(),
     requestResponse: vi.fn(),
-    speakNatural: vi.fn(),
-    speak: vi.fn(),
+    // A guardrail's safe replacement creates a response of its own, so the
+    // cut line's epoch is genuinely behind it.
+    speakNatural: vi.fn(() => {
+      epoch += 1;
+    }),
+    // A scripted say creates a response, and GrokVoiceSession advances the
+    // epoch on its `response.created`. The greeting's line is bound to that
+    // epoch, so a fake that never advanced it modelled the greeting as
+    // arriving on the response BEFORE its own.
+    speak: vi.fn(() => {
+      epoch += 1;
+    }),
     close: vi.fn(),
     getResponseEpoch: () => epoch,
   } satisfies BridgeSession;
@@ -140,6 +150,12 @@ function makeBridge(
     media: () => frames.filter((f) => f.event === "media"),
     clears: () => frames.filter((f) => f.event === "clear"),
   };
+}
+
+/** The name of the most recent mark the bridge emitted. */
+function lastMarkName(h: ReturnType<typeof makeBridge>): string {
+  const marks = h.marks();
+  return marks[marks.length - 1].mark.name;
 }
 
 /** Drive one complete agent utterance: a new response, transcript, audio,
@@ -1520,14 +1536,17 @@ describe("the practice greets the caller before the agent takes a turn", () => {
   });
 
   it("keeps the opening in order when a caller talks over the greeting", () => {
-    // The greeting is held in awaitingMark until Twilio echoes, but a caller
-    // completion used to write straight through — so the record read
+    // The greeting used to be held in awaitingMark until Twilio echoed, while
+    // a caller completion wrote straight through — so the record read
     // CALLER-then-AGENT for an exchange that happened the other way round.
     // Worse, agentLine() closes the open caller line, so the NEXT cumulative
     // re-emission of the same caller item appended a duplicate instead of
-    // replacing it. Barge-in used to prevent both by committing the agent's
-    // partial line the moment the caller spoke; the lock removed that.
+    // replacing it: the caller's words once on each side of the greeting.
     // Codex, #240, after merge.
+    //
+    // Both are gone with the deferral. The greeting's line is written when
+    // its audio starts, so it is already ahead of these completions and
+    // already closed this caller turn before the re-emission arrives.
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
     h.handlers().onAudioDelta("ZmFrZQ==");
@@ -1553,6 +1572,11 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     // shorter re-emission of one turn — and is discarded. The boundary is
     // the only thing separating that from a genuinely new utterance.
     // Codex, #241.
+    //
+    // Nothing is buffered now, so both the lines and the boundary between
+    // them are applied where they arrive. This is the case that proves it:
+    // "yes" is a strict word-prefix of "yes this is Wayne", so it survives
+    // only because the boundary reached the log before it did.
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
     h.handlers().onAudioDelta("ZmFrZQ==");
@@ -1574,7 +1598,11 @@ describe("the practice greets the caller before the agent takes a turn", () => {
   });
 
   it("does not lose what a caller said before hanging up on the greeting", () => {
-    // Held lines are committed at teardown or they never reach the record.
+    // Nothing is held any more, so nothing can be lost: the caller's line was
+    // written when it arrived and the greeting's when its audio started. What
+    // teardown still owes is the CUT — and it amends the greeting's committed
+    // line rather than appending, or the opening would appear twice, once
+    // whole and once interrupted.
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
     h.handlers().onAgentTranscriptDelta?.(GREETING);
@@ -1623,13 +1651,19 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     ]);
   });
 
-  it("keeps a caller first when they start before the greeting and finish after", () => {
-    // speech_started lands before the first greeting delta; the ASR
-    // completion lands after it. Recomputing the hold at completion flips
-    // the SAME utterance from caller-first to held, and the mark echo then
-    // writes the greeting ahead of someone who demonstrably spoke first.
-    // The previous test called the completion before audio started, so it
-    // could not see this transition. Codex, #241.
+  it("puts the greeting where its audio began, even mid-utterance", () => {
+    // The one ordering this change gives up, on purpose, and the reason it
+    // is written down. The caller starts before the greeting plays but their
+    // ASR completion lands after it has started, so the greeting's line is
+    // already in the record and theirs follows.
+    //
+    // What used to hold their line back was a per-utterance decision, taken
+    // at speech_started and carried to the completion. It is gone, and the
+    // two tests below are why: answered once and never re-answered, that same
+    // flag let a second utterance barge the greeting outright. An overlap
+    // cannot be rendered as anything but a sequence in a line-per-turn
+    // transcript; what a line CAN be is placed where its own audio began,
+    // which needs no decision at all and so has no seam to get wrong.
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
 
@@ -1638,23 +1672,283 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     h.handlers().onCallerTranscript("hello? anyone there?", "item-1"); // completes after
 
     h.handlers().onAudioDone(GREETING);
-    const markName = h.marks()[0]!.mark.name;
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      `AGENT: ${GREETING}`,
+      "CALLER: hello? anyone there?",
+    ]);
+  });
+
+  it("keeps the greeting ahead of a SECOND thing said over it", () => {
+    // The residual left on main by #241. The hold was decided once per
+    // utterance and never re-decided, so a caller who spoke before the
+    // greeting started arrived at their second utterance with the answer
+    // already "not held": it wrote straight through and landed ahead of a
+    // greeting whose line was still waiting on Twilio's echo.
+    //
+    // There is no mark echo in this test at all, and that is the fix stated
+    // as an assertion: nothing about the opening is waiting for one.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted(); // into the silence before the greeting
+    h.handlers().onCallerTranscript("is anyone there", "item-1");
+
+    h.handlers().onAudioDelta("ZmFrZQ=="); // NOW the greeting starts playing
+
+    h.handlers().onSpeechStarted(); // and they speak again over it
+    h.handlers().onCallerTranscript("hello hello", "item-2");
+
+    h.handlers().onAudioDone(GREETING);
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: is anyone there",
+      `AGENT: ${GREETING}`,
+      "CALLER: hello hello",
+    ]);
+  });
+
+  it("holds the lock against a caller who ALSO spoke before the greeting", () => {
+    // The same residual in its louder form: the buffering branch was what
+    // stopped a barge-in during the greeting, and it was skipped whenever the
+    // per-utterance hold had already been answered "no" — so this caller cut
+    // the opening short. On the after-hours line that is the closed-office
+    // notice, the 911 direction and the recording disclosure. The lock is
+    // tested explicitly now, so the answer cannot go stale.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted(); // before the greeting plays
+    h.handlers().onAudioDelta("ZmFrZQ=="); // the greeting starts
+    h.handlers().onSpeechStarted(); // over the greeting
+
+    expect(h.session.cancelResponse).not.toHaveBeenCalled();
+    expect(h.clears()).toEqual([]);
+  });
+
+  it("does not record the greeting twice when the call ends before its echo", () => {
+    // Its line went in when the audio started, and its awaitingMark entry is
+    // still outstanding at teardown. That entry has to AMEND the line, not
+    // add a second copy of the opening — while still saying the caller heard
+    // only part of it, because the tail was in Twilio's buffer.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    // The wire's own transcript of a SCRIPTED line, which is not required to
+    // come back byte-identical. The amendment has to agree with the line it
+    // amends — the practice's words, as configured — not quietly swap in the
+    // model's transcription of them.
+    h.handlers().onAudioDone("thank you for calling azul vision optical how can i help you today");
+    h.handlers().onCallerTranscript("sorry wrong number", "item-1");
+
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      `AGENT: ${GREETING} [interrupted]`,
+      "CALLER: sorry wrong number",
+    ]);
+  });
+
+  it("records no greeting line when its audio never reached the caller", () => {
+    // No audio, no line — the rule every other utterance follows.
+    //
+    // Deliberately WITHOUT a new response: a second utterance of the same one
+    // carries the same epoch, so this is the single case the epoch bind
+    // cannot see. The pending text has to be dropped at the completion, or
+    // the greeting's line lands on top of a line the model actually spoke.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDone(GREETING); // the response ended without audio
+
+    h.handlers().onAgentTranscriptDelta("Sorry about that.");
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone("Sorry about that.");
+    const markName = lastMarkName(h);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual(["AGENT: Sorry about that."]);
+  });
+
+  /**
+   * A greeting is free text an operator saved in `agents.welcome_greeting`,
+   * so it goes through the agent's own output rules like any other line.
+   * That makes the guardrail cut the one path other than a hangup that can
+   * reach a greeting whose line is already committed.
+   */
+  function diagnosisGuardrail() {
+    return {
+      name: "No diagnosis",
+      policyHint: "Do not diagnose or clinically interpret symptoms.",
+      execute: async ({ agentOutput }: { agentOutput: string }) => ({
+        tripwireTriggered: /you have glaucoma/i.test(agentOutput),
+        outputInfo: {},
+      }),
+    };
+  }
+  const verdicts = () => Promise.resolve().then(() => Promise.resolve());
+  const BAD_GREETING = "Thank you for calling. If you have glaucoma, press one.";
+
+  it("amends the greeting's own line when a guardrail cuts it mid-playback", async () => {
+    // Its line is already in the record, so the cut has to rewrite that line.
+    // Appending would report the opening twice — once whole, once cut — which
+    // is the same duplication the mark echo is stopped from causing.
+    const h = makeBridge({
+      greeting: BAD_GREETING,
+      agent: makeAgent({ guardrails: [diagnosisGuardrail()] }),
+    });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ=="); // the line is committed HERE
+    h.handlers().onAgentTranscriptDelta(BAD_GREETING);
+    await verdicts();
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      `AGENT: ${BAD_GREETING} [cut by guardrail: No diagnosis]`,
+    ]);
+  });
+
+  it("starts a new caller line after a greeting the call cut short", async () => {
+    // The delivered case's twin. An amendment is that line FINISHING — cut
+    // short rather than delivered — so the caller's turn is over just as
+    // surely, and a NEW utterance that extends the earlier one must not merge
+    // backwards across it. The guardrail path is the one where nothing else
+    // would close the turn: its replacement never completes here.
+    const h = makeBridge({
+      greeting: BAD_GREETING,
+      agent: makeAgent({ guardrails: [diagnosisGuardrail()] }),
+    });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("yes"); // no itemId — word-level path
+
+    h.handlers().onAudioDelta("ZmFrZQ=="); // the greeting's line is written
+    h.handlers().onAgentTranscriptDelta(BAD_GREETING);
+    await verdicts(); // cut: the line is amended, and the turn ends with it
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("yes this is Wayne");
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: yes",
+      `AGENT: ${BAD_GREETING} [cut by guardrail: No diagnosis]`,
+      "CALLER: yes this is Wayne",
+    ]);
+  });
+
+  it("a greeting cut before it played does not claim the replacement's line", async () => {
+    // Nothing of it reached the caller, so it has no line of its own to
+    // write — and the pending text must not survive the cut and land on the
+    // first delta of the replacement turn, which would put the greeting in
+    // the record on top of words the model actually spoke.
+    const h = makeBridge({
+      greeting: BAD_GREETING,
+      agent: makeAgent({ guardrails: [diagnosisGuardrail()] }),
+    });
+    h.handlers().onConfigured();
+    h.handlers().onAgentTranscriptDelta(BAD_GREETING); // no audio yet
+    await verdicts();
+
+    // No manual response bump: `speakNatural` creates the replacement's own,
+    // which is exactly what puts it past the greeting's epoch.
+    h.handlers().onAgentTranscriptDelta("Thank you for calling. How can I help?");
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone("Thank you for calling. How can I help?");
+    const markName = lastMarkName(h);
     h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
 
     expect(h.bridge.getTranscript().split("\n")).toEqual([
-      "CALLER: hello? anyone there?",
+      `AGENT: ${BAD_GREETING} [cut by guardrail: No diagnosis]`,
+      "AGENT: Thank you for calling. How can I help?",
+    ]);
+  });
+
+  it("stamps the tail from a greeting a guardrail cut, when nothing else can", async () => {
+    // The cancelled response's own completion is discarded by the epoch
+    // check, and the safe replacement never completes either — the caller
+    // hangs up on it, and the guardrail already cleared `assistantAudioPlaying`
+    // so teardown's cut does not run. Without a stamp at the cut, a
+    // transcript with plainly caller-audible agent words in it carries no
+    // tail measurement at all. Codex, #243.
+    const persisted: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      greeting: BAD_GREETING,
+      agent: makeAgent({ guardrails: [diagnosisGuardrail()] }),
+      persistCallRecord: async (r) => void persisted.push(r),
+    });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAgentTranscriptDelta(BAD_GREETING);
+    await verdicts();
+
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await Promise.resolve();
+
+    expect(persisted[0]?.transcript.split("\n")).toEqual([
+      `AGENT: ${BAD_GREETING} [cut by guardrail: No diagnosis]`,
+    ]);
+    expect(persisted[0]?.lastTranscriptAtMs).toBeDefined();
+  });
+
+  it("refines a caller line that straddles the start of the greeting", () => {
+    // Codex, #243. Their turn began before the greeting played and their ASR
+    // is cumulative, so the fuller completion is the SAME utterance. Closing
+    // their line when the greeting goes in strands it: that re-emission
+    // appends instead of replacing, and the caller's words land twice, once
+    // on each side of the opening — the duplication #241 fought, in a
+    // narrower window. The greeting was queued at the handshake, before they
+    // had said anything, so it is not the provider moving on from their turn.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("hello", "item-1");
+    h.handlers().onAudioDelta("ZmFrZQ=="); // the greeting starts mid-turn
+    h.handlers().onCallerTranscript("hello are you there", "item-1"); // same turn
+
+    h.handlers().onAudioDone(GREETING);
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: hello are you there",
+      `AGENT: ${GREETING}`,
+    ]);
+  });
+
+  it("keeps refining one caller turn across the greeting's echo, by item id", () => {
+    // Codex, #243 round 4 — the mirror of the test below, and the reason the
+    // echo marks the turn rather than closing it. Item identity outranks the
+    // mark: a cumulative re-emission carrying the same item_id is the same
+    // utterance however much of the greeting played across it. Appending it
+    // would put one thing the caller said on BOTH sides of the opening, which
+    // is the defect this whole PR exists to remove.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("hello", "item-1");
+
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+    const markName = lastMarkName(h);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    // The SAME item, still being transcribed after the greeting was heard.
+    h.handlers().onCallerTranscript("hello are you there", "item-1");
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: hello are you there",
       `AGENT: ${GREETING}`,
     ]);
   });
 
   it("cannot be barged by a SECOND utterance after speaking before the greeting", () => {
-    // The lock's whole purpose, and the case that defeated it. A caller who
-    // speaks before playback records "do not hold my transcript line" —
-    // correct, their words come first. Reading that same decision to answer
-    // "may the greeting be interrupted?" let a LATER utterance cancel the
-    // greeting and clear Twilio's buffer mid-sentence, which on the
-    // after-hours line can cut the 911 direction or the recording
-    // disclosure. Codex, #241, after merge.
+    // From #242, which found this defect independently while this PR was open
+    // and fixed it inside the buffering. The lock's whole purpose, and the
+    // case that defeated it: a caller who speaks before playback recorded "do
+    // not hold my transcript line" — correct, their words come first — and
+    // that same decision was then read to answer "may the greeting be
+    // interrupted?", letting a LATER utterance cancel the greeting and clear
+    // Twilio's buffer mid-sentence. On the after-hours line that can cut the
+    // 911 direction or the recording disclosure.
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
 
@@ -1665,21 +1959,145 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     expect(h.session.cancelResponse).not.toHaveBeenCalled();
     expect(h.clears()).toEqual([]);
 
-    // And the SAME utterance keeps the decision it started with. The second
-    // speech-start must not re-decide it to "held" — that would order this
-    // caller after a greeting they began speaking before. Without this the
-    // per-utterance carry is untested: every other ordering test has only
-    // ONE speech-start, so a mutation making the decision unconditional
-    // reddens nothing.
+    // #242's ORDERING half asserted the reverse of what follows, and the
+    // difference is this PR's one deliberate behaviour change. There, the
+    // per-utterance carry held this caller's line so it landed ahead of a
+    // greeting they began speaking before. That carry is gone: it is the very
+    // decision whose staleness defeated the lock above, and Codex found two
+    // more faults in it on this PR. A line written when its own audio starts
+    // needs no such decision — so the greeting sits where its audio began,
+    // and words transcribed after that point follow it. See "puts the
+    // greeting where its audio began, even mid-utterance".
     h.handlers().onCallerTranscript("hello? are you there?", "item-1");
     h.handlers().onAudioDone(GREETING);
-    const markName = h.marks()[0]!.mark.name;
+    const markName2 = lastMarkName(h);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName2 } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      `AGENT: ${GREETING}`,
+      "CALLER: hello? are you there?",
+    ]);
+  });
+
+  it("starts a new caller line once the greeting is fully delivered", () => {
+    // Codex, #243. `openingLine` leaves the caller's turn open on purpose —
+    // the greeting's audio is only STARTING, and a turn straddling that
+    // moment must still refine in place — but the window has to close, and
+    // the mark echo is where. Left open, a genuinely NEW utterance that
+    // happens to EXTEND the earlier one merges into it: an extension replaces
+    // even across a speech boundary, by design, because within one turn it
+    // carries every earlier word and can lose nothing. Across a delivered
+    // agent line it can — the record would read as if the whole of "yes this
+    // is Wayne" were said before the practice ever spoke.
+    //
+    // No itemIds: this is the word-level correlation path, which is the only
+    // one where an extension can merge two separate turns.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("yes");
+
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+    const markName = lastMarkName(h);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    // A NEW turn, after the greeting was heard in full.
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("yes this is Wayne");
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: yes",
+      `AGENT: ${GREETING}`,
+      "CALLER: yes this is Wayne",
+    ]);
+  });
+
+  it("marks a greeting cut short by a superseded response, not delivered whole", () => {
+    // Codex, #243. Its line is in the record claiming the whole greeting was
+    // spoken, but only the beginning was: the response was superseded with no
+    // completion, so no mark went out and `awaitingMark` holds nothing to
+    // correct it with. Once the utterance sequence moves on, no later cut can
+    // find that line either — recordCutLine matches the greeting by sequence.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ=="); // the greeting starts playing
+    h.newResponse(); // superseded — its completion never comes
+    h.handlers().onAgentTranscriptDelta("Sorry, let me start again.");
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone("Sorry, let me start again.");
+    const markName = lastMarkName(h);
     h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
 
     expect(h.bridge.getTranscript().split("\n")).toEqual([
-      "CALLER: hello? are you there?",
-      `AGENT: ${GREETING}`,
+      `AGENT: ${GREETING} [interrupted]`,
+      "AGENT: Sorry, let me start again.",
     ]);
+  });
+
+  it("stamps the tail from a greeting a superseding response cut short", async () => {
+    // Same invariant as the barge-in and teardown cuts: words the caller
+    // heard, committed, move the clock. The superseding response here carries
+    // no transcript of its own, so nothing else in the call can stamp it and
+    // a greeting-length tail would be measured from before the call began.
+    const persisted: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      greeting: GREETING,
+      persistCallRecord: async (r) => void persisted.push(r),
+    });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.newResponse();
+    h.handlers().onAudioDelta("ZmFrZQ=="); // supersedes; no words of its own
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await Promise.resolve();
+
+    expect(persisted[0]?.transcript.split("\n")).toEqual([
+      `AGENT: ${GREETING} [interrupted]`,
+    ]);
+    expect(persisted[0]?.lastTranscriptAtMs).toBeDefined();
+  });
+
+  it("a greeting whose response emits NOTHING leaves no line behind", () => {
+    // Codex, #243. Superseded before a single delta, that response never
+    // opened an utterance — so the branch in openOrGetCurrent that drops a
+    // pending greeting has nothing to match on. Unbound, the REPLACEMENT's
+    // first audio writes the greeting's line, and then swallows the
+    // replacement's own transcript at its mark, because that line is marked
+    // as already committed. The greeting is the first response created after
+    // the handshake, and only that one may write it.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured(); // the greeting's response
+
+    h.newResponse(); // a later one — the greeting's produced nothing at all
+    h.handlers().onAgentTranscriptDelta("Sorry about that, how can I help?");
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone("Sorry about that, how can I help?");
+    const markName = lastMarkName(h);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "AGENT: Sorry about that, how can I help?",
+    ]);
+  });
+
+  it("a greeting superseded before it played leaves no line behind", () => {
+    // The greeting opened an utterance but never reached audio, and the wire
+    // moved past it. The replacement rides a later response, so the epoch
+    // bind refuses it the greeting's line — otherwise that utterance's first
+    // delta writes the greeting and its own real words are lost.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAgentTranscriptDelta("Thank you for calling"); // greeting opens
+    h.newResponse(); // superseded — no completion ever came for it
+    h.handlers().onAgentTranscriptDelta("Sorry, one moment.");
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone("Sorry, one moment.");
+    const markName = lastMarkName(h);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual(["AGENT: Sorry, one moment."]);
   });
 
   it("still barges in normally on a lane with no greeting", () => {
