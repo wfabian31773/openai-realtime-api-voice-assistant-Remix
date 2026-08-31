@@ -514,26 +514,26 @@ export class VoiceCallBridge {
     // and every call opened cold on the caller's own name (operator, three
     // calls, 2026-08-31). The greeting also covers the caller-ID lookup:
     // it is speaking while the 1.5s pre-context window runs.
-    // THEN the agent's own turn, with no per-response instructions at all —
-    // `response.instructions` OVERRIDES the session's, so supplying words
-    // here would switch the agent's prompt and the knowledge pack off for
-    // exactly the sentence that follows the greeting.
+    // and then NOTHING. The greeting ends in a question the CALLER answers —
+    // "How can I help you today?", or for a recognised caller the confirm
+    // that personalisation swapped in — so the next voice is theirs.
     //
-    // With a greeting, that turn is OWED rather than requested now, and it
-    // goes through the follow-up path instead of the session's own queue.
-    // The difference is the watchdog. Queueing it on the session works for
-    // ordering and silently loses the clock: the greeting's own deltas move
-    // the dead-air cause to "utterance", its completion then CLEARS the
-    // window (nothing is owed for a line already delivered), and the queued
-    // turn is released by `response.done` with no window at all — so a
-    // provider that stalled on the first real agent turn would sit in
-    // silence until the ten-minute ceiling instead of the 30s deadline.
-    // maybeRequestFollowUp re-arms it as a response owed anew, which is
-    // exactly what this is (Codex review, PR #240).
+    // Requesting an agent turn here was wrong twice over: it speaks a second
+    // opening over a question already asked, and on PCP it takes a turn
+    // before the call purpose its greeting just requested has been given
+    // (Codex review, PR #240). The watchdog concern that argued for owing a
+    // turn goes with it: after a delivered line with nothing owed, clearing
+    // the window is correct, and a caller taking their time to answer must
+    // never trip it.
+    //
+    // Only a lane with NO greeting needs the agent to open, and it gets the
+    // turn it always got.
     if (this.deps.greeting) {
       this.session.speak(this.deps.greeting);
-      this.followUpOwed = true;
     } else {
+      // No per-response instructions: `response.instructions` OVERRIDES the
+      // session's, so words here would switch the agent's prompt and the
+      // knowledge pack off for the caller's first sentence.
       this.session.requestResponse();
     }
     this.armDeadAir("response");

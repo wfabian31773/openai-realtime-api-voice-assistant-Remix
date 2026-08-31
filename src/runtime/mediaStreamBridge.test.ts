@@ -1315,47 +1315,42 @@ describe("the practice greets the caller before the agent takes a turn", () => {
    */
   const GREETING = "Thank you for calling Azul Vision optical.";
 
-  it("speaks the greeting first and does not take the agent's turn yet", () => {
+  it("speaks the greeting and then waits for the caller", () => {
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
 
     expect(h.session.speak).toHaveBeenCalledWith(GREETING);
-    // The agent's turn is OWED, not requested now: it belongs after the
-    // greeting's own response completes.
+    // The greeting ends in a question. Taking a turn here speaks a second
+    // opening over one already asked — and on PCP it answers before the
+    // call purpose the greeting just requested has been given.
     expect(h.session.requestResponse).not.toHaveBeenCalled();
   });
 
-  it("takes the agent's turn once the greeting's response completes", () => {
+  it("does not take a turn when the greeting's own response completes either", () => {
+    // The earlier version of this fix owed the agent a turn and released it
+    // here. That is the bug this test exists to keep out: the caller is
+    // mid-answer, and the next voice must be theirs.
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
+    h.handlers().onAgentTranscriptDelta?.("Thank you for calling");
+    h.handlers().onAudioDone(GREETING);
     h.handlers().onResponseDone();
 
-    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
-    const greetingAt = h.session.speak.mock.invocationCallOrder[0];
-    const agentTurnAt = h.session.requestResponse.mock.invocationCallOrder[0];
-    expect(greetingAt).toBeLessThan(agentTurnAt);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
   });
 
-  it("still owes the caller a dead-air window on that first agent turn", () => {
-    // The reason the turn goes through the follow-up path rather than the
-    // session's own say queue. Queueing it orders correctly and loses the
-    // clock: the greeting's deltas move the watchdog cause to "utterance",
-    // its completion clears the window, and the released turn would have no
-    // deadline at all — a provider stalling on the caller's first real
-    // sentence would sit silent until the ten-minute ceiling.
+  it("lets a caller take their time answering it", () => {
+    // Nothing is owed once a line is delivered, so the window is clear and
+    // a slow answer cannot trip dead air. Firing the timer proves the clock
+    // is actually down rather than merely re-armed somewhere else.
     const h = makeBridge({ greeting: GREETING });
     h.handlers().onConfigured();
-
-    // The greeting speaks, then completes: exactly the sequence that used
-    // to leave the call unwatched.
     h.handlers().onAgentTranscriptDelta?.("Thank you for calling");
-    h.handlers().onAudioDone("Thank you for calling Azul Vision optical.");
+    h.handlers().onAudioDone(GREETING);
     h.handlers().onResponseDone();
 
-    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
-    expect([...h.timers.pending.values()].some((t) => t.ms === 30_000)).toBe(true);
-    expect(h.timers.fire(30_000)).toBe(true);
-    expect(h.outcomes).toEqual(["dead_air"]);
+    expect(h.timers.fire(30_000)).toBe(false);
+    expect(h.outcomes).toEqual([]);
   });
 
   it("speaks it scripted, never as an instruction the model rephrases", () => {

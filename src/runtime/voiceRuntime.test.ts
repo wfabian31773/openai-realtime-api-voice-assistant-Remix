@@ -1107,3 +1107,99 @@ describe("the transfer's public domain", () => {
     );
   });
 });
+
+describe("a recognised caller hears the confirm in the greeting itself", () => {
+  /**
+   * The queue lines APPEND: they keep their own opening — which pre-empts
+   * the ask for a human on a line that cannot transfer — and swap its
+   * trailing question for "Am I speaking with <name>?". The tech and records
+   * prompts then instruct the model to take that answer and move on, which
+   * it cannot do if the caller was only ever asked "How can I help you
+   * today?" (Codex review, PR #240).
+   *
+   * Asserted through the real runtime rather than the bridge's fake session,
+   * because what is being checked is that voiceRuntime hands the bridge a
+   * PERSONALISED string — a bridge test would pass whatever it was given.
+   */
+  const GREETING =
+    "Thank you for calling Azul Vision optical. How can I help you today?";
+
+  const laneWithGreeting = (): LaneSource => ({
+    getAgentConfig: () => ({
+      id: "optical",
+      enabled: true,
+      agentType: "inbound",
+      greeting: GREETING,
+      factory: (async () => ({
+        instructions: "You are the optical queue agent.",
+        tools: [],
+      })) as unknown as LaneConfig["factory"],
+    }),
+  });
+
+  /** What the runtime actually put in Grok's mouth. */
+  const spokenText = (h: Harness): string[] =>
+    h.transports[0].sent
+      .filter((m) => m.type === "conversation.item.create")
+      .map((m) => {
+        const item = m.item as { content?: Array<{ text?: string }> };
+        return item?.content?.[0]?.text ?? "";
+      });
+
+  it("swaps the greeting's own question for the confirm", async () => {
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA40", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA40", tokenFrom(answered.text));
+    await settle(6);
+    // The handshake the real wire performs: only once the session is
+    // configured does a queued say reach the mouth.
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([
+      "Thank you for calling Azul Vision optical. Am I speaking with Wayne?",
+    ]);
+    ws.close();
+  });
+
+  it("never speaks a name the lookup did not stand behind", async () => {
+    // The firstName is PRESENT here and `matched` is false — a number that
+    // resolved to a candidate the service will not vouch for. That is the
+    // case worth guarding: the optical prompt's own recognition block exists
+    // only when the match is unique, "because saying that when it is false
+    // would name the wrong patient out loud". An unmatched caller hears the
+    // line exactly as configured, question and all.
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: false, firstName: "Wayne" }),
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA41", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA41", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([GREETING]);
+    ws.close();
+  });
+
+  it("leaves it alone when the match carries no first name to use", async () => {
+    // Personalising on an empty name would strip the greeting's question and
+    // put nothing in its place — a line that ends mid-thought.
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true }),
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA42", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA42", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([GREETING]);
+    ws.close();
+  });
+});

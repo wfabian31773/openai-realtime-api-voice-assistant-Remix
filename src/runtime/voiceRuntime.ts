@@ -58,6 +58,26 @@ import {
   TRANSFER_STATUS_PATH,
 } from "./runtimeTransfer";
 import { releaseCallHandoff } from "../tools/handoffBroker";
+import {
+  greetingStyleFor,
+  personaliseGreeting,
+} from "../services/greetingPersonalisation";
+
+/**
+ * The first name a caller-ID match resolved to, or "" when there is none.
+ *
+ * `precontext` reaches this untyped — it is whatever `fetchPrecontext`
+ * returned, injected so the runtime needs no network in tests — so the shape
+ * is checked rather than asserted. A match without a first name is not a
+ * match for this purpose: personalising on an empty string would strip the
+ * greeting's own question and leave nothing in its place.
+ */
+function recognisedFirstName(precontext: unknown): string {
+  if (!precontext || typeof precontext !== "object") return "";
+  const pc = precontext as { matched?: unknown; firstName?: unknown };
+  if (pc.matched !== true) return "";
+  return typeof pc.firstName === "string" ? pc.firstName.trim() : "";
+}
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
@@ -672,10 +692,25 @@ export function mountVoiceRuntime(
           context,
           startedAtMs,
           agent: lane.agent,
-          // The practice's own line, spoken before the agent's first turn.
-          // The queue prompts assume it has already played; on this
-          // transport nothing played it until now.
-          greeting: lane.greeting,
+          // The practice's own line, spoken before the agent's first turn,
+          // personalised for a recognised caller exactly as the SIP path
+          // personalises it — same two helpers, same per-agent style.
+          //
+          // Passing the raw registry greeting was not a smaller version of
+          // this, it was a different opening: the queue lines APPEND, so a
+          // recognised caller should hear their own greeting with its
+          // trailing question swapped for "Am I speaking with <name>?".
+          // Tech and records prompts then tell the model to take that
+          // answer and move on — which it cannot do if the caller was only
+          // ever asked "How can I help you today?" (Codex review, PR #240).
+          //
+          // No name, or no match, returns the greeting untouched: whether
+          // recognition happened is not a decision this makes.
+          greeting: personaliseGreeting(
+            lane.greeting ?? "",
+            recognisedFirstName(precontext),
+            greetingStyleFor(entry.slug),
+          ) || null,
           twilio: twilioSocket,
           createSession: (handlers) =>
             new GrokVoiceSession(
