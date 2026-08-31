@@ -277,10 +277,14 @@ exactly the symptom a timeout does, with nothing wrong anywhere. Reading
 silence as lateness will send you chasing a deadline that was never missed.
 Raised by Codex on #239.
 
-**How to tell, in one call:**
+**How to tell, in one call.** Steps 2–4 need a log line that ships with the
+greeting change (`voiceRuntime.ts`). **Check for it first** — grep one call
+for `[runtime] pre-context`. Present, use the full procedure. Absent, you are
+on an older build: skip to *Without that line*, below, and expect less.
 
 1. Dial from a number that exists in the mirror. If the agent opens by
-   confirming a name, pre-context worked and you are done.
+   confirming a name, pre-context worked and you are done. **This step needs
+   no telemetry** and it settles the positive case on any build.
 2. If it asks who you are, **read the outcome the runtime logged.** One line
    per call, and it is the only thing that separates the three cases — they
    all reach the runtime as the same `null`, so neither the greeting nor
@@ -301,9 +305,26 @@ Raised by Codex on #239.
    or a fetch failure. If none of them appear, the 1.5s deadline is what is
    left — that is the one mode nothing logs from the runtime side.
 
-That log line was added for this procedure (`voiceRuntime.ts`, PR #240). If
-you are on a build without it, step 2 cannot be carried out at all and this
-diagnosis is not available — check the build before spending time on it.
+**Without that line** — an older build — say what you can and no more, rather
+than guessing:
+
+- A cold open still tells you nothing on its own. Do not read it as a
+  timeout; `no_match` is the commoner cause and it looks identical.
+- The `[AZUL-SCHED]` lines still separate an unset key, an HTTP status and a
+  fetch failure. If one is present, that is your answer and it is complete.
+- If none is present, the remaining two — a valid `no_match` and a lookup
+  that beat no deadline — are **not distinguishable from this side.** The
+  Eye Care service's own request log is the only place that separates them:
+  a `sage_precontext` request logged for this call's number and timestamp
+  means the lookup arrived and answered, so a cold open was a real negative.
+  No request logged means it never got there.
+- Do not block the cutover on it either way. Pre-context decides whether the
+  agent greets by name; it does not decide whether the request is taken or
+  the ticket lands, and those are the pass mark below.
+
+Raised by Codex on #239, twice: first that the diagnosis pointed at
+`si_persons`, which answers a different question, and then that steps 2–4
+were being required on a build that did not yet carry the telemetry.
 
 The durable fix is to read the mirror directly. `patients_master` is mirrored
 in the Patient-Console project precisely so this is a fast indexed read, and
