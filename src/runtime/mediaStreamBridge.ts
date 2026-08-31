@@ -576,6 +576,18 @@ export class VoiceCallBridge {
     // Only a lane with NO greeting needs the agent to open, and it gets the
     // turn it always got.
     if (this.deps.greeting) {
+      // A greeting that ASKS something leaves the caller holding the turn,
+      // which is the whole reason nothing is requested after it. A
+      // DECLARATIVE one ("Thank you for calling Azul Vision.") leaves nobody
+      // holding it: the agent is not speaking and the caller was not asked,
+      // and once this line completes the watchdog clears because a delivered
+      // line owes nothing — so the call sits silent to the ten-minute
+      // ceiling. `welcome_greeting` is free text and the admin field does
+      // not require a question, so this is a greeting someone can simply
+      // save. The agent takes its own turn after one (Codex, #240).
+      if (!/\?\s*$/.test(this.deps.greeting.trim())) {
+        this.followUpOwed = true;
+      }
       // LOCKED. A caller who says "hello" over the opening must not be able
       // to truncate it: on the after-hours line it carries the closed-office
       // notice, the 911 direction and the recording disclosure, and

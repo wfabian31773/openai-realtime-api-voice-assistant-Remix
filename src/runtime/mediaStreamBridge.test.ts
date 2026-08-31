@@ -1313,7 +1313,13 @@ describe("the practice greets the caller before the agent takes a turn", () => {
    * and opened cold on the caller's own first name — three live calls,
    * 2026-08-31, before anyone worked out it was not the model's doing.
    */
-  const GREETING = "Thank you for calling Azul Vision optical.";
+  // Ends in a QUESTION, as every real greeting does — optical's live text is
+  // "…but I can take a message and they will follow up with you. How can I
+  // help you today?". The fixture used to be declarative, which meant the
+  // "waits for the caller" tests below were asserting that behaviour against
+  // a greeting that never asks anything: the caller was not holding the turn
+  // and nobody was. Found when the declarative case got a rule of its own.
+  const GREETING = "Thank you for calling Azul Vision optical. How can I help you today?";
 
   it("speaks the greeting and then waits for the caller", () => {
     const h = makeBridge({ greeting: GREETING });
@@ -1474,6 +1480,43 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     // Nothing is owed. A slow caller must not be cut off.
     expect(h.timers.fire(30_000)).toBe(false);
     expect(h.outcomes).toEqual([]);
+  });
+
+  it("takes its own turn after a greeting that asks nothing", () => {
+    // `welcome_greeting` is free text and the admin field does not require a
+    // question. A declarative greeting leaves nobody holding the turn: the
+    // agent is not speaking, the caller was not asked, and the watchdog
+    // clears because a delivered line owes nothing. Codex, #240.
+    const h = makeBridge({ greeting: "Thank you for calling Azul Vision." });
+    h.handlers().onConfigured();
+    expect(h.session.speak).toHaveBeenCalledWith("Thank you for calling Azul Vision.", {
+      interruptible: false,
+    });
+    // Not yet — it speaks first, then continues.
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone("Thank you for calling Azul Vision.");
+    h.handlers().onResponseDone();
+
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    // And that turn is owed, so silence after it is caught rather than
+    // running to the ten-minute ceiling.
+    expect(h.timers.fire(30_000)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
+
+  it("still waits after a greeting that does ask", () => {
+    // The control. GREETING ends in a question, so the caller holds the
+    // turn and the agent must not speak over it.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+    h.handlers().onResponseDone();
+
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+    expect(h.timers.fire(30_000)).toBe(false);
   });
 
   it("still barges in normally on a lane with no greeting", () => {

@@ -175,6 +175,13 @@ const MANDATORY_GREETING_COPY: Readonly<
   Record<string, ReadonlyArray<{ label: string; present: (g: string) => boolean }>>
 > = {
   'no-ivr': [
+    // THREE, not two. `noIvrAgent` names them: "the two things this line
+    // exists to say: that offices are closed, and that a medical emergency
+    // means calling 911 — plus the recording disclosure." I quoted that
+    // sentence and then encoded two of the three, so "For emergencies dial
+    // 911. Calls are recorded. How can I help?" would have passed and taken
+    // the after-hours status off the line (Codex, #240).
+    { label: 'closed-office notice', present: (g) => /clos(ed|ing)\b/i.test(g) },
     { label: '911 direction', present: (g) => /\b911\b/.test(g) },
     { label: 'recording disclosure', present: (g) => /record(ed|ing)\b/i.test(g) },
   ],

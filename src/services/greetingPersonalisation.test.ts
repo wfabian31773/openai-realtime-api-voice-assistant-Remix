@@ -178,11 +178,22 @@ describe('copy a lane must say whatever the database holds', () => {
     expect(missingMandatoryCopy('no-ivr', BUILT_IN)).toEqual([]);
   });
 
-  it('names both when a greeting has dropped both', () => {
+  it('names every statement a greeting has dropped', () => {
     expect(missingMandatoryCopy('no-ivr', 'Thanks for calling, how can I help?')).toEqual([
+      'closed-office notice',
       '911 direction',
       'recording disclosure',
     ]);
+  });
+
+  it('catches a greeting that has only lost the closed-office notice', () => {
+    // The case the first version of this validator let through: it checked
+    // 911 and recording only, so this passed and outranked the complete
+    // built-in greeting, taking the line's after-hours status off every
+    // call. Codex, #240.
+    expect(
+      missingMandatoryCopy('no-ivr', 'For emergencies dial 911. Calls are recorded. How can I help?'),
+    ).toEqual(['closed-office notice']);
   });
 
   it('requires nothing of a lane with no mandated copy', () => {
@@ -193,7 +204,7 @@ describe('copy a lane must say whatever the database holds', () => {
   });
 
   it('treats an empty or absent greeting as missing everything', () => {
-    expect(missingMandatoryCopy('no-ivr', '')).toHaveLength(2);
-    expect(missingMandatoryCopy('no-ivr', null)).toHaveLength(2);
+    expect(missingMandatoryCopy('no-ivr', '')).toHaveLength(3);
+    expect(missingMandatoryCopy('no-ivr', null)).toHaveLength(3);
   });
 });
