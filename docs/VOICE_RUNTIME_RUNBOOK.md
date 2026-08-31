@@ -109,6 +109,16 @@ answering-service: OK voice=eve tools=5 promptChars=33656 skipped=0
 
 `skipped` must be `0`. A skipped tool is a promise the agent cannot keep.
 
+**Do not read this test's timings as a lane's timings.** The first lane
+resolved pays a one-time cost that is not its own — `defaultLaneSource()`
+opens the config read, so whoever goes first absorbs the connect. Against a
+dummy `DATABASE_URL` that is a ~2s connection timeout, which can exceed
+vitest's default 5s per-test limit and make a perfectly healthy lane look
+broken. Verified by control rather than assumed: run `surgery` alone with
+`-t "surgery builds"` and it takes the same ~2.1s when it goes first. Use
+`--testTimeout=30000`, or a real `DATABASE_URL`, before concluding anything
+about a lane from this test's clock.
+
 ## 5. Pointing a number
 
 Set the number's Voice webhook to `POST https://<host>/voice/<slug>`.
@@ -195,6 +205,89 @@ set. Calls 3 and 4 should end normally with a ticket filed — **not** as
 `dead_air`. If you see `dead_air` on a transfer attempt, that is a real bug:
 tell me the callSid rather than re-dialling.
 
+## 6c. The queue-lane cutover — Optical first
+
+§6b proves the warm transfer. It proves **nothing** about `optical`,
+`surgery`, `tech`, `records` or `answering-service`: those lanes hold no
+transfer tool at all (standing instruction 9), so not one of those six calls
+touches a line of code they run. Their question is a different one — does the
+agent take the request, and does the ticket land?
+
+Optical goes first, deliberately. It is forwarded overflow rather than a
+primary line, it is the queue the operator described as working like a charm,
+and it carries enough volume (dept 1, ~1,744 tickets/90d) that a regression
+shows up the same day. Survivable and immediately obvious is what you want
+from the first lane to move.
+
+### Check pre-context BEFORE anything else
+
+This is the one that decides whether Optical still sounds like Optical. On the
+SIP path the agent knows who is calling and **confirms** — "Am I speaking
+with…?" — instead of asking cold. On this runtime that opening depends on a
+lookup that can fail silently three different ways:
+
+`server/index.ts` wires `fetchPrecontext` to `fetchAzulPrecontext`, which is an
+**HTTP call** — `callEyecareTool('sage_precontext')` against `EYECARE_BASE_URL`
+with `EYECARE_AGENT_API_KEY`. The runtime bounds it at 1.5s and drops it if
+slower; the function itself catches everything and returns `null`. So a slow
+service, a stale key, or any error all produce the same thing: no pre-context,
+and an agent that asks cold. None of the three logs a distinguishable reason.
+
+**How to tell, in one call:** dial from a number that exists in the mirror. If
+the agent opens by confirming a name, pre-context worked. If it asks who you
+are, it did not — and that is worth fixing before the live number moves, not
+after.
+
+The durable fix is to read the mirror directly. `patients_master` is mirrored
+in the Patient-Console project precisely so this is a fast indexed read, and
+`src/services/patientVerification.ts` already reads it and already refuses to
+guess between two people. Routing every lane's caller-ID lookup through
+azul-scheduling's HTTP tool is both slower and a dependency the queue lanes do
+not otherwise have. Not done yet; operator's call on whether it lands before or
+after the first cutover.
+
+### Two calls, on a spare number
+
+Point a number you do not mind breaking at `POST https://<host>/voice/optical`
+— **not** the live optical number.
+
+1. **An ordinary optical request.** Give a name and date of birth, ask about a
+   glasses or contacts order. Watch for: does it verify against the mirror,
+   take the request, and say it is filing something?
+2. **A request this queue does not own.** Ask to schedule an appointment. It
+   must take the request and route it to the HVA Hub. It must not tell you to
+   call back or send you to another extension (standing instruction 10). A
+   surgery *date* is the one exception to the HVA Hub rule.
+
+### The pass mark is the ticket, not the conversation
+
+A call that sounds good and files nothing is a failure. A stilted call that
+files correctly is a pass. After each:
+
+| check | where |
+|---|---|
+| a ticket exists, on department 1 | ticketing |
+| patient name, DOB and location are right | the ticket |
+| the callback number is the one you gave | the ticket — standing instruction 12 |
+| the tool timeline is populated | `call_logs` for that callSid |
+| outcome is not `dead_air` or `provider_failure` | `call_logs` — see §6 |
+
+The dangerous case is an empty tool timeline on a call that sounded fine: the
+model talked its way through without calling `file_optical_ticket`, and the
+caller was told something that did not happen. That is invisible from the
+audio and obvious from the row.
+
+### Then, and only then, the live number
+
+Move the live optical webhook to `/voice/optical` and watch the first hour.
+Keep the old core's webhook to hand — reverting is changing one URL back, and
+knowing that in advance is what makes the cutover cheap.
+
+After Optical, one lane at a time, same shape with that queue's own request
+type. `surgery`, `tech` and `records` already resolve clean (§4). `no-ivr` and
+`pcp` need §6b first, because they do transfer and those six calls are exactly
+the code they add.
+
 ## 7. What is not covered
 
 - **`azul-scheduling` still cannot transfer** — see §3. Scheduling for San
@@ -205,6 +298,11 @@ tell me the callSid rather than re-dialling.
   infers a patient from a tool result.
 - **Caller-ID pre-context** is fetched and passed, bounded at 1.5s, and
   dropped if slower. A match is a candidate to confirm, never an identity.
+  It currently goes through azul-scheduling's `sage_precontext` HTTP tool
+  rather than a direct read of the `patients_master` mirror, and a slow
+  service, a stale `EYECARE_AGENT_API_KEY` and a thrown error all degrade to
+  the same silent `null` — the agent asks cold and nothing says why. See §6c
+  for how to tell in one call, and why the mirror is the durable answer.
 
 ## 8. If the first call goes wrong
 
