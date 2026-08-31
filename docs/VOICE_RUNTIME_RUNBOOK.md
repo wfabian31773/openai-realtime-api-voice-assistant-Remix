@@ -281,13 +281,29 @@ Raised by Codex on #239.
 
 1. Dial from a number that exists in the mirror. If the agent opens by
    confirming a name, pre-context worked and you are done.
-2. If it asks who you are, **establish the match outcome first** — did the
-   lookup return `matched: false`? That is a valid negative, not a fault, and
-   the number is simply ambiguous or absent. Check `si_persons` for it.
-3. Only once a unique match is established does silence mean anything. Then
-   check the `[AZUL-SCHED]` lines above for an unset key, an HTTP status or a
-   fetch failure; if a unique match exists and none of those appear, the 1.5s
-   deadline is what is left.
+2. If it asks who you are, **read the outcome the runtime logged.** One line
+   per call, and it is the only thing that separates the three cases — they
+   all reach the runtime as the same `null`, so neither the greeting nor
+   `si_persons` can tell you which happened. `si_persons` shows what data
+   exists, not what this request returned:
+
+   ```
+   [runtime] pre-context optical <callSid>: recognised
+   [runtime] pre-context optical <callSid>: no_match (ran, vouched for nobody …)
+   [runtime] pre-context optical <callSid>: unavailable (failed or past the 1.5s deadline …)
+   ```
+
+3. **`no_match` means nothing is wrong.** The lookup ran and would not vouch
+   for the number — ambiguous, shared, or absent. A cold open is the correct
+   behaviour and there is nothing to fix. Stop here.
+4. **`unavailable`** is the only case worth digging into. Now the
+   `[AZUL-SCHED]` lines above tell you which: an unset key, an HTTP status,
+   or a fetch failure. If none of them appear, the 1.5s deadline is what is
+   left — that is the one mode nothing logs from the runtime side.
+
+That log line was added for this procedure (`voiceRuntime.ts`, PR #240). If
+you are on a build without it, step 2 cannot be carried out at all and this
+diagnosis is not available — check the build before spending time on it.
 
 The durable fix is to read the mirror directly. `patients_master` is mirrored
 in the Patient-Console project precisely so this is a fast indexed read, and
@@ -332,11 +348,23 @@ files correctly is a pass. After each:
 
 | check | where |
 |---|---|
+| **`file_optical_ticket` ran, and succeeded** | `tool_timeline` for that callSid |
+| **the ticket's `created_at` is AFTER this call started** | ticketing vs `call_logs.created_at` |
 | a ticket exists, **in the department the request belongs to** | ticketing |
 | patient name, DOB and location are right | the ticket |
 | the callback number is the one you gave | the ticket — standing instruction 12 |
-| the tool timeline is populated | `call_logs` for that callSid |
 | outcome is not `dead_air` or `provider_failure` | `call_logs` — see §6 |
+
+**The first two rows are the ones that matter, and they are first because
+the weaker version of this table passed the exact failure described below.**
+"the tool timeline is populated" is satisfied by a timeline holding
+`lookup_patient`, `classify_optical_request` and `check_open_tickets` and no
+filing at all. Worse, every remaining row can be satisfied by a ticket from
+an EARLIER call: `check_open_tickets` hands the agent a real ticket number
+with the right name, the right location and the right callback number, and
+`update-call-data` then stamps this call's `call_sid` onto it — so the
+record looks like this call's work. Naming the tool and comparing the
+timestamps are what cannot be faked. Raised by Codex on #239.
 
 **Which department is per call, not a constant.** Call 1 (the optical request)
 files on **department 1**. Call 2 (the scheduling request) is *supposed* to
