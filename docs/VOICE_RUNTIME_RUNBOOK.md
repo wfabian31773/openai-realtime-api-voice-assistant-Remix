@@ -64,6 +64,8 @@ ones readiness does NOT check, which is the trap:
 
 | Variable | Why |
 |---|---|
+| `TICKETING_SYSTEM_URL` | `ticketingApiClient.ensureInitialized()` THROWS without it. Every queue lane's filing tool depends on that client for the location lookup and the ticket itself, so a cutover that starts without this cannot satisfy its own pass mark on any call. |
+| `TICKETING_API_KEY` | same client, same throw. |
 | `EYECARE_AGENT_API_KEY` | bearer token for `callEyecareTool`. Without it `sage_precontext` returns an error on every call, so **every caller opens cold** — the agent asks who is calling instead of confirming. |
 | `EYECARE_SCHEDULING_BASE_URL` | optional. Defaults to the Vercel deployment; set it only to point at another service. Note the name — `EYECARE_BASE_URL` is a *different* variable, read by the urgent-transfer path, and setting it does nothing here. |
 
@@ -427,19 +429,32 @@ deployment that is working perfectly. Two different numbers is not enough on
 its own: it only rules out call 1 colliding with call 2, not a ticket either
 number was already carrying.
 
+**`check_open_tickets` does NOT read the ticketing system.** This matters more
+than it sounds, and the first version of this section got it wrong. It calls
+`SyncAgentService.checkOpenTickets`, which reads the last ten **completed
+Operations Hub `call_logs`** rows for the number and counts a ticket as open
+when the row has a `ticket_number`, a NULL `ticketing_synced_at`, and is less
+than seven days old. `tickets.status` is never queried. So closing a ticket
+in the Support Center does not necessarily clear the condition, and a ticket
+that is genuinely open can be invisible to it.
+
+Query the state the tool actually reads:
+
 ```sql
--- run against the ticketing database for EACH test number
-select ticket_number, department_id, status, created_at
-from tickets
-where patient_phone like '%<last 10 digits>%' and status = 'open'
-order by created_at desc;
+-- Operations Hub, per test number
+select ticket_number, agent_used, created_at, ticketing_synced_at
+from call_logs
+where (right(regexp_replace(coalesce("from",''),'\D','','g'),10) = '<10 digits>'
+    or right(regexp_replace(coalesce("to",''),'\D','','g'),10) = '<10 digits>')
+  and status = 'completed'
+  and created_at > now() - interval '7 days'
+order by created_at desc limit 10;
 ```
 
-Close what comes back, or use a number with nothing open. **This is not
-hypothetical for the first cutover:** VA-56007 (department 1) and VA-56008
-(department 9) were filed from the operator's own number on the morning of
-2026-08-31 and were still `open` hours later. Calling from that number
-without closing them first scores a working deployment as a failure.
+Any row with a `ticket_number` and a NULL `ticketing_synced_at` will suppress
+filing. None, and the number is clear whatever the Support Center shows.
+Raised by Codex on #239, correcting a query in this document that pointed at
+the wrong system entirely.
 
 **If you do call with a ticket already open**, the pass mark is different and
 you should know which test you are running: the agent should *report the open
