@@ -105,6 +105,7 @@ export class CallTranscriptLog {
     text: string;
     itemId: string | null;
     boundaryCrossed: boolean;
+    agentDelivered: boolean;
   } | null = null;
 
   /** One caller transcription completion — cumulative per turn, possibly
@@ -116,7 +117,23 @@ export class CallTranscriptLog {
     if (!open) {
       verdict = "append";
     } else if (open.itemId && itemId) {
+      // Item identity is authoritative and nothing overrides it — not a
+      // speech boundary, and not an agent line delivered in between. The same
+      // item IS the same utterance, however much of the greeting played
+      // across it; appending would put one thing the caller said on both
+      // sides of the opening.
       verdict = open.itemId === itemId ? "replace" : "append";
+    } else if (open.agentDelivered) {
+      // No item identity to go on, and an agent line was DELIVERED while this
+      // line was open — only the greeting can be, since only its line is
+      // written before its playback is proved. The turn is over, so nothing
+      // merges by words any more. This is the boundary rule one step further:
+      // a boundary segments one utterance and so still lets a pure EXTENSION
+      // merge, because within a turn an extension can lose nothing. Across a
+      // delivered line it can — "yes", then "yes this is Wayne" said after the
+      // greeting, would become one line reading as if all of it came before
+      // the practice ever spoke (Codex, #243).
+      verdict = "append";
     } else {
       const refinement = refinementVerdict(open.text, text);
       verdict =
@@ -144,6 +161,7 @@ export class CallTranscriptLog {
         text,
         itemId: itemId ?? null,
         boundaryCrossed: false,
+        agentDelivered: false,
       };
       this.lines.push(`CALLER: ${text}`);
     }
@@ -197,41 +215,37 @@ export class CallTranscriptLog {
    * twice — once whole, once interrupted. Rewriting in place cannot disturb
    * the open caller line's index, because no line moves.
    *
-   * The turn closes here for the same reason it closes in `agentLine`: an
-   * amendment is that line FINISHING, cut short rather than delivered, and a
-   * finished agent line means the provider moved on. `openingLine` is the
-   * only one that leaves the turn open, and only for as long as its audio is
-   * still playing. */
+   * It also marks the open caller turn, for the same reason the mark echo
+   * does: an amendment is that line FINISHING, cut short rather than
+   * delivered. See `agentLineDelivered` — a mark, not a close, so a caller
+   * turn genuinely still running keeps its item correlation. */
   amendAgentLine(index: number, text: string): void {
     if (index < 0 || index >= this.lines.length) return;
     this.lines[index] = `AGENT: ${text}`;
-    this.closeCallerTurn();
+    this.agentLineDelivered();
   }
 
   /**
-   * The open caller turn is over, with no agent line to write for it.
+   * An agent line FINISHED while a caller line was still open — delivered
+   * (its mark echoed) or cut short (amended).
    *
-   * One rule, four ways of reaching it. `agentLine` and `amendAgentLine`
-   * close the turn themselves, because each is an agent line FINISHED — one
-   * delivered, one cut short — and a finished agent line means the provider
-   * moved on. `openingLine` is the exception, and only while its audio is
-   * still playing. This method is the fourth case: that opening line
-   * finished by being DELIVERED, proved by its mark echo, with nothing to
-   * rewrite.
+   * Only the greeting can reach this, because only its line is written before
+   * its playback is proved, so only it can have a caller turn open across it.
+   * `agentLine` closes the turn outright instead; it is only ever called once
+   * delivery is already proved, and that is the behaviour every other line
+   * has always had.
    *
-   * Leaving it open lets a genuinely NEW utterance merge backwards into the
-   * one before the greeting. An EXTENSION replaces even across a speech
-   * boundary, by design: within one turn it carries every earlier word and
-   * can lose nothing. Across a finished agent line it can — "yes", then "yes
-   * this is Wayne" after the greeting, becomes one line reading as if all of
-   * it were said before the practice ever spoke (Codex, #243). */
-  closeCallerTurn(): void {
-    this.openCallerLine = null;
+   * Deliberately NOT a close. The turn may genuinely still be running, and a
+   * cumulative re-emission carrying the same item_id is still the same
+   * utterance — see `callerCompleted`, where identity outranks this. What it
+   * disarms is the word-level merge, which has no identity to go on. */
+  agentLineDelivered(): void {
+    if (this.openCallerLine) this.openCallerLine.agentDelivered = true;
   }
 
   /** Call over — nothing more can refine the open line. */
   close(): void {
-    this.closeCallerTurn();
+    this.openCallerLine = null;
   }
 
   render(): string {

@@ -594,10 +594,10 @@ export class VoiceCallBridge {
         const head = this.awaitingMark.shift()!;
         // The greeting's line went in when its audio started; this echo only
         // confirms what it already claimed. Writing it again would record the
-        // opening twice — but the caller's turn still has to close, which is
-        // the other half of what `agentLine` would have done here.
+        // opening twice — but this IS where its delivery is proved, and a
+        // caller turn open across it has to be told so.
         if (head.committedIndex === undefined) this.transcriptLog.agentLine(head.text);
-        else this.transcriptLog.closeCallerTurn();
+        else this.transcriptLog.agentLineDelivered();
         if (head.name === name) break;
       }
     }

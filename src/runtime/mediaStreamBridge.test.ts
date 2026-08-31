@@ -1913,6 +1913,33 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     ]);
   });
 
+  it("keeps refining one caller turn across the greeting's echo, by item id", () => {
+    // Codex, #243 round 4 — the mirror of the test below, and the reason the
+    // echo marks the turn rather than closing it. Item identity outranks the
+    // mark: a cumulative re-emission carrying the same item_id is the same
+    // utterance however much of the greeting played across it. Appending it
+    // would put one thing the caller said on BOTH sides of the opening, which
+    // is the defect this whole PR exists to remove.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("hello", "item-1");
+
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+    const markName = lastMarkName(h);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    // The SAME item, still being transcribed after the greeting was heard.
+    h.handlers().onCallerTranscript("hello are you there", "item-1");
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: hello are you there",
+      `AGENT: ${GREETING}`,
+    ]);
+  });
+
   it("starts a new caller line once the greeting is fully delivered", () => {
     // Codex, #243. `openingLine` leaves the caller's turn open on purpose —
     // the greeting's audio is only STARTING, and a turn straddling that
