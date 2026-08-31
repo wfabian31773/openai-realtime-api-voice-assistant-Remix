@@ -159,28 +159,25 @@ describe('PCP transfer eligibility tracks the purpose table', () => {
 });
 
 describe('what an urgent caller is told when the transfer fails outright', () => {
-  it('promises a callback only when a durable follow-up was actually filed', () => {
-    expect(urgentTransferFailureLine({ followUpFiled: true })).toMatch(/will call you back/i);
-  });
-
-  it('makes no callback promise when nothing was filed', () => {
-    // The failure this guards: an SMS that no-ops silently is not somebody
-    // being told, so a caller could hang up believing a callback is coming
-    // when no record of them exists anywhere.
-    const line = urgentTransferFailureLine({ followUpFiled: false });
+  it('never promises a callback — operator ruling 2026-08-30', () => {
+    // Backing a promise means filing a ticket and awaiting it before speaking,
+    // which leaves an urgent caller in silence while it completes. The ruling
+    // was to drop the promise, not to buy it with dead air.
+    const line = urgentTransferFailureLine();
     expect(line).not.toMatch(/call you back/i);
     expect(line).not.toMatch(/on-call team has your request/i);
+    expect(line).not.toMatch(/will (call|contact|reach)/i);
   });
 
-  it('never tells the caller to call us, filed or not — standing instruction 10', () => {
-    for (const followUpFiled of [true, false]) {
-      const line = urgentTransferFailureLine({ followUpFiled });
-      expect(line).not.toMatch(/call (us )?back during/i);
-      expect(line).not.toMatch(/please call (us|back)/i);
-      expect(line).not.toMatch(/try again later/i);
-      // The emergency route survives in both branches.
-      expect(line).toMatch(/nine one one/);
-    }
+  it('never tells the caller to call us — standing instruction 10', () => {
+    const line = urgentTransferFailureLine();
+    expect(line).not.toMatch(/call (us )?back/i);
+    expect(line).not.toMatch(/try again later/i);
+    expect(line).not.toMatch(/business hours/i);
+  });
+
+  it('still gives the caller the one route that always works', () => {
+    expect(urgentTransferFailureLine()).toMatch(/nine one one/);
   });
 });
 

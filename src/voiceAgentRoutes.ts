@@ -1202,19 +1202,13 @@ function logHistoryItem(item: RealtimeItem, callId?: string): void {
  * answer"; a dial that THREW — Twilio down, circuit breaker open, an
  * unroutable number — returned silently and left the urgent caller existing
  * nowhere but a console line. Same net under both.
- *
- * Returns whether a ticket actually landed. Still never throws — the callers
- * that fire it alongside a dial must not be broken by a ticketing outage —
- * but a caller that is about to PROMISE the patient a callback has to be able
- * to tell the difference between a filed request and a console line
- * (Codex review, PR #238).
  */
 async function fileUrgentHandoffFallbackTicket(
   openAiCallId: string,
   escalationDetails: { reason?: string; symptomsSummary?: string; patientFirstName?: string; patientLastName?: string; callbackNumber?: string } | undefined,
   callerID: string | null | undefined,
   ctx: { why: string; dialTarget?: string },
-): Promise<boolean> {
+): Promise<void> {
   console.warn(`[HANDOFF] Creating urgent fallback ticket — ${ctx.why}`);
   try {
     const { SyncAgentService } = await import('./services/syncAgentService');
@@ -1265,13 +1259,11 @@ async function fileUrgentHandoffFallbackTicket(
 
     if (ticketResult.success) {
       console.log('[HANDOFF] ✓ Urgent fallback ticket created:', ticketResult.ticketNumber);
-      return true;
+    } else {
+      console.error('[HANDOFF] ✗ Urgent fallback ticket creation failed:', ticketResult.error);
     }
-    console.error('[HANDOFF] ✗ Urgent fallback ticket creation failed:', ticketResult.error);
-    return false;
   } catch (ticketErr) {
     console.error('[HANDOFF] ✗ Exception creating urgent fallback ticket:', ticketErr);
-    return false;
   }
 }
 
@@ -1971,15 +1963,14 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
       console.error(
         `[SIP-RECOVERY] ${conferenceName}: urgent transfer destination is not configured — ending caller leg without dialing`,
       );
-      // A callback is PROMISED to this caller below, so something durable has
-      // to exist before it is spoken. The heads-up SMS is not that: it no-ops
-      // silently when URGENT_NOTIFICATION_NUMBER or TWILIO_PHONE_NUMBER is
-      // unset, and swallows delivery failures inside a detached task — so a
-      // caller could hang up believing somebody was told when nobody was
-      // (Codex review, PR #238). The ticket is the durable record, and unlike
-      // the other two callers of this helper there is no dial here for the
-      // await to delay: the next thing that happens is a hangup.
-      const filed = await fileUrgentHandoffFallbackTicket(
+      // Filed, not awaited. Operator ruling 2026-08-30: this caller is NOT
+      // promised a callback, so nothing spoken below depends on the ticket
+      // having landed — and awaiting it would hold an already-distressed
+      // caller in silence through a database lock, an outbox write, an
+      // external send and, on a contended claim, a deliberate three-second
+      // wait (Codex review, PR #238). The record still gets written; its
+      // latency just stops being the caller's problem.
+      void fileUrgentHandoffFallbackTicket(
         // Non-null holds by construction: `escalation` is only ever read as
         // `recoveredCallId ? escalationDetailsMap.get(recoveredCallId) : undefined`,
         // and the guard above returns when it is falsy. The helper keys the
@@ -1991,17 +1982,13 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
         {
           why:
             'URGENT call lost its assistant leg and NO transfer destination is configured — ' +
-            'nobody was dialled and the caller was told to expect a call back.',
+            'nobody was dialled. Call this patient back.',
         },
       );
-      // The wording lives in handoffPolicy so the rule it encodes is testable
-      // without booting this module: promise a callback only when one is
-      // backed, and never tell the caller to call us.
-      const say = urgentTransferFailureLine({ followUpFiled: filed });
       await client.calls(callerCallSid).update({
         twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">${escapeXml(say)}</Say>
+  <Say voice="Polly.Joanna">${escapeXml(urgentTransferFailureLine())}</Say>
   <Hangup/>
 </Response>`,
       });
@@ -2034,7 +2021,7 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
     // instruction 10). The previous wording here made no promise either — it
     // told them to call back during business hours, which is the other half of
     // the same rule.
-    const unansweredSay = urgentTransferFailureLine({ followUpFiled: false });
+    const unansweredSay = urgentTransferFailureLine();
     await client.calls(callerCallSid).update({
       twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
