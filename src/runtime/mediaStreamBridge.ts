@@ -434,6 +434,19 @@ export class VoiceCallBridge {
     return this.greetingLocked && this.assistantAudioPlaying;
   }
 
+  /**
+   * The hold decision for the caller's CURRENT utterance, made once when they
+   * start speaking and carried to its completion.
+   *
+   * Recomputing it at completion re-decides the same utterance on later
+   * state: a caller who starts before the greeting plays but whose ASR
+   * completion lands after the first delta flips from caller-first to held,
+   * and the mark echo then writes the greeting ahead of someone who
+   * demonstrably spoke first. `speech_started` is when the caller began, so
+   * it is when the question is answered. Raised by Codex on #241.
+   */
+  private callerUtteranceHeld: boolean | null = null;
+
   private greetingHeldCallerLines: Array<
     { kind: "line"; text: string; itemId?: string } | { kind: "boundary" }
   > = [];
@@ -499,7 +512,8 @@ export class VoiceCallBridge {
         // The clock is stamped either way — the caller DID speak, and dead-air
         // timing must not wait on a mark echo.
         this.noteTranscript("caller");
-        if (this.greetingHoldsTranscript()) {
+        // The decision made when they STARTED, not remade now.
+        if (this.callerUtteranceHeld ?? this.greetingHoldsTranscript()) {
           this.greetingHeldCallerLines.push({ kind: "line", text, itemId });
           return;
         }
@@ -958,6 +972,8 @@ export class VoiceCallBridge {
     // caller's words outright would be worse than misordering them.
     const held = this.greetingHeldCallerLines;
     this.greetingHeldCallerLines = [];
+    // Past the greeting, every line writes through; no decision to carry.
+    this.callerUtteranceHeld = null;
     for (const event of held) {
       if (event.kind === "boundary") this.transcriptLog.callerBoundary();
       else this.transcriptLog.callerCompleted(event.text, event.itemId);
@@ -969,7 +985,11 @@ export class VoiceCallBridge {
     // The caller is talking: not dead air, and any open caller line in the
     // record crossed a speech boundary (transcript correlation only).
     this.clearDeadAir();
-    if (this.greetingHoldsTranscript()) {
+    // Answered once per utterance, here, and read again at its completion.
+    if (this.callerUtteranceHeld === null) {
+      this.callerUtteranceHeld = this.greetingHoldsTranscript();
+    }
+    if (this.callerUtteranceHeld) {
       // Buffered IN SEQUENCE with the completions it separates — applying it
       // now would mark a log that is still empty, which is nothing at all.
       this.greetingHeldCallerLines.push({ kind: "boundary" });

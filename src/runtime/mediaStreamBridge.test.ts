@@ -1623,6 +1623,30 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     ]);
   });
 
+  it("keeps a caller first when they start before the greeting and finish after", () => {
+    // speech_started lands before the first greeting delta; the ASR
+    // completion lands after it. Recomputing the hold at completion flips
+    // the SAME utterance from caller-first to held, and the mark echo then
+    // writes the greeting ahead of someone who demonstrably spoke first.
+    // The previous test called the completion before audio started, so it
+    // could not see this transition. Codex, #241.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted(); // caller begins — nothing has played yet
+    h.handlers().onAudioDelta("ZmFrZQ=="); // greeting starts mid-utterance
+    h.handlers().onCallerTranscript("hello? anyone there?", "item-1"); // completes after
+
+    h.handlers().onAudioDone(GREETING);
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: hello? anyone there?",
+      `AGENT: ${GREETING}`,
+    ]);
+  });
+
   it("still barges in normally on a lane with no greeting", () => {
     // The lock must not leak into lanes that never take it.
     const h = makeBridge({ greeting: null });
