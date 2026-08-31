@@ -23,21 +23,55 @@
  *
  *   'replace'  the confirm question IS the greeting.
  *   'append'   keep the greeting, swap only its closing question.
+ *   null       say the greeting verbatim; do not personalise it at all.
  */
 export type GreetingStyle = 'replace' | 'append';
 
 /**
- * The queue lines append.
+ * A line EARNS personalisation. The default is to say its greeting verbatim.
  *
- * Their greeting does a second job besides saying hello: "All of our
- * coordinators are currently assisting other patients, but I can take a
- * message" pre-empts the ask for a human on a line that CANNOT transfer.
- * Operator-dictated, and worth more than the sentence it costs.
+ * This used to default to 'replace' for every unlisted slug, which was safe
+ * only by accident: on the SIP path `azulMetadataRef` is assigned in the
+ * optical, surgery, tech, records and azul-scheduling branches and nowhere
+ * else, so no other line ever had a recognised name to personalise with, and
+ * the default was unreachable. The voice runtime calls `fetchPrecontext` for
+ * EVERY lane, which made it reachable — and the first two lines it reached
+ * are the two that must never be personalised:
+ *
+ * - **no-ivr** is the after-hours line. Its greeting carries the closed-office
+ *   notice, the 911 direction and the recording disclosure, and `noIvrAgent`'s
+ *   own pre-context block exists to defend them: "YOUR GREETING IS NOT
+ *   OPTIONAL AND MUST NOT BE SHORTENED... DO NOT open with a name
+ *   confirmation", citing 2026-08-01 12:21 UTC, when the greeting was cut off
+ *   after "Thank you for calling" and a caller was never told to dial 911 and
+ *   never told the call was recorded. 'replace' would do that deliberately,
+ *   in the forced verbatim greeting, where the model cannot decline. Even
+ *   'append' would not be safe here: the recording disclosure shares its
+ *   sentence with the trailing question, so stripping the question strips the
+ *   disclosure with it.
+ * - **pcp** treats the caller's first reply as the call purpose ("Your
+ *   greeting already asked... you are RECORDING what they just said"). Ask
+ *   "Am I speaking with Wayne?" instead and the purpose recorded is "yes".
+ *
+ * Both raised by Codex on #240. A slug belongs in this map once someone has
+ * read its greeting and its prompt and decided what personalising it costs.
+ *
+ * The queue lines append: their greeting does a second job besides saying
+ * hello — "All of our coordinators are currently assisting other patients,
+ * but I can take a message" pre-empts the ask for a human on a line that
+ * CANNOT transfer. Operator-dictated, and worth more than the sentence it
+ * costs. azul-scheduling keeps the wholesale replacement it has always had.
  */
-export function greetingStyleFor(agentSlug: string | undefined): GreetingStyle {
-  return agentSlug === 'optical' || agentSlug === 'surgery' || agentSlug === 'tech' || agentSlug === 'records'
-    ? 'append'
-    : 'replace';
+const GREETING_STYLES: Readonly<Record<string, GreetingStyle>> = {
+  optical: 'append',
+  surgery: 'append',
+  tech: 'append',
+  records: 'append',
+  'azul-scheduling': 'replace',
+};
+
+export function greetingStyleFor(agentSlug: string | undefined): GreetingStyle | null {
+  return GREETING_STYLES[String(agentSlug ?? '')] ?? null;
 }
 
 /**
@@ -61,15 +95,16 @@ export function stripTrailingQuestion(greeting: string): string {
  * The greeting a recognised caller should hear.
  *
  * Returns the greeting unchanged when there is no name to use, so the caller
- * decides nothing about recognition — it either happened or it did not.
+ * decides nothing about recognition — it either happened or it did not, and
+ * unchanged when the line has no style: not every greeting may be rewritten.
  */
 export function personaliseGreeting(
   greeting: string,
   recognisedFirstName: string,
-  style: GreetingStyle,
+  style: GreetingStyle | null,
 ): string {
   const name = String(recognisedFirstName ?? '').trim();
-  if (!name || !greeting?.trim()) return greeting;
+  if (!style || !name || !greeting?.trim()) return greeting;
 
   if (style === 'replace') {
     return `Hello, thank you for calling Azul Vision. Am I speaking with ${name}?`;

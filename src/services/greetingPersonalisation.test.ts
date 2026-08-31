@@ -74,17 +74,68 @@ describe('what it refuses to change', () => {
   });
 });
 
-describe('which lines append and which replace', () => {
+describe('which lines append, which replace, and which are left alone', () => {
   it('appends for the queue lines, because their greeting carries a promise', () => {
     expect(greetingStyleFor('optical')).toBe('append');
     expect(greetingStyleFor('surgery')).toBe('append');
+    expect(greetingStyleFor('tech')).toBe('append');
+    expect(greetingStyleFor('records')).toBe('append');
   });
 
-  it('replaces everywhere else, preserving azul-scheduling behaviour', () => {
+  it('replaces on azul-scheduling, the one line that has always replaced', () => {
     expect(greetingStyleFor('azul-scheduling')).toBe('replace');
-    expect(greetingStyleFor(undefined)).toBe('replace');
     expect(personaliseGreeting(SURGERY, 'Wayne', 'replace')).toBe(
       'Hello, thank you for calling Azul Vision. Am I speaking with Wayne?',
     );
+  });
+
+  it('personalises nothing on a line nobody has cleared for it', () => {
+    // The default is verbatim, not 'replace'. Under the old default the voice
+    // runtime — which fetches pre-context on EVERY lane, unlike the SIP path —
+    // would have rewritten these openings the first time it recognised a
+    // caller. Codex, #240.
+    expect(greetingStyleFor('no-ivr')).toBeNull();
+    expect(greetingStyleFor('pcp')).toBeNull();
+    expect(greetingStyleFor('answering-service')).toBeNull();
+    expect(greetingStyleFor('after-hours')).toBeNull();
+    expect(greetingStyleFor(undefined)).toBeNull();
+    expect(greetingStyleFor('')).toBeNull();
+  });
+});
+
+describe('the after-hours greeting reaches the caller whole', () => {
+  // noIvrAgent's own pre-context block: "YOUR GREETING IS NOT OPTIONAL AND
+  // MUST NOT BE SHORTENED... DO NOT open with a name confirmation", citing
+  // 2026-08-01 12:21 UTC, when it was cut off after "Thank you for calling"
+  // and a caller was never told to dial 911 nor that the call was recorded.
+  // The forced greeting is the one place the model cannot decline, so a
+  // rewrite here is not a nudge — it is the incident, reproduced on purpose.
+  const NO_IVR =
+    'Thank you for calling Azul Vision, all of our offices are currently closed, you have ' +
+    'reached the after hours call service. If this is a medical emergency, please dial 911. ' +
+    'All calls are being recorded for quality assurance purposes, how can I help you?';
+
+  it('says it verbatim to a recognised caller', () => {
+    const out = personaliseGreeting(NO_IVR, 'Wayne', greetingStyleFor('no-ivr'));
+    expect(out).toBe(NO_IVR);
+    expect(out).toContain('dial 911');
+    expect(out).toContain('being recorded');
+    expect(out).toContain('currently closed');
+    expect(out).not.toContain('Am I speaking with');
+  });
+
+  it('would lose the recording disclosure even to an append, which is why it is not appended', () => {
+    // Not a rule being asserted — the reason the rule cannot be "append
+    // everywhere instead of replace". The disclosure shares its sentence with
+    // the trailing question, so stripping the question strips the disclosure.
+    expect(stripTrailingQuestion(NO_IVR)).not.toContain('being recorded');
+    expect(stripTrailingQuestion(NO_IVR)).toContain('dial 911');
+  });
+
+  it("keeps PCP's opening question, which is how PCP captures the call purpose", () => {
+    // pcpAgent: "Your greeting already asked... you are RECORDING what they
+    // just said." Replace it and the purpose on record is the caller's "yes".
+    const PCP = 'Thank you for calling Azul Vision PCP Support. How can I help you today?';
+    expect(personaliseGreeting(PCP, 'Wayne', greetingStyleFor('pcp'))).toBe(PCP);
   });
 });
