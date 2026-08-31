@@ -246,12 +246,29 @@ cold:
 alarm) rather than that middle line. **Only one mode is genuinely quiet:** the
 lookup that succeeds but arrives after the runtime's 1.5s deadline. Nothing
 logs that from the runtime side — the call simply proceeds without
-pre-context. If the greeting is cold and none of the lines above appear, that
-is the case you are in.
+pre-context.
 
-**How to tell, in one call:** dial from a number that exists in the mirror. If
-the agent opens by confirming a name, pre-context worked. If it asks who you
-are, check the log lines above before concluding anything.
+**A cold greeting with no error lines is NOT proof of a deadline miss.** The
+commonest reason for a cold open is the most ordinary one: the lookup ran,
+returned, and found nothing to stand behind. `fetchAzulPrecontext` returns any
+response carrying a boolean `matched`, `{ matched: false }` included, and
+`buildOpticalPrompt` deliberately opens cold for that — an ambiguous number
+(Wayne's own resolves to eight records) or a shared family line produces
+exactly the symptom a timeout does, with nothing wrong anywhere. Reading
+silence as lateness will send you chasing a deadline that was never missed.
+Raised by Codex on #239.
+
+**How to tell, in one call:**
+
+1. Dial from a number that exists in the mirror. If the agent opens by
+   confirming a name, pre-context worked and you are done.
+2. If it asks who you are, **establish the match outcome first** — did the
+   lookup return `matched: false`? That is a valid negative, not a fault, and
+   the number is simply ambiguous or absent. Check `si_persons` for it.
+3. Only once a unique match is established does silence mean anything. Then
+   check the `[AZUL-SCHED]` lines above for an unset key, an HTTP status or a
+   fetch failure; if a unique match exists and none of those appear, the 1.5s
+   deadline is what is left.
 
 The durable fix is to read the mirror directly. `patients_master` is mirrored
 in the Patient-Console project precisely so this is a fast indexed read, and
@@ -296,16 +313,34 @@ files correctly is a pass. After each:
 
 | check | where |
 |---|---|
-| a ticket exists, on department 1 | ticketing |
+| a ticket exists, **in the department the request belongs to** | ticketing |
 | patient name, DOB and location are right | the ticket |
 | the callback number is the one you gave | the ticket — standing instruction 12 |
 | the tool timeline is populated | `call_logs` for that callSid |
 | outcome is not `dead_air` or `provider_failure` | `call_logs` — see §6 |
 
+**Which department is per call, not a constant.** Call 1 (the optical request)
+files on **department 1**. Call 2 (the scheduling request) is *supposed* to
+leave the queue: `detectCrossQueue` routes it to the **HVA Hub, department 9**,
+and `file_optical_ticket` sends that routed department — standing instruction
+10. Expecting department 1 after both calls marks the correct behaviour as a
+cutover failure, which is the kind of mistake that gets a good deploy rolled
+back. Raised by Codex on #239, and confirmed live the same morning: VA-56007
+filed on department 1, VA-56008 on department 9, both assigned, both correct.
+
 The dangerous case is an empty tool timeline on a call that sounded fine: the
 model talked its way through without calling `file_optical_ticket`, and the
 caller was told something that did not happen. That is invisible from the
 audio and obvious from the row.
+
+**This is not hypothetical.** On 2026-08-31 an optical call ran
+`lookup_patient > lookup_patient > classify_optical_request >
+check_open_tickets` and no `file_optical_ticket`, then read back "ticket
+VA-56007" — a number `check_open_tickets` had found from a call sixteen
+minutes earlier. The end-of-call `update-call-data` post then overwrote that
+older ticket's `call_sid` with this call's, so the record itself came to agree
+with the claim. Check the timeline, not the transcript, and compare the
+ticket's `created_at` against the call's start before believing a `call_sid`.
 
 ### Then, and only then, the live number
 
