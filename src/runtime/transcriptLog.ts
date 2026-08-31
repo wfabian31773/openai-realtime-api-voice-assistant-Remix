@@ -33,10 +33,12 @@
  *
  * The GREETING is the exception that behaves like the scheduling port: it is
  * scripted, so its words are known before the model produces them and its
- * line is written the moment its audio starts playing. `agentLine` hands back
- * that line's index for the one consequence of writing early — a greeting the
- * call cuts short has to be amended in place, never recorded a second time.
- * Beyond that the log does not care where an agent line came from.
+ * line is written the moment its audio starts playing — by `openingLine`,
+ * which differs from `agentLine` in two ways, both consequences of writing a
+ * line before its delivery is proved: it does not close the open caller turn,
+ * and it hands back the index it wrote so a greeting the call cuts short can
+ * be amended in place rather than recorded a second time. Beyond that the log
+ * does not care where an agent line came from.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -156,10 +158,31 @@ export class CallTranscriptLog {
   }
 
   /** One agent utterance (the renderer's exact text). An agent line means
-   * the provider moved on: the open caller turn closes. Returns the index of
-   * the line written, which only `amendAgentLine` needs. */
-  agentLine(text: string): number {
+   * the provider moved on: the open caller turn closes. */
+  agentLine(text: string): void {
     this.openCallerLine = null;
+    this.lines.push(`AGENT: ${text}`);
+  }
+
+  /**
+   * The scripted opening, written when its audio starts playing.
+   *
+   * Everything `agentLine` does EXCEPT closing the open caller turn, and the
+   * exception is the point. The greeting was queued at the handshake, before
+   * the caller had said anything, so it is not the provider moving on from
+   * their turn. Closing it strands a caller utterance that straddles the
+   * moment playback began: their ASR is cumulative, so the next re-emission
+   * is the SAME turn, and against a closed line it appends instead of
+   * replacing — the caller's words landing twice, once on each side of the
+   * opening. That is the duplication PR #241 fought, in a narrower window
+   * (Codex, #243).
+   *
+   * Their line stays open and keeps refining in place, at the position where
+   * their turn began, which is ahead of the greeting exactly when they
+   * started speaking first.
+   *
+   * Returns the index of the line written, which only `amendAgentLine` needs. */
+  openingLine(text: string): number {
     this.lines.push(`AGENT: ${text}`);
     return this.lines.length - 1;
   }

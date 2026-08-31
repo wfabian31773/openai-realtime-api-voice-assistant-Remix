@@ -1821,6 +1821,75 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     ]);
   });
 
+  it("refines a caller line that straddles the start of the greeting", () => {
+    // Codex, #243. Their turn began before the greeting played and their ASR
+    // is cumulative, so the fuller completion is the SAME utterance. Closing
+    // their line when the greeting goes in strands it: that re-emission
+    // appends instead of replacing, and the caller's words land twice, once
+    // on each side of the opening — the duplication #241 fought, in a
+    // narrower window. The greeting was queued at the handshake, before they
+    // had said anything, so it is not the provider moving on from their turn.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("hello", "item-1");
+    h.handlers().onAudioDelta("ZmFrZQ=="); // the greeting starts mid-turn
+    h.handlers().onCallerTranscript("hello are you there", "item-1"); // same turn
+
+    h.handlers().onAudioDone(GREETING);
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: hello are you there",
+      `AGENT: ${GREETING}`,
+    ]);
+  });
+
+  it("marks a greeting cut short by a superseded response, not delivered whole", () => {
+    // Codex, #243. Its line is in the record claiming the whole greeting was
+    // spoken, but only the beginning was: the response was superseded with no
+    // completion, so no mark went out and `awaitingMark` holds nothing to
+    // correct it with. Once the utterance sequence moves on, no later cut can
+    // find that line either — recordCutLine matches the greeting by sequence.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ=="); // the greeting starts playing
+    h.newResponse(); // superseded — its completion never comes
+    h.handlers().onAgentTranscriptDelta("Sorry, let me start again.");
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone("Sorry, let me start again.");
+    const markName = lastMarkName(h);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      `AGENT: ${GREETING} [interrupted]`,
+      "AGENT: Sorry, let me start again.",
+    ]);
+  });
+
+  it("stamps the tail from a greeting a superseding response cut short", async () => {
+    // Same invariant as the barge-in and teardown cuts: words the caller
+    // heard, committed, move the clock. The superseding response here carries
+    // no transcript of its own, so nothing else in the call can stamp it and
+    // a greeting-length tail would be measured from before the call began.
+    const persisted: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      greeting: GREETING,
+      persistCallRecord: async (r) => void persisted.push(r),
+    });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.newResponse();
+    h.handlers().onAudioDelta("ZmFrZQ=="); // supersedes; no words of its own
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await Promise.resolve();
+
+    expect(persisted[0]?.transcript.split("\n")).toEqual([
+      `AGENT: ${GREETING} [interrupted]`,
+    ]);
+    expect(persisted[0]?.lastTranscriptAtMs).toBeDefined();
+  });
+
   it("a greeting superseded before it played leaves no line behind", () => {
     // openOrGetCurrent drops an utterance the wire moved past without ever
     // completing. The greeting's pending text goes with it, for the same

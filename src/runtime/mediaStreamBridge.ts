@@ -671,6 +671,23 @@ export class VoiceCallBridge {
       // The previous utterance never completed (it was superseded without
       // a completion event). Its audio is finished either way; drop it
       // rather than attributing its words to this response.
+      //
+      // If it was the GREETING and it had already started playing, its line
+      // is in the record claiming the whole thing was spoken when only the
+      // beginning was — and no mark was ever sent, so `awaitingMark` holds
+      // nothing to correct it with. This is the last moment the line can be
+      // reached at all: `recordCutLine` matches the greeting by utterance
+      // sequence, and the sequence is about to move on (Codex, #243).
+      const startedGreeting = this.greetingLine;
+      if (startedGreeting !== null && this.current.seq === startedGreeting.seq) {
+        this.transcriptLog.amendAgentLine(
+          startedGreeting.index,
+          `${startedGreeting.text} [interrupted]`,
+        );
+        // Words the caller heard, committed — so the tail is measured from
+        // here, the same invariant the barge-in and teardown cuts follow.
+        this.noteTranscript("agent");
+      }
       this.current = null;
       // And with it a greeting that never got as far as audio: only the
       // utterance that was carrying it may write its line.
@@ -803,7 +820,10 @@ export class VoiceCallBridge {
     if (this.greetingPending !== null) {
       const text = this.greetingPending;
       this.greetingPending = null;
-      this.greetingLine = { seq: current.seq, index: this.transcriptLog.agentLine(text), text };
+      // `openingLine`, not `agentLine`: it must not close a caller turn that
+      // is still open, or a cumulative re-emission of that same turn appends
+      // on the far side of the greeting instead of refining in place.
+      this.greetingLine = { seq: current.seq, index: this.transcriptLog.openingLine(text), text };
     }
     this.assistantAudioPlaying = true;
     this.mediaSinceLastMark = true;
