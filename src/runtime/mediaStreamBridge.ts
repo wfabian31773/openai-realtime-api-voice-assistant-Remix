@@ -408,14 +408,20 @@ export class VoiceCallBridge {
   private responseOwedFromGreeting = false;
   /**
    * The greeting's scripted text, from the handshake until the utterance
-   * carrying it either starts playing or ends without ever doing so.
+   * carrying it starts playing — or until it is clear no such utterance is
+   * coming.
    *
    * `deps.greeting` is spoken verbatim, so unlike every other line on this
-   * runtime its words are known before the model produces them — which is
-   * what lets its transcript line be written at playback instead of at its
-   * mark echo (module doc). Cleared when that line is written, and dropped
-   * at the first completion otherwise: a greeting whose audio never reached
-   * the caller gets no line, the rule every other utterance follows.
+   * runtime its words are known before the model produces them, which is what
+   * lets its transcript line be written at playback instead of at its mark
+   * echo (module doc).
+   *
+   * Two things retire it unwritten, and between them they cover every way the
+   * greeting can fail to reach the caller: `greetingEpoch` refuses audio from
+   * any LATER response, and `handleAudioDone` drops it at a completion of its
+   * own response — the one case an epoch cannot see, since a second utterance
+   * of one response carries the same epoch. A greeting whose audio never
+   * played gets no line, the rule every other utterance follows.
    */
   private greetingPending: string | null = null;
   /**
@@ -427,11 +433,11 @@ export class VoiceCallBridge {
    * epoch observed there. Comparing against that is the only way to tell the
    * greeting's own audio from a later response's.
    *
-   * `openOrGetCurrent` drops a pending greeting whose utterance is
-   * superseded, but a response that is superseded before emitting a SINGLE
-   * delta never opens an utterance at all — there is nothing for that branch
-   * to match on, and the replacement's first audio would write the greeting's
-   * line and swallow its own transcript at its mark (Codex, #243).
+   * A response superseded before emitting a SINGLE delta never opens an
+   * utterance at all, so nothing downstream has a handle on it. Without this
+   * the replacement's first audio would write the greeting's line and then
+   * swallow its own transcript at that line's mark, because the line is
+   * flagged as already committed (Codex, #243).
    */
   private greetingEpoch: number | null = null;
   /**
@@ -588,8 +594,10 @@ export class VoiceCallBridge {
         const head = this.awaitingMark.shift()!;
         // The greeting's line went in when its audio started; this echo only
         // confirms what it already claimed. Writing it again would record the
-        // opening twice.
+        // opening twice — but the caller's turn still has to close, which is
+        // the other half of what `agentLine` would have done here.
         if (head.committedIndex === undefined) this.transcriptLog.agentLine(head.text);
+        else this.transcriptLog.closeCallerTurn();
         if (head.name === name) break;
       }
     }

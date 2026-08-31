@@ -179,7 +179,9 @@ export class CallTranscriptLog {
    *
    * Their line stays open and keeps refining in place, at the position where
    * their turn began, which is ahead of the greeting exactly when they
-   * started speaking first.
+   * started speaking first. That window is not open-ended: whoever settles
+   * this line — its mark echo, or the cut that ends it — calls
+   * `closeCallerTurn`.
    *
    * Returns the index of the line written, which only `amendAgentLine` needs. */
   openingLine(text: string): number {
@@ -187,21 +189,49 @@ export class CallTranscriptLog {
     return this.lines.length - 1;
   }
 
-  /** Rewrite an agent line already in the record.
+  /** Rewrite an agent line already in the record, and close the caller turn.
    *
    * Only a line written BEFORE its playback was proved can need this, which
    * on this runtime means only the greeting. When the call cuts that audio
-   * short the record has to say so, and appending would report the same
-   * words twice — once whole, once interrupted. Rewriting in place cannot
-   * disturb the open caller line's index, because no line moves. */
+   * short the record has to say so, and appending would report the same words
+   * twice — once whole, once interrupted. Rewriting in place cannot disturb
+   * the open caller line's index, because no line moves.
+   *
+   * The turn closes here for the same reason it closes in `agentLine`: an
+   * amendment is that line FINISHING, cut short rather than delivered, and a
+   * finished agent line means the provider moved on. `openingLine` is the
+   * only one that leaves the turn open, and only for as long as its audio is
+   * still playing. */
   amendAgentLine(index: number, text: string): void {
     if (index < 0 || index >= this.lines.length) return;
     this.lines[index] = `AGENT: ${text}`;
+    this.closeCallerTurn();
+  }
+
+  /**
+   * The open caller turn is over, with no agent line to write for it.
+   *
+   * One rule, four ways of reaching it. `agentLine` and `amendAgentLine`
+   * close the turn themselves, because each is an agent line FINISHED — one
+   * delivered, one cut short — and a finished agent line means the provider
+   * moved on. `openingLine` is the exception, and only while its audio is
+   * still playing. This method is the fourth case: that opening line
+   * finished by being DELIVERED, proved by its mark echo, with nothing to
+   * rewrite.
+   *
+   * Leaving it open lets a genuinely NEW utterance merge backwards into the
+   * one before the greeting. An EXTENSION replaces even across a speech
+   * boundary, by design: within one turn it carries every earlier word and
+   * can lose nothing. Across a finished agent line it can — "yes", then "yes
+   * this is Wayne" after the greeting, becomes one line reading as if all of
+   * it were said before the practice ever spoke (Codex, #243). */
+  closeCallerTurn(): void {
+    this.openCallerLine = null;
   }
 
   /** Call over — nothing more can refine the open line. */
   close(): void {
-    this.openCallerLine = null;
+    this.closeCallerTurn();
   }
 
   render(): string {

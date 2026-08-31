@@ -1806,6 +1806,35 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     ]);
   });
 
+  it("starts a new caller line after a greeting the call cut short", async () => {
+    // The delivered case's twin. An amendment is that line FINISHING — cut
+    // short rather than delivered — so the caller's turn is over just as
+    // surely, and a NEW utterance that extends the earlier one must not merge
+    // backwards across it. The guardrail path is the one where nothing else
+    // would close the turn: its replacement never completes here.
+    const h = makeBridge({
+      greeting: BAD_GREETING,
+      agent: makeAgent({ guardrails: [diagnosisGuardrail()] }),
+    });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("yes"); // no itemId — word-level path
+
+    h.handlers().onAudioDelta("ZmFrZQ=="); // the greeting's line is written
+    h.handlers().onAgentTranscriptDelta(BAD_GREETING);
+    await verdicts(); // cut: the line is amended, and the turn ends with it
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("yes this is Wayne");
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: yes",
+      `AGENT: ${BAD_GREETING} [cut by guardrail: No diagnosis]`,
+      "CALLER: yes this is Wayne",
+    ]);
+  });
+
   it("a greeting cut before it played does not claim the replacement's line", async () => {
     // Nothing of it reached the caller, so it has no line of its own to
     // write — and the pending text must not survive the cut and land on the
@@ -1881,6 +1910,41 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     expect(h.bridge.getTranscript().split("\n")).toEqual([
       "CALLER: hello are you there",
       `AGENT: ${GREETING}`,
+    ]);
+  });
+
+  it("starts a new caller line once the greeting is fully delivered", () => {
+    // Codex, #243. `openingLine` leaves the caller's turn open on purpose —
+    // the greeting's audio is only STARTING, and a turn straddling that
+    // moment must still refine in place — but the window has to close, and
+    // the mark echo is where. Left open, a genuinely NEW utterance that
+    // happens to EXTEND the earlier one merges into it: an extension replaces
+    // even across a speech boundary, by design, because within one turn it
+    // carries every earlier word and can lose nothing. Across a delivered
+    // agent line it can — the record would read as if the whole of "yes this
+    // is Wayne" were said before the practice ever spoke.
+    //
+    // No itemIds: this is the word-level correlation path, which is the only
+    // one where an extension can merge two separate turns.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("yes");
+
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+    const markName = lastMarkName(h);
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    // A NEW turn, after the greeting was heard in full.
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("yes this is Wayne");
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: yes",
+      `AGENT: ${GREETING}`,
+      "CALLER: yes this is Wayne",
     ]);
   });
 
