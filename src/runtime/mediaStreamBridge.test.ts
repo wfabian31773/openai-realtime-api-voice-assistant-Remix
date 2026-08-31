@@ -1405,6 +1405,53 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     expect(h.clears()).toHaveLength(1);
   });
 
+  it("releases the lock if Twilio never echoes the greeting's mark", () => {
+    // The window between sending that mark and its echo is covered by
+    // nothing else: handleAudioDone clears the dead-air clock BEFORE the
+    // mark goes out. Unbounded, a lost echo would hold the lock for the
+    // whole call, so no LATER agent response could be interrupted either.
+    // Codex, #240 — and it corrected a comment of mine that claimed the
+    // watchdog already covered this.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+
+    // No echo. The fallback is playback time plus the grace; the audio here
+    // is one tiny frame, so the grace dominates.
+    expect(h.timers.fire(FINAL_MARK_GRACE_MS + 1)).toBe(true);
+
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onSpeechStarted();
+    expect(h.session.cancelResponse).toHaveBeenCalled();
+    expect(h.clears()).toHaveLength(1);
+  });
+
+  it("still owes the caller a reply when they answer over the greeting", () => {
+    // They spoke and stopped while the lock was held, so a response is owed.
+    // The greeting's own completion then clears the clock — it was speaking
+    // before they were, so it did not deliver that reply. Before the lock
+    // this could not happen: their speech cancelled the greeting outright.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onSpeechStarted();
+    h.handlers().onSpeechStopped(); // arms "response"
+    // THE STEP THAT MATTERS. The greeting is still playing, and its next
+    // delta re-arms the cause as "utterance" — which is what lets the
+    // completion below clear a clock that was owed to the caller. Without
+    // this delta the cause is still "response", the clearing branch never
+    // runs, and the test passes with or without the fix. It did, until
+    // mutation testing said so.
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+
+    // The debt survives: firing the window ends the call as dead air rather
+    // than letting it sit silent to the ten-minute ceiling.
+    expect(h.timers.fire(30_000)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
+
   it("still barges in normally on a lane with no greeting", () => {
     // The lock must not leak into lanes that never take it.
     const h = makeBridge({ greeting: null });

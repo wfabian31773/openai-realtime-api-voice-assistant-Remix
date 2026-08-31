@@ -72,6 +72,22 @@ import {
  * match for this purpose: personalising on an empty string would strip the
  * greeting's own question and leave nothing in its place.
  */
+/**
+ * Whether the lookup vouched for exactly one person, regardless of whether a
+ * usable first name came with it.
+ *
+ * Separate from `recognisedFirstName` on purpose. `AzulPrecontext` permits
+ * `{ matched: true }` with no name, and the greeting correctly does nothing
+ * with that — there is nothing to say. But logging it as `no_match` describes
+ * the opposite of what happened and would send someone looking for a lookup
+ * failure that did not occur. Classification is the flag's job; the name
+ * helper's job is the greeting (Codex review, PR #240).
+ */
+function precontextMatched(precontext: unknown): boolean {
+  if (!precontext || typeof precontext !== "object") return false;
+  return (precontext as { matched?: unknown }).matched === true;
+}
+
 function recognisedFirstName(precontext: unknown): string {
   if (!precontext || typeof precontext !== "object") return "";
   const pc = precontext as { matched?: unknown; firstName?: unknown };
@@ -569,8 +585,10 @@ export function mountVoiceRuntime(
           `[runtime] pre-context ${entry.slug} ${entry.callSid}: ` +
             (precontext === null
               ? "unavailable (failed or past the 1.5s deadline — see [AZUL-SCHED])"
-              : recognisedFirstName(precontext)
-                ? "recognised"
+              : precontextMatched(precontext)
+                ? recognisedFirstName(precontext)
+                  ? "recognised"
+                  : "matched, no usable first name — the greeting stays generic"
                 : "no_match (ran, vouched for nobody — a cold open is correct)"),
         );
         const lane = await resolveLane(

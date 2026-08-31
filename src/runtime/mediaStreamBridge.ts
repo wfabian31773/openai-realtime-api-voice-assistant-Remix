@@ -369,13 +369,30 @@ export class VoiceCallBridge {
    * discardable, which on the after-hours line is exactly where the
    * recording disclosure sits.
    *
-   * Bounded without a timer of its own: the dead-air watchdog is armed
-   * across this window, so a greeting whose mark never returns ends the
-   * call rather than holding the lock forever. Raised by Codex on #240.
+   * Bounded by its OWN timer. An earlier version of this comment claimed
+   * the dead-air watchdog covered the window; it does not, and the order in
+   * `handleAudioDone` is why — the clock is cleared BEFORE the mark is even
+   * sent. A greeting whose mark never echoed would have held the lock for
+   * the rest of the call, so no later agent response could be interrupted
+   * either. The fallback is derived the way `armFinalMark` derives its own:
+   * the audio's playback time plus a grace. Raised by Codex on #240.
    */
   private greetingLocked = false;
   /** The mark whose echo releases `greetingLocked`. */
   private greetingMarkName: string | null = null;
+  /** Releases the lock if that echo never arrives. */
+  private greetingLockTimer: unknown = null;
+  /**
+   * The caller finished a turn while the greeting still had the lock.
+   *
+   * A response is owed to them, but the greeting's remaining audio deltas
+   * re-arm the watchdog as `"utterance"`, and its completion then clears the
+   * clock — losing the debt. Before the lock existed this could not happen:
+   * the caller's speech cancelled the greeting outright, so no further
+   * deltas followed. The lock created the window, so the lock carries the
+   * debt across it. Raised by Codex on #240.
+   */
+  private responseOwedFromGreeting = false;
   /** The most recent mark sent, and whether media went out AFTER it: an
    * OLDER mark's echo must not clear the playback flag, or the next
    * barge-in early-returns and the caller is talked over. */
@@ -516,8 +533,7 @@ export class VoiceCallBridge {
     // The greeting reached the caller in full. Barge-in works normally from
     // here — this protects the opening, not the conversation.
     if (this.greetingMarkName !== null && name === this.greetingMarkName) {
-      this.greetingLocked = false;
-      this.greetingMarkName = null;
+      this.releaseGreetingLock();
     }
     if (this.finalMarkName !== null && name === this.finalMarkName) {
       // Ground truth: the final utterance actually played to the caller.
@@ -777,8 +793,13 @@ export class VoiceCallBridge {
     // before the line's completion (Codex review, PR #227 round 19).
     if (this.deadAirCause !== "response") {
       if (this.pendingToolCalls > 0) this.armDeadAir("response", TOOL_DISPATCH_GRACE_MS);
+      // A caller who answered while the greeting still held the lock is owed
+      // words, and this completion did not deliver them — the greeting was
+      // already speaking when they spoke.
+      else if (this.responseOwedFromGreeting) this.armDeadAir("response");
       else this.clearDeadAir();
     }
+    this.responseOwedFromGreeting = false;
 
     // Prefer the wire's own completed transcript over the accumulated
     // deltas: it is the authoritative text and it arrives whole.
@@ -787,6 +808,14 @@ export class VoiceCallBridge {
     // The greeting's own mark: its echo is what releases the lock.
     if (this.greetingLocked && this.greetingMarkName === null) {
       this.greetingMarkName = markName;
+      // Nothing else covers the wait for this echo, so it covers itself.
+      this.greetingLockTimer = this.setTimer(() => {
+        console.warn(
+          `[bridge] greeting mark ${markName} never echoed on ` +
+            `${this.deps.context.callSid} — releasing the barge-in lock`,
+        );
+        this.releaseGreetingLock();
+      }, Math.ceil(done.bytes / MULAW_BYTES_PER_MS) + FINAL_MARK_GRACE_MS);
     }
     if (text) this.awaitingMark.push({ name: markName, text });
     this.latestMarkName = markName;
@@ -851,6 +880,16 @@ export class VoiceCallBridge {
     this.finalFallbackTimer = this.setTimer(() => this.teardown("agent_ended"), fallbackMs);
   }
 
+  /** One way out of the lock, whether the echo arrived or the wait expired. */
+  private releaseGreetingLock(): void {
+    this.greetingLocked = false;
+    this.greetingMarkName = null;
+    if (this.greetingLockTimer !== null) {
+      this.clearTimer(this.greetingLockTimer);
+      this.greetingLockTimer = null;
+    }
+  }
+
   private handleCallerSpeechStarted(): void {
     if (this.ended) return;
     // The caller is talking: not dead air, and any open caller line in the
@@ -913,6 +952,10 @@ export class VoiceCallBridge {
     // utterance nor its audio arrives before the ceiling, the call is
     // stuck in dead air — tear down rather than bill silence.
     this.armDeadAir("response");
+    // Under the greeting lock this arm does not survive: the greeting is
+    // still playing, its deltas re-arm the clock as `"utterance"`, and its
+    // completion clears it. Remember the debt so completion can re-arm it.
+    if (this.greetingLocked) this.responseOwedFromGreeting = true;
   }
 
   // ── Tool dispatch ────────────────────────────────────────────────────

@@ -1199,6 +1199,11 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
       [{ matched: true, firstName: "Wayne" }, "recognised"],
       [{ matched: false }, "no_match"],
       [null, "unavailable"],
+      // A unique match with no usable first name. The greeting correctly
+      // does nothing with it — there is nothing to say — but logging it as
+      // `no_match` describes the opposite of what happened and would send
+      // someone hunting a lookup failure that never occurred. Codex, #240.
+      [{ matched: true }, "matched, no usable first name"],
     ];
     let n = 50;
     for (const [pc, expected] of cases) {
