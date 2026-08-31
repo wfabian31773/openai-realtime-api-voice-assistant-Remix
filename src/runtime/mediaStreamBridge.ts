@@ -253,6 +253,12 @@ export interface BridgeSession {
    * phrases — the guardrail correction is exactly that case. Not used for
    * ordinary turns, where the agent's own prompt must drive. */
   speakNatural(instructions: string): void;
+  /** Speak EXACTLY these words. The greeting uses this rather than
+   * speakNatural so the practice's opening line is identical on every call
+   * and the model has no opportunity to reword it. */
+  /** Scripted, verbatim. `interruptible: false` protects a line the caller
+   * must hear whole — see `greetingLocked`. */
+  speak(text: string, opts?: { interruptible?: boolean }): void;
   close(): void;
   getResponseEpoch(): number;
 }
@@ -265,6 +271,12 @@ export interface TwilioSocket {
 export interface VoiceCallBridgeDeps {
   context: VoiceCallContext;
   agent: BoundAgent;
+  /**
+   * The line the practice answers with, spoken verbatim before the agent
+   * takes its first turn. Optional: a lane without one simply opens on the
+   * agent's own words, which is what every lane did before this existed.
+   */
+  greeting?: string | null;
   twilio: TwilioSocket;
   /** The bridge hands its handlers to this factory and the factory returns
    * the session wired to them — the only way the two can be constructed
@@ -341,6 +353,46 @@ export class VoiceCallBridge {
   private cancelledEpoch: number | null = null;
 
   private assistantAudioPlaying = false;
+  /**
+   * The greeting is playing and may not be cut short.
+   *
+   * `interruptible: false` on the force_message tells the PROVIDER not to
+   * stop generating, but the truncation this guards against is ours: on
+   * caller speech the bridge cancels the response and sends Twilio a
+   * `clear`, which discards whatever of the greeting is still buffered.
+   * The provider flag cannot prevent that; only this can.
+   *
+   * Held until Twilio ECHOES the greeting's mark, because a mark echo is
+   * the only ground truth that audio actually reached the caller —
+   * `onAudioDone` means the provider finished sending, with the tail still
+   * buffered. Unlocking there would leave the last seconds of the greeting
+   * discardable, which on the after-hours line is exactly where the
+   * recording disclosure sits.
+   *
+   * Bounded by its OWN timer. An earlier version of this comment claimed
+   * the dead-air watchdog covered the window; it does not, and the order in
+   * `handleAudioDone` is why — the clock is cleared BEFORE the mark is even
+   * sent. A greeting whose mark never echoed would have held the lock for
+   * the rest of the call, so no later agent response could be interrupted
+   * either. The fallback is derived the way `armFinalMark` derives its own:
+   * the audio's playback time plus a grace. Raised by Codex on #240.
+   */
+  private greetingLocked = false;
+  /** The mark whose echo releases `greetingLocked`. */
+  private greetingMarkName: string | null = null;
+  /** Releases the lock if that echo never arrives. */
+  private greetingLockTimer: unknown = null;
+  /**
+   * The caller finished a turn while the greeting still had the lock.
+   *
+   * A response is owed to them, but the greeting's remaining audio deltas
+   * re-arm the watchdog as `"utterance"`, and its completion then clears the
+   * clock — losing the debt. Before the lock existed this could not happen:
+   * the caller's speech cancelled the greeting outright, so no further
+   * deltas followed. The lock created the window, so the lock carries the
+   * debt across it. Raised by Codex on #240.
+   */
+  private responseOwedFromGreeting = false;
   /** The most recent mark sent, and whether media went out AFTER it: an
    * OLDER mark's echo must not clear the playback flag, or the next
    * barge-in early-returns and the caller is talked over. */
@@ -478,6 +530,11 @@ export class VoiceCallBridge {
     if (name === this.latestMarkName && !this.mediaSinceLastMark) {
       this.assistantAudioPlaying = false;
     }
+    // The greeting reached the caller in full. Barge-in works normally from
+    // here — this protects the opening, not the conversation.
+    if (this.greetingMarkName !== null && name === this.greetingMarkName) {
+      this.releaseGreetingLock();
+    }
     if (this.finalMarkName !== null && name === this.finalMarkName) {
       // Ground truth: the final utterance actually played to the caller.
       this.teardown(this.endRequested ? "agent_ended" : "completed");
@@ -488,14 +545,63 @@ export class VoiceCallBridge {
 
   private handleSessionConfigured(): void {
     if (this.ended) return;
-    // The handshake landed. The agent's own prompt owns the opening line,
-    // so the runtime asks for a turn and supplies no words at all: a
-    // greeting written here would be a second source of truth for what the
-    // practice says when it picks up the phone, and — because
-    // `response.instructions` OVERRIDES the session's — it would also
-    // switch the agent's prompt and the knowledge pack off for exactly the
-    // sentence the caller hears first.
-    this.session.requestResponse();
+    // The handshake landed. Two turns, in this order.
+    //
+    // First the practice's own greeting, spoken VERBATIM — scripted, not
+    // generated, so it is the same sentence on every call and the model
+    // cannot reword it. It comes from the agent's config rather than from
+    // here, so there is still one source of truth for what the practice
+    // says when it picks up the phone.
+    //
+    // This is not a nicety. The SIP path plays that greeting before the
+    // agent takes over, and the queue prompts are written on that premise —
+    // optical's says "Your greeting has already played. Do NOT greet again.
+    // Go straight to confirming: Am I speaking with …?". This runtime never
+    // played it, so the agent obeyed an instruction whose premise was false
+    // and every call opened cold on the caller's own name (operator, three
+    // calls, 2026-08-31). The greeting also covers the caller-ID lookup:
+    // it is speaking while the 1.5s pre-context window runs.
+    // and then NOTHING. The greeting ends in a question the CALLER answers —
+    // "How can I help you today?", or for a recognised caller the confirm
+    // that personalisation swapped in — so the next voice is theirs.
+    //
+    // Requesting an agent turn here was wrong twice over: it speaks a second
+    // opening over a question already asked, and on PCP it takes a turn
+    // before the call purpose its greeting just requested has been given
+    // (Codex review, PR #240). The watchdog concern that argued for owing a
+    // turn goes with it: after a delivered line with nothing owed, clearing
+    // the window is correct, and a caller taking their time to answer must
+    // never trip it.
+    //
+    // Only a lane with NO greeting needs the agent to open, and it gets the
+    // turn it always got.
+    if (this.deps.greeting) {
+      // A greeting that ASKS something leaves the caller holding the turn,
+      // which is the whole reason nothing is requested after it. A
+      // DECLARATIVE one ("Thank you for calling Azul Vision.") leaves nobody
+      // holding it: the agent is not speaking and the caller was not asked,
+      // and once this line completes the watchdog clears because a delivered
+      // line owes nothing — so the call sits silent to the ten-minute
+      // ceiling. `welcome_greeting` is free text and the admin field does
+      // not require a question, so this is a greeting someone can simply
+      // save. The agent takes its own turn after one (Codex, #240).
+      if (!/\?\s*$/.test(this.deps.greeting.trim())) {
+        this.followUpOwed = true;
+      }
+      // LOCKED. A caller who says "hello" over the opening must not be able
+      // to truncate it: on the after-hours line it carries the closed-office
+      // notice, the 911 direction and the recording disclosure, and
+      // noIvrAgent requires the whole thing before anything else. The
+      // operator asked for the same thing in the same words — the greeting
+      // should not be barge-able (2026-08-31).
+      this.greetingLocked = true;
+      this.session.speak(this.deps.greeting, { interruptible: false });
+    } else {
+      // No per-response instructions: `response.instructions` OVERRIDES the
+      // session's, so words here would switch the agent's prompt and the
+      // knowledge pack off for the caller's first sentence.
+      this.session.requestResponse();
+    }
     this.armDeadAir("response");
   }
 
@@ -699,13 +805,30 @@ export class VoiceCallBridge {
     // before the line's completion (Codex review, PR #227 round 19).
     if (this.deadAirCause !== "response") {
       if (this.pendingToolCalls > 0) this.armDeadAir("response", TOOL_DISPATCH_GRACE_MS);
+      // A caller who answered while the greeting still held the lock is owed
+      // words, and this completion did not deliver them — the greeting was
+      // already speaking when they spoke.
+      else if (this.responseOwedFromGreeting) this.armDeadAir("response");
       else this.clearDeadAir();
     }
+    this.responseOwedFromGreeting = false;
 
     // Prefer the wire's own completed transcript over the accumulated
     // deltas: it is the authoritative text and it arrives whole.
     const text = (transcript ?? done.text).trim();
     const markName = `utt-${done.seq}`;
+    // The greeting's own mark: its echo is what releases the lock.
+    if (this.greetingLocked && this.greetingMarkName === null) {
+      this.greetingMarkName = markName;
+      // Nothing else covers the wait for this echo, so it covers itself.
+      this.greetingLockTimer = this.setTimer(() => {
+        console.warn(
+          `[bridge] greeting mark ${markName} never echoed on ` +
+            `${this.deps.context.callSid} — releasing the barge-in lock`,
+        );
+        this.releaseGreetingLock();
+      }, Math.ceil(done.bytes / MULAW_BYTES_PER_MS) + FINAL_MARK_GRACE_MS);
+    }
     if (text) this.awaitingMark.push({ name: markName, text });
     this.latestMarkName = markName;
     this.mediaSinceLastMark = false;
@@ -769,12 +892,28 @@ export class VoiceCallBridge {
     this.finalFallbackTimer = this.setTimer(() => this.teardown("agent_ended"), fallbackMs);
   }
 
+  /** One way out of the lock, whether the echo arrived or the wait expired. */
+  private releaseGreetingLock(): void {
+    this.greetingLocked = false;
+    this.greetingMarkName = null;
+    if (this.greetingLockTimer !== null) {
+      this.clearTimer(this.greetingLockTimer);
+      this.greetingLockTimer = null;
+    }
+  }
+
   private handleCallerSpeechStarted(): void {
     if (this.ended) return;
     // The caller is talking: not dead air, and any open caller line in the
     // record crossed a speech boundary (transcript correlation only).
     this.clearDeadAir();
     this.transcriptLog.callerBoundary();
+    // The greeting is not barge-able. Their audio keeps arriving and is
+    // still transcribed — nothing about the caller is dropped, and the
+    // provider will answer them once the line finishes — but the cancel
+    // and the `clear` below do not run, so the rest of the greeting plays.
+    // Not counted as an interruption either: nothing was interrupted.
+    if (this.greetingLocked) return;
     if (!this.assistantAudioPlaying) return;
     this.interruptions += 1;
     // BARGE-IN: both signals, always together (see module doc). The line
@@ -825,6 +964,20 @@ export class VoiceCallBridge {
     // utterance nor its audio arrives before the ceiling, the call is
     // stuck in dead air — tear down rather than bill silence.
     this.armDeadAir("response");
+    // Under the greeting lock this arm does not survive: the greeting is
+    // still playing, its deltas re-arm the clock as `"utterance"`, and its
+    // completion clears it. Remember the debt so completion can re-arm it.
+    //
+    // Only while the greeting is STILL BEING DELIVERED — `greetingMarkName`
+    // is set at its completion, so a null one is the honest test for that.
+    // The lock outlives the audio, waiting on Twilio's echo, and a caller who
+    // answers in THAT window is answering a greeting already finished: the
+    // next completion is the agent's real reply to them. Arming a debt then
+    // would hang up on a caller who pauses after hearing it, as `dead_air`.
+    // Raised by Codex on #240.
+    if (this.greetingLocked && this.greetingMarkName === null) {
+      this.responseOwedFromGreeting = true;
+    }
   }
 
   // ── Tool dispatch ────────────────────────────────────────────────────

@@ -58,6 +58,80 @@ import {
   TRANSFER_STATUS_PATH,
 } from "./runtimeTransfer";
 import { releaseCallHandoff } from "../tools/handoffBroker";
+import {
+  greetingStyleFor,
+  missingMandatoryCopy,
+  personaliseGreeting,
+} from "../services/greetingPersonalisation";
+
+/**
+ * The first name a caller-ID match resolved to, or "" when there is none.
+ *
+ * `precontext` reaches this untyped — it is whatever `fetchPrecontext`
+ * returned, injected so the runtime needs no network in tests — so the shape
+ * is checked rather than asserted. A match without a first name is not a
+ * match for this purpose: personalising on an empty string would strip the
+ * greeting's own question and leave nothing in its place.
+ */
+/**
+ * Whether the lookup vouched for exactly one person, regardless of whether a
+ * usable first name came with it.
+ *
+ * Separate from `recognisedFirstName` on purpose. `AzulPrecontext` permits
+ * `{ matched: true }` with no name, and the greeting correctly does nothing
+ * with that — there is nothing to say. But logging it as `no_match` describes
+ * the opposite of what happened and would send someone looking for a lookup
+ * failure that did not occur. Classification is the flag's job; the name
+ * helper's job is the greeting (Codex review, PR #240).
+ */
+/**
+ * The configured greeting, unless it is missing copy the lane must say.
+ *
+ * The database outranks the registry — that is `greetingResolver`'s whole
+ * purpose and an operator's edit has to be what the caller hears. But an
+ * edit is a choice of WORDING, not permission to drop the 911 direction or
+ * the recording disclosure from the after-hours line. When the configured
+ * text has lost one, the registry string is used and the gap is logged
+ * loudly, because the row still needs fixing and only a person can do that.
+ *
+ * The alternative — play it anyway, warn, and let a caller miss a
+ * disclosure — is worse in the only direction that matters. Codex, #240.
+ */
+export function chooseGreeting(
+  slug: string,
+  configured: string | null,
+  registry: string | null,
+): string {
+  if (!configured) return registry ?? "";
+  const missing = missingMandatoryCopy(slug, configured);
+  if (missing.length === 0) return configured;
+  if (missingMandatoryCopy(slug, registry).length > 0) {
+    // Neither has it. Say the configured one and make the gap impossible to
+    // miss: falling back would swap one deficient greeting for another.
+    console.error(
+      `[runtime] ${slug}: configured AND registry greetings are both missing ` +
+        `${missing.join(", ")} — FIX agents.welcome_greeting`,
+    );
+    return configured;
+  }
+  console.error(
+    `[runtime] ${slug}: configured greeting is missing ${missing.join(", ")} — ` +
+      `using the built-in greeting instead. FIX agents.welcome_greeting`,
+  );
+  return registry ?? configured;
+}
+
+function precontextMatched(precontext: unknown): boolean {
+  if (!precontext || typeof precontext !== "object") return false;
+  return (precontext as { matched?: unknown }).matched === true;
+}
+
+function recognisedFirstName(precontext: unknown): string {
+  if (!precontext || typeof precontext !== "object") return "";
+  const pc = precontext as { matched?: unknown; firstName?: unknown };
+  if (pc.matched !== true) return "";
+  return typeof pc.firstName === "string" ? pc.firstName.trim() : "";
+}
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
@@ -159,6 +233,19 @@ export interface VoiceRuntimeOptions {
   /** Caller-ID pre-context lookup. Injected so tests need no network, and
    * so a lane that should not do one simply is not given it. */
   fetchPrecontext?: (phone: string) => Promise<unknown>;
+  /**
+   * The admin-configured `agents.welcome_greeting`, or null when there is
+   * none. Injected for the same reason as `fetchPrecontext`: the resolver
+   * reaches the database, and the runtime's tests must not.
+   *
+   * The DB value is the source of truth for how every agent opens — that is
+   * what `greetingResolver` exists to enforce, and what the admin UI and the
+   * Observatory display. Playing the registry string instead means an
+   * operator edits the greeting, sees it change everywhere, and hears the old
+   * one on the line (Codex review, PR #240). The registry string stays as the
+   * fallback, which is also the SIP path's arrangement.
+   */
+  resolveGreeting?: (slug: string) => Promise<string | null>;
   /** Opens the call_logs row. Injected for tests. */
   openCallRow?: CallLogInsert;
   /** Persists the finished call. Injected for tests. */
@@ -500,12 +587,48 @@ export function mountVoiceRuntime(
       try {
         // Started BEFORE the agent is built so the two overlap, and bounded
         // so it can never hold the call open on its own.
-        const precontext = options.fetchPrecontext
-          ? await withinOrNull(
-              options.fetchPrecontext(entry.callerPhone) as Promise<unknown>,
-              PRECONTEXT_DEADLINE_MS,
-            )
-          : null;
+        // Both together: the greeting resolver is a warm Map read after
+        // boot, but on a cold miss it can wait on the database, and that
+        // must overlap the pre-context lookup rather than follow it.
+        const [precontext, configuredGreeting] = await Promise.all([
+          options.fetchPrecontext
+            ? withinOrNull(
+                options.fetchPrecontext(entry.callerPhone) as Promise<unknown>,
+                PRECONTEXT_DEADLINE_MS,
+              )
+            : Promise.resolve(null),
+          options.resolveGreeting
+            ? withinOrNull(
+                options.resolveGreeting(entry.slug),
+                PRECONTEXT_DEADLINE_MS,
+              )
+            : Promise.resolve(null),
+        ]);
+        // WHICH of the three pre-context outcomes happened. Without this the
+        // runbook's own diagnosis step is not performable: every failure —
+        // an ordinary "no match", a service error, a lookup that beat no
+        // deadline — arrives here as the same `null`, and the runbook told
+        // an operator to establish which one before concluding anything.
+        // `si_persons` shows what data exists, not what this request
+        // returned. So the distinction has to be logged where it is known,
+        // and this is the only place that knows (Codex review, PR #239).
+        //
+        // No name, no number: `recognised` is the fact the operator needs,
+        // and the caller's own line already carries the identity.
+        // `unavailable` is null — the lookup failed or missed the 1.5s
+        // deadline, and callEyecareTool's own [AZUL-SCHED] lines separate
+        // those two. `no_match` is a lookup that ran and vouched for nobody,
+        // which is ORDINARY and the commonest reason an opening is cold.
+        console.info(
+          `[runtime] pre-context ${entry.slug} ${entry.callSid}: ` +
+            (precontext === null
+              ? "unavailable (failed or past the 1.5s deadline — see [AZUL-SCHED])"
+              : precontextMatched(precontext)
+                ? recognisedFirstName(precontext)
+                  ? "recognised"
+                  : "matched, no usable first name — the greeting stays generic"
+                : "no_match (ran, vouched for nobody — a cold open is correct)"),
+        );
         const lane = await resolveLane(
           entry.slug,
           {
@@ -672,6 +795,29 @@ export function mountVoiceRuntime(
           context,
           startedAtMs,
           agent: lane.agent,
+          // The practice's own line, spoken before the agent's first turn,
+          // personalised for a recognised caller exactly as the SIP path
+          // personalises it — same two helpers, same per-agent style.
+          //
+          // Passing the raw registry greeting was not a smaller version of
+          // this, it was a different opening: the queue lines APPEND, so a
+          // recognised caller should hear their own greeting with its
+          // trailing question swapped for "Am I speaking with <name>?".
+          // Tech and records prompts then tell the model to take that
+          // answer and move on — which it cannot do if the caller was only
+          // ever asked "How can I help you today?" (Codex review, PR #240).
+          //
+          // No name, or no match, returns the greeting untouched: whether
+          // recognition happened is not a decision this makes.
+          // The configured greeting outranks the registry string, exactly as
+          // it does on the SIP path — an admin edit must be what the caller
+          // hears, not what the code was shipped with. UNLESS it has dropped
+          // copy the lane is required to say; see `chooseGreeting`.
+          greeting: personaliseGreeting(
+            chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
+            recognisedFirstName(precontext),
+            greetingStyleFor(entry.slug),
+          ) || null,
           twilio: twilioSocket,
           createSession: (handlers) =>
             new GrokVoiceSession(

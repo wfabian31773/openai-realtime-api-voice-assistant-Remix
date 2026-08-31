@@ -68,6 +68,7 @@ function b64(bytes: number): string {
 function makeBridge(
   over: {
     agent?: BoundAgent;
+    greeting?: string | null;
     persistCallRecord?: (r: VoiceCallRecord) => Promise<void>;
     endCallToolNames?: string[];
     maxCallMs?: number;
@@ -87,6 +88,7 @@ function makeBridge(
     sendToolResult: vi.fn(),
     requestResponse: vi.fn(),
     speakNatural: vi.fn(),
+    speak: vi.fn(),
     close: vi.fn(),
     getResponseEpoch: () => epoch,
   } satisfies BridgeSession;
@@ -102,6 +104,7 @@ function makeBridge(
       dialedNumber: "+15559876543",
     },
     agent,
+    greeting: over.greeting,
     twilio: {
       sendFrame: (f) => frames.push(f),
       close: twilioClose,
@@ -932,6 +935,7 @@ describe("VoiceCallBridge — exactly-once teardown", () => {
           sendToolResult: vi.fn(),
           requestResponse: vi.fn(),
           speakNatural: vi.fn(),
+    speak: vi.fn(),
           close: vi.fn(),
           getResponseEpoch: () => 0,
         };
@@ -1294,5 +1298,242 @@ describe("VoiceCallBridge — transcript timing is caller-anchored", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("the practice greets the caller before the agent takes a turn", () => {
+  /**
+   * Why this is a bridge concern and not the agent's.
+   *
+   * The queue prompts are written for the SIP path, where the greeting has
+   * already played by the time the agent is handed the call. Optical's says
+   * so outright: "Your greeting has already played. Do NOT greet again. Go
+   * straight to confirming: Am I speaking with …?". This runtime never
+   * played it, so the agent followed an instruction whose premise was false
+   * and opened cold on the caller's own first name — three live calls,
+   * 2026-08-31, before anyone worked out it was not the model's doing.
+   */
+  // Ends in a QUESTION, as every real greeting does — optical's live text is
+  // "…but I can take a message and they will follow up with you. How can I
+  // help you today?". The fixture used to be declarative, which meant the
+  // "waits for the caller" tests below were asserting that behaviour against
+  // a greeting that never asks anything: the caller was not holding the turn
+  // and nobody was. Found when the declarative case got a rule of its own.
+  const GREETING = "Thank you for calling Azul Vision optical. How can I help you today?";
+
+  it("speaks the greeting and then waits for the caller", () => {
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    expect(h.session.speak).toHaveBeenCalledWith(GREETING, { interruptible: false });
+    // The greeting ends in a question. Taking a turn here speaks a second
+    // opening over one already asked — and on PCP it answers before the
+    // call purpose the greeting just requested has been given.
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+  });
+
+  it("does not take a turn when the greeting's own response completes either", () => {
+    // The earlier version of this fix owed the agent a turn and released it
+    // here. That is the bug this test exists to keep out: the caller is
+    // mid-answer, and the next voice must be theirs.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAgentTranscriptDelta?.("Thank you for calling");
+    h.handlers().onAudioDone(GREETING);
+    h.handlers().onResponseDone();
+
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+  });
+
+  it("lets a caller take their time answering it", () => {
+    // Nothing is owed once a line is delivered, so the window is clear and
+    // a slow answer cannot trip dead air. Firing the timer proves the clock
+    // is actually down rather than merely re-armed somewhere else.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAgentTranscriptDelta?.("Thank you for calling");
+    h.handlers().onAudioDone(GREETING);
+    h.handlers().onResponseDone();
+
+    expect(h.timers.fire(30_000)).toBe(false);
+    expect(h.outcomes).toEqual([]);
+  });
+
+  it("speaks it scripted, never as an instruction the model rephrases", () => {
+    // speakNatural hands the model a meaning to phrase; speak hands it words.
+    // A greeting that varies call to call is the thing being fixed, so the
+    // distinction is the fix, not a detail.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    expect(h.session.speakNatural).not.toHaveBeenCalled();
+  });
+
+  it("does not let a caller talk over the greeting", () => {
+    // The operator asked for this in these words — the opening should not be
+    // barge-able — and it is a safety rule on the after-hours line, whose
+    // greeting carries the closed-office notice, the 911 direction and the
+    // recording disclosure. noIvrAgent requires all of it before anything
+    // else. A caller saying "hello" over it used to cancel the response and
+    // send Twilio a `clear`, discarding whatever was still buffered.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+
+    h.handlers().onSpeechStarted(); // "hello?" over the opening
+
+    // The two things that truncate it, neither of which may happen here.
+    expect(h.session.cancelResponse).not.toHaveBeenCalled();
+    expect(h.clears()).toEqual([]);
+  });
+
+  it("takes the lock off once Twilio confirms the greeting played", () => {
+    // Released on the MARK ECHO, not on onAudioDone: audio-done means the
+    // provider finished sending, with the tail still in Twilio's buffer.
+    // Unlocking there would leave the last seconds discardable, which on the
+    // after-hours line is exactly where the recording disclosure sits.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+
+    // Still locked: sent, not yet played.
+    h.handlers().onSpeechStarted();
+    expect(h.clears()).toEqual([]);
+
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    // Played. Barge-in is ordinary from here — this protects the opening,
+    // not the conversation.
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onSpeechStarted();
+    expect(h.session.cancelResponse).toHaveBeenCalled();
+    expect(h.clears()).toHaveLength(1);
+  });
+
+  it("releases the lock if Twilio never echoes the greeting's mark", () => {
+    // The window between sending that mark and its echo is covered by
+    // nothing else: handleAudioDone clears the dead-air clock BEFORE the
+    // mark goes out. Unbounded, a lost echo would hold the lock for the
+    // whole call, so no LATER agent response could be interrupted either.
+    // Codex, #240 — and it corrected a comment of mine that claimed the
+    // watchdog already covered this.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+
+    // No echo. The fallback is playback time plus the grace; the audio here
+    // is one tiny frame, so the grace dominates.
+    expect(h.timers.fire(FINAL_MARK_GRACE_MS + 1)).toBe(true);
+
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onSpeechStarted();
+    expect(h.session.cancelResponse).toHaveBeenCalled();
+    expect(h.clears()).toHaveLength(1);
+  });
+
+  it("still owes the caller a reply when they answer over the greeting", () => {
+    // They spoke and stopped while the lock was held, so a response is owed.
+    // The greeting's own completion then clears the clock — it was speaking
+    // before they were, so it did not deliver that reply. Before the lock
+    // this could not happen: their speech cancelled the greeting outright.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onSpeechStarted();
+    h.handlers().onSpeechStopped(); // arms "response"
+    // THE STEP THAT MATTERS. The greeting is still playing, and its next
+    // delta re-arms the cause as "utterance" — which is what lets the
+    // completion below clear a clock that was owed to the caller. Without
+    // this delta the cause is still "response", the clearing branch never
+    // runs, and the test passes with or without the fix. It did, until
+    // mutation testing said so.
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+
+    // The debt survives: firing the window ends the call as dead air rather
+    // than letting it sit silent to the ten-minute ceiling.
+    expect(h.timers.fire(30_000)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
+
+  it("does not hang up on a caller who pauses after the agent's real reply", () => {
+    // The lock outlives the greeting's AUDIO — it waits on Twilio's echo. A
+    // caller who answers in that gap is answering a greeting that already
+    // finished, so the next completion is the agent's genuine reply to them.
+    // Treating that as an undelivered debt disconnects someone who simply
+    // pauses after hearing it. Codex, #240.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING); // greeting sent; echo not back yet
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onSpeechStopped(); // answered AFTER the greeting finished
+
+    // The agent's actual reply, delivered.
+    h.newResponse();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone("Of course, I can help with that.");
+
+    // Nothing is owed. A slow caller must not be cut off.
+    expect(h.timers.fire(30_000)).toBe(false);
+    expect(h.outcomes).toEqual([]);
+  });
+
+  it("takes its own turn after a greeting that asks nothing", () => {
+    // `welcome_greeting` is free text and the admin field does not require a
+    // question. A declarative greeting leaves nobody holding the turn: the
+    // agent is not speaking, the caller was not asked, and the watchdog
+    // clears because a delivered line owes nothing. Codex, #240.
+    const h = makeBridge({ greeting: "Thank you for calling Azul Vision." });
+    h.handlers().onConfigured();
+    expect(h.session.speak).toHaveBeenCalledWith("Thank you for calling Azul Vision.", {
+      interruptible: false,
+    });
+    // Not yet — it speaks first, then continues.
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone("Thank you for calling Azul Vision.");
+    h.handlers().onResponseDone();
+
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    // And that turn is owed, so silence after it is caught rather than
+    // running to the ten-minute ceiling.
+    expect(h.timers.fire(30_000)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
+
+  it("still waits after a greeting that does ask", () => {
+    // The control. GREETING ends in a question, so the caller holds the
+    // turn and the agent must not speak over it.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+    h.handlers().onResponseDone();
+
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+    expect(h.timers.fire(30_000)).toBe(false);
+  });
+
+  it("still barges in normally on a lane with no greeting", () => {
+    // The lock must not leak into lanes that never take it.
+    const h = makeBridge({ greeting: null });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onSpeechStarted();
+
+    expect(h.session.cancelResponse).toHaveBeenCalled();
+    expect(h.clears()).toHaveLength(1);
+  });
+
+  it("opens on the agent's own words when the lane has no greeting", () => {
+    const h = makeBridge({ greeting: null });
+    h.handlers().onConfigured();
+    expect(h.session.speak).not.toHaveBeenCalled();
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
   });
 });

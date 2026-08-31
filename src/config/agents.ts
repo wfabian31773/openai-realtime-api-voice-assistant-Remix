@@ -53,6 +53,7 @@ export class AgentRegistry {
       factory: createNoIvrAgentV2 as AgentFactory,
       enabled: true,
       description: 'DEV: ' + noIvrAgentV2Config.description,
+      greeting: noIvrAgentV2Config.greeting,
       twilioNumbers: [],
       agentType: 'inbound',
       version: '2.0.0-workflow', // v2.0.0: Workflow engine with structured intent classification and guarded escalation
@@ -64,6 +65,7 @@ export class AgentRegistry {
       factory: createNoIvrAgentV2 as AgentFactory,
       enabled: true,
       description: noIvrAgentV2Config.description,
+      greeting: noIvrAgentV2Config.greeting,
       twilioNumbers: [],
       agentType: 'inbound',
       version: noIvrAgentV2Config.version,
@@ -74,6 +76,9 @@ export class AgentRegistry {
       id: 'after-hours',
       factory: createAfterHoursAgent,
       enabled: true,
+      // No greeting: this lane is refused by the voice runtime (its factory
+      // takes a different argument layout), so one here would be unreachable.
+      // The SIP path uses afterHoursAgent's own WELCOME_GREETING.
       description: 'After-hours medical triage for Azul Vision',
       twilioNumbers: [],
       agentType: 'inbound',

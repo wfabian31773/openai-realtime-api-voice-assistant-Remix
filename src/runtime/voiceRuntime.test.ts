@@ -15,7 +15,12 @@ import http from "node:http";
 import { z } from "zod";
 import twilio from "twilio";
 import WebSocket from "ws";
-import { mountVoiceRuntime, publicTransferDomain, type RuntimeTransport } from "./voiceRuntime";
+import {
+  mountVoiceRuntime,
+  publicTransferDomain,
+  chooseGreeting,
+  type RuntimeTransport,
+} from "./voiceRuntime";
 import { CallSessionRegistry } from "./sessionRegistry";
 import { transferDestinationStatus, transferUnavailableReason } from "./runtimeTransfer";
 import type { GrokServerEvent } from "./wireTypes";
@@ -132,6 +137,7 @@ async function harness(
     stallHandshake?: boolean;
     providerSetupDeadlineMs?: number;
     fetchPrecontext?: (phone: string) => Promise<unknown>;
+    resolveGreeting?: (slug: string) => Promise<string | null>;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
     callRowDeadlineMs?: number;
     env?: Record<string, string | undefined>;
@@ -159,6 +165,7 @@ async function harness(
     providerSetupDeadlineMs: over.providerSetupDeadlineMs,
     callRowDeadlineMs: over.callRowDeadlineMs,
     fetchPrecontext: over.fetchPrecontext,
+    resolveGreeting: over.resolveGreeting,
     openCallRow:
       over.openCallRow ??
       (async (row) => {
@@ -1105,5 +1112,308 @@ describe("the transfer's public domain", () => {
     expect(publicTransferDomain({ REPLIT_DEV_DOMAIN: "azul.spock.replit.dev" })).toBe(
       "azul.spock.replit.dev",
     );
+  });
+});
+
+describe("a recognised caller hears the confirm in the greeting itself", () => {
+  /**
+   * The queue lines APPEND: they keep their own opening — which pre-empts
+   * the ask for a human on a line that cannot transfer — and swap its
+   * trailing question for "Am I speaking with <name>?". The tech and records
+   * prompts then instruct the model to take that answer and move on, which
+   * it cannot do if the caller was only ever asked "How can I help you
+   * today?" (Codex review, PR #240).
+   *
+   * Asserted through the real runtime rather than the bridge's fake session,
+   * because what is being checked is that voiceRuntime hands the bridge a
+   * PERSONALISED string — a bridge test would pass whatever it was given.
+   */
+  const GREETING =
+    "Thank you for calling Azul Vision optical. How can I help you today?";
+
+  const laneWithGreeting = (): LaneSource => ({
+    getAgentConfig: () => ({
+      id: "optical",
+      enabled: true,
+      agentType: "inbound",
+      greeting: GREETING,
+      factory: (async () => ({
+        instructions: "You are the optical queue agent.",
+        tools: [],
+      })) as unknown as LaneConfig["factory"],
+    }),
+  });
+
+  /** What the runtime actually put in Grok's mouth. */
+  const spokenText = (h: Harness): string[] =>
+    h.transports[0].sent
+      .filter((m) => m.type === "conversation.item.create")
+      .map((m) => {
+        const item = m.item as { content?: Array<{ text?: string }> };
+        return item?.content?.[0]?.text ?? "";
+      });
+
+  it("swaps the greeting's own question for the confirm", async () => {
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA40", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA40", tokenFrom(answered.text));
+    await settle(6);
+    // The handshake the real wire performs: only once the session is
+    // configured does a queued say reach the mouth.
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([
+      "Thank you for calling Azul Vision optical. Am I speaking with Wayne?",
+    ]);
+    ws.close();
+  });
+
+  it("never speaks a name the lookup did not stand behind", async () => {
+    // The firstName is PRESENT here and `matched` is false — a number that
+    // resolved to a candidate the service will not vouch for. That is the
+    // case worth guarding: the optical prompt's own recognition block exists
+    // only when the match is unique, "because saying that when it is false
+    // would name the wrong patient out loud". An unmatched caller hears the
+    // line exactly as configured, question and all.
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: false, firstName: "Wayne" }),
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA41", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA41", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([GREETING]);
+    ws.close();
+  });
+
+  it("says which pre-context outcome happened, so a cold open can be diagnosed", async () => {
+    // Every failure reaches the runtime as the same `null`, and an ordinary
+    // "no match" is indistinguishable from it in the return value. The
+    // runbook tells an operator to establish which before concluding
+    // anything, and without this line that step cannot be carried out —
+    // `si_persons` shows what data exists, not what this request returned
+    // (Codex, PR #239).
+    const cases: Array<[unknown, string]> = [
+      [{ matched: true, firstName: "Wayne" }, "recognised"],
+      [{ matched: false }, "no_match"],
+      [null, "unavailable"],
+      // A unique match with no usable first name. The greeting correctly
+      // does nothing with it — there is nothing to say — but logging it as
+      // `no_match` describes the opposite of what happened and would send
+      // someone hunting a lookup failure that never occurred. Codex, #240.
+      [{ matched: true }, "matched, no usable first name"],
+    ];
+    let n = 50;
+    for (const [pc, expected] of cases) {
+      const logged: string[] = [];
+      const spy = vi.spyOn(console, "info").mockImplementation((m) => {
+        logged.push(String(m));
+      });
+      try {
+        const sid = `CA${n++}`;
+        const h = await harness({
+          laneSource: laneWithGreeting(),
+          fetchPrecontext: async () => pc,
+        });
+        const answered = await post(h, "/voice/optical", { CallSid: sid, From: "+1", To: "+2" });
+        const { ws } = await openStream(h, sid, tokenFrom(answered.text));
+        await settle(6);
+        const line = logged.find((l) => l.includes("pre-context"));
+        expect(line, `no pre-context line for ${expected}`).toBeDefined();
+        expect(line).toContain(expected);
+        expect(line).toContain(sid);
+        ws.close();
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  it("never puts the recognised caller's name in that line", async () => {
+    // The operator's test is whether the AGENT said the name, not whether a
+    // log did. Nothing here needs it, so it does not go in.
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "info").mockImplementation((m) => {
+      logged.push(String(m));
+    });
+    try {
+      const h = await harness({
+        laneSource: laneWithGreeting(),
+        fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      });
+      const answered = await post(h, "/voice/optical", { CallSid: "CA60", From: "+1", To: "+2" });
+      const { ws } = await openStream(h, "CA60", tokenFrom(answered.text));
+      await settle(6);
+      const line = logged.find((l) => l.includes("pre-context"));
+      expect(line).toBeDefined();
+      expect(line).not.toContain("Wayne");
+      ws.close();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("plays the greeting an administrator configured, not the shipped one", async () => {
+    // `agents.welcome_greeting` is the source of truth — it is what the admin
+    // UI and the Observatory display, and what the SIP path resolves. Playing
+    // the registry string means an operator edits the greeting, sees it
+    // change everywhere, and hears the old one on the line (Codex, PR #240).
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      resolveGreeting: async () =>
+        "Good afternoon, Azul Vision optical here. What can I do for you?",
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA43", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA43", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    // The configured copy, and personalised — both, not one or the other.
+    expect(spokenText(h)).toEqual([
+      "Good afternoon, Azul Vision optical here. Am I speaking with Wayne?",
+    ]);
+    ws.close();
+  });
+
+  it("falls back to the registry greeting when nothing is configured", async () => {
+    // The resolver returns null both when the column is empty and when the
+    // database cannot be reached. Neither may cost the caller their opening.
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      resolveGreeting: async () => null,
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA44", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA44", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([
+      "Thank you for calling Azul Vision optical. Am I speaking with Wayne?",
+    ]);
+    ws.close();
+  });
+
+  it("personalises the answering service, whose prompt is certain it did", async () => {
+    // answeringServiceAgent's matched-caller block: "YOUR GREETING HAS
+    // ALREADY PLAYED. Do NOT greet again... Go straight to the confirmation."
+    // Left out of the style map, that prompt would be certain of something
+    // untrue — the exact defect the module exists to remove (Codex, PR #240).
+    const AS_GREETING =
+      "Hello, thank you for calling Azul Vision, all of our operators are " +
+      "currently on the phone assisting other patients, how may I help you today?";
+    const h = await harness({
+      laneSource: {
+        getAgentConfig: () => ({
+          id: "answering-service",
+          enabled: true,
+          agentType: "inbound",
+          greeting: AS_GREETING,
+          factory: (async () => ({
+            instructions: "You are the answering service agent.",
+            tools: [],
+          })) as unknown as LaneConfig["factory"],
+        }),
+      },
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+    });
+    const answered = await post(h, "/voice/answering-service", {
+      CallSid: "CA45",
+      From: "+1",
+      To: "+2",
+    });
+    const { ws } = await openStream(h, "CA45", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    // The busy-operators line survives — it pre-empts the ask for a human,
+    // same as the queue lines — and only the closing question is swapped.
+    expect(spokenText(h)).toEqual([
+      "Hello, thank you for calling Azul Vision, all of our operators are " +
+        "currently on the phone assisting other patients. Am I speaking with Wayne?",
+    ]);
+    ws.close();
+  });
+
+  it("leaves it alone when the match carries no first name to use", async () => {
+    // Personalising on an empty name would strip the greeting's question and
+    // put nothing in its place — a line that ends mid-thought.
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true }),
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA42", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA42", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([GREETING]);
+    ws.close();
+  });
+});
+
+describe("the database outranks the code, but not on the copy a lane must say", () => {
+  // `greetingResolver` makes agents.welcome_greeting the source of truth, and
+  // that is right — a boot that overwrote operator edits was a real incident.
+  // But an edit chooses WORDING; it does not license dropping the 911
+  // direction or the recording disclosure from the after-hours line.
+  //
+  // Live evidence, 2026-08-31: the no-ivr row carried 911 and the
+  // closed-office notice and NO recording disclosure, while the built-in
+  // greeting had all three. Codex, #240.
+  const LIVE_ROW =
+    "Thank you for calling Azul Vision. Our offices are currently closed. If this is a " +
+    "medical emergency, please hang up and dial 911. Otherwise, I'm happy to help — how " +
+    "may I assist you?";
+  const BUILT_IN =
+    "Thank you for calling Azul Vision, all of our offices are currently closed, you have " +
+    "reached the after hours call service. If this is a medical emergency, please dial 911. " +
+    "All calls are being recorded for quality assurance purposes, how can I help you?";
+
+  it("prefers the configured greeting whenever it is complete", () => {
+    expect(chooseGreeting("optical", "Configured optical line.", "Registry.")).toBe(
+      "Configured optical line.",
+    );
+    expect(chooseGreeting("no-ivr", BUILT_IN, "something else")).toBe(BUILT_IN);
+  });
+
+  it("falls back to the built-in greeting when the row has lost mandated copy", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(chooseGreeting("no-ivr", LIVE_ROW, BUILT_IN)).toBe(BUILT_IN);
+      // The row still needs a person to fix it, so the gap is loud.
+      expect(spy.mock.calls.flat().join(" ")).toContain("recording disclosure");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("keeps the configured one when neither carries it, and says so", () => {
+    // Swapping one deficient greeting for another helps nobody; the log is
+    // the only thing that can help here.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(chooseGreeting("no-ivr", LIVE_ROW, "Thanks for calling.")).toBe(LIVE_ROW);
+      expect(spy.mock.calls.flat().join(" ")).toContain("both missing");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("uses the registry string when nothing is configured", () => {
+    expect(chooseGreeting("optical", null, "Registry.")).toBe("Registry.");
+    expect(chooseGreeting("optical", null, null)).toBe("");
   });
 });
