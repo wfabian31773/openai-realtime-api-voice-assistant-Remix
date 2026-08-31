@@ -313,11 +313,15 @@ than guessing:
 - The `[AZUL-SCHED]` lines still separate an unset key, an HTTP status and a
   fetch failure. If one is present, that is your answer and it is complete.
 - If none is present, the remaining two — a valid `no_match` and a lookup
-  that beat no deadline — are **not distinguishable from this side.** The
-  Eye Care service's own request log is the only place that separates them:
-  a `sage_precontext` request logged for this call's number and timestamp
-  means the lookup arrived and answered, so a cold open was a real negative.
-  No request logged means it never got there.
+  that answered too late — are **not distinguishable from this side.** Only
+  the Eye Care service's own log separates them, and **a request entry alone
+  does not.** `withinOrNull` races a timer against the lookup and does not
+  cancel it, so a request that took 3s still reaches the service, is still
+  logged, and still answers — into a call that gave up at 1.5s. You need the
+  entry's **outcome and its latency**: answered `matched: false` inside 1.5s
+  is a real negative; answered at all beyond 1.5s is a deadline miss no
+  matter what it returned. Request presence at the right timestamp is
+  consistent with both. Raised by Codex on #239.
 - Do not block the cutover on it either way. Pre-context decides whether the
   agent greets by name; it does not decide whether the request is taken or
   the ticket lands, and those are the pass mark below.
@@ -370,7 +374,7 @@ files correctly is a pass. After each:
 | check | where |
 |---|---|
 | **`file_optical_ticket` ran, and succeeded** | `tool_timeline` for that callSid |
-| **the ticket's `created_at` is AFTER this call started** | ticketing vs `call_logs.created_at` |
+| **the ticket's `created_at` is AFTER this call started** | ticketing vs `call_logs.start_time` |
 | a ticket exists, **in the department the request belongs to** | ticketing |
 | patient name, DOB and location are right | the ticket |
 | the callback number is the one you gave | the ticket — standing instruction 12 |
@@ -401,14 +405,31 @@ model talked its way through without calling `file_optical_ticket`, and the
 caller was told something that did not happen. That is invisible from the
 audio and obvious from the row.
 
-**This is not hypothetical.** On 2026-08-31 an optical call ran
-`lookup_patient > lookup_patient > classify_optical_request >
-check_open_tickets` and no `file_optical_ticket`, then read back "ticket
-VA-56007" — a number `check_open_tickets` had found from a call sixteen
-minutes earlier. The end-of-call `update-call-data` post then overwrote that
-older ticket's `call_sid` with this call's, so the record itself came to agree
-with the claim. Check the timeline, not the transcript, and compare the
-ticket's `created_at` against the call's start before believing a `call_sid`.
+**Use a DIFFERENT phone number for each of the two calls** — or close the
+first ticket before placing the second. `check_open_tickets` searches by
+phone alone, across every department, and the optical prompt says: *"If they
+already have one open, tell them where it stands instead of opening a
+second."* Call from the same handset twice and call 2 finds call 1's fresh
+ticket and correctly declines to file, so the department-9 check fails and a
+working deployment looks broken. Raised by Codex on #239.
+
+**This is not hypothetical, and it is worth reading precisely.** On
+2026-08-31 an optical call ran `lookup_patient > lookup_patient >
+classify_optical_request > check_open_tickets` with no `file_optical_ticket`,
+then said "I've logged your request as ticket VA-56007" — a ticket filed by
+an earlier call from the same number, sixteen minutes before.
+
+The agent was **not** inventing a ticket. It was obeying the rule above, and
+the tool chain did what it is written to do. Two things around it are wrong:
+the wording ("I've logged your request") describes filing when it is
+reporting, so it is indistinguishable from a fabrication on the audio; and
+the end-of-call `update-call-data` post then overwrote that older ticket's
+`call_sid` with this call's, destroying its link to the call that really
+created it. So the record came to agree with the misleading sentence.
+
+The lesson for this table is the timing check, not suspicion of the agent:
+compare the ticket's `created_at` against `call_logs.start_time` before
+believing a `call_sid`.
 
 ### Then, and only then, the live number
 
