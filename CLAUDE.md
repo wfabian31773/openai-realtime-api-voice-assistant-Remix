@@ -95,6 +95,52 @@ Green tests did not prevent any of the regressions listed there.
     queue agent. **All overnight volume is on the no-IVR agent**, which Wayne
     uses as the after-hours agent (2026-08-13).
 
+14. **One source of truth: the Eye Care Patient Console.** (2026-08-31)
+    *"Any scheduling or pre-context or anything of that nature, verification,
+    should run to the Eye Care Patient Console's patient summary or patients
+    table, and there's a mirror also in there that holds the schedule as well.
+    So we should use those two tables. Same thing for providers or anything
+    like that of that nature. All of that information is in the console.
+    That's where we should — one source of truth."*
+
+    Applies to **the runtime agents and 5Star**. Read the Console project
+    `kbbmywvasbsxnbblrhot`, not the Operations Hub's own copies:
+
+    | what you need | table | rows |
+    |---|---|---|
+    | who a person is | `patients_master` | 915,843 |
+    | the schedule mirror | `si_appointment_facts` | 908,995 |
+    | providers | `si_providers` | 77 |
+    | locations | `si_locations` | 105 |
+    | phone → patient; powers `sage_precontext` | `si_persons` | 3,731 |
+
+    **What violates this today — do not assume it is already done:**
+
+    - `lookup_patient`, the FIRST tool optical, surgery, tech and records call,
+      goes to `scheduleLookupService`, which imports `{ schedule }` from the
+      Operations Hub — the appointment book. A real patient with no
+      appointment inside the schedule window cannot verify, and the failure
+      looks random from outside.
+    - `src/services/patientVerification.ts` already reads `patients_master`
+      correctly and was written for exactly this bug. It is wired into
+      `src/core/router.ts` and the standalone demo line only — **never into
+      the shared queue tool.**
+    - Caller-ID pre-context on the runtime goes through
+      `fetchAzulPrecontext` → the `sage_precontext` HTTP tool. That is Console
+      data (`si_persons`) but over the network and bounded at 1.5s, and every
+      failure is normalized to `null`, so the agent asks cold for several
+      different reasons. The RETURN VALUE is indistinguishable; the logs are
+      not — `callEyecareTool` writes `[AZUL-SCHED]` lines naming an unset key,
+      an HTTP status, or a fetch/abort, and 401/403 go through
+      `noteAuthFailure`. The one genuinely silent mode is a lookup that
+      succeeds after the 1.5s deadline: nothing logs that, the call just
+      proceeds without pre-context.
+
+    `lookup_patient` is not only verification — it also returns the offices
+    and providers a patient was actually seen at, which is how optical
+    resolves which office they mean. So the shape is mirror-first for
+    identity, then the schedule for history. Not one replacing the other.
+
 ---
 
 ## Line status — check this before saying anything about what is on or off
@@ -158,7 +204,15 @@ Nothing built over the weekend has reached a line that takes calls.
   turn kills every later turn of the call.
 - Supabase projects:
   - **Operations Hub** `pslzngjciiifowemrzza` — `call_logs`, `Schedule`, `ticket_agent_config`
-  - **Patient-Console** `kbbmywvasbsxnbblrhot` — `patients_master` (909,376 persons)
+  - **Patient-Console** `kbbmywvasbsxnbblrhot` — the source of truth
+    (standing instruction 14). `patients_master` (915,843 persons),
+    `si_appointment_facts` (908,995 — the schedule mirror), `si_providers`,
+    `si_locations`, `si_persons` (phone→patient, powers `sage_precontext`),
+    plus the scheduling-intelligence tables (`si_slot_rules`,
+    `si_eligibility_matrix`, `open_slots_snapshot`).
+  - The Hub keeps its OWN `Schedule` copy and several services still read it.
+    That is the appointment book, not the person base, and it is the reason
+    verification has been the hardest part of every line — see instruction 14.
   - `Schedule.PersonID` (uuid) ↔ `patients_master.person_id`; `uuid = text`
     needs an explicit `::uuid` cast.
 
