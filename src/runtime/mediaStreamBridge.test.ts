@@ -1452,6 +1452,30 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     expect(h.outcomes).toEqual(["dead_air"]);
   });
 
+  it("does not hang up on a caller who pauses after the agent's real reply", () => {
+    // The lock outlives the greeting's AUDIO — it waits on Twilio's echo. A
+    // caller who answers in that gap is answering a greeting that already
+    // finished, so the next completion is the agent's genuine reply to them.
+    // Treating that as an undelivered debt disconnects someone who simply
+    // pauses after hearing it. Codex, #240.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING); // greeting sent; echo not back yet
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onSpeechStopped(); // answered AFTER the greeting finished
+
+    // The agent's actual reply, delivered.
+    h.newResponse();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone("Of course, I can help with that.");
+
+    // Nothing is owed. A slow caller must not be cut off.
+    expect(h.timers.fire(30_000)).toBe(false);
+    expect(h.outcomes).toEqual([]);
+  });
+
   it("still barges in normally on a lane with no greeting", () => {
     // The lock must not leak into lanes that never take it.
     const h = makeBridge({ greeting: null });

@@ -955,7 +955,17 @@ export class VoiceCallBridge {
     // Under the greeting lock this arm does not survive: the greeting is
     // still playing, its deltas re-arm the clock as `"utterance"`, and its
     // completion clears it. Remember the debt so completion can re-arm it.
-    if (this.greetingLocked) this.responseOwedFromGreeting = true;
+    //
+    // Only while the greeting is STILL BEING DELIVERED — `greetingMarkName`
+    // is set at its completion, so a null one is the honest test for that.
+    // The lock outlives the audio, waiting on Twilio's echo, and a caller who
+    // answers in THAT window is answering a greeting already finished: the
+    // next completion is the agent's real reply to them. Arming a debt then
+    // would hang up on a caller who pauses after hearing it, as `dead_air`.
+    // Raised by Codex on #240.
+    if (this.greetingLocked && this.greetingMarkName === null) {
+      this.responseOwedFromGreeting = true;
+    }
   }
 
   // ── Tool dispatch ────────────────────────────────────────────────────

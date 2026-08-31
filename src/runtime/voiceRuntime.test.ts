@@ -15,7 +15,12 @@ import http from "node:http";
 import { z } from "zod";
 import twilio from "twilio";
 import WebSocket from "ws";
-import { mountVoiceRuntime, publicTransferDomain, type RuntimeTransport } from "./voiceRuntime";
+import {
+  mountVoiceRuntime,
+  publicTransferDomain,
+  chooseGreeting,
+  type RuntimeTransport,
+} from "./voiceRuntime";
 import { CallSessionRegistry } from "./sessionRegistry";
 import { transferDestinationStatus, transferUnavailableReason } from "./runtimeTransfer";
 import type { GrokServerEvent } from "./wireTypes";
@@ -1356,5 +1361,59 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
 
     expect(spokenText(h)).toEqual([GREETING]);
     ws.close();
+  });
+});
+
+describe("the database outranks the code, but not on the copy a lane must say", () => {
+  // `greetingResolver` makes agents.welcome_greeting the source of truth, and
+  // that is right — a boot that overwrote operator edits was a real incident.
+  // But an edit chooses WORDING; it does not license dropping the 911
+  // direction or the recording disclosure from the after-hours line.
+  //
+  // Live evidence, 2026-08-31: the no-ivr row carried 911 and the
+  // closed-office notice and NO recording disclosure, while the built-in
+  // greeting had all three. Codex, #240.
+  const LIVE_ROW =
+    "Thank you for calling Azul Vision. Our offices are currently closed. If this is a " +
+    "medical emergency, please hang up and dial 911. Otherwise, I'm happy to help — how " +
+    "may I assist you?";
+  const BUILT_IN =
+    "Thank you for calling Azul Vision, all of our offices are currently closed, you have " +
+    "reached the after hours call service. If this is a medical emergency, please dial 911. " +
+    "All calls are being recorded for quality assurance purposes, how can I help you?";
+
+  it("prefers the configured greeting whenever it is complete", () => {
+    expect(chooseGreeting("optical", "Configured optical line.", "Registry.")).toBe(
+      "Configured optical line.",
+    );
+    expect(chooseGreeting("no-ivr", BUILT_IN, "something else")).toBe(BUILT_IN);
+  });
+
+  it("falls back to the built-in greeting when the row has lost mandated copy", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(chooseGreeting("no-ivr", LIVE_ROW, BUILT_IN)).toBe(BUILT_IN);
+      // The row still needs a person to fix it, so the gap is loud.
+      expect(spy.mock.calls.flat().join(" ")).toContain("recording disclosure");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("keeps the configured one when neither carries it, and says so", () => {
+    // Swapping one deficient greeting for another helps nobody; the log is
+    // the only thing that can help here.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(chooseGreeting("no-ivr", LIVE_ROW, "Thanks for calling.")).toBe(LIVE_ROW);
+      expect(spy.mock.calls.flat().join(" ")).toContain("both missing");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("uses the registry string when nothing is configured", () => {
+    expect(chooseGreeting("optical", null, "Registry.")).toBe("Registry.");
+    expect(chooseGreeting("optical", null, null)).toBe("");
   });
 });

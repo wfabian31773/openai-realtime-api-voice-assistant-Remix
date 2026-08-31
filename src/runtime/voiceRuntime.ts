@@ -60,6 +60,7 @@ import {
 import { releaseCallHandoff } from "../tools/handoffBroker";
 import {
   greetingStyleFor,
+  missingMandatoryCopy,
   personaliseGreeting,
 } from "../services/greetingPersonalisation";
 
@@ -83,6 +84,43 @@ import {
  * failure that did not occur. Classification is the flag's job; the name
  * helper's job is the greeting (Codex review, PR #240).
  */
+/**
+ * The configured greeting, unless it is missing copy the lane must say.
+ *
+ * The database outranks the registry — that is `greetingResolver`'s whole
+ * purpose and an operator's edit has to be what the caller hears. But an
+ * edit is a choice of WORDING, not permission to drop the 911 direction or
+ * the recording disclosure from the after-hours line. When the configured
+ * text has lost one, the registry string is used and the gap is logged
+ * loudly, because the row still needs fixing and only a person can do that.
+ *
+ * The alternative — play it anyway, warn, and let a caller miss a
+ * disclosure — is worse in the only direction that matters. Codex, #240.
+ */
+export function chooseGreeting(
+  slug: string,
+  configured: string | null,
+  registry: string | null,
+): string {
+  if (!configured) return registry ?? "";
+  const missing = missingMandatoryCopy(slug, configured);
+  if (missing.length === 0) return configured;
+  if (missingMandatoryCopy(slug, registry).length > 0) {
+    // Neither has it. Say the configured one and make the gap impossible to
+    // miss: falling back would swap one deficient greeting for another.
+    console.error(
+      `[runtime] ${slug}: configured AND registry greetings are both missing ` +
+        `${missing.join(", ")} — FIX agents.welcome_greeting`,
+    );
+    return configured;
+  }
+  console.error(
+    `[runtime] ${slug}: configured greeting is missing ${missing.join(", ")} — ` +
+      `using the built-in greeting instead. FIX agents.welcome_greeting`,
+  );
+  return registry ?? configured;
+}
+
 function precontextMatched(precontext: unknown): boolean {
   if (!precontext || typeof precontext !== "object") return false;
   return (precontext as { matched?: unknown }).matched === true;
@@ -773,9 +811,10 @@ export function mountVoiceRuntime(
           // recognition happened is not a decision this makes.
           // The configured greeting outranks the registry string, exactly as
           // it does on the SIP path — an admin edit must be what the caller
-          // hears, not what the code was shipped with.
+          // hears, not what the code was shipped with. UNLESS it has dropped
+          // copy the lane is required to say; see `chooseGreeting`.
           greeting: personaliseGreeting(
-            configuredGreeting ?? lane.greeting ?? "",
+            chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
             recognisedFirstName(precontext),
             greetingStyleFor(entry.slug),
           ) || null,

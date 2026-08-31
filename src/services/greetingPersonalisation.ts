@@ -144,3 +144,52 @@ export function personaliseGreeting(
   }
   return `${stripTrailingQuestion(greeting)} Am I speaking with ${name}?`.trim();
 }
+
+/**
+ * Copy a lane's greeting must contain, whatever the database says.
+ *
+ * `agents.welcome_greeting` is the source of truth for how an agent opens,
+ * and deliberately so — a boot that overwrote operator edits was a real
+ * incident (`seedAgents.ts` still carries the note). But "the operator may
+ * word the greeting" is not the same as "any greeting is acceptable". The
+ * no-IVR line is the after-hours service: `noIvrAgent`'s own pre-context
+ * block demands the whole greeting before anything else, naming the incident
+ * where a caller "was never told to dial 911 in an emergency and was never
+ * told the call was recorded".
+ *
+ * This is not hypothetical drift. On 2026-08-31 the live `no-ivr` row read:
+ *
+ *   "Thank you for calling Azul Vision. Our offices are currently closed. If
+ *    this is a medical emergency, please hang up and dial 911. Otherwise,
+ *    I'm happy to help — how may I assist you?"
+ *
+ * — 911 and the closed-office notice present, the recording disclosure
+ * absent. So making the configured greeting outrank the registry string, as
+ * the SIP path does, would have taken that disclosure off the runtime too.
+ * Raised by Codex on #240.
+ *
+ * Deliberately narrow: only the lane that has legally-shaped copy, and only
+ * the two statements. Everything else is the operator's wording to choose.
+ */
+const MANDATORY_GREETING_COPY: Readonly<
+  Record<string, ReadonlyArray<{ label: string; present: (g: string) => boolean }>>
+> = {
+  'no-ivr': [
+    { label: '911 direction', present: (g) => /\b911\b/.test(g) },
+    { label: 'recording disclosure', present: (g) => /record(ed|ing)\b/i.test(g) },
+  ],
+};
+
+/**
+ * What a candidate greeting is missing for this lane, or [] when it is
+ * complete (and always [] for a lane with nothing mandatory).
+ */
+export function missingMandatoryCopy(
+  agentSlug: string | undefined,
+  greeting: string | null | undefined,
+): string[] {
+  const required = MANDATORY_GREETING_COPY[String(agentSlug ?? '')];
+  if (!required) return [];
+  const text = String(greeting ?? '');
+  return required.filter((r) => !r.present(text)).map((r) => r.label);
+}

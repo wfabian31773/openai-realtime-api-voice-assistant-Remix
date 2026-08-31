@@ -3,6 +3,7 @@ import {
   personaliseGreeting,
   stripTrailingQuestion,
   greetingStyleFor,
+  missingMandatoryCopy,
 } from './greetingPersonalisation';
 
 const SURGERY =
@@ -151,5 +152,48 @@ describe('the after-hours greeting reaches the caller whole', () => {
     // just said." Replace it and the purpose on record is the caller's "yes".
     const PCP = 'Thank you for calling Azul Vision PCP Support. How can I help you today?';
     expect(personaliseGreeting(PCP, 'Wayne', greetingStyleFor('pcp'))).toBe(PCP);
+  });
+});
+
+describe('copy a lane must say whatever the database holds', () => {
+  // Not hypothetical: on 2026-08-31 the LIVE no-ivr row carried 911 and the
+  // closed-office notice but no recording disclosure, while the code's
+  // version had all three. Letting the configured greeting outrank the
+  // registry — which is correct in general — would have taken the
+  // disclosure off the runtime too. Codex, #240.
+  const LIVE_ROW =
+    'Thank you for calling Azul Vision. Our offices are currently closed. If this is a ' +
+    "medical emergency, please hang up and dial 911. Otherwise, I'm happy to help — how " +
+    'may I assist you?';
+  const BUILT_IN =
+    'Thank you for calling Azul Vision, all of our offices are currently closed, you have ' +
+    'reached the after hours call service. If this is a medical emergency, please dial 911. ' +
+    'All calls are being recorded for quality assurance purposes, how can I help you?';
+
+  it('spots the disclosure missing from the greeting that is live today', () => {
+    expect(missingMandatoryCopy('no-ivr', LIVE_ROW)).toEqual(['recording disclosure']);
+  });
+
+  it('passes the built-in greeting, which carries both', () => {
+    expect(missingMandatoryCopy('no-ivr', BUILT_IN)).toEqual([]);
+  });
+
+  it('names both when a greeting has dropped both', () => {
+    expect(missingMandatoryCopy('no-ivr', 'Thanks for calling, how can I help?')).toEqual([
+      '911 direction',
+      'recording disclosure',
+    ]);
+  });
+
+  it('requires nothing of a lane with no mandated copy', () => {
+    // Deliberately narrow. Every other line's wording is the operator's.
+    expect(missingMandatoryCopy('optical', 'Thanks for calling!')).toEqual([]);
+    expect(missingMandatoryCopy('pcp', '')).toEqual([]);
+    expect(missingMandatoryCopy(undefined, '')).toEqual([]);
+  });
+
+  it('treats an empty or absent greeting as missing everything', () => {
+    expect(missingMandatoryCopy('no-ivr', '')).toHaveLength(2);
+    expect(missingMandatoryCopy('no-ivr', null)).toHaveLength(2);
   });
 });
