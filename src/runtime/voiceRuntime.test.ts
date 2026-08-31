@@ -1188,6 +1188,68 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     ws.close();
   });
 
+  it("says which pre-context outcome happened, so a cold open can be diagnosed", async () => {
+    // Every failure reaches the runtime as the same `null`, and an ordinary
+    // "no match" is indistinguishable from it in the return value. The
+    // runbook tells an operator to establish which before concluding
+    // anything, and without this line that step cannot be carried out —
+    // `si_persons` shows what data exists, not what this request returned
+    // (Codex, PR #239).
+    const cases: Array<[unknown, string]> = [
+      [{ matched: true, firstName: "Wayne" }, "recognised"],
+      [{ matched: false }, "no_match"],
+      [null, "unavailable"],
+    ];
+    let n = 50;
+    for (const [pc, expected] of cases) {
+      const logged: string[] = [];
+      const spy = vi.spyOn(console, "info").mockImplementation((m) => {
+        logged.push(String(m));
+      });
+      try {
+        const sid = `CA${n++}`;
+        const h = await harness({
+          laneSource: laneWithGreeting(),
+          fetchPrecontext: async () => pc,
+        });
+        const answered = await post(h, "/voice/optical", { CallSid: sid, From: "+1", To: "+2" });
+        const { ws } = await openStream(h, sid, tokenFrom(answered.text));
+        await settle(6);
+        const line = logged.find((l) => l.includes("pre-context"));
+        expect(line, `no pre-context line for ${expected}`).toBeDefined();
+        expect(line).toContain(expected);
+        expect(line).toContain(sid);
+        ws.close();
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  it("never puts the recognised caller's name in that line", async () => {
+    // The operator's test is whether the AGENT said the name, not whether a
+    // log did. Nothing here needs it, so it does not go in.
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "info").mockImplementation((m) => {
+      logged.push(String(m));
+    });
+    try {
+      const h = await harness({
+        laneSource: laneWithGreeting(),
+        fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      });
+      const answered = await post(h, "/voice/optical", { CallSid: "CA60", From: "+1", To: "+2" });
+      const { ws } = await openStream(h, "CA60", tokenFrom(answered.text));
+      await settle(6);
+      const line = logged.find((l) => l.includes("pre-context"));
+      expect(line).toBeDefined();
+      expect(line).not.toContain("Wayne");
+      ws.close();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("plays the greeting an administrator configured, not the shipped one", async () => {
     // `agents.welcome_greeting` is the source of truth — it is what the admin
     // UI and the Observatory display, and what the SIP path resolves. Playing

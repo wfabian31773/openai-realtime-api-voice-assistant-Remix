@@ -550,6 +550,29 @@ export function mountVoiceRuntime(
               )
             : Promise.resolve(null),
         ]);
+        // WHICH of the three pre-context outcomes happened. Without this the
+        // runbook's own diagnosis step is not performable: every failure —
+        // an ordinary "no match", a service error, a lookup that beat no
+        // deadline — arrives here as the same `null`, and the runbook told
+        // an operator to establish which one before concluding anything.
+        // `si_persons` shows what data exists, not what this request
+        // returned. So the distinction has to be logged where it is known,
+        // and this is the only place that knows (Codex review, PR #239).
+        //
+        // No name, no number: `recognised` is the fact the operator needs,
+        // and the caller's own line already carries the identity.
+        // `unavailable` is null — the lookup failed or missed the 1.5s
+        // deadline, and callEyecareTool's own [AZUL-SCHED] lines separate
+        // those two. `no_match` is a lookup that ran and vouched for nobody,
+        // which is ORDINARY and the commonest reason an opening is cold.
+        console.info(
+          `[runtime] pre-context ${entry.slug} ${entry.callSid}: ` +
+            (precontext === null
+              ? "unavailable (failed or past the 1.5s deadline — see [AZUL-SCHED])"
+              : recognisedFirstName(precontext)
+                ? "recognised"
+                : "no_match (ran, vouched for nobody — a cold open is correct)"),
+        );
         const lane = await resolveLane(
           entry.slug,
           {
