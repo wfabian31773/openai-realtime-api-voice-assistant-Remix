@@ -1519,6 +1519,134 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     expect(h.timers.fire(30_000)).toBe(false);
   });
 
+  it("keeps the opening in order when a caller talks over the greeting", () => {
+    // The greeting is held in awaitingMark until Twilio echoes, but a caller
+    // completion used to write straight through — so the record read
+    // CALLER-then-AGENT for an exchange that happened the other way round.
+    // Worse, agentLine() closes the open caller line, so the NEXT cumulative
+    // re-emission of the same caller item appended a duplicate instead of
+    // replacing it. Barge-in used to prevent both by committing the agent's
+    // partial line the moment the caller spoke; the lock removed that.
+    // Codex, #240, after merge.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("hello", "item-1");
+    // Cumulative re-emission of the SAME item — must refine, not duplicate.
+    h.handlers().onCallerTranscript("hello are you there", "item-1");
+
+    h.handlers().onAudioDone(GREETING);
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    const lines = h.bridge.getTranscript().split("\n");
+    expect(lines).toEqual([`AGENT: ${GREETING}`, "CALLER: hello are you there"]);
+  });
+
+  it("keeps two separate things the caller said over the greeting", () => {
+    // Buffering the completions dropped the VAD boundaries between them:
+    // callerBoundary() only marks an OPEN line, so against a log that is
+    // still empty it is a no-op. Replayed without it, a second utterance
+    // that happens to be a PREFIX of the first scores as `keep` — the
+    // shorter re-emission of one turn — and is discarded. The boundary is
+    // the only thing separating that from a genuinely new utterance.
+    // Codex, #241.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("yes this is Wayne"); // no itemId
+    h.handlers().onSpeechStarted(); // a NEW utterance, not a refinement
+    h.handlers().onCallerTranscript("yes");
+
+    h.handlers().onAudioDone(GREETING);
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      `AGENT: ${GREETING}`,
+      "CALLER: yes this is Wayne",
+      "CALLER: yes",
+    ]);
+  });
+
+  it("does not lose what a caller said before hanging up on the greeting", () => {
+    // Held lines are committed at teardown or they never reach the record.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAgentTranscriptDelta?.(GREETING);
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onCallerTranscript("wrong number sorry", "item-1");
+
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+
+    // Asserted on the WHOLE transcript, not with toContain. The first version
+    // of this test used toContain and so could not see order at all — it
+    // passed while teardown was flushing these lines in FRONT of the greeting
+    // still playing, reproducing the reversal in every hangup record from
+    // that window. Codex, #241.
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      `AGENT: ${GREETING} [interrupted]`,
+      "CALLER: wrong number sorry",
+    ]);
+  });
+
+  it("leaves the caller first when they speak before the greeting plays", () => {
+    // The lock is taken at the handshake, but the greeting does not start
+    // playing until the provider generates it. A caller who speaks in THAT
+    // window really did speak first — nothing had reached them. Holding
+    // their line and letting the mark echo commit the greeting ahead of it
+    // manufactures the same reversal this buffering exists to prevent,
+    // pointing the other way.
+    //
+    // Note the absent onAudioDelta before the caller speaks: every other
+    // ordering test here sends one, which is exactly why none of them could
+    // see this. Codex, #241.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("hello? anyone there?", "item-1");
+
+    // NOW the greeting starts and finishes.
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: hello? anyone there?",
+      `AGENT: ${GREETING}`,
+    ]);
+  });
+
+  it("keeps a caller first when they start before the greeting and finish after", () => {
+    // speech_started lands before the first greeting delta; the ASR
+    // completion lands after it. Recomputing the hold at completion flips
+    // the SAME utterance from caller-first to held, and the mark echo then
+    // writes the greeting ahead of someone who demonstrably spoke first.
+    // The previous test called the completion before audio started, so it
+    // could not see this transition. Codex, #241.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+
+    h.handlers().onSpeechStarted(); // caller begins — nothing has played yet
+    h.handlers().onAudioDelta("ZmFrZQ=="); // greeting starts mid-utterance
+    h.handlers().onCallerTranscript("hello? anyone there?", "item-1"); // completes after
+
+    h.handlers().onAudioDone(GREETING);
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    expect(h.bridge.getTranscript().split("\n")).toEqual([
+      "CALLER: hello? anyone there?",
+      `AGENT: ${GREETING}`,
+    ]);
+  });
+
   it("still barges in normally on a lane with no greeting", () => {
     // The lock must not leak into lanes that never take it.
     const h = makeBridge({ greeting: null });
