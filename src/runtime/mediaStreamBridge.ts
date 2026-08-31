@@ -37,12 +37,25 @@
  * fact: on this runtime the agent's words are written by the MODEL, not by
  * a renderer that knew them in advance.
  *
- *   1. AGENT TEXT COMES OFF THE WIRE. The scheduling bridge held each
- *      utterance's text from the moment it was queued. Here the only source
- *      is the transcript stream, so the bridge accumulates
- *      `response.output_audio_transcript.delta` and commits on
+ *   1. AGENT TEXT COMES OFF THE WIRE — EXCEPT THE GREETING. The scheduling
+ *      bridge held each utterance's text from the moment it was queued.
+ *      Here the only source is the transcript stream, so the bridge
+ *      accumulates `response.output_audio_transcript.delta` and commits on
  *      `...done` — which also means a line cut off mid-sentence still has
  *      the words the caller actually heard, recorded as "[interrupted]".
+ *
+ *      The greeting is `deps.greeting`, spoken verbatim: its words are known
+ *      at the handshake, so its line waits for nothing and is written the
+ *      moment its first audio goes out. That is not an optimisation. Every
+ *      other line is committed on its Twilio mark echo, and for the greeting
+ *      that echo lands long after the caller events the line has to be
+ *      ordered against — while the lock below means it cannot borrow
+ *      barge-in's habit of committing early either. Deferring a line whose
+ *      text was never in doubt produced five distinct ordering defects in the
+ *      opening exchange (PR #241), each fix deciding "before or after" at a
+ *      different point in the event stream and exposing the next seam.
+ *      Writing it where its audio began produces none, because there is
+ *      nothing left to order.
  *
  *   2. STALE UTTERANCES ARE IDENTIFIED BY RESPONSE EPOCH, not by a queue
  *      sequence assigned at render time. The wire is ordered and responses
@@ -394,62 +407,27 @@ export class VoiceCallBridge {
    */
   private responseOwedFromGreeting = false;
   /**
-   * Caller transcript completions that arrived while the greeting was
-   * locked and still uncommitted.
+   * The greeting's scripted text, from the handshake until the utterance
+   * carrying it either starts playing or ends without ever doing so.
    *
-   * The greeting's line is held in `awaitingMark` until Twilio echoes, but a
-   * caller completion writes straight through — so a caller who talks over
-   * the greeting lands in the record BEFORE it, reversing the opening. Worse,
-   * `agentLine()` closes the open caller line, so the next cumulative
-   * re-emission of that same caller item appends a duplicate instead of
-   * replacing it: the caller's words appear twice, once on each side of the
-   * greeting.
-   *
-   * Barge-in used to prevent this by committing the agent's partial line the
-   * instant the caller spoke. The lock removed that, so the ordering has to
-   * be preserved here instead. Raised by Codex on #240, after merge.
-   *
-   * VAD BOUNDARIES are buffered with the lines, not applied as they arrive.
-   * `callerBoundary()` only marks an OPEN line, so against a log that has
-   * nothing in it yet it is a no-op and the boundary is simply lost. Replayed
-   * without it, a second utterance that happens to be a prefix of the first
-   * ("yes this is Wayne", then "yes") scores as `keep` — the shorter
-   * re-emission of one turn — and is dropped, when it was a separate thing
-   * the caller said. The boundary is what tells those two cases apart, so it
-   * has to travel with them. Raised by Codex on #241.
+   * `deps.greeting` is spoken verbatim, so unlike every other line on this
+   * runtime its words are known before the model produces them — which is
+   * what lets its transcript line be written at playback instead of at its
+   * mark echo (module doc). Cleared when that line is written, and dropped
+   * at the first completion otherwise: a greeting whose audio never reached
+   * the caller gets no line, the rule every other utterance follows.
    */
+  private greetingPending: string | null = null;
   /**
-   * Whether the caller's words must wait for the greeting's line.
+   * The greeting's line once written: which utterance it belongs to, where it
+   * sits in the record, and the exact words it claims.
    *
-   * The lock is taken at the handshake, but the greeting does not START
-   * PLAYING until the provider generates it. A caller who speaks in that
-   * window genuinely spoke FIRST — nothing had reached them yet — so holding
-   * their line and letting the mark echo commit the greeting ahead of it
-   * would manufacture the very reversal this buffering exists to prevent,
-   * just pointing the other way. `assistantAudioPlaying` is precisely "bytes
-   * have gone to Twilio", which is the question being asked. Raised by Codex
-   * on #241.
+   * Kept because that line is committed BEFORE its playback is proved. If the
+   * audio is then cut — a hangup mid-greeting, a guardrail, a barge-in once
+   * the lock has lapsed — the record must say the caller heard only part of
+   * it, and the only honest way to say so is to amend the line already there.
    */
-  private greetingHoldsTranscript(): boolean {
-    return this.greetingLocked && this.assistantAudioPlaying;
-  }
-
-  /**
-   * The hold decision for the caller's CURRENT utterance, made once when they
-   * start speaking and carried to its completion.
-   *
-   * Recomputing it at completion re-decides the same utterance on later
-   * state: a caller who starts before the greeting plays but whose ASR
-   * completion lands after the first delta flips from caller-first to held,
-   * and the mark echo then writes the greeting ahead of someone who
-   * demonstrably spoke first. `speech_started` is when the caller began, so
-   * it is when the question is answered. Raised by Codex on #241.
-   */
-  private callerUtteranceHeld: boolean | null = null;
-
-  private greetingHeldCallerLines: Array<
-    { kind: "line"; text: string; itemId?: string } | { kind: "boundary" }
-  > = [];
+  private greetingLine: { seq: number; index: number; text: string } | null = null;
   /** The most recent mark sent, and whether media went out AFTER it: an
    * OLDER mark's echo must not clear the playback flag, or the next
    * barge-in early-returns and the caller is talked over. */
@@ -459,8 +437,19 @@ export class VoiceCallBridge {
    * confirmed PLAYING. Marks are the only playback ground truth: committing
    * at completion claims full delivery for audio still buffered when a
    * barge-in or hangup cuts it. Committed on echo; downgraded to
-   * "[interrupted]" when the window is cut. */
-  private readonly awaitingMark: Array<{ name: string; text: string }> = [];
+   * "[interrupted]" when the window is cut.
+   *
+   * The greeting rides here too — the mark still gates the lock's release,
+   * the interruption accounting and the hangup path — but its line is
+   * already in the record, so its entry carries that line's index and the
+   * echo writes nothing. Only the transcript write moved. */
+  private readonly awaitingMark: Array<{
+    name: string;
+    text: string;
+    /** Set when this line was written at playback start. The echo must not
+     * write it again, and a cut amends it rather than appending. */
+    committedIndex?: number;
+  }> = [];
 
   private finalMarkName: string | null = null;
   private finalFallbackTimer: unknown = null;
@@ -509,14 +498,11 @@ export class VoiceCallBridge {
       onResponseDone: () => this.handleResponseDone(),
       onCallerTranscript: (text, itemId) => {
         if (this.ended) return;
-        // The clock is stamped either way — the caller DID speak, and dead-air
-        // timing must not wait on a mark echo.
         this.noteTranscript("caller");
-        // The decision made when they STARTED, not remade now.
-        if (this.callerUtteranceHeld ?? this.greetingHoldsTranscript()) {
-          this.greetingHeldCallerLines.push({ kind: "line", text, itemId });
-          return;
-        }
+        // Straight through, greeting or no greeting. Where the greeting's own
+        // line sits was settled when its audio started, so there is no
+        // "before or after it" left to decide here — which is the point:
+        // deciding it here, and at four other points, was PR #241.
         this.transcriptLog.callerCompleted(text, itemId);
       },
       onError: (err) => this.handleSessionFailure(err),
@@ -584,7 +570,10 @@ export class VoiceCallBridge {
     if (this.awaitingMark.some((e) => e.name === name)) {
       while (this.awaitingMark.length > 0) {
         const head = this.awaitingMark.shift()!;
-        this.transcriptLog.agentLine(head.text);
+        // The greeting's line went in when its audio started; this echo only
+        // confirms what it already claimed. Writing it again would record the
+        // opening twice.
+        if (head.committedIndex === undefined) this.transcriptLog.agentLine(head.text);
         if (head.name === name) break;
       }
     }
@@ -659,6 +648,9 @@ export class VoiceCallBridge {
       // operator asked for the same thing in the same words — the greeting
       // should not be barge-able (2026-08-31).
       this.greetingLocked = true;
+      // Its words are known NOW, so the record does not have to wait for
+      // them — see `greetingPending` and the module doc.
+      this.greetingPending = this.deps.greeting;
       this.session.speak(this.deps.greeting, { interruptible: false });
     } else {
       // No per-response instructions: `response.instructions` OVERRIDES the
@@ -680,6 +672,9 @@ export class VoiceCallBridge {
       // a completion event). Its audio is finished either way; drop it
       // rather than attributing its words to this response.
       this.current = null;
+      // And with it a greeting that never got as far as audio: only the
+      // utterance that was carrying it may write its line.
+      this.greetingPending = null;
     }
     if (!this.current) {
       this.utteranceSeq += 1;
@@ -758,17 +753,14 @@ export class VoiceCallBridge {
       return;
     }
     console.error(`[bridge] GUARDRAIL TRIPPED, cutting the line: ${guardrail.name}`);
-    const heardPartial = this.awaitingMark.shift();
+    this.recordCutLine(`[cut by guardrail: ${guardrail.name}]`);
     this.awaitingMark.length = 0;
-    if (heardPartial) {
-      this.transcriptLog.agentLine(`${heardPartial.text} [cut by guardrail: ${guardrail.name}]`);
-    } else if (this.current && this.current.text.trim()) {
-      this.transcriptLog.agentLine(
-        `${this.current.text.trim()} [cut by guardrail: ${guardrail.name}]`,
-      );
-    }
     this.cancelledEpoch = this.session.getResponseEpoch();
     this.current = null;
+    // The cut response is abandoned. A greeting stopped before it reached
+    // audio has no line, and must not claim the replacement turn's first
+    // delta as its own.
+    this.greetingPending = null;
     // A goodbye that violated a safety rule did not finish either: the armed
     // hangup is revoked exactly as a barge-in revokes it, and the agent must
     // re-request termination through its own guards.
@@ -802,6 +794,17 @@ export class VoiceCallBridge {
     // prevent.
     if (!current) return;
     current.bytes += Buffer.from(base64Audio, "base64").length;
+    // PLAYBACK BEGINS HERE — and for the greeting that is when its line is
+    // written. Its words are scripted, so none of them is waiting on the
+    // wire, and this is the one moment that sits in its true place among the
+    // caller's events. Every other line still waits for its mark echo,
+    // because for every other line the mark is the only proof the words were
+    // spoken at all.
+    if (this.greetingPending !== null) {
+      const text = this.greetingPending;
+      this.greetingPending = null;
+      this.greetingLine = { seq: current.seq, index: this.transcriptLog.agentLine(text), text };
+    }
     this.assistantAudioPlaying = true;
     this.mediaSinceLastMark = true;
     // Audio is flowing — the stall clock restarts from every delta, and
@@ -851,6 +854,13 @@ export class VoiceCallBridge {
       return;
     }
     this.noteTranscript("agent");
+    // A greeting whose response completed without ever sending audio never
+    // reached the caller, so it gets no line — the rule every utterance
+    // follows — and it must not survive to claim a LATER utterance's first
+    // delta as its own. Before the `!done` return, because a completion that
+    // opened no utterance at all has to drop it too. (If the greeting did
+    // play, its first delta already cleared this when it wrote the line.)
+    this.greetingPending = null;
     const done = this.current;
     this.current = null;
     if (!done) return;
@@ -893,7 +903,22 @@ export class VoiceCallBridge {
         this.releaseGreetingLock();
       }, Math.ceil(done.bytes / MULAW_BYTES_PER_MS) + FINAL_MARK_GRACE_MS);
     }
-    if (text) this.awaitingMark.push({ name: markName, text });
+    // The greeting's line is already in the record. Its entry still rides in
+    // `awaitingMark` — the mark gates the lock, the interruption accounting
+    // and the hangup path — but it carries that line's index, so the echo
+    // writes nothing and a cut amends instead of appending. Its own scripted
+    // words, not the wire's transcript: the committed line already says them,
+    // and an amendment has to agree with what it is amending.
+    const greetingDone = this.greetingLine?.seq === done.seq ? this.greetingLine : null;
+    if (greetingDone) {
+      this.awaitingMark.push({
+        name: markName,
+        text: greetingDone.text,
+        committedIndex: greetingDone.index,
+      });
+    } else if (text) {
+      this.awaitingMark.push({ name: markName, text });
+    }
     this.latestMarkName = markName;
     this.mediaSinceLastMark = false;
     this.sendFrame({
@@ -956,7 +981,8 @@ export class VoiceCallBridge {
     this.finalFallbackTimer = this.setTimer(() => this.teardown("agent_ended"), fallbackMs);
   }
 
-  /** One way out of the lock, whether the echo arrived or the wait expired. */
+  /** One way out of the lock, whether the echo arrived or the wait expired.
+   * Barge-in is all it governs: the transcript has nothing waiting on it. */
   private releaseGreetingLock(): void {
     this.greetingLocked = false;
     this.greetingMarkName = null;
@@ -964,69 +990,91 @@ export class VoiceCallBridge {
       this.clearTimer(this.greetingLockTimer);
       this.greetingLockTimer = null;
     }
-    // Whatever the caller said over the greeting, in the order they said it.
-    // On the echo path the greeting's own line is already committed by the
-    // loop above, so these land after it and the opening reads correctly.
-    // On the timeout path the greeting may still be held — the order can
-    // still be wrong there, but that is a degraded path, and losing the
-    // caller's words outright would be worse than misordering them.
-    const held = this.greetingHeldCallerLines;
-    this.greetingHeldCallerLines = [];
-    // Past the greeting, every line writes through; no decision to carry.
-    this.callerUtteranceHeld = null;
-    for (const event of held) {
-      if (event.kind === "boundary") this.transcriptLog.callerBoundary();
-      else this.transcriptLog.callerCompleted(event.text, event.itemId);
+  }
+
+  /**
+   * Record the words of a line the call cut short — by a barge-in, by a
+   * guardrail, or by ending underneath it.
+   *
+   * Twilio plays serially, so the line that was actually playing is the
+   * OLDEST un-echoed finished one if there is any; everything queued behind
+   * it never reached the caller and is dropped. Failing that, it is the line
+   * still streaming.
+   *
+   * The GREETING is the case that needs care, because its line is already in
+   * the record — written when its audio started. Appending here would report
+   * the opening twice, whole and then cut, so its committed line is AMENDED
+   * to carry the suffix. That is also what leaves a caller who hangs up
+   * mid-greeting a record saying the greeting was cut short, rather than one
+   * claiming they heard all of it.
+   *
+   * Returns whether anything was recorded, so callers stamp the transcript
+   * clock only when words actually reached it.
+   */
+  private recordCutLine(suffix: string): boolean {
+    const heardPartial = this.awaitingMark.shift();
+    if (heardPartial) {
+      if (heardPartial.committedIndex !== undefined) {
+        this.transcriptLog.amendAgentLine(
+          heardPartial.committedIndex,
+          `${heardPartial.text} ${suffix}`,
+        );
+      } else {
+        this.transcriptLog.agentLine(`${heardPartial.text} ${suffix}`);
+      }
+      return true;
     }
+    const greeting = this.greetingLine;
+    if (greeting !== null && this.current?.seq === greeting.seq) {
+      // Still streaming when it was cut. Amended with its own scripted words
+      // rather than the partial deltas — the line already says them.
+      this.transcriptLog.amendAgentLine(greeting.index, `${greeting.text} ${suffix}`);
+      return true;
+    }
+    if (this.current && this.current.text.trim()) {
+      this.transcriptLog.agentLine(`${this.current.text.trim()} ${suffix}`);
+      return true;
+    }
+    return false;
   }
 
   private handleCallerSpeechStarted(): void {
     if (this.ended) return;
     // The caller is talking: not dead air, and any open caller line in the
-    // record crossed a speech boundary (transcript correlation only).
+    // record crossed a speech boundary (transcript correlation only). Applied
+    // HERE, as it arrives. Buffering these alongside the caller lines they
+    // separate and replaying them later is what collapsed two utterances into
+    // one, because `callerBoundary()` only marks a line that is already open
+    // and a replay puts them back in the wrong order (PR #241).
     this.clearDeadAir();
-    // Answered once per utterance, here, and read again at its completion.
-    if (this.callerUtteranceHeld === null) {
-      this.callerUtteranceHeld = this.greetingHoldsTranscript();
-    }
-    if (this.callerUtteranceHeld) {
-      // Buffered IN SEQUENCE with the completions it separates — applying it
-      // now would mark a log that is still empty, which is nothing at all.
-      this.greetingHeldCallerLines.push({ kind: "boundary" });
-      return;
-    }
     this.transcriptLog.callerBoundary();
-    // Reaching here while the greeting is still locked means it has not
-    // started playing, and `assistantAudioPlaying` below already returns for
-    // that — a separate guard would be a branch no test could distinguish.
-    // The greeting is not barge-able. Their audio keeps arriving and is
-    // still transcribed — nothing about the caller is dropped, and the
-    // provider will answer them once the line finishes — but the cancel
-    // and the `clear` below do not run, so the rest of the greeting plays.
-    // Not counted as an interruption either: nothing was interrupted.
-    if (!this.assistantAudioPlaying) return;
+    // The greeting is not barge-able — that is what the lock is for. Their
+    // audio keeps arriving and is still transcribed, so nothing about the
+    // caller is dropped and the provider answers them once the line
+    // finishes; but the cancel and the `clear` below do not run, and the rest
+    // of the opening plays. Not counted as an interruption either: nothing
+    // was interrupted.
+    //
+    // The lock is tested EXPLICITLY. It used to be implied by a buffering
+    // branch that returned here first, and that branch answered its question
+    // once per utterance and never re-answered it — so a caller who spoke
+    // before the greeting started and again over it arrived with the answer
+    // already "no" and fell straight through to the barge-in below, cutting
+    // the very line the lock exists to protect.
+    if (this.greetingLocked || !this.assistantAudioPlaying) return;
     this.interruptions += 1;
     // BARGE-IN: both signals, always together (see module doc). The line
     // that was PLAYING was partially heard, and the record says so —
-    // Twilio plays serially, so it is the OLDEST un-echoed finished line
-    // if one exists (its audio was still buffered when the clear discarded
-    // it), else the line currently streaming. Everything behind it never
-    // reached the caller and is dropped.
-    const heardPartial = this.awaitingMark.shift();
+    // `recordCutLine` decides which line that was.
+    //
+    // Committing words the caller heard stamps the transcript clock: a
+    // cancelled response may never emit its transcript.done, so this is the
+    // interrupted line's ONLY chance to move `lastTranscriptAtMs`. Without it
+    // the tail is measured from an older line — or, for a greeting
+    // interrupted before anything completed, not at all (Codex review,
+    // PR #227 round 13).
+    if (this.recordCutLine("[interrupted]")) this.noteTranscript("agent");
     this.awaitingMark.length = 0;
-    if (heardPartial) {
-      this.transcriptLog.agentLine(`${heardPartial.text} [interrupted]`);
-      // Committing words the caller heard stamps the transcript clock: a
-      // cancelled response may never emit its transcript.done, so this is
-      // the interrupted line's ONLY chance to move `lastTranscriptAtMs`.
-      // Without it the tail is measured from an older line — or, for a
-      // greeting interrupted before anything completed, not at all
-      // (Codex review, PR #227 round 13).
-      this.noteTranscript("agent");
-    } else if (this.current && this.current.text.trim()) {
-      this.transcriptLog.agentLine(`${this.current.text.trim()} [interrupted]`);
-      this.noteTranscript("agent");
-    }
     // Everything this response emits from here is stale.
     this.cancelledEpoch = this.session.getResponseEpoch();
     this.current = null;
@@ -1305,30 +1353,20 @@ export class VoiceCallBridge {
 
     // A line still mid-delivery when the call ends was partially heard —
     // record it as interrupted; lines that never produced audio the caller
-    // could hear are dropped. The oldest un-echoed finished line is the
-    // one that was playing, if any.
+    // could hear are dropped.
     if (this.assistantAudioPlaying) {
-      const heardPartial = this.awaitingMark.shift();
-      if (heardPartial) {
-        this.transcriptLog.agentLine(`${heardPartial.text} [interrupted]`);
-        // Same invariant as the barge-in commit: audio was playing right up
-        // to the end of the call, so the tail from these words is ~zero —
-        // truthful, where measuring from an older line overstates dead air
-        // and a caller who hung up mid-greeting got no tail at all.
-        this.noteTranscript("agent");
-      } else if (this.current && this.current.text.trim()) {
-        this.transcriptLog.agentLine(`${this.current.text.trim()} [interrupted]`);
-        this.noteTranscript("agent");
-      }
+      // Same invariant as the barge-in commit: audio was playing right up to
+      // the end of the call, so the tail from these words is ~zero —
+      // truthful, where measuring from an older line overstates dead air and
+      // a caller who hung up mid-greeting got no tail at all.
+      if (this.recordCutLine("[interrupted]")) this.noteTranscript("agent");
     }
     this.awaitingMark.length = 0;
-    // A caller who hung up over the greeting still said something, and it is
-    // committed here or lost — but AFTER the block above, never before it.
-    // Flushing at the top of teardown put those lines in front of the
-    // greeting that was still playing, which is the reversal this whole
-    // change exists to remove, reproduced in every hangup and
-    // provider-failure record from that window. Raised by Codex on #241.
-    if (this.greetingHeldCallerLines.length > 0) this.releaseGreetingLock();
+    // Nothing to flush. The caller's lines were written as they arrived and
+    // the greeting's was written when it started playing, so the record is
+    // already in order. Teardown used to replay a buffer of held caller
+    // lines here, and placing that replay correctly against a greeting still
+    // in flight took three attempts (PR #241).
     this.transcriptLog.close();
 
     // Record the outcome BEFORE closing the socket: closing is what
