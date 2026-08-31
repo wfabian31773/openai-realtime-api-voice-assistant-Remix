@@ -1210,7 +1210,7 @@ function logHistoryItem(item: RealtimeItem, callId?: string): void {
  */
 async function fileUrgentHandoffFallbackTicket(
   openAiCallId: string,
-  escalationDetails: { reason?: string; symptomsSummary?: string; patientFirstName?: string; patientLastName?: string } | undefined,
+  escalationDetails: { reason?: string; symptomsSummary?: string; patientFirstName?: string; patientLastName?: string; callbackNumber?: string } | undefined,
   callerID: string | null | undefined,
   ctx: { why: string; dialTarget?: string },
 ): Promise<boolean> {
@@ -1222,7 +1222,15 @@ async function fileUrgentHandoffFallbackTicket(
     const urgentMapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // generic urgent
     const patientFirst = escalationDetails?.patientFirstName || 'Unknown';
     const patientLast = escalationDetails?.patientLastName || 'Caller';
-    const rawPhone = callerID || '';
+    // The number to CALL BACK is the one the patient gave, when they gave one.
+    // It is frequently not the phone they are calling from — a spouse's mobile,
+    // a nurse's station, a caller on a landline who wants their cell — and
+    // filing caller ID as `patientPhone` puts the wrong number in front of
+    // whoever works the ticket. That matters most on exactly the paths this
+    // helper serves: the caller has been promised a call back (standing
+    // instruction 12; Codex review, PR #238). `callData.callerPhone` below
+    // keeps the true inbound number, so nothing loses the provenance.
+    const rawPhone = escalationDetails?.callbackNumber || callerID || '';
     const digits = rawPhone.replace(/\D/g, '');
     const formattedPhone = digits.length === 10
       ? `+1${digits}`
@@ -1286,14 +1294,21 @@ function sendUrgentTransferSms(opts: {
   /**
    * What this alert is actually announcing.
    *
-   * 'transfer' (default) — a leg is being dialled; the operator's phone is
-   * about to ring and they should pick up.
-   * 'callback' — nothing was dialled and nothing will be. The operator has to
+   * 'transfer' (default) — a leg is being dialled TO THIS RECIPIENT; their
+   * phone is about to ring and they should pick up.
+   * 'callback' — nothing was dialled and nothing will be. The recipient has to
    * call out. Sending the 'transfer' wording here told them to expect an
    * inbound call that was never coming, so they would wait instead of dialling
    * the urgent patient (Codex review, PR #238).
+   * 'routed' — the call is ringing SOMEWHERE ELSE, at the office queue the
+   * rules engine chose. The recipient is being kept informed, not summoned:
+   * during business hours the office takes it, and telling the on-call phone
+   * "connecting patient to you now" left it waiting on a call ringing in
+   * another building (Codex review, PR #238).
    */
-  kind?: 'transfer' | 'callback';
+  kind?: 'transfer' | 'callback' | 'routed';
+  /** For 'routed': where it actually went, e.g. "Glendale Front". */
+  routedTo?: string;
 }): void {
   const to = envConfig.twilio.urgentNotificationNumber;
   const from = envConfig.twilio.phoneNumber;
@@ -1308,9 +1323,12 @@ function sendUrgentTransferSms(opts: {
       const d = opts.escalationDetails;
 
       const callbackOnly = opts.kind === 'callback';
+      const routedElsewhere = opts.kind === 'routed';
       let smsBody = callbackOnly
         ? `📵 NO TRANSFER — CALL THIS PATIENT - ${callTime}\n`
-        : `📞 INCOMING TRANSFER - ${callTime}\n`;
+        : routedElsewhere
+          ? `🏥 URGENT — ROUTED TO OFFICE - ${callTime}\n`
+          : `📞 INCOMING TRANSFER - ${callTime}\n`;
       smsBody += `From: ${opts.callerNumber || 'Unknown'}\n`;
       if (opts.note) {
         smsBody += `\n⚠️ ${opts.note}\n`;
@@ -1329,7 +1347,10 @@ function sendUrgentTransferSms(opts: {
       }
       smsBody += callbackOnly
         ? `\n📱 Nobody is being connected to you. Please call this patient back now.`
-        : `\n📱 Connecting patient to you now...`;
+        : routedElsewhere
+          ? `\n📱 Ringing ${opts.routedTo || 'the office queue'} — not your phone. ` +
+            `For your awareness; no action needed unless they do not pick it up.`
+          : `\n📱 Connecting patient to you now...`;
 
       await client.messages.create({ body: smsBody, from, to });
       console.log('[HANDOFF] ✓ SMS notification sent to', to);
@@ -1425,6 +1446,12 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
   // routing one into an office front desk would be wrong. So the office queue
   // only ever replaces the CLINICAL destination.
   let dialSource = 'policy';
+  // Hoisted out of the block below so the heads-up SMS can tell the on-call
+  // phone which of two different things is happening. Without it, an office
+  // routed call sent the same "connecting patient to you now" as a call that
+  // really was ringing that phone (Codex review, PR #238).
+  let urgentSource: string | null = null;
+  let urgentQueueLabel: string | undefined;
   if (policy.policy !== 'pcp') {
     const { resolveUrgentTransferTarget } = await import('./services/urgentTransfer');
     const target = await resolveUrgentTransferTarget({
@@ -1438,6 +1465,8 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     if (target?.number) {
       handoffDestination = target.number;
       dialSource = target.source + (target.queueLabel ? ` — ${target.queueLabel}` : '');
+      urgentSource = target.source;
+      urgentQueueLabel = target.queueLabel;
     }
   }
   console.log(`[HANDOFF] Dialing ${handoffDestination} (${dialSource})`);
@@ -1466,9 +1495,19 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       : [];
     
     // STEP 1: Send SMS notification immediately (fire and forget)
-    // Provider gets heads-up while we're dialing them
+    // Provider gets heads-up while we're dialing them — but only the recipient
+    // whose phone is ACTUALLY about to ring is told to pick up. In business
+    // hours a no-IVR escalation goes to the office queue the rules engine
+    // chose, and this alert still lands on the on-call mobile; sending the
+    // "connecting patient to you now" wording there left it waiting on a call
+    // ringing in another building (Codex review, PR #238).
     if (policy.policy !== 'pcp') {
-      sendUrgentTransferSms({ callerNumber: callerID, escalationDetails });
+      const routedToOffice = urgentSource === 'office_queue';
+      sendUrgentTransferSms({
+        callerNumber: callerID,
+        escalationDetails,
+        ...(routedToOffice ? { kind: 'routed' as const, routedTo: urgentQueueLabel } : {}),
+      });
     }
     
     let sequentialPcpAnswered = false;
