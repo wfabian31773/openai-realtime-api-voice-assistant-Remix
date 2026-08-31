@@ -40,6 +40,7 @@ import { director, directorEnabledFor, type DirectorAction } from './director/di
 import { getEnvironmentConfig, resolveAppDomain } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 import {
+  preferredCallbackNumber,
   resolveClinicalTransferNumber,
   resolveHandoffDestination,
   resolvePcpDialSequence,
@@ -1222,15 +1223,18 @@ async function fileUrgentHandoffFallbackTicket(
     const urgentMapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // generic urgent
     const patientFirst = escalationDetails?.patientFirstName || 'Unknown';
     const patientLast = escalationDetails?.patientLastName || 'Caller';
-    // The number to CALL BACK is the one the patient gave, when they gave one.
-    // It is frequently not the phone they are calling from — a spouse's mobile,
-    // a nurse's station, a caller on a landline who wants their cell — and
-    // filing caller ID as `patientPhone` puts the wrong number in front of
-    // whoever works the ticket. That matters most on exactly the paths this
-    // helper serves: the caller has been promised a call back (standing
-    // instruction 12; Codex review, PR #238). `callData.callerPhone` below
-    // keeps the true inbound number, so nothing loses the provenance.
-    const rawPhone = escalationDetails?.callbackNumber || callerID || '';
+    // The number to CALL BACK is the one the patient gave, when they gave one
+    // AND it is dialable. It is frequently not the phone they are calling from
+    // — a spouse's mobile, a nurse's station, a caller on a landline who wants
+    // their cell — but it arrives as free text, so an unvalidated preference
+    // can swap a good caller ID for a fragment. The policy decides; see
+    // preferredCallbackNumber (standing instruction 12; Codex review, PR #238).
+    // `callData.callerPhone` below keeps the true inbound number regardless, so
+    // nothing loses the provenance.
+    const rawPhone = preferredCallbackNumber({
+      collected: escalationDetails?.callbackNumber,
+      callerId: callerID,
+    }) || '';
     const digits = rawPhone.replace(/\D/g, '');
     const formattedPhone = digits.length === 10
       ? `+1${digits}`

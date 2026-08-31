@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest';
 import {
   resolveClinicalTransferNumber,
   resolveHandoffDestination,
+  preferredCallbackNumber,
   resolvePcpDialSequence,
   urgentTransferFailureLine,
 } from './handoffPolicy';
@@ -180,5 +181,31 @@ describe('what an urgent caller is told when the transfer fails outright', () =>
       // The emergency route survives in both branches.
       expect(line).toMatch(/nine one one/);
     }
+  });
+});
+
+describe('which number a promised callback is filed against', () => {
+  const CALLER_ID = '+16265551212';
+
+  it('prefers the number the patient asked to be reached on', () => {
+    expect(preferredCallbackNumber({ collected: '714-956-4300', callerId: CALLER_ID }))
+      .toBe('+17149564300');
+  });
+
+  it('keeps caller ID when the collected number is a fragment', () => {
+    // "555-1234" is seven digits: toE164 cannot place it, so it comes back
+    // without a '+'. Filing it would replace a dialable number with one that
+    // is not, on a path that just promised to call this person back.
+    expect(preferredCallbackNumber({ collected: '555-1234', callerId: CALLER_ID }))
+      .toBe(CALLER_ID);
+  });
+
+  it('keeps caller ID when nothing was collected', () => {
+    expect(preferredCallbackNumber({ collected: undefined, callerId: CALLER_ID })).toBe(CALLER_ID);
+    expect(preferredCallbackNumber({ collected: '   ', callerId: CALLER_ID })).toBe(CALLER_ID);
+  });
+
+  it('returns nothing when neither is usable, rather than a fragment', () => {
+    expect(preferredCallbackNumber({ collected: '1234', callerId: null })).toBeUndefined();
   });
 });
