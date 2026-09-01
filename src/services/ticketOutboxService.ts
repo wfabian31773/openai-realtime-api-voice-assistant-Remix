@@ -141,7 +141,17 @@ export class TicketOutboxService {
             providerName: params.lastProviderSeen || undefined,
             locationName: params.locationOfLastVisit || undefined,
           });
-          if (lookupResult.success) {
+          // See syncAgentService's matching block. Skipping the ids is right;
+          // doing it silently is not. On the outbox this matters more, not
+          // less: a retry that lands during an outage files unrouted and the
+          // entry is then marked sent, so nothing ever revisits it.
+          const { lookupWasUnavailable } = await import('../../server/services/ticketingApiClient');
+          if (lookupWasUnavailable(lookupResult)) {
+            console.error(
+              `[TICKET OUTBOX] ✗ PROVIDER/LOCATION LOOKUP UNAVAILABLE for ${outboxId} — ` +
+                `filing unrouted. Cause: ${lookupResult.error ?? 'unknown'}`,
+            );
+          } else {
             resolvedProviderId = lookupResult.providerId ?? undefined;
             resolvedLocationId = lookupResult.locationId ?? undefined;
           }

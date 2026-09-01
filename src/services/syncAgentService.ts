@@ -205,7 +205,21 @@ export class SyncAgentService {
           locationName: lookupFields.locationOfLastVisit,
         });
         
-        if (lookupResult.success) {
+        /**
+         * Skipping the ids when the lookup did not answer is right — inventing
+         * one is worse than filing unrouted. What was missing is saying so.
+         * A `success:false` here reads identically whether the service was
+         * down or the name matched nobody, and this path is asynchronous, so
+         * the only trace either way was an unrouted ticket and no reason.
+         * Same distinction the queue tools got on 2026-09-01.
+         */
+        const { lookupWasUnavailable } = await import('../../server/services/ticketingApiClient');
+        if (lookupWasUnavailable(lookupResult)) {
+          console.error(
+            `[SYNC-AGENT] ✗ PROVIDER/LOCATION LOOKUP UNAVAILABLE — filing unrouted. ` +
+              `Cause: ${lookupResult.error ?? 'unknown'}`,
+          );
+        } else {
           if (lookupResult.providerId) resolvedProviderId = lookupResult.providerId;
           if (lookupResult.locationId) resolvedLocationId = lookupResult.locationId;
         }
