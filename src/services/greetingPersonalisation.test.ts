@@ -291,3 +291,60 @@ describe('the greeting used when the database row is rejected', () => {
     expect(missingMandatoryCopy('no-ivr', lunch)).toEqual([]);
   });
 });
+
+
+/**
+ * A DISCLOSURE THAT SAYS THE OPPOSITE STILL CONTAINS THE KEYWORD — Codex, #244.
+ *
+ * These predicates were bare keyword tests, and this check is the compliance
+ * boundary for a field an admin can edit. "Calls are not being recorded" would
+ * have reported the recording disclosure as present, and the row would have
+ * outranked the known-safe code greeting on a line that records from start.
+ *
+ * The second half of this block matters as much as the first: a negation test
+ * that is too loose rejects legitimate wording, and a rejected row falls back
+ * to the code greeting with only a log line — an operator edit that returns
+ * success and changes nothing, which is this repo's other recurring failure.
+ */
+describe('the mandatory copy has to be affirmative', () => {
+  const COMPLIANT =
+    'Thank you for calling Azul Vision, all of our offices are currently closed. ' +
+    'If this is a medical emergency, please dial 911. All calls are being recorded ' +
+    'for quality assurance purposes, how can I help you?';
+
+  it('accepts the real greeting', () => {
+    expect(missingMandatoryCopy('no-ivr', COMPLIANT)).toEqual([]);
+  });
+
+  it('rejects each phrase turned on its head', () => {
+    expect(missingMandatoryCopy('no-ivr', COMPLIANT.replace('are currently closed', 'are not closed')))
+      .toEqual(['closed-office notice']);
+    expect(missingMandatoryCopy('no-ivr', COMPLIANT.replace('please dial 911', 'please do not dial 911')))
+      .toEqual(['911 direction']);
+    expect(missingMandatoryCopy('no-ivr', COMPLIANT.replace('are being recorded', 'are not being recorded')))
+      .toEqual(['recording disclosure']);
+  });
+
+  it('does not reject an innocent "not" that belongs to another clause', () => {
+    // A real way to word this line. The negation attaches to "an emergency",
+    // not to dialling 911, and the greeting is entirely compliant.
+    const legitimate =
+      'Thank you for calling Azul Vision, our offices are closed. If this is not an ' +
+      'emergency I can take a message; if it is a medical emergency, please dial 911. ' +
+      'All calls are being recorded for quality assurance purposes.';
+    expect(missingMandatoryCopy('no-ivr', legitimate)).toEqual([]);
+  });
+
+  it('still catches a phrase that is simply absent', () => {
+    // The failure that actually happened on 2026-08-31: the disclosure was not
+    // negated, it was gone.
+    // The clause ends in a comma, not a full stop — the first version of this
+    // test removed nothing and passed for the wrong reason.
+    const withoutDisclosure = COMPLIANT.replace(
+      'All calls are being recorded for quality assurance purposes, ',
+      '',
+    );
+    expect(withoutDisclosure).not.toMatch(/record/i);
+    expect(missingMandatoryCopy('no-ivr', withoutDisclosure)).toEqual(['recording disclosure']);
+  });
+});

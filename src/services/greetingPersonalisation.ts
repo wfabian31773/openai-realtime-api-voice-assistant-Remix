@@ -183,9 +183,34 @@ const MANDATORY_GREETING_COPY: Readonly<
     // sentence and then encoded two of the three, so "For emergencies dial
     // 911. Calls are recorded. How can I help?" would have passed and taken
     // the after-hours status off the line (Codex, #240).
-    { label: 'closed-office notice', present: (g) => /clos(ed|ing)\b/i.test(g) },
-    { label: '911 direction', present: (g) => /\b911\b/.test(g) },
-    { label: 'recording disclosure', present: (g) => /record(ed|ing)\b/i.test(g) },
+    //
+    // NEGATION, added 2026-09-01 (Codex, #244). These were bare keyword tests,
+    // so "our offices are not closed", "do not dial 911" and "calls are not
+    // being recorded" all reported the mandatory copy as PRESENT — and this
+    // check is the compliance boundary for a field an admin can edit. A row
+    // that says the opposite of the required sentence would have outranked the
+    // known-safe code greeting.
+    //
+    // Each negation is anchored to its own phrase rather than "a 'not'
+    // somewhere near". A loose test would reject legitimate wording — "if this
+    // is not a medical emergency, leave a message; otherwise dial 911" is a
+    // perfectly good greeting — and a rejected row falls back silently to the
+    // code greeting, which is this repo's other recurring failure: an edit that
+    // returns success and changes nothing.
+    {
+      label: 'closed-office notice',
+      present: (g) => /clos(ed|ing)\b/i.test(g) && !/\bnot\s+(currently\s+|presently\s+)?clos(ed|ing)\b/i.test(g),
+    },
+    {
+      label: '911 direction',
+      present: (g) =>
+        /\b911\b/.test(g) &&
+        !/\b(do\s*n[o']?t|never|no\s+need\s+to)\s+(dial|call|contact|phone)\s+911\b/i.test(g),
+    },
+    {
+      label: 'recording disclosure',
+      present: (g) => /record(ed|ing)\b/i.test(g) && !/\bnot\s+(being\s+)?record(ed|ing)\b/i.test(g),
+    },
   ],
 };
 
