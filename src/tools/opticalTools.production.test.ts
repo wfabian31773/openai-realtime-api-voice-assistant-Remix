@@ -611,3 +611,158 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     expect(create).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * THE GATE NOW HAS AN EXIT — operator ruling, 2026-09-01.
+ *
+ * Wayne: *"In optical, if you gate the location, the agent will ask and if no
+ * answer, unassigned."*
+ *
+ * The gate is right and stays: department 1 assigns BY office, and the control
+ * above (a name that matched nothing is refused, not filed blind) is the
+ * behaviour that keeps a caller from being told nine times that their office
+ * does not exist. What was wrong is that refusing was the ONLY outcome.
+ *
+ * Measured over the 14 days to 2026-09-01: 107 calls reached a filing tool,
+ * were refused for a missing field, and ended with no ticket at all — and 62 of
+ * those were this gate, with the office as the only thing still missing. Those
+ * callers had already given their name, date of birth, callback number and the
+ * request itself.
+ *
+ * The far side accepts the result: in the same window a department-1
+ * create-ticket carrying neither a location id nor a location name was answered
+ * 200, so "unassigned" is a ticket that exists rather than a second way to lose
+ * the request.
+ */
+describe('optical: ask once for the office, then file it unassigned', () => {
+  const CALL = 'CA00000000000000000000000000000042';
+  const BASE = {
+    first_name: 'Wayne',
+    last_name: 'Fabian',
+    date_of_birth: '03/17/1973',
+    callback_number: '845-531-7471',
+    request_description: 'my glasses broke at the hinge',
+  };
+
+  beforeEach(async () => {
+    const { resetGateAttempts } = await import('./gateAttempts');
+    resetGateAttempts();
+  });
+
+  async function client() {
+    return (await import('../../server/services/ticketingApiClient')).ticketingApiClient;
+  }
+
+  it('asks the first time an office does not resolve, and files the second', async () => {
+    const api = await client();
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue({
+      success: true,
+      outcome: 'no_match',
+      locationId: undefined,
+      locationMatches: [],
+    } as never);
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValue({
+      success: true,
+      ticketNumber: 'VA-UNASSIGNED',
+    } as never);
+
+    // First attempt: the 2026-08-13 behaviour, unchanged. The agent asks.
+    const first = await runTool('file_optical_ticket', {
+      ...BASE,
+      location: 'Downtown LA',
+      call_sid: CALL,
+    });
+    expect(first.success).toBe(false);
+    expect((first as { missingFields: string[] }).missingFields).toContain('location');
+    expect(create).not.toHaveBeenCalled();
+
+    // The caller answers and it still does not resolve — or they cannot say.
+    // The request is taken rather than lost.
+    const second = await runTool('file_optical_ticket', {
+      ...BASE,
+      location: 'Downtown LA',
+      call_sid: CALL,
+    });
+    expect(second.success).toBe(true);
+    expect(create).toHaveBeenCalledOnce();
+
+    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    // No office attached, so nothing in a queue view surfaces it — the raised
+    // priority is what does. Asserted rather than commented, because a comment
+    // in this file once claimed a priority the payload never sent.
+    expect(filed.priority).toBe('high');
+    expect(filed).not.toHaveProperty('locationId');
+    // The caller's own words still travel, so a human can finish the routing.
+    expect(filed.locationOfLastVisit).toBe('Downtown LA');
+    // And the instruction to staff still does not go in patient-readable text.
+    expect(String(filed.description)).not.toMatch(/NEEDS OFFICE|unassigned|lookup/i);
+  });
+
+  it('does the same when the caller never named an office at all', async () => {
+    const api = await client();
+    const lookup = vi.spyOn(api, 'lookupProviderAndLocation');
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValue({
+      success: true,
+      ticketNumber: 'VA-NO-OFFICE',
+    } as never);
+
+    const first = await runTool('file_optical_ticket', { ...BASE, location: '', call_sid: CALL });
+    expect((first as { missingFields: string[] }).missingFields).toContain('location');
+
+    const second = await runTool('file_optical_ticket', { ...BASE, location: '', call_sid: CALL });
+    expect(second.success).toBe(true);
+
+    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(filed.priority).toBe('high');
+    // Nothing to look up and nothing to send. An empty string here is what the
+    // ticketing app answers "Missing required information: office" to.
+    expect(filed).not.toHaveProperty('locationOfLastVisit');
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('files normally when the second answer does resolve', async () => {
+    // The ask is not a formality — this is the case it exists for.
+    const api = await client();
+    const lookup = vi.spyOn(api, 'lookupProviderAndLocation');
+    lookup.mockResolvedValueOnce({ success: true, outcome: 'no_match', locationId: undefined, locationMatches: [] } as never);
+    lookup.mockResolvedValueOnce({ success: true, outcome: 'matched', locationId: 12, locationMatches: [] } as never);
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValue({
+      success: true,
+      ticketNumber: 'VA-RESOLVED',
+    } as never);
+
+    await runTool('file_optical_ticket', { ...BASE, location: 'Downtwn LA', call_sid: CALL });
+    const second = await runTool('file_optical_ticket', { ...BASE, location: 'Eastvale', call_sid: CALL });
+
+    expect(second.success).toBe(true);
+    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(filed.locationId).toBe(12);
+    expect(filed.priority).toBe('medium');
+  });
+
+  it('does not spend one caller\'s ask on another caller', async () => {
+    const api = await client();
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue({
+      success: true,
+      outcome: 'no_match',
+      locationId: undefined,
+      locationMatches: [],
+    } as never);
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValue({
+      success: true,
+      ticketNumber: 'VA-OTHER',
+    } as never);
+
+    await runTool('file_optical_ticket', { ...BASE, location: 'Downtown LA', call_sid: CALL });
+    // A different call, first attempt. It must still be ASKED, not filed
+    // unassigned on the strength of somebody else's conversation.
+    const other = await runTool('file_optical_ticket', {
+      ...BASE,
+      location: 'Downtown LA',
+      call_sid: 'CA00000000000000000000000000000099',
+    });
+    expect(other.success).toBe(false);
+    expect((other as { missingFields: string[] }).missingFields).toContain('location');
+    expect(create).not.toHaveBeenCalled();
+  });
+});

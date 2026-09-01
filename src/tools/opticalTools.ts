@@ -18,6 +18,10 @@ import { registerTool, missing, type ToolResult } from './registry';
 // queue — the same three definitions Surgery uses, not copies of them.
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
+
+/** This tool's own name, for the per-call gate counter. */
+const OPTICAL_FILE_TOOL = 'file_optical_ticket';
 
 // ---------------------------------------------------------------- what kind
 
@@ -95,7 +99,22 @@ registerTool({
       caller_phone: { type: 'string', description: 'The number they called from, if different from the callback number.' },
       dialed_number: { type: 'string', description: 'The number they dialled.' },
     },
-    required: ['first_name', 'last_name', 'date_of_birth', 'callback_number', 'location', 'request_description'],
+    /**
+     * `location` is NOT in this list, and that is the operator ruling, not a
+     * relaxation of the gate.
+     *
+     * Wayne, 2026-09-01: *"if you gate the location, the agent will ask and if
+     * no answer, unassigned."* `validateInput` refuses before the handler runs,
+     * so while `location` sat here the handler could never reach the second
+     * half of that sentence — a caller who could not name an office was refused
+     * for as long as they stayed on the line, and then lost.
+     *
+     * The gate still exists and still asks first; it lives in the handler now,
+     * where it can count how many times this call has already been asked. The
+     * refusal a caller hears on the first attempt is the same one, in the same
+     * words, from `missing(['location'], …)`.
+     */
+    required: ['first_name', 'last_name', 'date_of_birth', 'callback_number', 'request_description'],
   },
   handler: async (input): Promise<ToolResult> => {
     const first = str(input.first_name);
@@ -166,7 +185,28 @@ registerTool({
     );
     const cleanLocation = sanitizeLocationName(location).value;
     const cleanProvider = sanitizeProviderName(str(input.provider)).value;
-    if (!cleanLocation) {
+
+    /**
+     * ASK ONCE, THEN FILE IT ANYWAY. Operator ruling, 2026-09-01:
+     * *"In optical, if you gate the location, the agent will ask and if no
+     * answer, unassigned."*
+     *
+     * The gate itself is right and stays — this queue assigns BY office. What
+     * was wrong is that it had no exit. Measured over the 14 days to
+     * 2026-09-01: 107 calls reached a filing tool, were refused for a missing
+     * field, and ended with nothing filed. **62 of them were this gate**, with
+     * the office as the only thing still missing; the caller had already given
+     * their name, date of birth, callback number and the request itself.
+     *
+     * `gateRefusalsSoFar` is read BEFORE this refusal is recorded, so the first
+     * attempt asks and a later one files. The far side accepts it: a
+     * department-1 create-ticket carrying neither a location id nor a location
+     * name was answered 200 in this same window, so "unassigned" is a ticket
+     * that exists, not a second way to lose the request.
+     */
+    const askedForOfficeAlready = gateRefusalsSoFar(callSid, OPTICAL_FILE_TOOL, 'location') > 0;
+    if (!cleanLocation && !askedForOfficeAlready) {
+      noteGateRefusal(callSid, OPTICAL_FILE_TOOL, 'location');
       return missing(['location'], 'Which of our offices do you usually visit?');
     }
 
@@ -186,10 +226,23 @@ registerTool({
     // with the name alone produced location_id NULL and assigned_to_id NULL:
     // a real ticket, in the right department, that reached nobody. For a queue
     // whose assignment IS the location, that is the whole failure mode.
-    const lookup = await ticketingApiClient.lookupProviderAndLocation({
-      locationName: cleanLocation,
-      ...(cleanProvider ? { providerName: cleanProvider } : {}),
-    });
+    // Nothing to resolve if the caller never named an office and never named a
+    // provider — and calling /lookup with an empty name is how a queue asks a
+    // question it already knows the answer to.
+    const lookup =
+      cleanLocation || cleanProvider
+        ? await ticketingApiClient.lookupProviderAndLocation({
+            ...(cleanLocation ? { locationName: cleanLocation } : {}),
+            ...(cleanProvider ? { providerName: cleanProvider } : {}),
+          })
+        : {
+            success: true,
+            outcome: 'no_match' as const,
+            locationId: undefined,
+            providerId: undefined,
+            locationMatches: [],
+            error: undefined,
+          };
     /**
      * A LOOKUP THAT NEVER RAN IS NOT A NAME THAT DID NOT MATCH.
      *
@@ -228,20 +281,35 @@ registerTool({
        * envelope the prompts already teach the agent to answer by speaking to
        * the caller, rather than as an error it is invited to retry.
        */
-      const candidates = lookup.locationMatches?.length
-        ? ` I have ${lookup.locationMatches.map((m) => m.name).join(', ')} — is it one of those?`
-        : '';
-      return missing(
-        ['location'],
-        // NOT "which city is your office in?". Four agent prompts — optical,
-        // surgery, tech, records — say "NEVER ask a patient which city one of
-        // our offices is in; they came to us, we know where we are", and this
-        // tool was handing the model that exact sentence to say. Read back the
-        // candidates when there are any, which is what the prompts ask for.
-        `I'm not finding an office by that name.${
-          candidates || ' Which of our offices do you usually visit?'
-        }`,
-      );
+      /**
+       * Second time here on the same call, per the operator ruling above: the
+       * agent has asked, the answer still does not resolve, so the request is
+       * taken and the office becomes a manual step rather than a lost call.
+       * The caller's own words travel on `locationOfLastVisit`, and the raised
+       * priority below is what surfaces it for assignment.
+       */
+      if (askedForOfficeAlready) {
+        console.warn(
+          `[optical] office "${cleanLocation}" still does not resolve after asking — ` +
+            'filing UNASSIGNED at high priority (operator ruling 2026-09-01)',
+        );
+      } else {
+        const candidates = lookup.locationMatches?.length
+          ? ` I have ${lookup.locationMatches.map((m) => m.name).join(', ')} — is it one of those?`
+          : '';
+        noteGateRefusal(callSid, OPTICAL_FILE_TOOL, 'location');
+        return missing(
+          ['location'],
+          // NOT "which city is your office in?". Four agent prompts — optical,
+          // surgery, tech, records — say "NEVER ask a patient which city one of
+          // our offices is in; they came to us, we know where we are", and this
+          // tool was handing the model that exact sentence to say. Read back the
+          // candidates when there are any, which is what the prompts ask for.
+          `I'm not finding an office by that name.${
+            candidates || ' Which of our offices do you usually visit?'
+          }`,
+        );
+      }
     }
 
     /**
@@ -342,7 +410,7 @@ registerTool({
     // An optical ticket with no office is one nobody's queue view will surface.
     // Raising the priority is what surfaces it — see the block above for why the
     // signal does not go in the description.
-    const filedPriority = lookupRan ? 'medium' : 'high';
+    const filedPriority = lookup.locationId ? 'medium' : 'high';
     if (redirect) {
       console.info(
         `[optical] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
@@ -374,7 +442,7 @@ registerTool({
       // Omitted rather than sent null when the lookup could not run — the name
       // still travels, and the raised priority surfaces it for assignment.
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
-      locationOfLastVisit: cleanLocation,
+      ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       lastProviderSeen: cleanProvider || undefined,
       description: routedDescription,
