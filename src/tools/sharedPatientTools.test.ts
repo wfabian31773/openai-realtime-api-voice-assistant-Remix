@@ -210,7 +210,9 @@ describe('resolve_location', () => {
     const r = await run('resolve_location', { spoken_location: 'Downtown LA', queue: 'optical' });
     expect(r.success).toBe(false);
     expect(r.missingFields).toContain('spoken_location');
-    expect(r.message).toMatch(/which city/i);
+    // Speakable, but never the question the queue prompts forbid.
+    expect(r.message).not.toMatch(/which city/i);
+    expect(r.message).toMatch(/which of our offices/i);
   });
 
   it('files under the name the RECEIVER stores, not the mirror\'s', async () => {

@@ -533,7 +533,7 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       success: false,
       error: 'Invalid JSON response from ticketing API: 200',
     } as never);
-    vi.spyOn(ticketingApiClient, 'createTicket').mockResolvedValue({
+    const create = vi.spyOn(ticketingApiClient, 'createTicket').mockResolvedValue({
       success: true,
       ticketNumber: 'VA-OUTAGE',
     } as never);
@@ -551,6 +551,27 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     expect((out as { missingFields?: string[] }).missingFields ?? []).not.toContain('location');
     // And we must not say something untrue about their office to their face.
     expect(JSON.stringify(out)).not.toMatch(/not finding an office/i);
+
+    /**
+     * The operator's ruling, 2026-09-01: *"if the lookup is down we process
+     * what we have."* Not saying the false sentence is only half of it — the
+     * request has to actually be taken, or the caller is still losing.
+     */
+    expect(create).toHaveBeenCalledTimes(1);
+    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+
+    // Dept 1 assigns BY location, so a ticket with no office reaches nobody
+    // unless something surfaces it. These two are that something, and they are
+    // asserted because a comment in this file once claimed a "raised priority"
+    // the payload never sent.
+    expect(filed.priority).toBe('high');
+    expect(filed.locationOfLastVisit).toBe('Eastvale');
+    // Omitted, never sent null — null is what filed VA-50803 unassigned.
+    expect(filed).not.toHaveProperty('locationId');
+
+    // The instruction to staff does not go in patient-readable free text.
+    // See docs/BACKEND_HANDOFF.md on annotating an unrouted description.
+    expect(String(filed.description)).not.toMatch(/NEEDS OFFICE|assignment|lookup was unavailable/i);
   });
 
   /**
@@ -582,7 +603,11 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
 
     expect(out.success).toBe(false);
     expect((out as { missingFields: string[] }).missingFields).toContain('location');
-    expect((out as { message: string }).message).toMatch(/which city/i);
+    // The agent must be handed something speakable — but NOT "which city is
+    // your office in?". This assertion used to require that exact sentence,
+    // pinning in place the one question all four queue prompts forbid.
+    expect((out as { message: string }).message).not.toMatch(/which city/i);
+    expect((out as { message: string }).message).toMatch(/which of our offices/i);
     expect(create).not.toHaveBeenCalled();
   });
 });

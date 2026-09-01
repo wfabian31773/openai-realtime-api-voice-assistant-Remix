@@ -226,7 +226,14 @@ registerTool({
         : '';
       return missing(
         ['location'],
-        `I'm not finding an office by that name — which city is your optical office in?${candidates}`,
+        // NOT "which city is your office in?". Four agent prompts — optical,
+        // surgery, tech, records — say "NEVER ask a patient which city one of
+        // our offices is in; they came to us, we know where we are", and this
+        // tool was handing the model that exact sentence to say. Read back the
+        // candidates when there are any, which is what the prompts ask for.
+        `I'm not finding an office by that name.${
+          candidates || ' Which of our offices do you usually visit?'
+        }`,
       );
     }
 
@@ -239,11 +246,21 @@ registerTool({
      * a lost one is a patient problem.
      *
      * The difference here is that optical's assignment IS the location, so an
-     * unassigned ticket reaches nobody unless a human is told to look — which
-     * is what the banner and the raised priority are for. The office the caller
-     * gave is preserved verbatim in `locationOfLastVisit` and named in the
-     * description, so the manual step is "set this office", not "phone them
-     * back and ask again".
+     * unassigned ticket reaches nobody unless something surfaces it. Two
+     * signals do that, and neither touches patient-readable text: the office
+     * the caller named is preserved verbatim in `locationOfLastVisit`, and the
+     * priority is raised so the ticket does not sit at the bottom of a queue
+     * view sorted by it. Staff then see a high-priority optical ticket with no
+     * office set and the caller's own words for the office — the manual step is
+     * "set this office", not "phone them back and ask again".
+     *
+     * NOT in the description. `docs/BACKEND_HANDOFF.md` lists annotating an
+     * unrouted ticket's description under changes that made things worse,
+     * because description is free text that has fed patient-facing SMS. No
+     * current template pulls it (checked 2026-09-01 against every `sendSMS`
+     * call site, and against 85 sent messages), but the field is the wrong
+     * place for an instruction to staff and there is no internal-notes column
+     * to put one in.
      */
     if (!lookupRan) {
       console.error(
@@ -315,14 +332,10 @@ registerTool({
     const routedDescription = redirect
       ? `${redirect.note}\n\n${cleanDescription.value}`
       : cleanDescription.value;
-    // Staff read the description first, and an optical ticket with no office is
-    // one nobody's queue view will surface. Name the office the caller gave, so
-    // the manual step is a lookup and not a callback.
-    const filedDescription = lookupRan
-      ? routedDescription
-      : `[NEEDS OFFICE ASSIGNMENT — the office lookup was unavailable when this was taken. `
-        + `Caller said: "${cleanLocation}". Set the office before working this ticket.]\n\n`
-        + routedDescription;
+    // An optical ticket with no office is one nobody's queue view will surface.
+    // Raising the priority is what surfaces it — see the block above for why the
+    // signal does not go in the description.
+    const filedPriority = lookupRan ? 'medium' : 'high';
     if (redirect) {
       console.info(
         `[optical] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
@@ -352,13 +365,13 @@ registerTool({
       patientBirthYear: parts.year,
       // The id is what sets the foreign key; the name is what staff read.
       // Omitted rather than sent null when the lookup could not run — the name
-      // still travels, and the description says the office needs setting.
+      // still travels, and the raised priority surfaces it for assignment.
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       locationOfLastVisit: cleanLocation,
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       lastProviderSeen: cleanProvider || undefined,
-      description: filedDescription,
-      priority: 'medium',
+      description: routedDescription,
+      priority: filedPriority,
       callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
       // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
       // a real Twilio SID, when the retry lands on someone else's key.

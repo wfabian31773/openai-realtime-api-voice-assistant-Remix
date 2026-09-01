@@ -271,7 +271,9 @@ registerTool({
        */
       return missing(
         ['spoken_location'],
-        `I'm not finding an office by that name — which city is the office in?`,
+        // See opticalTools' matching refusal: every queue prompt that uses
+        // resolve_location forbids asking which city an office is in.
+        `I'm not finding an office by that name — which of our offices do you usually visit?`,
       );
     }
 
