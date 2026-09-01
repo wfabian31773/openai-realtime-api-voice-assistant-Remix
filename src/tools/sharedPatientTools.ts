@@ -171,6 +171,30 @@ registerTool({
     // be confirmed and the history must not be read back.
     const certain = resolved.identity?.unique !== false;
 
+    /**
+     * PASS THE RECORD ALONG — operator instruction, 2026-09-01.
+     *
+     * The service has already returned this patient's date of birth in
+     * `patientData`, and nothing carried it the twenty lines to the filing
+     * tool. So the agent asked for a date of birth the process was holding,
+     * and when the caller could not give it the request was lost: 45 calls
+     * refused for a date of birth in fourteen days, 23 of them for a patient
+     * this tool had already identified.
+     *
+     * Only a CERTAIN match is remembered, and it is only ever read back for
+     * the same name — see verifiedIdentity.ts. An uncertain match still has to
+     * be confirmed out loud, which is the rule the identity_warning above
+     * exists to enforce.
+     */
+    if (certain) {
+      const { rememberVerifiedIdentity } = await import('./verifiedIdentity');
+      rememberVerifiedIdentity(str(input.call_sid), {
+        firstName: resolved.patientData?.firstName,
+        lastName: resolved.patientData?.lastName,
+        dateOfBirth: resolved.patientData?.dateOfBirth,
+      });
+    }
+
     return {
       success: true,
       found: true,

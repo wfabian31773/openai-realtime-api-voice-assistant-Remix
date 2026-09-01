@@ -189,8 +189,36 @@ describe('the Optical tool set is exactly what that queue needs', () => {
     const required = file!.input_schema.required ?? [];
     expect(required).toContain('first_name');
     expect(required).toContain('last_name');
-    expect(required).toContain('date_of_birth');
     expect(required).toContain('callback_number');
+  });
+
+  /**
+   * `date_of_birth` left `required` on 2026-09-01 for the same reason
+   * `location` did, and the gate is unchanged in both cases.
+   *
+   * Operator: *"if we do our job and validate and pass the patient records
+   * along, you will not have this issue."* `lookup_patient` finds the caller on
+   * 95% of queue calls and the service returns their date of birth with the
+   * match — but `validateInput` refuses before the handler runs, so the handler
+   * could never consult it. 45 calls in fourteen days were refused for a date
+   * of birth and lost; on 23 the patient had already been identified.
+   *
+   * The behaviour that matters is asserted instead of the schema shape: with
+   * nothing verified for this call, the tool still refuses.
+   */
+  it('still refuses a date of birth it has neither been given nor verified', async () => {
+    const { resetVerifiedIdentities } = await import('./verifiedIdentity');
+    resetVerifiedIdentities();
+    const out = await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      callback_number: '845-531-7471',
+      location: 'Eastvale',
+      request_description: 'my glasses broke at the hinge',
+      call_sid: 'CA00000000000000000000000000000078',
+    });
+    expect(out.success).toBe(false);
+    expect((out as { missingFields: string[] }).missingFields).toContain('date_of_birth');
   });
 
   /**

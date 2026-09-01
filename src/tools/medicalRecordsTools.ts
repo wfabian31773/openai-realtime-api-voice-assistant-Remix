@@ -136,7 +136,20 @@ registerTool({
       caller_phone: { type: 'string', description: 'The number they called from.' },
       dialed_number: { type: 'string', description: 'The number they dialled.' },
     },
-    required: ['first_name', 'last_name', 'date_of_birth', 'callback_number', 'request_description', 'requester'],
+    /**
+     * `date_of_birth` is NOT in this list, and the gate on it is unchanged.
+     *
+     * `validateInput` refuses before the handler runs, so while it sat here the
+     * handler could never consult the record `lookup_patient` had already
+     * matched — and the caller was asked for a date of birth the process was
+     * holding. 45 calls in the fourteen days to 2026-09-01 were refused for one
+     * and ended with no ticket; on 23 of them the patient had already been
+     * identified.
+     *
+     * The handler still refuses when it has neither the caller's answer nor a
+     * verified record for that same name, in the same words as before.
+     */
+    required: ['first_name', 'last_name', 'callback_number', 'request_description', 'requester'],
   },
   handler: async (input): Promise<ToolResult> => {
     const first = str(input.first_name);
@@ -272,7 +285,31 @@ registerTool({
       '../../server/services/ticketingApiClient'
     );
     const { normalizeDobParts } = await import('./dobParts');
-    const parts = normalizeDobParts(dob);
+    let parts = normalizeDobParts(dob);
+    if (!parts) {
+      /**
+       * ASK ONCE, NOT TWICE. Operator instruction, 2026-09-01: *"if we do our
+       * job and validate and pass the patient records along, you will not have
+       * this issue."*
+       *
+       * `lookup_patient` found this caller — it does on 95% of queue calls —
+       * and the service returned their date of birth with the match. Nothing
+       * carried it here, so the agent asked for something the process already
+       * held, and 45 calls in fourteen days ended with no ticket because the
+       * caller could not answer. On 23 of those we already knew who they were.
+       *
+       * Only ever for the SAME NAME as the verified match, and only from a
+       * match the lookup was certain about. See verifiedIdentity.ts.
+       */
+      const { verifiedDobFor } = await import('./verifiedIdentity');
+      const known = verifiedDobFor(callSid, first, last);
+      parts = known ? normalizeDobParts(known) : null;
+      if (parts) {
+        // No name in the log line: this is the one place a masked identifier
+        // would still be the patient.
+        console.info('[records] date of birth taken from the verified record for this call');
+      }
+    }
     if (!parts) {
       return missing(['date_of_birth'], 'I did not catch that date of birth — month, day and year?');
     }
