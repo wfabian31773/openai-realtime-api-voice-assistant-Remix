@@ -6,6 +6,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated as isReplitAuthenticated } from "./replitAuth";
 import { authRouter, requireRole, requireManager } from "./auth";
+import { agentPromptWriteRefusal, AGENT_PROMPT_WRITE_STATUS } from "./agentPromptSurface";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { getTwilioClient, getTwilioFromPhoneNumber } from "../src/lib/twilioClient";
@@ -700,44 +701,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Create or update agent prompt
+  /**
+   * Create or update agent prompt — REFUSED, see server/agentPromptSurface.ts.
+   *
+   * This wrote to `agent_prompts` and returned 200. Nothing on the call path
+   * reads that table, so the operator got a success and the live agent was
+   * unchanged. The table is empty and no client page calls this, so refusing
+   * breaks no workflow that exists; it just stops the first person who tries
+   * from believing they changed a live agent.
+   */
   app.put('/api/agent-prompts/:slug', requireManager, async (req: any, res) => {
-    try {
-      const { slug } = req.params;
-      const { greeting, personality, customInstructions, closingScript, changeNotes } = req.body;
-      
-      // Get current prompt for versioning
-      const existingPrompt = await storage.getAgentPrompt(slug);
-      
-      // Upsert the prompt
-      const prompt = await storage.upsertAgentPrompt({
-        agentSlug: slug,
-        greeting,
-        personality,
-        customInstructions,
-        closingScript,
-        publishedBy: req.session?.userId || null,
-        publishedAt: new Date(),
-      });
-      
-      // Create version history
-      await storage.createAgentPromptVersion({
-        agentSlug: slug,
-        version: prompt.version || 1,
-        greeting,
-        personality,
-        customInstructions,
-        closingScript,
-        createdBy: req.session?.userId || null,
-        changeNotes: changeNotes || 'Updated prompt',
-      });
-      
-      console.log(`[PROMPTS] Updated prompt for agent: ${slug}, version: ${prompt.version}`);
-      res.json(prompt);
-    } catch (error) {
-      console.error("Error updating agent prompt:", error);
-      res.status(500).json({ message: "Failed to update agent prompt" });
-    }
+    const { slug } = req.params;
+    console.warn(
+      `[PROMPTS] ✗ REFUSED a write to agent_prompts for "${slug}" — that table is not read ` +
+        'by the call path. Live greeting: agents.welcome_greeting. Everything else: src/agents/.',
+    );
+    return res.status(AGENT_PROMPT_WRITE_STATUS).json(agentPromptWriteRefusal(slug));
   });
 
   // Get prompt version history
