@@ -31,7 +31,14 @@ vi.mock('./ticketOutboxService', async (importOriginal) => {
   return { ...actual, TicketOutboxService: { writeToOutbox } };
 });
 
-const { createTicketDurable, postFailureToolResult } = await import('./durableTicketFiling');
+// Registration is an import side effect, and askAsFor reads the registry — so
+// the wording assertion below is only meaningful with the tool actually loaded,
+// which is always true in a live process because the agent built it.
+await import('../tools/sharedPatientTools');
+await import('../tools/surgeryTools');
+await import('../tools/opticalTools');
+
+const { createTicketDurable, postFailureToolResult, missingFieldFromError } = await import('./durableTicketFiling');
 const { CREATE_TICKET_PAYLOAD_KIND } = await import('./ticketOutboxService');
 
 /**
@@ -169,5 +176,96 @@ describe('what the agent is told to say', () => {
     const out = postFailureToolResult({ success: false, queued: false, error: 'ECONNREFUSED' });
     expect(out.success).toBe(false);
     expect((out as { error?: string }).error).toBe('ECONNREFUSED');
+  });
+});
+
+
+/**
+ * A REFUSAL IS NOT AN OUTAGE.
+ *
+ * Measured in the ticketing app's voice_agent_api_logs over the 14 days to
+ * 2026-09-01: create-ticket answered HTTP 400 to 664 POSTs from the queue
+ * lines, a fifth of everything they sent. 602 of those were one message —
+ * "Missing required information: surgeon" — across 181 surgery calls. Three
+ * identical doomed POSTs per call, because the tool answered `retryable: true`
+ * for every failure and the model obliged. The most recent was 20:11 the day
+ * this was written.
+ *
+ * Without this split the outbox built yesterday would have swallowed all 664:
+ * requests that can never send, an alarm tripped continuously by them, and a
+ * caller told their request was recorded when the server had refused it.
+ */
+describe('a payload the server read and refused', () => {
+  const REFUSED = {
+    success: false,
+    statusCode: 400,
+    error: 'Missing required information: surgeon. Surgery tickets are assigned by surgeon.',
+  };
+
+  it('is never queued — retrying cannot change a refusal', async () => {
+    createTicket.mockResolvedValue(REFUSED);
+
+    const res = await createTicketDurable(OPTICAL_OTHER);
+
+    expect(res.terminal).toBe(true);
+    expect(res.queued).toBe(false);
+    expect(writeToOutbox).not.toHaveBeenCalled();
+  });
+
+  it('becomes a question for the caller, in the tool\'s own words', async () => {
+    createTicket.mockResolvedValue(REFUSED);
+    const res = await createTicketDurable(OPTICAL_OTHER);
+
+    const out = postFailureToolResult(res, 'file_surgery_ticket') as {
+      success: boolean;
+      missingFields?: string[];
+      message?: string;
+      retryable?: boolean;
+    };
+    expect(out.success).toBe(false);
+    expect(out.missingFields).toEqual(['surgeon']);
+    // file_surgery_ticket's own askAs, not a second sentence written here.
+    expect(out.message).toMatch(/which surgeon are you seeing/i);
+    // The envelope the prompts already teach the agent to answer by speaking.
+    expect(out.retryable).toBeUndefined();
+  });
+
+  it('translates the server\'s vocabulary into ours', async () => {
+    // It says "office". Our optical schema calls the field `location`, and a
+    // missingFields entry the tool does not own is one the agent cannot act on.
+    expect(missingFieldFromError('Missing required information: office. Optical tickets are assigned by office.')).toBe('location');
+    expect(missingFieldFromError('Missing required information: surgeon.')).toBe('surgeon');
+    expect(missingFieldFromError('Validation failed')).toBeUndefined();
+  });
+
+  it('refuses without retrying when the reason names no field', async () => {
+    createTicket.mockResolvedValue({
+      success: false,
+      statusCode: 400,
+      error: 'patientPhone: Too big: expected string to have <=20 characters',
+    });
+    const res = await createTicketDurable(OPTICAL_OTHER);
+    const out = postFailureToolResult(res, 'file_optical_ticket') as {
+      success: boolean;
+      retryable?: boolean;
+      error?: string;
+    };
+    expect(writeToOutbox).not.toHaveBeenCalled();
+    expect(out.success).toBe(false);
+    expect(out.retryable).toBe(false);
+    expect(out.error).toMatch(/patientPhone/);
+  });
+
+  it('still captures the statuses that mean "not now"', async () => {
+    // 429 and 408 are the server asking for a retry, which is what the outbox
+    // is for. A 503 or a timeout carries no status at all and is already
+    // handled above.
+    for (const statusCode of [408, 429, 500, 502, 503]) {
+      writeToOutbox.mockClear();
+      createTicket.mockResolvedValue({ success: false, statusCode, error: 'later' });
+      const res = await createTicketDurable(OPTICAL_OTHER);
+      expect(res.queued, `HTTP ${statusCode} must be captured`).toBe(true);
+      expect(writeToOutbox).toHaveBeenCalledOnce();
+    }
   });
 });

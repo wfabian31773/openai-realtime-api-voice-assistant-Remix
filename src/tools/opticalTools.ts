@@ -388,7 +388,7 @@ registerTool({
     if (!res.success || !res.ticketNumber) {
       // The POST failed. createTicketDurable has already put the payload in the
       // outbox if it could; this only decides what the agent says about it.
-      return postFailureToolResult(res);
+      return postFailureToolResult(res, 'file_optical_ticket');
     }
 
     return {

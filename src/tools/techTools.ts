@@ -325,7 +325,7 @@ registerTool({
     });
 
     if (!res.success || !res.ticketNumber) {
-      return postFailureToolResult(res);
+      return postFailureToolResult(res, 'file_tech_ticket');
     }
 
     return {

@@ -75,6 +75,18 @@ export interface CreateTicketResponse {
   ticketId?: number;
   ticketNumber?: string;
   error?: string;
+  /**
+   * The HTTP status, when the request reached the server and it said no.
+   *
+   * Absent for a timeout, a DNS failure or a socket reset — which is exactly
+   * the distinction that matters: a 400 will fail identically forever, a
+   * timeout may work on the next try. Without this the two are one string and
+   * the only available behaviour is to retry both. Measured over 14 days,
+   * that cost 602 POSTs across 181 surgery calls, all rejected with the same
+   * "Missing required information: surgeon", roughly three per call while a
+   * patient waited.
+   */
+  statusCode?: number;
   // New fields from enhanced API (2026-01-13)
   providerSearched?: string;
   providerMatched?: boolean;
@@ -561,7 +573,14 @@ export class TicketingApiClient {
           { endpoint, method, viaGateway: shadowViaGateway, status: response.status, body: body ?? {}, response: data ?? {} },
           { sensitive: true, component: 'ticketingApiClient' });
         shadowReported = true;
-        throw new Error(data.error || `HTTP ${response.status} error`);
+        // Carry the status out with the message. Callers that need to tell a
+        // refusal from an outage read it; everything else still sees an Error
+        // with the same text it always had.
+        const httpError = new Error(data.error || `HTTP ${response.status} error`) as Error & {
+          statusCode?: number;
+        };
+        httpError.statusCode = response.status;
+        throw httpError;
       }
 
       shadowTap.emit('n8n_workflow_completed', shadowSession, shadowAgent,
@@ -704,6 +723,7 @@ export class TicketingApiClient {
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
+        statusCode: (error as { statusCode?: number } | null)?.statusCode,
       };
     }
   }

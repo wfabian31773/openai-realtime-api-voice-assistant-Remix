@@ -23,15 +23,15 @@ vi.mock('../services/ticketOutboxService', async (importOriginal) => {
   return { ...actual, TicketOutboxService: { writeToOutbox } };
 });
 
-const QUEUE_TOOL_FILES = [
-  'opticalTools.ts',
-  'surgeryTools.ts',
-  'techTools.ts',
-  'medicalRecordsTools.ts',
+const QUEUE_TOOL_FILES: Array<[file: string, toolName: string]> = [
+  ['opticalTools.ts', 'file_optical_ticket'],
+  ['surgeryTools.ts', 'file_surgery_ticket'],
+  ['techTools.ts', 'file_tech_ticket'],
+  ['medicalRecordsTools.ts', 'file_records_ticket'],
 ];
 
 describe('every queue filing tool files durably', () => {
-  for (const file of QUEUE_TOOL_FILES) {
+  for (const [file, toolName] of QUEUE_TOOL_FILES) {
     const src = readFileSync(join(__dirname, file), 'utf8');
 
     it(`${file} files through createTicketDurable`, () => {
@@ -45,7 +45,10 @@ describe('every queue filing tool files durably', () => {
     });
 
     it(`${file} answers a failed POST with postFailureToolResult`, () => {
-      expect(src).toMatch(/return postFailureToolResult\(res\);/);
+      // Its OWN name, because that is how the refusal reaches the caller in
+      // the tool's own askAs wording rather than a generic sentence. Passing a
+      // neighbour's name would silently ask the wrong question.
+      expect(src).toContain(`return postFailureToolResult(res, '${toolName}');`);
     });
   }
 });

@@ -31,12 +31,73 @@
  *    exists a long outage is still found by a human noticing.
  */
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
+// One-way edge: the registry does not import this module, the tools import both.
+import { getTool } from '../tools/registry';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 
 export interface DurableCreateResult extends CreateTicketResponse {
   /** The POST failed and the payload is now persisted; the worker owns it. */
   queued?: boolean;
   outboxId?: string;
+  /** The server read the payload and refused it. Retrying changes nothing. */
+  terminal?: boolean;
+  /** The field the server says is missing, in OUR vocabulary. */
+  missingField?: string;
+}
+
+/**
+ * A REFUSAL IS NOT AN OUTAGE, and putting one in the outbox would be the worse
+ * half of this module.
+ *
+ * Measured over the 14 days to 2026-09-01, create-ticket answered 400 to 664
+ * POSTs from the queue lines — a fifth of everything they sent. 602 of those
+ * were one message, "Missing required information: surgeon", across 181
+ * surgery calls: roughly three identical doomed POSTs per call, because the
+ * tool reports `retryable: true` for every failure and the model obliges. The
+ * most recent was minutes before this was written.
+ *
+ * Capturing those into the outbox would fill it with requests that can never
+ * send, trip the filing alarm's outbox plane continuously, and tell the caller
+ * their request was recorded when it was refused. So a 4xx is terminal and
+ * stops here.
+ *
+ * 408 and 429 are the exceptions and are treated as transport: the server is
+ * saying "not now", which is precisely what retrying is for.
+ */
+function isTerminalRefusal(status?: number): boolean {
+  return typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
+/**
+ * The ticketing app's own hard-requires, in its words and then in ours.
+ *
+ * It answers `Missing required information: surgeon` / `: office`. Our schemas
+ * call those `surgeon` and `location`. Two entries because two exist; a name
+ * this map does not know still refuses, it just cannot name the field.
+ */
+const REMOTE_FIELD_TO_OURS: Readonly<Record<string, string>> = {
+  surgeon: 'surgeon',
+  office: 'location',
+  location: 'location',
+};
+
+/**
+ * The tool's own wording for asking after a field.
+ *
+ * Read from the registry rather than copied, so the sentence the caller hears
+ * when the ticketing app refuses is the same one they hear when our own gate
+ * refuses. Returns undefined if the tool or field is unknown — a caller that
+ * cannot be asked properly is better asked plainly than not at all.
+ */
+function askAsFor(toolName: string, field: string): string | undefined {
+  const prop = getTool(toolName)?.input_schema.properties[field] as { askAs?: string } | undefined;
+  return prop?.askAs;
+}
+
+export function missingFieldFromError(error?: string): string | undefined {
+  const m = /missing required information:\s*([a-z_]+)/i.exec(error ?? '');
+  if (!m) return undefined;
+  return REMOTE_FIELD_TO_OURS[m[1].toLowerCase()];
 }
 
 /**
@@ -51,6 +112,15 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
   if (res.success && res.ticketNumber) return res;
 
   const agent = params.callData?.agentUsed ?? 'unknown';
+
+  if (isTerminalRefusal(res.statusCode)) {
+    const missingField = missingFieldFromError(res.error);
+    console.warn(
+      `[TICKET FILING] ${agent}: create-ticket REFUSED the payload (HTTP ${res.statusCode}) — ` +
+        `${res.error ?? 'no reason given'}. Not queued: retrying cannot change a refusal.`,
+    );
+    return { ...res, queued: false, terminal: true, missingField };
+  }
 
   /**
    * The outbox key IS the API idempotency key, deliberately.
@@ -124,7 +194,37 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
  * There is no ticket number to read back, so the message says so explicitly.
  * A model handed "recorded" with no number will invent one if nothing stops it.
  */
-export function postFailureToolResult(res: DurableCreateResult) {
+export function postFailureToolResult(res: DurableCreateResult, toolName?: string) {
+  /**
+   * A refusal becomes a QUESTION, not a retry.
+   *
+   * The ticketing app enforces its own hard-requires — a surgery ticket needs
+   * a surgeon, an optical ticket needs an office — and until now the agent was
+   * told `retryable: true` and sent the same payload again. 602 POSTs across
+   * 181 surgery calls in a fortnight, all identical, all refused.
+   *
+   * The wording comes from the tool's own `askAs`, so what the caller hears is
+   * the sentence the library already teaches for that field rather than a
+   * second one written here. Standing instruction 10 is why the fallback still
+   * asks rather than deferring the caller.
+   */
+  if (res.terminal) {
+    if (res.missingField) {
+      const asked = toolName ? askAsFor(toolName, res.missingField) : undefined;
+      return {
+        success: false as const,
+        missingFields: [res.missingField],
+        message: asked ?? `Can you tell me the ${res.missingField}?`,
+      };
+    }
+    return {
+      success: false as const,
+      error: res.error ?? 'the ticketing system refused this request',
+      // Deliberately NOT retryable: the server read it and said no.
+      retryable: false,
+    };
+  }
+
   if (res.queued) {
     return {
       success: true as const,
