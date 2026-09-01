@@ -440,3 +440,44 @@ describe('overflow lines can learn that the agent leg died', () => {
     }
   });
 });
+
+
+/**
+ * DECLINING THE DATABASE GREETING MUST LEAVE ONE BEHIND — Codex, PR #244.
+ *
+ * `voiceAgentRoutes` rejects an `agents.welcome_greeting` row that is missing
+ * a mandatory phrase. That branch used to only log. `agentGreeting` starts as
+ * `metadata?.agentGreeting`, which is lost whenever the webhook lands on a
+ * different instance — the diagnosed cause of agents improvising their
+ * openings — so metadata lost plus a bad row left nothing to say, and the
+ * greeting check further down falls through to a bare `response.create` where
+ * the model opens the call itself.
+ *
+ * Read as text, like the rest of this file: the transport cannot be stood up
+ * in a unit test, and what is being checked is that one branch assigns.
+ */
+describe('a rejected database greeting still leaves a compliant one', () => {
+  const ROUTES_SRC = readFileSync(join(__dirname, '..', 'voiceAgentRoutes.ts'), 'utf8');
+
+  it('assigns the code greeting rather than only logging', () => {
+    const branch = ROUTES_SRC.slice(
+      ROUTES_SRC.indexOf('is missing ${missing.join'),
+      ROUTES_SRC.indexOf('Lunch is not after hours'),
+    );
+    expect(branch, 'the rejection branch must exist').toBeTruthy();
+    // The assignment, not just the console.error.
+    expect(branch).toMatch(/agentGreeting = fallback/);
+    expect(branch).toMatch(/WELCOME_GREETING/);
+  });
+
+  it('only when there is nothing already in hand', () => {
+    // A greeting the process already holds is the caller's own lane copy and
+    // outranks the fallback; overwriting it would undo the listen-first and
+    // per-route greetings.
+    const branch = ROUTES_SRC.slice(
+      ROUTES_SRC.indexOf('is missing ${missing.join'),
+      ROUTES_SRC.indexOf('Lunch is not after hours'),
+    );
+    expect(branch).toMatch(/if \(!agentGreeting \|\| agentGreeting\.trim\(\) === ''\)/);
+  });
+});

@@ -253,3 +253,41 @@ describe('lunchGreetingFor — the lunch hour is not after hours', () => {
     expect(missingMandatoryCopy('no-ivr', g)).toEqual([]);
   });
 });
+
+
+/**
+ * THE FALLBACK ITSELF HAS TO BE COMPLIANT — Codex, PR #244.
+ *
+ * When the database row fails the mandatory-copy check, `voiceAgentRoutes`
+ * falls back to `WELCOME_GREETING`, the registry string this line has always
+ * used. That is only safe while the string carries all three phrases, and the
+ * string lives in another file that nothing stopped anyone editing. This is
+ * what stops it quietly ceasing to be a safe fallback.
+ *
+ * The failure it guards is specific: metadata is lost when a webhook lands on
+ * a different instance (diagnosed 2026-08-06, four live SD calls), and if the
+ * database row is also bad there is nothing left to say. The check further
+ * down voiceAgentRoutes then falls through to a bare `response.create` and the
+ * model opens the call itself — which is how the recording disclosure went
+ * missing to begin with.
+ */
+describe('the greeting used when the database row is rejected', () => {
+  it('carries every phrase the lane is required to say', async () => {
+    // Read as text rather than imported: `afterHoursAgent` pulls in the whole
+    // agent module and, through it, the database. The string is what matters,
+    // and this still fails the moment somebody edits it.
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../agents/afterHoursAgent.ts', import.meta.url), 'utf8');
+    const literal = /return\s+"([^"]+)";/.exec(
+      src.slice(src.indexOf('function getUrgentTriageGreeting')),
+    );
+    expect(literal, 'could not find the greeting literal').toBeTruthy();
+    expect(missingMandatoryCopy('no-ivr', literal![1])).toEqual([]);
+  });
+
+  it('and the lunch greeting does too, since it replaces the same opening', async () => {
+    const lunch = lunchGreetingFor('no-ivr', { hour: 12, shortDay: 'Mon' });
+    expect(lunch).toBeTruthy();
+    expect(missingMandatoryCopy('no-ivr', lunch)).toEqual([]);
+  });
+});

@@ -4358,8 +4358,51 @@ async function observeCall(
       if (missing.length) {
         console.error(
           `[GREETING] ✗ configured greeting for ${agentSlug} is missing ${missing.join(', ')} — ` +
-            `keeping the code greeting. Fix the agents.welcome_greeting row.`,
+            `falling back to the code greeting. Fix the agents.welcome_greeting row.`,
         );
+        /**
+         * DECLINING THE DATABASE IS NOT THE SAME AS HAVING A GREETING.
+         *
+         * Found by Codex on PR #244. This branch only logged, and "keeping the
+         * code greeting" was a claim rather than an assignment — there is a
+         * live path where there is no code greeting to keep. `agentGreeting`
+         * starts as `metadata?.agentGreeting`, and that metadata is lost
+         * whenever the webhook lands on a different instance than the one that
+         * stored it. That is not hypothetical: it is the diagnosed root cause
+         * of agents improvising their openings, four live SD calls on
+         * 2026-08-06, and it is the reason the database rescue above exists.
+         *
+         * So: metadata lost AND the database row non-compliant — which is
+         * exactly the state the live `no-ivr` row was in — left `agentGreeting`
+         * undefined, and the check further down falls through to a bare
+         * `response.create`. The model then improvises an opening, which is
+         * how the recording disclosure and the 911 direction went missing in
+         * the first place. This change would have narrowed that window and
+         * called it fixed.
+         *
+         * WELCOME_GREETING is the registry string this line has always used
+         * and it carries all three mandatory phrases — asserted in
+         * greetingPersonalisation.test.ts, so it cannot quietly stop being a
+         * safe fallback.
+         */
+        if (!agentGreeting || agentGreeting.trim() === '') {
+          const fallback = agentSlug === 'no-ivr' ? WELCOME_GREETING : null;
+          if (fallback) {
+            agentGreeting = fallback;
+            console.warn(
+              `[GREETING] in-memory metadata was also missing for ${callId} — ` +
+                `using the compliant code greeting for ${agentSlug} rather than letting the model open`,
+            );
+          } else {
+            // No lane but no-ivr has mandatory copy today, so this is
+            // unreachable — and it says so rather than failing silently if a
+            // second lane is ever added to MANDATORY_GREETING_COPY.
+            console.error(
+              `[GREETING] ✗✗ ${agentSlug} has mandatory copy, a bad database row and no code ` +
+                `greeting to fall back on — the model will open this call unscripted`,
+            );
+          }
+        }
       } else {
         if (!agentGreeting || agentGreeting.trim() === '') {
           console.info(`[GREETING] In-memory metadata missing for ${callId} — configured greeting rescued from DB (agent: ${agentSlug})`);
