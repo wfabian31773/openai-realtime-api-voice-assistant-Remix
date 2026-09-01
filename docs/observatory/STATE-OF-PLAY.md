@@ -376,3 +376,92 @@ old, so all-zero cards can never again pass as quiet lines.
 **Deploy markers** (grep after republish):
 `[DB KEEP-ALIVE] self-heal armed (build 2026-08-27)` and
 `[StaleCallSweeper] armed (build 2026-08-27)`.
+
+---
+
+## 10. The 2026-08-31 filing outage and the week's work order (written 09-01)
+
+### What happened
+
+The n8n Cloud account hit its **monthly execution cap at 20:16 UTC on
+2026-08-31**. The gateway refused every create-ticket **at the webhook, before
+any node ran**, and answered HTTP 200 with a body that is not JSON. Every queue
+line saw `Invalid JSON response from ticketing API: 200`; optical failed a step
+earlier, at `/lookup`, and so presented as a different defect.
+
+**Measured, not inferred:** 286 filing attempts rejected. 185 consecutive queue
+calls filed nothing, from 20:15:45 to 23:54:54. 43 optical callers were told
+their real office does not exist — Mission Hills, Downey, Glendale, Santa Ana,
+the whole map — because nothing was being looked up. One call ran 19 tool calls
+over 8 minutes with a patient on the line.
+
+It was found hours later because **staff told Wayne**. Nothing watched the
+ticket path: R1–R12 in `02-diagnosis-rules.md` do not cover it, which is the
+queue lines' entire job.
+
+**Recovery:** `TICKETING_SYSTEM_URL` flipped to the app directly
+(`https://ticketing-app--fabianwayne1.replit.app`), verified by traffic rather
+than by reading the secret. 107 distinct requests reconstructed from
+transcripts; 82 filed, 67 new tickets; 24 optical reconstructions still
+unfiled; 25 correctly refused, 24 of those for a missing surgeon.
+
+**A cost I caused during recovery:** 77 patients received a welcome SMS,
+because I fired 82 POSTs without checking the blast radius first.
+
+### The work order
+
+Wayne, 2026-09-01: *"let's kill standalone and core, two pipelines only … fix
+compliance, request lost, silence, and the other live now bugs and then stop
+there."*
+
+All of it is on `claude/determined-brown-o5qsft` / PR #244, which carries the
+full detail per commit. In short:
+
+- **Two pipelines.** `src/core/` and `src/standalone/` deleted. Casualty:
+  `replayRealCalls.test.ts`, the instrument standing instruction 8 names. No
+  replacement yet — outstanding.
+- **Compliance.** The database may word the no-IVR greeting; it may no longer
+  drop the recording disclosure or the 911 line. Lunch closure (12–1) added.
+  7am is after-hours by routing and was already right.
+- **Silence.** Overflow legs now carry a status callback and register with the
+  SIP conference lifecycle. 34 of 3,203 overflow calls had sat in >600s of
+  terminal silence against 0 of 927 on no-IVR.
+- **Request lost.** The four queue tools now persist a refused payload verbatim
+  to the existing outbox before returning; the outbox re-sends queue payloads
+  without re-validating them; retry window 15 min → ~3.5 h.
+- **The alarm.** `ticketFilingHealth.ts`, wired to systemAlertService every 5
+  minutes and to a red banner on the command center. Would have caught 08-31 at
+  **20:23:06**.
+
+### What the measuring turned up that nobody had asked about
+
+- **The model was overwriting the CallSid.** 130 surgery POSTs carried the
+  literal string `"unknown"`, while every one of the 2,926 queue calls had a
+  real CA-prefixed SID on its `call_logs` row. The adapter merged the model's
+  arguments over the injected context. No SID means no idempotency key: no
+  duplicate protection, no post-call enrichment, no outbox key.
+- **20% of queue POSTs are refused with HTTP 400** — 664 in 14 days, 602 of
+  them *"Missing required information: surgeon"* across 181 surgery calls, at
+  3.3 identical doomed attempts per call. That is what `retryable: true` on
+  every failure buys. It would also have poisoned the new outbox.
+- **`getValidatedTicketIds` rewrote ten live departments to the medication
+  queue.** Not firing at volume — only two callers reach it — but it is why the
+  queue tools could not be routed through the outbox.
+- **`lookup_patient` times out on 13–17% of queue calls** (6s budget, 475
+  events). First tool every queue call runs. Unfixed.
+- **Ticket write-back is NOT broken.** It was on the list as if it were;
+  97–98% on every clean day. The apparent gap was the 08-25/08-26 blackout and
+  my own recovery run showing up on the wrong side of midnight.
+
+### Open, and Wayne's to settle
+
+1. **Optical with no resolved office** — unassigned at high priority (what
+   surgery does with a missing surgeon), or routed to a default office? 62 of
+   the 107 requests lost to a gate in 14 days are exactly this.
+2. **May a request be filed with a name and a phone but no date of birth?**
+   23 more turn on it.
+3. **records went live on 2026-08-31** (4 calls, then 27) and nothing in the
+   repo says who pointed the number.
+4. **answering-service took zero calls on 09-01** through 13:22 PT, after 38
+   the day before and a steady 18–58 every weekday. Weekends are zero for it;
+   this was not a weekend.
