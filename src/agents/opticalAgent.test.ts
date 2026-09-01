@@ -283,7 +283,23 @@ describe('the call id must not depend on the model remembering it', () => {
     void runTool;
   });
 
-  it('falls back to callId when there is no callSid', async () => {
+  /**
+   * REVERSED 2026-09-01, and the old assertion is quoted here so the change is
+   * not mistaken for a regression: this used to require `call_sid` to fall back
+   * to the OpenAI call id when no Twilio SID was known.
+   *
+   * The fallback value is a uuid. It fails isTwilioCallSid, so the ticket goes
+   * out with no idempotency key; it matches no ticket in the post-call
+   * enrichment endpoint; and since 2026-09-01 it gives the outbox no key
+   * either. It is exactly as useless as sending nothing, and it looks like an
+   * identifier in the logs, which is worse — it made "we never had a SID"
+   * uncountable.
+   *
+   * The concern the old test encoded is real and is still covered by the test
+   * above: a null from the model must not blank the injected id. That is a
+   * different thing from inventing one.
+   */
+  it('sends no call_sid at all rather than an id that is not a Twilio SID', async () => {
     const spy = vi.spyOn(await import('../tools/registry'), 'runTool');
     const agent = await createOpticalAgent(undefined, { callId: 'call-only' });
     const t = ((agent as { tools?: Array<{ name: string; invoke?: Function }> }).tools ?? []).find(
@@ -291,7 +307,11 @@ describe('the call id must not depend on the model remembering it', () => {
     );
     await t!.invoke?.({} as never, JSON.stringify({ phone: '845-531-7471' }));
     const calls = spy.mock.calls;
-    expect((calls[calls.length - 1][1] as Record<string, unknown>).call_sid).toBe('call-only');
+    const passed = calls[calls.length - 1][1] as Record<string, unknown>;
+    expect(passed.call_sid).toBeUndefined();
+    // The call is still identified where identification actually works — the
+    // telemetry carries callId, and the timeline row is keyed on callLogId.
+    expect(passed.phone).toBe('845-531-7471');
   });
 });
 

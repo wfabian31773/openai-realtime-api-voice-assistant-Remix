@@ -149,7 +149,58 @@ export function realtimeToolsFor(
         const started = Date.now();
         console.info(`[TOOLS] → ${def.name} (${telemetry?.agentSlug ?? 'no-slug'})`);
         try {
-          const result = await runTool(def.name, { ...context, ...supplied });
+          /**
+           * THE PROCESS WINS THE FIELDS IT SUPPLIED.
+           *
+           * This used to be `{ ...context, ...supplied }` — the model's
+           * arguments on top — and the comment above explained why: an unset
+           * argument arrives as null under strict mode and would blank what we
+           * injected. Filtering nulls out of `supplied` fixed that case and
+           * left the one that mattered.
+           *
+           * `call_sid` is a declared property on all four filing tools ("The
+           * call id, so a retry cannot double-file"), so the model emits it —
+           * and it emits a guess. Measured in the ticketing app's
+           * voice_agent_api_logs: 130 surgery create-ticket POSTs between
+           * 2026-08-24 and 2026-09-01 carried callData.callSid = "unknown",
+           * plus optical's seven, and "none", "undefined", "N/A", "latest",
+           * "automated_xxx_placeholder". Every one of those calls has a real
+           * CA-prefixed SID on its call_logs row; all 2,926 queue calls in the
+           * window do. Nothing was missing, it was overwritten.
+           *
+           * A payload carrying "unknown" fails isTwilioCallSid, so it goes out
+           * with no idempotency key: no duplicate protection, nothing for the
+           * post-call enrichment endpoint to match, and no outbox key. With a
+           * real SID duplicate filing is 3 calls in 2,086; without one there is
+           * no defence at all.
+           *
+           * Only DEFINED context values win, so a context that does not know
+           * the caller's phone does not blank the one the model was told.
+           */
+          const injected = Object.fromEntries(
+            Object.entries(context).filter(([, v]) => v !== null && v !== undefined),
+          );
+          /**
+           * DEPLOY MARKER, and a live counter for the same defect.
+           *
+           * This line only appears when the model actually tried to overwrite a
+           * value the process holds — so its presence proves the new build is
+           * running, and its rate is the measurement of how often the old merge
+           * was corrupting a payload. Expect it on the surgery line first: 130
+           * POSTs in nine days carried callSid "unknown".
+           *
+           * Key names only, plus the offending value for `call_sid` alone —
+           * a CallSid is not a patient, a phone number is.
+           */
+          for (const [k, v] of Object.entries(injected)) {
+            if (k in supplied && supplied[k] !== v) {
+              console.info(
+                `[TOOLS] ${def.name}: kept the call's ${k}` +
+                  (k === 'call_sid' ? ` over the model's "${String(supplied[k]).slice(0, 40)}"` : ''),
+              );
+            }
+          }
+          const result = await runTool(def.name, { ...supplied, ...injected });
           const outcome =
             result.success === true
               ? 'ok'
