@@ -503,4 +503,86 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     // A real answer, not a failure — and one the agent can act on out loud.
     expect(String(r.message)).toMatch(/ask which office/i);
   });
+
+  /**
+   * THE 2026-08-31 OUTAGE, AS THE CALLER EXPERIENCED IT.
+   *
+   * `file_optical_ticket` resolves the office to a numeric id before filing,
+   * and optical is the only queue that hard-requires it — dept 1 assigns BY
+   * location. That resolve goes out over `/api/voice-agent/lookup`, which on
+   * 2026-08-31 rode the n8n gateway. n8n hit its plan's execution cap at
+   * 20:16 UTC and refused every execution at the webhook, before any node ran,
+   * answering 200 with a body that is not JSON.
+   *
+   * `lookupProviderAndLocation` catches that and returns `{success:false}` —
+   * the same shape it returns for a name that matches nobody. The tool reads
+   * only `locationId`, so both land in one branch and the caller is told
+   * "I'm not finding an office by that name". That sentence is false during an
+   * outage, and it is the loop: the caller names the office again, the tool
+   * asks again. One live call ran 19 tool calls over 8 minutes this way.
+   *
+   * Offices rejected that afternoon include Mission Hills, Montebello,
+   * Huntington Beach, Santa Ana, Laguna Hills, Tarzana, Downey, Redlands,
+   * Glendale and Anaheim — the whole map, because nothing was being looked up.
+   */
+  it('does not tell the caller their real office does not exist when the lookup service is down', async () => {
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    // Verbatim shape of a lookup that threw and was swallowed. The error text
+    // is the one 254 rejected payloads carried on 2026-08-31.
+    vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation').mockResolvedValueOnce({
+      success: false,
+      error: 'Invalid JSON response from ticketing API: 200',
+    } as never);
+    vi.spyOn(ticketingApiClient, 'createTicket').mockResolvedValue({
+      success: true,
+      ticketNumber: 'VA-OUTAGE',
+    } as never);
+
+    const out = await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471',
+      location: 'Eastvale', // a real office, in the roster, named clearly
+      request_description: 'my glasses broke at the hinge',
+    });
+
+    // The caller answered this question correctly. Asking it again is the loop.
+    expect((out as { missingFields?: string[] }).missingFields ?? []).not.toContain('location');
+    // And we must not say something untrue about their office to their face.
+    expect(JSON.stringify(out)).not.toMatch(/not finding an office/i);
+  });
+
+  /**
+   * The control for the test above, and the behaviour it must NOT break.
+   *
+   * On 2026-08-13 a caller said "Downtown LA" nine times in a 236-second call
+   * and we have no optical office there. A name that matches nobody is not a
+   * transient error, and refusing it as a missing field is correct — that is
+   * what the agent knows how to answer by speaking to the caller. The
+   * difference is that here the lookup SUCCEEDED and reported no match.
+   */
+  it('still refuses an office name that the lookup ran and matched to nothing', async () => {
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation').mockResolvedValueOnce({
+      success: true,
+      locationId: undefined,
+      locationMatches: [],
+    } as never);
+    const create = vi.spyOn(ticketingApiClient, 'createTicket');
+
+    const out = await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471',
+      location: 'Downtown LA',
+      request_description: 'glasses broke',
+    });
+
+    expect(out.success).toBe(false);
+    expect((out as { missingFields: string[] }).missingFields).toContain('location');
+    expect((out as { message: string }).message).toMatch(/which city/i);
+    expect(create).not.toHaveBeenCalled();
+  });
 });

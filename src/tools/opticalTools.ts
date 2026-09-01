@@ -187,7 +187,27 @@ registerTool({
       locationName: cleanLocation,
       ...(cleanProvider ? { providerName: cleanProvider } : {}),
     });
-    if (!lookup.locationId) {
+    /**
+     * A LOOKUP THAT NEVER RAN IS NOT A NAME THAT DID NOT MATCH.
+     *
+     * `lookupProviderAndLocation` catches its own error and returns
+     * `{success:false}` — the SAME shape it returns for a name that matches
+     * nobody. Reading only `locationId` collapses the two, and only one of them
+     * is the caller's problem to solve.
+     *
+     * On 2026-08-31 that collapse took optical to zero. `/api/voice-agent/lookup`
+     * rode the n8n gateway; n8n hit its plan's execution cap at 20:16 UTC and
+     * refused every execution at the webhook, answering 200 with a body that is
+     * not JSON. Optical is the only queue that hard-requires this resolve, so it
+     * failed a step earlier than the others and never reached create-ticket.
+     * Forty-three callers were told "I'm not finding an office by that name"
+     * about Mission Hills, Downey, Glendale, Santa Ana and the rest of the map.
+     * The sentence was false, so the caller repeated the office, so the tool
+     * asked again: one call ran 19 tool calls over 8 minutes.
+     */
+    const lookupRan = lookup.success !== false;
+
+    if (lookupRan && !lookup.locationId) {
       /**
        * A NAME THAT DOES NOT MATCH IS NOT A TRANSIENT ERROR, and this used to
        * say `retryable: true` while telling the agent to go and call
@@ -207,6 +227,29 @@ registerTool({
       return missing(
         ['location'],
         `I'm not finding an office by that name — which city is your optical office in?${candidates}`,
+      );
+    }
+
+    /**
+     * The lookup is down. Take the request — losing it is the worse outcome,
+     * and standing instruction 10 is that a caller's request gets taken and
+     * routed, never deferred back to them. Surgery already files unrouted on
+     * exactly this failure (`SURGEON DID NOT RESOLVE`, dept 2 routes by
+     * surgeon) on the same reasoning: an unassigned ticket is a manual step,
+     * a lost one is a patient problem.
+     *
+     * The difference here is that optical's assignment IS the location, so an
+     * unassigned ticket reaches nobody unless a human is told to look — which
+     * is what the banner and the raised priority are for. The office the caller
+     * gave is preserved verbatim in `locationOfLastVisit` and named in the
+     * description, so the manual step is "set this office", not "phone them
+     * back and ask again".
+     */
+    if (!lookupRan) {
+      console.error(
+        `[Optical] ✗ LOCATION LOOKUP UNAVAILABLE — filing '${cleanLocation}' UNASSIGNED. ` +
+          `Dept 1 assigns by location, so this ticket needs manual assignment. ` +
+          `Cause: ${lookup.error ?? 'unknown'}`,
       );
     }
 
@@ -269,9 +312,17 @@ registerTool({
     const filedDepartmentId = redirect?.departmentId ?? OPTICAL_DEPARTMENT_ID;
     const filedTypeId = redirect?.requestTypeId ?? filing.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? filing.requestReasonId;
-    const filedDescription = redirect
+    const routedDescription = redirect
       ? `${redirect.note}\n\n${cleanDescription.value}`
       : cleanDescription.value;
+    // Staff read the description first, and an optical ticket with no office is
+    // one nobody's queue view will surface. Name the office the caller gave, so
+    // the manual step is a lookup and not a callback.
+    const filedDescription = lookupRan
+      ? routedDescription
+      : `[NEEDS OFFICE ASSIGNMENT — the office lookup was unavailable when this was taken. `
+        + `Caller said: "${cleanLocation}". Set the office before working this ticket.]\n\n`
+        + routedDescription;
     if (redirect) {
       console.info(
         `[optical] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
@@ -300,7 +351,9 @@ registerTool({
       patientBirthDay: parts.day,
       patientBirthYear: parts.year,
       // The id is what sets the foreign key; the name is what staff read.
-      locationId: lookup.locationId,
+      // Omitted rather than sent null when the lookup could not run — the name
+      // still travels, and the description says the office needs setting.
+      ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       locationOfLastVisit: cleanLocation,
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       lastProviderSeen: cleanProvider || undefined,
