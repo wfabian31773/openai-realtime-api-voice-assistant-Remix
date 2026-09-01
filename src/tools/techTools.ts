@@ -186,7 +186,9 @@ registerTool({
     const cleanProvider = sanitizeProviderName(str(input.provider)).value;
     const cleanLocation = sanitizeLocationName(str(input.location)).value;
 
-    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    const { ticketingApiClient, lookupWasUnavailable } = await import(
+      '../../server/services/ticketingApiClient'
+    );
     const { normalizeDobParts } = await import('./dobParts');
     const parts = normalizeDobParts(dob);
     if (!parts) {
@@ -203,12 +205,62 @@ registerTool({
             ...(cleanProvider ? { providerName: cleanProvider } : {}),
             ...(cleanLocation ? { locationName: cleanLocation } : {}),
           })
-        : { providerId: undefined, locationId: undefined, locationMatches: [] };
+        : // Nothing to look up. That is a ran-and-matched-nothing, not an
+          // outage — say so explicitly so `lookupWasUnavailable` cannot read
+          // a bare object as a failure.
+          {
+            success: true,
+            outcome: 'no_match' as const,
+            providerId: undefined,
+            locationId: undefined,
+            locationMatches: [],
+            error: undefined,
+          };
+
+    /**
+     * A LOOKUP THAT NEVER RAN IS NOT A PRESCRIBER WHO DOES NOT EXIST.
+     *
+     * `lookupProviderAndLocation` used to catch its own error and answer
+     * `{success:false}` — the same shape as a name that matched nobody. Optical
+     * read only `locationId`, collapsed the two, and on 2026-08-31 told 43
+     * callers their real office did not exist; see `LookupOutcome` in
+     * ticketingApiClient. This queue never told anyone anything, which is its
+     * own failure: a prescriber the caller named correctly went in the bin with
+     * no trace, on the queue that files 103 tickets a day and cannot work a
+     * refill without somebody to sign it.
+     *
+     * Nothing here refuses. The module header is explicit that the prescriber
+     * is not a gate, and a caller sent away because they cannot name their
+     * doctor is not recoverable. So the request is taken exactly as before, and
+     * what changes is that the loss is visible: the caller's words still travel
+     * in `lastProviderSeen` / `locationOfLastVisit`, the ids are omitted rather
+     * than sent null, this logs loudly, and the priority is raised so a
+     * technician sees a ticket that needs a name resolved.
+     *
+     * NOT in the description — that becomes the body of a patient-facing SMS,
+     * and `docs/BACKEND_HANDOFF.md` lists annotating it under changes that made
+     * things worse. There is no staff-notes field on `CreateTicketParams`.
+     */
+    const lookupUnavailable = lookupWasUnavailable(lookup);
+    const lostToOutage =
+      lookupUnavailable &&
+      ((Boolean(cleanProvider) && !lookup.providerId) ||
+        (Boolean(cleanLocation) && !lookup.locationId));
+    if (lostToOutage) {
+      console.error(
+        `[tech] ✗ PROVIDER LOOKUP UNAVAILABLE — filing ` +
+          `'${cleanProvider || cleanLocation}' with no id. This ticket needs manual ` +
+          `assignment. Cause: ${lookup.error ?? 'unknown'}`,
+      );
+    }
 
     // Sight-preserving medication. A patient out of glaucoma drops is not a
     // routine refill: pressure rises within days and the damage does not come
     // back. The practice gave it its own reason; this gives it its own urgency.
-    const priority = cls.requestReasonId === 155 ? 'high' : 'medium';
+    //
+    // An outage raises it too, for the reason above — never for a name the
+    // lookup ran and rejected, which is an ordinary fact about the call.
+    const priority = cls.requestReasonId === 155 || lostToOutage ? 'high' : 'medium';
 
     // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
     // Never submit-ticket: it re-derives the DEPARTMENT server-side and

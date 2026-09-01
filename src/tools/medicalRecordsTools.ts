@@ -267,7 +267,9 @@ registerTool({
     const cleanProvider = sanitizeProviderName(str(input.provider)).value;
     const cleanLocation = sanitizeLocationName(str(input.location)).value;
 
-    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    const { ticketingApiClient, lookupWasUnavailable } = await import(
+      '../../server/services/ticketingApiClient'
+    );
     const { normalizeDobParts } = await import('./dobParts');
     const parts = normalizeDobParts(dob);
     if (!parts) {
@@ -280,7 +282,54 @@ registerTool({
             ...(cleanProvider ? { providerName: cleanProvider } : {}),
             ...(cleanLocation ? { locationName: cleanLocation } : {}),
           })
-        : { providerId: undefined, locationId: undefined, locationMatches: [] };
+        : // Nothing to look up. That is a ran-and-matched-nothing, not an
+          // outage — say so explicitly so `lookupWasUnavailable` cannot read
+          // a bare object as a failure.
+          {
+            success: true,
+            outcome: 'no_match' as const,
+            providerId: undefined,
+            locationId: undefined,
+            locationMatches: [],
+            error: undefined,
+          };
+
+    /**
+     * A LOOKUP THAT NEVER RAN IS NOT AN OFFICE THAT DOES NOT EXIST.
+     *
+     * `lookupProviderAndLocation` used to catch its own error and answer
+     * `{success:false}` — the same shape as a name that matched nobody. Optical
+     * read only `locationId`, collapsed the two, and on 2026-08-31 told 43
+     * callers their real office did not exist; see `LookupOutcome` in
+     * ticketingApiClient. This queue said nothing at all, which on a department
+     * under a Corrective Action Plan with HHS OCR is its own problem: the
+     * office and doctor a caller named were dropped, and the ticket looks
+     * exactly like one where they were never asked.
+     *
+     * Nothing here refuses. Neither field is a gate on this queue — the module
+     * header says so, and a records request that arrives needing a callback is
+     * recoverable where a refused caller is not. What changes is that the loss
+     * is visible: the caller's words still travel in `locationOfLastVisit` /
+     * `lastProviderSeen`, the ids are omitted rather than sent null, this logs
+     * loudly, and the priority is raised so the ticket is not filed away as
+     * routine with a hole in it.
+     *
+     * NOT in the description. It carries the CAP clock line and the caller's
+     * own words, and it becomes the body of a patient-facing SMS —
+     * `docs/BACKEND_HANDOFF.md` lists annotating it under changes that made
+     * things worse. There is no staff-notes field on `CreateTicketParams`.
+     */
+    const lookupUnavailable = lookupWasUnavailable(lookup);
+    const lostToOutage =
+      lookupUnavailable &&
+      ((Boolean(cleanLocation) && !lookup.locationId) ||
+        (Boolean(cleanProvider) && !lookup.providerId));
+    if (lostToOutage) {
+      console.error(
+        `[records] ✗ LOOKUP UNAVAILABLE — filing ` +
+          `'${cleanLocation || cleanProvider}' with no id. Cause: ${lookup.error ?? 'unknown'}`,
+      );
+    }
 
     // A CALLER WHO PRESSED THE WRONG OPTION IS NOT SENT AWAY.
     //
@@ -332,7 +381,11 @@ registerTool({
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
       lastProviderSeen: cleanProvider || undefined,
       description: filedDescription,
-      priority: 'medium',
+      // Raised only when an outage cost us an id we had the name for — never
+      // for a name the lookup ran and rejected, which is an ordinary fact
+      // about the call. See the block above the lookup for why this is the
+      // signal rather than a note in the text.
+      priority: lostToOutage ? 'high' : 'medium',
       // Structured, so the ticketing app can stop defaulting mr_cases to
       // 'roa_patient'. Extra fields are ignored by an endpoint that does not
       // read them yet, which is why they are safe to send today — but the

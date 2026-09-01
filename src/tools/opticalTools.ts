@@ -169,7 +169,9 @@ registerTool({
       return missing(['location'], 'Which of our offices do you usually visit?');
     }
 
-    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    const { ticketingApiClient, lookupWasUnavailable } = await import(
+      '../../server/services/ticketingApiClient'
+    );
     const { normalizeDobParts } = await import('./dobParts');
     const parts = normalizeDobParts(dob);
     if (!parts) {
@@ -205,7 +207,11 @@ registerTool({
      * The sentence was false, so the caller repeated the office, so the tool
      * asked again: one call ran 19 tool calls over 8 minutes.
      */
-    const lookupRan = lookup.success !== false;
+    // Read through the shared predicate rather than off `success`, so this
+    // queue and the other three answer the question the same way. The client
+    // now states it outright as `outcome: 'unavailable'`; the predicate keeps
+    // the old boolean working for fixtures that predate the field.
+    const lookupRan = !lookupWasUnavailable(lookup);
 
     if (lookupRan && !lookup.locationId) {
       /**

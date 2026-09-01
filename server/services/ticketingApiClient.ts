@@ -200,8 +200,48 @@ interface LookupParams {
   locationName?: string;
 }
 
+/**
+ * WHY THIS CARRIES AN `outcome` AND NOT JUST A BOOLEAN.
+ *
+ * `lookupProviderAndLocation` catches its own transport error and answers
+ * `{success:false}` — historically byte-identical to what it answers when a
+ * name legitimately matched nobody. Every caller read only `providerId` /
+ * `locationId`, so the two states collapsed into one branch, and the branch
+ * said the caller's office or surgeon does not exist.
+ *
+ * On 2026-08-31 that collapse took optical to zero. `/api/voice-agent/lookup`
+ * rode the n8n gateway; n8n hit its plan's execution cap at 20:16 UTC and
+ * refused every execution at the webhook, answering 200 with a body that is
+ * not JSON. Forty-three callers were told "I'm not finding an office by that
+ * name" about Mission Hills, Downey, Glendale, Santa Ana and the rest of the
+ * map. The sentence was false, so the caller repeated the office, so the tool
+ * asked again: one call ran 19 tool calls over 8 minutes.
+ *
+ * Fixing that at the four call sites would have been four patches on one trap.
+ * The trap is removed here instead, by making the two states impossible to
+ * conflate: read `outcome`, or better, `lookupWasUnavailable()` below.
+ *
+ *   'unavailable'  the request never completed. NOT the caller's fault, and
+ *                  they must never be told a name was not found.
+ *   'no_match'     the request completed and returned no id. The name really
+ *                  is one we do not hold.
+ *   'matched'      at least one id came back.
+ *
+ * `outcome` describes the SERVICE, not a single field: a request for both a
+ * provider and a location that resolves only one is still 'matched'. Which
+ * fields resolved is still read from `providerId` / `locationId`, exactly as
+ * before — the shape is unchanged and only widened.
+ */
+export type LookupOutcome = 'matched' | 'no_match' | 'unavailable';
+
 interface LookupResponse {
   success: boolean;
+  /**
+   * Optional only because responses constructed elsewhere (test fixtures,
+   * recorded payloads) predate the field. Anything this client returns sets
+   * it. Use `lookupWasUnavailable()` rather than reading it raw.
+   */
+  outcome?: LookupOutcome;
   providerId?: number | null;
   provider?: {
     id: number;
@@ -971,9 +1011,11 @@ export class TicketingApiClient {
    * This ensures we use IDs that exist in the external database, preventing FK violations.
    */
   async lookupProviderAndLocation(params: LookupParams): Promise<LookupResponse> {
-    // Skip lookup if neither provider nor location specified
+    // Skip lookup if neither provider nor location specified. Nothing was
+    // asked, so nothing was found — but the service was never in question,
+    // which is what 'no_match' says and 'unavailable' would not.
     if (!params.providerName && !params.locationName) {
-      return { success: true };
+      return { success: true, outcome: 'no_match' };
     }
 
     console.info("[TICKETING API] Looking up provider/location:", {
@@ -997,16 +1039,54 @@ export class TicketingApiClient {
         locationMatches: response.locationMatches?.length || 0,
       });
 
-      return response;
+      /**
+       * A body that says `success:false` is the far side declining to answer,
+       * not a considered "no such name" — so it is 'unavailable' too. That
+       * keeps the equivalence `outcome === 'unavailable'` <-> `success ===
+       * false` exact, which is what lets `lookupWasUnavailable()` fall back
+       * safely on a response that predates this field.
+       */
+      const outcome: LookupOutcome =
+        response.success === false
+          ? 'unavailable'
+          : response.providerId || response.locationId
+            ? 'matched'
+            : 'no_match';
+
+      return { ...response, outcome };
     } catch (error) {
       console.warn("[TICKETING API] ⚠️ Lookup failed, will create ticket without IDs:", error);
-      // Don't fail ticket creation if lookup fails - just proceed without IDs
+      // Don't fail ticket creation if lookup fails — but SAY SO, in a way the
+      // caller cannot mistake for a name that matched nobody. Proceeding
+      // without ids is right; telling the patient their office does not exist
+      // is what cost 43 calls on 2026-08-31.
       return {
         success: false,
+        outcome: 'unavailable',
         error: error instanceof Error ? error.message : String(error),
       };
     }
   }
+}
+
+/**
+ * THE ONE QUESTION EVERY CALLER OF THE LOOKUP HAS TO ASK.
+ *
+ * "Did the lookup actually run?" — because the answer decides whether the
+ * caller's own words may be questioned back at them. Use this rather than
+ * reading `outcome` or `success` directly, so the decision is made the same
+ * way in all four queues.
+ *
+ * The `success === false` fallback covers responses built before `outcome`
+ * existed (fixtures, recorded payloads, anything not minted by
+ * `lookupProviderAndLocation`). The two are equivalent by construction above.
+ */
+export function lookupWasUnavailable(
+  result: { outcome?: LookupOutcome; success?: boolean } | null | undefined,
+): boolean {
+  if (!result) return true;
+  if (result.outcome) return result.outcome === 'unavailable';
+  return result.success === false;
 }
 
 export const ticketingApiClient = new TicketingApiClient();
