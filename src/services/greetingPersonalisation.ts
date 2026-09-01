@@ -18,6 +18,8 @@
  * only test that could reach it was one that read the source as text.
  */
 
+import { isLunchClosure } from '../utils/timeAware';
+
 /**
  * How a line combines its greeting with the confirm question.
  *
@@ -186,6 +188,46 @@ const MANDATORY_GREETING_COPY: Readonly<
     { label: 'recording disclosure', present: (g) => /record(ed|ing)\b/i.test(g) },
   ],
 };
+
+/**
+ * THE LUNCH HOUR IS NOT AFTER HOURS.
+ *
+ * Operator, 2026-09-01: *"no-ivr callers are any hours outside of business
+ * hours — a 7am call is no-ivr, our offices are still closed. If it is during
+ * lunch, our offices are closed between 12-1, so that should be said."*
+ *
+ * The standing greeting says "you have reached the after hours call service",
+ * which is true at 7am and wrong at 12:30 — the practice is open today, it is
+ * at lunch, and a caller told they have reached an after-hours service assumes
+ * nobody is back until tomorrow. `isLunchClosure()` (src/utils/timeAware.ts,
+ * weekdays, hour 12, already carrying the 2026-08-06 directive that this
+ * window gets a callback rather than a transfer attempt) decides which one.
+ *
+ * A whole alternative greeting rather than surgery on the configured string:
+ * rewriting the operator's own wording with a regex is how the closed-office
+ * clause and the 911 direction get lost. This is one constant, reviewable in
+ * one place, and it carries all three mandatory statements itself — which the
+ * test asserts by running it back through `missingMandatoryCopy`.
+ */
+const LUNCH_GREETINGS: Readonly<Record<string, string>> = {
+  'no-ivr':
+    'Thank you for calling Azul Vision. Our offices are closed for lunch between twelve and one. ' +
+    'If this is a medical emergency, please dial 911. All calls are being recorded for quality ' +
+    'assurance purposes. How can I help you?',
+};
+
+/**
+ * The lunch-hour greeting for this lane, or null when the lane has none or it
+ * is not lunch. `now` is injectable so this is testable without a clock.
+ */
+export function lunchGreetingFor(
+  agentSlug: string | undefined,
+  now?: { hour: number; shortDay: string },
+): string | null {
+  const candidate = LUNCH_GREETINGS[String(agentSlug ?? '')];
+  if (!candidate) return null;
+  return isLunchClosure(now) ? candidate : null;
+}
 
 /**
  * What a candidate greeting is missing for this lane, or [] when it is

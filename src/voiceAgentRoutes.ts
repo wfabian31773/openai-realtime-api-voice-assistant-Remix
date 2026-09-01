@@ -4334,10 +4334,53 @@ async function observeCall(
     const listenFirst = metadata?.agentGreeting !== undefined && metadata.agentGreeting.trim() === '';
     const configuredGreeting = listenFirst ? null : await resolveConfiguredGreeting(agentSlug);
     if (configuredGreeting) {
-      if (!agentGreeting || agentGreeting.trim() === '') {
-        console.info(`[GREETING] In-memory metadata missing for ${callId} — configured greeting rescued from DB (agent: ${agentSlug})`);
+      /**
+       * THE DATABASE MAY WORD THE GREETING. IT MAY NOT DROP THE DISCLOSURES.
+       *
+       * This override was unconditional, and on 2026-08-31 the live `no-ivr`
+       * row had lost the recording disclosure while the route records from
+       * start (`record="record-from-start"`, ~:5918). So calls were recorded
+       * and callers were no longer told — on the busiest overnight line, in a
+       * medical practice. Nobody edited code to cause it; the row simply
+       * outranked the registry string that carries the sentence.
+       *
+       * `missingMandatoryCopy` already existed for exactly this and was wired
+       * into the voice runtime only. Its own comment predicted this: "making
+       * the configured greeting outrank the registry string, as the SIP path
+       * does, would have taken that disclosure off the runtime too."
+       *
+       * Narrow on purpose: only the lane with legally-shaped copy, and only
+       * the closed-office notice, the 911 direction and the recording
+       * disclosure. Everything else is the operator's wording to choose.
+       */
+      const { missingMandatoryCopy } = await import('./services/greetingPersonalisation');
+      const missing = missingMandatoryCopy(agentSlug, configuredGreeting);
+      if (missing.length) {
+        console.error(
+          `[GREETING] ✗ configured greeting for ${agentSlug} is missing ${missing.join(', ')} — ` +
+            `keeping the code greeting. Fix the agents.welcome_greeting row.`,
+        );
+      } else {
+        if (!agentGreeting || agentGreeting.trim() === '') {
+          console.info(`[GREETING] In-memory metadata missing for ${callId} — configured greeting rescued from DB (agent: ${agentSlug})`);
+        }
+        agentGreeting = configuredGreeting;
       }
-      agentGreeting = configuredGreeting;
+    }
+
+    /**
+     * Lunch is not after hours. Operator, 2026-09-01: "if it is during lunch,
+     * our offices are closed between 12-1, so that should be said." Last, so
+     * it wins over both the registry string and the database row — the reason
+     * to say it is the clock, not the configuration.
+     */
+    {
+      const { lunchGreetingFor } = await import('./services/greetingPersonalisation');
+      const lunchGreeting = lunchGreetingFor(agentSlug);
+      if (lunchGreeting && !listenFirst) {
+        console.info(`[GREETING] lunch closure (12–1 PT) — ${agentSlug} using the lunch greeting`);
+        agentGreeting = lunchGreeting;
+      }
     }
     const recognisedFirstName = azulMetadataRef?.precontext?.matched
       ? String(azulMetadataRef.precontext.firstName ?? '').trim()

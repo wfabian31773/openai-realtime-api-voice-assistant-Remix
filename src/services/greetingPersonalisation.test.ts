@@ -4,6 +4,7 @@ import {
   stripTrailingQuestion,
   greetingStyleFor,
   missingMandatoryCopy,
+  lunchGreetingFor,
 } from './greetingPersonalisation';
 
 const SURGERY =
@@ -206,5 +207,49 @@ describe('copy a lane must say whatever the database holds', () => {
   it('treats an empty or absent greeting as missing everything', () => {
     expect(missingMandatoryCopy('no-ivr', '')).toHaveLength(3);
     expect(missingMandatoryCopy('no-ivr', null)).toHaveLength(3);
+  });
+});
+
+describe('lunchGreetingFor — the lunch hour is not after hours', () => {
+  const WEEKDAY_NOON = { hour: 12, shortDay: 'Tue' };
+
+  /**
+   * Operator, 2026-09-01: "no-ivr callers are any hours outside of business
+   * hours — a 7am call is no-ivr, our offices are still closed. If it is
+   * during lunch, our offices are closed between 12-1, so that should be
+   * said." A caller at 12:30 is not an after-hours caller and must not be
+   * told they have reached the after-hours service.
+   */
+  it('returns the lunch greeting on a weekday at noon', () => {
+    const g = lunchGreetingFor('no-ivr', WEEKDAY_NOON);
+    expect(g).toBeTruthy();
+    expect(g).toMatch(/closed for lunch between twelve and one/i);
+    expect(g).not.toMatch(/after hours/i);
+  });
+
+  it('says nothing about lunch at 7am, which really is after hours', () => {
+    expect(lunchGreetingFor('no-ivr', { hour: 7, shortDay: 'Tue' })).toBeNull();
+  });
+
+  it('does not treat a weekend noon as lunch — that is just closed', () => {
+    expect(lunchGreetingFor('no-ivr', { hour: 12, shortDay: 'Sat' })).toBeNull();
+    expect(lunchGreetingFor('no-ivr', { hour: 12, shortDay: 'Sun' })).toBeNull();
+  });
+
+  it('is scoped to the lane that has legally-shaped copy', () => {
+    expect(lunchGreetingFor('optical', WEEKDAY_NOON)).toBeNull();
+    expect(lunchGreetingFor('surgery', WEEKDAY_NOON)).toBeNull();
+    expect(lunchGreetingFor(undefined, WEEKDAY_NOON)).toBeNull();
+  });
+
+  /**
+   * The whole reason this is a separate constant rather than surgery on the
+   * configured string: an alternative greeting is another place the three
+   * mandatory statements can go missing. It is checked by the same rule the
+   * database row is checked by.
+   */
+  it('carries the closed notice, the 911 direction and the recording disclosure', () => {
+    const g = lunchGreetingFor('no-ivr', WEEKDAY_NOON);
+    expect(missingMandatoryCopy('no-ivr', g)).toEqual([]);
   });
 });
