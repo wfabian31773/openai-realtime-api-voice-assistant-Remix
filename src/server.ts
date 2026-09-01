@@ -201,6 +201,11 @@ async function startVoiceServer() {
     
     // Start grader-based push alerting (checks every 15 min)
     systemAlertService.startGraderAlertSchedule();
+
+    // The ticket path finally has a watch on it (every 5 min). On 2026-08-31
+    // filing stopped at 20:16 UTC and nothing noticed for three and a half
+    // hours; replayed against that night's rows this fires at 20:23:06.
+    systemAlertService.startTicketFilingSchedule();
     
     // Start data retention policy scheduler (purges expired data daily)
     import('./services/retentionPolicyService').then(({ retentionPolicyService }) => {

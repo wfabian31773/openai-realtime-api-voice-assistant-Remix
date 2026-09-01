@@ -160,6 +160,16 @@ interface TodayOverview {
   /** Epoch ms of the newest call_logs row — null if none. Lets the page say
    * "logging is down" instead of showing silent zeros on every card. */
   lastCallLogAtMs?: number | null
+  /** The same guard for the ticket path, which had none until 2026-09-01.
+   * Thresholds and their derivation: server/services/ticketFilingHealth.ts. */
+  ticketFiling?: {
+    stalled: boolean
+    reason: string | null
+    unfiledRun: number
+    lastFiledAtMs: number | null
+    minutesSinceLastFiled: number | null
+    outboxHeld: number
+  } | null
 }
 interface BriefAgentMetric {
   agentId: string
@@ -1730,6 +1740,32 @@ function CommandCenterTab({
             )
           }
           return null
+        })()}
+        {(() => {
+          // The ticket path, which had no guard at all until 2026-09-01. On
+          // 08-31 filing stopped at 20:16 UTC and ran dead for three and a half
+          // hours; this page showed nothing, because a queue call that files no
+          // ticket looks exactly like one that had nothing to file. Staff told
+          // the operator in the end.
+          const tf = today.data?.ticketFiling
+          if (!tf?.stalled) return null
+          return (
+            <div className="mb-3 rounded-lg border border-red-500/60 bg-red-500/10 p-3 text-sm">
+              <p className="font-semibold text-red-700 dark:text-red-400">
+                ⚠ TICKET FILING HAS STOPPED — {tf.reason}
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {tf.lastFiledAtMs
+                  ? `Last ticket filed ${new Date(tf.lastFiledAtMs).toLocaleString()}. `
+                  : 'No ticket on record in the recent window. '}
+                {tf.outboxHeld > 0
+                  ? `${tf.outboxHeld} request(s) are held in the outbox and being retried — the payloads are intact. `
+                  : ''}
+                Callers are still being answered. Check{' '}
+                <code>[TICKETING API]</code> and <code>[TICKET OUTBOX]</code> in the deployment logs.
+              </p>
+            </div>
+          )
         })()}
         {today.isError && (
           <p className="text-sm text-red-600">

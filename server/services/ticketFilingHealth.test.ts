@@ -1,0 +1,125 @@
+/**
+ * Replaying 2026-08-31 against the alarm that did not exist that night.
+ *
+ * Filing stopped at 20:16 UTC when the gateway hit its execution cap. The last
+ * ticket landed at 20:15:38. 185 queue calls then arrived and left without one,
+ * until 23:54:54. Nobody was told; staff eventually told the operator.
+ *
+ * The numbers in these tests are the production rows, not invented shapes:
+ * over the 14 days to 2026-09-01 the run-length distribution of consecutive
+ * queue calls that filed no ticket was 185 once (the outage), then 8, 7, 7,
+ * and 6 six times, and nothing else above 5.
+ */
+import { describe, it, expect } from 'vitest';
+import {
+  assessTicketFiling,
+  UNFILED_RUN_ALARM,
+  OUTBOX_HELD_ALARM,
+  type TicketFilingSnapshot,
+} from './ticketFilingHealth';
+
+const MIN = 60_000;
+const NOW = Date.parse('2026-08-31T20:23:06Z');
+
+/** Newest first, one call every 90 seconds, `unfiled` of them with no ticket. */
+function calls(unfiled: number, thenFiled: number, from = NOW): TicketFilingSnapshot['recentQueueCalls'] {
+  const out: TicketFilingSnapshot['recentQueueCalls'] = [];
+  for (let i = 0; i < unfiled; i++) out.push({ createdAtMs: from - i * 90_000, hasTicket: false });
+  for (let i = 0; i < thenFiled; i++) {
+    out.push({ createdAtMs: from - (unfiled + i) * 90_000, hasTicket: true });
+  }
+  return out;
+}
+
+function snapshot(over: Partial<TicketFilingSnapshot> = {}): TicketFilingSnapshot {
+  return {
+    recentQueueCalls: calls(0, 20),
+    outboxPending: 0,
+    outboxFailed: 0,
+    outboxDeadLetter: 0,
+    nowMs: NOW,
+    ...over,
+  };
+}
+
+describe('plane A — calls arriving and leaving without a ticket', () => {
+  it('does not fire on the worst run a normal fortnight produced', () => {
+    // Eight. Seen once in 14 days, and nothing was wrong.
+    const v = assessTicketFiling(snapshot({ recentQueueCalls: calls(8, 12) }));
+    expect(v.stalled).toBe(false);
+    expect(v.unfiledRun).toBe(8);
+  });
+
+  it('fires on the outage', () => {
+    const v = assessTicketFiling(snapshot({ recentQueueCalls: calls(185, 5) }));
+    expect(v.stalled).toBe(true);
+    expect(v.unfiledRun).toBe(185);
+    expect(v.reason).toMatch(/185 queue calls in a row/);
+  });
+
+  it('is exact at the boundary the threshold was chosen for', () => {
+    expect(assessTicketFiling(snapshot({ recentQueueCalls: calls(UNFILED_RUN_ALARM - 1, 5) })).stalled).toBe(false);
+    expect(assessTicketFiling(snapshot({ recentQueueCalls: calls(UNFILED_RUN_ALARM, 5) })).stalled).toBe(true);
+  });
+
+  it('cannot be tripped by silence, which is the whole reason it counts calls', () => {
+    // A closed line. The clock-based version of this alarm — the obvious one —
+    // fires here every night and gets muted within a week.
+    expect(assessTicketFiling(snapshot({ recentQueueCalls: [] })).stalled).toBe(false);
+
+    // And a real weekend: the last ticket was three days ago because nobody
+    // rang, not because filing broke. The longest healthy gap between two
+    // filed tickets in the measured fortnight is days long.
+    const weekend = snapshot({
+      recentQueueCalls: [
+        { createdAtMs: NOW - 5 * MIN, hasTicket: false },
+        { createdAtMs: NOW - 40 * MIN, hasTicket: false },
+        { createdAtMs: NOW - 3 * 24 * 60 * MIN, hasTicket: true },
+      ],
+    });
+    const v = assessTicketFiling(weekend);
+    expect(v.stalled).toBe(false);
+    expect(v.minutesSinceLastFiled).toBe(3 * 24 * 60);
+  });
+
+  it('reports the last filed call, not the last call', () => {
+    const v = assessTicketFiling(snapshot({ recentQueueCalls: calls(4, 6) }));
+    expect(v.lastFiledAtMs).toBe(NOW - 4 * 90_000);
+    expect(v.minutesSinceLastFiled).toBe(6);
+  });
+});
+
+describe('plane B — our own POSTs failing, before any run builds up', () => {
+  it('fires on a dead letter even while calls are filing normally', () => {
+    // A request that exhausted every retry. The table held no non-sent row at
+    // all between 2026-05-12 and 2026-09-01, so one is already abnormal.
+    const v = assessTicketFiling(snapshot({ outboxDeadLetter: 1 }));
+    expect(v.stalled).toBe(true);
+    expect(v.reason).toMatch(/gave up after every retry/);
+    // And it says the thing a person needs to hear next.
+    expect(v.reason).toMatch(/replayable|nothing is lost/i);
+  });
+
+  it('fires when the outbox is holding requests it cannot send', () => {
+    const v = assessTicketFiling(snapshot({ outboxPending: 2, outboxFailed: 1 }));
+    expect(v.stalled).toBe(true);
+    expect(v.outboxHeld).toBe(OUTBOX_HELD_ALARM);
+    expect(v.reason).toMatch(/refusing POSTs/);
+    // The caller was told their request was recorded — that promise is now
+    // this alarm's problem to keep.
+    expect(v.reason).toMatch(/told their request was recorded/);
+  });
+
+  it('tolerates one retry in flight', () => {
+    expect(assessTicketFiling(snapshot({ outboxPending: 1 })).stalled).toBe(false);
+  });
+
+  it('catches the outage sooner than plane A would', () => {
+    // The point of two planes. During 08-31 the POSTs were being refused from
+    // the first minute; plane A had to wait for twelve calls to arrive.
+    const early = snapshot({ recentQueueCalls: calls(3, 10), outboxFailed: 4 });
+    const v = assessTicketFiling(early);
+    expect(v.stalled).toBe(true);
+    expect(v.unfiledRun).toBe(3); // plane A is nowhere near firing
+  });
+});

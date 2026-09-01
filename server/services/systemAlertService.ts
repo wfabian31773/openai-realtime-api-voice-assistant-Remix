@@ -14,7 +14,7 @@ import { db } from '../../server/db';
 import { sql } from 'drizzle-orm';
 
 interface AlertEvent {
-  type: 'database_failure' | 'call_log_failure' | 'circuit_breaker_open' | 'system_degraded' | 'recovery' | 'emergency_miss' | 'provider_miss' | 'handoff_failure_spike' | 'high_mismatch_ratio' | 'grader_critical_failure';
+  type: 'database_failure' | 'call_log_failure' | 'circuit_breaker_open' | 'system_degraded' | 'recovery' | 'emergency_miss' | 'provider_miss' | 'handoff_failure_spike' | 'high_mismatch_ratio' | 'grader_critical_failure' | 'ticket_filing_stalled';
   severity: 'critical' | 'warning' | 'info';
   message: string;
   details?: Record<string, any>;
@@ -469,6 +469,59 @@ class SystemAlertService {
     setInterval(() => {
       this.checkGraderAlerts();
     }, 15 * 60 * 1000);
+  }
+
+  /**
+   * THE TICKET PATH FINALLY HAS A WATCH ON IT.
+   *
+   * On 2026-08-31 filing stopped at 20:16 UTC and ran dead for three and a
+   * half hours. Nothing alerted — R1–R12 in the diagnosis rules do not cover
+   * the ticket path at all, which is the queue lines' entire job — and it was
+   * found because staff told the operator.
+   *
+   * Thresholds and their derivation live in ticketFilingHealth.ts. Replayed
+   * against the production rows, this fires at 20:23:06 that night, and does
+   * not fire on any other run in the fortnight around it.
+   *
+   * Every five minutes rather than fifteen: seven minutes of detection is only
+   * worth having if the check runs inside it.
+   */
+  async checkTicketFilingAlert(): Promise<void> {
+    try {
+      const { readTicketFilingSnapshot, assessTicketFiling } = await import('./ticketFilingHealth');
+      const snapshot = await readTicketFilingSnapshot();
+      if (!snapshot) return; // it logged its own reason
+
+      const verdict = assessTicketFiling(snapshot);
+      if (!verdict.stalled) {
+        console.log(
+          `[ALERT SERVICE] Ticket filing OK — ${verdict.unfiledRun} call(s) since the last ticket, ` +
+            `${verdict.outboxHeld} held in the outbox`,
+        );
+        return;
+      }
+
+      await this.sendAlert({
+        type: 'ticket_filing_stalled',
+        severity: 'critical',
+        message: `TICKET FILING HAS STOPPED: ${verdict.reason}`,
+        details: {
+          unfiledRun: verdict.unfiledRun,
+          minutesSinceLastFiled: verdict.minutesSinceLastFiled,
+          outboxHeld: verdict.outboxHeld,
+        },
+        timestamp: new Date(),
+      });
+    } catch (error) {
+      console.error('[ALERT SERVICE] Error checking ticket filing:', error);
+    }
+  }
+
+  startTicketFilingSchedule(): void {
+    console.log('[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes)');
+    setInterval(() => {
+      this.checkTicketFilingAlert();
+    }, 5 * 60 * 1000);
   }
 
   async runSyntheticAlertTest(): Promise<Array<{ alertType: string; delivered: boolean; detail: string }>> {

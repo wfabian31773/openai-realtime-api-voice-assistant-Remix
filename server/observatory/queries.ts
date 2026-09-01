@@ -10,6 +10,7 @@
  */
 import { pool } from '../db';
 import { fivestarQuery } from './fivestarDb';
+import { assessTicketFiling, type TicketFilingVerdict } from '../services/ticketFilingHealth';
 
 // ────────────────────────────────────────────────────────────────────────
 // Ops Hub agents — six-pillar scorecards
@@ -956,6 +957,8 @@ export interface TodayOverview {
    * explanation anywhere on the page. A zero must be distinguishable from
    * "nothing recorded" (measurement-traps.md). */
   lastCallLogAtMs: number | null;
+  /** Ticket-path health, or null when it could not be read. See ticketFilingHealth.ts. */
+  ticketFiling: TicketFilingVerdict | null;
 }
 
 export async function todayOverview(): Promise<TodayOverview> {
@@ -1000,6 +1003,50 @@ export async function todayOverview(): Promise<TodayOverview> {
   );
   const lastCallLogAtMs =
     lastLog.rows[0]?.last_ms != null ? Number(lastLog.rows[0].last_ms) : null;
+
+  /**
+   * The same guard for the ticket path, which had none at all.
+   *
+   * Call logging got its staleness banner on 2026-08-24. A week later filing
+   * stopped for three and a half hours and this page showed nothing, because
+   * a queue call that files no ticket looks exactly like a queue call that had
+   * nothing to file. The rule and the thresholds live in
+   * server/services/ticketFilingHealth.ts, next to the run-length distribution
+   * they were measured from — this reads both planes and asks it.
+   */
+  let ticketFiling: TicketFilingVerdict | null = null;
+  try {
+    const recent = await pool.query(
+      `SELECT (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_ms,
+              (ticket_number IS NOT NULL) AS has_ticket
+         FROM call_logs
+        WHERE agent_used IN ('optical', 'surgery', 'tech', 'records')
+        ORDER BY created_at DESC
+        LIMIT 40`,
+    );
+    const held = await pool.query(
+      `SELECT status::text AS status, COUNT(*)::int AS n
+         FROM ticket_outbox
+        WHERE status <> 'sent' AND created_at > NOW() - INTERVAL '6 hours'
+        GROUP BY 1`,
+    );
+    const byStatus: Record<string, number> = {};
+    for (const r of held.rows) byStatus[r.status] = Number(r.n) || 0;
+    ticketFiling = assessTicketFiling({
+      recentQueueCalls: recent.rows.map((r: { created_ms: string; has_ticket: boolean }) => ({
+        createdAtMs: Number(r.created_ms),
+        hasTicket: Boolean(r.has_ticket),
+      })),
+      outboxPending: (byStatus.pending ?? 0) + (byStatus.sending ?? 0),
+      outboxFailed: byStatus.failed ?? 0,
+      outboxDeadLetter: byStatus.dead_letter ?? 0,
+      nowMs: Date.now(),
+    });
+  } catch (err) {
+    // A widget that cannot read is not a system that is healthy — say nothing
+    // rather than green.
+    console.error('[observatory] ticket filing health unavailable:', err);
+  }
 
   let sage: TodayOverview['sage'];
   try {
@@ -1080,6 +1127,7 @@ export async function todayOverview(): Promise<TodayOverview> {
     })),
     sage,
     lastCallLogAtMs,
+    ticketFiling,
   };
 }
 
