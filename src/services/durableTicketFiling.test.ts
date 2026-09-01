@@ -256,6 +256,34 @@ describe('a payload the server read and refused', () => {
     expect(out.error).toMatch(/patientPhone/);
   });
 
+  it('is terminal even when the refusal body was not JSON', async () => {
+    // The Codex finding on PR #244: an empty or non-JSON 400 threw from
+    // response.json() before the status was attached, so a permanent refusal
+    // was read as an outage and queued.
+    createTicket.mockResolvedValue({
+      success: false,
+      statusCode: 400,
+      error: 'Invalid JSON response from ticketing API: 400',
+    });
+    const res = await createTicketDurable(OPTICAL_OTHER);
+    expect(res.terminal).toBe(true);
+    expect(writeToOutbox).not.toHaveBeenCalled();
+  });
+
+  it('but the 2026-08-31 outage still gets captured', async () => {
+    // The case that must NOT change shape: n8n answered HTTP 200 with a body
+    // that is not JSON. Same thrown message, a status that is not a refusal.
+    createTicket.mockResolvedValue({
+      success: false,
+      statusCode: 200,
+      error: 'Invalid JSON response from ticketing API: 200',
+    });
+    const res = await createTicketDurable(OPTICAL_OTHER);
+    expect(res.terminal).toBeUndefined();
+    expect(res.queued).toBe(true);
+    expect(writeToOutbox).toHaveBeenCalledOnce();
+  });
+
   it('still captures the statuses that mean "not now"', async () => {
     // 429 and 408 are the server asking for a retry, which is what the outbox
     // is for. A 503 or a timeout carries no status at all and is already

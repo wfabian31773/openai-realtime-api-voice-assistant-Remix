@@ -407,9 +407,33 @@ export class TicketOutboxService {
     const now = new Date();
     const leaseExpiry = new Date(Date.now() - SENDING_LEASE_TIMEOUT_MS);
 
-    const claimed = await db
-      .update(ticketOutbox)
-      .set({ status: 'sending', updatedAt: now })
+    /**
+     * SELECT the due rows. Do NOT claim them here.
+     *
+     * Found by Codex on PR #244, and it means this worker has never re-sent
+     * anything. It used to `update ... set status='sending', updatedAt=now`
+     * and then call `attemptSend`, whose own claim takes only `pending`,
+     * `failed`, or a `sending` row whose two-minute lease has expired. A row
+     * this function had just marked `sending` with a fresh lease matched none
+     * of those, so every entry came back "already being processed by another
+     * worker" — and on the next tick this function refreshed the lease and did
+     * it again. Rows sat in `sending` for ever.
+     *
+     * The production table agrees: 36 rows, all `sent`, newest 2026-08-22, and
+     * every one of them was sent by syncAgentService calling `attemptSend`
+     * directly on a fresh row. Nothing has ever left here through the worker.
+     *
+     * That was survivable while only the answering-service path wrote to the
+     * outbox and sent inline. It is not survivable now the queue tools depend
+     * on this worker to send what a failed POST left behind.
+     *
+     * `attemptSend` is the single atomic claimer and stays that way — its
+     * UPDATE...WHERE is what makes two workers safe. This function's job is
+     * only to say which rows are due.
+     */
+    const due = await db
+      .select({ id: ticketOutbox.id })
+      .from(ticketOutbox)
       .where(
         and(
           or(
@@ -425,20 +449,19 @@ export class TicketOutboxService {
             lte(ticketOutbox.nextRetryAt, now),
           ),
         ),
-      )
-      .returning({ id: ticketOutbox.id, retryCount: ticketOutbox.retryCount, payload: ticketOutbox.payload });
+      );
 
-    if (claimed.length === 0) return 0;
+    if (due.length === 0) return 0;
 
-    console.info(`[TICKET OUTBOX] Claimed ${claimed.length} entries for retry`);
+    console.info(`[TICKET OUTBOX] ${due.length} entr(ies) due for retry`);
     let successCount = 0;
 
-    for (const entry of claimed) {
+    for (const entry of due) {
       const result = await TicketOutboxService.attemptSend(entry.id);
       if (result.success) successCount++;
     }
 
-    console.info(`[TICKET OUTBOX] Retry batch complete: ${successCount}/${claimed.length} succeeded`);
+    console.info(`[TICKET OUTBOX] Retry batch complete: ${successCount}/${due.length} succeeded`);
     return successCount;
   }
 

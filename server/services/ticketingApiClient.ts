@@ -557,7 +557,26 @@ export class TicketingApiClient {
         data = await response.json();
       } catch (parseError) {
         console.error(`[TICKETING API] ✗ Failed to parse JSON response:`, parseError);
-        throw new Error(`Invalid JSON response from ticketing API: ${response.status}`);
+        /**
+         * THE STATUS SURVIVES A BODY WE COULD NOT READ.
+         *
+         * Found by Codex on PR #244. This threw a plain Error, so a 4xx with an
+         * empty or non-JSON body arrived at `createTicketDurable` with no
+         * `statusCode` — read as a transport failure and written to the outbox,
+         * which is the one thing the 4xx split exists to prevent. An empty 400
+         * is ordinary, and a 401/403 after a key rotation would have filled the
+         * outbox with requests that can never send and held the filing alarm
+         * open indefinitely.
+         *
+         * The 2026-08-31 outage is the case that must NOT change: n8n answered
+         * HTTP 200 with a body that is not JSON. That now carries statusCode
+         * 200, which is not a refusal, so it is still captured and retried.
+         */
+        const parseFailure = new Error(
+          `Invalid JSON response from ticketing API: ${response.status}`,
+        ) as Error & { statusCode?: number };
+        parseFailure.statusCode = response.status;
+        throw parseFailure;
       }
 
       if (!response.ok) {
@@ -598,6 +617,22 @@ export class TicketingApiClient {
           { sensitive: true, component: 'ticketingApiClient' });
       }
       
+      /**
+       * A response-derived error passes through untouched.
+       *
+       * This catch wraps the whole try — the fetch AND the response handling —
+       * so the two throws above land here too. The rewraps below are for
+       * errors that never received a response, and either of them would strip
+       * the `statusCode` that `createTicketDurable` uses to tell a refusal
+       * from an outage. The `.includes('fetch')` test is the live hazard: the
+       * message can be the far side's own error text, and a refusal whose text
+       * happened to contain that word would be rewrapped as "unreachable" and
+       * queued as a transport failure.
+       */
+      if ((networkError as { statusCode?: number } | null)?.statusCode !== undefined) {
+        throw networkError;
+      }
+
       if (networkError instanceof Error && networkError.name === 'AbortError') {
         console.error(`[TICKETING API] ✗ Request aborted (timeout): ${endpoint}`);
         throw new Error(`Ticketing API timeout after ${timeoutMs}ms - please try again`);

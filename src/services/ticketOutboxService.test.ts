@@ -184,3 +184,54 @@ describe('the retry window has to outlast an outage', () => {
     expect(dead!.lastError).toMatch(/Invalid JSON/);
   });
 });
+
+
+/**
+ * THE WORKER HAS NEVER RE-SENT ANYTHING — found by Codex on PR #244.
+ *
+ * `processRetries` used to mark every due row `sending` with a fresh
+ * `updatedAt` and then call `attemptSend`, whose own claim accepts only
+ * `pending`, `failed`, or a `sending` row whose two-minute lease has expired.
+ * A row just marked `sending` matched none of them, so every entry came back
+ * "already being processed by another worker", and the next tick refreshed the
+ * lease and repeated it. Rows sat in `sending` for ever.
+ *
+ * The production table agrees: 36 rows, all `sent`, newest 2026-08-22, every
+ * one sent by syncAgentService calling `attemptSend` directly on a fresh row.
+ * Nothing has ever left through the worker.
+ *
+ * Harmless while the answering-service path sent inline. Not harmless now the
+ * queue tools depend on this to send what a failed POST left behind.
+ */
+describe('the retry worker', () => {
+  it('actually sends a row that is due', async () => {
+    // db.select() -> the due ids; then attemptSend's own claim, then its
+    // mark-sent write.
+    selectResults.push([{ id: 'ob-1' }]);
+    updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER)), undefined);
+
+    const sent = await TicketOutboxService.processRetries();
+
+    expect(sent).toBe(1);
+    expect(createTicket).toHaveBeenCalledOnce();
+    expect(setPayloads.find((p) => p.status === 'sent')?.ticketNumber).toBe('VA-52100');
+  });
+
+  it('does not claim the row before attemptSend does', async () => {
+    // The regression itself: any write here puts the row into a state
+    // attemptSend refuses, and one claimer is the whole reason two workers are
+    // safe. Exactly one `sending` write should happen per entry — attemptSend's.
+    selectResults.push([{ id: 'ob-1' }]);
+    updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER)), undefined);
+
+    await TicketOutboxService.processRetries();
+
+    expect(setPayloads.filter((p) => p.status === 'sending')).toHaveLength(1);
+  });
+
+  it('does nothing when nothing is due', async () => {
+    selectResults.push([]);
+    expect(await TicketOutboxService.processRetries()).toBe(0);
+    expect(createTicket).not.toHaveBeenCalled();
+  });
+});
