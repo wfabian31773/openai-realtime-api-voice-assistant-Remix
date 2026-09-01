@@ -17,6 +17,7 @@ import { registerTool, missing, type ToolResult } from './registry';
 // shared module. Importing it here is what puts them in the registry for this
 // queue — the same three definitions Surgery uses, not copies of them.
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
+import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 
 // ---------------------------------------------------------------- what kind
 
@@ -349,7 +350,7 @@ registerTool({
       );
     }
 
-    const res = await ticketingApiClient.createTicket({
+    const res = await createTicketDurable({
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
@@ -385,11 +386,9 @@ registerTool({
     });
 
     if (!res.success || !res.ticketNumber) {
-      return {
-        success: false,
-        error: res.error ?? 'ticket creation failed',
-        retryable: true,
-      };
+      // The POST failed. createTicketDurable has already put the payload in the
+      // outbox if it could; this only decides what the agent says about it.
+      return postFailureToolResult(res);
     }
 
     return {

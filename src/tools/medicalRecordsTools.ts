@@ -32,6 +32,7 @@
  */
 import { registerTool, missing, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
+import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 
 // ---------------------------------------------------------------- what kind
 
@@ -356,7 +357,7 @@ registerTool({
     // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
     // Never submit-ticket: it re-derives the DEPARTMENT server-side and
     // defaults to 8.
-    const res = await ticketingApiClient.createTicket({
+    const res = await createTicketDurable({
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
@@ -412,7 +413,7 @@ registerTool({
     });
 
     if (!res.success || !res.ticketNumber) {
-      return { success: false, error: res.error ?? 'ticket creation failed', retryable: true };
+      return postFailureToolResult(res);
     }
 
     return {

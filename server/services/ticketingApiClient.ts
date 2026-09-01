@@ -3,7 +3,7 @@ import { shadowTap } from '../../src/shadow/tap'; // observation-only tap; no-op
 import { isNoTicketError } from './ticketingSyncPolicy';
 import type { PcpTicketPayload, PcpTicketResponse } from '../../src/pcp/pcpTicketing';
 
-interface CallData {
+export interface CallData {
   callSid?: string;
   recordingUrl?: string;
   transcript?: string;
@@ -19,7 +19,7 @@ interface CallData {
   agentOutcome?: string;
 }
 
-interface CreateTicketParams {
+export interface CreateTicketParams {
   /**
    * MEDICAL RECORDS / CAP ONLY.
    *
@@ -70,7 +70,7 @@ interface CreateTicketParams {
   idempotencyKey?: string; // Undeclared here let a typo compile clean and send nothing — see PR #220.
 }
 
-interface CreateTicketResponse {
+export interface CreateTicketResponse {
   success: boolean;
   ticketId?: number;
   ticketNumber?: string;

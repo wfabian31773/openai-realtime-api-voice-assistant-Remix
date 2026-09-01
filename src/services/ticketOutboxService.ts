@@ -2,19 +2,75 @@ import { db } from '../../server/db';
 import { ticketOutbox } from '../../shared/schema';
 import { eq, and, lte, or, isNull, sql, inArray } from 'drizzle-orm';
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
+import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 import { getValidatedTicketIds } from '../config/answeringServiceTicketing';
 import type { SyncAgentTicketParams } from './syncAgentService';
 import { storage } from '../../server/storage';
 
 const RETRY_BACKOFF_BASE_MS = 30_000;
-const MAX_RETRIES = 5;
+/**
+ * THE RETRY WINDOW HAS TO OUTLAST AN OUTAGE, or the outbox is just a log line.
+ *
+ * It was five retries on a pure doubling from 30s: 30s, 1m, 2m, 4m, 8m — dead
+ * letter at 15 minutes. The outage on 2026-08-31 ran from 20:16 UTC until the
+ * URL was flipped the next morning. Everything written during it would have
+ * dead-lettered inside the first quarter hour and then sat there, which is the
+ * same lost request with a row to prove it.
+ *
+ * Doubling to a 30-minute ceiling over twelve attempts covers about three and a
+ * half hours unattended. That is not a whole night; a dead letter still holds
+ * the full payload and is replayable by hand, and #46 (the "tickets filed = 0"
+ * alarm) is what turns a long outage into a page rather than a discovery.
+ */
+const RETRY_BACKOFF_CAP_MS = 30 * 60_000;
+const MAX_RETRIES = 12;
 const WORKER_INTERVAL_MS = 60_000;
 const SENDING_LEASE_TIMEOUT_MS = 120_000;
+
+/**
+ * WHAT THE OUTBOX HOLDS — two shapes, and the difference is load-bearing.
+ *
+ * - A bare `SyncAgentTicketParams`, which is every row written before
+ *   2026-09-01. It is re-validated on the way out because the answering-service
+ *   path never validated it on the way in.
+ *
+ * - `{ kind: 'create_ticket_v1', params }`, written by a queue tool whose
+ *   payload was ALREADY validated against its own department's taxonomy. It is
+ *   stored verbatim and sent verbatim.
+ *
+ * Re-validating the second shape would be actively wrong. `getValidatedTicketIds`
+ * owns departments 1, 2, 3, 11 and 12 only, so an optical call that
+ * `detectCrossQueue` routed to the HVA Hub (department 9) would go into the
+ * outbox as a scheduling request and come out of it as a department 3
+ * medication ticket — see the header of answeringServiceTicketing.test.ts.
+ * The discriminator lives inside the jsonb payload rather than in a new column
+ * so that no migration stands between this and a deploy.
+ */
+export const CREATE_TICKET_PAYLOAD_KIND = 'create_ticket_v1';
+
+export interface CreateTicketOutboxPayload {
+  kind: typeof CREATE_TICKET_PAYLOAD_KIND;
+  params: CreateTicketParams;
+}
+
+export type OutboxPayload = SyncAgentTicketParams | CreateTicketOutboxPayload;
+
+export function wrapCreateTicketPayload(params: CreateTicketParams): CreateTicketOutboxPayload {
+  return { kind: CREATE_TICKET_PAYLOAD_KIND, params };
+}
+
+export function isCreateTicketPayload(payload: unknown): payload is CreateTicketOutboxPayload {
+  const p = payload as CreateTicketOutboxPayload | null | undefined;
+  return Boolean(p) && p?.kind === CREATE_TICKET_PAYLOAD_KIND && Boolean(p?.params);
+}
 
 interface OutboxWriteResult {
   outboxId: string;
   idempotencyKey?: string;
   alreadyExists: boolean;
+  /** Set only on an idempotent hit, so a caller can tell a queued entry from one already sent. */
+  status?: string;
+  ticketNumber?: string;
 }
 
 interface OutboxSendResult {
@@ -28,7 +84,7 @@ export class TicketOutboxService {
   private static workerTimer: ReturnType<typeof setInterval> | null = null;
 
   static async writeToOutbox(
-    params: SyncAgentTicketParams,
+    params: OutboxPayload,
     callSid?: string,
     callLogId?: string,
   ): Promise<OutboxWriteResult> {
@@ -58,7 +114,13 @@ export class TicketOutboxService {
 
         if (existing.length > 0) {
           console.info(`[TICKET OUTBOX] Idempotent hit: ${idempotencyKey} → ${existing[0].id} (${existing[0].status})`);
-          return { outboxId: existing[0].id, idempotencyKey, alreadyExists: true };
+          return {
+            outboxId: existing[0].id,
+            idempotencyKey,
+            alreadyExists: true,
+            status: existing[0].status,
+            ticketNumber: existing[0].ticketNumber || undefined,
+          };
         }
         throw new Error(`Conflict on idempotency key but entry not found: ${idempotencyKey}`);
       }
@@ -123,77 +185,19 @@ export class TicketOutboxService {
     }
 
     const entry = claimed[0];
-    const params = entry.payload as SyncAgentTicketParams;
+    const stored = entry.payload as unknown;
+    /**
+     * Legacy payloads only. The verbatim shape is deliberately NOT coerced into
+     * this type — nothing below may read a field off a queue payload, because
+     * every one of those reads is a chance to rewrite a ticket its own queue
+     * already got right.
+     */
+    const params = isCreateTicketPayload(stored) ? null : (stored as SyncAgentTicketParams);
 
     try {
-      const validatedIds = getValidatedTicketIds(
-        params.departmentId,
-        params.requestTypeId,
-        params.requestReasonId,
-      );
-
-      let resolvedProviderId: number | undefined;
-      let resolvedLocationId: number | undefined;
-
-      if (params.lastProviderSeen || params.locationOfLastVisit) {
-        try {
-          const lookupResult = await ticketingApiClient.lookupProviderAndLocation({
-            providerName: params.lastProviderSeen || undefined,
-            locationName: params.locationOfLastVisit || undefined,
-          });
-          // See syncAgentService's matching block. Skipping the ids is right;
-          // doing it silently is not. On the outbox this matters more, not
-          // less: a retry that lands during an outage files unrouted and the
-          // entry is then marked sent, so nothing ever revisits it.
-          const { lookupWasUnavailable } = await import('../../server/services/ticketingApiClient');
-          if (lookupWasUnavailable(lookupResult)) {
-            console.error(
-              `[TICKET OUTBOX] ✗ PROVIDER/LOCATION LOOKUP UNAVAILABLE for ${outboxId} — ` +
-                `filing unrouted. Cause: ${lookupResult.error ?? 'unknown'}`,
-            );
-          } else {
-            resolvedProviderId = lookupResult.providerId ?? undefined;
-            resolvedLocationId = lookupResult.locationId ?? undefined;
-          }
-        } catch (lookupErr) {
-          console.warn(`[TICKET OUTBOX] Provider/location lookup failed for ${outboxId}:`, lookupErr);
-        }
-      }
-
-      const response = await ticketingApiClient.createTicket({
-        departmentId: validatedIds.departmentId,
-        requestTypeId: validatedIds.requestTypeId,
-        requestReasonId: validatedIds.requestReasonId,
-        patientFirstName: params.patientFirstName,
-        patientLastName: params.patientLastName,
-        patientPhone: params.patientPhone,
-        patientEmail: params.patientEmail ?? undefined,
-        preferredContactMethod: params.preferredContactMethod ?? undefined,
-        lastProviderSeen: params.lastProviderSeen ?? undefined,
-        locationOfLastVisit: params.locationOfLastVisit ?? undefined,
-        patientBirthMonth: params.patientBirthMonth ?? undefined,
-        patientBirthDay: params.patientBirthDay ?? undefined,
-        patientBirthYear: params.patientBirthYear ?? undefined,
-        locationId: resolvedLocationId ?? undefined,
-        providerId: resolvedProviderId ?? undefined,
-        description: params.description,
-        priority: params.priority ?? 'medium',
-        callData: params.callData ? {
-          callSid: params.callData.callSid,
-          recordingUrl: params.callData.recordingUrl,
-          transcript: params.callData.transcript,
-          callerPhone: params.callData.callerPhone,
-          dialedNumber: params.callData.dialedNumber,
-          agentUsed: params.callData.agentUsed,
-          callStartTime: params.callData.callStartTime,
-          callEndTime: params.callData.callEndTime,
-          callDurationSeconds: params.callData.callDurationSeconds,
-          humanHandoffOccurred: params.callData.humanHandoffOccurred,
-          qualityScore: params.callData.qualityScore,
-          patientSentiment: params.callData.patientSentiment,
-          agentOutcome: params.callData.agentOutcome,
-        } : undefined,
-      });
+      const response = isCreateTicketPayload(stored)
+        ? await TicketOutboxService.sendVerbatim(stored, outboxId)
+        : await TicketOutboxService.sendSyncAgentPayload(stored as SyncAgentTicketParams, outboxId);
 
       if (response.success && response.ticketNumber) {
         const now = new Date();
@@ -234,15 +238,23 @@ export class TicketOutboxService {
           }
         });
 
-        // QVO ticket event — fire and forget, never blocks the outbox worker
+        // QVO ticket event — fire and forget, never blocks the outbox worker.
+        //
+        // Legacy payloads only, and that is not an oversight: emitTicketCreated
+        // takes a SyncAgentTicketParams, and a queue ticket filed directly by
+        // its tool emits no QVO event either. Emitting here and not there would
+        // make the event stream a record of which POSTs happened to fail.
         const ticketNumForQvo = response.ticketNumber;
         const callLogIdForQvo = entry.callLogId;
-        setImmediate(async () => {
-          try {
-            const { qvoEmitterService } = await import('./qvoEmitterService');
-            await qvoEmitterService.emitTicketCreated(outboxId, callLogIdForQvo, params, ticketNumForQvo);
-          } catch { /* never propagate */ }
-        });
+        const paramsForQvo = params;
+        if (paramsForQvo) {
+          setImmediate(async () => {
+            try {
+              const { qvoEmitterService } = await import('./qvoEmitterService');
+              await qvoEmitterService.emitTicketCreated(outboxId, callLogIdForQvo, paramsForQvo, ticketNumForQvo);
+            } catch { /* never propagate */ }
+          });
+        }
 
         return { success: true, ticketNumber: response.ticketNumber, outboxId };
       }
@@ -256,6 +268,107 @@ export class TicketOutboxService {
     }
   }
 
+  /**
+   * A QUEUE PAYLOAD GOES OUT EXACTLY AS IT CAME IN.
+   *
+   * No taxonomy validation, no provider/location lookup, no field mapping. The
+   * tool that built this payload had the caller on the line, resolved the
+   * office and the provider then, and picked the department — including a
+   * cross-queue redirect. Re-deriving any of that here would file a different
+   * ticket from the one the caller was promised.
+   *
+   * The idempotency key travels inside `params`, so a retry that lands after a
+   * POST which actually succeeded is deduplicated by the ticketing app rather
+   * than filed twice.
+   */
+  private static async sendVerbatim(
+    payload: CreateTicketOutboxPayload,
+    outboxId: string,
+  ): Promise<CreateTicketResponse> {
+    console.info(
+      `[TICKET OUTBOX] Re-sending queue ticket verbatim: ${outboxId} ` +
+        `(dept ${payload.params.departmentId}/${payload.params.requestTypeId ?? 'none'}/` +
+        `${payload.params.requestReasonId ?? 'none'}, agent ${payload.params.callData?.agentUsed ?? 'unknown'})`,
+    );
+    return await ticketingApiClient.createTicket(payload.params);
+  }
+
+  /** The answering-service shape, which is validated and enriched on the way out. */
+  private static async sendSyncAgentPayload(
+    params: SyncAgentTicketParams,
+    outboxId: string,
+  ): Promise<CreateTicketResponse> {
+    const validatedIds = getValidatedTicketIds(
+      params.departmentId,
+      params.requestTypeId,
+      params.requestReasonId,
+    );
+
+    let resolvedProviderId: number | undefined;
+    let resolvedLocationId: number | undefined;
+
+    if (params.lastProviderSeen || params.locationOfLastVisit) {
+      try {
+        const lookupResult = await ticketingApiClient.lookupProviderAndLocation({
+          providerName: params.lastProviderSeen || undefined,
+          locationName: params.locationOfLastVisit || undefined,
+        });
+        // See syncAgentService's matching block. Skipping the ids is right;
+        // doing it silently is not. On the outbox this matters more, not
+        // less: a retry that lands during an outage files unrouted and the
+        // entry is then marked sent, so nothing ever revisits it.
+        const { lookupWasUnavailable } = await import('../../server/services/ticketingApiClient');
+        if (lookupWasUnavailable(lookupResult)) {
+          console.error(
+            `[TICKET OUTBOX] ✗ PROVIDER/LOCATION LOOKUP UNAVAILABLE for ${outboxId} — ` +
+              `filing unrouted. Cause: ${lookupResult.error ?? 'unknown'}`,
+          );
+        } else {
+          resolvedProviderId = lookupResult.providerId ?? undefined;
+          resolvedLocationId = lookupResult.locationId ?? undefined;
+        }
+      } catch (lookupErr) {
+        console.warn(`[TICKET OUTBOX] Provider/location lookup failed for ${outboxId}:`, lookupErr);
+      }
+    }
+
+    return await ticketingApiClient.createTicket({
+      departmentId: validatedIds.departmentId,
+      requestTypeId: validatedIds.requestTypeId,
+      requestReasonId: validatedIds.requestReasonId,
+      patientFirstName: params.patientFirstName,
+      patientLastName: params.patientLastName,
+      patientPhone: params.patientPhone,
+      patientEmail: params.patientEmail ?? undefined,
+      preferredContactMethod: params.preferredContactMethod ?? undefined,
+      lastProviderSeen: params.lastProviderSeen ?? undefined,
+      locationOfLastVisit: params.locationOfLastVisit ?? undefined,
+      patientBirthMonth: params.patientBirthMonth ?? undefined,
+      patientBirthDay: params.patientBirthDay ?? undefined,
+      patientBirthYear: params.patientBirthYear ?? undefined,
+      locationId: resolvedLocationId ?? undefined,
+      providerId: resolvedProviderId ?? undefined,
+      description: params.description,
+      priority: params.priority ?? 'medium',
+      callData: params.callData ? {
+        callSid: params.callData.callSid,
+        recordingUrl: params.callData.recordingUrl,
+        transcript: params.callData.transcript,
+        callerPhone: params.callData.callerPhone,
+        dialedNumber: params.callData.dialedNumber,
+        agentUsed: params.callData.agentUsed,
+        callStartTime: params.callData.callStartTime,
+        callEndTime: params.callData.callEndTime,
+        callDurationSeconds: params.callData.callDurationSeconds,
+        humanHandoffOccurred: params.callData.humanHandoffOccurred,
+        qualityScore: params.callData.qualityScore,
+        patientSentiment: params.callData.patientSentiment,
+        agentOutcome: params.callData.agentOutcome,
+      } : undefined,
+    });
+
+  }
+
   private static async markFailed(
     outboxId: string,
     currentRetryCount: number,
@@ -265,7 +378,10 @@ export class TicketOutboxService {
     const isDeadLetter = newRetryCount >= MAX_RETRIES;
     const nextRetryAt = isDeadLetter
       ? null
-      : new Date(Date.now() + RETRY_BACKOFF_BASE_MS * Math.pow(2, newRetryCount - 1));
+      : new Date(
+          Date.now() +
+            Math.min(RETRY_BACKOFF_BASE_MS * Math.pow(2, newRetryCount - 1), RETRY_BACKOFF_CAP_MS),
+        );
 
     await db
       .update(ticketOutbox)
@@ -332,7 +448,16 @@ export class TicketOutboxService {
       return;
     }
 
-    console.info(`[TICKET OUTBOX] Starting retry worker (every ${WORKER_INTERVAL_MS / 1000}s)`);
+    // DEPLOY MARKER. A failed pull looks exactly like a failed fix (CLAUDE.md),
+    // and everything this build changed about the outbox is invisible until a
+    // POST fails — which is rare, and not something to go and cause. This line
+    // prints once at boot and names the policy, so "is the outbox build live?"
+    // is answerable without waiting for an outage.
+    console.info(
+      `[TICKET OUTBOX] Starting retry worker (every ${WORKER_INTERVAL_MS / 1000}s; ` +
+        `up to ${MAX_RETRIES} attempts, backoff ${RETRY_BACKOFF_BASE_MS / 1000}s → ` +
+        `${RETRY_BACKOFF_CAP_MS / 60_000}m; queue payloads re-sent verbatim)`,
+    );
     TicketOutboxService.workerTimer = setInterval(async () => {
       try {
         await TicketOutboxService.processRetries();

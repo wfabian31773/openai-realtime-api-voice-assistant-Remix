@@ -28,6 +28,7 @@
  */
 import { registerTool, missing, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
+import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 
 // ---------------------------------------------------------------- what kind
 
@@ -500,7 +501,7 @@ registerTool({
      *
      * A staff-notes field is the second ask in the ticketing change request.
      */
-    const res = await ticketingApiClient.createTicket({
+    const res = await createTicketDurable({
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
@@ -542,11 +543,9 @@ registerTool({
     });
 
     if (!res.success || !res.ticketNumber) {
-      return {
-        success: false,
-        error: res.error ?? 'ticket creation failed',
-        retryable: true,
-      };
+      // The POST failed. createTicketDurable has already put the payload in the
+      // outbox if it could; this only decides what the agent says about it.
+      return postFailureToolResult(res);
     }
 
     return {
