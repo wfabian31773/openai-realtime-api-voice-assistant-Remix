@@ -155,26 +155,31 @@ Green tests did not prevent any of the regressions listed there.
 
 ## Line status — check this before saying anything about what is on or off
 
-As of **2026-08-11 01:00 UTC**. Update this table whenever it changes.
+Volumes re-measured from `call_logs` on **2026-09-01 20:25 UTC**; the
+decisions are Wayne's and are unchanged. Update this table whenever it
+changes, and re-measure rather than copying the numbers forward.
 
-| Line | State | Who decided | Why |
-|---|---|---|---|
-| **answering-service** | **LIVE**, old core (`/api/voice/answering-service`) | — | 579 calls on Aug 10, its biggest day. Not broken. |
-| **no-ivr** | **LIVE** | — | ~30–50/day. Produces the best transcripts; Wayne's quality benchmark. |
-| **pcp** | **OFF** in Twilio | Wayne decided, **I recommended it and sequenced it as step 1** | Transfer failures seen Friday; complaints from surgery centers; medical-facing. *"I just cannot see the disasters I was seeing on Friday on that line."* Was ~200 calls/day. |
-| **azul-scheduling** (San Diego) | **OFF** | Wayne, Aug 10–11 | Gate B replay: **books 8 of 21** the old core booked. Not ready. Was ~80 calls/day. |
-| **claude-as** | Test number only | — | The Claude pipeline. **Unproven — zero clean end-to-end calls.** |
-| **optical** (queue) | **LIVE** | Wayne, Aug 12 | Forwarded optical overflow. *"Optical works like a charm."* Dept 1, 1,744 tickets/90d. |
-| **surgery** (queue) | **LIVE** | Wayne, Aug 12 | Dept 2. Filing was dead until the strict-mode schema fix; **VA-51121** is the proof it works. |
-| **tech** (queue) | Built, number pending | Wayne, Aug 13 | Clinical Tech Support, dept 3 — **9,288 tickets/90d, 103/day, the largest queue in the practice.** It is the medication queue. |
+| Line | State | Volume (7d avg) | Who decided | Why |
+|---|---|---|---|---|
+| **tech** (queue) | **LIVE** — the busiest line in the fleet | **85.6/day**, 1,330 in 14d, 69% file a ticket | Wayne, Aug 13 | Clinical Tech Support, dept 3. It is the medication queue. *(This row said "Built, number pending" until 2026-09-01. It has been live and carrying more calls than anything else for weeks.)* |
+| **surgery** (queue) | **LIVE** | 64.7/day, 945 in 14d, **37% file a ticket** | Wayne, Aug 12 | Dept 2. The low filing rate is not mystery: 181 calls in 14 days were refused by the ticketing app for a missing surgeon. See #48. |
+| **no-ivr** | **LIVE** — also the after-hours agent | 52.4/day, 874 in 14d | — | Wayne's quality benchmark; produces the best transcripts. Carries all overnight and weekend volume (standing instruction 13). |
+| **optical** (queue) | **LIVE** | 37.1/day, 632 in 14d, 45% file a ticket | Wayne, Aug 12 | Forwarded optical overflow. *"Optical works like a charm."* Dept 1. |
+| **answering-service** | **LIVE**, old core (`/api/voice/answering-service`) | 16.1/day, 272 in 14d — **but zero so far on 2026-09-01** | — | Was 579 calls on Aug 10 and 491 on Aug 12, then 18–58/day on weekdays and 0 at weekends. **The zero today is not the weekend pattern and it is not explained here — ask Wayne, do not guess.** |
+| **records** (queue) | **LIVE — new since 2026-08-31** | 4.4/day, 31 in 14d and **all 31 in the last two days** | — | Dept 16, Medical Records. It was not taking calls when this table was last written. |
+| **pcp** | **OFF** in Twilio | 18 in 14d, last one 2026-08-31 | Wayne decided, **I recommended it and sequenced it as step 1** | Transfer failures seen Friday; complaints from surgery centers; medical-facing. *"I just cannot see the disasters I was seeing on Friday on that line."* Was ~200 calls/day. The trickle is consistent with direct dials, not with the line being back. |
+| **azul-scheduling** (San Diego) | **OFF** | **zero calls in 14 days** | Wayne, Aug 10–11 | Gate B replay: **books 8 of 21** the old core booked. Not ready. Was ~80 calls/day. |
+| **claude-as** | Test number only | — | — | The Claude pipeline. **Unproven — zero clean end-to-end calls.** |
 
 **Queue lines take no calls after hours** — Nextiva routes everything to the
 after-hours agent. See standing instruction 13.
 
 **Do not ask Wayne why PCP or San Diego are off. It is written above.**
 
-Production quality has been **flat all week** (avg quality 2.82 → 2.80 → 2.73).
-Nothing built over the weekend has reached a line that takes calls.
+**A measurement trap in this table's own source:** `call_logs` has ZERO rows
+fleet-wide on 2026-08-25 and 2026-08-26, so any "14-day" figure is really over
+twelve days. The daily counts above are unaffected; averages computed by
+dividing by 14 are not.
 
 ---
 
@@ -234,6 +239,33 @@ Nothing built over the weekend has reached a line that takes calls.
 - Prompt caching: 10,576 → 94 input tokens, but only ~800ms saved — latency is
   **generation-bound, not prompt-bound.**
 
+**Ticket path, measured 2026-09-01 over the preceding 14 days.** All of these
+came from `voice_agent_api_logs` in the Support Center (`vsmcxhxeirkoobmjcrbn`)
+or `call_logs` in the Hub. Do not re-derive them; do re-measure before quoting
+them as current.
+
+- **20% of queue create-ticket POSTs are refused with HTTP 400** — 664 of
+  ~3,200. 602 of those are one message, *"Missing required information:
+  surgeon"*, across **181 surgery calls**: 3.3 identical doomed POSTs per call,
+  because the tool answered `retryable: true` and the model obliged. Fixed
+  2026-09-01; the refusal is now a question.
+- **14% of POSTs carried no usable CallSid** ("unknown", "none", "N/A", a uuid)
+  while **every one of the 2,926 queue calls had a real CA-prefixed SID on its
+  `call_logs` row**. The model was overwriting the injected value. Fixed.
+- **With an idempotency key, duplicate filing is 3 calls in 2,086 (0.14%).**
+  The key works; the exposure was always the payloads without one.
+- **Requests lost to a gate:** 107 calls in 14 days called a filing tool, were
+  refused for a missing field, and ended with no ticket. Still missing at the
+  hang-up: optical/location **62**, date-of-birth only **23**, callback number
+  **2**, no usable identity **20**.
+- **Filing-stop detection:** runs of consecutive queue calls with no ticket were
+  185 once (the 08-31 outage) and never above 8 otherwise. The alarm fires at 12
+  and would have caught 08-31 at **20:23:06**, seven minutes in.
+- **`lookup_patient` times out (6s budget) on 13–17% of queue calls** — 475
+  events, 314 calls. It is the first tool every queue call runs. Unfixed (#68).
+- **Ticket write-back is NOT broken** (it was on the list as if it were):
+  187 vs 184, 183 vs 178, 145 vs 139 on clean days — 97–98%.
+
 ---
 
 ## How to tell whether a deploy actually took
@@ -252,6 +284,29 @@ in the new build. Current marker:
 
 **If the marker is absent, the code is not live and the call proves nothing.**
 Whenever you ship something whose effect is hard to see, add a marker like this.
+
+Markers added 2026-09-01, all on the branch `claude/determined-brown-o5qsft`
+(PR #244). Two print at boot, so they are the fastest way to tell whether a
+pull took:
+
+```
+[TICKET OUTBOX] Starting retry worker (every 60s; up to 12 attempts,
+  backoff 30s → 30m; queue payloads re-sent verbatim)
+[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes)
+```
+
+The other three print only when the thing they watch happens, which makes each
+of them a live counter as well as a marker:
+
+```
+[TOOLS] file_surgery_ticket: kept the call's call_sid over the model's "unknown"
+[TICKET FILING] surgery: create-ticket REFUSED the payload (HTTP 400) — ...
+[PROMPTS] ✗ REFUSED a write to agent_prompts for "<slug>"
+```
+
+One of them needs no log at all: after the deploy, **no create-ticket POST
+from a queue agent should carry a `callData.callSid` that does not begin with
+`CA`.** Before it, 6–8% of live POSTs did.
 
 ---
 
