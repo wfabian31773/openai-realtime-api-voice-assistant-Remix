@@ -335,6 +335,37 @@ describe('the mandatory copy has to be affirmative', () => {
     expect(missingMandatoryCopy('no-ivr', legitimate)).toEqual([]);
   });
 
+  /**
+   * ROUND FIVE, one step narrower than round four: a negation that matches only
+   * the literal word `not` still lets "calls aren't being recorded" through.
+   * An admin typing into a web form writes contractions, and gets whichever
+   * apostrophe their keyboard produces.
+   */
+  it('rejects the contracted forms too', () => {
+    for (const negated of [
+      "Calls aren't being recorded",
+      'Calls aren\u2019t being recorded',
+      'Calls are never recorded',
+    ]) {
+      expect(
+        missingMandatoryCopy('no-ivr', COMPLIANT.replace('All calls are being recorded', negated)),
+        negated,
+      ).toEqual(['recording disclosure']);
+    }
+    expect(missingMandatoryCopy('no-ivr', COMPLIANT.replace("are currently closed", "aren't closed")))
+      .toEqual(['closed-office notice']);
+  });
+
+  it('does not reject a contraction that belongs to another clause', () => {
+    // The over-tightening guard, in contracted form. "don't hesitate" has
+    // nothing to do with the recording disclosure that follows it.
+    const legitimate =
+      "Thank you for calling Azul Vision, our offices are closed. If this is a medical " +
+      "emergency, please dial 911. Please don't hesitate to leave a message — all calls " +
+      'are being recorded for quality assurance purposes.';
+    expect(missingMandatoryCopy('no-ivr', legitimate)).toEqual([]);
+  });
+
   it('still catches a phrase that is simply absent', () => {
     // The failure that actually happened on 2026-08-31: the disclosure was not
     // negated, it was gone.

@@ -173,6 +173,30 @@ export function personaliseGreeting(
  * Deliberately narrow: only the lane that has legally-shaped copy, and only
  * the two statements. Everything else is the operator's wording to choose.
  */
+/**
+ * The ways an ordinary sentence reverses itself, immediately before a phrase.
+ *
+ * Codex found this twice on #244, each time one step narrower than the last:
+ * first that the checks were bare keyword tests, so "calls are not being
+ * recorded" read as compliant; then that a negation matching only the literal
+ * word `not` still lets "calls aren't being recorded" through. Both apostrophes
+ * are covered because an admin typing into a web form gets whichever one their
+ * keyboard produces.
+ *
+ * ADJACENCY IS THE WHOLE DESIGN. The negator has to sit immediately before the
+ * phrase it reverses, so "if this is not an emergency I can take a message; if
+ * it is a medical emergency, please dial 911" stays compliant — the `not`
+ * belongs to "an emergency", not to dialling. A looser test would reject
+ * legitimate wording, and a rejected row falls back to the code greeting with
+ * only a log line, which is an operator edit that returns success and changes
+ * nothing.
+ */
+const NEGATOR = String.raw`(?:\bnot\b|n['\u2019]t\b|\bnever\b)`;
+
+function negated(greeting: string, phrase: string): boolean {
+  return new RegExp(`${NEGATOR}\\s+${phrase}\\b`, 'i').test(greeting);
+}
+
 const MANDATORY_GREETING_COPY: Readonly<
   Record<string, ReadonlyArray<{ label: string; present: (g: string) => boolean }>>
 > = {
@@ -199,17 +223,18 @@ const MANDATORY_GREETING_COPY: Readonly<
     // returns success and changes nothing.
     {
       label: 'closed-office notice',
-      present: (g) => /clos(ed|ing)\b/i.test(g) && !/\bnot\s+(currently\s+|presently\s+)?clos(ed|ing)\b/i.test(g),
+      present: (g) => /clos(ed|ing)\b/i.test(g) && !negated(g, String.raw`(?:currently\s+|presently\s+)?clos(?:ed|ing)`),
     },
     {
       label: '911 direction',
       present: (g) =>
         /\b911\b/.test(g) &&
-        !/\b(do\s*n[o']?t|never|no\s+need\s+to)\s+(dial|call|contact|phone)\s+911\b/i.test(g),
+        !negated(g, String.raw`(?:need\s+to\s+)?(?:dial|call|contact|phone)\s+911`) &&
+        !/\bno\s+need\s+to\s+(?:dial|call|contact|phone)\s+911\b/i.test(g),
     },
     {
       label: 'recording disclosure',
-      present: (g) => /record(ed|ing)\b/i.test(g) && !/\bnot\s+(being\s+)?record(ed|ing)\b/i.test(g),
+      present: (g) => /record(ed|ing)\b/i.test(g) && !negated(g, String.raw`(?:being\s+)?record(?:ed|ing)`),
     },
   ],
 };
