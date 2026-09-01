@@ -41,7 +41,11 @@ export interface DurableCreateResult extends CreateTicketResponse {
   outboxId?: string;
   /** The server read the payload and refused it. Retrying changes nothing. */
   terminal?: boolean;
-  /** The field the server says is missing, in OUR vocabulary. */
+  /**
+   * The field the server named, in the SERVER's vocabulary ("surgeon",
+   * "office"). Translated to the invoking tool's own name in
+   * `postFailureToolResult`, which is where the schema that decides is known.
+   */
   missingField?: string;
 }
 
@@ -69,17 +73,44 @@ function isTerminalRefusal(status?: number): boolean {
 }
 
 /**
- * The ticketing app's own hard-requires, in its words and then in ours.
+ * The ticketing app's hard-requires, mapped to whatever the INVOKING TOOL
+ * actually calls that field.
  *
- * It answers `Missing required information: surgeon` / `: office`. Our schemas
- * call those `surgeon` and `location`. Two entries because two exist; a name
- * this map does not know still refuses, it just cannot name the field.
+ * Found by Codex on PR #244, and production had already done it: `detectCrossQueue`
+ * routes a request from optical, tech or records into Surgery, the API refuses it
+ * with `Missing required information: surgeon` — and only `file_surgery_ticket`
+ * has a `surgeon` property. The other three call the same person `provider`, and
+ * every filing tool sets `additionalProperties: false`, so an agent told to
+ * collect `surgeon` cannot put it anywhere. The caller answers the question and
+ * the request still cannot be filed.
+ *
+ * It is not hypothetical: in the 14 days to 2026-09-01 optical took that refusal
+ * on 2 calls (16 POSTs) and tech on 1.
+ *
+ * Candidates are in preference order and resolved against the tool's own schema.
+ * `office` needs no alternatives — all four call it `location` — but it is listed
+ * the same way so the next queue to be added is a data change, not a code change.
  */
-const REMOTE_FIELD_TO_OURS: Readonly<Record<string, string>> = {
-  surgeon: 'surgeon',
-  office: 'location',
-  location: 'location',
+const REMOTE_FIELD_CANDIDATES: Readonly<Record<string, readonly string[]>> = {
+  surgeon: ['surgeon', 'provider'],
+  office: ['location', 'office'],
+  location: ['location', 'office'],
 };
+
+/**
+ * The name THIS tool would accept for a field the server named, or undefined
+ * when it has none — in which case the refusal stays a plain refusal rather
+ * than sending the agent after something it cannot submit.
+ */
+function toolFieldFor(toolName: string | undefined, remoteField: string): string | undefined {
+  if (!toolName) return undefined;
+  const properties = getTool(toolName)?.input_schema.properties;
+  if (!properties) return undefined;
+  for (const candidate of REMOTE_FIELD_CANDIDATES[remoteField] ?? [remoteField]) {
+    if (candidate in properties) return candidate;
+  }
+  return undefined;
+}
 
 /**
  * The tool's own wording for asking after a field.
@@ -94,10 +125,16 @@ function askAsFor(toolName: string, field: string): string | undefined {
   return prop?.askAs;
 }
 
+/**
+ * The field the SERVER named, in the server's own vocabulary. Translating it
+ * happens later, in `postFailureToolResult`, because that is where the tool
+ * whose schema decides the answer is known.
+ */
 export function missingFieldFromError(error?: string): string | undefined {
   const m = /missing required information:\s*([a-z_]+)/i.exec(error ?? '');
   if (!m) return undefined;
-  return REMOTE_FIELD_TO_OURS[m[1].toLowerCase()];
+  const remote = m[1].toLowerCase();
+  return remote in REMOTE_FIELD_CANDIDATES ? remote : undefined;
 }
 
 /**
@@ -209,12 +246,17 @@ export function postFailureToolResult(res: DurableCreateResult, toolName?: strin
    * asks rather than deferring the caller.
    */
   if (res.terminal) {
-    if (res.missingField) {
-      const asked = toolName ? askAsFor(toolName, res.missingField) : undefined;
+    // The server's word for the field, translated into this tool's own — see
+    // toolFieldFor. A field the tool has no property for is not askable, so it
+    // falls through to the plain refusal below rather than sending the agent
+    // after something `additionalProperties: false` will reject.
+    const field = res.missingField ? toolFieldFor(toolName, res.missingField) : undefined;
+    if (field) {
+      const asked = askAsFor(toolName!, field);
       return {
         success: false as const,
-        missingFields: [res.missingField],
-        message: asked ?? `Can you tell me the ${res.missingField}?`,
+        missingFields: [field],
+        message: asked ?? `Can you tell me the ${field}?`,
       };
     }
     return {

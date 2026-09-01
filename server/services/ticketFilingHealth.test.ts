@@ -11,6 +11,7 @@
  * and 6 six times, and nothing else above 5.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   assessTicketFiling,
   UNFILED_RUN_ALARM,
@@ -121,5 +122,51 @@ describe('plane B — our own POSTs failing, before any run builds up', () => {
     const v = assessTicketFiling(early);
     expect(v.stalled).toBe(true);
     expect(v.unfiledRun).toBe(3); // plane A is nowhere near firing
+  });
+});
+
+
+/**
+ * A DEAD LETTER DOES NOT AGE OUT — Codex, PR #244.
+ *
+ * The snapshot query applied one six-hour window to every unsent status, so an
+ * overnight outage's dead letters dropped out of it and both the scheduled
+ * check and the Observatory banner returned to green while those requests sat
+ * unfiled, their payloads still needing a manual replay. Healthy-because-old is
+ * the same lie as a zero that means "nothing recorded" — the failure the
+ * logging banner was built for a week earlier.
+ *
+ * Read as SQL text: the query needs a database, the predicate does not.
+ */
+describe('what the snapshot query is allowed to forget', () => {
+  const source = readFileSync(new URL('./ticketFilingHealth.ts', import.meta.url), 'utf8');
+  const outboxQuery = source.slice(source.indexOf('FROM ticket_outbox'), source.indexOf('GROUP BY status'));
+
+  it('counts a dead letter however old it is', () => {
+    expect(outboxQuery).toMatch(/status = 'dead_letter'/);
+    // And not behind the window — the OR has to reach it.
+    const windowClause = outboxQuery.slice(outboxQuery.indexOf('INTERVAL'));
+    expect(windowClause).not.toMatch(/dead_letter'\s*$/);
+  });
+
+  it('still bounds the transient states, which are mid-retry by definition', () => {
+    expect(outboxQuery).toMatch(/NOT IN \('sent', 'dead_letter'\)/);
+    expect(outboxQuery).toMatch(/INTERVAL '6 hours'/);
+  });
+
+  it('is the same predicate the Observatory uses', () => {
+    // Two copies of one rule is how a banner goes green while an alarm is red.
+    const observatory = readFileSync(
+      new URL('../observatory/queries.ts', import.meta.url),
+      'utf8',
+    );
+    const theirs = observatory.slice(
+      observatory.indexOf('FROM ticket_outbox'),
+      observatory.indexOf('GROUP BY 1`'),
+    );
+    const normalise = (q: string) => q.replace(/\s+/g, ' ').trim();
+    expect(normalise(theirs)).toContain("status = 'dead_letter'");
+    expect(normalise(theirs)).toContain("NOT IN ('sent', 'dead_letter')");
+    expect(normalise(theirs)).toContain("INTERVAL '6 hours'");
   });
 });

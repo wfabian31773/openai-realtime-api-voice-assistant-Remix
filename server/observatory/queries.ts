@@ -1024,10 +1024,15 @@ export async function todayOverview(): Promise<TodayOverview> {
         ORDER BY created_at DESC
         LIMIT 40`,
     );
+    // Same predicate as readTicketFilingSnapshot, and it has to stay that way:
+    // a dead letter is counted for ever, the transient states only while they
+    // are recent. Codex found these two drifting apart on PR #244 — the banner
+    // would have gone green overnight while requests sat unfiled.
     const held = await pool.query(
       `SELECT status::text AS status, COUNT(*)::int AS n
          FROM ticket_outbox
-        WHERE status <> 'sent' AND created_at > NOW() - INTERVAL '6 hours'
+        WHERE status = 'dead_letter'
+           OR (status NOT IN ('sent', 'dead_letter') AND created_at > NOW() - INTERVAL '6 hours')
         GROUP BY 1`,
     );
     const byStatus: Record<string, number> = {};

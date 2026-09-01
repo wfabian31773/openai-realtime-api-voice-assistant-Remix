@@ -37,6 +37,8 @@ vi.mock('./ticketOutboxService', async (importOriginal) => {
 await import('../tools/sharedPatientTools');
 await import('../tools/surgeryTools');
 await import('../tools/opticalTools');
+await import('../tools/techTools');
+await import('../tools/medicalRecordsTools');
 
 const { createTicketDurable, postFailureToolResult, missingFieldFromError } = await import('./durableTicketFiling');
 const { CREATE_TICKET_PAYLOAD_KIND } = await import('./ticketOutboxService');
@@ -230,12 +232,73 @@ describe('a payload the server read and refused', () => {
     expect(out.retryable).toBeUndefined();
   });
 
-  it('translates the server\'s vocabulary into ours', async () => {
-    // It says "office". Our optical schema calls the field `location`, and a
-    // missingFields entry the tool does not own is one the agent cannot act on.
-    expect(missingFieldFromError('Missing required information: office. Optical tickets are assigned by office.')).toBe('location');
+  it('reads the field the server named, in the server\'s own words', async () => {
+    // Translation happens later, against the tool that is asking — see below.
+    expect(missingFieldFromError('Missing required information: office. Optical tickets are assigned by office.')).toBe('office');
     expect(missingFieldFromError('Missing required information: surgeon.')).toBe('surgeon');
     expect(missingFieldFromError('Validation failed')).toBeUndefined();
+  });
+
+  /**
+   * THE FIELD HAS TO BE ONE THE ASKING TOOL CAN ACTUALLY TAKE — Codex, PR #244.
+   *
+   * `detectCrossQueue` routes a request from optical, tech or records into
+   * Surgery, and the API then refuses it with "Missing required information:
+   * surgeon". Only `file_surgery_ticket` has a `surgeon` property; the other
+   * three call the same person `provider`, and every filing tool sets
+   * `additionalProperties: false`. Handing those agents `missingFields:
+   * ['surgeon']` sends them after something they cannot submit — the caller
+   * answers and the request still cannot be filed.
+   *
+   * Production had already done it: optical took that refusal on 2 calls (16
+   * POSTs) and tech on 1, in the 14 days to 2026-09-01.
+   */
+  describe('the refused field is translated per tool', () => {
+    const SURGEON_REFUSAL = {
+      success: false,
+      statusCode: 400,
+      error: 'Missing required information: surgeon. Surgery tickets are assigned by surgeon.',
+    };
+
+    it('asks surgery for a surgeon', async () => {
+      createTicket.mockResolvedValue(SURGEON_REFUSAL);
+      const res = await createTicketDurable(OPTICAL_OTHER);
+      const out = postFailureToolResult(res, 'file_surgery_ticket') as { missingFields?: string[] };
+      expect(out.missingFields).toEqual(['surgeon']);
+    });
+
+    it('asks the other three for a provider — the name their schema has', async () => {
+      createTicket.mockResolvedValue(SURGEON_REFUSAL);
+      const res = await createTicketDurable(OPTICAL_OTHER);
+      for (const tool of ['file_optical_ticket', 'file_tech_ticket', 'file_records_ticket']) {
+        const out = postFailureToolResult(res, tool) as { missingFields?: string[]; message?: string };
+        expect(out.missingFields, `${tool} has no surgeon property`).toEqual(['provider']);
+        expect(out.message).toBeTruthy();
+      }
+    });
+
+    it('calls the office `location` everywhere, because all four do', async () => {
+      createTicket.mockResolvedValue({
+        success: false,
+        statusCode: 400,
+        error: 'Missing required information: office. Optical tickets are assigned by office.',
+      });
+      const res = await createTicketDurable(OPTICAL_OTHER);
+      for (const tool of ['file_optical_ticket', 'file_surgery_ticket', 'file_tech_ticket']) {
+        expect((postFailureToolResult(res, tool) as { missingFields?: string[] }).missingFields).toEqual(['location']);
+      }
+    });
+
+    it('refuses plainly rather than naming a field the tool cannot take', async () => {
+      // No tool name to resolve against: better a flat refusal than an
+      // instruction the agent cannot carry out.
+      createTicket.mockResolvedValue(SURGEON_REFUSAL);
+      const res = await createTicketDurable(OPTICAL_OTHER);
+      const out = postFailureToolResult(res) as { success: boolean; retryable?: boolean; missingFields?: string[] };
+      expect(out.missingFields).toBeUndefined();
+      expect(out.success).toBe(false);
+      expect(out.retryable).toBe(false);
+    });
   });
 
   it('refuses without retrying when the reason names no field', async () => {

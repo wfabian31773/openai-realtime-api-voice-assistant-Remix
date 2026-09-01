@@ -188,11 +188,24 @@ export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot |
       LIMIT ${LOOKBACK_CALLS}
     `);
 
+    /**
+     * A DEAD LETTER DOES NOT AGE OUT — found by Codex on PR #244.
+     *
+     * The six-hour window was applied to every unsent status, so an overnight
+     * outage's dead letters dropped out of the alarm and both this check and
+     * the Observatory returned to green while the requests sat there unfiled,
+     * their payloads still needing a manual replay. Healthy-because-old is the
+     * same lie as a zero that means "nothing recorded".
+     *
+     * The window stays for the transient states — a pending or failed row is
+     * mid-retry, and an old one is either about to send or about to become a
+     * dead letter, which is the state this now counts for ever.
+     */
     const outbox = await db.execute(sql`
       SELECT status::text AS status, COUNT(*)::int AS n
       FROM ticket_outbox
-      WHERE status <> 'sent'
-        AND created_at > NOW() - INTERVAL '6 hours'
+      WHERE status = 'dead_letter'
+         OR (status NOT IN ('sent', 'dead_letter') AND created_at > NOW() - INTERVAL '6 hours')
       GROUP BY status
     `);
 
