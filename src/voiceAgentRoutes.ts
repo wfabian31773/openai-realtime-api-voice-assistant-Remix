@@ -29,7 +29,6 @@ import { getGreeterOpeningGreeting } from './utils/timeAware';
 import { resolveConfiguredGreeting, scheduleGreetingCacheWarm } from './services/greetingResolver';
 import { seedLedger, renderKnownFacts, releaseLedger, harvestCallerLine } from './services/callFactsLedger';
 import { startRamp, onCallerUtterance, rampActive, releaseRamp } from './services/rampEngine';
-import { newCoreFor, newCoreEnabled, releaseNewCoreCall } from './core/router';
 import { getLedger as getCallFacts } from './services/callFactsLedger';
 import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
@@ -236,15 +235,6 @@ const pendingGreetings = new Map<string, PendingGreeting>();
 
 /** CP-4: lines running the deterministic ramp (env override RAMP_AGENTS). */
 const RAMP_AGENTS = new Set((process.env.RAMP_AGENTS ?? 'answering-service,pcp,azul-scheduling').split(',').map((x) => x.trim()).filter(Boolean));
-
-/**
- * Calls owned by a new-core line module (reconstruction-plan.md §4), keyed by
- * call id -> the slug the module was REGISTERED under. Looking a module up by
- * any other name returns nothing and the caller hears dead air, which is
- * exactly what happened when a 'no-ivr' call was re-labelled 'after-hours'
- * mid-session (live 2026-08-09).
- */
-const newCoreCalls = new Map<string, string>();
 
 /**
  * Wrap-up hangups, pending. A caller can speak AFTER the closing line — most
@@ -3332,7 +3322,7 @@ async function observeCall(
        * ANY response delta means the model has started producing output.
        *
        * This was pinned to `response.output_audio.delta` /
-       * `response.audio.delta` — the names `standalone/demoLine.ts` uses on a
+       * `response.audio.delta` — the names the OpenAI Realtime API uses on a
        * raw websocket. The Agents SDK transport does not surface those under
        * those names, so the mark never fired once: on the first live night
        * `modelFirstAudioMs` and `callerWaitMs` were blank on all 51 agent
@@ -3457,76 +3447,10 @@ async function observeCall(
               `[CONTEXT] ${effectiveSlug} ${callId.slice(-6)} | name=${src(cf.firstName, cf.matchedFirstName)} ${src(cf.lastName, cf.matchedLastName)}` +
                 ` | dob=${src(cf.dateOfBirth, cf.matchedDob)} | verified=${cf.identityVerified ? 'YES' : 'no'}` +
                 ` | callback=${last4} | reason=${reason}` +
-                ` | lang=${cf.language ?? 'en'}${cf.contactMethod && cf.contactMethod !== 'callback' ? ` | via=${cf.contactMethod}` : ''}` +
-                ` | core=${newCoreCalls.has(callId) ? 'NEW' : 'old'}`,
+                ` | lang=${cf.language ?? 'en'}${cf.contactMethod && cf.contactMethod !== 'callback' ? ` | via=${cf.contactMethod}` : ''}`,
             );
           }
         } catch { /* logging must never affect a call */ }
-
-        // Reconstruction cutover: the new-core line module owns EVERY turn of
-        // this call. It returns the exact next line (and executes its own
-        // tools in code); the model's improvised reply is cancelled and the
-        // scripted line rides the same delivery guarantee as greetings.
-        if (newCoreCalls.has(callId)) {
-          // The caller spoke again: whatever we had queued to end the call is
-          // off until the module says so again.
-          cancelPendingHangup(callId);
-          void (async () => {
-            try {
-              const mod = newCoreFor(newCoreCalls.get(callId) ?? effectiveSlug);
-              if (!mod) {
-                console.error(`[NEW-CORE] no module for ${callId} (registered=${newCoreCalls.get(callId)}, effective=${effectiveSlug}) — the caller would hear nothing`);
-                return;
-              }
-              let action: import('./core/types').CoreAction | null = await mod.onUtterance(callId, transcript);
-              while (action) {
-                if (action.say) {
-                  if (responseInFlight.has(callId)) {
-                    try { (session.transport as any).sendEvent({ type: 'response.cancel' }); } catch { /* fine */ }
-                  }
-                  armGreetingGuarantee(
-                    callId,
-                    action.say,
-                    `Say this to the caller word-for-word, without adding, removing, or rephrasing anything: "${action.say}" - Then stop and wait for their response.`,
-                    session.transport as any,
-                  );
-                  console.info(`[NEW-CORE] ${mod.stateOf(callId)} line forced (guaranteed) for ${callId}`);
-                }
-                if (action.alert) console.error(`[NEW-CORE][ALERT] ${action.alert}`);
-                if (action.endCall) {
-                  // Hang up the CALL (not just our transport) after the wrap
-                  // line has had time to play — same REST call as terminate_call.
-                  // Held in pendingHangups so a caller who speaks again (an
-                  // emergency, a second request) cancels it.
-                  cancelPendingHangup(callId);
-                  pendingHangups.set(callId, setTimeout(() => {
-                    pendingHangups.delete(callId);
-                    void (async () => {
-                      try {
-                        const apiKey = process.env.OPENAI_API_KEY;
-                        if (apiKey) {
-                          const res = await fetch(
-                            `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
-                            { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` } },
-                          );
-                          console.info(`[NEW-CORE] wrap hangup for ${callId} → ${res.status}`);
-                          // Deliberate, successful wrap hangup — SIP recovery
-                          // must hang up the lingering caller, not transfer.
-                          if (res.ok) markCallConcluded(callId, 'new_core_wrap');
-                        }
-                      } catch (e) {
-                        console.warn(`[NEW-CORE] hangup failed for ${callId}:`, e);
-                      }
-                    })();
-                  }, 7000));
-                }
-                action = action.followUp ? await action.followUp() : null;
-              }
-            } catch (newCoreErr) {
-              console.warn(`[NEW-CORE] error for ${callId}:`, newCoreErr);
-            }
-          })();
-        }
 
         // CP-4: the ramp state machine owns the opening — parse the answer,
         // force the operator's next line, preempting any improvised reply
@@ -3596,12 +3520,9 @@ async function observeCall(
         recordCallerSpeech(callId, transcript);
 
         // Loop guard: a repeated "representative / customer service" demand
-        // trips the escalation directive. (New-core calls handle the busy
-        // script inside the line module — a second directive would double-talk.)
-        if (!newCoreCalls.has(callId)) {
-          const lgCallerDirective = conversationLoopGuard.onCallerLine(callId, effectiveSlug, transcript);
-          if (lgCallerDirective) sendLoopGuardDirective(session, callId, lgCallerDirective);
-        }
+        // trips the escalation directive.
+        const lgCallerDirective = conversationLoopGuard.onCallerLine(callId, effectiveSlug, transcript);
+        if (lgCallerDirective) sendLoopGuardDirective(session, callId, lgCallerDirective);
 
         // Director: bank what the caller just told us, so re-asking it is
         // detectable on the FIRST repeat rather than the third.
@@ -4445,102 +4366,6 @@ async function observeCall(
       console.info(`[GREETING] Personalised for recognised caller (${recognisedFirstName}) on ${agentSlug}`);
     }
 
-    // Reconstruction cutover: when NEW_CORE_LINES names this line, its
-    // module owns the WHOLE call and the ramp stays out. The greeting is
-    // NOT personalized to the confirm-question here — the module captures
-    // intent first and asks the identity question itself.
-    if (agentSlug && newCoreEnabled(agentSlug) && newCoreFor(agentSlug)) {
-      if (agentSlug === 'pcp' || agentSlug === 'azul-scheduling') {
-        const { registerPcpBindings } = await import('./core/router');
-        registerPcpBindings(callId, {
-          callSid: callId,
-          handoff: async () => {
-            try {
-              const outcome = await addHumanAgent(callId);
-              return { ok: Boolean((outcome as { ok?: boolean })?.ok ?? true) };
-            } catch (e) {
-              return { ok: false, reason: String(e) };
-            }
-          },
-        });
-      }
-      newCoreFor(agentSlug)!.start(callId);
-      newCoreCalls.set(callId, agentSlug);
-
-      // MOUTHPIECE. The state machine owns the call, so the model must own
-      // nothing: no agent prompt with its own agenda, no tools it can decide
-      // to call. Live 2026-08-09 proved why — with the old prompt still
-      // active, TWO agents talked on the same call, the module asking its
-      // scripted questions while the model invented its own ("which
-      // pharmacy...", "let me check your open tickets"). That is the piling,
-      // inside a single call.
-      try {
-        (session.transport as any).sendEvent({
-          type: 'session.update',
-          session: {
-            instructions:
-              'You are the VOICE of a scripted system, not a decision maker.\n' +
-              '- Say exactly the words you are given, and nothing else.\n' +
-              '- Never ask a question you were not given. Never add a follow-up.\n' +
-              '- Never offer to check, look up, transfer, schedule, or confirm anything.\n' +
-              '- If you were given nothing to say, stay silent and wait.\n' +
-              'Speak naturally and warmly, but the words are not yours to choose.',
-            tools: [],
-            tool_choice: 'none',
-            // THE PART THAT ACTUALLY SILENCES THE MODEL. Stripping the tools
-            // and the prompt is not enough: with create_response true the
-            // model is still handed every caller turn, and instructions are
-            // advice, not a gate. The live 13:43 after-hours call proved it —
-            //   "I can help with that. Could you"          (model, cut off)
-            //   "May I have the patient's first and last name?"  (module)
-            //   "Actually, let me quickly check if you have any open tickets"
-            // Two agents, one call, on a line already cut over.
-            //
-            // Why this block is shaped the way it is. There are two rules in
-            // this file that look contradictory: line ~720 says a
-            // session.update omitting the audio format clobbers it to PCM16,
-            // while the accept payload says SIP must NEVER send a format
-            // because the codec comes from SDP. Both are true of DIFFERENT
-            // things. The clobber warning is about the SDK's update path:
-            // _getMergedSessionConfig merges against
-            // DEFAULT_OPENAI_REALTIME_SESSION_CONFIG — the DEFAULTS, not the
-            // live session — so anything it is not told is sent as PCM16.
-            // This is a raw partial sendEvent, which carries only the keys
-            // named here, and the accept payload deliberately set no input
-            // format at all. So there is no format to preserve, and none is
-            // sent.
-            //
-            // What IS preserved: transcription and noise reduction are
-            // repeated verbatim, and the output voice with them, so that this
-            // update is safe whether the server merges `audio.input`
-            // field-by-field or replaces it wholesale. Under replace, this is
-            // exactly the accept payload's audio minus the format it never
-            // had. Losing transcription here would make the module deaf —
-            // strictly worse than the bug being fixed.
-            audio: {
-              input: {
-                noise_reduction: { type: 'far_field' },
-                transcription: buildTranscriptionConfig({
-                  establishedLanguage: establishedLanguageCode,
-                  callerSurname: resolvedPrecontextSurname,
-                }),
-                turn_detection: {
-                  type: 'semantic_vad',
-                  eagerness: vadEagernessFor(agentSlug),
-                  create_response: false,
-                  interrupt_response: true,
-                },
-              },
-              output: { voice: voiceForCall },
-            },
-          },
-        });
-        console.info(`[NEW-CORE] ${agentSlug} session stripped to mouthpiece for ${callId}`);
-      } catch (e) {
-        console.warn(`[NEW-CORE] could not strip session for ${callId}:`, e);
-      }
-      console.info(`[NEW-CORE] ${agentSlug} line module owns ${callId}`);
-    } else
     // CP-4 (spine S1): on ramp lines, a caller-ID match personalizes the
     // greeting for ANY agent, and the deterministic ramp takes the opening.
     if (agentSlug && RAMP_AGENTS.has(agentSlug)) {
@@ -4994,29 +4819,13 @@ async function observeCall(
     responseInFlight.delete(callId);
     pendingGreetings.delete(callId);
     lastFactsRender.delete(callId);
-    // HANG-UP SAFETY NET, BEFORE ANYTHING IS CLEARED. A caller who gave us
-    // enough to act on and then dropped must still leave a ticket behind —
-    // and finalize needs both the ledger and the module state to do it, so
-    // it runs first and everything else waits for it (review 2026-08-09).
-    void (async () => {
-      try {
-        const mod = newCoreCalls.has(callId) ? newCoreFor(newCoreCalls.get(callId) ?? effectiveSlug) : null;
-        if (mod?.finalize) {
-          const r = await mod.finalize(callId);
-          if (r.filed) console.info(`[NEW-CORE] hang-up ticket filed for ${callId}`);
-          if (r.alert) console.error(`[NEW-CORE][ALERT] ${r.alert}`);
-        }
-      } catch (e) {
-        console.warn(`[NEW-CORE] finalize failed for ${callId}:`, e);
-      } finally {
-        releaseLedger(callId);
-        void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
-        releaseRamp(callId);
-        releaseNewCoreCall(callId);
-        cancelPendingHangup(callId);
-        newCoreCalls.delete(callId);
-      }
-    })();
+    // Per-call state, released before anything else is cleared. These four
+    // are the only owners of their maps, so a missed release leaks for the
+    // life of the process — they run unconditionally.
+    releaseLedger(callId);
+    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
+    releaseRamp(callId);
+    cancelPendingHangup(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
     deadAirWatchdog.release(callId);

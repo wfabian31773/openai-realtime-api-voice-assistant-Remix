@@ -4,12 +4,14 @@
  * critical failure among them.
  *
  * In its own module, with no imports, for one load-bearing reason: the full
- * `CallGradingService` (and `replayCall`, which value-imports it) opens the
- * database at module load. Anything that only needs the LIST — the runtime
- * regression harness, a test — must be able to import it without a database,
- * or it inherits the p0Hardening failure mode: a suite that cannot import
- * runs zero tests and reports it as red, or worse, a mutation check counts
- * the import failure as a caught mutation.
+ * `CallGradingService` opens the database at module load. Anything that only
+ * needs the LIST — the runtime regression harness, a test — must be able to
+ * import it without a database, or it inherits the p0Hardening failure mode:
+ * a suite that cannot import runs zero tests and reports it as red, or worse,
+ * a mutation check counts the import failure as a caught mutation.
+ *
+ * Moved here from `src/core/replay/` on 2026-09-01 when that pipeline was
+ * deleted. The runtime regression harness is now its only consumer.
  *
  * Audio-plumbing graders (latency, interruption_rate, transcript_coverage,
  * duration_mismatch) are deliberately absent: a text replay has no audio on

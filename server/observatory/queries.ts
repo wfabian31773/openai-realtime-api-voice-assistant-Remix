@@ -1138,8 +1138,17 @@ export async function replayTapeList(agent: string, verdict = 'worse', limit = 4
   }));
 }
 
-/** Render one tape live: both transcripts, both grader verdicts. */
-export async function replayTape(callLogId: string): Promise<{
+/**
+ * Render one tape live: both transcripts, both grader verdicts.
+ *
+ * Dead as of 2026-09-01. Live tape rendering re-ran the call through the new
+ * core (`src/core/replay/replayCall.ts`); that pipeline was deleted with
+ * `src/core/`, so there is no "new" side left to render and this returns null
+ * — the route turns that into its existing 404. Verdicts already computed and
+ * stored in `new_core_replay_index` are unaffected and still served by
+ * `replayTapeList` above.
+ */
+export async function replayTape(_callLogId: string): Promise<{
   callLogId: string;
   agent: string;
   verdict: string | null;
@@ -1150,48 +1159,5 @@ export async function replayTape(callLogId: string): Promise<{
   newCriticalCount: number;
   approximations: string[] | null;
 } | null> {
-  const { rows } = await pool.query(
-    `SELECT id, agent_used, "from", caller_name, patient_name, patient_dob, patient_found,
-            ticket_number, transferred_to_human, total_turns, duration, transcript
-     FROM call_logs WHERE id = $1 LIMIT 1`,
-    [callLogId],
-  );
-  if (!rows.length || !rows[0].transcript) return null;
-  const row = rows[0] as any;
-  const agent = String(row.agent_used ?? 'answering-service');
-  const { replayStoredCall } = await import('../../src/core/replay/replayCall');
-  const tape = await replayStoredCall(
-    {
-      id: row.id,
-      from: row.from,
-      caller_name: row.caller_name,
-      patient_name: row.patient_name,
-      patient_dob: row.patient_dob,
-      patient_found: row.patient_found,
-      ticket_number: row.ticket_number,
-      transferred_to_human: row.transferred_to_human,
-      total_turns: row.total_turns,
-      duration: row.duration,
-      transcript: row.transcript,
-    },
-    (agent === 'pcp'
-      ? 'pcp'
-      : agent === 'azul-scheduling'
-        ? 'azul-scheduling'
-        : agent === 'no-ivr' || agent === 'after-hours'
-          ? 'no-ivr'
-          : 'answering-service'),
-  );
-  if (!tape) return null;
-  return {
-    callLogId,
-    agent,
-    verdict: tape.verdict,
-    oldTranscript: row.transcript,
-    newTranscript: tape.new_transcript,
-    newGraders: tape.new_grader_results,
-    oldCriticalCount: tape.old_critical.length,
-    newCriticalCount: tape.new_critical.length,
-    approximations: tape.approximations,
-  };
+  return null;
 }

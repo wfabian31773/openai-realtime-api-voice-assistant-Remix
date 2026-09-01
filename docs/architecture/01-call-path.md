@@ -7,6 +7,13 @@ carries a `file:line`. Paths are relative to the repo root they name:
 - `openai-realtime-api-voice-assistant-Remix/` — the voice agents (unprefixed below)
 - `ticketing-app/` — the Next.js app the agents file into (prefixed `ticketing-app/`)
 
+> **Superseded in part, 2026-09-01 (later the same day).** `src/core/` and
+> `src/standalone/` were deleted — the two unreachable voice pipelines this
+> survey identified. Two live paths remain: the OpenAI SIP path
+> (`src/voiceAgentRoutes.ts`) and the Grok runtime (`src/runtime/`). Every
+> `src/core/…` or `src/standalone/…` path and line number below is historical
+> and no longer resolves.
+
 This is a map. No recommendations, no fixes. Where a fact could not be
 determined from the source it is written `UNKNOWN —` with what would settle it.
 

@@ -6,6 +6,13 @@ Survey date **2026-09-01**. Traffic window **2026-08-18 → 2026-09-01** (14 day
 `pslzngjciiifowemrzza`, table `call_logs`. "Yesterday" = **2026-08-31**. All clock times converted to
 America/Los_Angeles; `call_logs.start_time` is stored UTC.
 
+> **Superseded in part, 2026-09-01 (later the same day).** `src/core/` and
+> `src/standalone/` were deleted — the two unreachable voice pipelines this
+> survey identified. Two live paths remain: the OpenAI SIP path
+> (`src/voiceAgentRoutes.ts`) and the Grok runtime (`src/runtime/`). Every
+> `src/core/…` or `src/standalone/…` path and line number below is historical
+> and no longer resolves.
+
 Three things claim to know what is live, and they do not agree:
 
 | Source | What it is |

@@ -13,11 +13,11 @@
  *   agent.tools         the real tools, with the real `invoke` that does
  *                       the real work (files the real ticket)
  *
- * This is the `src/standalone/claudeBrain.ts` pattern, which already proved
- * the approach against a different provider. Production agent files are
- * never edited (standing instruction 5), and the agent is unchanged by the
- * pipeline swap (standing instruction 2: *same exact agent, different voice
- * pipeline*).
+ * The borrow-don't-reimplement approach was proved earlier against a
+ * different provider by the Claude-brain experiment (deleted 2026-09-01 with
+ * the rest of the standalone pipeline). Production agent files are never
+ * edited (standing instruction 5), and the agent is unchanged by the pipeline
+ * swap (standing instruction 2: *same exact agent, different voice pipeline*).
  *
  * ## Tool schemas — the rule that cost most of 2026-08-12
  *

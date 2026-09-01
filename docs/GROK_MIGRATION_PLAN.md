@@ -4,6 +4,13 @@ Written 2026-08-29. Companion to `/CLAUDE.md` and `docs/observatory/STATE-OF-PLA
 — both were re-read before this plan was written, per their own standing rule.
 Pricing figures carry their source and date; verify before any budget commitment.
 
+> **2026-09-01 — paths below are historical.** `src/standalone/` and `src/core/`
+> were deleted; the Grok runtime this plan describes now lives in
+> `src/runtime/`, mounted from `server/index.ts`. Where the text says to build
+> in `src/standalone/` (§8 sequence, Phase 1 `grokLine.ts`) or to replay with
+> `replayRealCalls.test.ts`, read that as the intent, not the location — those
+> files no longer exist and no replacement replay harness has been built.
+
 ---
 
 ## 0. Executive summary

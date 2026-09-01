@@ -70,6 +70,9 @@ Green tests did not prevent any of the regressions listed there.
 8. **Stop making him the test harness.** A failing call goes into
    `replayRealCalls.test.ts` *before* any code changes. Show red-then-green
    offline. Do not ask him to dial to find out whether a guess was right.
+   *(2026-09-01: `src/core/replayRealCalls.test.ts` was deleted along with the
+   `src/core/` pipeline it replayed. The instrument this instruction names no
+   longer exists and no replacement has been built — that is outstanding.)*
 
 9. **"There is no handoff for any of the answering service agents, only for
    PCP, Scheduling SD. All other agents politely state they are unable to
@@ -122,9 +125,16 @@ Green tests did not prevent any of the regressions listed there.
       appointment inside the schedule window cannot verify, and the failure
       looks random from outside.
     - `src/services/patientVerification.ts` already reads `patients_master`
-      correctly and was written for exactly this bug. It is wired into
-      `src/core/router.ts` and the standalone demo line only — **never into
-      the shared queue tool.**
+      correctly and was written for exactly this bug. Its only two wirings
+      were `src/core/router.ts` and the standalone demo line, and both trees
+      were deleted on 2026-09-01 — so today it is wired into **nothing**, and
+      still never into the shared queue tool.
+
+      **DO NOT DELETE IT AS DEAD CODE.** It is the correct implementation of
+      this instruction and the only one in the repo; it has no importers
+      because the two callers it had were dead pipelines, not because it is
+      wrong. Where mirror verification should be wired on the live path is
+      an open question for Wayne.
     - Caller-ID pre-context on the runtime goes through
       `fetchAzulPrecontext` → the `sage_precontext` HTTP tool. That is Console
       data (`si_persons`) but over the network and bounded at 1.5s, and every
@@ -172,10 +182,6 @@ Nothing built over the weekend has reached a line that takes calls.
 
 | Thing | Where | What it does |
 |---|---|---|
-| Offline replay harness | `src/core/replayRealCalls.test.ts` | Replays real caller utterances from `call_logs` through the parser floor. 2 seconds, no phone. |
-| Claude brain | `src/standalone/claudeBrain.ts` | The real agent's prompt + tools on a Claude tool loop. Borrows `agent.instructions` / `agent.tools`; reimplements nothing. |
-| Latency/tool probes | `src/standalone/claudeProbe.ts` | `/demo/claude-probe` (TTFT), `/demo/tool-check` (tool selection). |
-| Standalone line | `src/standalone/demoLine.ts` | Twilio Media Streams + Deepgram + brain + OpenAI-as-mouth. |
 | Mirror verification | `src/services/patientVerification.ts` | Verifies against `patients_master`; refuses to guess between two people. |
 | Appointment answers | `src/services/appointmentAnswers.ts` | `Schedule.PersonID` join; excludes `Removed`. |
 | Replay tables | Operations Hub | `new_core_replay_summary`, `new_core_replay_index`, `ticket_agent_config` |
