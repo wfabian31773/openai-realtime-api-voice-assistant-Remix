@@ -6079,6 +6079,41 @@ export function setupVoiceAgentRoutes(app: Express): void {
         console.warn('[${opts.tag}] ⚠️ No webhook CallToken found — passing empty string');
       }
       const effectiveToken = webhookToken || '';
+      /**
+       * THE CALLER MUST NOT BE LEFT ALONE IN THE CONFERENCE.
+       *
+       * This block used to ask Twilio for `conferenceStatusCallbackEvent:
+       * ['join']` and nothing else. No `statusCallback`, so
+       * `/api/voice/sip-status` never fired for an overflow line, so
+       * `recoverCallerAfterSipTermination` never ran. When the agent leg died
+       * mid-call the caller stayed in a conference whose `waitUrl` is ""
+       * — silence — because `endConferenceOnExit` is on the CUSTOMER
+       * participant, so the conference outlives the agent. The only backstop
+       * left was the lifecycle coordinator's 15-minute cap.
+       *
+       * Measured 2026-08-18 → 09-01, calls ending with more than ten minutes
+       * of terminal silence (`post_transcript_tail_ms`):
+       *
+       *   tech 12/1325 · surgery 7/943 · optical 9/637 · answering-service 6/293
+       *   no-ivr, which already had this callback:   0 of 927
+       *
+       * 34 of 3,203 against 0 of 927 — about 1 in 20,000 by chance. 65 calls
+       * sat through more than five minutes of it, 642 billed minutes. Of the
+       * eight worst, four heard only the greeting, two died while the agent
+       * was looking their record up after they had given name and date of
+       * birth, and one had a ticket filed and read back before being left on
+       * the line for fourteen minutes.
+       *
+       * `/api/voice/no-ivr` has had these three lines all along. This is that,
+       * copied — not a second recovery mechanism.
+       *
+       * Safe on a normal hangup, which also fires `completed`:
+       * `recoverCallerAfterSipTermination` returns early unless the caller's
+       * leg is still `in-progress`, and when the session ended deliberately it
+       * says goodbye and hangs that leg up rather than transferring anyone.
+       * Only a genuine prior escalation reaches a human — the 2026-08-10
+       * ruling, already encoded there.
+       */
       const participant = await twilioClient.conferences(conferenceName)
         .participants
         .create({
@@ -6087,12 +6122,22 @@ export function setupVoiceAgentRoutes(app: Express): void {
           to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=${opts.slug}`,
           earlyMedia: true,
           callToken: effectiveToken,
+          statusCallback: `https://${domain}/api/voice/sip-status`,
+          statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+          statusCallbackMethod: 'POST',
           conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
           conferenceStatusCallbackEvent: ['join']
         });
+      // Belt and braces: `resolveConferenceName` can recover the conference by
+      // parsing X-conferenceName out of the SIP To URI, which these lines set,
+      // so this is a robustness nicety rather than a prerequisite.
+      sipConferenceLifecycle.registerSipLeg(conferenceName, participant.callSid);
       console.info(`[${opts.tag}] ✓ ${opts.slug} agent successfully added to conference: ${conferenceName}`);
     } catch (error) {
       console.error(`[${opts.tag}] ✗ Failed to add agent to conference:`, error);
+      // The caller is already in the conference — TwiML was returned before
+      // this ran. Without this they hear silence until the 15-minute cap.
+      void recoverCallerAfterSipTermination(conferenceName, 'creation_failed');
     }
   });
   }
