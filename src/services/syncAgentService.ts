@@ -175,10 +175,52 @@ export class SyncAgentService {
           };
         }
 
-        console.warn(`[SYNC AGENT] ⚠️  Immediate send failed (outbox ${outboxId}): ${sendResult.error} - background retry will handle it`);
         if (callSid) {
           try { await storage.releaseTicketCreationLock(callSid); } catch {}
         }
+
+        /**
+         * A REFUSAL IS NOT A PROMISE — Codex, PR #244, and it is a consequence
+         * of this branch's own terminal-refusal change two rounds earlier.
+         *
+         * A 400 or 422 means the far side read the payload and said no: the row
+         * goes straight to dead_letter and NOTHING retries it. Answering that
+         * with "recorded and will be processed shortly" tells a caller who is
+         * still on the line that their request is safe when it is not, and the
+         * log line beneath it used to say "background retry will handle it",
+         * which was untrue for exactly this case.
+         *
+         * The shape matches `submitSimplifiedTicket`'s existing refusal — the
+         * sibling on this same path — so the agent handles it the way it
+         * already handles a missing field: collect and try again. That
+         * recoverability is the whole reason `.agents/memory/ticket-creation-lock.md`
+         * exists, and the lock is released ABOVE, before the return, so the
+         * retry this invites is not blocked by the lease this attempt held.
+         *
+         * Transport failures are unchanged: those really are retried, and the
+         * caller really can be told it was recorded.
+         */
+        if (sendResult.terminal) {
+          console.warn(
+            `[SYNC AGENT] ✗ Terminal refusal (outbox ${outboxId}, HTTP ${sendResult.statusCode ?? 'unknown'}): ` +
+              `${sendResult.error} - dead-lettered, NOT retrying`,
+          );
+          const missing = /missing required information:\s*(.+)$/i.exec(sendResult.error ?? '')?.[1]?.trim();
+          if (missing) {
+            return {
+              success: false,
+              error: `Missing required information: ${missing}`,
+              message: `I need to collect more information. Please provide: ${missing}`,
+            };
+          }
+          return {
+            success: false,
+            error: sendResult.error || 'The ticketing system refused this request',
+            message: 'I was not able to submit that request. Let me take the details again.',
+          };
+        }
+
+        console.warn(`[SYNC AGENT] ⚠️  Immediate send failed (outbox ${outboxId}): ${sendResult.error} - background retry will handle it`);
         return {
           success: true,
           ticketNumber: undefined,
@@ -205,7 +247,21 @@ export class SyncAgentService {
           locationName: lookupFields.locationOfLastVisit,
         });
         
-        if (lookupResult.success) {
+        /**
+         * Skipping the ids when the lookup did not answer is right — inventing
+         * one is worse than filing unrouted. What was missing is saying so.
+         * A `success:false` here reads identically whether the service was
+         * down or the name matched nobody, and this path is asynchronous, so
+         * the only trace either way was an unrouted ticket and no reason.
+         * Same distinction the queue tools got on 2026-09-01.
+         */
+        const { lookupWasUnavailable } = await import('../../server/services/ticketingApiClient');
+        if (lookupWasUnavailable(lookupResult)) {
+          console.error(
+            `[SYNC-AGENT] ✗ PROVIDER/LOCATION LOOKUP UNAVAILABLE — filing unrouted. ` +
+              `Cause: ${lookupResult.error ?? 'unknown'}`,
+          );
+        } else {
           if (lookupResult.providerId) resolvedProviderId = lookupResult.providerId;
           if (lookupResult.locationId) resolvedLocationId = lookupResult.locationId;
         }

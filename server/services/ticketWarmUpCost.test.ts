@@ -171,3 +171,64 @@ describe('nothing about failure handling changed', () => {
     expect(code).toMatch(/timeoutMs: number = 15000/);
   });
 });
+
+
+/**
+ * THE STATUS HAS TO SURVIVE A BODY WE COULD NOT READ — Codex, PR #244.
+ *
+ * `createTicketDurable` decides between "the server refused this" and "the
+ * transport failed" on `statusCode` alone. A 4xx whose body is empty or not
+ * JSON threw from `response.json()` first, and that throw carried no status —
+ * so a permanent refusal was read as an outage and written to the outbox, to
+ * be retried until it dead-lettered. An empty 400 is ordinary; a 401 or 403
+ * after a key rotation would have filled the outbox and held the filing alarm
+ * open indefinitely.
+ *
+ * Read as source, like the rest of this file: the client needs real config and
+ * a live probe to instantiate, and the invariant here is structural — every
+ * exit from a response we received must carry the status it came with.
+ */
+describe('every throw about a received response carries its status', () => {
+  it('the JSON-parse failure attaches statusCode', () => {
+    const parseCatch = code.slice(
+      code.indexOf('Failed to parse JSON response'),
+      code.indexOf('if (!response.ok)'),
+    );
+    expect(parseCatch, 'the parse-failure path must set statusCode').toMatch(/statusCode = response\.status/);
+    expect(parseCatch).toMatch(/Invalid JSON response from ticketing API/);
+  });
+
+  it('the not-ok path attaches statusCode', () => {
+    // Bounded by the success emit that follows the block — `markAlive` also
+    // names a method defined earlier in the file, so indexOf finds that first
+    // and the slice comes back empty. It did, on the first run of this test.
+    const notOk = code.slice(
+      code.indexOf('if (!response.ok)'),
+      code.indexOf("shadowTap.emit('n8n_workflow_completed'"),
+    );
+    expect(notOk).toMatch(/statusCode = response\.status/);
+  });
+
+  it('lets a response-derived error through the network catch unchanged', () => {
+    /**
+     * The catch wraps the whole try — the fetch AND the response handling — so
+     * both throws above land in it. Its rewraps are for errors that never
+     * received a response, and either would strip the status. The
+     * `.includes('fetch')` test is the live hazard: that message can be the far
+     * side's own error text, so a refusal whose text happened to contain the
+     * word would be rewrapped as "unreachable" and queued as an outage.
+     *
+     * A timeout or a reset still carries no status, deliberately —
+     * `createTicketDurable` must read those as transport and capture them.
+     */
+    const networkCatch = code.slice(
+      code.indexOf('catch (networkError)'),
+      code.indexOf('private async warmUpWithRetry'),
+    );
+    const passthrough = networkCatch.indexOf('statusCode');
+    expect(passthrough, 'the catch must check for a carried status').toBeGreaterThan(-1);
+    // And it must do so BEFORE either rewrap, or the check is decoration.
+    expect(passthrough).toBeLessThan(networkCatch.indexOf('AbortError'));
+    expect(passthrough).toBeLessThan(networkCatch.indexOf("includes('fetch')"));
+  });
+});

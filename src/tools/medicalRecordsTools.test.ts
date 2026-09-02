@@ -550,3 +550,97 @@ describe('the CAP fields are required when the clock is running', () => {
     expect(r.missingFields).toContain('deliver_to');
   });
 });
+
+/**
+ * THE 2026-08-31 OUTAGE, ON DEPARTMENT 16.
+ *
+ * `lookupProviderAndLocation` caught its own error and returned
+ * `{success:false}` — indistinguishable from a name that matched nobody.
+ * Optical read only `locationId`, collapsed the two, and told 43 callers their
+ * real office did not exist. Records, like tech, said nothing at all: the
+ * office and doctor a caller named were dropped with no trace, on the queue
+ * that is under a Corrective Action Plan with HHS OCR and whose tickets are
+ * audited.
+ *
+ * Neither field is a gate here — the module header says so, and a records
+ * request that arrives needing a callback is recoverable where a refused
+ * caller is not. So the outage handling is optical's minus the refusal: take
+ * the request, keep the caller's words in the text fields the queue already
+ * reads, omit the ids rather than sending null, log loudly, and raise the
+ * priority so a ticket that lost data to an outage is visible as one. Never
+ * the description — it becomes the body of a patient-facing SMS.
+ */
+describe('a lookup that never ran is not an office that does not exist', () => {
+  it('takes the request and surfaces it when the lookup service is down', async () => {
+    const api = await client();
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue({
+      success: false,
+      outcome: 'unavailable',
+      error: 'Invalid JSON response from ticketing API: 200',
+    } as never);
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-REC-OUTAGE'));
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      errors.push(a.map(String).join(' '));
+    });
+
+    const out = (await runTool('file_records_ticket', {
+      ...BASE,
+      request_description: 'I need a copy of my chart',
+      location: 'Eastvale',
+      provider: 'Dwayne Logan, MD',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(true);
+    expect((out.missingFields as string[] | undefined) ?? []).not.toContain('location');
+    expect(JSON.stringify(out)).not.toMatch(/not find|no such|not finding|do not have a/i);
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+
+    expect(filed.locationOfLastVisit).toBe('Eastvale');
+    expect(filed.lastProviderSeen).toBe('Dwayne Logan'); // sanitizeProviderName drops the credential suffix
+    // OMITTED, never null.
+    expect(filed).not.toHaveProperty('locationId');
+    expect(filed).not.toHaveProperty('providerId');
+    expect(filed.priority).toBe('high');
+    // The clock line and the caller's words only — no staff instruction.
+    expect(String(filed.description)).not.toMatch(/unavailable|unrouted|assign|lookup/i);
+
+    expect(errors.join('\n')).toMatch(/LOOKUP UNAVAILABLE/);
+  });
+
+  /**
+   * THE CONTROL, and the behaviour that must NOT regress.
+   *
+   * The lookup RAN and matched nobody. Records files anyway, at its ordinary
+   * priority, with no outage marker.
+   */
+  it('files an office the lookup ran and matched to nothing exactly as before', async () => {
+    const api = await client();
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue({
+      success: true,
+      outcome: 'no_match',
+      locationId: undefined,
+      locationMatches: [],
+    } as never);
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-REC-NOMATCH'));
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      errors.push(a.map(String).join(' '));
+    });
+
+    const out = (await runTool('file_records_ticket', {
+      ...BASE,
+      request_description: 'I need a copy of my chart',
+      location: 'Downtown LA',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(filed).not.toHaveProperty('locationId');
+    expect(filed.priority).toBe('medium');
+    expect(errors.join('\n')).not.toMatch(/LOOKUP UNAVAILABLE/);
+  });
+});

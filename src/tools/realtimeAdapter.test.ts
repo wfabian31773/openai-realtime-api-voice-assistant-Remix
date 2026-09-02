@@ -163,3 +163,83 @@ describe('a model may omit what it does not have', () => {
     ).toBe(false);
   });
 });
+
+
+/**
+ * THE CALL KNOWS ITS OWN SID. THE MODEL DOES NOT GET A VOTE.
+ *
+ * Measured 2026-09-01 in the ticketing app's voice_agent_api_logs: 130
+ * create-ticket POSTs from the surgery queue between 08-24 and today carried
+ * `callData.callSid = "unknown"` — the literal string. Seven more from optical,
+ * plus "none", "undefined", "N/A", "latest", "automated_xxx_placeholder".
+ *
+ * Every one of those calls has a real CA-prefixed CallSid on its call_logs row.
+ * All 2,926 queue calls in the window do. The SID was never missing; it was
+ * OVERWRITTEN — `call_sid` is a declared property on the filing tools ("The
+ * call id, so a retry cannot double-file"), so the model emits it, and the
+ * merge below put the model's arguments on top of the injected context.
+ *
+ * The cost is not cosmetic. The idempotency key is `call-${callSid}` guarded by
+ * isTwilioCallSid, so a payload carrying "unknown" goes out with NO key: no
+ * duplicate protection on a retry, no way for the post-call enrichment endpoint
+ * to attach the recording and transcript, and — since 2026-09-01 — no key for
+ * the outbox either. With a real SID, duplicate filing is 3 calls in 2,086
+ * (0.14%). Without one it is unbounded.
+ */
+describe('injected call context outranks the model', () => {
+  it('keeps the real CallSid when the model passes "unknown"', async () => {
+    const { registerTool } = await import('./registry');
+    const { realtimeToolsFor } = await import('./realtimeAdapter');
+    registerTool({
+      name: 'echo_context_test',
+      description: 'test only',
+      layer: 'agent',
+      timeoutMs: 1000,
+      input_schema: {
+        type: 'object',
+        properties: {
+          call_sid: { type: 'string', description: 'the call id' },
+          caller_phone: { type: 'string', description: 'the caller' },
+          note: { type: 'string', description: 'anything' },
+        },
+        required: [],
+      },
+      handler: async (input: Record<string, unknown>) => ({ success: true, saw: input }),
+    } as never);
+
+    const tool = realtimeToolsFor(
+      ['echo_context_test'],
+      { call_sid: 'CA11111111111111111111111111111111', caller_phone: '+17605551234' },
+    )[0] as never;
+
+    const out = JSON.parse(
+      await callTool(tool, {
+        // What the model actually emits on the surgery line, 130 times in nine days.
+        call_sid: 'unknown',
+        caller_phone: 'N/A',
+        note: 'the model may still say what it likes about its own fields',
+      }),
+    );
+
+    expect(out.saw.call_sid).toBe('CA11111111111111111111111111111111');
+    expect(out.saw.caller_phone).toBe('+17605551234');
+    // The model's OWN arguments are untouched — this is not "the process wins
+    // everything", it is "the process wins the fields it supplied".
+    expect(out.saw.note).toMatch(/model may still say/);
+  });
+
+  it('does not blank a model argument the context has no value for', async () => {
+    const { realtimeToolsFor } = await import('./realtimeAdapter');
+    // caller_phone absent from the context — a call whose caller ID never
+    // arrived. Overwriting the model's answer with undefined here would be the
+    // same bug pointing the other way.
+    const tool = realtimeToolsFor(
+      ['echo_context_test'],
+      { call_sid: 'CA22222222222222222222222222222222', caller_phone: undefined },
+    )[0] as never;
+
+    const out = JSON.parse(await callTool(tool, { caller_phone: '7605559999' }));
+    expect(out.saw.caller_phone).toBe('7605559999');
+    expect(out.saw.call_sid).toBe('CA22222222222222222222222222222222');
+  });
+});

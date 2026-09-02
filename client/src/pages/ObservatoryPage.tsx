@@ -160,6 +160,16 @@ interface TodayOverview {
   /** Epoch ms of the newest call_logs row — null if none. Lets the page say
    * "logging is down" instead of showing silent zeros on every card. */
   lastCallLogAtMs?: number | null
+  /** The same guard for the ticket path, which had none until 2026-09-01.
+   * Thresholds and their derivation: server/services/ticketFilingHealth.ts. */
+  ticketFiling?: {
+    stalled: boolean
+    reason: string | null
+    unfiledRun: number
+    lastFiledAtMs: number | null
+    minutesSinceLastFiled: number | null
+    outboxHeld: number
+  } | null
 }
 interface BriefAgentMetric {
   agentId: string
@@ -1731,6 +1741,32 @@ function CommandCenterTab({
           }
           return null
         })()}
+        {(() => {
+          // The ticket path, which had no guard at all until 2026-09-01. On
+          // 08-31 filing stopped at 20:16 UTC and ran dead for three and a half
+          // hours; this page showed nothing, because a queue call that files no
+          // ticket looks exactly like one that had nothing to file. Staff told
+          // the operator in the end.
+          const tf = today.data?.ticketFiling
+          if (!tf?.stalled) return null
+          return (
+            <div className="mb-3 rounded-lg border border-red-500/60 bg-red-500/10 p-3 text-sm">
+              <p className="font-semibold text-red-700 dark:text-red-400">
+                ⚠ TICKET FILING HAS STOPPED — {tf.reason}
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {tf.lastFiledAtMs
+                  ? `Last ticket filed ${new Date(tf.lastFiledAtMs).toLocaleString()}. `
+                  : 'No ticket on record in the recent window. '}
+                {tf.outboxHeld > 0
+                  ? `${tf.outboxHeld} request(s) are held in the outbox and being retried — the payloads are intact. `
+                  : ''}
+                Callers are still being answered. Check{' '}
+                <code>[TICKETING API]</code> and <code>[TICKET OUTBOX]</code> in the deployment logs.
+              </p>
+            </div>
+          )
+        })()}
         {today.isError && (
           <p className="text-sm text-red-600">
             Today stats failed: {(today.error as any)?.response?.data?.error ?? String(today.error)}
@@ -2100,41 +2136,28 @@ interface ReplaySummaryRow {
   replayedAt: string | null
 }
 
-interface ReplayTape {
-  callLogId: string
-  agent: string
-  verdict: string | null
-  oldTranscript: string | null
-  newTranscript: string | null
-  oldCriticalCount: number
-  newCriticalCount: number
-  approximations: string[] | null
-}
 
 /** Share of calls, as a percentage of a count (distinct from the ratio-based `pct`). */
 function share(n: number, d: number) {
   return d ? `${((100 * n) / d).toFixed(1)}%` : '—'
 }
 
-function TranscriptPane({ title, text, tone }: { title: string; text: string | null; tone: 'old' | 'new' }) {
-  return (
-    <div className="flex-1 min-w-0">
-      <h4 className={`mb-1 text-xs font-semibold uppercase tracking-wide ${tone === 'old' ? 'text-muted-foreground' : 'text-emerald-700'}`}>
-        {title}
-      </h4>
-      <pre className="max-h-[28rem] overflow-auto whitespace-pre-wrap rounded border bg-muted/30 p-3 text-xs leading-relaxed">
-        {text ?? '(not stored)'}
-      </pre>
-    </div>
-  )
-}
-
 function ReplaysTab() {
   const [agent, setAgent] = useState('pcp')
   const [verdict, setVerdict] = useState('worse')
-  const [openCall, setOpenCall] = useState<string | null>(null)
-  const tapeRef = useRef<HTMLDivElement | null>(null)
-
+  /**
+   * LIVE TAPE RENDERING IS GONE — Codex, PR #244 round thirteen.
+   *
+   * Rendering a tape re-ran the call through the new core, and that pipeline
+   * was deleted with `src/core/`, so `replayTape()` returns null and the route
+   * turns every request into a 404. The rows here were still clickable, and
+   * the error they produced blamed "the stored call has no transcript" — a
+   * wrong explanation for a deterministic failure, on every row.
+   *
+   * The stored verdicts are unaffected: `new_core_replay_index` still holds
+   * them and `replayTapeList` still serves them, which is what the counts
+   * below are. So the counts stay and the promise of a readable tape goes.
+   */
   const summary = useQuery<{ summary: ReplaySummaryRow[] }>({
     queryKey: ['obs-replays'],
     queryFn: async () => (await apiClient.get('/observatory/replays')).data,
@@ -2143,19 +2166,8 @@ function ReplaysTab() {
     queryKey: ['obs-replay-list', agent, verdict],
     queryFn: async () => (await apiClient.get(`/observatory/replays/${agent}/list?verdict=${verdict}`)).data,
   })
-  const tape = useQuery<ReplayTape>({
-    queryKey: ['obs-replay-tape', openCall],
-    queryFn: async () => (await apiClient.get(`/observatory/replay/${openCall}`)).data,
-    enabled: Boolean(openCall),
-  })
 
   const rows = summary.data?.summary ?? []
-
-  useEffect(() => {
-    if (openCall && tape.data && tapeRef.current) {
-      tapeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
-  }, [openCall, tape.data])
 
   return (
     <section className="space-y-6">
@@ -2163,7 +2175,8 @@ function ReplaysTab() {
         <h3 className="text-lg font-semibold">New core vs old core, on real calls</h3>
         <p className="text-sm text-muted-foreground">
           Every call below actually happened. The new core was fed the same caller turns and scored by the same
-          graders. Nothing cuts over on these numbers alone — read the tapes.
+          graders. These are the verdicts recorded at the time; the new core has since been deleted, so the
+          tapes can no longer be re-rendered and these counts are the whole of what remains.
         </p>
       </div>
 
@@ -2207,7 +2220,7 @@ function ReplaysTab() {
         {rows.map((r) => (
           <button
             key={r.agent}
-            onClick={() => { setAgent(r.agent); setOpenCall(null) }}
+            onClick={() => setAgent(r.agent)}
             className={`rounded border px-3 py-1 text-sm ${agent === r.agent ? 'bg-foreground text-background' : ''}`}
           >
             {r.agent}
@@ -2217,7 +2230,7 @@ function ReplaysTab() {
         {['worse', 'better', 'same'].map((v) => (
           <button
             key={v}
-            onClick={() => { setVerdict(v); setOpenCall(null) }}
+            onClick={() => setVerdict(v)}
             className={`rounded border px-3 py-1 text-sm ${verdict === v ? 'bg-foreground text-background' : ''}`}
           >
             {v}
@@ -2227,64 +2240,29 @@ function ReplaysTab() {
 
       <div className="grid gap-2">
         {(list.data?.tapes ?? []).map((t) => (
-          <button
+          <div
             key={t.callLogId}
-            onClick={() => setOpenCall(t.callLogId === openCall ? null : t.callLogId)}
-            className="flex items-center justify-between rounded border px-3 py-2 text-left text-sm hover:bg-muted/40"
+            className="flex items-center justify-between rounded border px-3 py-2 text-left text-sm"
           >
             <span className="font-mono text-xs">{t.callLogId.slice(0, 8)}</span>
             <span className="text-xs text-muted-foreground">
               old {t.oldCriticalCount} critical → new {t.newCriticalCount}
             </span>
-          </button>
+          </div>
         ))}
         {list.data && list.data.tapes.length === 0 && (
           <p className="text-sm text-muted-foreground">No {verdict} tapes for {agent}.</p>
         )}
       </div>
 
-      {openCall && tape.isLoading && (
-        <p className="rounded border p-4 text-sm text-muted-foreground">
-          Replaying call {openCall.slice(0, 8)} through the new core…
+      {(list.data?.tapes ?? []).length > 0 && (
+        <p className="rounded border border-dashed p-3 text-xs text-muted-foreground">
+          Side-by-side tapes are no longer available. Rendering one re-ran the call through the new core, and
+          that pipeline was deleted on 2026-09-01; the verdicts above were computed before it was removed and
+          are still stored in <code>new_core_replay_index</code>.
         </p>
       )}
-      {openCall && tape.isError && (
-        <div className="rounded border border-red-300 p-4 text-sm">
-          <p className="font-medium text-red-600">Could not render this tape.</p>
-          <p className="mt-1 text-muted-foreground">
-            {(tape.error as any)?.response?.data?.message ??
-              (tape.error as any)?.response?.data?.error ??
-              String(tape.error)}
-          </p>
-          <p className="mt-2 text-xs text-muted-foreground">
-            Call {openCall} — most often this means the stored call has no transcript to replay.
-          </p>
-        </div>
-      )}
-      {openCall && tape.data && (
-        <div ref={tapeRef} className="space-y-2 rounded border p-4">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h4 className="font-semibold">Call {tape.data.callLogId.slice(0, 8)} — {tape.data.verdict}</h4>
-            <span className="text-xs text-muted-foreground">
-              old {tape.data.oldCriticalCount} critical → new {tape.data.newCriticalCount}
-            </span>
-          </div>
-          <div className="flex flex-col gap-4 md:flex-row">
-            <TranscriptPane title="Old core (what actually happened)" text={tape.data.oldTranscript} tone="old" />
-            <TranscriptPane title="New core (what it would have said)" text={tape.data.newTranscript} tone="new" />
-          </div>
-          {tape.data.approximations && tape.data.approximations.length > 0 && (
-            <details className="text-xs text-muted-foreground">
-              <summary className="cursor-pointer">Replay caveats ({tape.data.approximations.length})</summary>
-              <ul className="ml-4 list-disc">
-                {tape.data.approximations.map((a, i) => (
-                  <li key={i}>{a}</li>
-                ))}
-              </ul>
-            </details>
-          )}
-        </div>
-      )}
+
     </section>
   )
 }

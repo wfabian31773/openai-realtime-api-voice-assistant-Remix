@@ -374,23 +374,10 @@ async function startServer() {
   // server is already accepting connections.
   const earlyServer = http.createServer(app);
 
-  // The standalone demo line lives HERE, on the public server, not on the
-  // voice server behind the /api/voice proxy — that proxy speaks HTTP only
-  // and cannot forward the WebSocket upgrade a media stream needs. Mounted
-  // before listen so the upgrade handler is attached when the first call
-  // lands, and before registerRoutes so nothing can shadow /demo/*.
-  // A failure here must never stop the API server.
-  try {
-    const { mountDemoLine } = await import('../src/standalone/demoLine');
-    mountDemoLine(app, earlyServer);
-  } catch (err) {
-    console.error('[STARTUP] Demo line failed to mount (rest of the server unaffected):', err);
-  }
-
-  // The Grok voice runtime (src/runtime/). Same reasoning as the demo line,
-  // and for the same hard reason: it serves Twilio Media Streams, and the
-  // /api/voice proxy in front of the voice server speaks HTTP only — a
-  // WebSocket upgrade cannot reach it there. Mounted before listen so the
+  // The Grok voice runtime (src/runtime/). It lives HERE, on the public
+  // server, not on the voice server behind the /api/voice proxy, for one hard
+  // reason: it serves Twilio Media Streams, and that proxy speaks HTTP only —
+  // a WebSocket upgrade cannot reach it there. Mounted before listen so the
   // upgrade handler is attached when the first call lands.
   //
   // Mounting is unconditional and safe: an unconfigured process still
@@ -424,8 +411,8 @@ async function startServer() {
   }
 
   // The tool library's HTTP surface. Mounted here, before registerRoutes, for
-  // the same reason as the demo line: nothing should be able to shadow
-  // /api/tools/*, and a failure here must never stop the API server.
+  // the same reason as the voice runtime above: nothing should be able to
+  // shadow /api/tools/*, and a failure here must never stop the API server.
   try {
     const { mountToolServer } = await import('../src/tools/server');
     mountToolServer(app);

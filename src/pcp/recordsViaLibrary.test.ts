@@ -31,6 +31,12 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
     createTicket: (...a: unknown[]) => createTicket(...a),
     lookupProviderAndLocation: (...a: unknown[]) => lookupProviderAndLocation(...a),
   },
+  // Mirrors the real predicate: 'unavailable' means the lookup never ran, and
+  // it is exactly equivalent to success === false. Kept in step with the
+  // source rather than stubbed to a constant, or this mock would hide the
+  // very distinction the predicate exists to make.
+  lookupWasUnavailable: (r: { outcome?: string; success?: boolean } | null | undefined) =>
+    r?.outcome === 'unavailable' || r?.success === false,
 }));
 
 const { getTool } = await import('../tools/registry');

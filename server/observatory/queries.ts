@@ -10,6 +10,7 @@
  */
 import { pool } from '../db';
 import { fivestarQuery } from './fivestarDb';
+import { assessTicketFiling, type TicketFilingVerdict } from '../services/ticketFilingHealth';
 
 // ────────────────────────────────────────────────────────────────────────
 // Ops Hub agents — six-pillar scorecards
@@ -956,6 +957,8 @@ export interface TodayOverview {
    * explanation anywhere on the page. A zero must be distinguishable from
    * "nothing recorded" (measurement-traps.md). */
   lastCallLogAtMs: number | null;
+  /** Ticket-path health, or null when it could not be read. See ticketFilingHealth.ts. */
+  ticketFiling: TicketFilingVerdict | null;
 }
 
 export async function todayOverview(): Promise<TodayOverview> {
@@ -1000,6 +1003,62 @@ export async function todayOverview(): Promise<TodayOverview> {
   );
   const lastCallLogAtMs =
     lastLog.rows[0]?.last_ms != null ? Number(lastLog.rows[0].last_ms) : null;
+
+  /**
+   * The same guard for the ticket path, which had none at all.
+   *
+   * Call logging got its staleness banner on 2026-08-24. A week later filing
+   * stopped for three and a half hours and this page showed nothing, because
+   * a queue call that files no ticket looks exactly like a queue call that had
+   * nothing to file. The rule and the thresholds live in
+   * server/services/ticketFilingHealth.ts, next to the run-length distribution
+   * they were measured from — this reads both planes and asks it.
+   */
+  let ticketFiling: TicketFilingVerdict | null = null;
+  try {
+    const recent = await pool.query(
+      // `status = 'completed'` matches readTicketFilingSnapshot and has to stay
+      // that way. The row is created at call START as 'in_progress', so without
+      // it every call currently on the line counts as one that filed nothing —
+      // a busy morning alone would paint this banner red. See the long note in
+      // ticketFilingHealth.ts for why the filter is 'completed' exactly and not
+      // "anything not in-flight".
+      `SELECT (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_ms,
+              (ticket_number IS NOT NULL) AS has_ticket
+         FROM call_logs
+        WHERE agent_used IN ('optical', 'surgery', 'tech', 'records')
+          AND status = 'completed'
+        ORDER BY created_at DESC
+        LIMIT 40`,
+    );
+    // Same predicate as readTicketFilingSnapshot, and it has to stay that way:
+    // a dead letter is counted for ever, the transient states only while they
+    // are recent. Codex found these two drifting apart on PR #244 — the banner
+    // would have gone green overnight while requests sat unfiled.
+    const held = await pool.query(
+      `SELECT status::text AS status, COUNT(*)::int AS n
+         FROM ticket_outbox
+        WHERE status = 'dead_letter'
+           OR (status NOT IN ('sent', 'dead_letter') AND created_at > NOW() - INTERVAL '6 hours')
+        GROUP BY 1`,
+    );
+    const byStatus: Record<string, number> = {};
+    for (const r of held.rows) byStatus[r.status] = Number(r.n) || 0;
+    ticketFiling = assessTicketFiling({
+      recentQueueCalls: recent.rows.map((r: { created_ms: string; has_ticket: boolean }) => ({
+        createdAtMs: Number(r.created_ms),
+        hasTicket: Boolean(r.has_ticket),
+      })),
+      outboxPending: (byStatus.pending ?? 0) + (byStatus.sending ?? 0),
+      outboxFailed: byStatus.failed ?? 0,
+      outboxDeadLetter: byStatus.dead_letter ?? 0,
+      nowMs: Date.now(),
+    });
+  } catch (err) {
+    // A widget that cannot read is not a system that is healthy — say nothing
+    // rather than green.
+    console.error('[observatory] ticket filing health unavailable:', err);
+  }
 
   let sage: TodayOverview['sage'];
   try {
@@ -1080,6 +1139,7 @@ export async function todayOverview(): Promise<TodayOverview> {
     })),
     sage,
     lastCallLogAtMs,
+    ticketFiling,
   };
 }
 
@@ -1138,60 +1198,16 @@ export async function replayTapeList(agent: string, verdict = 'worse', limit = 4
   }));
 }
 
-/** Render one tape live: both transcripts, both grader verdicts. */
-export async function replayTape(callLogId: string): Promise<{
-  callLogId: string;
-  agent: string;
-  verdict: string | null;
-  oldTranscript: string | null;
-  newTranscript: string | null;
-  newGraders: unknown;
-  oldCriticalCount: number;
-  newCriticalCount: number;
-  approximations: string[] | null;
-} | null> {
-  const { rows } = await pool.query(
-    `SELECT id, agent_used, "from", caller_name, patient_name, patient_dob, patient_found,
-            ticket_number, transferred_to_human, total_turns, duration, transcript
-     FROM call_logs WHERE id = $1 LIMIT 1`,
-    [callLogId],
-  );
-  if (!rows.length || !rows[0].transcript) return null;
-  const row = rows[0] as any;
-  const agent = String(row.agent_used ?? 'answering-service');
-  const { replayStoredCall } = await import('../../src/core/replay/replayCall');
-  const tape = await replayStoredCall(
-    {
-      id: row.id,
-      from: row.from,
-      caller_name: row.caller_name,
-      patient_name: row.patient_name,
-      patient_dob: row.patient_dob,
-      patient_found: row.patient_found,
-      ticket_number: row.ticket_number,
-      transferred_to_human: row.transferred_to_human,
-      total_turns: row.total_turns,
-      duration: row.duration,
-      transcript: row.transcript,
-    },
-    (agent === 'pcp'
-      ? 'pcp'
-      : agent === 'azul-scheduling'
-        ? 'azul-scheduling'
-        : agent === 'no-ivr' || agent === 'after-hours'
-          ? 'no-ivr'
-          : 'answering-service'),
-  );
-  if (!tape) return null;
-  return {
-    callLogId,
-    agent,
-    verdict: tape.verdict,
-    oldTranscript: row.transcript,
-    newTranscript: tape.new_transcript,
-    newGraders: tape.new_grader_results,
-    oldCriticalCount: tape.old_critical.length,
-    newCriticalCount: tape.new_critical.length,
-    approximations: tape.approximations,
-  };
-}
+/**
+ * Live tape rendering is GONE, deliberately, and `replayTape()` with it.
+ *
+ * It re-ran the call through the new core (`src/core/replay/replayCall.ts`),
+ * and that pipeline was deleted on 2026-09-01, so the function could only
+ * return null and its route could only answer 404 — while the Observatory
+ * still offered every row as a clickable tape and blamed the resulting error
+ * on a missing transcript (Codex, PR #244 round thirteen). The control and the
+ * route are removed rather than left to fail.
+ *
+ * Verdicts computed before the deletion are unaffected: they are stored in
+ * `new_core_replay_index` and still served by `replayTapeList` above.
+ */

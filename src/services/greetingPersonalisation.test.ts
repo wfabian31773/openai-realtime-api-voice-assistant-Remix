@@ -4,6 +4,7 @@ import {
   stripTrailingQuestion,
   greetingStyleFor,
   missingMandatoryCopy,
+  lunchGreetingFor,
 } from './greetingPersonalisation';
 
 const SURGERY =
@@ -206,5 +207,402 @@ describe('copy a lane must say whatever the database holds', () => {
   it('treats an empty or absent greeting as missing everything', () => {
     expect(missingMandatoryCopy('no-ivr', '')).toHaveLength(3);
     expect(missingMandatoryCopy('no-ivr', null)).toHaveLength(3);
+  });
+});
+
+describe('lunchGreetingFor — the lunch hour is not after hours', () => {
+  const WEEKDAY_NOON = { hour: 12, shortDay: 'Tue' };
+
+  /**
+   * Operator, 2026-09-01: "no-ivr callers are any hours outside of business
+   * hours — a 7am call is no-ivr, our offices are still closed. If it is
+   * during lunch, our offices are closed between 12-1, so that should be
+   * said." A caller at 12:30 is not an after-hours caller and must not be
+   * told they have reached the after-hours service.
+   */
+  it('returns the lunch greeting on a weekday at noon', () => {
+    const g = lunchGreetingFor('no-ivr', WEEKDAY_NOON);
+    expect(g).toBeTruthy();
+    expect(g).toMatch(/closed for lunch between twelve and one/i);
+    expect(g).not.toMatch(/after hours/i);
+  });
+
+  it('says nothing about lunch at 7am, which really is after hours', () => {
+    expect(lunchGreetingFor('no-ivr', { hour: 7, shortDay: 'Tue' })).toBeNull();
+  });
+
+  it('does not treat a weekend noon as lunch — that is just closed', () => {
+    expect(lunchGreetingFor('no-ivr', { hour: 12, shortDay: 'Sat' })).toBeNull();
+    expect(lunchGreetingFor('no-ivr', { hour: 12, shortDay: 'Sun' })).toBeNull();
+  });
+
+  it('is scoped to the lane that has legally-shaped copy', () => {
+    expect(lunchGreetingFor('optical', WEEKDAY_NOON)).toBeNull();
+    expect(lunchGreetingFor('surgery', WEEKDAY_NOON)).toBeNull();
+    expect(lunchGreetingFor(undefined, WEEKDAY_NOON)).toBeNull();
+  });
+
+  /**
+   * The whole reason this is a separate constant rather than surgery on the
+   * configured string: an alternative greeting is another place the three
+   * mandatory statements can go missing. It is checked by the same rule the
+   * database row is checked by.
+   */
+  it('carries the closed notice, the 911 direction and the recording disclosure', () => {
+    const g = lunchGreetingFor('no-ivr', WEEKDAY_NOON);
+    expect(missingMandatoryCopy('no-ivr', g)).toEqual([]);
+  });
+});
+
+
+/**
+ * THE FALLBACK ITSELF HAS TO BE COMPLIANT — Codex, PR #244.
+ *
+ * When the database row fails the mandatory-copy check, `voiceAgentRoutes`
+ * falls back to `WELCOME_GREETING`, the registry string this line has always
+ * used. That is only safe while the string carries all three phrases, and the
+ * string lives in another file that nothing stopped anyone editing. This is
+ * what stops it quietly ceasing to be a safe fallback.
+ *
+ * The failure it guards is specific: metadata is lost when a webhook lands on
+ * a different instance (diagnosed 2026-08-06, four live SD calls), and if the
+ * database row is also bad there is nothing left to say. The check further
+ * down voiceAgentRoutes then falls through to a bare `response.create` and the
+ * model opens the call itself — which is how the recording disclosure went
+ * missing to begin with.
+ */
+describe('the greeting used when the database row is rejected', () => {
+  it('carries every phrase the lane is required to say', async () => {
+    // Read as text rather than imported: `afterHoursAgent` pulls in the whole
+    // agent module and, through it, the database. The string is what matters,
+    // and this still fails the moment somebody edits it.
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../agents/afterHoursAgent.ts', import.meta.url), 'utf8');
+    const literal = /return\s+"([^"]+)";/.exec(
+      src.slice(src.indexOf('function getUrgentTriageGreeting')),
+    );
+    expect(literal, 'could not find the greeting literal').toBeTruthy();
+    expect(missingMandatoryCopy('no-ivr', literal![1])).toEqual([]);
+  });
+
+  it('and the lunch greeting does too, since it replaces the same opening', async () => {
+    const lunch = lunchGreetingFor('no-ivr', { hour: 12, shortDay: 'Mon' });
+    expect(lunch).toBeTruthy();
+    expect(missingMandatoryCopy('no-ivr', lunch)).toEqual([]);
+  });
+});
+
+
+/**
+ * A DISCLOSURE THAT SAYS THE OPPOSITE STILL CONTAINS THE KEYWORD — Codex, #244.
+ *
+ * These predicates were bare keyword tests, and this check is the compliance
+ * boundary for a field an admin can edit. "Calls are not being recorded" would
+ * have reported the recording disclosure as present, and the row would have
+ * outranked the known-safe code greeting on a line that records from start.
+ *
+ * The second half of this block matters as much as the first: a negation test
+ * that is too loose rejects legitimate wording, and a rejected row falls back
+ * to the code greeting with only a log line — an operator edit that returns
+ * success and changes nothing, which is this repo's other recurring failure.
+ */
+describe('the mandatory copy has to be affirmative', () => {
+  const COMPLIANT =
+    'Thank you for calling Azul Vision, all of our offices are currently closed. ' +
+    'If this is a medical emergency, please dial 911. All calls are being recorded ' +
+    'for quality assurance purposes, how can I help you?';
+
+  it('accepts the real greeting', () => {
+    expect(missingMandatoryCopy('no-ivr', COMPLIANT)).toEqual([]);
+  });
+
+  it('rejects each phrase turned on its head', () => {
+    expect(missingMandatoryCopy('no-ivr', COMPLIANT.replace('are currently closed', 'are not closed')))
+      .toEqual(['closed-office notice']);
+    expect(missingMandatoryCopy('no-ivr', COMPLIANT.replace('please dial 911', 'please do not dial 911')))
+      .toEqual(['911 direction']);
+    expect(missingMandatoryCopy('no-ivr', COMPLIANT.replace('are being recorded', 'are not being recorded')))
+      .toEqual(['recording disclosure']);
+  });
+
+  it('does not reject an innocent "not" that belongs to another clause', () => {
+    // A real way to word this line. The negation attaches to "an emergency",
+    // not to dialling 911, and the greeting is entirely compliant.
+    const legitimate =
+      'Thank you for calling Azul Vision, our offices are closed. If this is not an ' +
+      'emergency I can take a message; if it is a medical emergency, please dial 911. ' +
+      'All calls are being recorded for quality assurance purposes.';
+    expect(missingMandatoryCopy('no-ivr', legitimate)).toEqual([]);
+  });
+
+  /**
+   * ROUND FIVE, one step narrower than round four: a negation that matches only
+   * the literal word `not` still lets "calls aren't being recorded" through.
+   * An admin typing into a web form writes contractions, and gets whichever
+   * apostrophe their keyboard produces.
+   */
+  it('rejects the contracted forms too', () => {
+    for (const negated of [
+      "Calls aren't being recorded",
+      'Calls aren\u2019t being recorded',
+      'Calls are never recorded',
+    ]) {
+      expect(
+        missingMandatoryCopy('no-ivr', COMPLIANT.replace('All calls are being recorded', negated)),
+        negated,
+      ).toEqual(['recording disclosure']);
+    }
+    expect(missingMandatoryCopy('no-ivr', COMPLIANT.replace("are currently closed", "aren't closed")))
+      .toEqual(['closed-office notice']);
+  });
+
+  it('does not reject a contraction that belongs to another clause', () => {
+    // The over-tightening guard, in contracted form. "don't hesitate" has
+    // nothing to do with the recording disclosure that follows it.
+    const legitimate =
+      "Thank you for calling Azul Vision, our offices are closed. If this is a medical " +
+      "emergency, please dial 911. Please don't hesitate to leave a message — all calls " +
+      'are being recorded for quality assurance purposes.';
+    expect(missingMandatoryCopy('no-ivr', legitimate)).toEqual([]);
+  });
+
+  it('still catches a phrase that is simply absent', () => {
+    // The failure that actually happened on 2026-08-31: the disclosure was not
+    // negated, it was gone.
+    // The clause ends in a comma, not a full stop — the first version of this
+    // test removed nothing and passed for the wrong reason.
+    const withoutDisclosure = COMPLIANT.replace(
+      'All calls are being recorded for quality assurance purposes, ',
+      '',
+    );
+    expect(withoutDisclosure).not.toMatch(/record/i);
+    expect(missingMandatoryCopy('no-ivr', withoutDisclosure)).toEqual(['recording disclosure']);
+  });
+});
+
+/**
+ * THE NUMBER IS NOT THE DIRECTION — Codex, PR #244, round seven.
+ *
+ * The check required `\b911\b` and then subtracted a fixed list of negations.
+ * That shape accepts anything containing the token unless a reversal is
+ * recognised, so "911 is not available" and "please don't use 911" both
+ * passed: neither contains `dial|call|contact|phone`, so neither could be
+ * caught by negating those verbs. Chasing it with more negations is unbounded,
+ * and every phrasing nobody anticipated is a false accept — which here means
+ * an emergency caller is never told where to go, on the line that carries
+ * every overnight call.
+ *
+ * Inverted to state what the clause must SAY. Both live greetings satisfy it.
+ */
+describe('the 911 clause has to direct someone to 911', () => {
+  const base = 'Thank you for calling Azul Vision. Our offices are currently closed. ';
+  const tail = ' All calls are being recorded for quality assurance purposes.';
+  const check = (g: string) => missingMandatoryCopy('no-ivr', g);
+
+  it('accepts the registry greeting', () => {
+    expect(check(base + 'If this is a medical emergency, please dial 911.' + tail)).toEqual([]);
+  });
+
+  it('accepts the live database row, which words it differently', () => {
+    // "please hang up and dial 911" — read out of agents.welcome_greeting.
+    expect(check(base + 'If this is a medical emergency, please hang up and dial 911.' + tail)).toEqual([]);
+  });
+
+  it.each([
+    ['911 is not available',      'the token with no direction at all'],
+    ['please don\'t use 911',      'a reversal the old verb list could not see'],
+    ['do not dial 911',           'the plain negation'],
+    ['for emergencies, 911',      'the number offered without telling anyone to use it'],
+  ])('rejects "%s" — %s', (clause) => {
+    expect(check(base + clause + '.' + tail)).toContain('911 direction');
+  });
+
+  it('does NOT catch a direction talked out of at a distance, and that is the limit', () => {
+    // "there is no reason to contact 911" contains an affirmative "contact
+    // 911", and the negator is not adjacent to it, so this passes. Recorded
+    // rather than hidden: the check is a guard on operator-authored text, not
+    // a general reader of intent, and the alternative is the unbounded
+    // negation-chasing this inversion was meant to end.
+    //
+    // What bounds the risk is that the rejected path is the SAFE one — a
+    // greeting that fails falls back to the compliant code string. The failure
+    // mode left here needs someone to deliberately write a compliant-looking
+    // sentence that means the opposite, which is a different problem from the
+    // accidental omission this was built for.
+    expect(check(base + 'there is no reason to contact 911.' + tail)).toEqual([]);
+  });
+
+  it('still rejects a greeting that never mentions 911 at all', () => {
+    expect(check(base + 'How can I help you?' + tail)).toContain('911 direction');
+  });
+});
+
+/**
+ * "CANNOT" IS A NEGATION — Codex, PR #244 round ten, and one more it did not name.
+ *
+ * `\bnot\b` cannot match the `not` inside `cannot`, so "calls cannot be
+ * recorded" and "you cannot call 911 from this line" both read as compliant.
+ *
+ * Checking that against the live wording turned up a SECOND hole in the same
+ * line: **"calls can not be recorded" also passed**, and there the negator
+ * matches perfectly well. What failed was the phrase — it allowed "being
+ * recorded" but not "be recorded", so nothing lined up after the negator. One
+ * fix, `cannot` plus an optional copula, closes both; fixing only what was
+ * reported would have left the two-word form live.
+ */
+describe('cannot, and the copula that hid beside it', () => {
+  const base = 'Thank you for calling Azul Vision. Our offices are currently closed. ';
+  const emerg = 'If this is a medical emergency, please dial 911. ';
+  const rec = 'All calls are being recorded for quality assurance purposes.';
+  const check = (g: string) => missingMandatoryCopy('no-ivr', g);
+
+  it.each([
+    'Calls cannot be recorded',
+    'Calls can not be recorded',
+    'Calls cannot be recorded on this line',
+  ])('rejects the recording disclosure reversed by "%s"', (clause) => {
+    expect(check(base + emerg + clause + '.')).toContain('recording disclosure');
+  });
+
+  it.each([
+    'You cannot call 911 from this line',
+    'You can not dial 911 from here',
+  ])('rejects the 911 direction reversed by "%s"', (clause) => {
+    expect(check(base + clause + '. ' + rec)).toContain('911 direction');
+  });
+
+  it('rejects a closed-office notice reversed with cannot', () => {
+    expect(
+      check('Thank you for calling. Our offices cannot be closed. ' + emerg + rec),
+    ).toContain('closed-office notice');
+  });
+
+  it('still accepts both live greetings unchanged', () => {
+    // The registry string and the agents.welcome_greeting row. A guard that is
+    // too tight rejects the row and falls back silently, which is an operator
+    // edit that returns success and changes nothing.
+    expect(check(base + emerg + rec)).toEqual([]);
+    expect(
+      check('Thank you for calling Azul Vision. Our offices are currently closed. '
+        + 'If this is a medical emergency, please hang up and dial 911. ' + rec),
+    ).toEqual([]);
+  });
+
+  it('does not treat a copula as licence to reach across the sentence', () => {
+    // The negator plus ONE short auxiliary, not arbitrary distance. "not an
+    // emergency" keeps its `not`, so the 911 direction beside it still counts.
+    expect(
+      check('Thank you for calling. Our offices are currently closed. '
+        + 'If this is not an emergency I can take a message; if it is a medical emergency, please dial 911. '
+        + rec),
+    ).toEqual([]);
+  });
+});
+
+/**
+ * AN ADVERB IS NOT A GAP IN THE NEGATION — Codex, PR #244 round thirteen.
+ *
+ * "Calls are not currently being recorded" passed as compliant. The positive
+ * `record(ed|ing)` test matched, and `negated()` could not reach the phrase
+ * because it required the negator to sit immediately before the optional
+ * copula and could not cross `currently`. So a database row that DENIES the
+ * recording disclosure outranked the compliant code greeting, on the line that
+ * records every overnight call from the first second.
+ *
+ * Two changes, and the second is the one that generalises. The negator may now
+ * cross a run of -ly adverbs; and the recording clause, like the 911 direction
+ * before it, asks what the greeting must SAY rather than subtracting a fixed
+ * list of things it must not.
+ */
+describe('a denied recording disclosure is not a disclosure', () => {
+  const withRecording = (clause: string) =>
+    `Thank you for calling Azul Vision, all of our offices are currently closed. ` +
+    `If this is a medical emergency, please dial 911. ${clause} How can I help you?`;
+
+  const recordingPresent = (g: string) => !missingMandatoryCopy('no-ivr', g).includes('recording disclosure');
+
+  it('rejects an adverb-separated denial', () => {
+    expect(recordingPresent(withRecording('Calls are not currently being recorded.'))).toBe(false);
+  });
+
+  it.each([
+    'Calls are not being recorded.',
+    'Calls are never recorded.',
+    "Calls aren't recorded.",
+    'Calls cannot be recorded.',
+    'Calls are not presently recorded.',
+    'Calls are not normally recorded.',
+  ])('still rejects: %s', (clause) => {
+    expect(recordingPresent(withRecording(clause))).toBe(false);
+  });
+
+  it.each([
+    'All calls are being recorded for quality assurance purposes.',
+    'This call is recorded.',
+    'Your call may be recorded.',
+    'All calls will be recorded.',
+  ])('still accepts an affirmative disclosure: %s', (clause) => {
+    expect(recordingPresent(withRecording(clause))).toBe(true);
+  });
+
+  it('rejects a greeting that only mentions recording without disclosing it', () => {
+    // The inversion's whole point: containing the word is not saying the thing.
+    expect(recordingPresent(withRecording('Ask us about our recording policy.'))).toBe(false);
+  });
+
+  it('the adverb run does not loosen adjacency for the 911 direction', () => {
+    // The legitimate wording this design has always had to protect.
+    const g =
+      'Thank you for calling Azul Vision, our offices are closed. If this is not an emergency ' +
+      'I can take a message; if it is a medical emergency, please dial 911. ' +
+      'All calls are being recorded for quality assurance purposes.';
+    expect(missingMandatoryCopy('no-ivr', g)).toEqual([]);
+  });
+
+  it('rejects an adverb-separated denial of the closed-office notice too', () => {
+    const g =
+      'Thank you for calling Azul Vision, our offices are not currently closed. ' +
+      'If this is a medical emergency, please dial 911. ' +
+      'All calls are being recorded for quality assurance purposes.';
+    expect(missingMandatoryCopy('no-ivr', g)).toContain('closed-office notice');
+  });
+});
+
+/**
+ * ONE COPULA, A LIST OF PARTICIPLES — Codex, PR #244, and a FALSE REJECT I
+ * introduced with the affirmative inversion the round before.
+ *
+ * "This call may be monitored or recorded for quality assurance" is an
+ * ordinary compliant disclosure and it failed, because `monitored or` sits
+ * between the copula and the verb. A rejected row falls back to the code
+ * greeting with only a log line — an operator edit that returns success and
+ * changes nothing, which is this repo's other recurring failure. Inverting a
+ * check trades false accepts for false rejects, and this is the bill.
+ */
+describe('a coordinated disclosure is still a disclosure', () => {
+  const withRecording = (clause: string) =>
+    `Thank you for calling Azul Vision, all of our offices are currently closed. ` +
+    `If this is a medical emergency, please dial 911. ${clause} How can I help you?`;
+
+  const recordingPresent = (g: string) => !missingMandatoryCopy('no-ivr', g).includes('recording disclosure');
+
+  it.each([
+    'This call may be monitored or recorded for quality assurance.',
+    'Calls are monitored and recorded.',
+    'This call may be monitored, recorded and reviewed.',
+    'Your call will be monitored or recorded.',
+  ])('accepts: %s', (clause) => {
+    expect(recordingPresent(withRecording(clause))).toBe(true);
+  });
+
+  it('does not let the coordination smuggle a negation through', () => {
+    // Only -ed/-ing words joined by and/or/comma qualify, so `not` cannot sit
+    // in the list, and the negation guard is untouched either way.
+    expect(recordingPresent(withRecording('Calls are monitored but not recorded.'))).toBe(false);
+    expect(recordingPresent(withRecording('Calls are not monitored or recorded.'))).toBe(false);
+  });
+
+  it('still refuses a mention that discloses nothing', () => {
+    expect(recordingPresent(withRecording('Ask us about our monitoring and recording policy.'))).toBe(false);
   });
 });

@@ -18,6 +18,8 @@
  * only test that could reach it was one that read the source as text.
  */
 
+import { isLunchClosure } from '../utils/timeAware';
+
 /**
  * How a line combines its greeting with the confirm question.
  *
@@ -171,6 +173,72 @@ export function personaliseGreeting(
  * Deliberately narrow: only the lane that has legally-shaped copy, and only
  * the two statements. Everything else is the operator's wording to choose.
  */
+/**
+ * The ways an ordinary sentence reverses itself, immediately before a phrase.
+ *
+ * Codex found this twice on #244, each time one step narrower than the last:
+ * first that the checks were bare keyword tests, so "calls are not being
+ * recorded" read as compliant; then that a negation matching only the literal
+ * word `not` still lets "calls aren't being recorded" through. Both apostrophes
+ * are covered because an admin typing into a web form gets whichever one their
+ * keyboard produces.
+ *
+ * ADJACENCY IS THE WHOLE DESIGN. The negator has to sit immediately before the
+ * phrase it reverses, so "if this is not an emergency I can take a message; if
+ * it is a medical emergency, please dial 911" stays compliant — the `not`
+ * belongs to "an emergency", not to dialling. A looser test would reject
+ * legitimate wording, and a rejected row falls back to the code greeting with
+ * only a log line, which is an operator edit that returns success and changes
+ * nothing.
+ */
+const NEGATOR = String.raw`(?:\bcannot\b|\bnot\b|n['\u2019]t\b|\bnever\b)`;
+
+/**
+ * ONE COPULA MAY SIT BETWEEN THE NEGATOR AND THE PHRASE.
+ *
+ * `cannot` came from Codex on PR #244 — `\bnot\b` cannot match the `not`
+ * inside `cannot`, so "calls cannot be recorded" read as compliant. Checking
+ * that against the live wording turned up a SECOND hole it had not named:
+ * "calls can not be recorded" also passed, and there the negator matches
+ * perfectly well. What failed was the phrase — it allowed "being recorded" and
+ * not "be recorded", so nothing lined up after the negator.
+ *
+ * Hence the optional `be|being|been` here rather than another alternative in
+ * each phrase: the same auxiliary appears between a negator and every one of
+ * these clauses, and fixing it once is what stops the next variant needing a
+ * tenth round.
+ *
+ * ADJACENCY IS STILL THE DESIGN, and one short auxiliary does not loosen it.
+ * "If this is not an emergency I can take a message; if it is a medical
+ * emergency, please dial 911" still passes — `an` is not a copula, so the
+ * `not` stays attached to "an emergency" where it belongs. So does "please
+ * don't hesitate to leave a message — all calls are being recorded".
+ */
+/**
+ * AND A RUN OF ADVERBS MAY SIT THERE TOO — Codex, round thirteen.
+ *
+ * "Calls are not currently being recorded" passed. The negator had to sit
+ * immediately before the optional copula, and `currently` is neither, so
+ * nothing lined up after the `not` and the denial read as a disclosure.
+ *
+ * `-ly` adverbs rather than another enumerated list, because the list is the
+ * bug: the closed-office clause already carried `(?:currently|presently)` and
+ * the recording clause did not, which is precisely how one of them was open
+ * and the other was not. Currently, presently, normally, usually, generally,
+ * typically and everything else of that shape are one rule now.
+ *
+ * ADJACENCY IS STILL THE DESIGN. An adverb modifies the verb it precedes, so
+ * crossing one keeps the negator attached to the same clause. "If this is not
+ * an emergency I can take a message; if it is a medical emergency, please dial
+ * 911" still passes — `an` is not an adverb or a copula, so the `not` stays
+ * where it belongs.
+ */
+const ADVERBS = String.raw`(?:\s+\w+ly\b)*`;
+
+function negated(greeting: string, phrase: string): boolean {
+  return new RegExp(`${NEGATOR}${ADVERBS}\\s+(?:be|being|been)?\\s*${phrase}\\b`, 'i').test(greeting);
+}
+
 const MANDATORY_GREETING_COPY: Readonly<
   Record<string, ReadonlyArray<{ label: string; present: (g: string) => boolean }>>
 > = {
@@ -181,11 +249,130 @@ const MANDATORY_GREETING_COPY: Readonly<
     // sentence and then encoded two of the three, so "For emergencies dial
     // 911. Calls are recorded. How can I help?" would have passed and taken
     // the after-hours status off the line (Codex, #240).
-    { label: 'closed-office notice', present: (g) => /clos(ed|ing)\b/i.test(g) },
-    { label: '911 direction', present: (g) => /\b911\b/.test(g) },
-    { label: 'recording disclosure', present: (g) => /record(ed|ing)\b/i.test(g) },
+    //
+    // NEGATION, added 2026-09-01 (Codex, #244). These were bare keyword tests,
+    // so "our offices are not closed", "do not dial 911" and "calls are not
+    // being recorded" all reported the mandatory copy as PRESENT — and this
+    // check is the compliance boundary for a field an admin can edit. A row
+    // that says the opposite of the required sentence would have outranked the
+    // known-safe code greeting.
+    //
+    // Each negation is anchored to its own phrase rather than "a 'not'
+    // somewhere near". A loose test would reject legitimate wording — "if this
+    // is not a medical emergency, leave a message; otherwise dial 911" is a
+    // perfectly good greeting — and a rejected row falls back silently to the
+    // code greeting, which is this repo's other recurring failure: an edit that
+    // returns success and changes nothing.
+    {
+      label: 'closed-office notice',
+      // The enumerated `(?:currently|presently)` that used to sit in this
+      // phrase is gone: `negated()` crosses any -ly adverb now, so keeping a
+      // private list here would suggest the general rule does not exist.
+      present: (g) => /clos(ed|ing)\b/i.test(g) && !negated(g, String.raw`clos(?:ed|ing)`),
+    },
+    {
+      /**
+       * THE NUMBER IS NOT THE DIRECTION — Codex, PR #244, the round after the
+       * negation fix and narrower again.
+       *
+       * Requiring `\b911\b` and then subtracting negations is the wrong shape:
+       * it accepts anything containing the token unless one of a fixed list of
+       * reversals is spotted, so "911 is not available" and "please don't use
+       * 911" both passed — neither contains `dial|call|contact|phone`, so
+       * neither could be caught by negating those verbs. Chasing that with
+       * more negations is unbounded; every phrasing nobody thought of is a
+       * false accept, and a false accept here means an emergency caller is
+       * never told where to go.
+       *
+       * Inverted, so the check is what the clause must SAY rather than what it
+       * must avoid: an affirmative direction to 911. Both live greetings
+       * satisfy it — the registry string says "please dial 911", the database
+       * row says "please hang up and dial 911" — and the negation guard stays
+       * on top for "don't call 911".
+       */
+      label: '911 direction',
+      present: (g) =>
+        /\b(?:dial|call|contact|phone)\s+911\b/i.test(g) &&
+        !negated(g, String.raw`(?:need\s+to\s+)?(?:dial|call|contact|phone)\s+911`) &&
+        !/\bno\s+need\s+to\s+(?:dial|call|contact|phone)\s+911\b/i.test(g),
+    },
+    {
+      /**
+       * THE WORD IS NOT THE DISCLOSURE — the same inversion as the 911
+       * direction above, and for the same reason, one round later.
+       *
+       * Requiring `record(ed|ing)` and subtracting negations accepts anything
+       * containing the token unless a reversal is spotted, so every phrasing
+       * nobody thought of is a false accept — and a false accept here means a
+       * caller is recorded without being told. Codex found the adverb hole
+       * ("not currently being recorded"); "ask about our recording policy"
+       * would have passed too, and no amount of negation-chasing catches that.
+       *
+       * So the check is what the clause must SAY: the call is, may be, or will
+       * be recorded. Both live greetings satisfy it — the registry string and
+       * the lunch greeting both say "All calls are being recorded for quality
+       * assurance purposes" — and the negation guard stays on top.
+       *
+       * COORDINATION, the round after — Codex again, and this one was a
+       * FALSE REJECT I introduced with the inversion above. "This call may be
+       * monitored or recorded for quality assurance" is a perfectly ordinary
+       * compliant disclosure, and it failed, because `monitored or` sits
+       * between the copula and the verb. A rejected row falls back to the code
+       * greeting with only a log line — an operator edit that returns success
+       * and changes nothing, which is this repo's other recurring failure.
+       *
+       * So one copula may govern a coordinated list of participles:
+       * "monitored or recorded", "monitored and recorded", "monitored,
+       * recorded". Only `-ed`/`-ing` words joined by and/or/comma qualify, so
+       * `not` still cannot slip in, and the negation guard is untouched.
+       */
+      label: 'recording disclosure',
+      present: (g) =>
+        /\b(?:is|are|was|were|be|being|been)\s+(?:being\s+)?(?:\w+(?:ed|ing)(?:\s*,\s*|\s+(?:and|or)\s+))*record(?:ed|ing)\b/i.test(g) &&
+        !negated(g, String.raw`(?:being\s+)?record(?:ed|ing)`),
+    },
   ],
 };
+
+/**
+ * THE LUNCH HOUR IS NOT AFTER HOURS.
+ *
+ * Operator, 2026-09-01: *"no-ivr callers are any hours outside of business
+ * hours — a 7am call is no-ivr, our offices are still closed. If it is during
+ * lunch, our offices are closed between 12-1, so that should be said."*
+ *
+ * The standing greeting says "you have reached the after hours call service",
+ * which is true at 7am and wrong at 12:30 — the practice is open today, it is
+ * at lunch, and a caller told they have reached an after-hours service assumes
+ * nobody is back until tomorrow. `isLunchClosure()` (src/utils/timeAware.ts,
+ * weekdays, hour 12, already carrying the 2026-08-06 directive that this
+ * window gets a callback rather than a transfer attempt) decides which one.
+ *
+ * A whole alternative greeting rather than surgery on the configured string:
+ * rewriting the operator's own wording with a regex is how the closed-office
+ * clause and the 911 direction get lost. This is one constant, reviewable in
+ * one place, and it carries all three mandatory statements itself — which the
+ * test asserts by running it back through `missingMandatoryCopy`.
+ */
+const LUNCH_GREETINGS: Readonly<Record<string, string>> = {
+  'no-ivr':
+    'Thank you for calling Azul Vision. Our offices are closed for lunch between twelve and one. ' +
+    'If this is a medical emergency, please dial 911. All calls are being recorded for quality ' +
+    'assurance purposes. How can I help you?',
+};
+
+/**
+ * The lunch-hour greeting for this lane, or null when the lane has none or it
+ * is not lunch. `now` is injectable so this is testable without a clock.
+ */
+export function lunchGreetingFor(
+  agentSlug: string | undefined,
+  now?: { hour: number; shortDay: string },
+): string | null {
+  const candidate = LUNCH_GREETINGS[String(agentSlug ?? '')];
+  if (!candidate) return null;
+  return isLunchClosure(now) ? candidate : null;
+}
 
 /**
  * What a candidate greeting is missing for this lane, or [] when it is

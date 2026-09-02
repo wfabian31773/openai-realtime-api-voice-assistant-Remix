@@ -204,6 +204,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // is the field D11 turns on: it is the difference between "the agent
     // promised a callback and filed it" and "promised and filed nothing".
     'success', 'ticket_number', 'ticketNumber', 'validationError',
+    // A request the POST could not file and the outbox is now holding.
+    // Without this key a captured request is indistinguishable in the
+    // timeline from a filed one — success is true for both, and only this
+    // says there is no ticket number because there is not one yet.
+    'filed_pending',
     'department', 'requestType', 'escalated', 'patientFound',
     'say', // directive text — kept so the Phase 7 rubric can grade say-verbatim compliance
     /**

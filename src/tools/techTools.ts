@@ -28,6 +28,7 @@
  */
 import { registerTool, missing, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
+import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 
 // ---------------------------------------------------------------- what kind
 
@@ -109,7 +110,20 @@ registerTool({
       caller_phone: { type: 'string', description: 'The number they called from.' },
       dialed_number: { type: 'string', description: 'The number they dialled.' },
     },
-    required: ['first_name', 'last_name', 'date_of_birth', 'callback_number', 'request_description'],
+    /**
+     * `date_of_birth` is NOT in this list, and the gate on it is unchanged.
+     *
+     * `validateInput` refuses before the handler runs, so while it sat here the
+     * handler could never consult the record `lookup_patient` had already
+     * matched — and the caller was asked for a date of birth the process was
+     * holding. 45 calls in the fourteen days to 2026-09-01 were refused for one
+     * and ended with no ticket; on 23 of them the patient had already been
+     * identified.
+     *
+     * The handler still refuses when it has neither the caller's answer nor a
+     * verified record for that same name, in the same words as before.
+     */
+    required: ['first_name', 'last_name', 'callback_number', 'request_description'],
   },
   handler: async (input): Promise<ToolResult> => {
     const first = str(input.first_name);
@@ -186,9 +200,35 @@ registerTool({
     const cleanProvider = sanitizeProviderName(str(input.provider)).value;
     const cleanLocation = sanitizeLocationName(str(input.location)).value;
 
-    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    const { ticketingApiClient, lookupWasUnavailable } = await import(
+      '../../server/services/ticketingApiClient'
+    );
     const { normalizeDobParts } = await import('./dobParts');
-    const parts = normalizeDobParts(dob);
+    let parts = normalizeDobParts(dob);
+    if (!parts) {
+      /**
+       * ASK ONCE, NOT TWICE. Operator instruction, 2026-09-01: *"if we do our
+       * job and validate and pass the patient records along, you will not have
+       * this issue."*
+       *
+       * `lookup_patient` found this caller — it does on 95% of queue calls —
+       * and the service returned their date of birth with the match. Nothing
+       * carried it here, so the agent asked for something the process already
+       * held, and 45 calls in fourteen days ended with no ticket because the
+       * caller could not answer. On 23 of those we already knew who they were.
+       *
+       * Only ever for the SAME NAME as the verified match, and only from a
+       * match the lookup was certain about. See verifiedIdentity.ts.
+       */
+      const { verifiedDobFor } = await import('./verifiedIdentity');
+      const known = verifiedDobFor(callSid, first, last);
+      parts = known ? normalizeDobParts(known) : null;
+      if (parts) {
+        // No name in the log line: this is the one place a masked identifier
+        // would still be the patient.
+        console.info('[tech] date of birth taken from the verified record for this call');
+      }
+    }
     if (!parts) {
       return missing(['date_of_birth'], 'I did not catch that date of birth — month, day and year?');
     }
@@ -203,12 +243,62 @@ registerTool({
             ...(cleanProvider ? { providerName: cleanProvider } : {}),
             ...(cleanLocation ? { locationName: cleanLocation } : {}),
           })
-        : { providerId: undefined, locationId: undefined, locationMatches: [] };
+        : // Nothing to look up. That is a ran-and-matched-nothing, not an
+          // outage — say so explicitly so `lookupWasUnavailable` cannot read
+          // a bare object as a failure.
+          {
+            success: true,
+            outcome: 'no_match' as const,
+            providerId: undefined,
+            locationId: undefined,
+            locationMatches: [],
+            error: undefined,
+          };
+
+    /**
+     * A LOOKUP THAT NEVER RAN IS NOT A PRESCRIBER WHO DOES NOT EXIST.
+     *
+     * `lookupProviderAndLocation` used to catch its own error and answer
+     * `{success:false}` — the same shape as a name that matched nobody. Optical
+     * read only `locationId`, collapsed the two, and on 2026-08-31 told 43
+     * callers their real office did not exist; see `LookupOutcome` in
+     * ticketingApiClient. This queue never told anyone anything, which is its
+     * own failure: a prescriber the caller named correctly went in the bin with
+     * no trace, on the queue that files 103 tickets a day and cannot work a
+     * refill without somebody to sign it.
+     *
+     * Nothing here refuses. The module header is explicit that the prescriber
+     * is not a gate, and a caller sent away because they cannot name their
+     * doctor is not recoverable. So the request is taken exactly as before, and
+     * what changes is that the loss is visible: the caller's words still travel
+     * in `lastProviderSeen` / `locationOfLastVisit`, the ids are omitted rather
+     * than sent null, this logs loudly, and the priority is raised so a
+     * technician sees a ticket that needs a name resolved.
+     *
+     * NOT in the description — that becomes the body of a patient-facing SMS,
+     * and `docs/BACKEND_HANDOFF.md` lists annotating it under changes that made
+     * things worse. There is no staff-notes field on `CreateTicketParams`.
+     */
+    const lookupUnavailable = lookupWasUnavailable(lookup);
+    const lostToOutage =
+      lookupUnavailable &&
+      ((Boolean(cleanProvider) && !lookup.providerId) ||
+        (Boolean(cleanLocation) && !lookup.locationId));
+    if (lostToOutage) {
+      console.error(
+        `[tech] ✗ PROVIDER LOOKUP UNAVAILABLE — filing ` +
+          `'${cleanProvider || cleanLocation}' with no id. This ticket needs manual ` +
+          `assignment. Cause: ${lookup.error ?? 'unknown'}`,
+      );
+    }
 
     // Sight-preserving medication. A patient out of glaucoma drops is not a
     // routine refill: pressure rises within days and the damage does not come
     // back. The practice gave it its own reason; this gives it its own urgency.
-    const priority = cls.requestReasonId === 155 ? 'high' : 'medium';
+    //
+    // An outage raises it too, for the reason above — never for a name the
+    // lookup ran and rejected, which is an ordinary fact about the call.
+    const priority = cls.requestReasonId === 155 || lostToOutage ? 'high' : 'medium';
 
     // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
     // Never submit-ticket: it re-derives the DEPARTMENT server-side and
@@ -239,7 +329,7 @@ registerTool({
       );
     }
 
-    const res = await ticketingApiClient.createTicket({
+    const res = await createTicketDurable({
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
@@ -272,7 +362,7 @@ registerTool({
     });
 
     if (!res.success || !res.ticketNumber) {
-      return { success: false, error: res.error ?? 'ticket creation failed', retryable: true };
+      return postFailureToolResult(res, 'file_tech_ticket');
     }
 
     return {

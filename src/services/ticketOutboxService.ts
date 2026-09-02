@@ -2,19 +2,84 @@ import { db } from '../../server/db';
 import { ticketOutbox } from '../../shared/schema';
 import { eq, and, lte, or, isNull, sql, inArray } from 'drizzle-orm';
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
+import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 import { getValidatedTicketIds } from '../config/answeringServiceTicketing';
 import type { SyncAgentTicketParams } from './syncAgentService';
 import { storage } from '../../server/storage';
 
 const RETRY_BACKOFF_BASE_MS = 30_000;
-const MAX_RETRIES = 5;
+/**
+ * THE RETRY WINDOW HAS TO OUTLAST AN OUTAGE, or the outbox is just a log line.
+ *
+ * It was five retries on a pure doubling from 30s: 30s, 1m, 2m, 4m, 8m — dead
+ * letter at 15 minutes. The outage on 2026-08-31 ran from 20:16 UTC until the
+ * URL was flipped the next morning. Everything written during it would have
+ * dead-lettered inside the first quarter hour and then sat there, which is the
+ * same lost request with a row to prove it.
+ *
+ * Doubling to a 30-minute ceiling over twelve attempts covers about three and a
+ * half hours unattended. That is not a whole night; a dead letter still holds
+ * the full payload and is replayable by hand, and #46 (the "tickets filed = 0"
+ * alarm) is what turns a long outage into a page rather than a discovery.
+ */
+const RETRY_BACKOFF_CAP_MS = 30 * 60_000;
+const MAX_RETRIES = 12;
 const WORKER_INTERVAL_MS = 60_000;
 const SENDING_LEASE_TIMEOUT_MS = 120_000;
+
+/**
+ * WHAT THE OUTBOX HOLDS — two shapes, and the difference is load-bearing.
+ *
+ * - A bare `SyncAgentTicketParams`, which is every row written before
+ *   2026-09-01. It is re-validated on the way out because the answering-service
+ *   path never validated it on the way in.
+ *
+ * - `{ kind: 'create_ticket_v1', params }`, written by a queue tool whose
+ *   payload was ALREADY validated against its own department's taxonomy. It is
+ *   stored verbatim and sent verbatim.
+ *
+ * Re-validating the second shape would be actively wrong. `getValidatedTicketIds`
+ * owns departments 1, 2, 3, 11 and 12 only, so an optical call that
+ * `detectCrossQueue` routed to the HVA Hub (department 9) would go into the
+ * outbox as a scheduling request and come out of it as a department 3
+ * medication ticket — see the header of answeringServiceTicketing.test.ts.
+ * The discriminator lives inside the jsonb payload rather than in a new column
+ * so that no migration stands between this and a deploy.
+ */
+import { isTerminalRefusal } from './terminalRefusal';
+
+export const CREATE_TICKET_PAYLOAD_KIND = 'create_ticket_v1';
+
+export interface CreateTicketOutboxPayload {
+  kind: typeof CREATE_TICKET_PAYLOAD_KIND;
+  params: CreateTicketParams;
+}
+
+export type OutboxPayload = SyncAgentTicketParams | CreateTicketOutboxPayload;
+
+export function wrapCreateTicketPayload(params: CreateTicketParams): CreateTicketOutboxPayload {
+  return { kind: CREATE_TICKET_PAYLOAD_KIND, params };
+}
+
+export function isCreateTicketPayload(payload: unknown): payload is CreateTicketOutboxPayload {
+  const p = payload as CreateTicketOutboxPayload | null | undefined;
+  return Boolean(p) && p?.kind === CREATE_TICKET_PAYLOAD_KIND && Boolean(p?.params);
+}
 
 interface OutboxWriteResult {
   outboxId: string;
   idempotencyKey?: string;
   alreadyExists: boolean;
+  /** Set only on an idempotent hit, so a caller can tell a queued entry from one already sent. */
+  status?: string;
+  ticketNumber?: string;
+  /**
+   * This write REPLACED a dead-lettered payload and put the row back in the
+   * queue. Only a dead letter is ever reopened — it filed nothing, so there is
+   * no ticket to duplicate — and it is how a caller's correction reaches the
+   * row the retry will actually send.
+   */
+  reopened?: boolean;
 }
 
 interface OutboxSendResult {
@@ -22,13 +87,27 @@ interface OutboxSendResult {
   ticketNumber?: string;
   error?: string;
   outboxId: string;
+  /**
+   * The far side READ the payload and refused it, so the row went straight to
+   * dead_letter and NOTHING will retry it — found by Codex on PR #244.
+   *
+   * Without this the caller cannot tell a permanent refusal from a transport
+   * failure, and `SyncAgentService` answered both with "your request has been
+   * recorded and will be processed shortly". On a terminal refusal that is a
+   * promise nothing can keep: no retry is scheduled and the identical payload
+   * cannot succeed. That path carries the answering service, no-IVR and
+   * after-hours — the line that takes every overnight call.
+   */
+  terminal?: boolean;
+  /** The HTTP status behind a terminal refusal, for the caller's message. */
+  statusCode?: number;
 }
 
 export class TicketOutboxService {
   private static workerTimer: ReturnType<typeof setInterval> | null = null;
 
   static async writeToOutbox(
-    params: SyncAgentTicketParams,
+    params: OutboxPayload,
     callSid?: string,
     callLogId?: string,
   ): Promise<OutboxWriteResult> {
@@ -57,8 +136,71 @@ export class TicketOutboxService {
           .limit(1);
 
         if (existing.length > 0) {
+          /**
+           * A DEAD LETTER MUST NOT HOLD THE KEY ITS OWN CORRECTION NEEDS —
+           * Codex, PR #244 round twelve, and a consequence of round eleven.
+           *
+           * Round eleven made a terminal refusal honest: the caller is asked
+           * for the field the API named instead of being told the request was
+           * recorded. They answer, and the agent files again on the SAME
+           * CallSid. That lands here — and `onConflictDoNothing` handed back
+           * the refused row with its stale payload untouched. `attemptSend`
+           * then declined to claim a `dead_letter` row and reported no
+           * `terminal` flag, so the caller who had just supplied the missing
+           * surgeon was told their request was recorded. Nothing was going to
+           * send it.
+           *
+           * A dead letter filed NOTHING, which is exactly why replacing it is
+           * safe: there is no ticket to duplicate. That is the whole difference
+           * from a `sent` row, which must never be touched — that one really is
+           * the duplicate this key exists to stop — and from `pending`,
+           * `failed` and `sending`, which the worker still owns and whose
+           * payload was never refused, only undelivered.
+           *
+           * The update is GUARDED on the status it read, so two writers cannot
+           * both reopen: whoever loses falls through and reports the row as it
+           * found it.
+           */
+          if (existing[0].status === 'dead_letter') {
+            const reopenedAt = new Date();
+            const reopened = await db
+              .update(ticketOutbox)
+              .set({
+                payload: params as any,
+                status: 'pending',
+                retryCount: 0,
+                lastError: null,
+                nextRetryAt: reopenedAt,
+                updatedAt: reopenedAt,
+              })
+              .where(
+                and(eq(ticketOutbox.id, existing[0].id), eq(ticketOutbox.status, 'dead_letter')),
+              )
+              .returning({ id: ticketOutbox.id });
+
+            if (reopened.length > 0) {
+              console.info(
+                `[TICKET OUTBOX] ↻ Reopened dead letter ${existing[0].id} with a corrected payload ` +
+                  `(${idempotencyKey}) — the refused one filed nothing, so there is nothing to duplicate`,
+              );
+              return {
+                outboxId: existing[0].id,
+                idempotencyKey,
+                alreadyExists: true,
+                status: 'pending',
+                reopened: true,
+              };
+            }
+          }
+
           console.info(`[TICKET OUTBOX] Idempotent hit: ${idempotencyKey} → ${existing[0].id} (${existing[0].status})`);
-          return { outboxId: existing[0].id, idempotencyKey, alreadyExists: true };
+          return {
+            outboxId: existing[0].id,
+            idempotencyKey,
+            alreadyExists: true,
+            status: existing[0].status,
+            ticketNumber: existing[0].ticketNumber || undefined,
+          };
         }
         throw new Error(`Conflict on idempotency key but entry not found: ${idempotencyKey}`);
       }
@@ -85,15 +227,35 @@ export class TicketOutboxService {
   }
 
   static async attemptSend(outboxId: string): Promise<OutboxSendResult> {
+    /**
+     * THE BACKOFF HAS TO BE PART OF THE CLAIM — Codex, PR #244.
+     *
+     * `processRetries` SELECTs the due rows and then sends them one at a time,
+     * so the batch is a snapshot: by the time the loop reaches the fifth row,
+     * another worker (or the previous interval, still running) may already
+     * have failed it and pushed `nextRetryAt` half an hour out. This claim
+     * accepted any `failed` row, so the stale selection posted again
+     * immediately and burned a retry the backoff had just bought.
+     *
+     * Twelve attempts is the whole budget between a transport outage and a
+     * dead letter. Spending them in the first minute is the difference between
+     * surviving an outage and giving up during it.
+     *
+     * `isNull` is part of it: a `pending` row that has never failed carries no
+     * `nextRetryAt` and must still be claimable.
+     */
+    const now = new Date();
+    const dueNow = or(isNull(ticketOutbox.nextRetryAt), lte(ticketOutbox.nextRetryAt, now));
+
     const claimed = await db
       .update(ticketOutbox)
-      .set({ status: 'sending', updatedAt: new Date() })
+      .set({ status: 'sending', updatedAt: now })
       .where(
         and(
           eq(ticketOutbox.id, outboxId),
           or(
-            eq(ticketOutbox.status, 'pending'),
-            eq(ticketOutbox.status, 'failed'),
+            and(eq(ticketOutbox.status, 'pending'), dueNow),
+            and(eq(ticketOutbox.status, 'failed'), dueNow),
             and(
               eq(ticketOutbox.status, 'sending'),
               lte(ticketOutbox.updatedAt, new Date(Date.now() - SENDING_LEASE_TIMEOUT_MS)),
@@ -117,73 +279,29 @@ export class TicketOutboxService {
         return { success: true, ticketNumber: existing.ticketNumber || undefined, outboxId };
       }
       if (existing.status === 'dead_letter') {
-        return { success: false, error: 'Entry moved to dead letter', outboxId };
+        // Nothing will send this row, so it must never be reported as retrying —
+        // that is precisely the false promise round eleven removed. The backstop
+        // to the reopen in `writeToOutbox`, for any route that reaches a dead
+        // letter anyway.
+        return { success: false, error: 'Entry moved to dead letter', outboxId, terminal: true };
       }
       return { success: false, error: 'Entry already being processed by another worker', outboxId };
     }
 
     const entry = claimed[0];
-    const params = entry.payload as SyncAgentTicketParams;
+    const stored = entry.payload as unknown;
+    /**
+     * Legacy payloads only. The verbatim shape is deliberately NOT coerced into
+     * this type — nothing below may read a field off a queue payload, because
+     * every one of those reads is a chance to rewrite a ticket its own queue
+     * already got right.
+     */
+    const params = isCreateTicketPayload(stored) ? null : (stored as SyncAgentTicketParams);
 
     try {
-      const validatedIds = getValidatedTicketIds(
-        params.departmentId,
-        params.requestTypeId,
-        params.requestReasonId,
-      );
-
-      let resolvedProviderId: number | undefined;
-      let resolvedLocationId: number | undefined;
-
-      if (params.lastProviderSeen || params.locationOfLastVisit) {
-        try {
-          const lookupResult = await ticketingApiClient.lookupProviderAndLocation({
-            providerName: params.lastProviderSeen || undefined,
-            locationName: params.locationOfLastVisit || undefined,
-          });
-          if (lookupResult.success) {
-            resolvedProviderId = lookupResult.providerId ?? undefined;
-            resolvedLocationId = lookupResult.locationId ?? undefined;
-          }
-        } catch (lookupErr) {
-          console.warn(`[TICKET OUTBOX] Provider/location lookup failed for ${outboxId}:`, lookupErr);
-        }
-      }
-
-      const response = await ticketingApiClient.createTicket({
-        departmentId: validatedIds.departmentId,
-        requestTypeId: validatedIds.requestTypeId,
-        requestReasonId: validatedIds.requestReasonId,
-        patientFirstName: params.patientFirstName,
-        patientLastName: params.patientLastName,
-        patientPhone: params.patientPhone,
-        patientEmail: params.patientEmail ?? undefined,
-        preferredContactMethod: params.preferredContactMethod ?? undefined,
-        lastProviderSeen: params.lastProviderSeen ?? undefined,
-        locationOfLastVisit: params.locationOfLastVisit ?? undefined,
-        patientBirthMonth: params.patientBirthMonth ?? undefined,
-        patientBirthDay: params.patientBirthDay ?? undefined,
-        patientBirthYear: params.patientBirthYear ?? undefined,
-        locationId: resolvedLocationId ?? undefined,
-        providerId: resolvedProviderId ?? undefined,
-        description: params.description,
-        priority: params.priority ?? 'medium',
-        callData: params.callData ? {
-          callSid: params.callData.callSid,
-          recordingUrl: params.callData.recordingUrl,
-          transcript: params.callData.transcript,
-          callerPhone: params.callData.callerPhone,
-          dialedNumber: params.callData.dialedNumber,
-          agentUsed: params.callData.agentUsed,
-          callStartTime: params.callData.callStartTime,
-          callEndTime: params.callData.callEndTime,
-          callDurationSeconds: params.callData.callDurationSeconds,
-          humanHandoffOccurred: params.callData.humanHandoffOccurred,
-          qualityScore: params.callData.qualityScore,
-          patientSentiment: params.callData.patientSentiment,
-          agentOutcome: params.callData.agentOutcome,
-        } : undefined,
-      });
+      const response = isCreateTicketPayload(stored)
+        ? await TicketOutboxService.sendVerbatim(stored, outboxId)
+        : await TicketOutboxService.sendSyncAgentPayload(stored as SyncAgentTicketParams, outboxId);
 
       if (response.success && response.ticketNumber) {
         const now = new Date();
@@ -224,20 +342,51 @@ export class TicketOutboxService {
           }
         });
 
-        // QVO ticket event — fire and forget, never blocks the outbox worker
+        // QVO ticket event — fire and forget, never blocks the outbox worker.
+        //
+        // Legacy payloads only, and that is not an oversight: emitTicketCreated
+        // takes a SyncAgentTicketParams, and a queue ticket filed directly by
+        // its tool emits no QVO event either. Emitting here and not there would
+        // make the event stream a record of which POSTs happened to fail.
         const ticketNumForQvo = response.ticketNumber;
         const callLogIdForQvo = entry.callLogId;
-        setImmediate(async () => {
-          try {
-            const { qvoEmitterService } = await import('./qvoEmitterService');
-            await qvoEmitterService.emitTicketCreated(outboxId, callLogIdForQvo, params, ticketNumForQvo);
-          } catch { /* never propagate */ }
-        });
+        const paramsForQvo = params;
+        if (paramsForQvo) {
+          setImmediate(async () => {
+            try {
+              const { qvoEmitterService } = await import('./qvoEmitterService');
+              await qvoEmitterService.emitTicketCreated(outboxId, callLogIdForQvo, paramsForQvo, ticketNumForQvo);
+            } catch { /* never propagate */ }
+          });
+        }
 
         return { success: true, ticketNumber: response.ticketNumber, outboxId };
       }
 
       const error = response.error || 'API returned success=false with no ticket number';
+      /**
+       * THE FAR SIDE READ IT AND SAID NO — do not spend twelve retries on that.
+       *
+       * Found by Codex on PR #244. `createTicketDurable` already refuses to
+       * queue a 4xx, but a payload can still be HOLDING a permanent refusal
+       * here: it was captured during a transport outage (no status at all),
+       * and only once the far side recovers does it answer "Missing required
+       * information: surgeon". Retrying identical bytes cannot change that.
+       *
+       * Two costs, and the second is the one that matters. The row sat for
+       * ~3.5 hours of backoff before dead-lettering; and while fewer than
+       * three rows are held, the filing alarm's outbox plane stays quiet for
+       * exactly that long — so the signal that would have named the problem
+       * arrives after the outage it was built to catch.
+       */
+      if (isTerminalRefusal(response.statusCode)) {
+        console.error(
+          `[TICKET OUTBOX] ☠ REFUSED (HTTP ${response.statusCode}) — dead-lettering ${outboxId} ` +
+            `without retrying: ${error}`,
+        );
+        const refused = await TicketOutboxService.markFailed(outboxId, entry.retryCount, error, true);
+        return { ...refused, statusCode: response.statusCode };
+      }
       return await TicketOutboxService.markFailed(outboxId, entry.retryCount, error);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -246,16 +395,123 @@ export class TicketOutboxService {
     }
   }
 
+  /**
+   * A QUEUE PAYLOAD GOES OUT EXACTLY AS IT CAME IN.
+   *
+   * No taxonomy validation, no provider/location lookup, no field mapping. The
+   * tool that built this payload had the caller on the line, resolved the
+   * office and the provider then, and picked the department — including a
+   * cross-queue redirect. Re-deriving any of that here would file a different
+   * ticket from the one the caller was promised.
+   *
+   * The idempotency key travels inside `params`, so a retry that lands after a
+   * POST which actually succeeded is deduplicated by the ticketing app rather
+   * than filed twice.
+   */
+  private static async sendVerbatim(
+    payload: CreateTicketOutboxPayload,
+    outboxId: string,
+  ): Promise<CreateTicketResponse> {
+    console.info(
+      `[TICKET OUTBOX] Re-sending queue ticket verbatim: ${outboxId} ` +
+        `(dept ${payload.params.departmentId}/${payload.params.requestTypeId ?? 'none'}/` +
+        `${payload.params.requestReasonId ?? 'none'}, agent ${payload.params.callData?.agentUsed ?? 'unknown'})`,
+    );
+    return await ticketingApiClient.createTicket(payload.params);
+  }
+
+  /** The answering-service shape, which is validated and enriched on the way out. */
+  private static async sendSyncAgentPayload(
+    params: SyncAgentTicketParams,
+    outboxId: string,
+  ): Promise<CreateTicketResponse> {
+    const validatedIds = getValidatedTicketIds(
+      params.departmentId,
+      params.requestTypeId,
+      params.requestReasonId,
+    );
+
+    let resolvedProviderId: number | undefined;
+    let resolvedLocationId: number | undefined;
+
+    if (params.lastProviderSeen || params.locationOfLastVisit) {
+      try {
+        const lookupResult = await ticketingApiClient.lookupProviderAndLocation({
+          providerName: params.lastProviderSeen || undefined,
+          locationName: params.locationOfLastVisit || undefined,
+        });
+        // See syncAgentService's matching block. Skipping the ids is right;
+        // doing it silently is not. On the outbox this matters more, not
+        // less: a retry that lands during an outage files unrouted and the
+        // entry is then marked sent, so nothing ever revisits it.
+        const { lookupWasUnavailable } = await import('../../server/services/ticketingApiClient');
+        if (lookupWasUnavailable(lookupResult)) {
+          console.error(
+            `[TICKET OUTBOX] ✗ PROVIDER/LOCATION LOOKUP UNAVAILABLE for ${outboxId} — ` +
+              `filing unrouted. Cause: ${lookupResult.error ?? 'unknown'}`,
+          );
+        } else {
+          resolvedProviderId = lookupResult.providerId ?? undefined;
+          resolvedLocationId = lookupResult.locationId ?? undefined;
+        }
+      } catch (lookupErr) {
+        console.warn(`[TICKET OUTBOX] Provider/location lookup failed for ${outboxId}:`, lookupErr);
+      }
+    }
+
+    return await ticketingApiClient.createTicket({
+      departmentId: validatedIds.departmentId,
+      requestTypeId: validatedIds.requestTypeId,
+      requestReasonId: validatedIds.requestReasonId,
+      patientFirstName: params.patientFirstName,
+      patientLastName: params.patientLastName,
+      patientPhone: params.patientPhone,
+      patientEmail: params.patientEmail ?? undefined,
+      preferredContactMethod: params.preferredContactMethod ?? undefined,
+      lastProviderSeen: params.lastProviderSeen ?? undefined,
+      locationOfLastVisit: params.locationOfLastVisit ?? undefined,
+      patientBirthMonth: params.patientBirthMonth ?? undefined,
+      patientBirthDay: params.patientBirthDay ?? undefined,
+      patientBirthYear: params.patientBirthYear ?? undefined,
+      locationId: resolvedLocationId ?? undefined,
+      providerId: resolvedProviderId ?? undefined,
+      description: params.description,
+      priority: params.priority ?? 'medium',
+      callData: params.callData ? {
+        callSid: params.callData.callSid,
+        recordingUrl: params.callData.recordingUrl,
+        transcript: params.callData.transcript,
+        callerPhone: params.callData.callerPhone,
+        dialedNumber: params.callData.dialedNumber,
+        agentUsed: params.callData.agentUsed,
+        callStartTime: params.callData.callStartTime,
+        callEndTime: params.callData.callEndTime,
+        callDurationSeconds: params.callData.callDurationSeconds,
+        humanHandoffOccurred: params.callData.humanHandoffOccurred,
+        qualityScore: params.callData.qualityScore,
+        patientSentiment: params.callData.patientSentiment,
+        agentOutcome: params.callData.agentOutcome,
+      } : undefined,
+    });
+
+  }
+
   private static async markFailed(
     outboxId: string,
     currentRetryCount: number,
     error: string,
+    /** The server refused the payload itself. Retrying cannot change that, so
+     *  it goes straight to dead_letter regardless of attempts remaining. */
+    terminal = false,
   ): Promise<OutboxSendResult> {
     const newRetryCount = currentRetryCount + 1;
-    const isDeadLetter = newRetryCount >= MAX_RETRIES;
+    const isDeadLetter = terminal || newRetryCount >= MAX_RETRIES;
     const nextRetryAt = isDeadLetter
       ? null
-      : new Date(Date.now() + RETRY_BACKOFF_BASE_MS * Math.pow(2, newRetryCount - 1));
+      : new Date(
+          Date.now() +
+            Math.min(RETRY_BACKOFF_BASE_MS * Math.pow(2, newRetryCount - 1), RETRY_BACKOFF_CAP_MS),
+        );
 
     await db
       .update(ticketOutbox)
@@ -268,22 +524,51 @@ export class TicketOutboxService {
       })
       .where(eq(ticketOutbox.id, outboxId));
 
-    if (isDeadLetter) {
+    if (isDeadLetter && !terminal) {
       console.error(`[TICKET OUTBOX] ☠ Dead letter after ${MAX_RETRIES} retries: ${outboxId} - ${error}`);
+    } else if (isDeadLetter) {
+      // The refusal was already logged with its status at the call site.
     } else {
       console.warn(`[TICKET OUTBOX] Retry ${newRetryCount}/${MAX_RETRIES} scheduled for ${outboxId} at ${nextRetryAt?.toISOString()}`);
     }
 
-    return { success: false, error, outboxId };
+    // `terminal` travels with the result: a dead letter reached by refusal is a
+    // different fact from one reached by exhausting twelve retries, and only
+    // the caller still holding the line can act on it.
+    return { success: false, error, outboxId, terminal: terminal || undefined };
   }
 
   static async processRetries(): Promise<number> {
     const now = new Date();
     const leaseExpiry = new Date(Date.now() - SENDING_LEASE_TIMEOUT_MS);
 
-    const claimed = await db
-      .update(ticketOutbox)
-      .set({ status: 'sending', updatedAt: now })
+    /**
+     * SELECT the due rows. Do NOT claim them here.
+     *
+     * Found by Codex on PR #244, and it means this worker has never re-sent
+     * anything. It used to `update ... set status='sending', updatedAt=now`
+     * and then call `attemptSend`, whose own claim takes only `pending`,
+     * `failed`, or a `sending` row whose two-minute lease has expired. A row
+     * this function had just marked `sending` with a fresh lease matched none
+     * of those, so every entry came back "already being processed by another
+     * worker" — and on the next tick this function refreshed the lease and did
+     * it again. Rows sat in `sending` for ever.
+     *
+     * The production table agrees: 36 rows, all `sent`, newest 2026-08-22, and
+     * every one of them was sent by syncAgentService calling `attemptSend`
+     * directly on a fresh row. Nothing has ever left here through the worker.
+     *
+     * That was survivable while only the answering-service path wrote to the
+     * outbox and sent inline. It is not survivable now the queue tools depend
+     * on this worker to send what a failed POST left behind.
+     *
+     * `attemptSend` is the single atomic claimer and stays that way — its
+     * UPDATE...WHERE is what makes two workers safe. This function's job is
+     * only to say which rows are due.
+     */
+    const due = await db
+      .select({ id: ticketOutbox.id })
+      .from(ticketOutbox)
       .where(
         and(
           or(
@@ -299,20 +584,19 @@ export class TicketOutboxService {
             lte(ticketOutbox.nextRetryAt, now),
           ),
         ),
-      )
-      .returning({ id: ticketOutbox.id, retryCount: ticketOutbox.retryCount, payload: ticketOutbox.payload });
+      );
 
-    if (claimed.length === 0) return 0;
+    if (due.length === 0) return 0;
 
-    console.info(`[TICKET OUTBOX] Claimed ${claimed.length} entries for retry`);
+    console.info(`[TICKET OUTBOX] ${due.length} entr(ies) due for retry`);
     let successCount = 0;
 
-    for (const entry of claimed) {
+    for (const entry of due) {
       const result = await TicketOutboxService.attemptSend(entry.id);
       if (result.success) successCount++;
     }
 
-    console.info(`[TICKET OUTBOX] Retry batch complete: ${successCount}/${claimed.length} succeeded`);
+    console.info(`[TICKET OUTBOX] Retry batch complete: ${successCount}/${due.length} succeeded`);
     return successCount;
   }
 
@@ -322,7 +606,16 @@ export class TicketOutboxService {
       return;
     }
 
-    console.info(`[TICKET OUTBOX] Starting retry worker (every ${WORKER_INTERVAL_MS / 1000}s)`);
+    // DEPLOY MARKER. A failed pull looks exactly like a failed fix (CLAUDE.md),
+    // and everything this build changed about the outbox is invisible until a
+    // POST fails — which is rare, and not something to go and cause. This line
+    // prints once at boot and names the policy, so "is the outbox build live?"
+    // is answerable without waiting for an outage.
+    console.info(
+      `[TICKET OUTBOX] Starting retry worker (every ${WORKER_INTERVAL_MS / 1000}s; ` +
+        `up to ${MAX_RETRIES} attempts, backoff ${RETRY_BACKOFF_BASE_MS / 1000}s → ` +
+        `${RETRY_BACKOFF_CAP_MS / 60_000}m; queue payloads re-sent verbatim)`,
+    );
     TicketOutboxService.workerTimer = setInterval(async () => {
       try {
         await TicketOutboxService.processRetries();

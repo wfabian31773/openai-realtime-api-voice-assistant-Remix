@@ -171,6 +171,30 @@ registerTool({
     // be confirmed and the history must not be read back.
     const certain = resolved.identity?.unique !== false;
 
+    /**
+     * PASS THE RECORD ALONG — operator instruction, 2026-09-01.
+     *
+     * The service has already returned this patient's date of birth in
+     * `patientData`, and nothing carried it the twenty lines to the filing
+     * tool. So the agent asked for a date of birth the process was holding,
+     * and when the caller could not give it the request was lost: 45 calls
+     * refused for a date of birth in fourteen days, 23 of them for a patient
+     * this tool had already identified.
+     *
+     * Only a CERTAIN match is remembered, and it is only ever read back for
+     * the same name — see verifiedIdentity.ts. An uncertain match still has to
+     * be confirmed out loud, which is the rule the identity_warning above
+     * exists to enforce.
+     */
+    if (certain) {
+      const { rememberVerifiedIdentity } = await import('./verifiedIdentity');
+      rememberVerifiedIdentity(str(input.call_sid), {
+        firstName: resolved.patientData?.firstName,
+        lastName: resolved.patientData?.lastName,
+        dateOfBirth: resolved.patientData?.dateOfBirth,
+      });
+    }
+
     return {
       success: true,
       found: true,
@@ -271,7 +295,9 @@ registerTool({
        */
       return missing(
         ['spoken_location'],
-        `I'm not finding an office by that name — which city is the office in?`,
+        // See opticalTools' matching refusal: every queue prompt that uses
+        // resolve_location forbids asking which city an office is in.
+        `I'm not finding an office by that name — which of our offices do you usually visit?`,
       );
     }
 
@@ -363,9 +389,11 @@ export function str(v: unknown): string {
  * those sentinels would key on the literal string instead of the call, so a
  * second caller's retry could read back a stranger's ticket number.
  */
-export function isTwilioCallSid(v: string | undefined | null): v is string {
-  return typeof v === 'string' && /^CA[0-9a-f]{32}$/i.test(v);
-}
+// The definition moved to `./callSid` so `gateAttempts` and `verifiedIdentity`
+// can validate their map keys without importing this module (which pulls in
+// the registry and every queue tool). Re-exported here so the four filing
+// tools keep their single import line and there is still ONE definition.
+export { isTwilioCallSid } from './callSid';
 
 // Re-exported so the four queue tools only need one import line from here,
 // not a second import path into `utils/phone.ts`. See that file for what it

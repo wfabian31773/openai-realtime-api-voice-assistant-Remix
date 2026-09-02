@@ -38,7 +38,7 @@
  */
 import { callLogToFixture } from "../../shadow/callLogReplay";
 import type { CallGradingService, GraderResult } from "../../services/callGradingService";
-import { COMPARABLE, criticalsOf } from "../../core/replay/comparable";
+import { COMPARABLE, criticalsOf } from "./comparable";
 import type { BoundAgent } from "../agentBinding";
 import type { GrokToolDefinition } from "../wireTypes";
 

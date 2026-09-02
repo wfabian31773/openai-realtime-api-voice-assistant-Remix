@@ -654,3 +654,126 @@ describe('the ladder cannot outrun the tool it lives in', () => {
     expect(create).toHaveBeenCalledOnce();
   }, 30000);
 });
+
+/**
+ * THE 2026-08-31 OUTAGE, ON DEPARTMENT 2.
+ *
+ * `lookupProviderAndLocation` used to catch its own error and return
+ * `{success:false}` — byte-identical to what it returns for a name that
+ * matched nobody. Optical read only `locationId`, collapsed the two, and told
+ * 43 callers their real office did not exist; one call ran 19 tool calls over
+ * 8 minutes. Optical was fixed on 2026-09-01. Surgery had the same conflation
+ * in a quieter place: the `SURGEON DID NOT RESOLVE` log fires for both states,
+ * so an outage and an unknown surgeon leave the same trace and the same
+ * medium-priority unrouted ticket.
+ *
+ * Dept 2 routes BY SURGEON. A ticket the outage left unrouted is a manual
+ * NextGen lookup nobody volunteers for (operator, 2026-08-18), so it has to
+ * be visible as such — and the two signals are the ones optical already uses:
+ * the caller's own words kept in `lastProviderSeen`, and a raised priority.
+ * Never the description: `docs/BACKEND_HANDOFF.md` lists annotating an
+ * unrouted ticket's description under changes that made things worse, because
+ * that field becomes the body of a patient-facing SMS.
+ */
+describe('a lookup that never ran is not a surgeon who does not exist', () => {
+  it('takes the request and surfaces it when the lookup service is down', async () => {
+    const api = await client();
+    // The verbatim shape of a lookup that threw and was swallowed. Every rung
+    // of the ladder gets the same answer, because the service is down.
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue({
+      success: false,
+      outcome: 'unavailable',
+      error: 'Invalid JSON response from ticketing API: 200',
+    } as never);
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-SURG-OUTAGE' } as never);
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      errors.push(a.map(String).join(' '));
+    });
+
+    const out = (await runTool('file_surgery_ticket', {
+      ...BASE,
+      surgeon: 'Dwayne Logan, MD',
+      location: 'Eastvale',
+      request_description: 'what time should I arrive on Thursday',
+    })) as Record<string, unknown>;
+
+    // The caller named their surgeon correctly. Nothing they said is in doubt,
+    // so nothing they said may be questioned back at them.
+    expect(out.success).toBe(true);
+    expect((out.missingFields as string[] | undefined) ?? []).not.toContain('surgeon');
+    expect(JSON.stringify(out)).not.toMatch(/not find|no such|not finding|do not have a/i);
+
+    // The request is TAKEN. Losing it is the worse outcome — a call ends in a
+    // ticket, never in nothing.
+    expect(create).toHaveBeenCalledTimes(1);
+    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+
+    // The caller's own words survive in the text field this queue already
+    // reads, so the manual step is "resolve this name", not "ring them back".
+    expect(filed.lastProviderSeen).toBe('Dwayne Logan'); // sanitizeProviderName drops the credential suffix
+    expect(filed.locationOfLastVisit).toBe('Eastvale');
+    // OMITTED, never sent null — null is what files a ticket unassigned.
+    expect(filed).not.toHaveProperty('providerId');
+    expect(filed).not.toHaveProperty('locationId');
+    // Raised, so an unrouted dept-2 ticket is not sitting at the bottom of a
+    // queue view sorted by priority. Asserted on the payload, because a
+    // comment in optical once claimed a raise the payload never sent.
+    expect(filed.priority).toBe('high');
+    // The instruction to staff does not go in patient-readable free text.
+    expect(String(filed.description)).not.toMatch(/unavailable|unrouted|assign|lookup/i);
+
+    // Greppable, and distinct from the unknown-surgeon log below — an outage
+    // that leaves the same trace as a bad name is an outage nobody finds.
+    expect(errors.join('\n')).toMatch(/SURGEON LOOKUP UNAVAILABLE/);
+  }, 30000);
+
+  /**
+   * THE CONTROL, and the behaviour that must NOT regress.
+   *
+   * Here the lookup RAN and matched nobody. That is not a transient error and
+   * it is not the caller's problem to solve either: surgery does not gate on a
+   * surgeon (see 'files WITHOUT a location' above and the module header — only
+   * optical refuses, because dept 1 assigns BY location), so this files
+   * unrouted at its normal priority with the existing loud log. Turning this
+   * into a refusal would relinquish a caller, which the operator's rulings in
+   * docs/BACKEND_HANDOFF.md forbid outright.
+   */
+  it('files a surgeon the lookup ran and matched to nothing exactly as before', async () => {
+    const api = await client();
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue({
+      success: true,
+      outcome: 'no_match',
+      providerId: undefined,
+      locationMatches: [],
+    } as never);
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-SURG-NOMATCH' } as never);
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      errors.push(a.map(String).join(' '));
+    });
+
+    const out = (await runTool('file_surgery_ticket', {
+      ...BASE,
+      surgeon: 'Doctor Nobody',
+      request_description: 'what time should I arrive on Thursday',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(filed).not.toHaveProperty('providerId');
+    // NOT raised. A name that matches nobody is an ordinary fact about the
+    // call; raising every one of them would make the raise mean nothing.
+    expect(filed.priority).toBe('medium');
+    // The existing signal, unchanged.
+    expect(errors.join('\n')).toMatch(/SURGEON DID NOT RESOLVE/);
+    // And emphatically NOT the outage marker — that is the whole point of
+    // having two.
+    expect(errors.join('\n')).not.toMatch(/SURGEON LOOKUP UNAVAILABLE/);
+  }, 30000);
+});

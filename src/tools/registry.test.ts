@@ -184,17 +184,74 @@ describe('the Optical tool set is exactly what that queue needs', () => {
     expect(file!.timeout_seconds).toBeGreaterThanOrEqual(30);
   });
 
-  it('will not file without the four things a ticket cannot be assigned without', () => {
+  it('will not file without the things a ticket cannot be assigned without', () => {
     const file = manifest().find((t) => t.name === 'file_optical_ticket');
     const required = file!.input_schema.required ?? [];
-    // Location above all: one optician per office, and Optical assigns BY
-    // location, so a ticket without one reaches nobody. Measured: the hard
-    // requires hold this to 2.1% missing across 1,744 real tickets.
-    expect(required).toContain('location');
     expect(required).toContain('first_name');
     expect(required).toContain('last_name');
-    expect(required).toContain('date_of_birth');
     expect(required).toContain('callback_number');
+  });
+
+  /**
+   * `date_of_birth` left `required` on 2026-09-01 for the same reason
+   * `location` did, and the gate is unchanged in both cases.
+   *
+   * Operator: *"if we do our job and validate and pass the patient records
+   * along, you will not have this issue."* `lookup_patient` finds the caller on
+   * 95% of queue calls and the service returns their date of birth with the
+   * match — but `validateInput` refuses before the handler runs, so the handler
+   * could never consult it. 45 calls in fourteen days were refused for a date
+   * of birth and lost; on 23 the patient had already been identified.
+   *
+   * The behaviour that matters is asserted instead of the schema shape: with
+   * nothing verified for this call, the tool still refuses.
+   */
+  it('still refuses a date of birth it has neither been given nor verified', async () => {
+    const { resetVerifiedIdentities } = await import('./verifiedIdentity');
+    resetVerifiedIdentities();
+    const out = await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      callback_number: '845-531-7471',
+      location: 'Eastvale',
+      request_description: 'my glasses broke at the hinge',
+      call_sid: 'CA00000000000000000000000000000078',
+    });
+    expect(out.success).toBe(false);
+    expect((out as { missingFields: string[] }).missingFields).toContain('date_of_birth');
+  });
+
+  /**
+   * CHANGED 2026-09-01, and the old assertion is written out here so this is
+   * not read as the gate being dropped: this used to require `location` in the
+   * schema's `required` list, on the reasoning that one optician per office
+   * means a ticket without one reaches nobody. That reasoning still holds.
+   *
+   * What changed is where it is enforced. Operator ruling: *"if you gate the
+   * location, the agent will ask and if no answer, unassigned."* `validateInput`
+   * refuses before the handler runs, so while `location` sat in `required` the
+   * second half of that sentence was unreachable — a caller who could not name
+   * an office was refused for as long as they stayed on the line, and then lost.
+   * 62 calls in fourteen days ended exactly that way.
+   *
+   * So the gate moved into the handler, which can count how many times this
+   * call has already been asked. The assertion moved with it, from the shape of
+   * the schema to the behaviour, which is the thing that actually mattered.
+   */
+  it('still refuses the first time it is called without an office', async () => {
+    const { resetGateAttempts } = await import('./gateAttempts');
+    resetGateAttempts();
+    const out = await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      date_of_birth: '03/17/1973',
+      callback_number: '845-531-7471',
+      request_description: 'my glasses broke at the hinge',
+      call_sid: 'CA00000000000000000000000000000077',
+    });
+    expect(out.success).toBe(false);
+    expect((out as { missingFields: string[] }).missingFields).toContain('location');
+    expect((out as { message: string }).message).toMatch(/which of our offices/i);
   });
 
   it('every agent tool has a usable description and a timeout', () => {

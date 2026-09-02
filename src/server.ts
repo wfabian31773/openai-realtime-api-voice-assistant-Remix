@@ -40,9 +40,9 @@ app.use(bodyParser.raw({ type: "*/*" }));
 // Setup voice agent routes (Twilio webhooks, OpenAI webhooks, etc.)
 setupVoiceAgentRoutes(app);
 
-// NOTE: the standalone demo line does NOT live here. It mounts on the public
-// server (server/index.ts), because this process sits behind an HTTP-only
-// /api/voice proxy that cannot forward a WebSocket upgrade.
+// NOTE: no Twilio Media Streams line mounts here — the Grok voice runtime
+// mounts on the public server (server/index.ts), because this process sits
+// behind an HTTP-only /api/voice proxy that cannot forward a WebSocket upgrade.
 const httpServer = http.createServer(app);
 
 // Tracking active calls for graceful shutdown
@@ -148,6 +148,11 @@ async function startVoiceServer() {
     { name: 'TWILIO_PHONE_NUMBER', present: !!process.env.TWILIO_PHONE_NUMBER },
     { name: 'OPENAI_API_KEY', present: !!process.env.OPENAI_API_KEY },
     { name: 'DATABASE_URL', present: !!process.env.DATABASE_URL },
+    // Added 2026-09-02: this is no longer only the invite/password mailer. The
+    // ticket-filing alarm now delivers through it (the operator's ruling), so
+    // an unset SMTP_PASSWORD means a critical filing outage detects correctly
+    // and still reaches nobody — which is the failure that alarm exists to end.
+    { name: 'SMTP_PASSWORD', present: !!process.env.SMTP_PASSWORD },
   ];
   const missingSecrets = secretChecks.filter(s => !s.present);
   const isProd = process.env.APP_ENV === 'production';
@@ -201,6 +206,11 @@ async function startVoiceServer() {
     
     // Start grader-based push alerting (checks every 15 min)
     systemAlertService.startGraderAlertSchedule();
+
+    // The ticket path finally has a watch on it (every 5 min). On 2026-08-31
+    // filing stopped at 20:16 UTC and nothing noticed for three and a half
+    // hours; replayed against that night's rows this fires at 20:23:06.
+    systemAlertService.startTicketFilingSchedule();
     
     // Start data retention policy scheduler (purges expired data daily)
     import('./services/retentionPolicyService').then(({ retentionPolicyService }) => {
@@ -216,14 +226,6 @@ async function startVoiceServer() {
     import('./services/dataQualitySloService').then(({ dataQualitySloService }) => {
       dataQualitySloService.startMonitoring(60);
     }).catch(err => console.error('[STARTUP] Failed to start SLO monitoring:', err));
-
-    // Gate C for the SD line: the new scheduling line run silently beside the
-    // old one on real calls. A pure shadowTap subscriber — it adds nothing to
-    // the call path, and book/transfer/fileCallback are recorders, so it
-    // cannot write anywhere. Off unless SD_SHADOW=1.
-    import('./core/shadow/sdShadow').then(({ initSdShadow }) => {
-      try { initSdShadow(); } catch (err) { console.error('[STARTUP] SD shadow init failed (production unaffected):', err); }
-    }).catch(err => console.error('[STARTUP] SD shadow unavailable (production unaffected):', err));
 
     // Shadow observer (SHADOW_MODE_ENABLED, default off — no-op unless configured).
     // Fully async/observational; a shadow failure must never affect calls.

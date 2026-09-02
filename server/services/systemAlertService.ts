@@ -14,7 +14,7 @@ import { db } from '../../server/db';
 import { sql } from 'drizzle-orm';
 
 interface AlertEvent {
-  type: 'database_failure' | 'call_log_failure' | 'circuit_breaker_open' | 'system_degraded' | 'recovery' | 'emergency_miss' | 'provider_miss' | 'handoff_failure_spike' | 'high_mismatch_ratio' | 'grader_critical_failure';
+  type: 'database_failure' | 'call_log_failure' | 'circuit_breaker_open' | 'system_degraded' | 'recovery' | 'emergency_miss' | 'provider_miss' | 'handoff_failure_spike' | 'high_mismatch_ratio' | 'grader_critical_failure' | 'ticket_filing_stalled';
   severity: 'critical' | 'warning' | 'info';
   message: string;
   details?: Record<string, any>;
@@ -99,11 +99,14 @@ class SystemAlertService {
       timestamp: new Date(),
     };
     
-    this.alertHistory.push(event);
-    
     if (this.state.consecutiveFailures >= FAILURE_THRESHOLD) {
       this.state.systemHealthy = false;
+      // sendAlert records it; pushing here too would count it twice.
       await this.sendAlert(event);
+    } else {
+      // The only path that records WITHOUT alerting. A single failure below
+      // the threshold is history worth keeping and not worth waking anyone for.
+      this.alertHistory.push(event);
     }
   }
 
@@ -138,7 +141,7 @@ class SystemAlertService {
       timestamp: new Date(),
     };
     
-    this.alertHistory.push(event);
+    // Recorded by sendAlert, reached unconditionally from here.
     await this.sendAlert(event);
   }
 
@@ -155,7 +158,7 @@ class SystemAlertService {
         timestamp: new Date(),
       };
       
-      this.alertHistory.push(event);
+      // Recorded by sendAlert, reached unconditionally from here.
       await this.sendAlert(event);
     }
   }
@@ -168,6 +171,30 @@ class SystemAlertService {
     
     // Check cooldown
     const lastAlert = this.state.lastAlertTime.get(alertKey) || 0;
+    /**
+     * RECORD EVERY ALERT, BEFORE ANY REASON NOT TO SEND IT — Codex, PR #244,
+     * across two rounds, and the second round was correcting the first.
+     *
+     * Round seven: the note at the top of this file promises alerts "still
+     * record to logs and alertHistory". That held for the three callers that
+     * push the event themselves and not for `sendAlert` — which SEVEN other
+     * call sites use, the grader alerts and the ticket-filing alarm among
+     * them. Those were never recorded at all.
+     *
+     * Round eight: adding the push lower down made the three self-pushing
+     * callers record twice, inflating `getAlertStats()` and eating the
+     * ten-event recent window.
+     *
+     * Recording HERE, above the cooldown and hourly-limit returns, settles
+     * both. Suppression is a decision about DELIVERY, and an alert dropped for
+     * being the fourth this hour is precisely the one an operator later needs
+     * to find in the history — the old placement, below those returns, would
+     * have lost it. The two callers that always reach this drop their own
+     * push; `recordDatabaseFailure` keeps one for the sub-threshold case where
+     * it never calls this at all.
+     */
+    this.alertHistory.push(event);
+
     const timeSinceLastAlert = Date.now() - lastAlert;
     
     if (timeSinceLastAlert < ALERT_COOLDOWN_MS) {
@@ -187,13 +214,14 @@ class SystemAlertService {
     this.state.alertCounts.set(alertKey, hourlyCount + 1);
     
     console.log(`[ALERT SERVICE] Sending ${event.severity} alert: ${event.message}`);
-    
+
     // Send SMS alert for critical issues
     if (event.severity === 'critical') {
       await this.sendSmsAlert(event);
     }
-    
-    // Log for now - email integration can be added later
+
+    await this.sendEmailAlert(event);
+
     console.log(`[ALERT SERVICE] Alert sent:`, {
       type: event.type,
       severity: event.severity,
@@ -205,6 +233,53 @@ class SystemAlertService {
   /**
    * Send SMS alert via Twilio
    */
+  /**
+   * EMAIL IS THE CHANNEL THAT ACTUALLY REACHES SOMEONE — operator, 2026-09-02.
+   *
+   * Codex found that a critical filing outage produced two console lines and
+   * nothing else: SMS off since the 2026-07-27 ruling, email a TODO. I left
+   * the channel open as his call rather than reverse that ruling by enabling
+   * SMS. He answered: *"for the alert, email me at wfabian@azulvision.com,
+   * use the same route we use for invites and such"* — which is
+   * `emailService.sendEmail`, the Office365 sender behind `sendInviteEmail`.
+   *
+   * DELIBERATELY BELOW THE COOLDOWN AND HOURLY GATES. The July ruling was
+   * about volume — one text every fifteen minutes for hours, burying the
+   * message that mattered — and putting email above those returns would
+   * reproduce it in an inbox. Here it inherits the 5-minute cooldown and the
+   * ten-an-hour cap, and critical-only on top of that.
+   *
+   * ON BY DEFAULT, with no new flag and no required variable. A flag
+   * defaulting off, or an unset SYSTEM_ALERT_EMAIL, would deploy an alarm that
+   * detects perfectly and still reaches nobody — the exact defect being fixed.
+   *
+   * NEVER THROWS. This is called from the five-minute alarm loop; a mail
+   * failure must not take the loop down or mask the outage it is reporting.
+   * `sendEmail` already swallows its own errors and returns false, so the
+   * catch here is for the import and the body build.
+   */
+  private async sendEmailAlert(event: AlertEvent): Promise<void> {
+    try {
+      const { shouldEmailAlert, buildAlertEmail } = await import('./alertEmail');
+      if (!shouldEmailAlert(event.severity)) return;
+
+      const { sendEmail } = await import('./emailService');
+      const message = buildAlertEmail(event);
+      const delivered = await sendEmail(message);
+
+      if (delivered) {
+        console.log(`[ALERT SERVICE] Alert emailed to ${message.to}: ${event.type}`);
+      } else {
+        console.error(
+          `[ALERT SERVICE] ✗ Alert email FAILED for ${event.type} to ${message.to} — ` +
+            `the alert is recorded but nobody has been told. Check SMTP_PASSWORD.`,
+        );
+      }
+    } catch (error) {
+      console.error('[ALERT SERVICE] ✗ Alert email threw (alert still recorded):', error);
+    }
+  }
+
   private async sendSmsAlert(event: AlertEvent): Promise<void> {
     if (!SYSTEM_ALERT_SMS_ENABLED) {
       console.log(`[ALERT SERVICE] SMS suppressed (SYSTEM_ALERT_SMS_ENABLED not set): ${event.type} — ${event.message}`);
@@ -469,6 +544,59 @@ class SystemAlertService {
     setInterval(() => {
       this.checkGraderAlerts();
     }, 15 * 60 * 1000);
+  }
+
+  /**
+   * THE TICKET PATH FINALLY HAS A WATCH ON IT.
+   *
+   * On 2026-08-31 filing stopped at 20:16 UTC and ran dead for three and a
+   * half hours. Nothing alerted — R1–R12 in the diagnosis rules do not cover
+   * the ticket path at all, which is the queue lines' entire job — and it was
+   * found because staff told the operator.
+   *
+   * Thresholds and their derivation live in ticketFilingHealth.ts. Replayed
+   * against the production rows, this fires at 20:23:06 that night, and does
+   * not fire on any other run in the fortnight around it.
+   *
+   * Every five minutes rather than fifteen: seven minutes of detection is only
+   * worth having if the check runs inside it.
+   */
+  async checkTicketFilingAlert(): Promise<void> {
+    try {
+      const { readTicketFilingSnapshot, assessTicketFiling } = await import('./ticketFilingHealth');
+      const snapshot = await readTicketFilingSnapshot();
+      if (!snapshot) return; // it logged its own reason
+
+      const verdict = assessTicketFiling(snapshot);
+      if (!verdict.stalled) {
+        console.log(
+          `[ALERT SERVICE] Ticket filing OK — ${verdict.unfiledRun} call(s) since the last ticket, ` +
+            `${verdict.outboxHeld} held in the outbox`,
+        );
+        return;
+      }
+
+      await this.sendAlert({
+        type: 'ticket_filing_stalled',
+        severity: 'critical',
+        message: `TICKET FILING HAS STOPPED: ${verdict.reason}`,
+        details: {
+          unfiledRun: verdict.unfiledRun,
+          minutesSinceLastFiled: verdict.minutesSinceLastFiled,
+          outboxHeld: verdict.outboxHeld,
+        },
+        timestamp: new Date(),
+      });
+    } catch (error) {
+      console.error('[ALERT SERVICE] Error checking ticket filing:', error);
+    }
+  }
+
+  startTicketFilingSchedule(): void {
+    console.log('[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes)');
+    setInterval(() => {
+      this.checkTicketFilingAlert();
+    }, 5 * 60 * 1000);
   }
 
   async runSyntheticAlertTest(): Promise<Array<{ alertType: string; delivered: boolean; detail: string }>> {

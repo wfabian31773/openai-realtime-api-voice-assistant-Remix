@@ -262,7 +262,18 @@ export async function createOpticalAgent(
     // VA-50813 filed with call_sid null because the prompt was the only thing
     // carrying it.
     tools: realtimeToolsFor(OPTICAL_TOOLS, {
-      call_sid: metadata.callSid ?? metadata.callId,
+      /**
+      * THE TWILIO SID OR NOTHING — never the OpenAI call id in its place.
+      *
+      * This read `metadata.callSid ?? metadata.callId`. The fallback is a
+      * uuid, so it fails isTwilioCallSid, produces no idempotency key, and
+      * matches no ticket in the post-call enrichment endpoint — the same
+      * dead end as sending nothing, but it looks like an identifier in the
+      * logs. Absent is the honest value, and it makes "we never had a SID"
+      * countable. Telemetry keeps its own callId; this field is the one that
+      * travels on the ticket.
+      */
+      call_sid: metadata.callSid,
       caller_phone: metadata.callerPhone,
       dialed_number: metadata.dialedNumber,
       // The three shared patient tools serve both queues now. This is what
