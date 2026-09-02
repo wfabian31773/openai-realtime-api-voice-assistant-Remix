@@ -436,3 +436,65 @@ describe('the 911 clause has to direct someone to 911', () => {
     expect(check(base + 'How can I help you?' + tail)).toContain('911 direction');
   });
 });
+
+/**
+ * "CANNOT" IS A NEGATION — Codex, PR #244 round ten, and one more it did not name.
+ *
+ * `\bnot\b` cannot match the `not` inside `cannot`, so "calls cannot be
+ * recorded" and "you cannot call 911 from this line" both read as compliant.
+ *
+ * Checking that against the live wording turned up a SECOND hole in the same
+ * line: **"calls can not be recorded" also passed**, and there the negator
+ * matches perfectly well. What failed was the phrase — it allowed "being
+ * recorded" but not "be recorded", so nothing lined up after the negator. One
+ * fix, `cannot` plus an optional copula, closes both; fixing only what was
+ * reported would have left the two-word form live.
+ */
+describe('cannot, and the copula that hid beside it', () => {
+  const base = 'Thank you for calling Azul Vision. Our offices are currently closed. ';
+  const emerg = 'If this is a medical emergency, please dial 911. ';
+  const rec = 'All calls are being recorded for quality assurance purposes.';
+  const check = (g: string) => missingMandatoryCopy('no-ivr', g);
+
+  it.each([
+    'Calls cannot be recorded',
+    'Calls can not be recorded',
+    'Calls cannot be recorded on this line',
+  ])('rejects the recording disclosure reversed by "%s"', (clause) => {
+    expect(check(base + emerg + clause + '.')).toContain('recording disclosure');
+  });
+
+  it.each([
+    'You cannot call 911 from this line',
+    'You can not dial 911 from here',
+  ])('rejects the 911 direction reversed by "%s"', (clause) => {
+    expect(check(base + clause + '. ' + rec)).toContain('911 direction');
+  });
+
+  it('rejects a closed-office notice reversed with cannot', () => {
+    expect(
+      check('Thank you for calling. Our offices cannot be closed. ' + emerg + rec),
+    ).toContain('closed-office notice');
+  });
+
+  it('still accepts both live greetings unchanged', () => {
+    // The registry string and the agents.welcome_greeting row. A guard that is
+    // too tight rejects the row and falls back silently, which is an operator
+    // edit that returns success and changes nothing.
+    expect(check(base + emerg + rec)).toEqual([]);
+    expect(
+      check('Thank you for calling Azul Vision. Our offices are currently closed. '
+        + 'If this is a medical emergency, please hang up and dial 911. ' + rec),
+    ).toEqual([]);
+  });
+
+  it('does not treat a copula as licence to reach across the sentence', () => {
+    // The negator plus ONE short auxiliary, not arbitrary distance. "not an
+    // emergency" keeps its `not`, so the 911 direction beside it still counts.
+    expect(
+      check('Thank you for calling. Our offices are currently closed. '
+        + 'If this is not an emergency I can take a message; if it is a medical emergency, please dial 911. '
+        + rec),
+    ).toEqual([]);
+  });
+});

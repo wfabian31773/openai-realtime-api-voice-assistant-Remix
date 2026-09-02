@@ -191,10 +191,31 @@ export function personaliseGreeting(
  * only a log line, which is an operator edit that returns success and changes
  * nothing.
  */
-const NEGATOR = String.raw`(?:\bnot\b|n['\u2019]t\b|\bnever\b)`;
+const NEGATOR = String.raw`(?:\bcannot\b|\bnot\b|n['\u2019]t\b|\bnever\b)`;
 
+/**
+ * ONE COPULA MAY SIT BETWEEN THE NEGATOR AND THE PHRASE.
+ *
+ * `cannot` came from Codex on PR #244 — `\bnot\b` cannot match the `not`
+ * inside `cannot`, so "calls cannot be recorded" read as compliant. Checking
+ * that against the live wording turned up a SECOND hole it had not named:
+ * "calls can not be recorded" also passed, and there the negator matches
+ * perfectly well. What failed was the phrase — it allowed "being recorded" and
+ * not "be recorded", so nothing lined up after the negator.
+ *
+ * Hence the optional `be|being|been` here rather than another alternative in
+ * each phrase: the same auxiliary appears between a negator and every one of
+ * these clauses, and fixing it once is what stops the next variant needing a
+ * tenth round.
+ *
+ * ADJACENCY IS STILL THE DESIGN, and one short auxiliary does not loosen it.
+ * "If this is not an emergency I can take a message; if it is a medical
+ * emergency, please dial 911" still passes — `an` is not a copula, so the
+ * `not` stays attached to "an emergency" where it belongs. So does "please
+ * don't hesitate to leave a message — all calls are being recorded".
+ */
 function negated(greeting: string, phrase: string): boolean {
-  return new RegExp(`${NEGATOR}\\s+${phrase}\\b`, 'i').test(greeting);
+  return new RegExp(`${NEGATOR}\\s+(?:be|being|been)?\\s*${phrase}\\b`, 'i').test(greeting);
 }
 
 const MANDATORY_GREETING_COPY: Readonly<
