@@ -1496,3 +1496,80 @@ describe("recording starts once the call is provably live", () => {
     await h.close();
   });
 });
+
+/**
+ * A CALLER-ID MATCH HAS TO REACH THE LEDGER — Codex, PR #251.
+ *
+ * `sage_precontext` reached the queue lanes only as agent metadata. Nothing on
+ * optical, surgery, tech or records ever wrote matchedFirstName into the
+ * call-facts ledger — only answeringServiceAgent does — so identity at
+ * teardown reported patientFound:false and no name for a caller we had in
+ * fact recognised, on the four lanes that carry all the traffic. The
+ * migration gate would have read "we match almost nobody".
+ */
+describe("a recognised caller reaches call_logs", () => {
+  it("carries the matched name and DOB onto the record, unverified", async () => {
+    const h = await harness({
+      fetchPrecontext: async () => ({
+        matched: true,
+        firstName: "Wayne",
+        lastNameOnFile: "Fabian",
+        dobOnFile: "03/17/1973",
+      }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CAMATCH1",
+      From: "+15551230000",
+      To: "+15559990000",
+    });
+    const { ws } = await openStream(h, "CAMATCH1", tokenFrom(answered.text));
+    await settle();
+    ws.close();
+    await settle();
+
+    const row = h.persisted.find((r) => r.callSid === "CAMATCH1");
+    expect(row).toBeDefined();
+    const identity = row!.identity as Record<string, unknown>;
+    expect(identity?.patientName).toBe("Wayne Fabian");
+    expect(identity?.patientDob).toBe("03/17/1973");
+    // Matched to a record — which is what patient_found means.
+    expect(identity?.patientFound).toBe(true);
+    // But NOT verified: the ✓ follows identityVerified and nothing weaker,
+    // because this phone number resolves to eight people in the mirror.
+    expect(identity?.callerName).toBe("Wayne Fabian");
+
+    await h.close();
+  });
+
+  it("claims nobody when the lookup matched nobody, even if it named someone", async () => {
+    // `matched: false` WITH a name is the case that matters. The person base
+    // can return a near-miss, and treating a name it declined to stand behind
+    // as a match is how patient_found stops meaning anything. Found by
+    // mutation: with a nameless fixture, deleting the matched check entirely
+    // reddened nothing.
+    const h = await harness({
+      fetchPrecontext: async () => ({
+        matched: false,
+        firstName: "Wayne",
+        lastNameOnFile: "Fabian",
+      }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CAMATCH2",
+      From: "+15551230000",
+      To: "+15559990000",
+    });
+    const { ws } = await openStream(h, "CAMATCH2", tokenFrom(answered.text));
+    await settle();
+    ws.close();
+    await settle();
+
+    const row = h.persisted.find((r) => r.callSid === "CAMATCH2");
+    expect(row).toBeDefined();
+    const identity = row!.identity as Record<string, unknown>;
+    expect(identity?.patientFound).toBe(false);
+    expect("patientName" in identity).toBe(false);
+
+    await h.close();
+  });
+});

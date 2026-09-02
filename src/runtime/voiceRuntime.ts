@@ -126,6 +126,43 @@ function precontextMatched(precontext: unknown): boolean {
   return (precontext as { matched?: unknown }).matched === true;
 }
 
+/**
+ * Put a caller-ID match into the call-facts ledger, for EVERY lane.
+ *
+ * Codex, PR #251: `sage_precontext` reached the queue lanes only as agent
+ * metadata. Nothing on optical, surgery, tech or records ever wrote
+ * matchedFirstName/matchedLastName into the ledger — only answeringServiceAgent
+ * does — so `identityFromLedger` reported patientFound:false and no name for a
+ * caller we had in fact recognised, on the four lanes that carry the traffic.
+ * The migration gate would have read "we match almost nobody".
+ *
+ * A match is still a CANDIDATE TO CONFIRM, never an identity: it fills the
+ * `matched*` slots, never the stated ones, and never sets identityVerified.
+ * Wayne's own number resolves to eight records in the mirror.
+ */
+function seedMatchedIdentity(callSid: string, precontext: unknown): void {
+  if (!precontextMatched(precontext)) return;
+  const pc = precontext as {
+    firstName?: unknown;
+    lastNameOnFile?: unknown;
+    dobOnFile?: unknown;
+    language?: unknown;
+  };
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v.trim() ? v.trim() : undefined;
+  try {
+    seedLedger(callSid, {
+      ...(str(pc.firstName) ? { matchedFirstName: str(pc.firstName) } : {}),
+      ...(str(pc.lastNameOnFile) ? { matchedLastName: str(pc.lastNameOnFile) } : {}),
+      ...(str(pc.dobOnFile) ? { matchedDob: str(pc.dobOnFile) } : {}),
+      ...(str(pc.language) ? { language: str(pc.language) } : {}),
+    });
+  } catch (error) {
+    // Pre-context is an aid, never a dependency of the call.
+    console.error(`[RUNTIME FACTS] ✗ could not seed the match for ${callSid}:`, error);
+  }
+}
+
 function recognisedFirstName(precontext: unknown): string {
   if (!precontext || typeof precontext !== "object") return "";
   const pc = precontext as { matched?: unknown; firstName?: unknown };
@@ -137,6 +174,7 @@ import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
 import { persistRecordingUrl } from "./callRecord";
+import { seedLedger } from "../services/callFactsLedger";
 import {
   RECORDING_STATUS_PATH,
   createRecordingStarter,
@@ -689,6 +727,9 @@ export function mountVoiceRuntime(
               )
             : Promise.resolve(null),
         ]);
+        // Into the ledger BEFORE the bridge is built, so the very first
+        // KNOWN FACTS render and the teardown identity both see the match.
+        seedMatchedIdentity(entry.callSid, precontext);
         // WHICH of the three pre-context outcomes happened. Without this the
         // runbook's own diagnosis step is not performable: every failure —
         // an ordinary "no match", a service error, a lookup that beat no

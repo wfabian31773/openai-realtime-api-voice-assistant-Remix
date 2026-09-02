@@ -35,6 +35,8 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
+import { sql } from "drizzle-orm";
+import { callLogs } from "../../shared/schema";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 
 /**
@@ -118,11 +120,21 @@ export interface RuntimeCallLogRow {
  * DURING the call — the agents' own tool telemetry, `stampVerifiedIdentity`,
  * the ticket number — and a blanket `set` overwrites all of it, which is
  * how a green migration produces unclassifiable filing outcomes (Codex
- * review, PR #227). Identity is deliberately excluded even when supplied:
- * refreshing it can only ever replace a value someone better informed
- * already wrote.
+ * review, PR #227). Identity was excluded outright for that reason —
+ * "refreshing it can only ever replace a value someone better informed
+ * already wrote" — and that turned out to be half right. It also meant #57's
+ * identity never landed at all on the normal path, because openRuntimeCall
+ * creates the row at call open so teardown ALWAYS conflicts (Codex, PR #251).
+ * Both rulings hold at once through COALESCE: fill a column that is still
+ * NULL, never replace one that is not. See the identity block below.
  */
-export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLogRow> {
+/**
+ * The conflict update. Identity columns are SQL expressions rather than
+ * values — see the COALESCE note below — so the return type admits them.
+ */
+export function toConflictUpdate(
+  row: RuntimeCallLogRow,
+): Partial<Record<keyof RuntimeCallLogRow, unknown>> {
   return {
     status: row.status,
     endTime: row.endTime,
@@ -143,6 +155,42 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
       : {}),
     ...(row.transcriptWindowSeconds !== undefined
       ? { transcriptWindowSeconds: row.transcriptWindowSeconds }
+      : {}),
+    /**
+     * IDENTITY HAS TO BE HERE, or #57 only worked when the opening insert
+     * FAILED — Codex, PR #251.
+     *
+     * openRuntimeCall inserts the row at call OPEN, so on the normal path
+     * this row already exists and teardown always takes the conflict branch.
+     * Identity was set only on the insert, so patient_name, patient_dob,
+     * patient_found and caller_name stayed NULL on exactly the calls that
+     * went well — which is the same always-NULL the fix was written for. I
+     * documented "openRuntimeCall inserts at call open" in this very PR and
+     * did not follow it through to this function.
+     *
+     * NON-DESTRUCTIVE, which is why these are COALESCE and not plain sets.
+     * The queue agents' own `stampVerifiedIdentity` may already have written
+     * a VERIFIED name during the call, and what teardown holds may be only a
+     * caller-ID candidate — Wayne's number resolves to eight records. So this
+     * fills a column that is still NULL and never replaces one that is not.
+     * A prior test pinned "patientName is not in the update at all"; that was
+     * the right instinct and too blunt, and it is now pinned as this.
+     */
+    ...(row.patientName !== undefined
+      ? { patientName: sql`COALESCE(${callLogs.patientName}, ${row.patientName})` }
+      : {}),
+    ...(row.patientDob !== undefined
+      ? { patientDob: sql`COALESCE(${callLogs.patientDob}, ${row.patientDob})` }
+      : {}),
+    ...(row.callerName !== undefined
+      ? { callerName: sql`COALESCE(${callLogs.callerName}, ${row.callerName})` }
+      : {}),
+    // patientFound is a boolean with a default of false, so COALESCE cannot
+    // tell "nobody wrote it" from "someone wrote false". OR is the same
+    // promise for a flag: a true another writer stored survives, and this
+    // one can only ever turn it on.
+    ...(row.patientFound !== undefined
+      ? { patientFound: sql`(${callLogs.patientFound} OR ${row.patientFound})` }
       : {}),
   };
 }
@@ -400,7 +448,7 @@ export async function openRuntimeCall(
 
 export type CallLogUpsert = (
   row: RuntimeCallLogRow,
-  update: Partial<RuntimeCallLogRow>,
+  update: Partial<Record<keyof RuntimeCallLogRow, unknown>>,
 ) => Promise<void>;
 
 /** The real write. Kept separate and injectable so a test can prove the
@@ -409,15 +457,12 @@ export type CallLogUpsert = (
  * mutation putting the whole row back passed the entire suite. */
 async function defaultUpsert(
   row: RuntimeCallLogRow,
-  update: Partial<RuntimeCallLogRow>,
+  update: Partial<Record<keyof RuntimeCallLogRow, unknown>>,
 ): Promise<void> {
-  const [{ db }, { callLogs }] = await Promise.all([
-    import("../../server/db"),
-    import("../../shared/schema"),
-  ]);
+  const [{ db }] = await Promise.all([import("../../server/db")]);
   await db.insert(callLogs).values(row).onConflictDoUpdate({
     target: callLogs.callSid,
-    set: update,
+    set: update as Record<string, unknown>,
   });
 }
 
