@@ -567,3 +567,42 @@ describe('a denied recording disclosure is not a disclosure', () => {
     expect(missingMandatoryCopy('no-ivr', g)).toContain('closed-office notice');
   });
 });
+
+/**
+ * ONE COPULA, A LIST OF PARTICIPLES — Codex, PR #244, and a FALSE REJECT I
+ * introduced with the affirmative inversion the round before.
+ *
+ * "This call may be monitored or recorded for quality assurance" is an
+ * ordinary compliant disclosure and it failed, because `monitored or` sits
+ * between the copula and the verb. A rejected row falls back to the code
+ * greeting with only a log line — an operator edit that returns success and
+ * changes nothing, which is this repo's other recurring failure. Inverting a
+ * check trades false accepts for false rejects, and this is the bill.
+ */
+describe('a coordinated disclosure is still a disclosure', () => {
+  const withRecording = (clause: string) =>
+    `Thank you for calling Azul Vision, all of our offices are currently closed. ` +
+    `If this is a medical emergency, please dial 911. ${clause} How can I help you?`;
+
+  const recordingPresent = (g: string) => !missingMandatoryCopy('no-ivr', g).includes('recording disclosure');
+
+  it.each([
+    'This call may be monitored or recorded for quality assurance.',
+    'Calls are monitored and recorded.',
+    'This call may be monitored, recorded and reviewed.',
+    'Your call will be monitored or recorded.',
+  ])('accepts: %s', (clause) => {
+    expect(recordingPresent(withRecording(clause))).toBe(true);
+  });
+
+  it('does not let the coordination smuggle a negation through', () => {
+    // Only -ed/-ing words joined by and/or/comma qualify, so `not` cannot sit
+    // in the list, and the negation guard is untouched either way.
+    expect(recordingPresent(withRecording('Calls are monitored but not recorded.'))).toBe(false);
+    expect(recordingPresent(withRecording('Calls are not monitored or recorded.'))).toBe(false);
+  });
+
+  it('still refuses a mention that discloses nothing', () => {
+    expect(recordingPresent(withRecording('Ask us about our monitoring and recording policy.'))).toBe(false);
+  });
+});

@@ -720,6 +720,36 @@ describe('optical: ask once for the office, then file it unassigned', () => {
     expect(lookup).not.toHaveBeenCalled();
   });
 
+  it('does NOT boost priority once the ticket has left Optical', async () => {
+    /**
+     * Codex, PR #244. The office boost exists so an office-less ticket surfaces
+     * in the OPTICAL queue view. A scheduling request goes to the HVA Hub under
+     * the 2026-08-13 ruling, and their ticket does not depend on an optician's
+     * branch — so boosting it there marks a routine appointment urgent because
+     * the caller never mentioned an office they were never asked for.
+     */
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValue({
+      success: true,
+      ticketNumber: 'VA-CROSS-QUEUE',
+    } as never);
+
+    const args = {
+      ...BASE,
+      request_description: 'I need to reschedule my appointment for next week',
+      location: '',
+      call_sid: CALL,
+    };
+    await runTool('file_optical_ticket', args);
+    const second = await runTool('file_optical_ticket', args);
+    expect(second.success).toBe(true);
+
+    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    // It really did leave Optical — otherwise this test proves nothing.
+    expect(filed.departmentId).toBe(9);
+    expect(filed.priority).toBe('medium');
+  });
+
   it('files normally when the second answer does resolve', async () => {
     // The ask is not a formality — this is the case it exists for.
     const api = await client();

@@ -444,10 +444,23 @@ registerTool({
     const routedDescription = redirect
       ? `${redirect.note}\n\n${cleanDescription.value}`
       : cleanDescription.value;
-    // An optical ticket with no office is one nobody's queue view will surface.
-    // Raising the priority is what surfaces it — see the block above for why the
-    // signal does not go in the description.
-    const filedPriority = lookup.locationId ? 'medium' : 'high';
+    /**
+     * ONLY WHILE THE TICKET IS STILL OPTICAL'S — Codex, PR #244.
+     *
+     * An optical ticket with no office is one nobody's queue view will
+     * surface, and raising the priority is what surfaces it (see the block
+     * above for why the signal does not go in the description). That reasoning
+     * is entirely about the OPTICAL queue view.
+     *
+     * Once `detectCrossQueue` has sent the ticket somewhere else — a
+     * scheduling request going to the HVA Hub under the 2026-08-13 ruling —
+     * the receiving team's ticket does not depend on an optical office at all.
+     * Boosting it there marks a routine appointment request urgent because the
+     * caller never mentioned an optician's branch, or because the lookup
+     * happened to be down. Falsely urgent tickets in someone else's queue are
+     * how a priority column stops meaning anything.
+     */
+    const filedPriority = !redirect && !lookup.locationId ? 'high' : 'medium';
     if (redirect) {
       console.info(
         `[optical] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +

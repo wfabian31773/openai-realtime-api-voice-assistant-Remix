@@ -312,10 +312,23 @@ const MANDATORY_GREETING_COPY: Readonly<
        * be recorded. Both live greetings satisfy it — the registry string and
        * the lunch greeting both say "All calls are being recorded for quality
        * assurance purposes" — and the negation guard stays on top.
+       *
+       * COORDINATION, the round after — Codex again, and this one was a
+       * FALSE REJECT I introduced with the inversion above. "This call may be
+       * monitored or recorded for quality assurance" is a perfectly ordinary
+       * compliant disclosure, and it failed, because `monitored or` sits
+       * between the copula and the verb. A rejected row falls back to the code
+       * greeting with only a log line — an operator edit that returns success
+       * and changes nothing, which is this repo's other recurring failure.
+       *
+       * So one copula may govern a coordinated list of participles:
+       * "monitored or recorded", "monitored and recorded", "monitored,
+       * recorded". Only `-ed`/`-ing` words joined by and/or/comma qualify, so
+       * `not` still cannot slip in, and the negation guard is untouched.
        */
       label: 'recording disclosure',
       present: (g) =>
-        /\b(?:is|are|was|were|be|being|been)\s+(?:being\s+)?record(?:ed|ing)\b/i.test(g) &&
+        /\b(?:is|are|was|were|be|being|been)\s+(?:being\s+)?(?:\w+(?:ed|ing)(?:\s*,\s*|\s+(?:and|or)\s+))*record(?:ed|ing)\b/i.test(g) &&
         !negated(g, String.raw`(?:being\s+)?record(?:ed|ing)`),
     },
   ],
