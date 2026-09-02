@@ -268,45 +268,43 @@ describe("no unhandled throw reaches Twilio", () => {
  * call the runtime will actually serve, is NOT called for one it refuses, and
  * cannot take the call down.
  */
-describe("the webhook starts the recording the greeting promises", () => {
-  it("starts recording for a call it is going to serve", () => {
-    const started: Array<[string, string]> = [];
-    const d = deps({ startRecording: (sid: string, host: string) => started.push([sid, host]) });
-
+describe("the webhook does NOT start the recording, and why", () => {
+  /**
+   * It used to. That was a race the recording could only lose.
+   *
+   * An inbound call is not `in-progress` until Twilio has received and begun
+   * executing the returned TwiML — and this handler issued
+   * `recordings.create` BEFORE writing that response. Twilio rejects it with
+   * 21220, the exact error `callRecording.test.ts` models, so the greeting's
+   * recording disclosure would have been false on every call: the whole thing
+   * #54 exists to prevent (Codex, PR #247).
+   *
+   * The start moved to the Media Streams `start` frame, which Twilio only
+   * sends once it is executing this TwiML. What the webhook owns now is
+   * carrying the host forward so the callback URL built there points at the
+   * origin Twilio actually reached.
+   */
+  it("carries the host onto the registry entry for the start frame to use", () => {
+    const d = deps();
     const res = handleVoiceWebhook("optical", signedRequest("/voice/optical", BODY), d);
 
     expect(res.status).toBe(200);
-    expect(res.body).toContain("<Connect><Stream");
-    expect(started).toHaveLength(1);
-    expect(started[0][0]).toBe(BODY.CallSid);
-    // Same host the stream URL uses — the callback has to be reachable.
-    expect(res.body).toContain(started[0][1]);
+    const entry = d.registry.get(BODY.CallSid);
+    expect(entry?.host).toBeTruthy();
+    // The same host the stream URL uses — the callback has to be reachable
+    // at the same origin, or the recording never comes back.
+    expect(res.body).toContain(entry!.host!);
   });
 
-  it("does NOT record a call it refuses to serve", () => {
-    // An unavailable lane gets the controlled spoken line and hangs up. There
-    // is no conversation to record, and recording one would be a Twilio charge
-    // and a stored audio file for a call we did not take.
-    const started: string[] = [];
-    const d = deps({
-      laneIsAvailable: () => false,
-      startRecording: (sid: string) => started.push(sid),
-    });
+  it("registers nothing for a call it refuses, so that call can never be recorded", () => {
+    // An unavailable lane gets the controlled spoken line and hangs up. With
+    // no entry there is no start frame and no recording — the "don't record a
+    // call we did not take" property now holds by construction rather than by
+    // a branch that could be reordered.
+    const d = deps({ laneIsAvailable: () => false });
 
     handleVoiceWebhook("optical", signedRequest("/voice/optical", BODY), d);
 
-    expect(started).toEqual([]);
-  });
-
-  it("still answers the call when recording cannot be started", () => {
-    // The starter is documented as non-throwing, but the webhook must not
-    // depend on that: a caller does not lose their call over a recording.
-    const d = deps({
-      startRecording: () => {
-        throw new Error("twilio exploded");
-      },
-    });
-
-    expect(() => handleVoiceWebhook("optical", signedRequest("/voice/optical", BODY), d)).not.toThrow();
+    expect(d.registry.get(BODY.CallSid)).toBeUndefined();
   });
 });
