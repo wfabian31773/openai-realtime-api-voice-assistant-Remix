@@ -201,7 +201,8 @@ a reliable courier between two of its own tool calls.
 
 `src/tools/resolvedContext.ts` holds the resolved office server-side for the
 length of one call, the same way `verifiedIdentity.ts` holds the verified date
-of birth (both exist because of this same failure, found six weeks apart).
+of birth (both exist because of this same failure, found one day apart —
+2026-09-01 and 2026-09-02).
 
 **Three things a future change must not undo:**
 

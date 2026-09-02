@@ -188,7 +188,7 @@ dividing by 14 are not.
 | Thing | Where | What it does |
 |---|---|---|
 | Mirror verification | `src/services/patientVerification.ts` | Verifies against `patients_master`; refuses to guess between two people. |
-| Per-call carries between tools | `src/tools/verifiedIdentity.ts`, `src/tools/resolvedContext.ts` | The model does NOT reliably pass one of its own tool's results into the next tool's arguments. These hold it server-side for the length of one call: the verified date of birth, and the resolved office. Keyed on a REAL CallSid — a sentinel key would file one caller's request against another's. Both fill a GAP only; what the caller said always wins. |
+| Per-call carries between tools | `src/tools/verifiedIdentity.ts`, `src/tools/resolvedContext.ts` | The model does NOT reliably pass one of its own tool's results into the next tool's arguments. These hold it server-side for the length of one call: the verified date of birth, and the resolved office. Keyed on a REAL CallSid — a sentinel key would file one caller's request against another's. Both fill a GAP only; what the caller said always wins. The office is OPTICAL ONLY and only on the SECOND filing attempt, after its gate has asked — see BACKEND_HANDOFF §3 before widening either. |
 | Appointment answers | `src/services/appointmentAnswers.ts` | `Schedule.PersonID` join; excludes `Removed`. |
 | Replay tables | Operations Hub | `new_core_replay_summary`, `new_core_replay_index`, `ticket_agent_config` |
 

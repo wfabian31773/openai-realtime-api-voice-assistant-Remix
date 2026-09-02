@@ -1,11 +1,11 @@
 /**
- * WHAT A TOOL ON THIS CALL HAS ALREADY RESOLVED.
+ * THE OFFICE THIS CALL ALREADY RESOLVED.
  *
- * The sibling of `verifiedIdentity.ts`, for the two fields the ticketing API
- * hard-requires: the office and the surgeon. Same failure, same shape of fix.
+ * The sibling of `verifiedIdentity.ts`, written one day after it (2026-09-01
+ * and 2026-09-02) for the same failure in a different field.
  *
- * **The control that found it**, 2026-09-02, optical call
- * CA747908b5d46b7ed25cffe733fb792738 — its tool timeline in order:
+ * **The control**, optical call CA747908b5d46b7ed25cffe733fb792738 — its tool
+ * timeline in order:
  *
  *     lookup_patient (577ms, success)
  *     check_open_tickets
@@ -16,25 +16,39 @@
  *
  * `resolve_location` verified the office and the very next filing call went out
  * without it. The request died in the outbox with the office in hand the whole
- * time. Four surgery requests died the same afternoon the same way, and on all
- * four `lookup_patient` had SUCCEEDED in under 300ms — so the provider ladder
- * in surgeryTools had a record to fall back to and the payload still carried no
- * surgeon.
+ * time.
  *
- * **Why:** `location` and `surgeon` are MODEL arguments. opticalTools.ts says
- * it outright — "The office, as returned by resolve_location." We ask the model
- * to carry one tool's result into the next tool's arguments, and it does not
- * reliably do it. Nothing on the server held the resolved value, so a gate that
- * was working perfectly refused a request we could already have filled in.
+ * **Why:** `location` is a MODEL argument — opticalTools.ts says it outright,
+ * "The office, as returned by resolve_location." We ask the model to carry one
+ * tool's result into the next tool's arguments and it does not reliably do it.
+ * Nothing on the server held the value, so a gate that was working perfectly
+ * refused a request we could already have filled in.
  *
- * That is the same twenty-line hand-off `verifiedIdentity.ts` was built for,
- * and this is deliberately the same narrow shape:
+ * SCOPE — OPTICAL ONLY, and read this before widening it:
  *
- *  - Only a CERTAIN resolution is remembered. `resolve_location` reports
- *    `verified`, and an unverified guess is never stored — a ticket routed to
- *    the wrong office is worse than one routed by a human.
- *  - It is only ever read back for the SAME CALL, keyed on a real CallSid.
- *  - It NEVER replaces something the caller actually said. It fills a gap.
+ *  - Four surgery requests died the same afternoon and they are NOT the same
+ *    shape. I claimed they were and retracted it (Cursor, PR #253). Surgery
+ *    does not gate on location at all, so a missing office was never why they
+ *    died — a missing SURGEON was. Worse, `resolveWith` ANDs `cleanLocation`
+ *    into every `/lookup`, so carrying an office there would narrow the
+ *    surgeon ladder on the one queue that most needs it.
+ *  - `rememberResolvedProvider` exists and is deliberately UNWIRED. The
+ *    surgeon carry needs the four timelines measured first — matched_by,
+ *    whether the ladder ran, whether name+DOB on the filing call agreed with
+ *    the lookup. See #48. Do not wire it in the dark.
+ *
+ * THE GUARDS, all three load-bearing:
+ *
+ *  - Only a resolution this queue can actually FILE TO is stored.
+ *    `verified` means the Console directory hit; `usable_for_this_queue` is
+ *    computed separately, and a surgery centre spoken to optical is the first
+ *    and not the second.
+ *  - Read back only for the SAME CALL, keyed on a real CallSid.
+ *  - Optical applies it only on the SECOND attempt, after its gate has already
+ *    asked. The carry is last-write-wins with no "is this still what the caller
+ *    said" check, and optical assigns BY office, so on a first attempt it could
+ *    file an office the caller had since corrected. Wayne's ruling decides
+ *    which way to err: unassigned is sanctioned, a wrong building is not.
  *
  * In memory, for the length of one call, like `gateAttempts.ts` beside it.
  */
@@ -44,7 +58,7 @@ import { isTwilioCallSid } from './callSid';
 interface Entry {
   /** The office name exactly as `resolve_location` returned it. */
   office?: string;
-  /** A clinician the record shows for this patient, for the surgeon ladder. */
+  /** UNWIRED — see the scope note above. Nothing writes this in production. */
   provider?: string;
   at: number;
 }
@@ -87,17 +101,18 @@ function remember(callSid: string | undefined, patch: Partial<Omit<Entry, 'at'>>
 /**
  * Remember an office `resolve_location` was CERTAIN about.
  *
- * `verified` is the tool's own word for "this matched a real Azul Vision
- * office", and an unverified guess is not stored: routing a ticket to the wrong
- * office is worse than leaving it for a human to route.
+ * The caller passes `verified && usable`, NOT `verified` alone: `verified` is
+ * only the Console directory hit, and a surgery centre spoken to optical is
+ * verified and unusable. Routing a ticket to a building this queue cannot file
+ * to is worse than leaving it for a human to route.
  */
 export function rememberResolvedOffice(
   callSid: string | undefined,
   office: string | undefined,
-  verified: boolean,
+  fileable: boolean,
 ): void {
   const name = (office ?? '').trim();
-  if (!name || !verified) return;
+  if (!name || !fileable) return;
   remember(callSid, { office: name });
 }
 
