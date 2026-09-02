@@ -186,8 +186,23 @@ class SystemAlertService {
     this.state.lastAlertTime.set(alertKey, Date.now());
     this.state.alertCounts.set(alertKey, hourlyCount + 1);
     
+    /**
+     * RECORD IT BEFORE TRYING TO DELIVER IT — Codex, PR #244.
+     *
+     * The note at the top of this file says "alerts still record to logs and
+     * alertHistory, they just don't go to a phone". That was true of the three
+     * callers that push it themselves and false of THIS one, which is the
+     * generic path the ticket-filing alarm uses. With SMS off by the operator's
+     * 2026-07-27 decision and email still a TODO, a critical filing outage
+     * produced two console lines and nothing an interface could read back.
+     *
+     * `alertHistory` is what the Observatory renders, so this is the difference
+     * between an alarm that is visible after the fact and one that is not.
+     */
+    this.alertHistory.push(event);
+
     console.log(`[ALERT SERVICE] Sending ${event.severity} alert: ${event.message}`);
-    
+
     // Send SMS alert for critical issues
     if (event.severity === 'critical') {
       await this.sendSmsAlert(event);

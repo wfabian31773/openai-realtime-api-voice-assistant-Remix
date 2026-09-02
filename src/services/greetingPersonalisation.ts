@@ -226,9 +226,28 @@ const MANDATORY_GREETING_COPY: Readonly<
       present: (g) => /clos(ed|ing)\b/i.test(g) && !negated(g, String.raw`(?:currently\s+|presently\s+)?clos(?:ed|ing)`),
     },
     {
+      /**
+       * THE NUMBER IS NOT THE DIRECTION — Codex, PR #244, the round after the
+       * negation fix and narrower again.
+       *
+       * Requiring `\b911\b` and then subtracting negations is the wrong shape:
+       * it accepts anything containing the token unless one of a fixed list of
+       * reversals is spotted, so "911 is not available" and "please don't use
+       * 911" both passed — neither contains `dial|call|contact|phone`, so
+       * neither could be caught by negating those verbs. Chasing that with
+       * more negations is unbounded; every phrasing nobody thought of is a
+       * false accept, and a false accept here means an emergency caller is
+       * never told where to go.
+       *
+       * Inverted, so the check is what the clause must SAY rather than what it
+       * must avoid: an affirmative direction to 911. Both live greetings
+       * satisfy it — the registry string says "please dial 911", the database
+       * row says "please hang up and dial 911" — and the negation guard stays
+       * on top for "don't call 911".
+       */
       label: '911 direction',
       present: (g) =>
-        /\b911\b/.test(g) &&
+        /\b(?:dial|call|contact|phone)\s+911\b/i.test(g) &&
         !negated(g, String.raw`(?:need\s+to\s+)?(?:dial|call|contact|phone)\s+911`) &&
         !/\bno\s+need\s+to\s+(?:dial|call|contact|phone)\s+911\b/i.test(g),
     },

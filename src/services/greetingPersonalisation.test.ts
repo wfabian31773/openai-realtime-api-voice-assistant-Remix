@@ -379,3 +379,60 @@ describe('the mandatory copy has to be affirmative', () => {
     expect(missingMandatoryCopy('no-ivr', withoutDisclosure)).toEqual(['recording disclosure']);
   });
 });
+
+/**
+ * THE NUMBER IS NOT THE DIRECTION — Codex, PR #244, round seven.
+ *
+ * The check required `\b911\b` and then subtracted a fixed list of negations.
+ * That shape accepts anything containing the token unless a reversal is
+ * recognised, so "911 is not available" and "please don't use 911" both
+ * passed: neither contains `dial|call|contact|phone`, so neither could be
+ * caught by negating those verbs. Chasing it with more negations is unbounded,
+ * and every phrasing nobody anticipated is a false accept — which here means
+ * an emergency caller is never told where to go, on the line that carries
+ * every overnight call.
+ *
+ * Inverted to state what the clause must SAY. Both live greetings satisfy it.
+ */
+describe('the 911 clause has to direct someone to 911', () => {
+  const base = 'Thank you for calling Azul Vision. Our offices are currently closed. ';
+  const tail = ' All calls are being recorded for quality assurance purposes.';
+  const check = (g: string) => missingMandatoryCopy('no-ivr', g);
+
+  it('accepts the registry greeting', () => {
+    expect(check(base + 'If this is a medical emergency, please dial 911.' + tail)).toEqual([]);
+  });
+
+  it('accepts the live database row, which words it differently', () => {
+    // "please hang up and dial 911" — read out of agents.welcome_greeting.
+    expect(check(base + 'If this is a medical emergency, please hang up and dial 911.' + tail)).toEqual([]);
+  });
+
+  it.each([
+    ['911 is not available',      'the token with no direction at all'],
+    ['please don\'t use 911',      'a reversal the old verb list could not see'],
+    ['do not dial 911',           'the plain negation'],
+    ['for emergencies, 911',      'the number offered without telling anyone to use it'],
+  ])('rejects "%s" — %s', (clause) => {
+    expect(check(base + clause + '.' + tail)).toContain('911 direction');
+  });
+
+  it('does NOT catch a direction talked out of at a distance, and that is the limit', () => {
+    // "there is no reason to contact 911" contains an affirmative "contact
+    // 911", and the negator is not adjacent to it, so this passes. Recorded
+    // rather than hidden: the check is a guard on operator-authored text, not
+    // a general reader of intent, and the alternative is the unbounded
+    // negation-chasing this inversion was meant to end.
+    //
+    // What bounds the risk is that the rejected path is the SAFE one — a
+    // greeting that fails falls back to the compliant code string. The failure
+    // mode left here needs someone to deliberately write a compliant-looking
+    // sentence that means the opposite, which is a different problem from the
+    // accidental omission this was built for.
+    expect(check(base + 'there is no reason to contact 911.' + tail)).toEqual([]);
+  });
+
+  it('still rejects a greeting that never mentions 911 at all', () => {
+    expect(check(base + 'How can I help you?' + tail)).toContain('911 direction');
+  });
+});

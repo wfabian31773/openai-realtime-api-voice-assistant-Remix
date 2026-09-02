@@ -149,15 +149,35 @@ export class TicketOutboxService {
   }
 
   static async attemptSend(outboxId: string): Promise<OutboxSendResult> {
+    /**
+     * THE BACKOFF HAS TO BE PART OF THE CLAIM — Codex, PR #244.
+     *
+     * `processRetries` SELECTs the due rows and then sends them one at a time,
+     * so the batch is a snapshot: by the time the loop reaches the fifth row,
+     * another worker (or the previous interval, still running) may already
+     * have failed it and pushed `nextRetryAt` half an hour out. This claim
+     * accepted any `failed` row, so the stale selection posted again
+     * immediately and burned a retry the backoff had just bought.
+     *
+     * Twelve attempts is the whole budget between a transport outage and a
+     * dead letter. Spending them in the first minute is the difference between
+     * surviving an outage and giving up during it.
+     *
+     * `isNull` is part of it: a `pending` row that has never failed carries no
+     * `nextRetryAt` and must still be claimable.
+     */
+    const now = new Date();
+    const dueNow = or(isNull(ticketOutbox.nextRetryAt), lte(ticketOutbox.nextRetryAt, now));
+
     const claimed = await db
       .update(ticketOutbox)
-      .set({ status: 'sending', updatedAt: new Date() })
+      .set({ status: 'sending', updatedAt: now })
       .where(
         and(
           eq(ticketOutbox.id, outboxId),
           or(
-            eq(ticketOutbox.status, 'pending'),
-            eq(ticketOutbox.status, 'failed'),
+            and(eq(ticketOutbox.status, 'pending'), dueNow),
+            and(eq(ticketOutbox.status, 'failed'), dueNow),
             and(
               eq(ticketOutbox.status, 'sending'),
               lte(ticketOutbox.updatedAt, new Date(Date.now() - SENDING_LEASE_TIMEOUT_MS)),

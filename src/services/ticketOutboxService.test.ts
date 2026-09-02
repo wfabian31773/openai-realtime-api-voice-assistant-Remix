@@ -15,6 +15,7 @@
  * There were no tests for this file at all before 2026-09-01.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 
 // ---------------------------------------------------------------- fake db --
 // A chainable stand-in for drizzle's builder. Every method returns the builder;
@@ -303,5 +304,56 @@ describe('a refusal from the far side is not retried', () => {
 
     const written = setPayloads.find((p) => p.status === 'failed' || p.status === 'dead_letter');
     expect(written?.status).toBe('failed');
+  });
+});
+
+/**
+ * THE BACKOFF HAS TO BE PART OF THE CLAIM — Codex, PR #244, round seven.
+ *
+ * `processRetries` SELECTs the due rows and then sends them one at a time, so
+ * the batch is a snapshot. By the time the loop reaches the fifth row, another
+ * worker — or the previous interval, still running — may already have failed
+ * it and pushed `nextRetryAt` half an hour out. The claim accepted any
+ * `failed` row, so the stale selection posted again immediately and burned a
+ * retry the backoff had just bought.
+ *
+ * Twelve attempts is the entire budget between a transport outage and a dead
+ * letter. Spending them in the first minute is the difference between
+ * surviving an outage and giving up during it.
+ *
+ * Asserted as source text, deliberately: the fake db above returns queued
+ * results and never evaluates a WHERE clause, so a behavioural test here would
+ * pass whether or not the predicate exists — which is exactly the kind of test
+ * that has already fooled me twice on this branch.
+ */
+describe('what the atomic claim is allowed to pick up', () => {
+  const source = readFileSync(new URL('./ticketOutboxService.ts', import.meta.url), 'utf8');
+  const claim = source.slice(source.indexOf('static async attemptSend'), source.indexOf('.returning();'));
+
+  it('only claims a row whose backoff has elapsed', () => {
+    expect(claim).toMatch(/dueNow/);
+    expect(claim).toMatch(/lte\(ticketOutbox\.nextRetryAt, now\)/);
+  });
+
+  it('applies it to both retryable states, not just one', () => {
+    expect(claim).toMatch(/eq\(ticketOutbox\.status, 'pending'\), dueNow/);
+    expect(claim).toMatch(/eq\(ticketOutbox\.status, 'failed'\), dueNow/);
+  });
+
+  it('still claims a pending row that has never failed and so has no due time', () => {
+    // A first send carries no nextRetryAt at all; requiring one would strand
+    // every newly captured request.
+    expect(claim).toMatch(/isNull\(ticketOutbox\.nextRetryAt\)/);
+  });
+
+  it('leaves the stale-lease recovery alone', () => {
+    // A 'sending' row whose lease expired is recovered on the LEASE, not the
+    // backoff — its nextRetryAt belongs to the attempt that died holding it.
+    expect(claim).toMatch(/SENDING_LEASE_TIMEOUT_MS/);
+    // Anchored on the STATUS arm, not the `.set({ status: 'sending' })` at the
+    // top of the claim — the first version of this sliced from there and so
+    // covered the whole clause, which made it assert nothing.
+    const sendingArm = claim.slice(claim.indexOf("eq(ticketOutbox.status, 'sending')"));
+    expect(sendingArm).not.toMatch(/dueNow/);
   });
 });
