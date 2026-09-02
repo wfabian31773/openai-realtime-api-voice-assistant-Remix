@@ -37,6 +37,10 @@ export interface CallEntry {
   streamToken: string;
   callerPhone: string;
   dialedNumber: string;
+  /** The host Twilio reached the webhook on, carried forward so the status
+   * callback URL built at start-frame time points at the same origin. Absent
+   * on entries made before this existed, and on hand-built test entries. */
+  host?: string;
   createdAtMs: number;
   streamStarted: boolean;
   outcome: CallOutcome | null;
@@ -76,6 +80,7 @@ export class CallSessionRegistry {
     slug: string;
     callerPhone: string;
     dialedNumber: string;
+    host?: string;
   }): CallEntry {
     this.sweep();
     const existing = this.entries.get(input.callSid);
@@ -86,6 +91,7 @@ export class CallSessionRegistry {
       streamToken: randomBytes(16).toString("hex"),
       callerPhone: input.callerPhone,
       dialedNumber: input.dialedNumber,
+      ...(input.host ? { host: input.host } : {}),
       createdAtMs: this.now(),
       streamStarted: false,
       outcome: null,

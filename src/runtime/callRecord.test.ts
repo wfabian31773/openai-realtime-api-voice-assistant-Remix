@@ -138,10 +138,53 @@ describe("toCallLogRow", () => {
     expect(update.endTime).toBeInstanceOf(Date);
     expect(update.transcript).toBe("CALLER: Hi\nAGENT: Hello");
     expect(update.duration).toBe(93);
-    // Anything another writer owns is not in the update at all.
+    // Anything another writer owns outright is not in the update at all.
     expect('toolTimeline' in update).toBe(false);
-    expect('patientName' in update).toBe(false);
     expect('ticketNumber' in update).toBe(false);
+  });
+
+  /**
+   * IDENTITY: PRESENT, BUT NON-DESTRUCTIVE — Codex, PR #251.
+   *
+   * This used to assert `'patientName' in update === false`, on the reasoning
+   * (PR #227) that refreshing identity can only replace a value someone
+   * better informed already wrote. Right instinct, too blunt: openRuntimeCall
+   * creates the row at call OPEN, so teardown ALWAYS takes the conflict
+   * branch, and excluding identity there meant #57's identity never landed on
+   * any call that went well — the same always-NULL it was written to fix.
+   *
+   * COALESCE keeps both promises at once. The assertions are on SQL because
+   * that is where the guarantee now lives; a plain value here would be the
+   * regression.
+   */
+  it("fills identity only where the column is still NULL", () => {
+    const row = toCallLogRow(record(), {
+      patientName: 'Test Patient',
+      patientDob: '03/17/1973',
+      callerName: 'Test Patient',
+      patientFound: true,
+    });
+    const update = toConflictUpdate(row) as unknown as Record<string, { queryChunks?: unknown[] }>;
+    for (const col of ['patientName', 'patientDob', 'callerName']) {
+      expect(col in update).toBe(true);
+      // An SQL expression, not the bare string — a bare string would clobber.
+      expect(update[col]).not.toBe('Test Patient');
+      expect(sqlText(update[col])).toContain('COALESCE');
+    }
+    // A boolean defaulting to false cannot use COALESCE: "nobody wrote it"
+    // and "someone wrote false" are the same value. OR is the same promise
+    // for a flag — it can only ever turn it on.
+    expect(sqlText(update.patientFound)).toContain('OR');
+  });
+
+  it("says nothing about identity when it learned nothing", () => {
+    // No identity supplied means no identity keys at all — not a COALESCE
+    // against undefined, and certainly not a null that erases.
+    const update = toConflictUpdate(toCallLogRow(record())) as unknown as Record<string, unknown>;
+    expect('patientName' in update).toBe(false);
+    expect('patientDob' in update).toBe(false);
+    expect('callerName' in update).toBe(false);
+    expect('patientFound' in update).toBe(false);
   });
 
   it("marks the row as Grok-served, so OpenAI cost estimation skips it", () => {
@@ -215,6 +258,18 @@ describe("toCallLogRow", () => {
 });
 
 
+/**
+ * The literal SQL text of a drizzle expression. The object graph is circular
+ * (it holds the table), so JSON.stringify throws — read the chunks instead.
+ */
+function sqlText(expr: unknown): string {
+  const chunks = (expr as { queryChunks?: Array<{ value?: string[] }> })?.queryChunks ?? [];
+  return chunks
+    .filter((c) => Array.isArray(c?.value))
+    .map((c) => c.value!.join(""))
+    .join("|");
+}
+
 describe("persistRuntimeCall", () => {
   it("sends the NARROW update to the database, not the whole row", async () => {
     // Asserting toConflictUpdate on its own never proved the writer used
@@ -226,9 +281,12 @@ describe("persistRuntimeCall", () => {
       Record<string, unknown>,
       Record<string, unknown>,
     ];
-    // The insert carries identity; the conflict update must not.
+    // The insert carries identity outright; the conflict update carries it
+    // as a COALESCE, so a name another writer already stored survives.
     expect(row.patientName).toBe("Test Patient");
-    expect("patientName" in update).toBe(false);
+    expect("patientName" in update).toBe(true);
+    expect(update.patientName).not.toBe("Test Patient");
+    expect(sqlText(update.patientName)).toContain("COALESCE");
     expect("toolTimeline" in update).toBe(false);
     expect(update.transcript).toBe("CALLER: Hi\nAGENT: Hello");
   });
@@ -381,5 +439,64 @@ describe("a greeting-only call keeps its tail", () => {
     expect(row.firstTranscriptDelayMs).toBe(4_000);
     expect(row.postTranscriptTailMs).toBe(40_000);
     expect(row.transcriptWindowSeconds).toBe(16);
+  });
+});
+
+/**
+ * THE UNSUPPLIED SECOND ARGUMENT — task #57.
+ *
+ * `persistRuntimeCall(record, identity = {})` took identity as its second
+ * parameter, and voiceRuntime.ts:855 called it with ONE argument. Every
+ * runtime row ever written therefore had patient_name, patient_dob and
+ * patient_found NULL, and nothing anywhere failed — the default made the
+ * omission look deliberate. GROK_MIGRATION_BASELINE.md lists phone-ID % as
+ * NOT USABLE as a cutover gate for exactly this reason.
+ *
+ * The fix is not "remember to pass it": identity now rides ON the record,
+ * so there is no second thing a caller can forget.
+ */
+describe("identity travels with the record", () => {
+  it("writes identity the record carries, with no second argument", async () => {
+    let written: Record<string, unknown> | null = null;
+    const ok = await persistRuntimeCall(
+      {
+        ...record(),
+        identity: { patientName: "Wayne Fabian", patientDob: "03/17/1973", patientFound: true, callerName: "Wayne Fabian ✓" },
+      },
+      undefined,
+      async (row) => {
+        written = row as unknown as Record<string, unknown>;
+      },
+    );
+    expect(ok).toBe(true);
+    expect(written!.patientName).toBe("Wayne Fabian");
+    expect(written!.patientDob).toBe("03/17/1973");
+    expect(written!.patientFound).toBe(true);
+    expect(written!.callerName).toBe("Wayne Fabian ✓");
+  });
+
+  it("an explicit identity argument still wins — the old call shape is intact", async () => {
+    let written: Record<string, unknown> | null = null;
+    await persistRuntimeCall(
+      { ...record(), identity: { patientName: "From the record" } },
+      { patientName: "Passed explicitly" },
+      async (row) => {
+        written = row as unknown as Record<string, unknown>;
+      },
+    );
+    expect(written!.patientName).toBe("Passed explicitly");
+  });
+
+  it("a record with no identity writes no identity columns", async () => {
+    // Absent must stay absent rather than becoming a false or an empty
+    // string: "" in patient_name is indistinguishable from a caller whose
+    // name we genuinely never got.
+    let written: Record<string, unknown> = {};
+    await persistRuntimeCall(record(), undefined, async (row) => {
+      written = row as unknown as Record<string, unknown>;
+    });
+    expect("patientName" in written).toBe(false);
+    expect("patientDob" in written).toBe(false);
+    expect("callerName" in written).toBe(false);
   });
 });

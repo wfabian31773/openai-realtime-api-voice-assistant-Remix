@@ -145,6 +145,7 @@ async function harness(
     openCallRow?: (row: unknown) => Promise<string | undefined>;
     callRowDeadlineMs?: number;
     env?: Record<string, string | undefined>;
+    startRecording?: (callSid: string, host: string) => void;
   } = {},
 ): Promise<Harness> {
   const app = express();
@@ -170,6 +171,7 @@ async function harness(
     callRowDeadlineMs: over.callRowDeadlineMs,
     fetchPrecontext: over.fetchPrecontext,
     resolveGreeting: over.resolveGreeting,
+    ...(over.startRecording ? { startRecording: over.startRecording } : {}),
     openCallRow:
       over.openCallRow ??
       (async (row) => {
@@ -1419,5 +1421,155 @@ describe("the database outranks the code, but not on the copy a lane must say", 
   it("uses the registry string when nothing is configured", () => {
     expect(chooseGreeting("optical", null, "Registry.")).toBe("Registry.");
     expect(chooseGreeting("optical", null, null)).toBe("");
+  });
+});
+
+/**
+ * THE RECORDING CALLBACK IS PUBLIC AND WAS UNAUTHENTICATED — Codex, PR #247.
+ *
+ * Its whole input is a CallSid and a URL. Without a signature check, anyone
+ * holding a CallSid could POST `RecordingStatus=completed` with a
+ * RecordingUrl of their choosing and overwrite the staff-facing recording
+ * link on a real patient's call. Every other runtime Twilio webhook already
+ * gated on this; this one was the exception.
+ *
+ * It still answers 200 either way. Twilio retries any non-2xx, and a retry
+ * storm from a caller that can never authenticate is worse than a dropped
+ * callback.
+ */
+describe("the recording-status callback authenticates before it writes", () => {
+  it("rejects an unsigned callback without writing, and still answers 200", async () => {
+    const h = await harness();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await fetch(`${h.base}/voice/recording-status`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          CallSid: "CAforged00000000000000000000000000",
+          RecordingStatus: "completed",
+          RecordingUrl: "https://attacker.example/evil.mp3",
+        }).toString(),
+      });
+
+      // 200, so Twilio does not retry — but nothing was accepted.
+      expect(res.status).toBe(200);
+      const rejected = warn.mock.calls.some((c) => String(c[0]).includes("REJECTED"));
+      expect(rejected).toBe(true);
+    } finally {
+      warn.mockRestore();
+      await h.close();
+    }
+  });
+});
+
+/**
+ * RECORDING STARTS ON THE START FRAME, NOT IN THE WEBHOOK — Codex, PR #247.
+ *
+ * An inbound call is not `in-progress` until Twilio has received and begun
+ * executing the TwiML, and the webhook issued `recordings.create` before
+ * writing that response. Twilio rejects that with 21220 and the greeting's
+ * recording disclosure is false for the whole call.
+ *
+ * This frame is Twilio saying it is executing our TwiML, so the call is live.
+ */
+describe("recording starts once the call is provably live", () => {
+  it("starts on the stream start frame, with the host the webhook was reached on", async () => {
+    const started: Array<[string, string]> = [];
+    const h = await harness({ startRecording: (sid, host) => started.push([sid, host]) });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CAREC1",
+      From: "+15551230000",
+      To: "+15559990000",
+    });
+    const { ws } = await openStream(h, "CAREC1", tokenFrom(answered.text));
+    await settle();
+
+    expect(started).toHaveLength(1);
+    expect(started[0][0]).toBe("CAREC1");
+    // The registry carried it from the webhook so the status callback lands
+    // on the same origin Twilio actually reached.
+    expect(started[0][1]).toBe(h.registry.get("CAREC1")?.host);
+    expect(started[0][1]).toBeTruthy();
+
+    ws.close();
+    await h.close();
+  });
+});
+
+/**
+ * A CALLER-ID MATCH HAS TO REACH THE LEDGER — Codex, PR #251.
+ *
+ * `sage_precontext` reached the queue lanes only as agent metadata. Nothing on
+ * optical, surgery, tech or records ever wrote matchedFirstName into the
+ * call-facts ledger — only answeringServiceAgent does — so identity at
+ * teardown reported patientFound:false and no name for a caller we had in
+ * fact recognised, on the four lanes that carry all the traffic. The
+ * migration gate would have read "we match almost nobody".
+ */
+describe("a recognised caller reaches call_logs", () => {
+  it("carries the matched name and DOB onto the record, unverified", async () => {
+    const h = await harness({
+      fetchPrecontext: async () => ({
+        matched: true,
+        firstName: "Wayne",
+        lastNameOnFile: "Fabian",
+        dobOnFile: "03/17/1973",
+      }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CAMATCH1",
+      From: "+15551230000",
+      To: "+15559990000",
+    });
+    const { ws } = await openStream(h, "CAMATCH1", tokenFrom(answered.text));
+    await settle();
+    ws.close();
+    await settle();
+
+    const row = h.persisted.find((r) => r.callSid === "CAMATCH1");
+    expect(row).toBeDefined();
+    const identity = row!.identity as Record<string, unknown>;
+    expect(identity?.patientName).toBe("Wayne Fabian");
+    expect(identity?.patientDob).toBe("03/17/1973");
+    // Matched to a record — which is what patient_found means.
+    expect(identity?.patientFound).toBe(true);
+    // But NOT verified: the ✓ follows identityVerified and nothing weaker,
+    // because this phone number resolves to eight people in the mirror.
+    expect(identity?.callerName).toBe("Wayne Fabian");
+
+    await h.close();
+  });
+
+  it("claims nobody when the lookup matched nobody, even if it named someone", async () => {
+    // `matched: false` WITH a name is the case that matters. The person base
+    // can return a near-miss, and treating a name it declined to stand behind
+    // as a match is how patient_found stops meaning anything. Found by
+    // mutation: with a nameless fixture, deleting the matched check entirely
+    // reddened nothing.
+    const h = await harness({
+      fetchPrecontext: async () => ({
+        matched: false,
+        firstName: "Wayne",
+        lastNameOnFile: "Fabian",
+      }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CAMATCH2",
+      From: "+15551230000",
+      To: "+15559990000",
+    });
+    const { ws } = await openStream(h, "CAMATCH2", tokenFrom(answered.text));
+    await settle();
+    ws.close();
+    await settle();
+
+    const row = h.persisted.find((r) => r.callSid === "CAMATCH2");
+    expect(row).toBeDefined();
+    const identity = row!.identity as Record<string, unknown>;
+    expect(identity?.patientFound).toBe(false);
+    expect("patientName" in identity).toBe(false);
+
+    await h.close();
   });
 });

@@ -47,7 +47,6 @@
 import twilio from "twilio";
 import { computeRuntimeReadiness } from "./readiness";
 import type { CallOutcome } from "./mediaStreamBridge";
-import type { RecordingStarter } from "./callRecording";
 import type { CallSessionRegistry } from "./sessionRegistry";
 
 export const VOICE_PATH_PREFIX = "/voice";
@@ -92,7 +91,6 @@ export interface WebhookDeps {
    * non-throwing: the caller is waiting on the TwiML below, and a REST round
    * trip in front of it is dead air.
    */
-  startRecording?: RecordingStarter;
 }
 
 function headerValue(
@@ -220,32 +218,30 @@ export function handleVoiceWebhook(
     return { status: 400, contentType: "text/plain", body: "missing CallSid" };
   }
 
+  const { host } = resolveRequestBase(req);
+
   const entry = deps.registry.register({
     callSid,
     slug,
     callerPhone: req.body.From ?? "",
     dialedNumber: req.body.To ?? "",
+    // Carried so the start frame can build a status-callback URL on the same
+    // origin Twilio actually reached us on.
+    host,
   });
-
-  const { host } = resolveRequestBase(req);
   const streamUrl = `wss://${host}${VOICE_STREAM_PATH}`;
 
-  // AFTER the gates, so a call this runtime is not going to serve is never
-  // recorded, and BEFORE the return only in program order — it does not wait.
-  // The same `host` Twilio just reached us on carries the status callback.
+  // RECORDING IS NOT STARTED HERE. It used to be, and that was a race the
+  // recording could only lose: an inbound call is not `in-progress` until
+  // Twilio has received and begun executing the TwiML below, and this ran
+  // BEFORE that response was even written. `recordings.create` would be
+  // rejected with 21220 — the exact error callRecording.test.ts models — and
+  // the greeting's recording disclosure would be false on every call, which
+  // is the whole thing #54 exists to prevent (Codex, PR #247).
   //
-  // Guarded even though the starter is documented as non-throwing: this
-  // function's job is to answer the call, and a caller must not lose one over
-  // a recording. Defence in depth against a future starter, or an injected one
-  // in a test, that forgets the contract.
-  try {
-    deps.startRecording?.(callSid, host);
-  } catch (error) {
-    console.error(
-      `[RUNTIME RECORDING] ✗ starter threw for ${callSid} — answering the call anyway:`,
-      error,
-    );
-  }
+  // It now fires on the Media Streams `start` frame instead, which Twilio
+  // only sends once it is executing this TwiML. See `startCall` in
+  // voiceRuntime.ts. The host is carried on the registry entry.
 
   return twimlResponse(
     200,
