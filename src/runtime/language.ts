@@ -31,6 +31,24 @@ const LANGUAGE_ALIASES: Record<string, string> = {
  * rather than forced to English — the provider handles more languages than
  * this table lists, and silently answering a Korean caller in English is a
  * worse failure than sending a hint the provider ignores. */
+/**
+ * Like `normalizeSpokenLanguage`, but ABSENT stays absent — task #55.
+ *
+ * `normalizeSpokenLanguage("")` returns "en", which is right for a mid-call
+ * switch (something was established) and wrong for lane configuration, where
+ * "nobody set one" is a real and different state. Defaulting it to English is
+ * how every runtime call ended up pinned to English before the caller had
+ * said a word, and a hard pin produces confident nonsense on exactly the
+ * fields the identity gates key on — names and dates of birth. See
+ * .agents/memory/transcription-config.md.
+ */
+export function normalizeSpokenLanguageOrNull(
+  raw: string | null | undefined,
+): SpokenLanguage | null {
+  const t = (raw ?? "").trim();
+  return t ? normalizeSpokenLanguage(t) : null;
+}
+
 export function normalizeSpokenLanguage(raw: string | null | undefined): SpokenLanguage {
   const t = (raw ?? "").trim().toLowerCase();
   if (!t) return "en";

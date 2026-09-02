@@ -220,13 +220,33 @@ describe("per-lane voice and language", () => {
     expect(lane!.voice.voiceName).toBe("nova");
   });
 
-  it("falls back to the runtime default when neither says anything", async () => {
+  it("falls back to the runtime default voice, and to NO language, when neither says anything", async () => {
+    /**
+     * The voice still defaults; the language deliberately does not — task #55.
+     *
+     * This test used to assert `language === "en"`, which was the bug written
+     * down as a requirement: every runtime call went out pinned to English
+     * before the caller said a word. A hard pin produces confident nonsense on
+     * names and dates of birth, which is what every identity gate keys on, and
+     * the practice takes Spanish calls daily.
+     *
+     * Null means "send no STT hint and let the provider detect" — not
+     * "English". An operator who wants a lane pinned sets XAI_VOICE_LANGUAGE.
+     */
     const lane = await resolveLane("optical", META, {
       source: source({ id: "optical" }),
       env: {},
     });
     expect(lane!.voice.voiceName).toBe("eve");
-    expect(lane!.voice.language).toBe("en");
+    expect(lane!.voice.language).toBeNull();
+  });
+
+  it("still honours a language an operator deliberately set", async () => {
+    const lane = await resolveLane("optical", META, {
+      source: source({ id: "optical" }),
+      env: { XAI_VOICE_LANGUAGE: "spanish" },
+    });
+    expect(lane!.voice.language).toBe("es");
   });
 
   it("keeps the lane's version for the record", async () => {

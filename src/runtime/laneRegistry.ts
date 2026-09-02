@@ -46,7 +46,7 @@ import {
   pickLaneEnv,
   type GrokRuntimeVoiceConfig,
 } from "./config";
-import { normalizeSpokenLanguage } from "./language";
+import { normalizeSpokenLanguageOrNull } from "./language";
 
 /** What the runtime needs from a lane's registry entry. Structurally a
  * subset of AgentConfig in src/config/agents.ts. */
@@ -331,7 +331,9 @@ export async function resolveLane(
       voiceName: pickLaneEnv(env, "XAI_VOICE_NAME", slug) ?? voice.voiceName,
       // Language IS provider-neutral ('en', 'es'), so the lane's own
       // registered value still counts.
-      language: normalizeSpokenLanguage(
+      // Null when nobody configured one — see GrokRuntimeVoiceConfig.language.
+      // An absent language is not English; it means send no pin (task #55).
+      language: normalizeSpokenLanguageOrNull(
         pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug) ?? config.language ?? voice.language,
       ),
     },
