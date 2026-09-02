@@ -220,8 +220,27 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
-    const cleanLocation = sanitizeLocationName(str(input.location)).value;
+    let cleanLocation = sanitizeLocationName(str(input.location)).value;
     const cleanSurgeon = sanitizeProviderName(str(input.surgeon)).value;
+
+    /**
+     * THE OFFICE THIS CALL ALREADY RESOLVED — same carry as optical, same
+     * reason. `location` is a model argument and the model does not reliably
+     * pass one of its own tool's results into the next call. Fills a gap only:
+     * what the caller said wins, and only a verified resolution is carried.
+     * See resolvedContext.ts.
+     */
+    if (!cleanLocation) {
+      const { resolvedOfficeFor } = await import('./resolvedContext');
+      const carried = sanitizeLocationName(resolvedOfficeFor(callSid) ?? '').value;
+      if (carried) {
+        cleanLocation = carried;
+        console.info(
+          `[surgery] office "${carried}" taken from resolve_location on this call — ` +
+            `the model did not carry it into the filing arguments`,
+        );
+      }
+    }
 
     const { ticketingApiClient, lookupWasUnavailable } = await import(
       '../../server/services/ticketingApiClient'

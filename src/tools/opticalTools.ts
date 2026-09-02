@@ -196,8 +196,33 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
-    const cleanLocation = sanitizeLocationName(location).value;
+    let cleanLocation = sanitizeLocationName(location).value;
     const cleanProvider = sanitizeProviderName(str(input.provider)).value;
+
+    /**
+     * THE OFFICE THIS CALL ALREADY RESOLVED.
+     *
+     * `location` is a model argument — "The office, as returned by
+     * resolve_location" — and the model is not a reliable courier between two
+     * of its own tool calls. On 2026-09-02 an optical request died in the
+     * outbox after resolve_location returned `verified: true` and the very
+     * next file_optical_ticket went out with no office at all. See
+     * resolvedContext.ts for that timeline.
+     *
+     * Fills a GAP only: anything the caller actually said wins, and only a
+     * resolution the tool called verified is ever carried.
+     */
+    if (!cleanLocation) {
+      const { resolvedOfficeFor } = await import('./resolvedContext');
+      const carried = sanitizeLocationName(resolvedOfficeFor(callSid) ?? '').value;
+      if (carried) {
+        cleanLocation = carried;
+        console.info(
+          `[optical] office "${carried}" taken from resolve_location on this call — ` +
+            `the model did not carry it into the filing arguments`,
+        );
+      }
+    }
 
     /**
      * ASK ONCE, THEN FILE IT ANYWAY. Operator ruling, 2026-09-01:

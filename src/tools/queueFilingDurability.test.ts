@@ -120,3 +120,44 @@ describe('the largest queue, end to end', () => {
     expect(writeToOutbox).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * THE FILING TOOLS READ WHAT resolve_location ALREADY RESOLVED.
+ *
+ * 2026-09-02: an optical request died in the outbox after this exact sequence
+ * on one call —
+ *
+ *     file_optical_ticket    -> refused, "Missing required information: office"
+ *     resolve_location       -> { success: true, verified: true }
+ *     file_optical_ticket    -> refused AGAIN, same missing office
+ *
+ * `location` is a model argument, and the model did not carry its own tool's
+ * result into its next tool call. Four surgery requests died the same
+ * afternoon with `lookup_patient` succeeding in under 300ms on every one.
+ *
+ * Read as source text for the same reason the durability checks above are:
+ * running these tools end to end needs the ticketing client, the lookups and a
+ * database, and this pins the one line that would silently undo the fix.
+ */
+describe('the office carry survives the model forgetting it', () => {
+  it('resolve_location actually WRITES what it resolved', () => {
+    // The read side is worthless if nothing fills the store. Deleting this
+    // one line broke nothing on the first mutation pass.
+    const shared = readFileSync(join(__dirname, 'sharedPatientTools.ts'), 'utf8');
+    expect(shared).toMatch(/rememberResolvedOffice\(str\(input\.call_sid\), fileable, true\)/);
+  });
+
+  for (const file of ['opticalTools.ts', 'surgeryTools.ts']) {
+    const src = readFileSync(join(__dirname, file), 'utf8');
+
+    it(`${file} falls back to resolvedOfficeFor`, () => {
+      expect(src).toMatch(/resolvedOfficeFor\(callSid\)/);
+    });
+
+    it(`${file} only fills a GAP — the caller's own words still win`, () => {
+      // The carry must sit behind `if (!cleanLocation)`. Reversing that would
+      // let a stale resolution outrank what the caller just said.
+      expect(src).toMatch(/if \(!cleanLocation\) \{[\s\S]{0,400}?resolvedOfficeFor/);
+    });
+  }
+});

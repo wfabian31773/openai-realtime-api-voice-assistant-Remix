@@ -323,6 +323,16 @@ registerTool({
     // heard of, which is how a resolved office still failed to file.
     const fileable = hit.fileAs || sanitizeLocationName(hit.canonical).value || hit.canonical;
 
+    // CARRY IT SERVER-SIDE. The filing tools take `location` as a model
+    // argument — "The office, as returned by resolve_location" — and on
+    // 2026-09-02 an optical request died in the outbox because this returned
+    // `verified: true` and the very next file_optical_ticket went out with no
+    // office at all. The model is not a reliable courier between two of its own
+    // tool calls; see resolvedContext.ts for the timeline. Only the verified,
+    // fileable name is stored, and only for this CallSid.
+    const { rememberResolvedOffice } = await import('./resolvedContext');
+    rememberResolvedOffice(str(input.call_sid), fileable, true);
+
     return {
       success: true,
       resolved: true,
