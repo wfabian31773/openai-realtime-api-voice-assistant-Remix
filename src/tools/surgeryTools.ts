@@ -220,28 +220,30 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
-    let cleanLocation = sanitizeLocationName(str(input.location)).value;
+    const cleanLocation = sanitizeLocationName(str(input.location)).value;
     const cleanSurgeon = sanitizeProviderName(str(input.surgeon)).value;
 
     /**
-     * THE OFFICE THIS CALL ALREADY RESOLVED — same carry as optical, same
-     * reason. `location` is a model argument and the model does not reliably
-     * pass one of its own tool's results into the next call. Fills a gap only:
-     * what the caller said wins, and only a verified resolution is carried.
-     * See resolvedContext.ts.
+     * NO OFFICE CARRY ON SURGERY — Cursor, PR #253, and it was right.
+     *
+     * I added one here on the theory that the four surgery requests lost on
+     * 2026-09-02 were the same shape as the optical one. They are not.
+     *
+     *  - Surgery does not gate on location at all. `files WITHOUT a location —
+     *    unlike Optical` is an explicit test, and the ruling behind it is that
+     *    copying optical's refusal "would cost real calls to prevent a failure
+     *    this queue does not have". So a missing office was never why those
+     *    four died; a missing SURGEON was.
+     *  - Worse, it would have made the surgeon ladder narrower. `resolveWith`
+     *    ANDs `cleanLocation` into every `/lookup`, so a carried office turns a
+     *    provider-only search into provider+location, and a surgeon who would
+     *    have matched unbound fails because they are not at that building —
+     *    on the one queue that lost four requests for a missing surgeon.
+     *
+     * The surgeon carry is a separate change and needs the four timelines
+     * measured first: matched_by, whether the ladder ran, and whether the name
+     * and date of birth on the filing call agreed with the lookup. See #48.
      */
-    if (!cleanLocation) {
-      const { resolvedOfficeFor } = await import('./resolvedContext');
-      const carried = sanitizeLocationName(resolvedOfficeFor(callSid) ?? '').value;
-      if (carried) {
-        cleanLocation = carried;
-        console.info(
-          `[surgery] office "${carried}" taken from resolve_location on this call — ` +
-            `the model did not carry it into the filing arguments`,
-        );
-      }
-    }
-
     const { ticketingApiClient, lookupWasUnavailable } = await import(
       '../../server/services/ticketingApiClient'
     );
