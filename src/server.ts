@@ -148,6 +148,11 @@ async function startVoiceServer() {
     { name: 'TWILIO_PHONE_NUMBER', present: !!process.env.TWILIO_PHONE_NUMBER },
     { name: 'OPENAI_API_KEY', present: !!process.env.OPENAI_API_KEY },
     { name: 'DATABASE_URL', present: !!process.env.DATABASE_URL },
+    // Added 2026-09-02: this is no longer only the invite/password mailer. The
+    // ticket-filing alarm now delivers through it (the operator's ruling), so
+    // an unset SMTP_PASSWORD means a critical filing outage detects correctly
+    // and still reaches nobody — which is the failure that alarm exists to end.
+    { name: 'SMTP_PASSWORD', present: !!process.env.SMTP_PASSWORD },
   ];
   const missingSecrets = secretChecks.filter(s => !s.present);
   const isProd = process.env.APP_ENV === 'production';
