@@ -216,17 +216,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get('/api/observatory/replay/:callLogId', isAuthenticated, async (req, res) => {
-    try {
-      const { replayTape } = await import('./observatory/queries');
-      const tape = await replayTape(req.params.callLogId);
-      if (!tape) return res.status(404).json({ message: 'No replay for this call' });
-      res.json(tape);
-    } catch (error) {
-      console.error('[observatory] replay tape failed:', error);
-      res.status(500).json({ message: 'Replay tape failed', error: error instanceof Error ? error.message : String(error) });
-    }
-  });
+  // GET /api/observatory/replay/:callLogId is gone with the pipeline behind it.
+  // Rendering a tape re-ran the call through the new core; `src/core/` was
+  // deleted on 2026-09-01, so the endpoint could only ever answer 404. The
+  // Observatory no longer offers the control, and the stored verdicts are
+  // still served by /api/observatory/replays/:agent/list above.
 
   // Daily Brief — baseline-tracked morning review: categorized critical
   // fails with proposals, vs yesterday and vs the day-one baseline

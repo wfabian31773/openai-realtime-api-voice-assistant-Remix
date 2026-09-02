@@ -498,3 +498,72 @@ describe('cannot, and the copula that hid beside it', () => {
     ).toEqual([]);
   });
 });
+
+/**
+ * AN ADVERB IS NOT A GAP IN THE NEGATION — Codex, PR #244 round thirteen.
+ *
+ * "Calls are not currently being recorded" passed as compliant. The positive
+ * `record(ed|ing)` test matched, and `negated()` could not reach the phrase
+ * because it required the negator to sit immediately before the optional
+ * copula and could not cross `currently`. So a database row that DENIES the
+ * recording disclosure outranked the compliant code greeting, on the line that
+ * records every overnight call from the first second.
+ *
+ * Two changes, and the second is the one that generalises. The negator may now
+ * cross a run of -ly adverbs; and the recording clause, like the 911 direction
+ * before it, asks what the greeting must SAY rather than subtracting a fixed
+ * list of things it must not.
+ */
+describe('a denied recording disclosure is not a disclosure', () => {
+  const withRecording = (clause: string) =>
+    `Thank you for calling Azul Vision, all of our offices are currently closed. ` +
+    `If this is a medical emergency, please dial 911. ${clause} How can I help you?`;
+
+  const recordingPresent = (g: string) => !missingMandatoryCopy('no-ivr', g).includes('recording disclosure');
+
+  it('rejects an adverb-separated denial', () => {
+    expect(recordingPresent(withRecording('Calls are not currently being recorded.'))).toBe(false);
+  });
+
+  it.each([
+    'Calls are not being recorded.',
+    'Calls are never recorded.',
+    "Calls aren't recorded.",
+    'Calls cannot be recorded.',
+    'Calls are not presently recorded.',
+    'Calls are not normally recorded.',
+  ])('still rejects: %s', (clause) => {
+    expect(recordingPresent(withRecording(clause))).toBe(false);
+  });
+
+  it.each([
+    'All calls are being recorded for quality assurance purposes.',
+    'This call is recorded.',
+    'Your call may be recorded.',
+    'All calls will be recorded.',
+  ])('still accepts an affirmative disclosure: %s', (clause) => {
+    expect(recordingPresent(withRecording(clause))).toBe(true);
+  });
+
+  it('rejects a greeting that only mentions recording without disclosing it', () => {
+    // The inversion's whole point: containing the word is not saying the thing.
+    expect(recordingPresent(withRecording('Ask us about our recording policy.'))).toBe(false);
+  });
+
+  it('the adverb run does not loosen adjacency for the 911 direction', () => {
+    // The legitimate wording this design has always had to protect.
+    const g =
+      'Thank you for calling Azul Vision, our offices are closed. If this is not an emergency ' +
+      'I can take a message; if it is a medical emergency, please dial 911. ' +
+      'All calls are being recorded for quality assurance purposes.';
+    expect(missingMandatoryCopy('no-ivr', g)).toEqual([]);
+  });
+
+  it('rejects an adverb-separated denial of the closed-office notice too', () => {
+    const g =
+      'Thank you for calling Azul Vision, our offices are not currently closed. ' +
+      'If this is a medical emergency, please dial 911. ' +
+      'All calls are being recorded for quality assurance purposes.';
+    expect(missingMandatoryCopy('no-ivr', g)).toContain('closed-office notice');
+  });
+});

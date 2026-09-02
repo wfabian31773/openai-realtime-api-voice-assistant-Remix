@@ -214,8 +214,29 @@ const NEGATOR = String.raw`(?:\bcannot\b|\bnot\b|n['\u2019]t\b|\bnever\b)`;
  * `not` stays attached to "an emergency" where it belongs. So does "please
  * don't hesitate to leave a message — all calls are being recorded".
  */
+/**
+ * AND A RUN OF ADVERBS MAY SIT THERE TOO — Codex, round thirteen.
+ *
+ * "Calls are not currently being recorded" passed. The negator had to sit
+ * immediately before the optional copula, and `currently` is neither, so
+ * nothing lined up after the `not` and the denial read as a disclosure.
+ *
+ * `-ly` adverbs rather than another enumerated list, because the list is the
+ * bug: the closed-office clause already carried `(?:currently|presently)` and
+ * the recording clause did not, which is precisely how one of them was open
+ * and the other was not. Currently, presently, normally, usually, generally,
+ * typically and everything else of that shape are one rule now.
+ *
+ * ADJACENCY IS STILL THE DESIGN. An adverb modifies the verb it precedes, so
+ * crossing one keeps the negator attached to the same clause. "If this is not
+ * an emergency I can take a message; if it is a medical emergency, please dial
+ * 911" still passes — `an` is not an adverb or a copula, so the `not` stays
+ * where it belongs.
+ */
+const ADVERBS = String.raw`(?:\s+\w+ly\b)*`;
+
 function negated(greeting: string, phrase: string): boolean {
-  return new RegExp(`${NEGATOR}\\s+(?:be|being|been)?\\s*${phrase}\\b`, 'i').test(greeting);
+  return new RegExp(`${NEGATOR}${ADVERBS}\\s+(?:be|being|been)?\\s*${phrase}\\b`, 'i').test(greeting);
 }
 
 const MANDATORY_GREETING_COPY: Readonly<
@@ -244,7 +265,10 @@ const MANDATORY_GREETING_COPY: Readonly<
     // returns success and changes nothing.
     {
       label: 'closed-office notice',
-      present: (g) => /clos(ed|ing)\b/i.test(g) && !negated(g, String.raw`(?:currently\s+|presently\s+)?clos(?:ed|ing)`),
+      // The enumerated `(?:currently|presently)` that used to sit in this
+      // phrase is gone: `negated()` crosses any -ly adverb now, so keeping a
+      // private list here would suggest the general rule does not exist.
+      present: (g) => /clos(ed|ing)\b/i.test(g) && !negated(g, String.raw`clos(?:ed|ing)`),
     },
     {
       /**
@@ -273,8 +297,26 @@ const MANDATORY_GREETING_COPY: Readonly<
         !/\bno\s+need\s+to\s+(?:dial|call|contact|phone)\s+911\b/i.test(g),
     },
     {
+      /**
+       * THE WORD IS NOT THE DISCLOSURE — the same inversion as the 911
+       * direction above, and for the same reason, one round later.
+       *
+       * Requiring `record(ed|ing)` and subtracting negations accepts anything
+       * containing the token unless a reversal is spotted, so every phrasing
+       * nobody thought of is a false accept — and a false accept here means a
+       * caller is recorded without being told. Codex found the adverb hole
+       * ("not currently being recorded"); "ask about our recording policy"
+       * would have passed too, and no amount of negation-chasing catches that.
+       *
+       * So the check is what the clause must SAY: the call is, may be, or will
+       * be recorded. Both live greetings satisfy it — the registry string and
+       * the lunch greeting both say "All calls are being recorded for quality
+       * assurance purposes" — and the negation guard stays on top.
+       */
       label: 'recording disclosure',
-      present: (g) => /record(ed|ing)\b/i.test(g) && !negated(g, String.raw`(?:being\s+)?record(?:ed|ing)`),
+      present: (g) =>
+        /\b(?:is|are|was|were|be|being|been)\s+(?:being\s+)?record(?:ed|ing)\b/i.test(g) &&
+        !negated(g, String.raw`(?:being\s+)?record(?:ed|ing)`),
     },
   ],
 };

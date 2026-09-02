@@ -1199,25 +1199,15 @@ export async function replayTapeList(agent: string, verdict = 'worse', limit = 4
 }
 
 /**
- * Render one tape live: both transcripts, both grader verdicts.
+ * Live tape rendering is GONE, deliberately, and `replayTape()` with it.
  *
- * Dead as of 2026-09-01. Live tape rendering re-ran the call through the new
- * core (`src/core/replay/replayCall.ts`); that pipeline was deleted with
- * `src/core/`, so there is no "new" side left to render and this returns null
- * — the route turns that into its existing 404. Verdicts already computed and
- * stored in `new_core_replay_index` are unaffected and still served by
- * `replayTapeList` above.
+ * It re-ran the call through the new core (`src/core/replay/replayCall.ts`),
+ * and that pipeline was deleted on 2026-09-01, so the function could only
+ * return null and its route could only answer 404 — while the Observatory
+ * still offered every row as a clickable tape and blamed the resulting error
+ * on a missing transcript (Codex, PR #244 round thirteen). The control and the
+ * route are removed rather than left to fail.
+ *
+ * Verdicts computed before the deletion are unaffected: they are stored in
+ * `new_core_replay_index` and still served by `replayTapeList` above.
  */
-export async function replayTape(_callLogId: string): Promise<{
-  callLogId: string;
-  agent: string;
-  verdict: string | null;
-  oldTranscript: string | null;
-  newTranscript: string | null;
-  newGraders: unknown;
-  oldCriticalCount: number;
-  newCriticalCount: number;
-  approximations: string[] | null;
-} | null> {
-  return null;
-}
