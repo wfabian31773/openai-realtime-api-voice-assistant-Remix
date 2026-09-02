@@ -261,7 +261,7 @@ class SystemAlertService {
   private async sendEmailAlert(event: AlertEvent): Promise<void> {
     try {
       const { shouldEmailAlert, buildAlertEmail } = await import('./alertEmail');
-      if (!shouldEmailAlert(event.severity)) return;
+      if (!shouldEmailAlert(event.type, event.severity)) return;
 
       const { sendEmail } = await import('./emailService');
       const message = buildAlertEmail(event);

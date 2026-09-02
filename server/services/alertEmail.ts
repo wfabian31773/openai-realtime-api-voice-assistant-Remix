@@ -50,15 +50,34 @@ export interface AlertEmailInput {
 }
 
 /**
- * Critical only — the same bar SMS used.
+ * The alert types Wayne asked to be emailed about. Exactly one, so far.
  *
- * The July ruling was about VOLUME, not about the channel, so emailing every
- * warning would reproduce it in a new inbox. Delivery is additionally bounded
- * by `sendAlert`'s own 5-minute cooldown and 10-per-hour cap, because this is
- * called from below both of those gates.
+ * Adding a type here is HIS decision, not a judgement call to be made while
+ * building something adjacent. That is the whole lesson of the entry below.
  */
-export function shouldEmailAlert(severity: string): boolean {
-  return severity === 'critical';
+export const EMAILED_ALERT_TYPES: ReadonlySet<string> = new Set(['ticket_filing_stalled']);
+
+/**
+ * BY TYPE, then by severity. Not by severity alone.
+ *
+ * 2026-09-02: Wayne asked for one thing — "for the alert, email me at
+ * wfabian@azulvision.com" — meaning the ticket-filing alarm we had just
+ * built. This gated on SEVERITY, and 35 sites in this repo raise a critical
+ * alert: provider_miss, emergency_miss, database_failure, call_log_failure
+ * and more. Every one of them started mailing him within hours, and he
+ * described it in the same words he used for the July SMS incident: "it's
+ * just like a return of the SMS spamming me with a bunch of emails."
+ *
+ * The July ruling was about VOLUME, and the comment that used to sit here
+ * said so — while gating on the one axis that does not bound volume. An
+ * inbox is not a quieter phone.
+ *
+ * Delivery is additionally bounded by `sendAlert`'s 5-minute cooldown and
+ * 10-per-hour cap, because this is called from below both of those gates.
+ * Those bound REPETITION of one alert; only this bounds how many KINDS.
+ */
+export function shouldEmailAlert(type: string, severity: string): boolean {
+  return severity === 'critical' && EMAILED_ALERT_TYPES.has(type);
 }
 
 /** Primitives only. Anything structured is dropped — see the PHI note above. */
