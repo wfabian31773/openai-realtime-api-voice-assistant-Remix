@@ -99,11 +99,14 @@ class SystemAlertService {
       timestamp: new Date(),
     };
     
-    this.alertHistory.push(event);
-    
     if (this.state.consecutiveFailures >= FAILURE_THRESHOLD) {
       this.state.systemHealthy = false;
+      // sendAlert records it; pushing here too would count it twice.
       await this.sendAlert(event);
+    } else {
+      // The only path that records WITHOUT alerting. A single failure below
+      // the threshold is history worth keeping and not worth waking anyone for.
+      this.alertHistory.push(event);
     }
   }
 
@@ -138,7 +141,7 @@ class SystemAlertService {
       timestamp: new Date(),
     };
     
-    this.alertHistory.push(event);
+    // Recorded by sendAlert, reached unconditionally from here.
     await this.sendAlert(event);
   }
 
@@ -155,7 +158,7 @@ class SystemAlertService {
         timestamp: new Date(),
       };
       
-      this.alertHistory.push(event);
+      // Recorded by sendAlert, reached unconditionally from here.
       await this.sendAlert(event);
     }
   }
@@ -168,6 +171,30 @@ class SystemAlertService {
     
     // Check cooldown
     const lastAlert = this.state.lastAlertTime.get(alertKey) || 0;
+    /**
+     * RECORD EVERY ALERT, BEFORE ANY REASON NOT TO SEND IT — Codex, PR #244,
+     * across two rounds, and the second round was correcting the first.
+     *
+     * Round seven: the note at the top of this file promises alerts "still
+     * record to logs and alertHistory". That held for the three callers that
+     * push the event themselves and not for `sendAlert` — which SEVEN other
+     * call sites use, the grader alerts and the ticket-filing alarm among
+     * them. Those were never recorded at all.
+     *
+     * Round eight: adding the push lower down made the three self-pushing
+     * callers record twice, inflating `getAlertStats()` and eating the
+     * ten-event recent window.
+     *
+     * Recording HERE, above the cooldown and hourly-limit returns, settles
+     * both. Suppression is a decision about DELIVERY, and an alert dropped for
+     * being the fourth this hour is precisely the one an operator later needs
+     * to find in the history — the old placement, below those returns, would
+     * have lost it. The two callers that always reach this drop their own
+     * push; `recordDatabaseFailure` keeps one for the sub-threshold case where
+     * it never calls this at all.
+     */
+    this.alertHistory.push(event);
+
     const timeSinceLastAlert = Date.now() - lastAlert;
     
     if (timeSinceLastAlert < ALERT_COOLDOWN_MS) {
@@ -186,21 +213,6 @@ class SystemAlertService {
     this.state.lastAlertTime.set(alertKey, Date.now());
     this.state.alertCounts.set(alertKey, hourlyCount + 1);
     
-    /**
-     * RECORD IT BEFORE TRYING TO DELIVER IT — Codex, PR #244.
-     *
-     * The note at the top of this file says "alerts still record to logs and
-     * alertHistory, they just don't go to a phone". That was true of the three
-     * callers that push it themselves and false of THIS one, which is the
-     * generic path the ticket-filing alarm uses. With SMS off by the operator's
-     * 2026-07-27 decision and email still a TODO, a critical filing outage
-     * produced two console lines and nothing an interface could read back.
-     *
-     * `alertHistory` is what the Observatory renders, so this is the difference
-     * between an alarm that is visible after the fact and one that is not.
-     */
-    this.alertHistory.push(event);
-
     console.log(`[ALERT SERVICE] Sending ${event.severity} alert: ${event.message}`);
 
     // Send SMS alert for critical issues
