@@ -73,6 +73,13 @@ interface OutboxWriteResult {
   /** Set only on an idempotent hit, so a caller can tell a queued entry from one already sent. */
   status?: string;
   ticketNumber?: string;
+  /**
+   * This write REPLACED a dead-lettered payload and put the row back in the
+   * queue. Only a dead letter is ever reopened — it filed nothing, so there is
+   * no ticket to duplicate — and it is how a caller's correction reaches the
+   * row the retry will actually send.
+   */
+  reopened?: boolean;
 }
 
 interface OutboxSendResult {
@@ -129,6 +136,63 @@ export class TicketOutboxService {
           .limit(1);
 
         if (existing.length > 0) {
+          /**
+           * A DEAD LETTER MUST NOT HOLD THE KEY ITS OWN CORRECTION NEEDS —
+           * Codex, PR #244 round twelve, and a consequence of round eleven.
+           *
+           * Round eleven made a terminal refusal honest: the caller is asked
+           * for the field the API named instead of being told the request was
+           * recorded. They answer, and the agent files again on the SAME
+           * CallSid. That lands here — and `onConflictDoNothing` handed back
+           * the refused row with its stale payload untouched. `attemptSend`
+           * then declined to claim a `dead_letter` row and reported no
+           * `terminal` flag, so the caller who had just supplied the missing
+           * surgeon was told their request was recorded. Nothing was going to
+           * send it.
+           *
+           * A dead letter filed NOTHING, which is exactly why replacing it is
+           * safe: there is no ticket to duplicate. That is the whole difference
+           * from a `sent` row, which must never be touched — that one really is
+           * the duplicate this key exists to stop — and from `pending`,
+           * `failed` and `sending`, which the worker still owns and whose
+           * payload was never refused, only undelivered.
+           *
+           * The update is GUARDED on the status it read, so two writers cannot
+           * both reopen: whoever loses falls through and reports the row as it
+           * found it.
+           */
+          if (existing[0].status === 'dead_letter') {
+            const reopenedAt = new Date();
+            const reopened = await db
+              .update(ticketOutbox)
+              .set({
+                payload: params as any,
+                status: 'pending',
+                retryCount: 0,
+                lastError: null,
+                nextRetryAt: reopenedAt,
+                updatedAt: reopenedAt,
+              })
+              .where(
+                and(eq(ticketOutbox.id, existing[0].id), eq(ticketOutbox.status, 'dead_letter')),
+              )
+              .returning({ id: ticketOutbox.id });
+
+            if (reopened.length > 0) {
+              console.info(
+                `[TICKET OUTBOX] ↻ Reopened dead letter ${existing[0].id} with a corrected payload ` +
+                  `(${idempotencyKey}) — the refused one filed nothing, so there is nothing to duplicate`,
+              );
+              return {
+                outboxId: existing[0].id,
+                idempotencyKey,
+                alreadyExists: true,
+                status: 'pending',
+                reopened: true,
+              };
+            }
+          }
+
           console.info(`[TICKET OUTBOX] Idempotent hit: ${idempotencyKey} → ${existing[0].id} (${existing[0].status})`);
           return {
             outboxId: existing[0].id,
@@ -215,7 +279,11 @@ export class TicketOutboxService {
         return { success: true, ticketNumber: existing.ticketNumber || undefined, outboxId };
       }
       if (existing.status === 'dead_letter') {
-        return { success: false, error: 'Entry moved to dead letter', outboxId };
+        // Nothing will send this row, so it must never be reported as retrying —
+        // that is precisely the false promise round eleven removed. The backstop
+        // to the reopen in `writeToOutbox`, for any route that reaches a dead
+        // letter anyway.
+        return { success: false, error: 'Entry moved to dead letter', outboxId, terminal: true };
       }
       return { success: false, error: 'Entry already being processed by another worker', outboxId };
     }

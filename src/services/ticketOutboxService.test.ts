@@ -26,12 +26,34 @@ const updateResults: unknown[] = [];
 const selectResults: unknown[] = [];
 const insertResults: unknown[] = [];
 const setPayloads: Record<string, unknown>[] = [];
+/**
+ * The columns each `.where(...)` was built from, in call order.
+ *
+ * The fake db cannot evaluate a drizzle condition, so a test that only queues a
+ * result proves nothing about the WHERE that asked for it — which is how the
+ * reopen's concurrency guard survived its own mutation. Recording the columns
+ * makes the guard observable: a reopen keyed on the id ALONE and one keyed on
+ * the id AND the status are different statements, and only the second is safe.
+ */
+const whereCols: string[][] = [];
+
+function columnsOf(node: unknown, out: string[] = []): string[] {
+  const n = node as { name?: unknown; table?: unknown; queryChunks?: unknown[] } | null;
+  if (!n || typeof n !== 'object') return out;
+  if (typeof n.name === 'string' && 'table' in n) out.push(n.name);
+  for (const chunk of n.queryChunks ?? []) columnsOf(chunk, out);
+  return out;
+}
 
 function chain(next: () => unknown) {
   const self: Record<string, unknown> = {};
-  for (const m of ['where', 'from', 'limit', 'values', 'onConflictDoNothing', 'returning', 'groupBy']) {
+  for (const m of ['from', 'limit', 'values', 'onConflictDoNothing', 'returning', 'groupBy']) {
     self[m] = () => self;
   }
+  self.where = (condition: unknown) => {
+    whereCols.push(columnsOf(condition));
+    return self;
+  };
   self.set = (v: Record<string, unknown>) => {
     setPayloads.push(v);
     return self;
@@ -108,6 +130,7 @@ beforeEach(() => {
   selectResults.length = 0;
   insertResults.length = 0;
   setPayloads.length = 0;
+  whereCols.length = 0;
   createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-52100', ticketId: 9001 });
   lookupProviderAndLocation.mockResolvedValue({ success: true, outcome: 'matched', locationId: null });
 });
@@ -411,5 +434,117 @@ describe('the terminal verdict leaves the outbox with the result', () => {
 
     expect(setPayloads.find((p) => p.status === 'dead_letter')).toBeTruthy();
     expect(res.terminal).toBeUndefined();
+  });
+});
+
+/**
+ * A DEAD LETTER MUST NOT HOLD THE KEY ITS OWN CORRECTION NEEDS.
+ *
+ * Codex, PR #244 round twelve, and a consequence of round eleven's fix. That
+ * round made a terminal refusal honest: instead of "recorded and will be
+ * processed shortly", the caller is now asked for the field the API named. The
+ * caller answers, the agent files again — and on the SAME CallSid.
+ *
+ * `writeToOutbox` keys on `call-<CallSid>` with `onConflictDoNothing`, so the
+ * second write found the refused row, kept its stale payload, and returned it.
+ * `attemptSend` then declined to claim a `dead_letter` row and returned a
+ * result with no `terminal` flag, which fell through to the retryable branch —
+ * and the caller who had just supplied the missing surgeon was told their
+ * request was recorded. Nothing was going to send it.
+ *
+ * So the invitation to correct has to reach the row the retry will send. A
+ * dead letter filed NOTHING, which is exactly why it is safe to replace: there
+ * is no ticket to duplicate. A `sent` row is the opposite and must never be
+ * touched — that one really is the duplicate the key exists to stop.
+ */
+describe('a dead letter must not hold the key its own correction needs', () => {
+  it('replaces the refused payload and reopens the row', async () => {
+    insertResults.push([]); // the conflict: nothing inserted
+    selectResults.push([{ id: 'ob-1', ticketNumber: null, status: 'dead_letter' }]);
+    updateResults.push([{ id: 'ob-1' }]); // the reopen won the race
+
+    const corrected = { ...OPTICAL_OTHER, description: 'Dr. Nguyen is the surgeon' };
+    const res = await TicketOutboxService.writeToOutbox(
+      wrapCreateTicketPayload(corrected as never) as never,
+      'CA0001',
+    );
+
+    expect(res.outboxId).toBe('ob-1');
+    expect(res.status).toBe('pending');
+
+    const reopen = setPayloads.find((p) => p.status === 'pending' && 'payload' in p);
+    expect(reopen).toBeTruthy();
+    expect(reopen!.retryCount).toBe(0);
+    // The CORRECTED words, not the ones the API refused.
+    expect((reopen!.payload as { params: { description: string } }).params.description).toBe(
+      'Dr. Nguyen is the surgeon',
+    );
+  });
+
+  it('leaves a sent row alone — that one really is the duplicate', async () => {
+    insertResults.push([]);
+    selectResults.push([{ id: 'ob-1', ticketNumber: 'VA-52100', status: 'sent' }]);
+
+    const res = await TicketOutboxService.writeToOutbox(
+      wrapCreateTicketPayload(OPTICAL_OTHER as never) as never,
+      'CA0001',
+    );
+
+    expect(res.status).toBe('sent');
+    expect(res.ticketNumber).toBe('VA-52100');
+    expect(setPayloads.some((p) => p.status === 'pending')).toBe(false);
+  });
+
+  it('leaves a row still in flight alone', async () => {
+    // `failed` is between retries: the worker still owns it and its payload was
+    // never refused — only undelivered. Reopening it would reset a backoff that
+    // is doing its job.
+    insertResults.push([]);
+    selectResults.push([{ id: 'ob-1', ticketNumber: null, status: 'failed' }]);
+
+    const res = await TicketOutboxService.writeToOutbox(
+      wrapCreateTicketPayload(OPTICAL_OTHER as never) as never,
+      'CA0001',
+    );
+
+    expect(res.status).toBe('failed');
+    expect(setPayloads.some((p) => p.status === 'pending')).toBe(false);
+  });
+
+  it('falls back to reporting the row when another writer reopened it first', async () => {
+    // The reopen update is guarded on `status = 'dead_letter'`, so a concurrent
+    // writer can win it. Losing that race must not throw and must not report a
+    // reopen that this call did not perform.
+    insertResults.push([]);
+    selectResults.push([{ id: 'ob-1', ticketNumber: null, status: 'dead_letter' }]);
+    updateResults.push([]); // the guarded update matched nothing
+
+    const res = await TicketOutboxService.writeToOutbox(
+      wrapCreateTicketPayload(OPTICAL_OTHER as never) as never,
+      'CA0001',
+    );
+
+    expect(res.outboxId).toBe('ob-1');
+    expect(res.status).toBe('dead_letter');
+
+    // And the reason losing is possible at all: the reopen is guarded on the
+    // status it read, not on the id alone. Without that guard two writers both
+    // "win", and the second can reset a row the first has already claimed and
+    // is mid-send — which is a duplicate ticket, not a lost one.
+    const reopenWhere = whereCols[whereCols.length - 1];
+    expect(reopenWhere).toContain('id');
+    expect(reopenWhere).toContain('status');
+  });
+
+  it('reports a row that is ALREADY dead-lettered as terminal, not as retrying', async () => {
+    // The backstop. Even if a dead letter reaches attemptSend by some other
+    // route, nothing will send it, so it must never be reported as retrying.
+    updateResults.push([]); // the claim matches nothing
+    selectResults.push([{ status: 'dead_letter', ticketNumber: null }]);
+
+    const res = await TicketOutboxService.attemptSend('ob-1');
+
+    expect(res.success).toBe(false);
+    expect(res.terminal).toBe(true);
   });
 });

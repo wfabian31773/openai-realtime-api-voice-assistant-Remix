@@ -141,3 +141,71 @@ describe('a transport failure is unchanged', () => {
     expect(res.message).toMatch(/has been recorded/i);
   });
 });
+
+/**
+ * AND THE CORRECTION HAS TO ACTUALLY GO — Codex, round twelve.
+ *
+ * Round eleven invited the caller to supply the missing field. Round twelve
+ * found that the invitation could not be taken up: the second filing reuses the
+ * same CallSid, `writeToOutbox` returned the dead-lettered row without
+ * replacing its payload, and `attemptSend` reported that row with no `terminal`
+ * flag — which fell straight through to "recorded and will be processed
+ * shortly". The caller answered the question and was lied to for it.
+ *
+ * `writeToOutbox` now reopens a dead letter with the corrected payload (its own
+ * tests cover that). These two pin the half that reaches the caller.
+ */
+describe('the correction the refusal invited', () => {
+  it('never hears "recorded" from a row that is already dead-lettered', async () => {
+    // The backstop shape attemptSend now returns for a dead letter it cannot
+    // claim. Whatever route produced it, nothing will send this row.
+    h.attemptSend.mockResolvedValue({
+      success: false,
+      outboxId: 'ob-1',
+      terminal: true,
+      error: 'Entry moved to dead letter',
+    });
+
+    const res = await SyncAgentService.createTicket(params);
+
+    expect(res.success).toBe(false);
+    expect(res.message).not.toMatch(/has been recorded|processed shortly/i);
+  });
+
+  it('files successfully on the second attempt once the field is supplied', async () => {
+    // Refused, asked, answered, sent — the whole loop the caller lives through.
+    h.attemptSend.mockResolvedValueOnce({
+      success: false,
+      outboxId: 'ob-1',
+      terminal: true,
+      statusCode: 400,
+      error: 'Missing required information: surgeon',
+    });
+
+    const refused = await SyncAgentService.createTicket(params);
+    expect(refused.success).toBe(false);
+    expect(refused.message).toContain('surgeon');
+
+    // The agent collects the surgeon and files again on the SAME call. The
+    // reopened row carries the corrected payload, so this one goes.
+    h.writeToOutbox.mockResolvedValue({
+      outboxId: 'ob-1',
+      alreadyExists: true,
+      status: 'pending',
+      reopened: true,
+    });
+    h.attemptSend.mockResolvedValue({
+      success: true,
+      outboxId: 'ob-1',
+      ticketNumber: 'VA-56900',
+    });
+
+    const filed = await SyncAgentService.createTicket({
+      ...(params as object),
+      description: 'Asking about her surgery date with Dr. Nguyen',
+    } as never);
+
+    expect(filed.success).toBe(true);
+    expect(filed.ticketNumber).toBe('VA-56900');
+  });
+});
