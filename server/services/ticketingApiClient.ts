@@ -64,6 +64,25 @@ export interface CreateTicketParams {
   patientBirthYear?: string;
   locationId?: number;
   providerId?: number;
+  /**
+   * "This call has already been asked for its routing field and still cannot
+   * supply one." The ticketing app's routing gate then takes the ticket
+   * UNASSIGNED into its department, with an advisory on the audit trail,
+   * instead of refusing it a second time — operator ruling 2026-09-02,
+   * currently honoured for department 2 only.
+   *
+   * The gate's refusal is a QUESTION: `postFailureToolResult` turns it into a
+   * sentence the agent puts to the caller. Asked twice it is not a question,
+   * it is a call that ends with no ticket at all. Two of the six surgery
+   * requests lost on 2026-09-02 died exactly there.
+   *
+   * Set from the sending tool's own per-call refusal counter (`gateAttempts`,
+   * keyed on a real CallSid) and NEVER from a model argument. Sent on every
+   * submission it would switch the app's gate off, and department 2's provider
+   * fill has already been driven from ~98% to 49% once by a change that looked
+   * smaller than this one.
+   */
+  routingAskExhausted?: boolean;
   description: string;
   priority?: "low" | "normal" | "medium" | "high" | "urgent";
   callData?: CallData;
