@@ -16,6 +16,7 @@ import {
   assessTicketFiling,
   UNFILED_RUN_ALARM,
   OUTBOX_HELD_ALARM,
+  TRAFFIC_RECENCY_MS,
   type TicketFilingSnapshot,
 } from './ticketFilingHealth';
 
@@ -297,5 +298,80 @@ describe('the run plane needs live traffic to mean anything', () => {
 
   it('does not fire when there are no queue calls at all', () => {
     expect(assessTicketFiling(snapshot({ recentQueueCalls: [] })).stalled).toBe(false);
+  });
+});
+
+/**
+ * A RUN MUST NOT REACH ACROSS A CLOSED NIGHT — production, 2026-09-02, the
+ * SECOND time the same night's 17 calls fired this alarm.
+ *
+ * The recency bound above fixed when the run plane is allowed to speak. It did
+ * not fix what the run COUNTS. At 15:04 the queue lines reopened; by then three
+ * calls had come in and, entirely normally, none had filed a ticket — only
+ * about half of healthy queue calls do. The run walked straight back through
+ * the overnight closure and added last night's 17, reaching 20, and with the
+ * traffic now live the alarm fired again on an outage that had been over for
+ * fifteen hours.
+ *
+ * Measured before writing this: at 15:06 UTC on 2026-09-02 the Hub had
+ * `queue_calls_today: 3 | filed: 0 | newest_queue_call: 15:04:09`, and the
+ * merged recency fix returns `STALLED: true | run: 20` on exactly that shape.
+ *
+ * So the run is a run of calls that were arriving TOGETHER. A gap of an hour
+ * with no queue call at all is the lines being shut, and two calls either side
+ * of it are not consecutive in any sense the threshold was measured over — the
+ * run-length distribution (185, then 8, 7, 7, 6…) was measured within business
+ * hours, on calls minutes apart.
+ *
+ * This cannot hide 2026-08-31: that outage ran 185 calls over three hours and
+ * thirty-nine minutes, roughly one every seventy seconds, with no gap anywhere
+ * near an hour.
+ */
+describe('a run is calls arriving together, not calls either side of a closure', () => {
+  /** 2026-09-02 as it actually was: last night's tail, the night, this morning. */
+  function reopenedAfterABadNight(freshUnfiled: number) {
+    const nightGap = 15 * 60 * MIN;
+    const lastNight = calls(17, 20, NOW - nightGap);
+    const thisMorning: TicketFilingSnapshot['recentQueueCalls'] = [];
+    for (let i = 0; i < freshUnfiled; i++) {
+      thisMorning.push({ createdAtMs: NOW - i * 3 * MIN, hasTicket: false });
+    }
+    return [...thisMorning, ...lastNight];
+  }
+
+  it('does not count last night into this morning', () => {
+    const v = assessTicketFiling(snapshot({ recentQueueCalls: reopenedAfterABadNight(3) }));
+    expect(v.unfiledRun).toBe(3);
+    expect(v.stalled).toBe(false);
+  });
+
+  it('still fires when this morning is the one that is broken', () => {
+    // The control. Same closure behind it, but the live side is itself a run
+    // past the threshold — that is a real stoppage and must still be caught.
+    const v = assessTicketFiling(
+      snapshot({ recentQueueCalls: reopenedAfterABadNight(UNFILED_RUN_ALARM) }),
+    );
+    expect(v.unfiledRun).toBe(UNFILED_RUN_ALARM);
+    expect(v.stalled).toBe(true);
+  });
+
+  it('does not hide the outage it was built for', () => {
+    // 185 calls over 3h39m — one every ~71 seconds, no gap near an hour.
+    const outage: TicketFilingSnapshot['recentQueueCalls'] = [];
+    for (let i = 0; i < 185; i++) outage.push({ createdAtMs: NOW - i * 71_000, hasTicket: false });
+    outage.push({ createdAtMs: NOW - 185 * 71_000, hasTicket: true });
+    const v = assessTicketFiling(snapshot({ recentQueueCalls: outage }));
+    expect(v.stalled).toBe(true);
+    expect(v.unfiledRun).toBe(185);
+  });
+
+  it('breaks the run at the gap and not before it', () => {
+    const spaced = (gapMs: number) => [
+      { createdAtMs: NOW, hasTicket: false },
+      { createdAtMs: NOW - gapMs, hasTicket: false },
+      { createdAtMs: NOW - gapMs - MIN, hasTicket: false },
+    ];
+    expect(assessTicketFiling(snapshot({ recentQueueCalls: spaced(TRAFFIC_RECENCY_MS - MIN) })).unfiledRun).toBe(3);
+    expect(assessTicketFiling(snapshot({ recentQueueCalls: spaced(TRAFFIC_RECENCY_MS + MIN) })).unfiledRun).toBe(1);
   });
 });
