@@ -46,9 +46,11 @@
  * nothing could reset it. Left alone it does that every morning — the
  * "muted within a week" death this alarm was shaped to avoid.
  *
- * So the run plane speaks only while calls are arriving: see
- * `TRAFFIC_RECENCY_MS`. Filing has STOPPED is a claim about now, and it needs
- * a now to be about.
+ * So the run plane speaks only while calls are arriving, and the run itself
+ * stops at any hour-long gap between consecutive calls: see
+ * `TRAFFIC_RECENCY_MS`, which bounds both. Filing has STOPPED is a claim about
+ * now, and it needs a now to be about — and a run of calls that were arriving
+ * together, not two piles either side of a closed night.
  *
  * TWO PLANES, as BACKEND_HANDOFF.md:244-248 requires, both of them local to
  * the Operations Hub so the alarm never depends on the system it is watching:
@@ -104,19 +106,32 @@ export const UNFILED_RUN_ALARM = 12;
 export const OUTBOX_HELD_ALARM = 3;
 
 /**
- * How recent the newest queue call must be for the RUN plane to speak.
+ * An hour with no queue call at all. This bounds the run plane twice over:
+ *
+ *   - the newest queue call must be this fresh for the plane to speak, and
+ *   - the run stops at any gap this long between two consecutive calls.
  *
  * The run says "calls are arriving and leaving without a ticket". With no
  * calls arriving it is a statement about the past, and a frozen run from the
  * previous evening is exactly what fired at 12:30 on 2026-09-02 with nothing
  * wrong.
  *
+ * The gap half is the second half of that same morning, and it needed both.
+ * Recency alone fixed WHEN the plane speaks and not WHAT it counts: at 15:04
+ * the lines reopened, three ordinary calls came in — only about half of healthy
+ * queue calls file anything — and the run walked back through the closure,
+ * picked up last night's 17, reached 20 and fired on an outage fifteen hours
+ * dead. Two calls with a shut office between them are not consecutive in any
+ * sense the threshold was measured over; that distribution (185, then 8, 7, 7,
+ * 6…) is business-hours calls minutes apart.
+ *
  * An hour, for two reasons. Queue volume in business hours is roughly one call
  * every three minutes across the four lines, so sixty minutes of nothing is
  * already outside anything normal — and the 08-31 outage, the event this alarm
- * exists for, had calls arriving throughout: its newest call was always seconds
- * old, so this bound could never have hidden it. Nothing shorter buys anything;
- * anything longer starts to re-admit the overnight tail.
+ * exists for, had calls arriving throughout: 185 calls in three hours and
+ * thirty-nine minutes, one every seventy-one seconds, newest always seconds
+ * old. Neither half of this bound could have hidden it. Nothing shorter buys
+ * anything; anything longer starts to re-admit the overnight tail.
  *
  * This bounds ONLY the run plane. The outbox planes below are about requests
  * we are holding, which is equally true at 3am, and they still fire.
@@ -125,10 +140,17 @@ export const TRAFFIC_RECENCY_MS = 60 * 60 * 1000;
 
 /** Pure: no clock, no database, so the outage can be replayed against it. */
 export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFilingVerdict {
+  // Walk back from the newest call. A ticket ends the run, and so does an
+  // hour with no call between two links of it — see TRAFFIC_RECENCY_MS. Only
+  // the run stops there; the older calls stay in the snapshot and the outbox
+  // planes below still see everything.
   let unfiledRun = 0;
+  let previousCallAtMs: number | null = null;
   for (const call of snapshot.recentQueueCalls) {
     if (call.hasTicket) break;
+    if (previousCallAtMs !== null && previousCallAtMs - call.createdAtMs > TRAFFIC_RECENCY_MS) break;
     unfiledRun++;
+    previousCallAtMs = call.createdAtMs;
   }
 
   const filed = snapshot.recentQueueCalls.find((c) => c.hasTicket);
