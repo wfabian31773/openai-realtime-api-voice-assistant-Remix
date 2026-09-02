@@ -113,7 +113,9 @@ import {
   harvestCallerLine,
   renderKnownFacts,
   releaseLedger,
+  getLedger,
 } from "../services/callFactsLedger";
+import type { RuntimeCallIdentity } from "./callRecord";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
 
 /**
@@ -236,6 +238,11 @@ export interface VoiceCallRecord {
   /** CALLER/AGENT lines in spoken order — '' when nothing was said. */
   transcript: string;
   toolEvents: ToolEvent[];
+  /** Who the call established the caller to be, read from the call-facts
+   * ledger at teardown. Rides WITH the record so no caller has to remember
+   * to pass it — an unsupplied second argument is what left patient_name,
+   * patient_dob and patient_found NULL on every runtime row (#57). */
+  identity?: RuntimeCallIdentity;
   /** Agent utterances that completed. The turn count for telemetry. */
   agentTurns: number;
   /** Barge-ins: times the caller talked over the agent. */
@@ -1462,6 +1469,28 @@ export class VoiceCallBridge {
 
   private transferWaitExtraMs = 0;
 
+  /**
+   * Identity as the CALL established it, for call_logs.
+   *
+   * `patientFound` means "this call was matched to a patient record", never
+   * "this caller is that patient" — a phone match is a candidate to confirm,
+   * and Wayne's own number resolves to eight records in the mirror. So the
+   * ✓ marker follows identityVerified and nothing weaker, exactly as the old
+   * core writes it.
+   */
+  private identityFromLedger(): RuntimeCallIdentity {
+    const f = getLedger(this.deps.context.callSid);
+    if (!f) return { patientFound: false };
+    const name = `${f.firstName ?? f.matchedFirstName ?? ""} ${f.lastName ?? f.matchedLastName ?? ""}`.trim();
+    const matched = Boolean(f.identityVerified || f.personId || f.matchedFirstName || f.matchedLastName);
+    return {
+      patientFound: matched,
+      ...(name ? { patientName: name } : {}),
+      ...(name ? { callerName: f.identityVerified ? `${name} ✓` : name } : {}),
+      ...(f.dateOfBirth || f.matchedDob ? { patientDob: f.dateOfBirth ?? f.matchedDob } : {}),
+    };
+  }
+
   private teardown(outcome: CallOutcome): void {
     if (this.ended) return;
     this.ended = true;
@@ -1469,10 +1498,6 @@ export class VoiceCallBridge {
     // closing, the provider session dying as the stream ends — the caller
     // was moved to a human on purpose. That is the outcome.
     if (this.transferInFlight) outcome = "transferred";
-
-    // Per-call memory dies with the call. A CallSid is not reused, but a
-    // ledger that outlives its call is a leak with PHI in it.
-    releaseLedger(this.deps.context.callSid);
 
     if (this.finalFallbackTimer !== null) {
       this.clearTimer(this.finalFallbackTimer);
@@ -1510,6 +1535,7 @@ export class VoiceCallBridge {
     if (this.deps.persistCallRecord) {
       const persist = this.deps.persistCallRecord;
       const record: VoiceCallRecord = {
+        identity: this.identityFromLedger(),
         callSid: this.deps.context.callSid,
         streamSid: this.deps.context.streamSid,
         slug: this.deps.context.slug,
@@ -1536,6 +1562,11 @@ export class VoiceCallBridge {
         // Losing the record must never break teardown.
       });
     }
+
+    // Per-call memory dies with the call, and only AFTER the record has read
+    // it: releasing at the top of teardown — where this first sat — makes
+    // identityFromLedger return nothing, silently, on every call.
+    releaseLedger(this.deps.context.callSid);
 
     try {
       this.session.close();

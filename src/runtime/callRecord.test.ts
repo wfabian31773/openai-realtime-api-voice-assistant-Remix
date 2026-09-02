@@ -383,3 +383,62 @@ describe("a greeting-only call keeps its tail", () => {
     expect(row.transcriptWindowSeconds).toBe(16);
   });
 });
+
+/**
+ * THE UNSUPPLIED SECOND ARGUMENT — task #57.
+ *
+ * `persistRuntimeCall(record, identity = {})` took identity as its second
+ * parameter, and voiceRuntime.ts:855 called it with ONE argument. Every
+ * runtime row ever written therefore had patient_name, patient_dob and
+ * patient_found NULL, and nothing anywhere failed — the default made the
+ * omission look deliberate. GROK_MIGRATION_BASELINE.md lists phone-ID % as
+ * NOT USABLE as a cutover gate for exactly this reason.
+ *
+ * The fix is not "remember to pass it": identity now rides ON the record,
+ * so there is no second thing a caller can forget.
+ */
+describe("identity travels with the record", () => {
+  it("writes identity the record carries, with no second argument", async () => {
+    let written: Record<string, unknown> | null = null;
+    const ok = await persistRuntimeCall(
+      {
+        ...record(),
+        identity: { patientName: "Wayne Fabian", patientDob: "03/17/1973", patientFound: true, callerName: "Wayne Fabian ✓" },
+      },
+      undefined,
+      async (row) => {
+        written = row as unknown as Record<string, unknown>;
+      },
+    );
+    expect(ok).toBe(true);
+    expect(written!.patientName).toBe("Wayne Fabian");
+    expect(written!.patientDob).toBe("03/17/1973");
+    expect(written!.patientFound).toBe(true);
+    expect(written!.callerName).toBe("Wayne Fabian ✓");
+  });
+
+  it("an explicit identity argument still wins — the old call shape is intact", async () => {
+    let written: Record<string, unknown> | null = null;
+    await persistRuntimeCall(
+      { ...record(), identity: { patientName: "From the record" } },
+      { patientName: "Passed explicitly" },
+      async (row) => {
+        written = row as unknown as Record<string, unknown>;
+      },
+    );
+    expect(written!.patientName).toBe("Passed explicitly");
+  });
+
+  it("a record with no identity writes no identity columns", async () => {
+    // Absent must stay absent rather than becoming a false or an empty
+    // string: "" in patient_name is indistinguishable from a caller whose
+    // name we genuinely never got.
+    let written: Record<string, unknown> = {};
+    await persistRuntimeCall(record(), undefined, async (row) => {
+      written = row as unknown as Record<string, unknown>;
+    });
+    expect("patientName" in written).toBe(false);
+    expect("patientDob" in written).toBe(false);
+    expect("callerName" in written).toBe(false);
+  });
+});

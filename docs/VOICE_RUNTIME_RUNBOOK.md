@@ -141,10 +141,37 @@ about a lane from this test's clock.
 
 ## 5. Pointing a number
 
-Set the number's Voice webhook to `POST https://<host>/voice/<slug>`.
-Nothing else. The runtime answers with `<Connect><Stream>` plus a
-`<Redirect>` to `/voice/<slug>/after`, which speaks a controlled line if the
-runtime itself failed and hangs up cleanly otherwise.
+Set the number's Voice webhook to `POST https://<host>/voice/<slug>`. The
+runtime answers with `<Connect><Stream>` plus a `<Redirect>` to
+`/voice/<slug>/after`, which speaks a controlled line if the runtime itself
+failed and hangs up cleanly otherwise.
+
+Then set the **status callback** to `POST
+https://<host>/api/voice/status-callback`, events `completed`. That endpoint
+belongs to the old-core process, which is fine: it looks the row up by
+CallSid in the same `call_logs` table the runtime writes, and
+`openRuntimeCall` inserts that row at call OPEN — not at teardown — so the
+callback cannot arrive before there is something to update.
+
+**What actually depends on it, measured rather than assumed** (old-core
+inbound calls, 2026-08-30 to 09-02, n=1,202 completed):
+
+| column | populated | comes from |
+|---|---|---|
+| `call_disposition` | 1,185 / 1,202 (98.6%) | **the status callback** — set this or the column stays NULL |
+| `twilio_cost_cents` | 1,202 / 1,202 (100%) | NOT the callback. A Twilio REST pull on `retryTwilioCosts`, every 5 minutes, for any completed row with a CallSid and no cost that ended within 4 hours. Provider-agnostic, so runtime rows qualify unchanged. |
+| `answered_by` | 0 / 1,202 | outbound answering-machine detection. Never set on an inbound call on either transport — its absence on a runtime row is not a gap. |
+| `is_voicemail` | 0 / 1,202 | same. |
+
+So the earlier version of this section — "Nothing else" — cost you
+`call_disposition` and nothing more. It did not cost you cost.
+
+**Runtime pricing is duration-only, by design.** `grokSession.ts` captures no
+token usage, and `priceVoiceCall` checks the Grok branch FIRST for exactly
+that reason: a runtime row's token columns are NULL in precisely the way an
+un-reconciled OpenAI row's are, and the duration estimate cannot tell them
+apart. `GROK_COST_CENTS_PER_SECOND` is xAI's flat per-minute rate. Do not
+read a NULL token column on a runtime row as a missing reconciliation.
 
 Start with **one** number on **one** lane, and prefer a queue that is
 forwarded rather than a primary line.

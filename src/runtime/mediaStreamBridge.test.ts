@@ -12,7 +12,7 @@ import {
 } from "./mediaStreamBridge";
 import type { TwilioOutboundFrame } from "./twilioFrames";
 import type { BoundAgent } from "./agentBinding";
-import { clearAllLedgers } from "../services/callFactsLedger";
+import { clearAllLedgers, getLedger, seedLedger } from "../services/callFactsLedger";
 
 // Every bridge in this file answers as CA-test, and the call-facts ledger is
 // a module-level map keyed by CallSid. Without this, a date of birth
@@ -2202,5 +2202,99 @@ describe("the call-facts ledger on the runtime", () => {
     const h = makeBridge();
     expect(() => h.handlers().onCallerTranscript("   ", "item-1")).not.toThrow();
     expect(() => h.handlers().onResponseDone()).not.toThrow();
+  });
+});
+
+/**
+ * IDENTITY NEVER REACHED call_logs — task #57.
+ *
+ * RuntimeCallIdentity has existed since callRecord.ts was written and was
+ * never supplied: voiceRuntime called persistCall(record) with one argument,
+ * so identity defaulted to {} and patient_name, patient_dob and patient_found
+ * were NULL on every runtime row. GROK_MIGRATION_BASELINE.md already lists
+ * phone-ID % as NOT USABLE as a gate because of it.
+ *
+ * The source is the call-facts ledger (#56). It is the only thing on this
+ * transport that knows who the caller turned out to be, and it is already
+ * there — this is reading it at teardown, not a second identity mechanism.
+ *
+ * MEASURED on the old core, 2026-08-26 to 09-02, 2,160 calls: caller_name
+ * populated on 1,824 (84%), the verified marker on ONE, patient_dob on zero.
+ * So the runtime must write caller_name for the migration to be comparable
+ * at all, and the ✓ convention is carried over verbatim rather than invented.
+ */
+describe("identity onto the call record", () => {
+  it("carries the name and date of birth the call actually established", () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.handlers().onCallerTranscript("This is Wayne Fabian, March 17th 1973.", "item-1");
+    h.handlers().onResponseDone();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    const record = records[records.length - 1];
+    expect(record?.identity?.patientDob).toContain("March 17th 1973");
+  });
+
+  it("survives the ledger being released at teardown", () => {
+    // The ordering hazard #56 introduced: releaseLedger ran at the TOP of
+    // teardown, and the record is built at the bottom. Reading identity
+    // after the release returns nothing, silently, forever.
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.handlers().onCallerTranscript("March 17th 1973.", "item-1");
+    h.handlers().onResponseDone();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    expect(records[records.length - 1]?.identity).toBeDefined();
+    expect(records[records.length - 1]?.identity?.patientDob).toBeTruthy();
+  });
+
+  it("still releases the ledger — a call must not leave PHI behind", () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.handlers().onCallerTranscript("March 17th 1973.", "item-1");
+    h.handlers().onResponseDone();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    expect(getLedger("CA-test")).toBeUndefined();
+  });
+
+  it("does not claim a patient was found when the call established nobody", () => {
+    // patient_found true on a call that matched no record is the failure
+    // that makes the column useless as a gate. An empty ledger says so.
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.handlers().onCallerTranscript("Hi, are you open on Saturday?", "item-1");
+    h.handlers().onResponseDone();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    expect(records[records.length - 1]?.identity?.patientFound).toBe(false);
+  });
+
+  it("a phone match is a candidate to confirm, so the name carries no ✓", () => {
+    // Wayne's own number resolves to EIGHT records in the mirror. The ✓ is
+    // the old core's marker for identityVerified and nothing weaker.
+    //
+    // The name has to be put in the ledger here: harvestCallerLine does not
+    // extract names, and must not — "why are you trying to determine what a
+    // first name is? You'll never ever get it to work like that" (Wayne,
+    // and he was right). Names reach the ledger from the LLM's tool calls.
+    // An earlier version of this test relied on the harvester for the name,
+    // so `name` was always "", the callerName key was never emitted, and
+    // the test passed against a mutant that stamped ✓ on everything.
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    seedLedger("CA-test", { matchedFirstName: "Wayne", matchedLastName: "Fabian" });
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    const identity = records[records.length - 1]?.identity;
+    expect(identity?.callerName).toBe("Wayne Fabian");
+    expect(identity?.patientName).toBe("Wayne Fabian");
+    // Matched to a record, which is what patient_found means — not verified.
+    expect(identity?.patientFound).toBe(true);
+  });
+
+  it("and DOES carry the ✓ once identity is actually verified", () => {
+    // The control for the above. Without it, "never stamp ✓" passes.
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    seedLedger("CA-test", { firstName: "Wayne", lastName: "Fabian", identityVerified: true });
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    expect(records[records.length - 1]?.identity?.callerName).toBe("Wayne Fabian ✓");
   });
 });

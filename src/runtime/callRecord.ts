@@ -51,6 +51,18 @@ export interface RuntimeCallIdentity {
   patientName?: string | null;
   patientDob?: string | null;
   patientFound?: boolean;
+  /**
+   * The old core's column and the old core's convention, carried over
+   * verbatim so the two transports are comparable during a cutover: the
+   * display name, with " ✓" appended when identity was actually VERIFIED
+   * and never for a phone match alone.
+   *
+   * Measured on the old core over the week to 2026-09-02, 2,160 calls:
+   * caller_name populated on 1,824 (84%), the ✓ on ONE, patient_dob on
+   * zero. Without this column a runtime lane's rows cannot be compared
+   * with the baseline at all.
+   */
+  callerName?: string | null;
 }
 
 /** The exact `call_logs` shape this module writes. Kept explicit so a
@@ -94,6 +106,7 @@ export interface RuntimeCallLogRow {
   patientName?: string;
   patientDob?: string;
   patientFound?: boolean;
+  callerName?: string;
 }
 
 /**
@@ -263,6 +276,9 @@ export function toCallLogRow(
       ? { patientDob: identity.patientDob }
       : {}),
     ...(identity.patientFound !== undefined ? { patientFound: identity.patientFound } : {}),
+    ...(identity.callerName !== undefined && identity.callerName !== null
+      ? { callerName: identity.callerName }
+      : {}),
   };
 }
 
@@ -407,10 +423,15 @@ async function defaultUpsert(
 
 export async function persistRuntimeCall(
   record: VoiceCallRecord,
-  identity: RuntimeCallIdentity = {},
+  identity?: RuntimeCallIdentity,
   upsert: CallLogUpsert = defaultUpsert,
 ): Promise<boolean> {
-  const row = toCallLogRow(record, identity);
+  // Identity rides ON the record by default. It was an unsupplied SECOND
+  // ARGUMENT that made patient_name, patient_dob and patient_found NULL on
+  // every runtime row ever written: voiceRuntime called this with one
+  // argument and nothing anywhere failed. Travelling with the record means
+  // a caller cannot forget it — there is no second thing to pass.
+  const row = toCallLogRow(record, identity ?? record.identity ?? {});
   try {
     await upsert(row, toConflictUpdate(row));
     return true;
