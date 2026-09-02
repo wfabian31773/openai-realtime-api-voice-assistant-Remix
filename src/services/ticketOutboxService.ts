@@ -80,6 +80,20 @@ interface OutboxSendResult {
   ticketNumber?: string;
   error?: string;
   outboxId: string;
+  /**
+   * The far side READ the payload and refused it, so the row went straight to
+   * dead_letter and NOTHING will retry it — found by Codex on PR #244.
+   *
+   * Without this the caller cannot tell a permanent refusal from a transport
+   * failure, and `SyncAgentService` answered both with "your request has been
+   * recorded and will be processed shortly". On a terminal refusal that is a
+   * promise nothing can keep: no retry is scheduled and the identical payload
+   * cannot succeed. That path carries the answering service, no-IVR and
+   * after-hours — the line that takes every overnight call.
+   */
+  terminal?: boolean;
+  /** The HTTP status behind a terminal refusal, for the caller's message. */
+  statusCode?: number;
 }
 
 export class TicketOutboxService {
@@ -302,7 +316,8 @@ export class TicketOutboxService {
           `[TICKET OUTBOX] ☠ REFUSED (HTTP ${response.statusCode}) — dead-lettering ${outboxId} ` +
             `without retrying: ${error}`,
         );
-        return await TicketOutboxService.markFailed(outboxId, entry.retryCount, error, true);
+        const refused = await TicketOutboxService.markFailed(outboxId, entry.retryCount, error, true);
+        return { ...refused, statusCode: response.statusCode };
       }
       return await TicketOutboxService.markFailed(outboxId, entry.retryCount, error);
     } catch (err) {
@@ -449,7 +464,10 @@ export class TicketOutboxService {
       console.warn(`[TICKET OUTBOX] Retry ${newRetryCount}/${MAX_RETRIES} scheduled for ${outboxId} at ${nextRetryAt?.toISOString()}`);
     }
 
-    return { success: false, error, outboxId };
+    // `terminal` travels with the result: a dead letter reached by refusal is a
+    // different fact from one reached by exhausting twelve retries, and only
+    // the caller still holding the line can act on it.
+    return { success: false, error, outboxId, terminal: terminal || undefined };
   }
 
   static async processRetries(): Promise<number> {

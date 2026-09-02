@@ -357,3 +357,59 @@ describe('what the atomic claim is allowed to pick up', () => {
     expect(sendingArm).not.toMatch(/dueNow/);
   });
 });
+
+/**
+ * A REFUSAL MUST REACH THE CALLER WHO IS STILL ON THE LINE — Codex, PR #244.
+ *
+ * `attemptSend` dead-letters a 400/422 immediately and nothing retries it. But
+ * it returned the same generic failed result as a transport failure, so
+ * `SyncAgentService` could not tell them apart and answered both with "your
+ * request has been recorded and will be processed shortly" — a promise nothing
+ * can keep, on the path that carries the answering service, no-IVR and
+ * after-hours.
+ *
+ * The verdict now travels with the result. What the caller HEARS is asserted in
+ * syncAgentService's own tests; this pins that the fact gets out of here.
+ */
+describe('the terminal verdict leaves the outbox with the result', () => {
+  it('marks a refusal terminal and carries its status', async () => {
+    createTicket.mockResolvedValue({
+      success: false,
+      statusCode: 400,
+      error: 'Missing required information: surgeon',
+    });
+    updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER), { retryCount: 0 }), undefined);
+
+    const res = await TicketOutboxService.attemptSend('ob-1');
+
+    expect(res.success).toBe(false);
+    expect(res.terminal).toBe(true);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('leaves a transport failure UNmarked, so it is still reported as retrying', async () => {
+    // The 08-31 shape: HTTP 200 with a non-JSON body, no status at all. This
+    // one genuinely is retried, and the caller genuinely can be told it was
+    // recorded — so `terminal` must stay absent.
+    createTicket.mockResolvedValue({ success: false, error: 'Invalid JSON response: 200' });
+    updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER), { retryCount: 0 }), undefined);
+
+    const res = await TicketOutboxService.attemptSend('ob-1');
+
+    expect(res.success).toBe(false);
+    expect(res.terminal).toBeUndefined();
+  });
+
+  it('does not mark an exhausted-retry dead letter as terminal', async () => {
+    // Twelve failed attempts and a refusal are both dead letters, and they are
+    // NOT the same fact: nobody is still on the line for the twelfth retry, and
+    // that row was never refused — it was never answered.
+    createTicket.mockResolvedValue({ success: false, error: 'Invalid JSON response: 200' });
+    updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER), { retryCount: 11 }), undefined);
+
+    const res = await TicketOutboxService.attemptSend('ob-1');
+
+    expect(setPayloads.find((p) => p.status === 'dead_letter')).toBeTruthy();
+    expect(res.terminal).toBeUndefined();
+  });
+});
