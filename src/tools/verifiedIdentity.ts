@@ -35,6 +35,8 @@
  * for the sake of a twenty-line hand-off.
  */
 
+import { isTwilioCallSid } from './callSid';
+
 export interface VerifiedIdentity {
   firstName: string;
   lastName: string;
@@ -72,9 +74,23 @@ function sweep(now: number): void {
 /**
  * Remember a match the lookup was CERTAIN about.
  *
- * Silently does nothing without a CallSid, without a date of birth, or without
- * both names — an entry that cannot be matched back to a person is worse than
- * no entry, because the whole guard on reading it is the name.
+ * Silently does nothing without a REAL CallSid, without a date of birth, or
+ * without both names — an entry that cannot be matched back to a person is
+ * worse than no entry, because the whole guard on reading it is the name.
+ *
+ * THE KEY MUST BE A REAL CALLSID, not merely a non-empty string — found by
+ * Codex on PR #244, and it is the most dangerous thing on this branch.
+ * `call_sid` is a declared property on the filing tools, so when the injected
+ * value is missing the model supplies a sentinel: "unknown", "latest", "none".
+ * A truthiness check accepts those, and every call that emits the same
+ * sentinel then shares one map entry. Two callers named the same thing — a
+ * father and son, which these lines get constantly — would be one key, and
+ * `verifiedDobFor` would hand the second caller the FIRST caller's date of
+ * birth for a ticket filed in their name. The name guard cannot catch it,
+ * because the names match; that is precisely when it fires.
+ *
+ * A call with no usable SID keeps the old behaviour: nothing is remembered,
+ * and the agent asks for the date of birth out loud.
  */
 export function rememberVerifiedIdentity(
   callSid: string | undefined,
@@ -83,7 +99,7 @@ export function rememberVerifiedIdentity(
   const firstName = norm(identity.firstName);
   const lastName = norm(identity.lastName);
   const dateOfBirth = (identity.dateOfBirth ?? '').trim();
-  if (!callSid || !firstName || !lastName || !dateOfBirth) return;
+  if (!isTwilioCallSid(callSid) || !firstName || !lastName || !dateOfBirth) return;
   const now = Date.now();
   sweep(now);
   verified.delete(callSid);
@@ -100,7 +116,10 @@ export function verifiedDobFor(
   firstName: string,
   lastName: string,
 ): string | undefined {
-  if (!callSid) return undefined;
+  // Validated on the READ as well as the write, not because a sentinel could
+  // be in the map (the write refuses it) but so the guard survives someone
+  // later relaxing the write. Both ends state the same rule.
+  if (!isTwilioCallSid(callSid)) return undefined;
   const entry = verified.get(callSid);
   if (!entry) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;

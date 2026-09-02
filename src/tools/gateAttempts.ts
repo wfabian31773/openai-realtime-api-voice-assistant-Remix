@@ -26,6 +26,8 @@ interface Attempt {
   at: number;
 }
 
+import { isTwilioCallSid } from './callSid';
+
 const attempts = new Map<string, Attempt>();
 
 /** Longer than any call, short enough that the map cannot become a leak. */
@@ -57,14 +59,22 @@ function sweep(now: number): void {
 /**
  * How many times this call has already been refused for this field.
  *
- * Returns 0 when there is no CallSid to key on, which keeps the old
+ * Returns 0 when there is no REAL CallSid to key on, which keeps the old
  * ask-every-time behaviour for those calls rather than letting one caller's
  * answer count for another's. Since 2026-09-01 a real CallSid reaches the
  * tools on every call (the model can no longer overwrite it), so that path is
  * the exception it looks like.
+ *
+ * A SENTINEL IS NOT A CALL — found by Codex on PR #244. `call_sid` is a
+ * declared property, so a model with no injected value supplies "unknown" or
+ * "latest", and a truthiness check makes every such call share one counter.
+ * One optical caller refused for a missing office would then make the NEXT
+ * sentinel-bearing call look already-asked, so it would skip the question and
+ * file unassigned without ever asking. Validating the key restores the
+ * documented ask-every-time fallback for those calls.
  */
 export function gateRefusalsSoFar(callSid: string | undefined, tool: string, field: string): number {
-  if (!callSid) return 0;
+  if (!isTwilioCallSid(callSid)) return 0;
   const entry = attempts.get(key(callSid, tool, field));
   if (!entry) return 0;
   if (Date.now() - entry.at > TTL_MS) return 0;
@@ -73,7 +83,7 @@ export function gateRefusalsSoFar(callSid: string | undefined, tool: string, fie
 
 /** Record that we just refused this call for this field. Returns the new count. */
 export function noteGateRefusal(callSid: string | undefined, tool: string, field: string): number {
-  if (!callSid) return 0;
+  if (!isTwilioCallSid(callSid)) return 0;
   const now = Date.now();
   sweep(now);
   const k = key(callSid, tool, field);

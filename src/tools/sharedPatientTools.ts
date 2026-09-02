@@ -389,9 +389,11 @@ export function str(v: unknown): string {
  * those sentinels would key on the literal string instead of the call, so a
  * second caller's retry could read back a stranger's ticket number.
  */
-export function isTwilioCallSid(v: string | undefined | null): v is string {
-  return typeof v === 'string' && /^CA[0-9a-f]{32}$/i.test(v);
-}
+// The definition moved to `./callSid` so `gateAttempts` and `verifiedIdentity`
+// can validate their map keys without importing this module (which pulls in
+// the registry and every queue tool). Re-exported here so the four filing
+// tools keep their single import line and there is still ONE definition.
+export { isTwilioCallSid } from './callSid';
 
 // Re-exported so the four queue tools only need one import line from here,
 // not a second import path into `utils/phone.ts`. See that file for what it

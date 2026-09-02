@@ -51,26 +51,15 @@ export interface DurableCreateResult extends CreateTicketResponse {
 
 /**
  * A REFUSAL IS NOT AN OUTAGE, and putting one in the outbox would be the worse
- * half of this module.
+ * half of this module: it would fill with requests that can never send, trip
+ * the filing alarm's outbox plane continuously, and tell the caller their
+ * request was recorded when the server had refused it.
  *
- * Measured over the 14 days to 2026-09-01, create-ticket answered 400 to 664
- * POSTs from the queue lines — a fifth of everything they sent. 602 of those
- * were one message, "Missing required information: surgeon", across 181
- * surgery calls: roughly three identical doomed POSTs per call, because the
- * tool reports `retryable: true` for every failure and the model obliges. The
- * most recent was minutes before this was written.
- *
- * Capturing those into the outbox would fill it with requests that can never
- * send, trip the filing alarm's outbox plane continuously, and tell the caller
- * their request was recorded when it was refused. So a 4xx is terminal and
- * stops here.
- *
- * 408 and 429 are the exceptions and are treated as transport: the server is
- * saying "not now", which is precisely what retrying is for.
+ * The rule itself now lives in `./terminalRefusal`, because the outbox worker
+ * re-sends these same payloads and needs the identical classification — see
+ * that file.
  */
-function isTerminalRefusal(status?: number): boolean {
-  return typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429;
-}
+import { isTerminalRefusal } from './terminalRefusal';
 
 /**
  * The ticketing app's hard-requires, mapped to whatever the INVOKING TOOL

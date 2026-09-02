@@ -46,6 +46,8 @@ const SENDING_LEASE_TIMEOUT_MS = 120_000;
  * The discriminator lives inside the jsonb payload rather than in a new column
  * so that no migration stands between this and a deploy.
  */
+import { isTerminalRefusal } from './terminalRefusal';
+
 export const CREATE_TICKET_PAYLOAD_KIND = 'create_ticket_v1';
 
 export interface CreateTicketOutboxPayload {
@@ -260,6 +262,28 @@ export class TicketOutboxService {
       }
 
       const error = response.error || 'API returned success=false with no ticket number';
+      /**
+       * THE FAR SIDE READ IT AND SAID NO — do not spend twelve retries on that.
+       *
+       * Found by Codex on PR #244. `createTicketDurable` already refuses to
+       * queue a 4xx, but a payload can still be HOLDING a permanent refusal
+       * here: it was captured during a transport outage (no status at all),
+       * and only once the far side recovers does it answer "Missing required
+       * information: surgeon". Retrying identical bytes cannot change that.
+       *
+       * Two costs, and the second is the one that matters. The row sat for
+       * ~3.5 hours of backoff before dead-lettering; and while fewer than
+       * three rows are held, the filing alarm's outbox plane stays quiet for
+       * exactly that long — so the signal that would have named the problem
+       * arrives after the outage it was built to catch.
+       */
+      if (isTerminalRefusal(response.statusCode)) {
+        console.error(
+          `[TICKET OUTBOX] ☠ REFUSED (HTTP ${response.statusCode}) — dead-lettering ${outboxId} ` +
+            `without retrying: ${error}`,
+        );
+        return await TicketOutboxService.markFailed(outboxId, entry.retryCount, error, true);
+      }
       return await TicketOutboxService.markFailed(outboxId, entry.retryCount, error);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -373,9 +397,12 @@ export class TicketOutboxService {
     outboxId: string,
     currentRetryCount: number,
     error: string,
+    /** The server refused the payload itself. Retrying cannot change that, so
+     *  it goes straight to dead_letter regardless of attempts remaining. */
+    terminal = false,
   ): Promise<OutboxSendResult> {
     const newRetryCount = currentRetryCount + 1;
-    const isDeadLetter = newRetryCount >= MAX_RETRIES;
+    const isDeadLetter = terminal || newRetryCount >= MAX_RETRIES;
     const nextRetryAt = isDeadLetter
       ? null
       : new Date(
@@ -394,8 +421,10 @@ export class TicketOutboxService {
       })
       .where(eq(ticketOutbox.id, outboxId));
 
-    if (isDeadLetter) {
+    if (isDeadLetter && !terminal) {
       console.error(`[TICKET OUTBOX] ☠ Dead letter after ${MAX_RETRIES} retries: ${outboxId} - ${error}`);
+    } else if (isDeadLetter) {
+      // The refusal was already logged with its status at the call site.
     } else {
       console.warn(`[TICKET OUTBOX] Retry ${newRetryCount}/${MAX_RETRIES} scheduled for ${outboxId} at ${nextRetryAt?.toISOString()}`);
     }

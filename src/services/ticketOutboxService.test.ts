@@ -235,3 +235,73 @@ describe('the retry worker', () => {
     expect(createTicket).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * THE OUTBOX MUST NOT SPEND TWELVE RETRIES ON A "NO" — Codex, PR #244.
+ *
+ * `createTicketDurable` already refuses to QUEUE a 4xx. But a payload can be
+ * holding a permanent refusal all the same: it was captured during a transport
+ * outage, when there was no status at all, and only once the far side recovers
+ * does it answer "Missing required information: surgeon". Identical bytes,
+ * identical answer, twelve times.
+ *
+ * Two costs, and the second is the one that matters. The row sits ~3.5 hours
+ * before dead-lettering; and while fewer than three rows are held the filing
+ * alarm's outbox plane stays quiet for exactly that long, so the signal that
+ * would have named the problem arrives after the outage it exists to catch.
+ *
+ * 408 and 429 stay retryable — the server is saying "not now", which is what
+ * retrying is for.
+ */
+describe('a refusal from the far side is not retried', () => {
+  it('dead-letters a 400 immediately instead of scheduling a retry', async () => {
+    createTicket.mockResolvedValue({
+      success: false,
+      statusCode: 400,
+      error: 'Missing required information: surgeon',
+    });
+    updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER), { retryCount: 0 }), undefined);
+
+    await TicketOutboxService.attemptSend('ob-1');
+
+    const written = setPayloads.find((p) => p.status === 'dead_letter' || p.status === 'failed');
+    expect(written?.status).toBe('dead_letter');
+    // No next attempt is scheduled: there is nothing to wait for.
+    expect(written?.nextRetryAt).toBeNull();
+  });
+
+  it('leaves the payload intact so it can be replayed by hand', async () => {
+    createTicket.mockResolvedValue({ success: false, statusCode: 400, error: 'Missing required information: office' });
+    updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER), { retryCount: 0 }), undefined);
+
+    await TicketOutboxService.attemptSend('ob-1');
+
+    const written = setPayloads.find((p) => p.status === 'dead_letter');
+    expect(written).toBeTruthy();
+    // A dead letter is a request that still needs filing, not a discarded one.
+    expect(written!.payload).toBeUndefined(); // the write never touches it
+  });
+
+  it.each([408, 429])('still retries %i — that one means "not now"', async (status) => {
+    createTicket.mockResolvedValue({ success: false, statusCode: status, error: 'slow down' });
+    updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER), { retryCount: 0 }), undefined);
+
+    await TicketOutboxService.attemptSend('ob-1');
+
+    const written = setPayloads.find((p) => p.status === 'failed' || p.status === 'dead_letter');
+    expect(written?.status).toBe('failed');
+    expect(written?.nextRetryAt).toBeInstanceOf(Date);
+  });
+
+  it('still retries a transport failure that carries no status at all', async () => {
+    // The 08-31 shape: HTTP 200 with a body that is not JSON. No statusCode,
+    // so nothing is known about whether the far side read the payload.
+    createTicket.mockResolvedValue({ success: false, error: 'Invalid JSON response: 200' });
+    updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER), { retryCount: 0 }), undefined);
+
+    await TicketOutboxService.attemptSend('ob-1');
+
+    const written = setPayloads.find((p) => p.status === 'failed' || p.status === 'dead_letter');
+    expect(written?.status).toBe('failed');
+  });
+});

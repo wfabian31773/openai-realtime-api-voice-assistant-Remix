@@ -179,11 +179,33 @@ export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot |
     const { db } = await import('../db');
     const { sql } = await import('drizzle-orm');
 
+    /**
+     * A CALL STILL ON THE LINE HAS NOT "ARRIVED AND LEFT" — found by Codex on
+     * PR #244, and it would have fired on the first busy morning.
+     *
+     * `voiceAgentRoutes.ts:2571` creates the row at call START with
+     * `status: 'in_progress'`, and it becomes 'completed' at the end. This
+     * query takes the newest 40 rows, so during business hours every call
+     * currently on the line is in that sample — and none of them can have a
+     * ticket yet, because their filing tool has not run. Five concurrent calls
+     * on top of the worst NORMAL run of eight completed non-filing calls is
+     * thirteen, past the threshold of twelve, and the alarm cries outage while
+     * nothing whatsoever is wrong.
+     *
+     * 'completed' specifically, not "not in-flight": the run-length
+     * distribution the threshold was derived from (185 once, then 8, 7, 7, 6…)
+     * was measured over a population that is 100% 'completed' — there is not a
+     * single row of any other status in fourteen days. Widening to 'failed',
+     * 'no_answer' or 'busy' would apply a threshold to a population it was
+     * never measured on, which is the trap `.agents/memory/measurement-traps.md`
+     * exists for. Narrowing to what was measured keeps the number honest.
+     */
     const calls = await db.execute(sql`
       SELECT (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_ms,
              (ticket_number IS NOT NULL) AS has_ticket
       FROM call_logs
       WHERE agent_used IN ('optical', 'surgery', 'tech', 'records')
+        AND status = 'completed'
       ORDER BY created_at DESC
       LIMIT ${LOOKBACK_CALLS}
     `);

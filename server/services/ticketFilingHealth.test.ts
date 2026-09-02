@@ -170,3 +170,56 @@ describe('what the snapshot query is allowed to forget', () => {
     expect(normalise(theirs)).toContain("INTERVAL '6 hours'");
   });
 });
+
+/**
+ * A CALL STILL ON THE LINE HAS NOT ARRIVED AND LEFT — Codex, PR #244.
+ *
+ * `voiceAgentRoutes.ts:2571` creates the call_logs row at call START with
+ * `status: 'in_progress'`; it becomes 'completed' at the end. The snapshot
+ * takes the newest 40 rows, so without a status filter every call currently on
+ * the line is counted as one that filed nothing — and none of them CAN have a
+ * ticket yet, because the filing tool has not run.
+ *
+ * Five concurrent calls on a busy morning, on top of the worst NORMAL run of
+ * eight completed non-filing calls, is thirteen — past the threshold of twelve.
+ * The alarm cries outage while nothing is wrong, and the Observatory banner
+ * goes red with it.
+ *
+ * 'completed' exactly, and not "anything not in-flight": the run-length
+ * distribution the threshold came from was measured over a population that is
+ * 100% 'completed' — not one row of any other status exists in fourteen days.
+ * Widening it would apply the number to a population it was never measured on.
+ */
+describe('which calls the alarm is allowed to count', () => {
+  const source = readFileSync(new URL('./ticketFilingHealth.ts', import.meta.url), 'utf8');
+  const callsQuery = source.slice(source.indexOf('FROM call_logs'), source.indexOf('LIMIT ${LOOKBACK_CALLS}'));
+
+  it('counts only calls that have finished', () => {
+    expect(callsQuery).toMatch(/status = 'completed'/);
+  });
+
+  it('restricts by equality, so no in-flight status can slip through', () => {
+    // Deliberately not `not.toMatch(/in_progress/)`: that string was never in
+    // the query, so such a test passes whether or not the fix is present — it
+    // survived a mutation that removed the filter entirely. An equality on
+    // 'completed' is the assertion with teeth, because every other status is
+    // excluded by construction rather than by enumeration.
+    expect(callsQuery).toMatch(/AND\s+status = 'completed'/);
+    expect(callsQuery).not.toMatch(/status\s*(!=|<>|NOT IN)/i);
+  });
+
+  it('is the same restriction the Observatory banner uses', () => {
+    // Two copies of one rule is how a banner goes red while the alarm is green.
+    //
+    // ANCHORED ON `AS has_ticket`, which appears exactly once in that file.
+    // The first version of this test sliced from `FROM call_logs` — which
+    // occurs SIXTEEN times in queries.ts — so it read an unrelated query and
+    // passed no matter what. It only came out because removing the filter from
+    // the Observatory copy failed to redden anything.
+    const observatory = readFileSync(new URL('../observatory/queries.ts', import.meta.url), 'utf8');
+    const anchor = observatory.indexOf('AS has_ticket');
+    expect(anchor).toBeGreaterThan(-1);
+    const theirs = observatory.slice(anchor, observatory.indexOf('LIMIT 40`', anchor));
+    expect(theirs.replace(/\s+/g, ' ')).toContain("status = 'completed'");
+  });
+});

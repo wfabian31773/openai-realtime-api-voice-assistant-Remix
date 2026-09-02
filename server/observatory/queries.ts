@@ -1017,10 +1017,17 @@ export async function todayOverview(): Promise<TodayOverview> {
   let ticketFiling: TicketFilingVerdict | null = null;
   try {
     const recent = await pool.query(
+      // `status = 'completed'` matches readTicketFilingSnapshot and has to stay
+      // that way. The row is created at call START as 'in_progress', so without
+      // it every call currently on the line counts as one that filed nothing —
+      // a busy morning alone would paint this banner red. See the long note in
+      // ticketFilingHealth.ts for why the filter is 'completed' exactly and not
+      // "anything not in-flight".
       `SELECT (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_ms,
               (ticket_number IS NOT NULL) AS has_ticket
          FROM call_logs
         WHERE agent_used IN ('optical', 'surgery', 'tech', 'records')
+          AND status = 'completed'
         ORDER BY created_at DESC
         LIMIT 40`,
     );
