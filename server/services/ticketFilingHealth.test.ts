@@ -223,3 +223,79 @@ describe('which calls the alarm is allowed to count', () => {
     expect(theirs.replace(/\s+/g, ' ')).toContain("status = 'completed'");
   });
 });
+
+/**
+ * SILENCE FREEZES THE RUN — found in production on 2026-09-02, the morning
+ * this alarm first ran live, and it is a false claim in this file's own header.
+ *
+ * That header says a run of calls "cannot be tripped by silence, which is the
+ * failure mode every time-based version of this has." Wrong, and the way it is
+ * wrong is the opposite of what I was guarding against. Silence does not
+ * manufacture unfiled calls — it PRESERVES a run that already exists, because
+ * only a call that files a ticket can reset it, and no calls arrive.
+ *
+ * What happened: the ticketing app wedged 23:25–23:58 on 2026-09-01 and 17
+ * queue calls timed out unfiled. The queue lines then closed for the night.
+ * At 12:30 the next day — with the outage twelve hours over, the app healthy
+ * and not one queue call since — the alarm fired, emailed the operator, and
+ * kept re-firing every five minutes because nothing could reset it until the
+ * lines reopened at 14:00.
+ *
+ * Left alone this fires every single morning on the tail of the previous
+ * evening, which is the "muted within a week" death the header claims to
+ * avoid.
+ *
+ * The fix is to say what the run plane can actually speak to: filing has
+ * STOPPED only if calls are still arriving. If the newest queue call is stale,
+ * there is no live traffic and this plane has nothing to report — the outbox
+ * planes are unaffected and still fire, and they are the ones that should
+ * carry an overnight problem.
+ */
+describe('the run plane needs live traffic to mean anything', () => {
+  it('does not fire when the whole run is hours old and the lines are quiet', () => {
+    // The exact production shape: 17 unfiled, newest of them 12 hours ago.
+    const twelveHours = 12 * 60 * MIN;
+    const v = assessTicketFiling(
+      snapshot({ recentQueueCalls: calls(17, 20, NOW - twelveHours) }),
+    );
+    expect(v.stalled).toBe(false);
+    // The count is still reported — it is true, and staff may want it.
+    expect(v.unfiledRun).toBe(17);
+  });
+
+  it('still fires on the same run while calls are arriving', () => {
+    // 2026-08-31: filing stopped and calls kept coming. Newest is seconds old,
+    // so recency never protected that outage and must not now.
+    const v = assessTicketFiling(snapshot({ recentQueueCalls: calls(17, 20) }));
+    expect(v.stalled).toBe(true);
+    expect(v.reason).toContain('17 queue calls in a row');
+  });
+
+  it('fires right up to the recency boundary and not past it', () => {
+    const justInside = assessTicketFiling(
+      snapshot({ recentQueueCalls: calls(17, 20, NOW - 50 * MIN) }),
+    );
+    expect(justInside.stalled).toBe(true);
+
+    const justOutside = assessTicketFiling(
+      snapshot({ recentQueueCalls: calls(17, 20, NOW - 70 * MIN) }),
+    );
+    expect(justOutside.stalled).toBe(false);
+  });
+
+  it('leaves the outbox planes alone — those must still fire overnight', () => {
+    // A dead letter is a request we hold and have not filed. That is true at
+    // 3am with no traffic, and it is the plane that should carry it.
+    const old = calls(17, 20, NOW - 12 * 60 * MIN);
+    expect(
+      assessTicketFiling(snapshot({ recentQueueCalls: old, outboxDeadLetter: 1 })).stalled,
+    ).toBe(true);
+    expect(
+      assessTicketFiling(snapshot({ recentQueueCalls: old, outboxPending: OUTBOX_HELD_ALARM })).stalled,
+    ).toBe(true);
+  });
+
+  it('does not fire when there are no queue calls at all', () => {
+    expect(assessTicketFiling(snapshot({ recentQueueCalls: [] })).stalled).toBe(false);
+  });
+});
