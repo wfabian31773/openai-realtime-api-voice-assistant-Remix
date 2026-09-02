@@ -1295,6 +1295,17 @@ export class VoiceCallBridge {
     // A termination the guards allowed is already arming the hangup on
     // the goodbye's mark; a follow-up would speak over that gate.
     if (!this.endRequested) {
+      // FACTS FIRST, and this is the turn that most needs them — Codex,
+      // PR #250. A tool still awaiting I/O when its carrying response ended
+      // had its ledger pushed BEFORE it wrote anything, and the follow-up
+      // was requested straight from toolCallSettled with no second push. So
+      // the very turn after a successful verification could go out without
+      // the verified identity in it, and ask for the date of birth again —
+      // the exact failure this whole ledger exists to stop.
+      //
+      // Still at a response boundary: nothing is open here, or the guard
+      // above returned.
+      this.pushKnownFacts();
       this.session.requestResponse();
       // The follow-up is a response owed ANEW: it gets its own window,
       // not whatever remains of the tool's (Codex review, PR #227
