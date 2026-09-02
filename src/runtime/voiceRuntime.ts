@@ -141,6 +141,7 @@ import {
   RECORDING_STATUS_PATH,
   createRecordingStarter,
   handleRecordingStatus,
+  type RecordingStarter,
   type RecordingStatusBody,
 } from "./callRecording";
 import {
@@ -150,6 +151,7 @@ import {
   VOICE_STREAM_PATH,
   type WebhookRequest,
   type WebhookResponse,
+  checkTwilioSignature,
 } from "./voiceWebhook";
 import {
   computeRuntimeReadiness,
@@ -255,6 +257,8 @@ export interface VoiceRuntimeOptions {
   resolveGreeting?: (slug: string) => Promise<string | null>;
   /** Opens the call_logs row. Injected for tests. */
   openCallRow?: CallLogInsert;
+  /** Test seam. Production builds one from env — see createRecordingStarter. */
+  startRecording?: RecordingStarter;
   /** Persists the finished call. Injected for tests. */
   persistCall?: (record: VoiceCallRecord) => Promise<boolean>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
@@ -386,7 +390,25 @@ export function mountVoiceRuntime(
    * call-level recording. See handleRecordingStatus.
    */
   app.post(RECORDING_STATUS_PATH, (req: Request, res: Response) => {
-    const result = handleRecordingStatus(toWebhookRequest(req).body as RecordingStatusBody);
+    // AUTHENTICATE BEFORE WRITING. This endpoint is public and its only input
+    // is a CallSid and a URL, so without this anyone holding a CallSid could
+    // POST `RecordingStatus=completed` with a RecordingUrl of their choosing
+    // and overwrite the staff-facing recording link on a real patient's call
+    // (Codex, PR #247). Every other runtime Twilio webhook already gates on
+    // this; this one was the exception.
+    //
+    // Still always 200 — Twilio retries any non-2xx, and a retry storm from a
+    // caller that can never authenticate is worse than a dropped callback.
+    const webhookReq = toWebhookRequest(req);
+    const sig = checkTwilioSignature(webhookReq, env);
+    if (sig !== "valid") {
+      console.warn(
+        `[RUNTIME RECORDING] ✗ recording-status callback REJECTED (${sig}) — not writing anything.`,
+      );
+      res.status(200).type("text/plain").send("");
+      return;
+    }
+    const result = handleRecordingStatus(webhookReq.body as RecordingStatusBody);
     console.log(result.log);
     if (result.persist) {
       // Fire-and-forget: Twilio gets its 200 either way, and persistRecordingUrl
@@ -455,7 +477,11 @@ export function mountVoiceRuntime(
    * health check — and readiness already refuses to take calls without the
    * account sid, so a live call always has the means to record.
    */
-  const startRecording = createRecordingStarter({ env, log: (line) => console.log(line) });
+  // Injectable for the same reason createTransport is: without a seam the
+  // start-frame trigger cannot be observed, and a mutation that deletes the
+  // call entirely reddens nothing (found by mutation check, PR #247).
+  const startRecording =
+    options.startRecording ?? createRecordingStarter({ env, log: (line) => console.log(line) });
 
   app.post("/voice/:slug", (req: Request, res: Response) => {
     const slug = String(req.params.slug ?? "");
@@ -464,7 +490,6 @@ export function mountVoiceRuntime(
       handleVoiceWebhook(slug, toWebhookRequest(req), {
         env,
         registry,
-        startRecording,
         // A lane the runtime has already served is known available. An
         // unseen slug is accepted here and resolved at start-frame time:
         // the alternative is awaiting the agent tree inside Twilio's
@@ -607,6 +632,33 @@ export function mountVoiceRuntime(
 
     async function startCall(entry: CallEntry, streamSid: string): Promise<void> {
       const startedAtMs = Date.now();
+      // RECORDING STARTS HERE, not in the webhook.
+      //
+      // An inbound call is not `in-progress` until Twilio has received and
+      // begun executing the TwiML, and the webhook returns that TwiML AFTER
+      // its handler body runs — so a `recordings.create` issued there raced
+      // the answer and lost, rejected with 21220, leaving the greeting's
+      // recording disclosure false on every call (Codex, PR #247). This
+      // frame is Twilio telling us it is executing that TwiML, so the call
+      // is live by definition.
+      //
+      // Guarded even though the starter is documented as non-throwing: a
+      // caller must not lose a call over a recording.
+      if (entry.host) {
+        try {
+          startRecording(entry.callSid, entry.host);
+        } catch (error) {
+          console.error(
+            `[RUNTIME RECORDING] ✗ starter threw for ${entry.callSid} — continuing the call:`,
+            error,
+          );
+        }
+      } else {
+        console.error(
+          `[RUNTIME RECORDING] ✗ no host on the registry entry for ${entry.callSid} — ` +
+            `NOT recording, and the greeting says we are.`,
+        );
+      }
       /** Filled in when the call_logs row lands; read through the metadata
        * getter above for the rest of the call. */
       let callLogId: string | undefined;

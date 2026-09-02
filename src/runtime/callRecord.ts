@@ -464,10 +464,23 @@ export async function persistRecordingUrl(
       import("../../shared/schema"),
       import("drizzle-orm"),
     ]);
-    await db
+    const updated = await db
       .update(callLogs)
       .set({ recordingUrl })
-      .where(eq(callLogs.callSid, callSid));
+      .where(eq(callLogs.callSid, callSid))
+      .returning({ id: callLogs.id });
+    if (updated.length === 0) {
+      // Codex, PR #247: a callback that arrives before the call row exists
+      // matched nothing, and returning true here reported that as attached.
+      // Teardown's upsert carries no recordingUrl, so the recording would be
+      // detached permanently and silently. Saying so is the minimum; the
+      // caller decides whether to retry.
+      console.error(
+        `[RUNTIME RECORDING] ✗ no call_logs row for ${callSid} — recording NOT attached. ` +
+          `The callback beat the call row; the URL is lost unless it is re-sent.`,
+      );
+      return false;
+    }
     return true;
   } catch (error) {
     console.error(
