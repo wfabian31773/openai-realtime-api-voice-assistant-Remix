@@ -595,7 +595,13 @@ export class TicketingApiClient {
         // Carry the status out with the message. Callers that need to tell a
         // refusal from an outage read it; everything else still sees an Error
         // with the same text it always had.
-        const httpError = new Error(data.error || `HTTP ${response.status} error`) as Error & {
+        // `data?.error`, not `data.error` — found by Codex on PR #244. A 4xx whose
+        // body is the valid JSON literal `null` parses fine and then throws a
+        // TypeError HERE, before the status is attached. That throw lands in the
+        // network catch below, gets rewrapped as an outage, and the refusal is
+        // queued to the outbox and reported to the caller as recorded. The
+        // optional form is already used two lines above, in the 404 check.
+        const httpError = new Error(data?.error || `HTTP ${response.status} error`) as Error & {
           statusCode?: number;
         };
         httpError.statusCode = response.status;
