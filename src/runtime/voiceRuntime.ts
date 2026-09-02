@@ -136,6 +136,13 @@ import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
+import { persistRecordingUrl } from "./callRecord";
+import {
+  RECORDING_STATUS_PATH,
+  createRecordingStarter,
+  handleRecordingStatus,
+  type RecordingStatusBody,
+} from "./callRecording";
 import {
   handleAfterRedirect,
   handleVoiceWebhook,
@@ -372,6 +379,23 @@ export function mountVoiceRuntime(
     send(res, transfer.handleStatus(toWebhookRequest(req)));
   });
 
+  /**
+   * Task #54: the greeting promises a recording, so the runtime makes one and
+   * this is where Twilio returns it. Keyed on CallSid — the old core's
+   * /api/voice/recording-status reads ConferenceSid and would silently drop a
+   * call-level recording. See handleRecordingStatus.
+   */
+  app.post(RECORDING_STATUS_PATH, (req: Request, res: Response) => {
+    const result = handleRecordingStatus(toWebhookRequest(req).body as RecordingStatusBody);
+    console.log(result.log);
+    if (result.persist) {
+      // Fire-and-forget: Twilio gets its 200 either way, and persistRecordingUrl
+      // never throws.
+      void persistRecordingUrl(result.persist.callSid, result.persist.recordingUrl);
+    }
+    res.status(result.status).type("text/plain").send(result.body);
+  });
+
   app.get("/voice/health", (_req: Request, res: Response) => {
     const readiness = computeRuntimeReadiness(env);
     const destinations = transferDestinationStatus(env);
@@ -425,6 +449,14 @@ export function mountVoiceRuntime(
     );
   });
 
+  /**
+   * Task #54. Built once, not per call: the SDK client is constructed lazily
+   * inside it, so an unconfigured process still boots and still answers its
+   * health check — and readiness already refuses to take calls without the
+   * account sid, so a live call always has the means to record.
+   */
+  const startRecording = createRecordingStarter({ env, log: (line) => console.log(line) });
+
   app.post("/voice/:slug", (req: Request, res: Response) => {
     const slug = String(req.params.slug ?? "");
     send(
@@ -432,6 +464,7 @@ export function mountVoiceRuntime(
       handleVoiceWebhook(slug, toWebhookRequest(req), {
         env,
         registry,
+        startRecording,
         // A lane the runtime has already served is known available. An
         // unseen slug is accepted here and resolved at start-frame time:
         // the alternative is awaiting the agent tree inside Twilio's

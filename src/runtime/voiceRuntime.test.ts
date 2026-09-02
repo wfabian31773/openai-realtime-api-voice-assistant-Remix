@@ -30,6 +30,10 @@ import { registerCallHandoff, registeredHandoffCount } from "../tools/handoffBro
 const AUTH_TOKEN = "test-auth-token";
 const ENV = {
   TWILIO_AUTH_TOKEN: AUTH_TOKEN,
+  // Required since task #54: the runtime starts Twilio's call recording over
+  // REST on the inbound path, so a lane without the account sid is not ready
+  // to answer — the greeting promises a recording it could not make.
+  TWILIO_ACCOUNT_SID: "ACtest",
   XAI_API_KEY: "xai-key",
   DATABASE_URL: "postgres://x",
 };

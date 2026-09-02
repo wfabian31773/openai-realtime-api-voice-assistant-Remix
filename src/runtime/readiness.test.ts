@@ -8,6 +8,7 @@ import {
 const FULL = {
   XAI_API_KEY: "k",
   TWILIO_AUTH_TOKEN: "t",
+  TWILIO_ACCOUNT_SID: "ACtest",
   DATABASE_URL: "postgres://x",
 };
 
@@ -20,7 +21,7 @@ describe("runtime readiness", () => {
 
   it("reports env var NAMES only — a readiness endpoint that echoes a value leaks it", () => {
     const r = computeRuntimeReadiness({ DATABASE_URL: "postgres://user:secret@host/db" });
-    expect(r.missing).toEqual(["XAI_API_KEY", "TWILIO_AUTH_TOKEN"]);
+    expect(r.missing).toEqual(["XAI_API_KEY", "TWILIO_AUTH_TOKEN", "TWILIO_ACCOUNT_SID"]);
     expect(JSON.stringify(r)).not.toContain("secret");
   });
 
@@ -54,6 +55,7 @@ describe("runtime readiness", () => {
     const prodWithProper = computeRuntimeReadiness({
       XAI_API_KEY: "k",
       TWILIO_AUTH_TOKEN: "t",
+  TWILIO_ACCOUNT_SID: "ACtest",
       NODE_ENV: "production",
       PRODUCTION_DATABASE_URL: "postgres://prod",
     });
@@ -61,6 +63,7 @@ describe("runtime readiness", () => {
     const prodWithNothing = computeRuntimeReadiness({
       XAI_API_KEY: "k",
       TWILIO_AUTH_TOKEN: "t",
+  TWILIO_ACCOUNT_SID: "ACtest",
       NODE_ENV: "production",
     });
     expect(prodWithNothing.liveReady).toBe(false);
@@ -70,6 +73,7 @@ describe("runtime readiness", () => {
     const r = computeRuntimeReadiness({
       XAI_API_KEY: "k",
       TWILIO_AUTH_TOKEN: "t",
+  TWILIO_ACCOUNT_SID: "ACtest",
       REPLIT_DEPLOYMENT: "1",
       PRODUCTION_DATABASE_URL: "postgres://prod",
     });
@@ -91,6 +95,7 @@ describe("runtime readiness", () => {
       const r = computeRuntimeReadiness({
         XAI_API_KEY: "k",
         TWILIO_AUTH_TOKEN: "t",
+  TWILIO_ACCOUNT_SID: "ACtest",
         PRODUCTION_DATABASE_URL: "postgres://prod",
         ...signal,
       });
@@ -101,6 +106,7 @@ describe("runtime readiness", () => {
     const dev = computeRuntimeReadiness({
       XAI_API_KEY: "k",
       TWILIO_AUTH_TOKEN: "t",
+  TWILIO_ACCOUNT_SID: "ACtest",
       PRODUCTION_DATABASE_URL: "postgres://prod",
       REPLIT_DOMAINS: "azul.spock.replit.dev",
     });
@@ -116,5 +122,20 @@ describe("runtime readiness", () => {
     expect(formatReadinessLines(computeRuntimeReadiness(FULL))[1]).toBe(
       "[voice-runtime] live-ready",
     );
+  });
+});
+
+/**
+ * Added with task #54. The runtime now starts Twilio's call recording over
+ * REST on the inbound path, and the greeting promises that recording — so a
+ * line without the means to make one is not ready to answer. Before this the
+ * account sid was not required, because nothing in the runtime made an
+ * inbound REST call.
+ */
+describe("recording is part of being ready to answer", () => {
+  it("is not live-ready without TWILIO_ACCOUNT_SID", () => {
+    const r = computeRuntimeReadiness({ ...FULL, TWILIO_ACCOUNT_SID: undefined });
+    expect(r.liveReady).toBe(false);
+    expect(r.missing).toContain("TWILIO_ACCOUNT_SID");
   });
 });

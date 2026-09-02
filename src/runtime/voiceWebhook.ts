@@ -47,6 +47,7 @@
 import twilio from "twilio";
 import { computeRuntimeReadiness } from "./readiness";
 import type { CallOutcome } from "./mediaStreamBridge";
+import type { RecordingStarter } from "./callRecording";
 import type { CallSessionRegistry } from "./sessionRegistry";
 
 export const VOICE_PATH_PREFIX = "/voice";
@@ -82,6 +83,16 @@ export interface WebhookDeps {
   /** Whether this slug can answer a call right now. Injected rather than
    * imported so the webhook stays testable without the agent tree. */
   laneIsAvailable: (slug: string) => boolean;
+  /**
+   * Starts Twilio's call recording, fire-and-forget — see callRecording.ts.
+   *
+   * The greeting tells the caller the call is being recorded and the
+   * compliance check refuses a greeting that drops that sentence, so this is
+   * what makes the sentence true (task #54). Injected, synchronous and
+   * non-throwing: the caller is waiting on the TwiML below, and a REST round
+   * trip in front of it is dead air.
+   */
+  startRecording?: RecordingStarter;
 }
 
 function headerValue(
@@ -218,6 +229,23 @@ export function handleVoiceWebhook(
 
   const { host } = resolveRequestBase(req);
   const streamUrl = `wss://${host}${VOICE_STREAM_PATH}`;
+
+  // AFTER the gates, so a call this runtime is not going to serve is never
+  // recorded, and BEFORE the return only in program order — it does not wait.
+  // The same `host` Twilio just reached us on carries the status callback.
+  //
+  // Guarded even though the starter is documented as non-throwing: this
+  // function's job is to answer the call, and a caller must not lose one over
+  // a recording. Defence in depth against a future starter, or an injected one
+  // in a test, that forgets the contract.
+  try {
+    deps.startRecording?.(callSid, host);
+  } catch (error) {
+    console.error(
+      `[RUNTIME RECORDING] ✗ starter threw for ${callSid} — answering the call anyway:`,
+      error,
+    );
+  }
 
   return twimlResponse(
     200,

@@ -15,6 +15,7 @@ import { CallSessionRegistry } from "./sessionRegistry";
 const AUTH_TOKEN = "test-auth-token";
 const LIVE_ENV = {
   TWILIO_AUTH_TOKEN: AUTH_TOKEN,
+  TWILIO_ACCOUNT_SID: "ACtest",
   XAI_API_KEY: "k",
   DATABASE_URL: "postgres://x",
 };
@@ -104,7 +105,7 @@ describe("webhook security posture", () => {
 
 describe("webhook readiness and lane gating", () => {
   it("speaks the controlled unavailable line when the process is not live-ready", () => {
-    const d = deps({ env: { TWILIO_AUTH_TOKEN: AUTH_TOKEN } });
+    const d = deps({ env: { TWILIO_AUTH_TOKEN: AUTH_TOKEN, TWILIO_ACCOUNT_SID: "ACtest" } });
     const res = handleVoiceWebhook("optical", signedRequest("/voice/optical", BODY), d);
     expect(res.status).toBe(200);
     expect(spoken(res.body)).toBe(RUNTIME_UNAVAILABLE_LINE);
@@ -256,5 +257,56 @@ describe("no unhandled throw reaches Twilio", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+/**
+ * TASK #54 — the greeting promises a recording, so the webhook starts one.
+ *
+ * The wiring is what matters here: the module's own rules are tested in
+ * callRecording.test.ts. What this pins is that the starter is called for a
+ * call the runtime will actually serve, is NOT called for one it refuses, and
+ * cannot take the call down.
+ */
+describe("the webhook starts the recording the greeting promises", () => {
+  it("starts recording for a call it is going to serve", () => {
+    const started: Array<[string, string]> = [];
+    const d = deps({ startRecording: (sid: string, host: string) => started.push([sid, host]) });
+
+    const res = handleVoiceWebhook("optical", signedRequest("/voice/optical", BODY), d);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toContain("<Connect><Stream");
+    expect(started).toHaveLength(1);
+    expect(started[0][0]).toBe(BODY.CallSid);
+    // Same host the stream URL uses — the callback has to be reachable.
+    expect(res.body).toContain(started[0][1]);
+  });
+
+  it("does NOT record a call it refuses to serve", () => {
+    // An unavailable lane gets the controlled spoken line and hangs up. There
+    // is no conversation to record, and recording one would be a Twilio charge
+    // and a stored audio file for a call we did not take.
+    const started: string[] = [];
+    const d = deps({
+      laneIsAvailable: () => false,
+      startRecording: (sid: string) => started.push(sid),
+    });
+
+    handleVoiceWebhook("optical", signedRequest("/voice/optical", BODY), d);
+
+    expect(started).toEqual([]);
+  });
+
+  it("still answers the call when recording cannot be started", () => {
+    // The starter is documented as non-throwing, but the webhook must not
+    // depend on that: a caller does not lose their call over a recording.
+    const d = deps({
+      startRecording: () => {
+        throw new Error("twilio exploded");
+      },
+    });
+
+    expect(() => handleVoiceWebhook("optical", signedRequest("/voice/optical", BODY), d)).not.toThrow();
   });
 });
