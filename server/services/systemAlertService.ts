@@ -219,8 +219,9 @@ class SystemAlertService {
     if (event.severity === 'critical') {
       await this.sendSmsAlert(event);
     }
-    
-    // Log for now - email integration can be added later
+
+    await this.sendEmailAlert(event);
+
     console.log(`[ALERT SERVICE] Alert sent:`, {
       type: event.type,
       severity: event.severity,
@@ -232,6 +233,53 @@ class SystemAlertService {
   /**
    * Send SMS alert via Twilio
    */
+  /**
+   * EMAIL IS THE CHANNEL THAT ACTUALLY REACHES SOMEONE — operator, 2026-09-02.
+   *
+   * Codex found that a critical filing outage produced two console lines and
+   * nothing else: SMS off since the 2026-07-27 ruling, email a TODO. I left
+   * the channel open as his call rather than reverse that ruling by enabling
+   * SMS. He answered: *"for the alert, email me at wfabian@azulvision.com,
+   * use the same route we use for invites and such"* — which is
+   * `emailService.sendEmail`, the Office365 sender behind `sendInviteEmail`.
+   *
+   * DELIBERATELY BELOW THE COOLDOWN AND HOURLY GATES. The July ruling was
+   * about volume — one text every fifteen minutes for hours, burying the
+   * message that mattered — and putting email above those returns would
+   * reproduce it in an inbox. Here it inherits the 5-minute cooldown and the
+   * ten-an-hour cap, and critical-only on top of that.
+   *
+   * ON BY DEFAULT, with no new flag and no required variable. A flag
+   * defaulting off, or an unset SYSTEM_ALERT_EMAIL, would deploy an alarm that
+   * detects perfectly and still reaches nobody — the exact defect being fixed.
+   *
+   * NEVER THROWS. This is called from the five-minute alarm loop; a mail
+   * failure must not take the loop down or mask the outage it is reporting.
+   * `sendEmail` already swallows its own errors and returns false, so the
+   * catch here is for the import and the body build.
+   */
+  private async sendEmailAlert(event: AlertEvent): Promise<void> {
+    try {
+      const { shouldEmailAlert, buildAlertEmail } = await import('./alertEmail');
+      if (!shouldEmailAlert(event.severity)) return;
+
+      const { sendEmail } = await import('./emailService');
+      const message = buildAlertEmail(event);
+      const delivered = await sendEmail(message);
+
+      if (delivered) {
+        console.log(`[ALERT SERVICE] Alert emailed to ${message.to}: ${event.type}`);
+      } else {
+        console.error(
+          `[ALERT SERVICE] ✗ Alert email FAILED for ${event.type} to ${message.to} — ` +
+            `the alert is recorded but nobody has been told. Check SMTP_PASSWORD.`,
+        );
+      }
+    } catch (error) {
+      console.error('[ALERT SERVICE] ✗ Alert email threw (alert still recorded):', error);
+    }
+  }
+
   private async sendSmsAlert(event: AlertEvent): Promise<void> {
     if (!SYSTEM_ALERT_SMS_ENABLED) {
       console.log(`[ALERT SERVICE] SMS suppressed (SYSTEM_ALERT_SMS_ENABLED not set): ${event.type} — ${event.message}`);

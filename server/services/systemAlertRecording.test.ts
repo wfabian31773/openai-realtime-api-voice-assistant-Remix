@@ -47,7 +47,8 @@ describe('sendAlert records what it was asked to send', () => {
     const cooldownAt = sendAlert.indexOf('Skipping alert (cooldown)');
     const hourlyAt = sendAlert.indexOf('Skipping alert (hourly limit)');
     const smsAt = sendAlert.indexOf('await this.sendSmsAlert(event)');
-    for (const [name, at] of [['cooldown', cooldownAt], ['hourly', hourlyAt], ['sms', smsAt]] as const) {
+    const emailAt = sendAlert.indexOf('await this.sendEmailAlert(event)');
+    for (const [name, at] of [['cooldown', cooldownAt], ['hourly', hourlyAt], ['sms', smsAt], ['email', emailAt]] as const) {
       expect(at, name).toBeGreaterThan(-1);
       expect(pushAt, name).toBeLessThan(at);
     }
@@ -81,5 +82,40 @@ describe('sendAlert records what it was asked to send', () => {
     // 2026-07-27: engineering telemetry to a personal phone buried the one
     // message that mattered. Re-enabling it here would reverse that silently.
     expect(source).toMatch(/SYSTEM_ALERT_SMS_ENABLED = process\.env\.SYSTEM_ALERT_SMS_ENABLED === 'true'/);
+  });
+});
+
+/**
+ * AND THE EMAIL SITS BELOW THE GATES — operator, 2026-09-02: *"for the alert,
+ * email me at wfabian@azulvision.com, use the same route we use for invites
+ * and such."*
+ *
+ * WHAT the email says and WHO it goes to are pure functions in `alertEmail.ts`
+ * and are tested by being run (`alertEmail.test.ts`). The only thing that can
+ * be checked here is placement, because this module cannot be imported without
+ * a live DATABASE_URL — so it is checked against the cooldown and hourly
+ * returns by position, which is a structural fact rather than a phrase.
+ */
+describe('a critical alert reaches an inbox', () => {
+  it('sends the email from inside sendAlert', () => {
+    expect(sendAlert).toMatch(/await this\.sendEmailAlert\(event\)/);
+  });
+
+  it('sends it AFTER the cooldown and hourly-limit returns, not before', () => {
+    // The 2026-07-27 ruling was about volume: one text every fifteen minutes
+    // for hours, burying the message that mattered. Above these returns, email
+    // would reproduce exactly that in an inbox.
+    const emailAt = sendAlert.indexOf('await this.sendEmailAlert(event)');
+    const cooldownAt = sendAlert.indexOf('Skipping alert (cooldown)');
+    const hourlyAt = sendAlert.indexOf('Skipping alert (hourly limit)');
+    expect(emailAt).toBeGreaterThan(-1);
+    expect(emailAt).toBeGreaterThan(cooldownAt);
+    expect(emailAt).toBeGreaterThan(hourlyAt);
+  });
+
+  it('no longer says email is a later problem', () => {
+    // The TODO Codex quoted. It described the state that left a filing outage
+    // reaching nobody.
+    expect(source).not.toMatch(/email integration can be added later/);
   });
 });
