@@ -1476,7 +1476,12 @@ describe("the recording-status callback authenticates before it writes", () => {
 describe("recording starts once the call is provably live", () => {
   it("starts on the stream start frame, with the host the webhook was reached on", async () => {
     const started: Array<[string, string]> = [];
-    const h = await harness({ startRecording: (sid, host) => started.push([sid, host]) });
+    const h = await harness({
+      startRecording: (sid, host) => started.push([sid, host]),
+      // The greeting has to actually say it — see the disclosure test below.
+      resolveGreeting: async () =>
+        "Thank you for calling Azul Vision. This call is recorded. How can I help?",
+    });
     const answered = await post(h, "/voice/optical", {
       CallSid: "CAREC1",
       From: "+15551230000",
@@ -1491,6 +1496,64 @@ describe("recording starts once the call is provably live", () => {
     // on the same origin Twilio actually reached.
     expect(started[0][1]).toBe(h.registry.get("CAREC1")?.host);
     expect(started[0][1]).toBeTruthy();
+
+    ws.close();
+    await h.close();
+  });
+});
+
+/**
+ * RECORD ONLY A CALLER WHO WAS TOLD — Codex, PR #247.
+ *
+ * The first version of this recorded every lane it could claim. But
+ * MANDATORY_GREETING_COPY covers ONLY 'no-ivr' — optical, surgery, tech,
+ * records and answering-service carry no recording notice in their greetings
+ * at all — so it would have recorded those callers without ever telling them,
+ * in a California medical practice where callRecording.ts's own header says
+ * the disclosure IS how consent is obtained.
+ *
+ * Whether to make the disclosure mandatory fleet-wide is Wayne's decision.
+ * Until he makes it, the greeting decides, per call.
+ */
+describe("recording follows the disclosure, not the lane", () => {
+  it("does NOT record when the greeting never says the call is recorded", async () => {
+    const started: string[] = [];
+    const h = await harness({
+      startRecording: (sid) => started.push(sid),
+      resolveGreeting: async () => "Thank you for calling Azul Vision. How can I help you today?",
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CANODISC",
+      From: "+15551230000",
+      To: "+15559990000",
+    });
+    const { ws } = await openStream(h, "CANODISC", tokenFrom(answered.text));
+    await settle();
+
+    expect(started).toEqual([]);
+
+    ws.close();
+    await h.close();
+  });
+
+  it("is not fooled by a greeting that says the call is NOT recorded", async () => {
+    // The disclosure check is the same negation-aware predicate the no-ivr
+    // mandatory-copy rule uses, for the reason it was hardened in #244: an
+    // admin-editable field that says the opposite must not read as consent.
+    const started: string[] = [];
+    const h = await harness({
+      startRecording: (sid) => started.push(sid),
+      resolveGreeting: async () => "Thanks for calling. This call is not being recorded.",
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CANEGDISC",
+      From: "+15551230000",
+      To: "+15559990000",
+    });
+    const { ws } = await openStream(h, "CANEGDISC", tokenFrom(answered.text));
+    await settle();
+
+    expect(started).toEqual([]);
 
     ws.close();
     await h.close();

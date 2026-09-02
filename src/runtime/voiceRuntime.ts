@@ -60,6 +60,7 @@ import {
 import { releaseCallHandoff } from "../tools/handoffBroker";
 import {
   greetingStyleFor,
+  greetingDisclosesRecording,
   missingMandatoryCopy,
   personaliseGreeting,
 } from "../services/greetingPersonalisation";
@@ -632,33 +633,6 @@ export function mountVoiceRuntime(
 
     async function startCall(entry: CallEntry, streamSid: string): Promise<void> {
       const startedAtMs = Date.now();
-      // RECORDING STARTS HERE, not in the webhook.
-      //
-      // An inbound call is not `in-progress` until Twilio has received and
-      // begun executing the TwiML, and the webhook returns that TwiML AFTER
-      // its handler body runs — so a `recordings.create` issued there raced
-      // the answer and lost, rejected with 21220, leaving the greeting's
-      // recording disclosure false on every call (Codex, PR #247). This
-      // frame is Twilio telling us it is executing that TwiML, so the call
-      // is live by definition.
-      //
-      // Guarded even though the starter is documented as non-throwing: a
-      // caller must not lose a call over a recording.
-      if (entry.host) {
-        try {
-          startRecording(entry.callSid, entry.host);
-        } catch (error) {
-          console.error(
-            `[RUNTIME RECORDING] ✗ starter threw for ${entry.callSid} — continuing the call:`,
-            error,
-          );
-        }
-      } else {
-        console.error(
-          `[RUNTIME RECORDING] ✗ no host on the registry entry for ${entry.callSid} — ` +
-            `NOT recording, and the greeting says we are.`,
-        );
-      }
       /** Filled in when the call_logs row lands; read through the metadata
        * getter above for the rest of the call. */
       let callLogId: string | undefined;
@@ -769,6 +743,7 @@ export function mountVoiceRuntime(
                 }),
           },
         );
+
         if (!lane) {
           // The webhook let this through unseen and it turned out to be
           // unknown or disabled. Closing the socket runs the <Redirect>,
@@ -796,6 +771,58 @@ export function mountVoiceRuntime(
           twilioSocket.close();
           return;
         }
+
+        // The exact words this caller is about to hear. Settled here rather
+        // than inline at the bridge because the recording decision below
+        // depends on them.
+        const spokenGreeting =
+          personaliseGreeting(
+            chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
+            recognisedFirstName(precontext),
+            greetingStyleFor(entry.slug),
+          ) || null;
+
+        // RECORD ONLY A CALLER WHO WAS TOLD — Codex, PR #247.
+        //
+        // This started life at the top of startCall and recorded every lane
+        // it could claim. But MANDATORY_GREETING_COPY covers ONLY 'no-ivr':
+        // optical, surgery, tech, records and answering-service carry no
+        // recording notice in their greetings at all, so that would have
+        // recorded those callers without ever telling them — in a California
+        // medical practice, where callRecording.ts's own header says the
+        // disclosure IS how consent is obtained.
+        //
+        // So the greeting decides, per call. A lane whose words do not say it
+        // is not recorded, and the log says which lane and why rather than
+        // leaving a silent gap. Making the disclosure mandatory fleet-wide is
+        // Wayne's call, not something to infer from a review comment.
+        //
+        // Still safe on timing: the stream frame means Twilio is executing
+        // our TwiML (so the call is in-progress and 21220 cannot fire), and
+        // the bridge has not been built, so nothing has been spoken yet.
+        if (!greetingDisclosesRecording(spokenGreeting)) {
+          console.log(
+            `[RUNTIME RECORDING] ${entry.slug}: NOT recording — this lane's greeting ` +
+              `does not disclose it. Recording without the disclosure is a consent problem.`,
+          );
+        } else if (!entry.host) {
+          console.error(
+            `[RUNTIME RECORDING] ✗ no host on the registry entry for ${entry.callSid} — ` +
+              `NOT recording, and this lane's greeting says we are.`,
+          );
+        } else {
+          // Guarded even though the starter is documented as non-throwing: a
+          // caller must not lose a call over a recording.
+          try {
+            startRecording(entry.callSid, entry.host);
+          } catch (error) {
+            console.error(
+              `[RUNTIME RECORDING] ✗ starter threw for ${entry.callSid} — continuing the call:`,
+              error,
+            );
+          }
+        }
+
         knownLanes.add(entry.slug);
         // Open the call's row BEFORE the agent can run a tool. The agents'
         // own telemetry, identity stamping and ticket number all UPDATE
@@ -898,11 +925,7 @@ export function mountVoiceRuntime(
           // it does on the SIP path — an admin edit must be what the caller
           // hears, not what the code was shipped with. UNLESS it has dropped
           // copy the lane is required to say; see `chooseGreeting`.
-          greeting: personaliseGreeting(
-            chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
-            recognisedFirstName(precontext),
-            greetingStyleFor(entry.slug),
-          ) || null,
+          greeting: spokenGreeting,
           twilio: twilioSocket,
           createSession: (handlers) =>
             new GrokVoiceSession(

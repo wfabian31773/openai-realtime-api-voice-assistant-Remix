@@ -241,6 +241,27 @@ describe("per-lane voice and language", () => {
     expect(lane!.voice.language).toBeNull();
   });
 
+  it("treats a lane's registered 'en' as unestablished, because production always has one", async () => {
+    /**
+     * THE FIXTURE ABOVE IS THE ONE SHAPE PRODUCTION NEVER HAS — Codex, #247.
+     *
+     * `source({ id: "optical" })` omits `language` entirely, so the test
+     * passed while the fix did nothing on any real lane: opticalAgentConfig,
+     * surgeryAgentConfig, answeringServiceAgentConfig and noIvrAgentConfig
+     * all carry `language: 'en'`, so the fallback resolved to English and
+     * every runtime call went out pinned to it — exactly the failure #55
+     * claimed to have fixed.
+     *
+     * That 'en' is a leftover from when declaring one was required, not a
+     * decision about this line, so it does not count as a pin.
+     */
+    const lane = await resolveLane("optical", META, {
+      source: source({ id: "optical", voice: "sage", language: "en" }),
+      env: {},
+    });
+    expect(lane!.voice.language).toBeNull();
+  });
+
   it("still honours a language an operator deliberately set", async () => {
     const lane = await resolveLane("optical", META, {
       source: source({ id: "optical" }),
