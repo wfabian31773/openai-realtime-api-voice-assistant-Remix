@@ -108,6 +108,12 @@
 
 import type { BoundAgent } from "./agentBinding";
 import { CallTranscriptLog } from "./transcriptLog";
+import {
+  seedLedger,
+  harvestCallerLine,
+  renderKnownFacts,
+  releaseLedger,
+} from "../services/callFactsLedger";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
 
 /**
@@ -272,6 +278,9 @@ export interface BridgeSession {
   /** Scripted, verbatim. `interruptible: false` protects a line the caller
    * must hear whole — see `greetingLocked`. */
   speak(text: string, opts?: { interruptible?: boolean }): void;
+  /** Standing context for the rest of the call — the KNOWN FACTS block.
+   * Replaces whatever was set before; null clears it. */
+  setStandingContext(block: string | null): void;
   close(): void;
   getResponseEpoch(): number;
 }
@@ -495,6 +504,9 @@ export class VoiceCallBridge {
   private deadAirCause: "utterance" | "response" | null = null;
 
   private readonly transcriptLog = new CallTranscriptLog();
+  /** The last KNOWN FACTS block handed to the session. Compared rather than
+   * re-sent: this is evaluated at every turn boundary. */
+  private lastFactsBlock: string | null = null;
   private readonly toolEvents: ToolEvent[] = [];
   private agentTurns = 0;
   private interruptions = 0;
@@ -509,6 +521,14 @@ export class VoiceCallBridge {
     this.endCallToolNames = new Set(deps.endCallToolNames ?? DEFAULT_END_CALL_TOOL_NAMES);
     this.startedAtMs = deps.startedAtMs ?? Date.now();
 
+    // The ledger opens BEFORE the first word, seeded with what the call
+    // already knows. Caller-ID is the default callback candidate from
+    // second zero — an empty callback field is 22% of live tickets, and the
+    // number was on the call the whole time. It stays a candidate to
+    // CONFIRM, never an identity: Wayne's own number resolves to eight
+    // records in the mirror.
+    seedLedger(deps.context.callSid, { callerPhone: deps.context.callerPhone });
+
     this.session = deps.createSession({
       onToolCall: (callId, name, args) => this.handleToolCall(callId, name, args),
       onConfigured: () => this.handleSessionConfigured(),
@@ -521,6 +541,12 @@ export class VoiceCallBridge {
       onCallerTranscript: (text, itemId) => {
         if (this.ended) return;
         this.noteTranscript("caller");
+        // Passive harvest FIRST, before anything can return early — every
+        // caller line fills empty ledger slots regardless of who is driving
+        // the conversation (operator principle, 2026-08-07: the morning
+        // failure left every slot empty because only the ramp wrote them).
+        // harvestCallerLine swallows its own errors by contract.
+        harvestCallerLine(this.deps.context.callSid, text);
         // Straight through, greeting or no greeting. Where the greeting's own
         // line sits was settled when its audio started, so there is no
         // "before or after it" left to decide here — which is the point:
@@ -1228,7 +1254,38 @@ export class VoiceCallBridge {
   private handleResponseDone(): void {
     if (this.ended) return;
     this.awaitingToolResponseDone = false;
+    this.pushKnownFacts();
     this.maybeRequestFollowUp();
+  }
+
+  /**
+   * KNOWN FACTS onto the live session, at the turn boundary and nowhere
+   * else. Mid-response is the one moment a session.update must not land:
+   * the model is generating against the config it was handed.
+   *
+   * Only on change. This runs at every boundary of every call, and an
+   * unchanged ledger has nothing to say.
+   */
+  private pushKnownFacts(): void {
+    try {
+      const facts = renderKnownFacts(this.deps.context.callSid);
+      if (facts === this.lastFactsBlock) return;
+      this.lastFactsBlock = facts;
+      this.session.setStandingContext(facts);
+      // Deploy marker AND live counter. Shape only, never values: the block
+      // carries a name and a date of birth. Absence of this line on a call
+      // that stated a DOB means the ledger is not wired in the build that
+      // took the call, and the call proves nothing about repetition.
+      console.log(
+        `[RUNTIME FACTS] ${this.deps.context.slug}: ${facts === null ? "cleared" : `${facts.split("\n").length - 1} settled, ${facts.length} chars`} -> session for ${this.deps.context.callSid}`,
+      );
+    } catch (error) {
+      // The ledger is an aid to the agent, not a dependency of the call.
+      console.error(
+        `[RUNTIME FACTS] ✗ KNOWN FACTS push failed for ${this.deps.context.callSid} — continuing the call without it:`,
+        error,
+      );
+    }
   }
 
   private maybeRequestFollowUp(): void {
@@ -1412,6 +1469,10 @@ export class VoiceCallBridge {
     // closing, the provider session dying as the stream ends — the caller
     // was moved to a human on purpose. That is the outcome.
     if (this.transferInFlight) outcome = "transferred";
+
+    // Per-call memory dies with the call. A CallSid is not reused, but a
+    // ledger that outlives its call is a leak with PHI in it.
+    releaseLedger(this.deps.context.callSid);
 
     if (this.finalFallbackTimer !== null) {
       this.clearTimer(this.finalFallbackTimer);
