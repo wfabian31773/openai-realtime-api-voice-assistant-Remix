@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   decodeToolOutput,
   VoiceCallBridge,
@@ -12,6 +12,14 @@ import {
 } from "./mediaStreamBridge";
 import type { TwilioOutboundFrame } from "./twilioFrames";
 import type { BoundAgent } from "./agentBinding";
+import { clearAllLedgers } from "../services/callFactsLedger";
+
+// Every bridge in this file answers as CA-test, and the call-facts ledger is
+// a module-level map keyed by CallSid. Without this, a date of birth
+// harvested by one test is still in the ledger for the next one.
+beforeEach(() => {
+  clearAllLedgers();
+});
 
 /** A timer bank the tests fire by hand — no real clock anywhere. */
 function makeTimers() {
@@ -99,6 +107,7 @@ function makeBridge(
     speak: vi.fn(() => {
       epoch += 1;
     }),
+    setStandingContext: vi.fn(),
     close: vi.fn(),
     getResponseEpoch: () => epoch,
   } satisfies BridgeSession;
@@ -948,6 +957,7 @@ describe("VoiceCallBridge — exactly-once teardown", () => {
         return {
           appendAudio: vi.fn(),
           cancelResponse: vi.fn(),
+          setStandingContext: vi.fn(),
           sendToolResult: vi.fn(),
           requestResponse: vi.fn(),
           speakNatural: vi.fn(),
@@ -2116,5 +2126,141 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     h.handlers().onConfigured();
     expect(h.session.speak).not.toHaveBeenCalled();
     expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * ANTI-REPETITION IS A PROPERTY OF THE TRANSPORT — task #56.
+ *
+ * CLAUDE.md's headline "question repetition across lines: 433 calls -> 41 ->
+ * 0" is not something the agents do. It is machinery in the old core, and
+ * none of it existed under src/runtime/: no ledger, no harvest, no KNOWN
+ * FACTS at the turn boundary. Cutting a lane over as it stood would have
+ * removed the only server-side thing holding that number down, onto a
+ * failure that is still the largest genuinely-real critical on the live
+ * agents — 49 calls on 2026-08-31, 36 of them re-asking date of birth, three
+ * times on 27 calls and five times on two, running 192-268s against a 127s
+ * baseline.
+ *
+ * The ledger itself is NOT rebuilt here. src/services/callFactsLedger.ts is
+ * transport-agnostic and already carries the harvest regexes and the render;
+ * this is the wiring the old core has at voiceAgentRoutes.ts:3421 and :4059
+ * and the runtime did not.
+ */
+/** `Array.prototype.at` is past this project's TS lib target. */
+function lastArg(calls: unknown[][]): unknown {
+  return calls[calls.length - 1]?.[0];
+}
+
+describe("the call-facts ledger on the runtime", () => {
+  const standingCalls = (h: ReturnType<typeof makeBridge>) =>
+    (h.session.setStandingContext as ReturnType<typeof vi.fn>).mock.calls;
+
+  it("harvests a date of birth from an ordinary caller line and never re-asks for it", () => {
+    const h = makeBridge();
+    h.handlers().onCallerTranscript("Yeah, it's March 17th 1973.", "item-1");
+    h.handlers().onResponseDone();
+    const block = lastArg(standingCalls(h)) as string;
+    expect(block).toContain("March 17th 1973");
+    expect(block).toMatch(/do not re-ask/i);
+  });
+
+  it("seeds the callback number from caller-ID before the caller says anything", () => {
+    // The old core's reason for seeding at second zero: an empty callback
+    // field is 22% of live tickets, and the number was on the call the
+    // whole time.
+    const h = makeBridge();
+    h.handlers().onCallerTranscript("Hi, I need to reach someone about my surgery.", "item-1");
+    h.handlers().onResponseDone();
+    const block = lastArg(standingCalls(h)) as string;
+    expect(block).toContain("Callback number");
+  });
+
+  it("injects at the TURN BOUNDARY, not mid-turn", () => {
+    // Mid-response is the one moment a session.update must not land: the
+    // model is generating against the config it was handed.
+    const h = makeBridge();
+    h.handlers().onCallerTranscript("March 17th 1973.", "item-1");
+    expect(h.session.setStandingContext).not.toHaveBeenCalled();
+    h.handlers().onResponseDone();
+    expect(h.session.setStandingContext).toHaveBeenCalled();
+  });
+
+  it("does not re-push an unchanged ledger on every boundary", () => {
+    const h = makeBridge();
+    h.handlers().onCallerTranscript("March 17th 1973.", "item-1");
+    h.handlers().onResponseDone();
+    const after = standingCalls(h).length;
+    h.handlers().onResponseDone();
+    h.handlers().onResponseDone();
+    expect(standingCalls(h).length).toBe(after);
+  });
+
+  it("a harvest that throws never takes the call down", () => {
+    // The harvester runs on every caller line on every call. It is the
+    // last thing that should be able to end one.
+    const h = makeBridge();
+    expect(() => h.handlers().onCallerTranscript("   ", "item-1")).not.toThrow();
+    expect(() => h.handlers().onResponseDone()).not.toThrow();
+  });
+});
+
+/**
+ * THE TURN AFTER A TOOL SETTLES IS THE ONE THAT MOST NEEDS THE FACTS —
+ * Codex, PR #250.
+ *
+ * A tool still awaiting I/O when its carrying response ends had its ledger
+ * pushed BEFORE it wrote anything, and the follow-up was then requested
+ * straight from `toolCallSettled` with no second push. Verification is
+ * exactly that shape: it is asynchronous, and the reply immediately after it
+ * succeeds is the reply that must not ask for the date of birth again.
+ *
+ * That is the failure the whole ledger exists to stop, arriving through the
+ * one path that skipped the push.
+ */
+describe("facts are refreshed before the post-tool turn", () => {
+  it("pushes the ledger again after an async tool settles", async () => {
+    const { updateLedger } = await import("../services/callFactsLedger");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+
+    const h = makeBridge({
+      agent: makeAgent({
+        // The bridge dispatches through the bound agent, not a tool list.
+        // Settles only when the test lets it, which is what puts the ledger
+        // write AFTER the carrying response's boundary.
+        dispatch: async () => {
+          await gate;
+          updateLedger("CA-test", {
+            firstName: "Wayne",
+            lastName: "Fabian",
+            dateOfBirth: "03/17/1973",
+            identityVerified: true,
+          });
+          return { ok: true, output: JSON.stringify({ verified: true }) };
+        },
+      }),
+    });
+
+    h.handlers().onToolCall("c1", "verify_identity", {});
+    // The carrying response ends while the tool is still in flight.
+    h.handlers().onResponseDone();
+    const beforeSettle = (h.session.setStandingContext as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    release();
+    for (let i = 0; i < 10; i += 1) await new Promise((r) => setTimeout(r, 1));
+    // The tool really did write to the ledger — otherwise this test would be
+    // asserting the push of an unchanged block.
+    const { getLedger } = await import("../services/callFactsLedger");
+    expect(getLedger("CA-test")?.identityVerified).toBe(true);
+
+    const calls = (h.session.setStandingContext as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.length).toBeGreaterThan(beforeSettle);
+    // And what it pushed is the VERIFIED identity, which is the whole point.
+    const latest = lastArg(calls) as string;
+    expect(latest).toContain("IDENTITY VERIFIED");
+    expect(latest).toMatch(/never ask for their name or date of birth again/i);
   });
 });

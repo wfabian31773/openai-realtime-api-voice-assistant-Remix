@@ -193,6 +193,18 @@ export class GrokVoiceSession {
   /** Mutable copy — mid-call language switches send a fresh session.update
    * with language_hint so Grok's STT follows the caller. */
   private sessionConfig: GrokSessionConfig;
+  /**
+   * The agent's own prompt, exactly as the lane built it. Two things get
+   * appended to it DURING a call — the language line and the KNOWN FACTS
+   * block — and both are replaced, not accumulated, so every rebuild starts
+   * from this. Keeping it separate is what lets either change without
+   * clobbering the other; string surgery on the live instructions could not.
+   */
+  private readonly baseInstructions: string;
+  /** The mid-call language reminder, or "" before any switch. */
+  private languageLine = "";
+  /** The live KNOWN FACTS block, or "" when the ledger is still empty. */
+  private standingContext = "";
   /** Caller audio that arrived before session.updated confirmed the
    * config. THE SIBLING REPO'S HARD-WON WIRE RULE: the session
    * configuration must ALWAYS precede the audio (ticketing 9fb0c83) —
@@ -247,6 +259,7 @@ export class GrokVoiceSession {
     private readonly handlers: GrokVoiceSessionHandlers,
   ) {
     this.sessionConfig = sessionConfig;
+    this.baseInstructions = sessionConfig.instructions;
     this.transport.onMessage((data) => this.handleServerEvent(data));
     this.transport.onError((err) => {
       this.state = "error";
@@ -289,9 +302,9 @@ export class GrokVoiceSession {
         : ` The caller is now speaking ${hint}. Follow their language from now on. ` +
           "Continue using the same tools, and keep tool ARGUMENTS in English " +
           "(names, dates, yes/no) regardless of the spoken language.";
+    this.languageLine = languageLine;
     this.sessionConfig = {
       ...this.sessionConfig,
-      instructions: this.sessionConfig.instructions + languageLine,
       audio: {
         ...this.sessionConfig.audio,
         input: {
@@ -303,6 +316,43 @@ export class GrokVoiceSession {
         },
       },
     };
+    // The hint changed even if the wording did not, so push regardless of
+    // whether rebuildInstructions finds a difference.
+    this.applyInstructions({ force: true });
+  }
+
+  /**
+   * The KNOWN FACTS block — what this call has already settled, phrased as
+   * prohibitions on re-asking. Rendered by the shared call-facts ledger and
+   * handed here at each turn boundary.
+   *
+   * It rides on `session.update` rather than the old core's `role: "system"`
+   * conversation item, for two reasons. The item type is not in this wire's
+   * client event union and has never been sent to xAI — porting it verbatim
+   * would be a guess on a live line. And instructions are REPLACED where an
+   * item ACCUMULATES: a call that fills six slots would otherwise carry six
+   * blocks, the earliest of which says the date of birth is still unknown.
+   *
+   * Called on every turn boundary, so an unchanged block costs nothing.
+   */
+  setStandingContext(block: string | null): void {
+    const next = block ? `\n\n${block}` : "";
+    if (next === this.standingContext) return;
+    this.standingContext = next;
+    this.applyInstructions();
+  }
+
+  /**
+   * Recompose instructions from the agent's prompt plus whatever the call
+   * has since learned, and put them on the wire if the handshake is far
+   * enough along. Before that the patched config simply goes out with the
+   * next handshake update — which is why a fact harvested from the caller's
+   * first sentence is not lost while the session is still connecting.
+   */
+  private applyInstructions(opts: { force?: boolean } = {}): void {
+    const instructions = this.baseInstructions + this.languageLine + this.standingContext;
+    if (!opts.force && instructions === this.sessionConfig.instructions) return;
+    this.sessionConfig = { ...this.sessionConfig, instructions };
     if (this.state === "configured" || this.state === "connected") {
       this.send({ type: "session.update", session: this.sessionConfig });
     }
@@ -335,8 +385,25 @@ export class GrokVoiceSession {
         this.sessionId = event.conversation?.id ?? null;
         this.send({ type: "session.update", session: this.sessionConfig });
         break;
-      case "session.updated":
+      case "session.updated": {
+        const firstHandshake = this.state !== "configured";
         this.state = "configured";
+        if (!firstHandshake) {
+          // A MID-CALL session.update IS NOT A HANDSHAKE — Codex, PR #250.
+          //
+          // Every setStandingContext and setSpokenLanguage sends a
+          // session.update, and its acknowledgement arrives on this same
+          // event. Running the setup path again re-fires onConfigured, and
+          // the bridge answers that by speaking the greeting: the caller
+          // hears the practice's opening line a second time, mid-call. The
+          // caller-ID seed makes the first KNOWN FACTS block non-null on
+          // nearly every call, so this would have fired on the first
+          // completed response of almost every one of them.
+          //
+          // Nothing to drain either — preConfigAudio was emptied by the
+          // first acknowledgement and only fills before `configured`.
+          break;
+        }
         // The opening scripted line goes on the wire FIRST (onConfigured
         // -> provider.start() -> force_message), THEN the held caller
         // audio: with server VAD live, releasing a buffered speech turn
@@ -349,6 +416,7 @@ export class GrokVoiceSession {
           this.send({ type: "input_audio_buffer.append", audio });
         }
         break;
+      }
       case "error":
         // A barge-in cancel races the response's NATURAL completion: we saw
         // response.created (so wireResponseActive is true) and sent a

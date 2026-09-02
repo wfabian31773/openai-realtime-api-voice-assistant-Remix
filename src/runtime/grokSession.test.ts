@@ -83,8 +83,10 @@ function buildHandlers(over: {
   onAudioDone?: NonNullable<GrokVoiceSessionHandlers["onAudioDone"]>;
   onAgentTranscriptDelta?: NonNullable<GrokVoiceSessionHandlers["onAgentTranscriptDelta"]>;
   onResponseDone?: NonNullable<GrokVoiceSessionHandlers["onResponseDone"]>;
+  onConfigured?: NonNullable<GrokVoiceSessionHandlers["onConfigured"]>;
 }) {
   return {
+    onConfigured: over.onConfigured ?? vi.fn(),
     onToolCall: over.onToolCall ?? vi.fn(),
     onError: over.onError ?? vi.fn(),
     onAudioDone: over.onAudioDone ?? vi.fn(),
@@ -823,5 +825,176 @@ describe("the STT language pin", () => {
       [...FIXTURE_TOOLS],
     );
     expect(cfg.audio.input.transcription).toEqual({ language_hint: "es" });
+  });
+});
+
+/**
+ * KNOWN FACTS ARE STANDING CONTEXT, NOT A CONVERSATIONAL TURN — task #56.
+ *
+ * The old core injects its ledger as a `role: "system"` conversation item
+ * (voiceAgentRoutes.ts:4059). That item type is not in this wire's client
+ * event union and has never been sent to xAI, so porting it verbatim would
+ * be a guess on a live line. `session.update` is the channel this transport
+ * has already proven — setSpokenLanguage has been mutating instructions
+ * mid-call through it since #55.
+ *
+ * It is also the better fit. A conversation item ACCUMULATES: the old core
+ * appends a new one every time the ledger changes, so a long call carries
+ * five stale copies of the facts alongside the current one, and only the
+ * "only when changed" guard keeps that from being every turn. Instructions
+ * are REPLACED, so the model sees exactly one KNOWN FACTS block, always the
+ * live one.
+ */
+/** `Array.prototype.at` is past this project's TS lib target. */
+function lastUpdate(transport: { sent: Array<{ type: string }> }): { session: { instructions: string } } {
+  const updates = transport.sent.filter((e) => e.type === "session.update");
+  return updates[updates.length - 1] as unknown as { session: { instructions: string } };
+}
+
+describe("GrokVoiceSession.setStandingContext", () => {
+  const FACTS = "# KNOWN FACTS (settled — never re-ask)\n- Date of birth already given: 03/17/1973 (do not re-ask).";
+
+  it("carries the block to the wire as a session.update", () => {
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "sess-facts" } });
+    transport.emit({ type: "session.updated" });
+    const before = transport.sent.filter((e) => e.type === "session.update").length;
+    session.setStandingContext(FACTS);
+    const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
+      session: { instructions: string };
+    }>;
+    expect(updates.length).toBe(before + 1);
+    expect(updates[updates.length - 1]?.session.instructions).toContain("never re-ask");
+    expect(updates[updates.length - 1]?.session.instructions).toContain("03/17/1973");
+  });
+
+  it("keeps the agent's own prompt — the block is appended, never a replacement", () => {
+    // response.instructions replacing the agent prompt is the bug that made
+    // the opening turn come from a model that did not know it worked for
+    // Azul Vision. The same mistake at session level would last the call.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "sess-facts-2" } });
+    transport.emit({ type: "session.updated" });
+    const base = (transport.sent.find((e) => e.type === "session.update") as { session: { instructions: string } })
+      .session.instructions;
+    session.setStandingContext(FACTS);
+    const latest = lastUpdate(transport).session.instructions;
+    expect(latest.startsWith(base)).toBe(true);
+  });
+
+  it("REPLACES the previous block rather than stacking copies of it", () => {
+    // The whole reason for using instructions over a conversation item. A
+    // call that fills six slots must not end up with six contradictory
+    // KNOWN FACTS blocks, the earliest of which says the DOB is unknown.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "sess-facts-3" } });
+    transport.emit({ type: "session.updated" });
+    session.setStandingContext(FACTS);
+    session.setStandingContext(`${FACTS}\n- Callback number: 555-0100 (confirmed).`);
+    const latest = lastUpdate(transport).session.instructions;
+    expect(latest.match(/KNOWN FACTS/g)).toHaveLength(1);
+    expect(latest).toContain("555-0100");
+  });
+
+  it("does not touch the wire when the block has not changed", () => {
+    // Called at every turn boundary, so an unchanged ledger must be free.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "sess-facts-4" } });
+    transport.emit({ type: "session.updated" });
+    session.setStandingContext(FACTS);
+    const after = transport.sent.filter((e) => e.type === "session.update").length;
+    session.setStandingContext(FACTS);
+    expect(transport.sent.filter((e) => e.type === "session.update").length).toBe(after);
+  });
+
+  it("survives a language switch in either order — neither clobbers the other", () => {
+    // These are two independent mutations of one string. Appending both
+    // blindly, or slicing at the facts delimiter, loses whichever came
+    // second; a call where the caller switches to Spanish AFTER giving a
+    // DOB is an ordinary call, not an edge case.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "sess-facts-5" } });
+    transport.emit({ type: "session.updated" });
+    session.setStandingContext(FACTS);
+    session.setSpokenLanguage("es");
+    const afterLang = lastUpdate(transport).session.instructions;
+    expect(afterLang).toContain("03/17/1973");
+    expect(afterLang).toMatch(/now speaking es/);
+
+    session.setStandingContext(`${FACTS}\n- Preferred language: Spanish.`);
+    const afterFacts = lastUpdate(transport).session.instructions;
+    expect(afterFacts).toMatch(/now speaking es/);
+    expect(afterFacts).toContain("Preferred language: Spanish");
+    expect(afterFacts.match(/KNOWN FACTS/g)).toHaveLength(1);
+  });
+
+  it("a repeated language switch does not stack language lines either", () => {
+    // Found while restructuring for the above: setSpokenLanguage appended
+    // to whatever instructions already held, so es-then-en left BOTH lines
+    // in the prompt and the second contradicted the first.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "sess-facts-6" } });
+    transport.emit({ type: "session.updated" });
+    session.setSpokenLanguage("es");
+    session.setSpokenLanguage("en");
+    const latest = lastUpdate(transport).session.instructions;
+    expect(latest).toMatch(/now speaking English/);
+    expect(latest).not.toMatch(/now speaking es/);
+  });
+
+  it("holds the block until the handshake completes, then ships it with the config", () => {
+    const { transport, session } = makeSession();
+    session.setStandingContext(FACTS);
+    expect(transport.sent.filter((e) => e.type === "session.update")).toHaveLength(0);
+    transport.emit({ type: "session.created", conversation: { id: "sess-facts-7" } });
+    const first = transport.sent.filter((e) => e.type === "session.update")[0] as { session: { instructions: string } };
+    expect(first.session.instructions).toContain("03/17/1973");
+  });
+
+  it("clears the block when handed null", () => {
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "sess-facts-8" } });
+    transport.emit({ type: "session.updated" });
+    session.setStandingContext(FACTS);
+    session.setStandingContext(null);
+    const latest = lastUpdate(transport).session.instructions;
+    expect(latest).not.toContain("KNOWN FACTS");
+  });
+});
+
+/**
+ * A MID-CALL session.update IS NOT A HANDSHAKE — Codex, PR #250.
+ *
+ * Every setStandingContext and setSpokenLanguage sends a session.update, and
+ * its acknowledgement arrives on the same `session.updated` event as the
+ * opening handshake's. Treating them alike re-fires onConfigured, and the
+ * bridge answers that by speaking the practice's greeting — a second time,
+ * mid-call, to a caller who is already talking.
+ *
+ * The caller-ID seed makes the first KNOWN FACTS block non-null on nearly
+ * every call, so this would have fired on the first completed response of
+ * almost every one of them.
+ */
+describe("only the first session.updated is a handshake", () => {
+  it("does not re-run setup when the facts block is pushed mid-call", () => {
+    let configured = 0;
+    const { transport, session } = makeSession({ onConfigured: () => { configured += 1; } });
+    transport.emit({ type: "session.created", conversation: { id: "sess-once" } });
+    transport.emit({ type: "session.updated" });
+    expect(configured).toBe(1);
+
+    session.setStandingContext("# KNOWN FACTS (settled — never re-ask)\n- Date of birth already given: 03/17/1973.");
+    transport.emit({ type: "session.updated" });
+    expect(configured).toBe(1);
+  });
+
+  it("does not re-run setup on a mid-call language switch either", () => {
+    let configured = 0;
+    const { transport, session } = makeSession({ onConfigured: () => { configured += 1; } });
+    transport.emit({ type: "session.created", conversation: { id: "sess-once-2" } });
+    transport.emit({ type: "session.updated" });
+    session.setSpokenLanguage("es");
+    transport.emit({ type: "session.updated" });
+    expect(configured).toBe(1);
   });
 });
