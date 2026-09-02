@@ -313,9 +313,38 @@ registerTool({
      * below, rather than at a local gate that does not exist.
      *
      * Read BEFORE this attempt can record anything, so the first pass through
-     * always reads 0 and the caller is asked exactly once.
+     * always reads 0.
+     *
+     * TWO REFUSALS, NOT ONE — and the threshold is the whole design.
+     *
+     * A refusal is not proof the caller was asked. Traced on
+     * CA101be0fe842e77fd83a6024ae06df244 (2026-09-02), whose tool_timeline
+     * shows `file_surgery_ticket` refused at 15:25:24.064 and called AGAIN at
+     * 15:25:25.270 — 1.2 seconds later, with an identical payload. The
+     * question "And which surgeon are you seeing?" is not in that gap; it
+     * comes afterwards. The model spent a retry before it asked anything.
+     *
+     * Timing cannot tell the two apart: over the 14 days to 2026-09-02 the
+     * gap from a refusal to the next attempt has p10 15.2s / median 32.4s
+     * when the caller HAD answered (the surgeon changed), and p10 14.0s /
+     * median 35.3s when nothing changed. The distributions sit on top of
+     * each other, so there is no floor to put a clock at.
+     *
+     * What the counter can do is refuse to fire on the attempt where the ask
+     * usually lands. Same 14 days, 196 surgery calls took a surgeon refusal:
+     *
+     *   139 ended with no ticket at all      <- what this exit is for
+     *    38 were rescued ON ATTEMPT 2        <- the ask worked; do not pre-empt it
+     *    19 were rescued on attempt 3+
+     *
+     * Firing at >= 1 would take all 139, but it fires exactly where those 38
+     * rescues happen, so it would file them unassigned instead of routed.
+     * Firing at >= 2 takes 111 of the 139 (80%) and risks 19 rather than 38.
+     * The 28 calls that hang up after a single refusal are the cost, and the
+     * better trade — dept 2 provider fill has been driven from ~98% to 49%
+     * once already (docs/BACKEND_HANDOFF.md).
      */
-    const surgeonAskExhausted = gateRefusalsSoFar(callSid, SURGERY_FILE_TOOL, 'surgeon') > 0;
+    const surgeonAskExhausted = gateRefusalsSoFar(callSid, SURGERY_FILE_TOOL, 'surgeon') >= 2;
     const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
     const filedDescription = redirect

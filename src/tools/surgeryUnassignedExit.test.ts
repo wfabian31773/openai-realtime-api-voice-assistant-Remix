@@ -61,7 +61,7 @@ beforeEach(() => {
   resetGateAttempts();
 });
 
-describe('the first attempt is unchanged — it asks', () => {
+describe('the attempts where the ask still lands are unchanged', () => {
   it('does not claim the ask is spent on a call that has never been refused', async () => {
     const api = await client();
     const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(SURGEON_REFUSAL);
@@ -72,26 +72,23 @@ describe('the first attempt is unchanged — it asks', () => {
     // And the refusal still reaches the agent as a question about the surgeon.
     expect((res as { missingFields?: string[] }).missingFields).toEqual(['surgeon']);
   });
-});
 
-describe('the second attempt says the ask is spent', () => {
-  it('carries routingAskExhausted after the app has already refused this call', async () => {
-    const api = await client();
-    const create = vi
-      .spyOn(api, 'createTicket')
-      .mockResolvedValueOnce(SURGEON_REFUSAL)
-      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-EXIT-1' } as never);
-
-    await runTool('file_surgery_ticket', NO_SURGEON);
-    const res = await runTool('file_surgery_ticket', NO_SURGEON);
-
-    expect(create.mock.calls[1][0].routingAskExhausted).toBe(true);
-    expect((res as { success: boolean; ticket_number?: string }).ticket_number).toBe('VA-EXIT-1');
-  });
-
-  it('never lets one call spend another call’s ask', async () => {
-    // The counter is keyed by CallSid. A refusal on one call must not make the
-    // NEXT caller look already-asked and skip their question entirely.
+  /**
+   * ONE REFUSAL IS NOT PROOF THE CALLER WAS ASKED.
+   *
+   * CA101be0fe842e77fd83a6024ae06df244, 2026-09-02: file_surgery_ticket
+   * refused at 15:25:24.064 and was called again at 15:25:25.270 — 1.2
+   * seconds later, identical payload. "And which surgeon are you seeing?"
+   * comes AFTER that pair, not between them. The model spent a retry before
+   * it asked the caller anything.
+   *
+   * Attempt 2 is also where 38 of the 196 refused surgery calls in the 14
+   * days to 2026-09-02 were RESCUED — the ask worked and a real surgeon
+   * arrived. Firing the exit there would file those unassigned instead of
+   * routed, which is the provider-fill regression this whole guard exists
+   * to avoid.
+   */
+  it('does not fire on attempt 2, where the ask usually lands', async () => {
     const api = await client();
     const create = vi
       .spyOn(api, 'createTicket')
@@ -99,12 +96,52 @@ describe('the second attempt says the ask is spent', () => {
       .mockResolvedValueOnce(SURGEON_REFUSAL);
 
     await runTool('file_surgery_ticket', NO_SURGEON);
-    await runTool('file_surgery_ticket', {
-      ...NO_SURGEON,
-      call_sid: 'CAcf07a0202a54d64eb10fbc2e4525d668',
-    });
+    await runTool('file_surgery_ticket', NO_SURGEON);
 
     expect(create.mock.calls[1][0].routingAskExhausted).toBeUndefined();
+  });
+});
+
+describe('the third attempt says the ask is spent', () => {
+  it('carries routingAskExhausted once the app has refused this call twice', async () => {
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce(SURGEON_REFUSAL)
+      .mockResolvedValueOnce(SURGEON_REFUSAL)
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-EXIT-1' } as never);
+
+    await runTool('file_surgery_ticket', NO_SURGEON);
+    await runTool('file_surgery_ticket', NO_SURGEON);
+    const res = await runTool('file_surgery_ticket', NO_SURGEON);
+
+    expect(create.mock.calls[2][0].routingAskExhausted).toBe(true);
+    expect((res as { success: boolean; ticket_number?: string }).ticket_number).toBe('VA-EXIT-1');
+  });
+
+  it('never lets one call spend another call’s ask', async () => {
+    // The counter is keyed by CallSid. Call A is driven PAST the threshold, so
+    // call B staying silent is a fact about the key rather than about the
+    // count not being high enough yet.
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValue(SURGEON_REFUSAL);
+
+    await runTool('file_surgery_ticket', NO_SURGEON);
+    await runTool('file_surgery_ticket', NO_SURGEON);
+    await runTool('file_surgery_ticket', NO_SURGEON);
+    // Call A has now spent its ask — prove that, or the next line is vacuous.
+    expect(create.mock.calls[2][0].routingAskExhausted).toBe(true);
+
+    const OTHER = { ...NO_SURGEON, call_sid: 'CAcf07a0202a54d64eb10fbc2e4525d668' };
+    await runTool('file_surgery_ticket', OTHER);
+    await runTool('file_surgery_ticket', OTHER);
+    await runTool('file_surgery_ticket', OTHER);
+
+    // Three refusals on B, none of them inherited from A: still its own first
+    // three, and the third is where B earns its own exit.
+    expect(create.mock.calls[3][0].routingAskExhausted).toBeUndefined();
+    expect(create.mock.calls[4][0].routingAskExhausted).toBeUndefined();
+    expect(create.mock.calls[5][0].routingAskExhausted).toBe(true);
   });
 
   it('does not spend the ask on a sentinel call_sid', async () => {
@@ -119,10 +156,17 @@ describe('the second attempt says the ask is spent', () => {
       .mockResolvedValueOnce(SURGEON_REFUSAL)
       .mockResolvedValueOnce(SURGEON_REFUSAL);
 
-    await runTool('file_surgery_ticket', { ...NO_SURGEON, call_sid: 'unknown' });
-    await runTool('file_surgery_ticket', { ...NO_SURGEON, call_sid: 'unknown' });
+    const SENTINEL = { ...NO_SURGEON, call_sid: 'unknown' };
+    await runTool('file_surgery_ticket', SENTINEL);
+    await runTool('file_surgery_ticket', SENTINEL);
+    await runTool('file_surgery_ticket', SENTINEL);
+    await runTool('file_surgery_ticket', SENTINEL);
 
-    expect(create.mock.calls[1][0].routingAskExhausted).toBeUndefined();
+    // Four refusals. A real SID would have opened the exit on the third; a
+    // sentinel never counts at all, so it never opens.
+    for (const call of create.mock.calls) {
+      expect(call[0].routingAskExhausted).toBeUndefined();
+    }
   });
 
   it('does not spend the ask on a refusal for a DIFFERENT field', async () => {
@@ -136,12 +180,20 @@ describe('the second attempt says the ask is spent', () => {
         statusCode: 400,
         error: 'Missing required information: office.',
       } as never)
+      .mockResolvedValueOnce({
+        success: false,
+        statusCode: 400,
+        error: 'Missing required information: office.',
+      } as never)
       .mockResolvedValueOnce(SURGEON_REFUSAL);
 
     await runTool('file_surgery_ticket', NO_SURGEON);
     await runTool('file_surgery_ticket', NO_SURGEON);
+    // Two office refusals is where the surgeon threshold would sit if office
+    // refusals counted. They do not.
+    await runTool('file_surgery_ticket', NO_SURGEON);
 
-    expect(create.mock.calls[1][0].routingAskExhausted).toBeUndefined();
+    expect(create.mock.calls[2][0].routingAskExhausted).toBeUndefined();
   });
 
   it('does not spend the ask on an OUTAGE, which is not a refusal', async () => {
@@ -152,12 +204,14 @@ describe('the second attempt says the ask is spent', () => {
     const create = vi
       .spyOn(api, 'createTicket')
       .mockResolvedValueOnce({ success: false, statusCode: 503, error: 'upstream down' } as never)
+      .mockResolvedValueOnce({ success: false, statusCode: 503, error: 'upstream down' } as never)
       .mockResolvedValueOnce(SURGEON_REFUSAL);
 
     await runTool('file_surgery_ticket', NO_SURGEON);
     await runTool('file_surgery_ticket', NO_SURGEON);
+    await runTool('file_surgery_ticket', NO_SURGEON);
 
-    expect(create.mock.calls[1][0].routingAskExhausted).toBeUndefined();
+    expect(create.mock.calls[2][0].routingAskExhausted).toBeUndefined();
   });
 });
 
@@ -176,14 +230,17 @@ describe('the flag never travels where it would do harm', () => {
     const create = vi
       .spyOn(api, 'createTicket')
       .mockResolvedValueOnce(SURGEON_REFUSAL)
+      .mockResolvedValueOnce(SURGEON_REFUSAL)
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-EXIT-2' } as never);
 
     const withSurgeon = { ...NO_SURGEON, surgeon: 'Kweku Grant-Acquah' };
     await runTool('file_surgery_ticket', withSurgeon);
     await runTool('file_surgery_ticket', withSurgeon);
+    await runTool('file_surgery_ticket', withSurgeon);
 
-    expect(create.mock.calls[1][0].providerId).toBe(31);
-    expect(create.mock.calls[1][0].routingAskExhausted).toBeUndefined();
+    // Past the threshold, so the flag would be sent but for the providerId.
+    expect(create.mock.calls[2][0].providerId).toBe(31);
+    expect(create.mock.calls[2][0].routingAskExhausted).toBeUndefined();
   });
 
   it('is absent on a request redirected off the surgery queue', async () => {
@@ -194,17 +251,20 @@ describe('the flag never travels where it would do harm', () => {
     const create = vi
       .spyOn(api, 'createTicket')
       .mockResolvedValueOnce(SURGEON_REFUSAL)
+      .mockResolvedValueOnce(SURGEON_REFUSAL)
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-EXIT-3' } as never);
 
+    await runTool('file_surgery_ticket', NO_SURGEON);
     await runTool('file_surgery_ticket', NO_SURGEON);
     await runTool('file_surgery_ticket', {
       ...NO_SURGEON,
       request_description: 'I need to reschedule my regular eye exam appointment',
     });
 
-    const second = create.mock.calls[1][0];
-    // Assert the redirect actually happened, or the next line proves nothing.
-    expect(second.departmentId).not.toBe(2);
-    expect(second.routingAskExhausted).toBeUndefined();
+    const third = create.mock.calls[2][0];
+    // The threshold IS met — so the redirect is the only thing suppressing the
+    // flag, which is what this test is about.
+    expect(third.departmentId).not.toBe(2);
+    expect(third.routingAskExhausted).toBeUndefined();
   });
 });
