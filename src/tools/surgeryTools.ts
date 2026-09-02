@@ -29,6 +29,10 @@
 import { registerTool, missing, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
+
+/** This tool's own name, for the per-call gate counter. */
+const SURGERY_FILE_TOOL = 'file_surgery_ticket';
 
 // ---------------------------------------------------------------- what kind
 
@@ -296,6 +300,22 @@ registerTool({
     const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
     /** Only THIS queue routes by surgeon; a redirect changes what may be filed. */
     const filedOnSurgeryQueue = filedDepartmentId === SURGERY_DEPARTMENT_ID;
+
+    /**
+     * HAS THIS CALL ALREADY BEEN ASKED FOR THE SURGEON?
+     *
+     * Unlike optical, this tool has never had a surgeon gate of its own — it
+     * always files, and the refusal comes from the ticketing app, which
+     * answers 400 "Missing required information: surgeon" and rejects the
+     * whole ticket. `postFailureToolResult` turns that into a question the
+     * agent asks the caller, so the ticketing app's refusal IS this queue's
+     * ask. The counter is therefore written where that refusal is handled,
+     * below, rather than at a local gate that does not exist.
+     *
+     * Read BEFORE this attempt can record anything, so the first pass through
+     * always reads 0 and the caller is asked exactly once.
+     */
+    const surgeonAskExhausted = gateRefusalsSoFar(callSid, SURGERY_FILE_TOOL, 'surgeon') > 0;
     const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
     const filedDescription = redirect
@@ -538,6 +558,21 @@ registerTool({
      *
      * A staff-notes field is the second ask in the ticketing change request.
      */
+    /**
+     * DEPLOY MARKER, and a live counter. Prints only when this call has
+     * already been asked for the surgeon and still has none — the exact
+     * population that used to end with no ticket. Absent from the logs, the
+     * exit is not deployed and any conclusion drawn from a call is worthless
+     * (CLAUDE.md, "How to tell whether a deploy actually took").
+     */
+    if (filedOnSurgeryQueue && surgeonAskExhausted && !lookup.providerId) {
+      console.warn(
+        '[surgery] SURGEON ASK ALREADY SPENT — filing UNASSIGNED rather than ' +
+          'refusing a second time (operator ruling 2026-09-02). ' +
+          `Caller said: ${surgeonName ? `"${surgeonName}"` : '(no surgeon given)'}`,
+      );
+    }
+
     const res = await createTicketDurable({
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
@@ -571,6 +606,38 @@ registerTool({
        */
       ...(filedOnSurgeryQueue && lookup.providerId ? { providerId: lookup.providerId } : {}),
       ...(filedOnSurgeryQueue && surgeonName ? { lastProviderSeen: surgeonName } : {}),
+      /**
+       * TAKE THE REQUEST RATHER THAN LOSE IT — operator ruling, 2026-09-02,
+       * extending to surgery the exit optical already had for its own bounded
+       * ask ("if you gate the location, the agent will ask and if no answer,
+       * unassigned", 2026-09-01).
+       *
+       * The ticketing app refuses a department-2 ticket with no resolvable
+       * surgeon. That refusal is a question the first time — the agent asks
+       * the caller who their surgeon is and refiles. The SECOND time there is
+       * nothing left to ask: the call ends and the request is gone. On
+       * 2026-09-02 two of the six lost surgery requests died exactly there —
+       * one caller had no provider anywhere on their record, the other named
+       * a surgeon absent from the providers table entirely.
+       *
+       * So on a re-attempt this tells the app the ask has been spent, and it
+       * files the ticket UNASSIGNED into department 2 with an advisory on the
+       * audit trail instead of refusing again.
+       *
+       * THREE GUARDS, all load-bearing:
+       *  - `surgeonAskExhausted` comes from the per-call refusal counter,
+       *    which is keyed on a REAL CallSid — never from a model argument.
+       *    Sent unconditionally this would switch the app's gate off, and
+       *    department 2's provider fill has already been driven from ~98% to
+       *    49% once by changes that looked smaller than this one.
+       *  - `!lookup.providerId`, so a ticket that DID resolve a surgeon never
+       *    claims to need manual routing.
+       *  - `filedOnSurgeryQueue`, because a request `detectCrossQueue` sent to
+       *    Optical or the HVA Hub is not gated on a surgeon at all.
+       */
+      ...(filedOnSurgeryQueue && surgeonAskExhausted && !lookup.providerId
+        ? { routingAskExhausted: true }
+        : {}),
       description: filedDescription,
       priority,
       callData: { agentUsed: 'surgery', ...(callSid ? { callSid } : {}) },
@@ -582,6 +649,16 @@ registerTool({
     if (!res.success || !res.ticketNumber) {
       // The POST failed. createTicketDurable has already put the payload in the
       // outbox if it could; this only decides what the agent says about it.
+      //
+      // A terminal refusal naming the surgeon is this queue's ASK: the line
+      // below turns it into a question the agent puts to the caller. Count it,
+      // so a second trip through here carries routingAskExhausted and the app
+      // takes the request unassigned instead of refusing it again. Counted
+      // only for the surgeon — a refusal for any other field has not asked
+      // this question and must not spend it.
+      if (res.terminal && res.missingField === 'surgeon') {
+        noteGateRefusal(callSid, SURGERY_FILE_TOOL, 'surgeon');
+      }
       return postFailureToolResult(res, 'file_surgery_ticket');
     }
 
