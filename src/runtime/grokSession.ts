@@ -385,8 +385,25 @@ export class GrokVoiceSession {
         this.sessionId = event.conversation?.id ?? null;
         this.send({ type: "session.update", session: this.sessionConfig });
         break;
-      case "session.updated":
+      case "session.updated": {
+        const firstHandshake = this.state !== "configured";
         this.state = "configured";
+        if (!firstHandshake) {
+          // A MID-CALL session.update IS NOT A HANDSHAKE — Codex, PR #250.
+          //
+          // Every setStandingContext and setSpokenLanguage sends a
+          // session.update, and its acknowledgement arrives on this same
+          // event. Running the setup path again re-fires onConfigured, and
+          // the bridge answers that by speaking the greeting: the caller
+          // hears the practice's opening line a second time, mid-call. The
+          // caller-ID seed makes the first KNOWN FACTS block non-null on
+          // nearly every call, so this would have fired on the first
+          // completed response of almost every one of them.
+          //
+          // Nothing to drain either — preConfigAudio was emptied by the
+          // first acknowledgement and only fills before `configured`.
+          break;
+        }
         // The opening scripted line goes on the wire FIRST (onConfigured
         // -> provider.start() -> force_message), THEN the held caller
         // audio: with server VAD live, releasing a buffered speech turn
@@ -399,6 +416,7 @@ export class GrokVoiceSession {
           this.send({ type: "input_audio_buffer.append", audio });
         }
         break;
+      }
       case "error":
         // A barge-in cancel races the response's NATURAL completion: we saw
         // response.created (so wireResponseActive is true) and sent a

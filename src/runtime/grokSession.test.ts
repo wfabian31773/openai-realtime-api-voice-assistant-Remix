@@ -83,8 +83,10 @@ function buildHandlers(over: {
   onAudioDone?: NonNullable<GrokVoiceSessionHandlers["onAudioDone"]>;
   onAgentTranscriptDelta?: NonNullable<GrokVoiceSessionHandlers["onAgentTranscriptDelta"]>;
   onResponseDone?: NonNullable<GrokVoiceSessionHandlers["onResponseDone"]>;
+  onConfigured?: NonNullable<GrokVoiceSessionHandlers["onConfigured"]>;
 }) {
   return {
+    onConfigured: over.onConfigured ?? vi.fn(),
     onToolCall: over.onToolCall ?? vi.fn(),
     onError: over.onError ?? vi.fn(),
     onAudioDone: over.onAudioDone ?? vi.fn(),
@@ -957,5 +959,42 @@ describe("GrokVoiceSession.setStandingContext", () => {
     session.setStandingContext(null);
     const latest = lastUpdate(transport).session.instructions;
     expect(latest).not.toContain("KNOWN FACTS");
+  });
+});
+
+/**
+ * A MID-CALL session.update IS NOT A HANDSHAKE — Codex, PR #250.
+ *
+ * Every setStandingContext and setSpokenLanguage sends a session.update, and
+ * its acknowledgement arrives on the same `session.updated` event as the
+ * opening handshake's. Treating them alike re-fires onConfigured, and the
+ * bridge answers that by speaking the practice's greeting — a second time,
+ * mid-call, to a caller who is already talking.
+ *
+ * The caller-ID seed makes the first KNOWN FACTS block non-null on nearly
+ * every call, so this would have fired on the first completed response of
+ * almost every one of them.
+ */
+describe("only the first session.updated is a handshake", () => {
+  it("does not re-run setup when the facts block is pushed mid-call", () => {
+    let configured = 0;
+    const { transport, session } = makeSession({ onConfigured: () => { configured += 1; } });
+    transport.emit({ type: "session.created", conversation: { id: "sess-once" } });
+    transport.emit({ type: "session.updated" });
+    expect(configured).toBe(1);
+
+    session.setStandingContext("# KNOWN FACTS (settled — never re-ask)\n- Date of birth already given: 03/17/1973.");
+    transport.emit({ type: "session.updated" });
+    expect(configured).toBe(1);
+  });
+
+  it("does not re-run setup on a mid-call language switch either", () => {
+    let configured = 0;
+    const { transport, session } = makeSession({ onConfigured: () => { configured += 1; } });
+    transport.emit({ type: "session.created", conversation: { id: "sess-once-2" } });
+    transport.emit({ type: "session.updated" });
+    session.setSpokenLanguage("es");
+    transport.emit({ type: "session.updated" });
+    expect(configured).toBe(1);
   });
 });

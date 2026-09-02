@@ -2298,3 +2298,63 @@ describe("identity onto the call record", () => {
     expect(records[records.length - 1]?.identity?.callerName).toBe("Wayne Fabian ✓");
   });
 });
+
+/**
+ * THE TURN AFTER A TOOL SETTLES IS THE ONE THAT MOST NEEDS THE FACTS —
+ * Codex, PR #250.
+ *
+ * A tool still awaiting I/O when its carrying response ends had its ledger
+ * pushed BEFORE it wrote anything, and the follow-up was then requested
+ * straight from `toolCallSettled` with no second push. Verification is
+ * exactly that shape: it is asynchronous, and the reply immediately after it
+ * succeeds is the reply that must not ask for the date of birth again.
+ *
+ * That is the failure the whole ledger exists to stop, arriving through the
+ * one path that skipped the push.
+ */
+describe("facts are refreshed before the post-tool turn", () => {
+  it("pushes the ledger again after an async tool settles", async () => {
+    const { updateLedger } = await import("../services/callFactsLedger");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+
+    const h = makeBridge({
+      agent: makeAgent({
+        // The bridge dispatches through the bound agent, not a tool list.
+        // Settles only when the test lets it, which is what puts the ledger
+        // write AFTER the carrying response's boundary.
+        dispatch: async () => {
+          await gate;
+          updateLedger("CA-test", {
+            firstName: "Wayne",
+            lastName: "Fabian",
+            dateOfBirth: "03/17/1973",
+            identityVerified: true,
+          });
+          return { ok: true, output: JSON.stringify({ verified: true }) };
+        },
+      }),
+    });
+
+    h.handlers().onToolCall("c1", "verify_identity", {});
+    // The carrying response ends while the tool is still in flight.
+    h.handlers().onResponseDone();
+    const beforeSettle = (h.session.setStandingContext as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    release();
+    for (let i = 0; i < 10; i += 1) await new Promise((r) => setTimeout(r, 1));
+    // The tool really did write to the ledger — otherwise this test would be
+    // asserting the push of an unchanged block.
+    const { getLedger } = await import("../services/callFactsLedger");
+    expect(getLedger("CA-test")?.identityVerified).toBe(true);
+
+    const calls = (h.session.setStandingContext as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.length).toBeGreaterThan(beforeSettle);
+    // And what it pushed is the VERIFIED identity, which is the whole point.
+    const latest = lastArg(calls) as string;
+    expect(latest).toContain("IDENTITY VERIFIED");
+    expect(latest).toMatch(/never ask for their name or date of birth again/i);
+  });
+});
