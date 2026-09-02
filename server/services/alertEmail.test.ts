@@ -46,14 +46,42 @@ describe('who the alert goes to', () => {
 });
 
 describe('which alerts email at all', () => {
-  it('emails a critical alert', () => {
-    expect(shouldEmailAlert('critical')).toBe(true);
+  /**
+   * ONE ALARM ASKED FOR, THE WHOLE CRITICAL STREAM DELIVERED — 2026-09-02.
+   *
+   * Wayne asked for ONE thing: "for the alert, email me at
+   * wfabian@azulvision.com, use the same route we use for invites and such."
+   * "The alert" was the ticket-filing alarm, the thing we had just built and
+   * were talking about.
+   *
+   * I gated on SEVERITY instead of on that alarm. There are 35 sites in this
+   * repo that raise a critical alert — ticket_filing_stalled, provider_miss,
+   * emergency_miss, database_failure, call_log_failure and more — and every
+   * one of them started emailing him. He reported it in the same words he
+   * used for the July SMS incident: "it's just like a return of the SMS
+   * spamming me with a bunch of emails."
+   *
+   * That July ruling was about VOLUME. Gating on severity reproduced it in an
+   * inbox, which is the exact failure the old comment here claimed to avoid.
+   * Severity is not scope. Only the alarm he asked for emails.
+   */
+  it('emails the ticket-filing alarm — the one alert that was asked for', () => {
+    expect(shouldEmailAlert('ticket_filing_stalled', 'critical')).toBe(true);
   });
 
-  it.each(['warning', 'info'])('does not email a %s alert', (sev) => {
-    // The 2026-07-27 ruling was about volume. Emailing every warning would
-    // reproduce it in an inbox instead of on a phone.
-    expect(shouldEmailAlert(sev)).toBe(false);
+  it.each(['provider_miss', 'emergency_miss', 'database_failure', 'call_log_failure'])(
+    'does NOT email %s, however critical it is',
+    (type) => {
+      // Each of these may well be worth an email. That is Wayne's call to
+      // make, one type at a time, and making it for him is what caused this.
+      expect(shouldEmailAlert(type, 'critical')).toBe(false);
+    },
+  );
+
+  it.each(['warning', 'info'])('does not email a %s ticket-filing alert', (sev) => {
+    // Severity still gates, on top of type: a non-critical filing notice is
+    // not an outage and does not belong in an inbox.
+    expect(shouldEmailAlert('ticket_filing_stalled', sev)).toBe(false);
   });
 });
 
