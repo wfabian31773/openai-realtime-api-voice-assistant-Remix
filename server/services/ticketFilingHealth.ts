@@ -33,8 +33,22 @@
  * ticket even when everything works, and the lines go quiet overnight and at
  * weekends: the longest gap between two filed tickets in the same fortnight is
  * days long and entirely healthy. A count of calls that arrived and left
- * without a ticket cannot be tripped by silence, which is the failure mode
- * every time-based version of this has.
+ * without a ticket cannot be MANUFACTURED by silence, which is the failure
+ * mode every time-based version of this has.
+ *
+ * BUT SILENCE FREEZES A RUN THAT ALREADY EXISTS — production, 2026-09-02, the
+ * first morning this ran live, and this paragraph used to claim otherwise.
+ * Only a call that FILES a ticket resets the run, so when the lines close on
+ * the tail of a bad evening the count is preserved intact until they reopen.
+ * The ticketing app wedged at 23:25 on 09-01 and 17 queue calls timed out
+ * unfiled; at 12:30 the next day, outage long over and the app healthy, the
+ * alarm fired on that frozen run and re-fired every five minutes because
+ * nothing could reset it. Left alone it does that every morning — the
+ * "muted within a week" death this alarm was shaped to avoid.
+ *
+ * So the run plane speaks only while calls are arriving: see
+ * `TRAFFIC_RECENCY_MS`. Filing has STOPPED is a claim about now, and it needs
+ * a now to be about.
  *
  * TWO PLANES, as BACKEND_HANDOFF.md:244-248 requires, both of them local to
  * the Operations Hub so the alarm never depends on the system it is watching:
@@ -89,6 +103,26 @@ export const UNFILED_RUN_ALARM = 12;
  */
 export const OUTBOX_HELD_ALARM = 3;
 
+/**
+ * How recent the newest queue call must be for the RUN plane to speak.
+ *
+ * The run says "calls are arriving and leaving without a ticket". With no
+ * calls arriving it is a statement about the past, and a frozen run from the
+ * previous evening is exactly what fired at 12:30 on 2026-09-02 with nothing
+ * wrong.
+ *
+ * An hour, for two reasons. Queue volume in business hours is roughly one call
+ * every three minutes across the four lines, so sixty minutes of nothing is
+ * already outside anything normal — and the 08-31 outage, the event this alarm
+ * exists for, had calls arriving throughout: its newest call was always seconds
+ * old, so this bound could never have hidden it. Nothing shorter buys anything;
+ * anything longer starts to re-admit the overnight tail.
+ *
+ * This bounds ONLY the run plane. The outbox planes below are about requests
+ * we are holding, which is equally true at 3am, and they still fire.
+ */
+export const TRAFFIC_RECENCY_MS = 60 * 60 * 1000;
+
 /** Pure: no clock, no database, so the outage can be replayed against it. */
 export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFilingVerdict {
   let unfiledRun = 0;
@@ -131,7 +165,13 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
     };
   }
 
-  if (unfiledRun >= UNFILED_RUN_ALARM) {
+  // The run plane needs live traffic — see TRAFFIC_RECENCY_MS. `unfiledRun` is
+  // still reported either way: the count is true and staff may want it.
+  const newestCallAtMs = snapshot.recentQueueCalls[0]?.createdAtMs ?? null;
+  const trafficIsLive =
+    newestCallAtMs !== null && snapshot.nowMs - newestCallAtMs <= TRAFFIC_RECENCY_MS;
+
+  if (trafficIsLive && unfiledRun >= UNFILED_RUN_ALARM) {
     return {
       stalled: true,
       reason:
