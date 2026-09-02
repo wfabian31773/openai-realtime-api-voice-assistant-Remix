@@ -547,57 +547,26 @@ class SystemAlertService {
   }
 
   /**
-   * THE TICKET PATH FINALLY HAS A WATCH ON IT.
+   * THE TICKET-FILING ALARM IS GONE. Wayne, 2026-09-02: "Kill the alarm, I
+   * don't want an alarm."
    *
-   * On 2026-08-31 filing stopped at 20:16 UTC and ran dead for three and a
-   * half hours. Nothing alerted — R1–R12 in the diagnosis rules do not cover
-   * the ticket path at all, which is the queue lines' entire job — and it was
-   * found because staff told the operator.
+   * It ran every five minutes and paged on a STANDING condition — six held
+   * requests kept emailing him every five minutes, and the only way to stop it
+   * was me deleting rows from the outbox by hand after he had routed each one
+   * to staff and told me it was done. That is a chore, not a detector. His
+   * words: "figure out why they are failing and fix it, not spam me with
+   * emails so that I have to stop what I'm doing."
    *
-   * Thresholds and their derivation live in ticketFilingHealth.ts. Replayed
-   * against the production rows, this fires at 20:23:06 that night, and does
-   * not fire on any other run in the fortnight around it.
+   * The verdict it read is still computed — `assessTicketFiling` in
+   * ticketFilingHealth.ts — and still drives the Observatory banner, which he
+   * opens when he wants it. Nothing pages.
    *
-   * Every five minutes rather than fifteen: seven minutes of detection is only
-   * worth having if the check runs inside it.
+   * DO NOT RE-ADD A SCHEDULED PAGE without asking him. If one is ever wanted
+   * again it has to be EDGE-triggered (fire once when a NEW request is lost,
+   * never repeat on the same standing count) and it must not require a human
+   * to clear anything.
    */
-  async checkTicketFilingAlert(): Promise<void> {
-    try {
-      const { readTicketFilingSnapshot, assessTicketFiling } = await import('./ticketFilingHealth');
-      const snapshot = await readTicketFilingSnapshot();
-      if (!snapshot) return; // it logged its own reason
 
-      const verdict = assessTicketFiling(snapshot);
-      if (!verdict.stalled) {
-        console.log(
-          `[ALERT SERVICE] Ticket filing OK — ${verdict.unfiledRun} call(s) since the last ticket, ` +
-            `${verdict.outboxHeld} held in the outbox`,
-        );
-        return;
-      }
-
-      await this.sendAlert({
-        type: 'ticket_filing_stalled',
-        severity: 'critical',
-        message: `TICKET FILING HAS STOPPED: ${verdict.reason}`,
-        details: {
-          unfiledRun: verdict.unfiledRun,
-          minutesSinceLastFiled: verdict.minutesSinceLastFiled,
-          outboxHeld: verdict.outboxHeld,
-        },
-        timestamp: new Date(),
-      });
-    } catch (error) {
-      console.error('[ALERT SERVICE] Error checking ticket filing:', error);
-    }
-  }
-
-  startTicketFilingSchedule(): void {
-    console.log('[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes)');
-    setInterval(() => {
-      this.checkTicketFilingAlert();
-    }, 5 * 60 * 1000);
-  }
 
   async runSyntheticAlertTest(): Promise<Array<{ alertType: string; delivered: boolean; detail: string }>> {
     const results: Array<{ alertType: string; delivered: boolean; detail: string }> = [];

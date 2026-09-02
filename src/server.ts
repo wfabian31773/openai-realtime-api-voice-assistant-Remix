@@ -207,10 +207,23 @@ async function startVoiceServer() {
     // Start grader-based push alerting (checks every 15 min)
     systemAlertService.startGraderAlertSchedule();
 
-    // The ticket path finally has a watch on it (every 5 min). On 2026-08-31
-    // filing stopped at 20:16 UTC and nothing noticed for three and a half
-    // hours; replayed against that night's rows this fires at 20:23:06.
-    systemAlertService.startTicketFilingSchedule();
+    // NO TICKET-FILING ALARM. Wayne, 2026-09-02: "Kill the alarm, I don't want
+    // an alarm." It is not started, and `startTicketFilingSchedule` is gone.
+    //
+    // It was built for a real gap — on 2026-08-31 filing stopped at 20:16 UTC
+    // and nothing noticed for three and a half hours — but what shipped paged
+    // him every five minutes on a STANDING condition, with no way to resolve
+    // one except me deleting rows out of the database by hand. That turned an
+    // outage detector into a chore he had to route to staff and then report
+    // back on. His words, and they are the design note: "figure out why they
+    // are failing and fix it, not spam me with emails."
+    //
+    // The state it read is still computed and still on the Observatory, which
+    // is a page he opens when he wants it rather than something that
+    // interrupts him: `assessTicketFiling` in server/services/ticketFilingHealth.ts
+    // and the banner in server/observatory/queries.ts are untouched.
+    //
+    // DO NOT RE-ADD A SCHEDULED PAGE without asking him first.
     
     // Start data retention policy scheduler (purges expired data daily)
     import('./services/retentionPolicyService').then(({ retentionPolicyService }) => {
