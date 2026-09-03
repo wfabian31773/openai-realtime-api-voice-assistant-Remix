@@ -67,6 +67,44 @@ export interface QueueCallSample {
   createdAtMs: number;
   /** A ticket number landed on the call row. */
   hasTicket: boolean;
+  /** Agent+caller turns on the call. Null when the row never recorded any. */
+  totalTurns: number | null;
+  /** Seconds. Null when the row never recorded one. */
+  durationSeconds: number | null;
+}
+
+/**
+ * A call that never got as far as a request.
+ *
+ * A caller who hangs up during the greeting has not "arrived and left without
+ * a ticket" in any sense the run is about — there was no request to file. Over
+ * the fourteen days to 2026-09-03, completed queue calls split like this:
+ *
+ *   greeting-only (<= 1 turn, or under 20s):   504 calls,     5 filed  (1.0%)
+ *   substantive:                             2,479 calls, 1,564 filed (63.1%)
+ *
+ * They are 17% of queue traffic and they file one percent of the time, and the
+ * run counted them identically to a real conversation that failed. That is
+ * what emailed the operator at 2026-09-03 18:24:56: a run of twelve of which
+ * FOUR were greeting-only hangups — 11s/1 turn, 17s/1 turn, 17s/1 turn,
+ * 34s/3 turns. Excluding them the run was eight, which is the worst run seen
+ * on an ordinary fortnight and below any threshold.
+ *
+ * This does NOT blind the alarm to the event it exists for. Of the 184
+ * completed queue calls in the 2026-08-31 outage, none of which filed, 145
+ * are substantive — twelve times the threshold.
+ *
+ * FAIL LOUD ON MISSING DATA. A row with neither figure recorded counts as
+ * substantive. Skipping is the quiet direction, and a call the database could
+ * not describe is not evidence that nothing was asked for.
+ */
+export const GREETING_ONLY_MAX_TURNS = 1;
+export const GREETING_ONLY_MAX_SECONDS = 20;
+
+export function isGreetingOnly(call: QueueCallSample): boolean {
+  if (call.totalTurns !== null && call.totalTurns <= GREETING_ONLY_MAX_TURNS) return true;
+  if (call.durationSeconds !== null && call.durationSeconds < GREETING_ONLY_MAX_SECONDS) return true;
+  return false;
 }
 
 export interface TicketFilingSnapshot {
@@ -76,6 +114,12 @@ export interface TicketFilingSnapshot {
   outboxPending: number;
   outboxFailed: number;
   outboxDeadLetter: number;
+  /**
+   * When a ticket was last ACTUALLY filed, as recorded by the filing path
+   * itself (ticketFilingPulse.ts) rather than inferred from call_logs. Null
+   * when nothing has filed since this process started.
+   */
+  lastTicketFiledAtMs: number | null;
   nowMs: number;
 }
 
@@ -89,6 +133,10 @@ export interface TicketFilingVerdict {
   minutesSinceLastFiled: number | null;
   /** Outbox rows waiting, failed or dead-lettered in the window. */
   outboxHeld: number;
+  /** Greeting-only calls skipped while counting the run. */
+  greetingOnlySkipped: number;
+  /** True when a confirmed filing inside the run's span held the alarm back. */
+  suppressedByConfirmedFiling: boolean;
 }
 
 /**
@@ -145,12 +193,23 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
   // the run stops there; the older calls stay in the snapshot and the outbox
   // planes below still see everything.
   let unfiledRun = 0;
+  let greetingOnlySkipped = 0;
   let previousCallAtMs: number | null = null;
+  /** The oldest call the run reaches — the span a confirmed filing is judged against. */
+  let runStartedAtMs: number | null = null;
   for (const call of snapshot.recentQueueCalls) {
     if (call.hasTicket) break;
     if (previousCallAtMs !== null && previousCallAtMs - call.createdAtMs > TRAFFIC_RECENCY_MS) break;
-    unfiledRun++;
+    // A greeting-only hangup is still TRAFFIC — it keeps the gap rule fed, so
+    // the run cannot walk back through a closure — but it is not EVIDENCE,
+    // because there was no request in it to file. See isGreetingOnly.
     previousCallAtMs = call.createdAtMs;
+    runStartedAtMs = call.createdAtMs;
+    if (isGreetingOnly(call)) {
+      greetingOnlySkipped++;
+      continue;
+    }
+    unfiledRun++;
   }
 
   const filed = snapshot.recentQueueCalls.find((c) => c.hasTicket);
@@ -172,6 +231,8 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
       lastFiledAtMs,
       minutesSinceLastFiled,
       outboxHeld,
+      greetingOnlySkipped,
+      suppressedByConfirmedFiling: false,
     };
   }
   if (outboxHeld >= OUTBOX_HELD_ALARM) {
@@ -184,6 +245,8 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
       lastFiledAtMs,
       minutesSinceLastFiled,
       outboxHeld,
+      greetingOnlySkipped,
+      suppressedByConfirmedFiling: false,
     };
   }
 
@@ -193,7 +256,30 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
   const trafficIsLive =
     newestCallAtMs !== null && snapshot.nowMs - newestCallAtMs <= TRAFFIC_RECENCY_MS;
 
-  if (trafficIsLive && unfiledRun >= UNFILED_RUN_ALARM) {
+  /**
+   * THE DISCONFIRMING CHECK — a positive fact beats an inference.
+   *
+   * The run says "filing has stopped" by observing that it did not happen.
+   * `ticketFilingPulse` says when it DID happen, recorded by the filing path
+   * at the moment the API answered. If a ticket was confirmed filed at any
+   * point inside the run's own span, filing plainly has not stopped, and the
+   * run is measuring a filing RATE — a different thing, and not an emergency.
+   *
+   * This is what would have held the 2026-09-03 18:24:56 email: VA-57240's
+   * create-ticket returned 200 at 18:24:15, inside a run reaching back to
+   * 18:13:37, and the alarm announced a stall forty-one seconds later.
+   *
+   * Deliberately the run's SPAN and not a fixed window, so there is no second
+   * constant to tune and no way for the check to outlive the evidence. A real
+   * outage has no confirmed filing anywhere in its span — 2026-08-31 had none
+   * for three hours and thirty-nine minutes — so this cannot silence one.
+   */
+  const filedInsideRun =
+    snapshot.lastTicketFiledAtMs !== null &&
+    runStartedAtMs !== null &&
+    snapshot.lastTicketFiledAtMs >= runStartedAtMs;
+
+  if (trafficIsLive && unfiledRun >= UNFILED_RUN_ALARM && !filedInsideRun) {
     return {
       stalled: true,
       reason:
@@ -206,12 +292,16 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
       lastFiledAtMs,
       minutesSinceLastFiled,
       outboxHeld,
+      greetingOnlySkipped,
+      suppressedByConfirmedFiling: false,
     };
   }
 
   return {
     stalled: false,
     reason: null,
+    suppressedByConfirmedFiling: trafficIsLive && unfiledRun >= UNFILED_RUN_ALARM && filedInsideRun,
+    greetingOnlySkipped,
     unfiledRun,
     lastFiledAtMs,
     minutesSinceLastFiled,
@@ -264,7 +354,9 @@ export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot |
      */
     const calls = await db.execute(sql`
       SELECT (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_ms,
-             (ticket_number IS NOT NULL) AS has_ticket
+             (ticket_number IS NOT NULL) AS has_ticket,
+             total_turns,
+             duration
       FROM call_logs
       WHERE agent_used IN ('optical', 'surgery', 'tech', 'records')
         AND status = 'completed'
@@ -298,10 +390,25 @@ export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot |
       held[row.status] = Number(row.n) || 0;
     }
 
+    const { lastTicketFiledAtMs } = await import('./ticketFilingPulse');
+
     return {
-      recentQueueCalls: (calls.rows as Array<{ created_ms: string | number; has_ticket: boolean }>).map(
-        (r) => ({ createdAtMs: Number(r.created_ms), hasTicket: Boolean(r.has_ticket) }),
-      ),
+      recentQueueCalls: (
+        calls.rows as Array<{
+          created_ms: string | number;
+          has_ticket: boolean;
+          total_turns: number | null;
+          duration: number | null;
+        }>
+      ).map((r) => ({
+        createdAtMs: Number(r.created_ms),
+        hasTicket: Boolean(r.has_ticket),
+        // Null stays null — isGreetingOnly treats an undescribed call as
+        // substantive, and coalescing here would quietly make it a skip.
+        totalTurns: r.total_turns === null ? null : Number(r.total_turns),
+        durationSeconds: r.duration === null ? null : Number(r.duration),
+      })),
+      lastTicketFiledAtMs: lastTicketFiledAtMs(),
       // `sending` counts as held: a lease that never completes is a request
       // nobody is holding on to.
       outboxPending: (held.pending ?? 0) + (held.sending ?? 0),

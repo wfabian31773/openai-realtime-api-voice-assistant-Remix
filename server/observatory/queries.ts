@@ -11,6 +11,7 @@
 import { pool } from '../db';
 import { fivestarQuery } from './fivestarDb';
 import { assessTicketFiling, type TicketFilingVerdict } from '../services/ticketFilingHealth';
+import { lastTicketFiledAtMs } from '../services/ticketFilingPulse';
 
 // ────────────────────────────────────────────────────────────────────────
 // Ops Hub agents — six-pillar scorecards
@@ -1023,8 +1024,13 @@ export async function todayOverview(): Promise<TodayOverview> {
       // a busy morning alone would paint this banner red. See the long note in
       // ticketFilingHealth.ts for why the filter is 'completed' exactly and not
       // "anything not in-flight".
+      // total_turns/duration join the SAME sync rule: isGreetingOnly reads
+      // them, so a copy without them would count greeting-only hangups the
+      // alarm skips and this banner would disagree with the email.
       `SELECT (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_ms,
-              (ticket_number IS NOT NULL) AS has_ticket
+              (ticket_number IS NOT NULL) AS has_ticket,
+              total_turns,
+              duration
          FROM call_logs
         WHERE agent_used IN ('optical', 'surgery', 'tech', 'records')
           AND status = 'completed'
@@ -1045,10 +1051,20 @@ export async function todayOverview(): Promise<TodayOverview> {
     const byStatus: Record<string, number> = {};
     for (const r of held.rows) byStatus[r.status] = Number(r.n) || 0;
     ticketFiling = assessTicketFiling({
-      recentQueueCalls: recent.rows.map((r: { created_ms: string; has_ticket: boolean }) => ({
-        createdAtMs: Number(r.created_ms),
-        hasTicket: Boolean(r.has_ticket),
-      })),
+      recentQueueCalls: recent.rows.map(
+        (r: {
+          created_ms: string;
+          has_ticket: boolean;
+          total_turns: number | null;
+          duration: number | null;
+        }) => ({
+          createdAtMs: Number(r.created_ms),
+          hasTicket: Boolean(r.has_ticket),
+          totalTurns: r.total_turns === null ? null : Number(r.total_turns),
+          durationSeconds: r.duration === null ? null : Number(r.duration),
+        }),
+      ),
+      lastTicketFiledAtMs: lastTicketFiledAtMs(),
       outboxPending: (byStatus.pending ?? 0) + (byStatus.sending ?? 0),
       outboxFailed: byStatus.failed ?? 0,
       outboxDeadLetter: byStatus.dead_letter ?? 0,

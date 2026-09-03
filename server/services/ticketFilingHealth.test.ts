@@ -17,18 +17,29 @@ import {
   UNFILED_RUN_ALARM,
   OUTBOX_HELD_ALARM,
   TRAFFIC_RECENCY_MS,
+  isGreetingOnly,
   type TicketFilingSnapshot,
 } from './ticketFilingHealth';
 
 const MIN = 60_000;
 const NOW = Date.parse('2026-08-31T20:23:06Z');
 
+/**
+ * A call with enough engagement to count — 8 turns over 95 seconds is an
+ * ordinary queue conversation. Every existing case below was written before
+ * greeting-only calls were skipped, and each one means "a real conversation
+ * that filed nothing", so substantive is the right default to preserve them.
+ */
+const SUBSTANTIVE = { totalTurns: 8, durationSeconds: 95 } as const;
+
 /** Newest first, one call every 90 seconds, `unfiled` of them with no ticket. */
 function calls(unfiled: number, thenFiled: number, from = NOW): TicketFilingSnapshot['recentQueueCalls'] {
   const out: TicketFilingSnapshot['recentQueueCalls'] = [];
-  for (let i = 0; i < unfiled; i++) out.push({ createdAtMs: from - i * 90_000, hasTicket: false });
+  for (let i = 0; i < unfiled; i++) {
+    out.push({ createdAtMs: from - i * 90_000, hasTicket: false, ...SUBSTANTIVE });
+  }
   for (let i = 0; i < thenFiled; i++) {
-    out.push({ createdAtMs: from - (unfiled + i) * 90_000, hasTicket: true });
+    out.push({ createdAtMs: from - (unfiled + i) * 90_000, hasTicket: true, ...SUBSTANTIVE });
   }
   return out;
 }
@@ -39,6 +50,7 @@ function snapshot(over: Partial<TicketFilingSnapshot> = {}): TicketFilingSnapsho
     outboxPending: 0,
     outboxFailed: 0,
     outboxDeadLetter: 0,
+    lastTicketFiledAtMs: null,
     nowMs: NOW,
     ...over,
   };
@@ -74,9 +86,9 @@ describe('plane A — calls arriving and leaving without a ticket', () => {
     // filed tickets in the measured fortnight is days long.
     const weekend = snapshot({
       recentQueueCalls: [
-        { createdAtMs: NOW - 5 * MIN, hasTicket: false },
-        { createdAtMs: NOW - 40 * MIN, hasTicket: false },
-        { createdAtMs: NOW - 3 * 24 * 60 * MIN, hasTicket: true },
+        { createdAtMs: NOW - 5 * MIN, hasTicket: false, ...SUBSTANTIVE },
+        { createdAtMs: NOW - 40 * MIN, hasTicket: false, ...SUBSTANTIVE },
+        { createdAtMs: NOW - 3 * 24 * 60 * MIN, hasTicket: true, ...SUBSTANTIVE },
       ],
     });
     const v = assessTicketFiling(weekend);
@@ -334,7 +346,7 @@ describe('a run is calls arriving together, not calls either side of a closure',
     const lastNight = calls(17, 20, NOW - nightGap);
     const thisMorning: TicketFilingSnapshot['recentQueueCalls'] = [];
     for (let i = 0; i < freshUnfiled; i++) {
-      thisMorning.push({ createdAtMs: NOW - i * 3 * MIN, hasTicket: false });
+      thisMorning.push({ createdAtMs: NOW - i * 3 * MIN, hasTicket: false, ...SUBSTANTIVE });
     }
     return [...thisMorning, ...lastNight];
   }
@@ -358,8 +370,8 @@ describe('a run is calls arriving together, not calls either side of a closure',
   it('does not hide the outage it was built for', () => {
     // 185 calls over 3h39m — one every ~71 seconds, no gap near an hour.
     const outage: TicketFilingSnapshot['recentQueueCalls'] = [];
-    for (let i = 0; i < 185; i++) outage.push({ createdAtMs: NOW - i * 71_000, hasTicket: false });
-    outage.push({ createdAtMs: NOW - 185 * 71_000, hasTicket: true });
+    for (let i = 0; i < 185; i++) outage.push({ createdAtMs: NOW - i * 71_000, hasTicket: false, ...SUBSTANTIVE });
+    outage.push({ createdAtMs: NOW - 185 * 71_000, hasTicket: true, ...SUBSTANTIVE });
     const v = assessTicketFiling(snapshot({ recentQueueCalls: outage }));
     expect(v.stalled).toBe(true);
     expect(v.unfiledRun).toBe(185);
@@ -367,11 +379,212 @@ describe('a run is calls arriving together, not calls either side of a closure',
 
   it('breaks the run at the gap and not before it', () => {
     const spaced = (gapMs: number) => [
-      { createdAtMs: NOW, hasTicket: false },
-      { createdAtMs: NOW - gapMs, hasTicket: false },
-      { createdAtMs: NOW - gapMs - MIN, hasTicket: false },
+      { createdAtMs: NOW, hasTicket: false, ...SUBSTANTIVE },
+      { createdAtMs: NOW - gapMs, hasTicket: false, ...SUBSTANTIVE },
+      { createdAtMs: NOW - gapMs - MIN, hasTicket: false, ...SUBSTANTIVE },
     ];
     expect(assessTicketFiling(snapshot({ recentQueueCalls: spaced(TRAFFIC_RECENCY_MS - MIN) })).unfiledRun).toBe(3);
     expect(assessTicketFiling(snapshot({ recentQueueCalls: spaced(TRAFFIC_RECENCY_MS + MIN) })).unfiledRun).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-09-03: the email that said filing had stopped while it had not
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('greeting-only hangups do not count toward the run', () => {
+  const GREETING = { totalTurns: 1, durationSeconds: 17 } as const;
+
+  /** Newest first, mixing substantive and greeting-only unfiled calls. */
+  function mixed(shape: Array<'sub' | 'greet'>, from = NOW): TicketFilingSnapshot['recentQueueCalls'] {
+    return shape.map((kind, i) => ({
+      createdAtMs: from - i * 90_000,
+      hasTicket: false,
+      ...(kind === 'greet' ? GREETING : SUBSTANTIVE),
+    }));
+  }
+
+  it('a caller who hangs up in the greeting is not a request that failed to file', () => {
+    expect(isGreetingOnly({ createdAtMs: NOW, hasTicket: false, ...GREETING })).toBe(true);
+    expect(isGreetingOnly({ createdAtMs: NOW, hasTicket: false, ...SUBSTANTIVE })).toBe(false);
+  });
+
+  it('counts a call short on EITHER axis — one turn, or under twenty seconds', () => {
+    const one = { createdAtMs: NOW, hasTicket: false, totalTurns: 1, durationSeconds: 300 };
+    const brief = { createdAtMs: NOW, hasTicket: false, totalTurns: 9, durationSeconds: 19 };
+    expect(isGreetingOnly(one)).toBe(true);
+    expect(isGreetingOnly(brief)).toBe(true);
+  });
+
+  it('is exclusive at both bounds — 2 turns and 20 seconds are substantive', () => {
+    expect(
+      isGreetingOnly({ createdAtMs: NOW, hasTicket: false, totalTurns: 2, durationSeconds: 20 }),
+    ).toBe(false);
+  });
+
+  it('FAILS LOUD: a call the database could not describe counts as substantive', () => {
+    // Skipping is the quiet direction. A row with neither figure is not
+    // evidence that nothing was asked for, and an outage that also broke
+    // telemetry must not silence the alarm.
+    expect(
+      isGreetingOnly({ createdAtMs: NOW, hasTicket: false, totalTurns: null, durationSeconds: null }),
+    ).toBe(false);
+  });
+
+  /**
+   * THE ACTUAL RUN, 2026-09-03 18:13:37 → 18:22:13. Twelve queue calls, of
+   * which four were greeting-only: 11s/1 turn, 17s/1 turn, 17s/1 turn and
+   * 34s/3 turns. unfiledRun reached 12, the threshold, and emailed the
+   * operator "TICKET FILING HAS STOPPED".
+   */
+  it('does not fire on the run that emailed the operator — eight substantive, not twelve', () => {
+    const shape: Array<'sub' | 'greet'> = [
+      'sub', 'greet', 'greet', 'sub', 'sub', 'greet',
+      'greet', 'sub', 'sub', 'sub', 'sub', 'sub',
+    ];
+    const v = assessTicketFiling(snapshot({ recentQueueCalls: mixed(shape) }));
+    expect(v.unfiledRun).toBe(8);
+    expect(v.greetingOnlySkipped).toBe(4);
+    expect(v.stalled).toBe(false);
+  });
+
+  it('still fires once twelve SUBSTANTIVE calls miss, however many hangups are mixed in', () => {
+    const shape: Array<'sub' | 'greet'> = [];
+    for (let i = 0; i < 12; i++) shape.push('sub', 'greet');
+    const v = assessTicketFiling(snapshot({ recentQueueCalls: mixed(shape) }));
+    expect(v.unfiledRun).toBe(12);
+    expect(v.greetingOnlySkipped).toBe(12);
+    expect(v.stalled).toBe(true);
+  });
+
+  /**
+   * 2026-08-31, the outage this alarm exists for: 184 completed queue calls
+   * over three hours and thirty-nine minutes, none of which filed. 39 of them
+   * are greeting-only, leaving 145 — twelve times the threshold. Skipping
+   * hangups must not blind the alarm to this.
+   */
+  it('still catches the 2026-08-31 outage with its greeting-only calls removed', () => {
+    const shape: Array<'sub' | 'greet'> = [];
+    for (let i = 0; i < 184; i++) shape.push(i % 184 < 39 ? 'greet' : 'sub');
+    const v = assessTicketFiling(snapshot({ recentQueueCalls: mixed(shape) }));
+    expect(v.greetingOnlySkipped).toBe(39);
+    expect(v.unfiledRun).toBe(145);
+    expect(v.stalled).toBe(true);
+  });
+
+  it('a hangup BRIDGES the gap rule — it is traffic, so the run continues across it', () => {
+    /**
+     * The ordering that matters: `previousCallAtMs` must advance on a
+     * greeting-only call BEFORE it is skipped. Otherwise the gap is measured
+     * from the last SUBSTANTIVE call, the hangup's own arrival is invisible,
+     * and two ordinary calls fifty minutes apart on either side of it look
+     * like a hundred-minute closure — so the run breaks early and the alarm
+     * under-counts.
+     *
+     * Here the hangup arrives 50 minutes after the newest call and 50 minutes
+     * before the next one. Nothing exceeds the one-hour bound, so all three
+     * are one stretch of live traffic and both substantive calls count.
+     */
+    const calls: TicketFilingSnapshot['recentQueueCalls'] = [
+      { createdAtMs: NOW, hasTicket: false, ...SUBSTANTIVE },
+      { createdAtMs: NOW - 50 * MIN, hasTicket: false, totalTurns: 1, durationSeconds: 17 },
+      { createdAtMs: NOW - 100 * MIN, hasTicket: false, ...SUBSTANTIVE },
+    ];
+    const v = assessTicketFiling(snapshot({ recentQueueCalls: calls }));
+    expect(v.greetingOnlySkipped).toBe(1);
+    expect(v.unfiledRun).toBe(2);
+  });
+
+  it('a hangup still feeds the gap rule, so the run cannot walk back through a closure', () => {
+    // Twelve substantive misses, but an overnight closure sits between the
+    // second and the third. The run must stop at the gap even though the call
+    // on the far side of it is one the count would otherwise have skipped.
+    const calls: TicketFilingSnapshot['recentQueueCalls'] = [
+      { createdAtMs: NOW, hasTicket: false, ...SUBSTANTIVE },
+      { createdAtMs: NOW - 90_000, hasTicket: false, ...SUBSTANTIVE },
+      { createdAtMs: NOW - 5 * 60 * 60_000, hasTicket: false, ...GREETING },
+      ...Array.from({ length: 12 }, (_, i) => ({
+        createdAtMs: NOW - 5 * 60 * 60_000 - (i + 1) * 90_000,
+        hasTicket: false,
+        ...SUBSTANTIVE,
+      })),
+    ];
+    const v = assessTicketFiling(snapshot({ recentQueueCalls: calls }));
+    expect(v.unfiledRun).toBe(2);
+    expect(v.stalled).toBe(false);
+  });
+});
+
+describe('a confirmed filing inside the run disconfirms the stall', () => {
+  it('holds the alarm when a ticket was filed inside the run span', () => {
+    // The run reaches back 12 * 90s from NOW; the pulse lands in the middle.
+    const v = assessTicketFiling(
+      snapshot({
+        recentQueueCalls: calls(12, 5),
+        lastTicketFiledAtMs: NOW - 6 * 90_000,
+      }),
+    );
+    expect(v.unfiledRun).toBe(12);
+    expect(v.stalled).toBe(false);
+    expect(v.suppressedByConfirmedFiling).toBe(true);
+  });
+
+  it('the 2026-09-03 case: filed 41 seconds before the alarm evaluated', () => {
+    const v = assessTicketFiling(
+      snapshot({ recentQueueCalls: calls(12, 5), lastTicketFiledAtMs: NOW - 41_000 }),
+    );
+    expect(v.stalled).toBe(false);
+    expect(v.suppressedByConfirmedFiling).toBe(true);
+  });
+
+  it('does NOT hold it when the last confirmed filing predates the run', () => {
+    // One second older than the oldest call in the run — outside the span.
+    const v = assessTicketFiling(
+      snapshot({
+        recentQueueCalls: calls(12, 5),
+        lastTicketFiledAtMs: NOW - 11 * 90_000 - 1,
+      }),
+    );
+    expect(v.stalled).toBe(true);
+    expect(v.suppressedByConfirmedFiling).toBe(false);
+  });
+
+  it('fires exactly at the span boundary — a filing at the run’s oldest call still counts', () => {
+    const v = assessTicketFiling(
+      snapshot({ recentQueueCalls: calls(12, 5), lastTicketFiledAtMs: NOW - 11 * 90_000 }),
+    );
+    expect(v.stalled).toBe(false);
+  });
+
+  it('an empty pulse behaves exactly as before — a restart must not silence the alarm', () => {
+    const v = assessTicketFiling(
+      snapshot({ recentQueueCalls: calls(12, 5), lastTicketFiledAtMs: null }),
+    );
+    expect(v.stalled).toBe(true);
+    expect(v.suppressedByConfirmedFiling).toBe(false);
+  });
+
+  it('cannot silence the outbox planes — those are requests we are holding', () => {
+    // A ticket filing normally elsewhere says nothing about payloads stuck in
+    // our own outbox, so the pulse must not reach plane A or B.
+    const dead = assessTicketFiling(
+      snapshot({ outboxDeadLetter: 1, lastTicketFiledAtMs: NOW }),
+    );
+    expect(dead.stalled).toBe(true);
+    const held = assessTicketFiling(
+      snapshot({ outboxFailed: 3, lastTicketFiledAtMs: NOW }),
+    );
+    expect(held.stalled).toBe(true);
+  });
+
+  it('cannot silence the 2026-08-31 outage — nothing filed anywhere in its span', () => {
+    const v = assessTicketFiling(
+      snapshot({
+        recentQueueCalls: calls(40, 0),
+        // The last confirmed filing was before the outage began.
+        lastTicketFiledAtMs: NOW - 40 * 90_000 - 60_000,
+      }),
+    );
+    expect(v.stalled).toBe(true);
   });
 });
