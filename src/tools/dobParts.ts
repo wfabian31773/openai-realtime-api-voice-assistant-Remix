@@ -16,7 +16,16 @@ export function normalizeDobParts(
 ): { month: string; day: string; year: string } | null {
   const iso = normalize(spoken);
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
-  if (!m) return null;
+  if (!m) {
+    /**
+     * LIVE COUNTER, AND THE ONLY PLACE A REFUSAL SAYS WHY. Shape only — see
+     * dobShape. A refusal that names "(none)" is the model not sending the
+     * date; one that names "# # ##" is the parser, and they need opposite
+     * fixes.
+     */
+    console.info(`[DOB] refused a date of birth in the shape ${dobShape(spoken)}`);
+    return null;
+  }
   /**
    * DEPLOY MARKER AND LIVE COUNTER, 2026-09-03. Prints only for the form that
    * used to be refused, so its first appearance in the logs is proof the build
@@ -27,6 +36,49 @@ export function normalizeDobParts(
     console.info('[DOB] parsed a date of birth the caller said as bare digits — no separator');
   }
   return { year: m[1], month: m[2], day: m[3] };
+}
+
+/**
+ * WHAT SHAPE THE DATE ARRIVED IN — never a single character of what it said.
+ *
+ * 2026-09-03, surgery, CAf9b262f33921dee7df6274a16d90d001. Jackie Bott said
+ * "5 8 39", the agent read it back to her as May 8th 1939 and she confirmed
+ * it, and file_surgery_ticket was still refused four times for a missing date
+ * of birth. The agent then told her "I've got your details noted." Nothing was
+ * filed.
+ *
+ * Every form the transcript makes plausible — "5 8 39", "May 8th, 1939",
+ * "1939-05-08" — parses on the build that was live. So the refusal says the
+ * model passed something ELSE, and there is no way to find out what:
+ * `date_of_birth` is correctly absent from SAFE_ARG_KEYS, so tool_timeline
+ * records `"args": {}` and the one fact that would close the case is the one
+ * fact we throw away.
+ *
+ * The answer is the discipline `recorded` already uses for record_pcp_intake
+ * and `missingFields` for results: keep the SHAPE, drop the content. Digits
+ * become `#` and letters become `a`, so
+ *
+ *   "5 8 39"          ->  "# # ##"
+ *   "May 8th, 1939"   ->  "aaa #aa, ####"
+ *   ""                ->  "(none)"      the model sent no date at all
+ *   {month: 5, ...}   ->  "(not a string)"
+ *
+ * which tells the next refusal apart from every other refusal, and cannot
+ * identify anybody: a birthday is its digits, and there are none left.
+ */
+export function dobShape(spoken: unknown): string {
+  if (spoken == null) return '(none)';
+  if (typeof spoken !== 'string') return '(not a string)';
+  const raw = spoken.trim();
+  if (!raw) return '(none)';
+  const shaped = raw
+    .replace(/\s+/g, ' ')
+    .replace(/\p{Nd}/gu, '#')
+    .replace(/\p{L}/gu, 'a');
+  // A sentence, not a date, is the interesting case — but the whole sentence
+  // is not needed to see that, and an unbounded field on every ticket row is
+  // its own problem.
+  return shaped.length > 60 ? `${shaped.slice(0, 60)}\u2026` : shaped;
 }
 
 /**

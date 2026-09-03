@@ -3,7 +3,7 @@
  * worse than not having it, so this parser refuses rather than guesses.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { normalizeDobParts } from './dobParts';
+import { normalizeDobParts, dobShape } from './dobParts';
 
 describe('the formats callers actually use', () => {
   const cases: Array<[string, string]> = [
@@ -341,5 +341,57 @@ describe('a two-digit year the pivot puts in the future', () => {
   it('still refuses a FOUR-digit year in the future — the pivot is not a way in', () => {
     expect(normalizeDobParts(`11/24/${new Date().getFullYear() + 1}`)).toBeNull();
     expect(normalizeDobParts(`${new Date().getFullYear() + 1}-11-24`)).toBeNull();
+  });
+});
+
+/**
+ * THE SHAPE OF WHAT ARRIVED, AND NOTHING ELSE.
+ *
+ * A refusal that says `missingFields: ["date_of_birth"]` is two different
+ * failures under one name — the model sent nothing, or it sent something the
+ * parser would not take — and they need opposite fixes. dobShape is what tells
+ * them apart on 2026-09-03's surgery call (CAf9b262f33921dee7df6274a16d90d001,
+ * refused four times for a date the caller had just confirmed back to the
+ * agent), and it goes into tool_timeline, so the test that matters most is the
+ * one proving it carries no birthday.
+ */
+describe('the shape a date of birth arrived in', () => {
+  it('keeps the shape and drops every digit and letter', () => {
+    expect(dobShape('5 8 39')).toBe('# # ##');
+    expect(dobShape('May 8th, 1939')).toBe('aaa #aa, ####');
+    expect(dobShape('03/17/1973')).toBe('##/##/####');
+    expect(dobShape('17 de febrero 1958')).toBe('## aa aaaaaaa ####');
+  });
+
+  it('says which refusal it was', () => {
+    // The model sent no date at all — a prompt problem, not a parser one.
+    expect(dobShape('')).toBe('(none)');
+    expect(dobShape('   ')).toBe('(none)');
+    expect(dobShape(null)).toBe('(none)');
+    expect(dobShape(undefined)).toBe('(none)');
+    // The model sent a structured object where a string was described.
+    expect(dobShape({ month: 5, day: 8, year: 1939 })).toBe('(not a string)');
+    expect(dobShape(19390508)).toBe('(not a string)');
+  });
+
+  it('cannot carry a birthday out — no digit and no letter survives', () => {
+    for (const spoken of [
+      '5 8 39',
+      'May 8th, 1939',
+      'my date of birth is June 17th, 1984',
+      'Jackie Bott, 5 8 39',
+      '17 de febrero 1958',
+      'nineteen twenty-nine',
+    ]) {
+      const shaped = dobShape(spoken);
+      expect(shaped, spoken).not.toMatch(/\p{Nd}/u);
+      expect(shaped, spoken).not.toMatch(/[b-z]/i);
+    }
+  });
+
+  it('is bounded — a whole sentence does not become a database column', () => {
+    const long = dobShape('x'.repeat(200));
+    expect(long.length).toBeLessThanOrEqual(61);
+    expect(long.endsWith('…')).toBe(true);
   });
 });
