@@ -173,6 +173,7 @@ import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
+import { runRequestSweep } from "./sweepRunner";
 import {
   handleAfterRedirect,
   handleVoiceWebhook,
@@ -287,6 +288,15 @@ export interface VoiceRuntimeOptions {
   openCallRow?: CallLogInsert;
   /** Persists the finished call. Injected for tests. */
   persistCall?: (record: VoiceCallRecord) => Promise<boolean>;
+  /**
+   * The teardown request sweep. Injected for tests, and settable to a no-op
+   * to turn it off without a deploy.
+   *
+   * Runs AFTER the call_logs write on every finished call: if the caller made
+   * a request and no ticket was filed, it files what they said. See
+   * requestSweep.ts for why, and sweepRunner.ts for the rules it holds to.
+   */
+  sweepCall?: (record: VoiceCallRecord) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -369,6 +379,7 @@ export function mountVoiceRuntime(
   // agent (and their database and API clients), which must not happen at
   // boot or in a health check.
   const persistCall = options.persistCall ?? persistRuntimeCall;
+  const sweepCall = options.sweepCall ?? runRequestSweep;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -894,7 +905,22 @@ export function mountVoiceRuntime(
             // A successful transfer has no pending legs left; no-op then.
             transfer.abandonFor(entry.callSid);
           },
-          persistCallRecord: (record) => persistCall(record).then(() => undefined),
+          /**
+           * THE RECORD FIRST, THEN THE SWEEP.
+           *
+           * Ordered, not raced. The call_logs row is the evidence every
+           * measurement is built on and it must land whatever the sweep does;
+           * the sweep in turn reads nothing from the row, so a failed write
+           * does not stop a request being recovered. `runRequestSweep` never
+           * throws — the catch here is the second lock, not the first.
+           *
+           * The bridge fires this and does not wait: teardown must not hold a
+           * socket open for a ticket POST.
+           */
+          persistCallRecord: async (record) => {
+            await persistCall(record);
+            await sweepCall(record).catch(() => undefined);
+          },
         });
         // Connect AFTER the bridge exists: a connection that fails then has
         // somewhere to report to and the call tears down cleanly, instead

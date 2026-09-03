@@ -118,6 +118,15 @@ function laneSource(over: Partial<LaneConfig> = {}): LaneSource {
 interface Harness {
   openedRows: Array<Record<string, unknown>>;
   persisted: Array<Record<string, unknown>>;
+  /**
+   * Calls the teardown request sweep saw, in order.
+   *
+   * Stubbed rather than left to the real one on purpose: `runRequestSweep`
+   * lazily imports the durable filing path, so an unstubbed sweep would put a
+   * ticket POST behind every call in this suite the first time a fixture
+   * happened to look sweepable.
+   */
+  swept: Array<Record<string, unknown>>;
   base: string;
   wsUrl: string;
   registry: CallSessionRegistry;
@@ -138,6 +147,7 @@ async function harness(
     providerSetupDeadlineMs?: number;
     fetchPrecontext?: (phone: string) => Promise<unknown>;
     resolveGreeting?: (slug: string) => Promise<string | null>;
+    sweepCall?: (record: unknown) => Promise<unknown>;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
     callRowDeadlineMs?: number;
     env?: Record<string, string | undefined>;
@@ -150,6 +160,7 @@ async function harness(
   const transports: FakeGrokTransport[] = [];
   const openedRows: Array<Record<string, unknown>> = [];
   const persisted: Array<Record<string, unknown>> = [];
+  const swept: Array<Record<string, unknown>> = [];
   mountVoiceRuntime(app, server, {
     env: over.env ?? ENV,
     // Short so the deadline test does not wait on a production-length one.
@@ -176,12 +187,23 @@ async function harness(
       persisted.push(record as unknown as Record<string, unknown>);
       return true;
     },
+    sweepCall:
+      over.sweepCall ??
+      (async (record) => {
+        // Order matters and is asserted: the durable record lands first.
+        swept.push({
+          ...(record as unknown as Record<string, unknown>),
+          persistedFirst: persisted.length,
+        });
+        return { filed: false, reason: "caller-said-nothing" };
+      }),
   });
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const port = (server.address() as { port: number }).port;
   const h: Harness = {
     openedRows,
     persisted,
+    swept,
     base: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/voice/stream`,
     registry,
@@ -760,6 +782,42 @@ describe("one whole call, end to end, offline", () => {
     expect(h.openedRows).toHaveLength(1);
     expect(h.persisted).toHaveLength(1);
     expect(h.persisted[0]).toMatchObject({ callSid: "CA16", outcome: "caller_hangup" });
+  });
+
+  /**
+   * THE SWEEP RUNS ON EVERY FINISHED CALL, AFTER THE RECORD.
+   *
+   * Built and merged on 2026-09-03 and wired to nothing for the rest of that
+   * afternoon, while ten calls ended with a request in the transcript and no
+   * ticket. A decision layer nobody calls recovers no requests, so what this
+   * pins is the call itself — not what it decides, which requestSweep.test.ts
+   * owns.
+   */
+  it("sweeps every finished call, and only after the call_logs row is written", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-sweep", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-sweep", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.persisted).toHaveLength(1);
+    expect(h.swept).toHaveLength(1);
+    expect(h.swept[0]).toMatchObject({ callSid: "CA-sweep" });
+    // The record was already in before the sweep saw the call.
+    expect(h.swept[0]!.persistedFirst).toBe(1);
+  });
+
+  it("finishes teardown even when the sweep rejects", async () => {
+    // Rule 1 of sweepRunner, enforced from the outside as well as the inside:
+    // a sweep that blows up must not cost the call its record.
+    const h = await harness({ sweepCall: async () => { throw new Error("boom"); } });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-sweep-boom", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-sweep-boom", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.persisted).toHaveLength(1);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA-sweep-boom" });
   });
 
   it("releases the brokered transfer when the caller hangs up before the bridge exists", async () => {

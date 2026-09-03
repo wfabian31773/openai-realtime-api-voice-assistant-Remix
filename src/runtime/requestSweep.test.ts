@@ -66,7 +66,7 @@ describe("when NOT to file", () => {
   });
 
   it("skips when a filing tool already succeeded", () => {
-    const d = decideSweep(call({ toolEvents: [{ name: "file_tech_ticket", ok: true }] }));
+    const d = decideSweep(call({ toolEvents: [{ name: "file_tech_ticket", succeeded: true }] }));
     expect(d).toEqual({ file: false, reason: "already-filed" });
   });
 
@@ -85,14 +85,21 @@ describe("when NOT to file", () => {
 
   it("does NOT count a REFUSED filing tool as filed", () => {
     /**
-     * The distinction the tool ceiling was reviewed over: dispatch answers ok
-     * whenever the tool RAN, refusal included. Reading `ok` alone would have
-     * skipped every call this exists for — CAc940b441 called
-     * file_surgery_ticket four times and filed nothing.
+     * The distinction the tool ceiling was reviewed over, and the one that
+     * nearly made this whole module a no-op.
+     *
+     * A runtime ToolEvent's `ok` means dispatch RAN the tool. A
+     * `missing([...])` refusal comes back `ok: true` AND WITHOUT AN `error` —
+     * nothing failed at the transport. The first version of this test invented
+     * an `error: "validation"` the bridge never sets, so it passed while the
+     * predicate underneath it read `ok` and would have called every refused
+     * ticket a filed one — skipping the sweep on all five calls at the top of
+     * requestSweep.ts. The fixture below is now the shape the bridge actually
+     * produces.
      */
     const events = [
-      { name: "file_surgery_ticket", ok: true, error: "validation" },
-      { name: "file_surgery_ticket", ok: true, error: "validation" },
+      { name: "file_surgery_ticket", succeeded: false },
+      { name: "file_surgery_ticket", succeeded: false },
     ];
     expect(alreadyFiledByTool(events)).toBe(false);
     expect(decideSweep(call({ slug: "surgery", toolEvents: events })).file).toBe(true);
@@ -114,7 +121,7 @@ describe("the five calls this was built for", () => {
     // ambiguous lookup and never classified or filed.
     const d = decideSweep(call({
       transcript: "AGENT: Could you give me your name?\nCALLER: My pharmacy sent a refill request nine days ago and nothing has come through.",
-      toolEvents: [{ name: "lookup_patient", ok: true }, { name: "lookup_patient", ok: true }],
+      toolEvents: [{ name: "lookup_patient", succeeded: true }, { name: "lookup_patient", succeeded: true }],
     }));
     expect(d.file).toBe(true);
   });
@@ -125,8 +132,8 @@ describe("the five calls this was built for", () => {
       slug: "surgery",
       transcript: "CALLER: I need an appointment for a graft with my surgeon.\nAGENT: I've logged your request.",
       toolEvents: [
-        { name: "lookup_patient", ok: true },
-        { name: "file_surgery_ticket", ok: true, error: "validation" },
+        { name: "lookup_patient", succeeded: true },
+        { name: "file_surgery_ticket", succeeded: false },
       ],
     }));
     expect(d.file).toBe(true);

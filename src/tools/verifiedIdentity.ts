@@ -96,8 +96,17 @@ export function rememberVerifiedIdentity(
   callSid: string | undefined,
   identity: Partial<VerifiedIdentity>,
 ): void {
-  const firstName = norm(identity.firstName);
-  const lastName = norm(identity.lastName);
+  /**
+   * STORED AS THE RECORD SPELLS IT, MATCHED CASE-INSENSITIVELY.
+   *
+   * These used to be stored lower-cased, because the only reader compared them
+   * and never showed them. The request sweep now puts this name on a ticket a
+   * human reads, and "testpatient example" on a patient record is wrong in a
+   * way nobody would have caught from a passing test. Matching is unchanged —
+   * `norm` is applied at the comparison instead of at the write.
+   */
+  const firstName = (identity.firstName ?? '').trim();
+  const lastName = (identity.lastName ?? '').trim();
   const dateOfBirth = (identity.dateOfBirth ?? '').trim();
   if (!isTwilioCallSid(callSid) || !firstName || !lastName || !dateOfBirth) return;
   const now = Date.now();
@@ -123,7 +132,9 @@ export function verifiedDobFor(
   const entry = verified.get(callSid);
   if (!entry) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;
-  if (norm(firstName) !== entry.firstName || norm(lastName) !== entry.lastName) return undefined;
+  if (norm(firstName) !== norm(entry.firstName) || norm(lastName) !== norm(entry.lastName)) {
+    return undefined;
+  }
   return entry.dateOfBirth;
 }
 

@@ -253,7 +253,28 @@ export type CallOutcome =
  * runtime never interprets a tool's arguments or its result. */
 export interface ToolEvent {
   name: string;
+  /**
+   * The tool RAN. Not that it worked.
+   *
+   * `dispatch` answers ok whenever it reached the handler at all — a
+   * `missing([...])` refusal comes back `ok: true` with no `error`, because
+   * nothing went wrong at the transport. Anything asking "did this tool do
+   * its job?" must read `succeeded`, not this.
+   */
   ok: boolean;
+  /**
+   * The tool DID ITS JOB — `ok`, and its own envelope did not say
+   * `success: false`.
+   *
+   * Required, not optional, and that is the point: `alreadyFiledByTool` in
+   * the request sweep was written against `ok` and would therefore have read
+   * every REFUSED `file_*_ticket` as a filed ticket — skipping the sweep on
+   * exactly the calls it exists to recover. Making this a field every
+   * producer must fill is what stops the next reader making the same
+   * assumption. The bridge already computed the value for the tool ceiling;
+   * it just was not written down.
+   */
+  succeeded: boolean;
   /** ms from call start, so a timeline is readable without timestamps. */
   atMs: number;
   error?: string;
@@ -1365,6 +1386,7 @@ export class VoiceCallBridge {
         this.toolEvents.push({
           name,
           ok: false,
+          succeeded: false,
           atMs: Date.now() - this.startedAtMs,
           error: `ceiling:${verdict.reason}`,
         });
@@ -1381,18 +1403,17 @@ export class VoiceCallBridge {
       }
 
       const result = await this.deps.agent.dispatch(name, args);
-      this.toolEvents.push({
-        name,
-        ok: result.ok,
-        atMs: Date.now() - this.startedAtMs,
-        ...(result.error ? { error: result.error } : {}),
-      });
       const output = decodeToolOutput(result.output);
       /**
        * `dispatch` answers `ok: true` whenever the tool RAN — a
        * `missing([...])` refusal comes back ok. The ceiling counts what the
        * tool actually decided, so the predicate has to read `success` out of
        * the tool's own envelope, not the transport's.
+       *
+       * Computed BEFORE the event is recorded, so the record carries the same
+       * answer the ceiling acts on. It used to be worked out below the push,
+       * which is how the durable record ended up with only the transport's
+       * `ok` on it and the sweep ended up reading the wrong field.
        */
       const toolSucceeded =
         result.ok &&
@@ -1401,6 +1422,13 @@ export class VoiceCallBridge {
           typeof output === "object" &&
           (output as Record<string, unknown>).success === false
         );
+      this.toolEvents.push({
+        name,
+        ok: result.ok,
+        succeeded: toolSucceeded,
+        atMs: Date.now() - this.startedAtMs,
+        ...(result.error ? { error: result.error } : {}),
+      });
       this.ceiling.settle(name, args, toolSucceeded, output);
       if (this.ended) return;
       this.session.sendToolResult(callId, result.ok, output);

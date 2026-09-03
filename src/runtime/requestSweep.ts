@@ -59,8 +59,18 @@ const DEPARTMENT_BY_SLUG: Record<string, number> = {
 
 export interface SweepToolEvent {
   name: string;
-  ok: boolean;
-  error?: string;
+  /**
+   * The tool DID ITS JOB — not merely that it ran.
+   *
+   * This field replaced `ok`, and the reason is the whole point of the sweep.
+   * `ok` on a runtime ToolEvent means dispatch reached the handler; a
+   * `missing([...])` refusal comes back `ok: true` with no error. So
+   * `alreadyFiledByTool`, reading `ok`, counted a REFUSED `file_*_ticket` as a
+   * filed ticket — and would have skipped the sweep on every one of the calls
+   * listed at the top of this file. Caught while wiring it in, before it ran
+   * on a live call.
+   */
+  succeeded: boolean;
 }
 
 export interface SweepInput {
@@ -137,12 +147,15 @@ export function callerSaidSomething(transcript: string): boolean {
 }
 
 /**
- * A filing tool that RAN AND SUCCEEDED. `ok` alone is not enough — dispatch
- * answers ok whenever the tool ran at all, refusal included, which is the
- * distinction that cost the tool ceiling a round of review.
+ * A filing tool that RAN AND SUCCEEDED.
+ *
+ * The distinction is not pedantic: it is the difference between this sweep
+ * doing its job and doing nothing at all. Dispatch answers ok whenever the
+ * tool ran, refusal included — the same trap the tool ceiling hit in review —
+ * so this reads the tool's own verdict and nothing else.
  */
 export function alreadyFiledByTool(events: readonly SweepToolEvent[]): boolean {
-  return events.some((e) => /^file_.*_ticket$/.test(e.name) && e.ok && !e.error);
+  return events.some((e) => /^file_.*_ticket$/.test(e.name) && e.succeeded);
 }
 
 export function decideSweep(input: SweepInput): SweepDecision {
@@ -197,6 +210,9 @@ export function decideSweep(input: SweepInput): SweepDecision {
  */
 
 export interface SweptTicket {
+  /** The lane that answered. Travels so `callData.agentUsed` names the queue
+   * a human would recognise, the same string every other filing path uses. */
+  slug: string;
   departmentId: number;
   requestTypeId: number;
   requestReasonId: number;
@@ -223,6 +239,7 @@ export function buildSweptTicket(
   const other = otherReasonFor(departmentId)!;
   const callerSaid = decision.callerSaid;
   return {
+    slug: input.slug,
     departmentId,
     requestTypeId: other.requestTypeId,
     requestReasonId: other.requestReasonId,
@@ -238,7 +255,22 @@ export function buildSweptTicket(
     // it was filed when it was not.
     priority: "high",
     callSid: input.callSid,
-    idempotencyKey: `sweep:${input.callSid}`,
+    /**
+     * THE SAME KEY THE AGENT'S OWN TOOLS USE — `call-<sid>`, deliberately.
+     *
+     * A sweep-specific key would make this idempotent only against itself. On
+     * `call-<sid>` it is idempotent against the AGENT too: if a filing POST is
+     * sitting in the outbox waiting to retry when the call ends, the sweep and
+     * the retry collide on one key and the caller gets one ticket, not two.
+     * `alreadyFiledByTool` cannot see that case — the tool did not succeed —
+     * so this is the second lock under it, and duplicate filing measured 3 in
+     * 2,086 with this key in place.
+     *
+     * It also inherits the guard in durableTicketFiling: only a real Twilio
+     * sid is keyed. A sentinel would produce one key shared by every caller
+     * who hit it, and the second one's request would be silently dropped.
+     */
+    idempotencyKey: `call-${input.callSid}`,
   };
 }
 

@@ -16,7 +16,7 @@ function record(over: Partial<VoiceCallRecord> = {}): VoiceCallRecord {
     dialedNumber: "+15559876543",
     outcome: "caller_hangup",
     transcript: "CALLER: Hi\nAGENT: Hello",
-    toolEvents: [{ name: "create_ticket", ok: true, atMs: 4200 }],
+    toolEvents: [{ name: "create_ticket", ok: true, succeeded: true, atMs: 4200 }],
     agentTurns: 3,
     interruptions: 1,
     startedAtMs: 1_000_000,
@@ -74,7 +74,7 @@ describe("toCallLogRow", () => {
 
   it("writes NO identity when the runtime was not told it — never inferred from a tool result", () => {
     const row = toCallLogRow(
-      record({ toolEvents: [{ name: "lookup_schedule", ok: true, atMs: 900 }] }),
+      record({ toolEvents: [{ name: "lookup_schedule", ok: true, succeeded: true, atMs: 900 }] }),
     ) as unknown as Record<string, unknown>;
     expect(row.patientName).toBeUndefined();
     expect(row.patientDob).toBeUndefined();
