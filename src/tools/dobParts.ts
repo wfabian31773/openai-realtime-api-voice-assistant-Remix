@@ -68,7 +68,10 @@ function normalize(spoken: string): string {
   if (mdy) {
     const mo = mdy[1].padStart(2, '0');
     const d = mdy[2].padStart(2, '0');
-    const y = mdy[3].length === 2 ? (Number(mdy[3]) > 30 ? `19${mdy[3]}` : `20${mdy[3]}`) : mdy[3];
+    const y =
+      mdy[3].length === 2
+        ? String(expandTwoDigitYear(Number(mdy[3]), Number(mdy[1]), Number(mdy[2])))
+        : mdy[3];
     return valid(y, mo, d) ? `${y}-${mo}-${d}` : '';
   }
 
@@ -164,9 +167,30 @@ function joinSplitYear(hi: number, lo: number): number | null {
   return hi * 100 + lo;
 }
 
-/** A two-digit year, on the same pivot the anchored branch has always used. */
-function expandTwoDigitYear(y: number): number {
-  return y > 30 ? 1900 + y : 2000 + y;
+/**
+ * A two-digit year — and NOBODY HAS A BIRTHDAY IN THE FUTURE.
+ *
+ * The pivot has always been "over 30 means 19xx", which quietly breaks for the
+ * oldest patients on the line. On 2026-09-03 a caller rang tech about
+ * prescriptions for a relative in a care centre and gave "11 24 26": born
+ * November 1926, ninety-nine years old. The pivot read it as 2026, a date
+ * eleven weeks from now, and the year check let it through because 2026 is
+ * this year.
+ *
+ * A wrong date of birth silently matches the wrong patient, which every
+ * comment in this file says is worse than no date at all — and this one is
+ * wrong by a century, on exactly the patients least able to ring back and
+ * correct it.
+ *
+ * So the pivot is a first guess and the calendar is the arbiter: a two-digit
+ * year that lands in the future is the other century. Nothing else changes —
+ * "5 8 39" was already 1939 and stays 1939.
+ */
+function expandTwoDigitYear(y: number, month: number, day: number, now = new Date()): number {
+  const guess = y > 30 ? 1900 + y : 2000 + y;
+  // Month is 1-based here, 0-based in Date.
+  const asDate = new Date(guess, month - 1, day);
+  return asDate.getTime() > now.getTime() ? guess - 100 : guess;
 }
 
 /** Words that may sit between a day and its month: "17 DE febrero", "17 OF March". */
@@ -290,7 +314,7 @@ function readDateFromAnything(raw: string): string {
     return '';
   }
 
-  if (year < 100) year = expandTwoDigitYear(year);
+  if (year < 100) year = expandTwoDigitYear(year, month, day);
   const mo = String(month).padStart(2, '0');
   const d = String(day).padStart(2, '0');
   const y = String(year);
@@ -377,8 +401,6 @@ const ABBREVIATED_MONTHS: Record<string, string> = {
   ene: '01', abr: '04', ago: '08', set: '09', dic: '12',
 };
 
-const MONTHS: Record<string, string> = ABBREVIATED_MONTHS;
-
 const DAYS_IN_MONTH = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 function valid(year: string, month: string, day: string): boolean {
@@ -387,6 +409,9 @@ function valid(year: string, month: string, day: string): boolean {
   const d = Number(day);
   if (mo < 1 || mo > 12 || d < 1) return false;
   if (d > DAYS_IN_MONTH[mo]) return false;
-  // A birth year in the future, or before living memory, is a mis-hear.
-  return y >= 1900 && y <= new Date().getFullYear();
+  // A birth year before living memory is a mis-hear — and a birthday in the
+  // FUTURE is one however plausible its year looks. 2026-11-24 passed the year
+  // check on 2026-09-03 and was eleven weeks away.
+  if (y < 1900) return false;
+  return new Date(y, mo - 1, d).getTime() <= Date.now();
 }

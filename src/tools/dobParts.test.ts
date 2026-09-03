@@ -2,7 +2,7 @@
  * A birthday on a ticket is how staff find the right chart. Getting it wrong is
  * worse than not having it, so this parser refuses rather than guesses.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { normalizeDobParts } from './dobParts';
 
 describe('the formats callers actually use', () => {
@@ -286,5 +286,60 @@ describe('a month word loose in an English sentence', () => {
   it('a linking word between the day and its month is still a date', () => {
     // "17 DE febrero", "17 OF March" — one preposition, not a sentence.
     expect(normalizeDobParts('17 of March 1973')).toEqual({ year: '1973', month: '03', day: '17' });
+  });
+});
+
+/**
+ * A TWO-DIGIT YEAR THAT LANDS IN THE FUTURE IS THE OTHER CENTURY.
+ *
+ * 2026-09-03, tech line, CA039096dc14b47e22b81724bad7c06823: a caller rang
+ * about prescriptions for a relative in a care centre and gave her birthday as
+ * "11 24 26". She was born in November 1926 — ninety-nine years old. The pivot
+ * ("over 30 means 19xx") read 26 as 2026, eleven weeks from now, and the year
+ * check let it through because 2026 is this year.
+ *
+ * A wrong date of birth silently matches the wrong patient, and this one was
+ * wrong by a century on exactly the patients least able to ring back and
+ * correct it.
+ *
+ * Time is pinned for the literal case, because whether "11 24 26" is in the
+ * future depends on what day it is — the point of the fix is that the calendar
+ * decides, so the test has to say which calendar.
+ */
+describe('a two-digit year the pivot puts in the future', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('reads "11 24 26" as 1926, not eleven weeks from now', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-03T22:34:55Z'));
+    expect(normalizeDobParts('11 24 26')).toEqual({ year: '1926', month: '11', day: '24' });
+  });
+
+  it('leaves a two-digit year that is already past alone', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-03T22:34:55Z'));
+    // Both sides of the pivot, both in the past, both unchanged by this fix.
+    expect(normalizeDobParts('5 8 39')).toEqual({ year: '1939', month: '05', day: '08' });
+    expect(normalizeDobParts('3-17-73')).toEqual({ year: '1973', month: '03', day: '17' });
+    expect(normalizeDobParts('9/2/48')).toEqual({ year: '1948', month: '09', day: '02' });
+    // A baby born this year is a real patient — 2020 is past, so it stays 2020.
+    expect(normalizeDobParts('1 1 20')).toEqual({ year: '2020', month: '01', day: '01' });
+  });
+
+  it('holds whatever day it is — a month from now is always the last century', () => {
+    // No fake timers: the same rule, expressed against the real clock, so this
+    // keeps testing the fix long after 2026-11-24 has gone past.
+    const soon = new Date();
+    soon.setDate(soon.getDate() + 30);
+    const spoken = `${soon.getMonth() + 1} ${soon.getDate()} ${String(soon.getFullYear()).slice(2)}`;
+    const p = normalizeDobParts(spoken);
+    expect(p?.year, spoken).toBe(String(soon.getFullYear() - 100));
+  });
+
+  it('still refuses a FOUR-digit year in the future — the pivot is not a way in', () => {
+    expect(normalizeDobParts(`11/24/${new Date().getFullYear() + 1}`)).toBeNull();
+    expect(normalizeDobParts(`${new Date().getFullYear() + 1}-11-24`)).toBeNull();
   });
 });
