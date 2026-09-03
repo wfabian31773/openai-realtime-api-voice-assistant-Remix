@@ -245,6 +245,28 @@ export function toCallLogRow(
     // calls on VoiceCallRecord, for logs and tests, and off the row.
     totalTurns: record.agentTurns,
     interruptionCount: record.interruptions,
+    /**
+     * WHAT THE CALL COST — the columns the old core has always written and the
+     * runtime never did.
+     *
+     * Spread conditionally, so a call the provider reported nothing for leaves
+     * them NULL rather than writing zeros. That distinction is the finding:
+     * on 2026-09-03, 179 completed runtime calls carried NULL in every one of
+     * these while the old core's 185 over the same hours reported 77.0% of
+     * input tokens served from cache. Zeros here would have made a missing
+     * feed look like a free call and hidden it again.
+     */
+    ...(record.usage
+      ? {
+          inputTextTokens: record.usage.inputTextTokens,
+          inputAudioTokens: record.usage.inputAudioTokens,
+          outputTextTokens: record.usage.outputTextTokens,
+          outputAudioTokens: record.usage.outputAudioTokens,
+          inputCachedTokens: record.usage.inputCachedTokens,
+          inputCachedTextTokens: record.usage.inputCachedTextTokens,
+          inputCachedAudioTokens: record.usage.inputCachedAudioTokens,
+        }
+      : {}),
     // Counted from real wire events, not estimated from wall time — the
     // distinction the column exists to record.
     telemetrySource: "realtime_events",
