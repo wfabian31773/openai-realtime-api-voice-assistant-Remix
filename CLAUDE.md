@@ -155,31 +155,53 @@ Green tests did not prevent any of the regressions listed there.
 
 ## Line status — check this before saying anything about what is on or off
 
-Volumes re-measured from `call_logs` on **2026-09-01 20:25 UTC**; the
+Volumes re-measured from `call_logs` on **2026-09-03 19:55 UTC**; the
 decisions are Wayne's and are unchanged. Update this table whenever it
 changes, and re-measure rather than copying the numbers forward.
 
+**THE DENOMINATOR IS WEEKDAYS, NOT DAYS.** Every figure below is per day on
+which that line actually took a call. Dividing by 14 understates every line by
+roughly a third, and the previous version of this table did exactly that. In
+the fourteen days to 2026-09-03 the four queues have calls on only **ten**
+days: 08-25 and 08-26 are missing fleet-wide (the known logging gap), and
+Saturdays and Sundays carry ONE call between them because Nextiva routes
+weekends to the after-hours agent (standing instruction 13). Ten weekdays is
+the real window, so `calls ÷ 10` is the honest number and `calls ÷ 14` is
+fiction.
+
 | Line | State | Volume (7d avg) | Who decided | Why |
 |---|---|---|---|---|
-| **tech** (queue) | **LIVE** — the busiest line in the fleet | **85.6/day**, 1,330 in 14d, 69% file a ticket | Wayne, Aug 13 | Clinical Tech Support, dept 3. It is the medication queue. *(This row said "Built, number pending" until 2026-09-01. It has been live and carrying more calls than anything else for weeks.)* |
-| **surgery** (queue) | **LIVE** | 64.7/day, 945 in 14d, **37% file a ticket** | Wayne, Aug 12 | Dept 2. The low filing rate is not mystery: 181 calls in 14 days were refused by the ticketing app for a missing surgeon. See #48. |
-| **no-ivr** | **LIVE** — also the after-hours agent | 52.4/day, 874 in 14d | — | Wayne's quality benchmark; produces the best transcripts. Carries all overnight and weekend volume (standing instruction 13). |
-| **optical** (queue) | **LIVE** | 37.1/day, 632 in 14d, 45% file a ticket | Wayne, Aug 12 | Forwarded optical overflow. *"Optical works like a charm."* Dept 1. |
-| **answering-service** | **LIVE**, old core (`/api/voice/answering-service`) | 16.1/day, 272 in 14d — **but zero so far on 2026-09-01** | — | Was 579 calls on Aug 10 and 491 on Aug 12, then 18–58/day on weekdays and 0 at weekends. **The zero today is not the weekend pattern and it is not explained here — ask Wayne, do not guess.** |
-| **records** (queue) | **LIVE — new since 2026-08-31** | 4.4/day, 31 in 14d and **all 31 in the last two days** | — | Dept 16, Medical Records. It was not taking calls when this table was last written. |
-| **pcp** | **OFF** in Twilio | 18 in 14d, last one 2026-08-31 | Wayne decided, **I recommended it and sequenced it as step 1** | Transfer failures seen Friday; complaints from surgery centers; medical-facing. *"I just cannot see the disasters I was seeing on Friday on that line."* Was ~200 calls/day. The trickle is consistent with direct dials, not with the line being back. |
+| **tech** (queue) | **LIVE — ON THE RUNTIME since 2026-09-03 19:51:10** | **131.5/weekday**, 1,315 in 14d, 67% file a ticket | Wayne, Aug 13 | Clinical Tech Support, dept 3. The medication queue and the busiest line in the fleet. Cut over with surgery so the day could be measured against its own first half. |
+| **surgery** (queue) | **LIVE — ON THE RUNTIME since 2026-09-03 19:43:57** | 95.2/weekday, 952 in 14d, **37% file a ticket** | Wayne, Aug 12 | Dept 2. The low filing rate is not a mystery: the surgeon gate. See #48, still open — surgeon fill fell ~98% → 49% and the identity capture behind it was never repaired. |
+| **no-ivr** | **LIVE**, old core — also the after-hours agent | 69.7/weekday, 836 in 14d, 27% file a ticket | — | Wayne's quality benchmark; produces the best transcripts. Carries all overnight and weekend volume (standing instruction 13), which is why its active-day count is 12 rather than 10. |
+| **optical** (queue) | **LIVE — ON THE RUNTIME since 2026-09-03 15:24:58** | 68.9/weekday, 620 in 14d, 46% file a ticket | Wayne, Aug 12 | Forwarded optical overflow. *"Optical works like a charm."* Dept 1. The first queue moved to the runtime. Two runtime calls also exist from 2026-08-31 (VA-56007, VA-56072) — those were tests, not the cutover, so `min(created_at)` on `voice_provider='grok'` reports 08-31 and is misleading. |
+| **answering-service** | **LIVE**, old core (`/api/voice/answering-service`) | 32.0/weekday, 192 in 14d, 34% file a ticket — **last call 2026-08-31 22:58** | — | It has taken NO calls for three days. The 2026-09-01 note asking about a one-day zero is superseded: this is not a weekend pattern and not a blip. **Still unexplained — ask Wayne, do not guess.** |
+| **records** (queue) | **LIVE**, old core — new since 2026-08-31 | 29.5/weekday, 118 in 14d, 44% file a ticket | — | Dept 16, Medical Records. Four active days only, so its average rests on a short base. |
+| **pcp** | **OFF** in Twilio | 20 in 14d, last one 2026-09-03 15:18 | Wayne decided, **I recommended it and sequenced it as step 1** | Transfer failures seen Friday; complaints from surgery centers; medical-facing. *"I just cannot see the disasters I was seeing on Friday on that line."* Was ~200 calls/day. The trickle is consistent with direct dials, not with the line being back. |
 | **azul-scheduling** (San Diego) | **OFF** | **zero calls in 14 days** | Wayne, Aug 10–11 | Gate B replay: **books 8 of 21** the old core booked. Not ready. Was ~80 calls/day. |
 | **claude-as** | Test number only | — | — | The Claude pipeline. **Unproven — zero clean end-to-end calls.** |
 
 **Queue lines take no calls after hours** — Nextiva routes everything to the
 after-hours agent. See standing instruction 13.
 
+**THREE OF THE FOUR QUEUES ARE ON THE GROK RUNTIME AS OF 2026-09-03** —
+optical 15:24:58, surgery 19:43:57, tech 19:51:10. Records is still on the old
+core. `voice_provider = 'grok'` on `call_logs` is the discriminator: the
+runtime writes it and the old core never does, so it is how you tell which
+pipeline answered any call. Do not describe the queue lines as "the old core"
+without checking that column first.
+
 **Do not ask Wayne why PCP or San Diego are off. It is written above.**
 
-**A measurement trap in this table's own source:** `call_logs` has ZERO rows
-fleet-wide on 2026-08-25 and 2026-08-26, so any "14-day" figure is really over
-twelve days. The daily counts above are unaffected; averages computed by
-dividing by 14 are not.
+**A measurement trap in this table's own source, and it is worse than it
+looks.** `call_logs` has ZERO rows fleet-wide on 2026-08-25 and 2026-08-26, so
+a "14-day" window is really twelve. But the queues also take almost nothing at
+weekends — ONE call across all four on 08-22 and 08-23 together, because
+Nextiva routes weekends to the after-hours agent — so the real base is **ten
+weekdays**, not fourteen days and not twelve. Dividing by 14 understates every
+queue by about a third. That is how this table came to say tech was 85.6/day
+when it was 131.5 a weekday. Count the days a line actually took calls and
+divide by that.
 
 ---
 
@@ -190,6 +212,10 @@ dividing by 14 are not.
 | Mirror verification | `src/services/patientVerification.ts` | Verifies against `patients_master`; refuses to guess between two people. |
 | Appointment answers | `src/services/appointmentAnswers.ts` | `Schedule.PersonID` join; excludes `Removed`. |
 | Replay tables | Operations Hub | `new_core_replay_summary`, `new_core_replay_index`, `ticket_agent_config` |
+| Repeated-failure ceiling | `src/runtime/toolCeiling.ts` | Stops a lane hammering one failing tool. 3 identical failures, 6 per tool, 40 dispatches per call; only failures count and a success resets. |
+| Filing-alarm disconfirmation | `server/services/ticketFilingPulse.ts` | When a ticket was ACTUALLY filed, recorded by the filing path. The alarm weighs it against the run before crying outage. |
+| Lane keyterms | `src/runtime/keyterms.ts`, `src/config/techKeyterms.ts` | Grok's ASR vocabulary per lane — surgeons, offices, drugs — ranked by 90-day volume, capped at the API's 100. |
+| Prompt ruling guard | `src/agents/queuePromptRulings.test.ts` | Asserts every operator ruling still survives in the queue prompts, matched on meaning rather than phrasing. Run it before shortening any prompt. |
 
 ---
 
