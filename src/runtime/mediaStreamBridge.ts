@@ -108,6 +108,7 @@
 
 import type { BoundAgent } from "./agentBinding";
 import { CallTranscriptLog } from "./transcriptLog";
+import { CallUsage, usageSummaryMarker, type UsageTotals } from "./tokenUsage";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
 import {
   ToolCallCeiling,
@@ -283,6 +284,11 @@ export interface VoiceCallRecord {
   firstTranscriptAtMs?: number;
   /** When the last transcript of any kind arrived. */
   lastTranscriptAtMs?: number;
+  /**
+   * What the provider reported this call cost, or undefined when it reported
+   * nothing. Undefined leaves the columns NULL on purpose — see CallUsage.
+   */
+  usage?: UsageTotals;
 }
 
 export interface VoiceCallContext {
@@ -395,7 +401,8 @@ export interface BridgeSessionHandlers {
   onSpeechStopped: () => void;
   /** The carrying response finished delivering everything — the boundary
    * the post-tool follow-up waits for. */
-  onResponseDone: () => void;
+  /** Carries the raw event: usage rides on it (tokenUsage.ts). */
+  onResponseDone: (raw?: unknown) => void;
   onCallerTranscript: (transcript: string, itemId?: string) => void;
   onError: (err: Error) => void;
   onClosed: () => void;
@@ -554,6 +561,8 @@ export class VoiceCallBridge {
   private deadAirCause: "utterance" | "response" | null = null;
 
   private readonly transcriptLog = new CallTranscriptLog();
+  /** What the provider says this call cost. See tokenUsage.ts. */
+  private readonly usage = new CallUsage();
   private readonly toolEvents: ToolEvent[] = [];
   private readonly ceiling: ToolCallCeiling;
   private agentTurns = 0;
@@ -580,7 +589,7 @@ export class VoiceCallBridge {
       onAudioDone: (transcript) => this.handleAudioDone(transcript),
       onSpeechStarted: () => this.handleCallerSpeechStarted(),
       onSpeechStopped: () => this.handleCallerSpeechStopped(),
-      onResponseDone: () => this.handleResponseDone(),
+      onResponseDone: (raw) => this.handleResponseDone(raw),
       onCallerTranscript: (text, itemId) => {
         if (this.ended) return;
         this.noteTranscript("caller");
@@ -1288,7 +1297,11 @@ export class VoiceCallBridge {
 
   /** The wire finished delivering a response — every function call it
    * carried has been observed by now. */
-  private handleResponseDone(): void {
+  private handleResponseDone(raw?: unknown): void {
+    // Usage is accumulated even on a torn-down call: the response that just
+    // finished was still billed, and a teardown racing the last response
+    // should not silently drop its tokens.
+    if (raw !== undefined) this.usage.add(raw);
     if (this.ended) return;
     this.awaitingToolResponseDone = false;
     this.maybeRequestFollowUp();
@@ -1586,6 +1599,9 @@ export class VoiceCallBridge {
     this.endedOutcome = outcome;
     this.deps.onOutcome(outcome);
 
+    const usageAtTeardown = this.usage.result();
+    if (usageAtTeardown) console.info(usageSummaryMarker(usageAtTeardown));
+
     if (this.deps.persistCallRecord) {
       const persist = this.deps.persistCallRecord;
       const record: VoiceCallRecord = {
@@ -1597,6 +1613,7 @@ export class VoiceCallBridge {
         outcome,
         transcript: this.transcriptLog.render(),
         toolEvents: [...this.toolEvents],
+        ...(usageAtTeardown ? { usage: usageAtTeardown } : {}),
         agentTurns: this.agentTurns,
         interruptions: this.interruptions,
         startedAtMs: this.startedAtMs,

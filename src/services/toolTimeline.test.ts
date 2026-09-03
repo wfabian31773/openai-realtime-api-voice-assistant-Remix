@@ -82,6 +82,57 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     expect(getAzulTimeline(callId)![0].outcome).toMatchObject({ success: true, ticket_number: 'T-9001' });
   });
 
+  /**
+   * WHICH refusal it was, without the birthday.
+   *
+   * `missingFields: ["date_of_birth"]` names two opposite failures: the model
+   * sent no date, or it sent one the parser would not take. On 2026-09-03 that
+   * ambiguity cost the diagnosis of a live surgery call refused four times for
+   * a date the caller had confirmed back to the agent — the timeline recorded
+   * `"args": {}` because date_of_birth is (correctly) not on the allow-list.
+   */
+  it('records the SHAPE of a refused date of birth, and never the date', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId, 'file_surgery_ticket', { ...TICKET_ARGS, date_of_birth: '5 8 39' },
+      JSON.stringify({ success: false, missingFields: ['date_of_birth'] }), 5,
+      { agentSlug: 'surgery' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.args.dobShape).toBe('# # ##');
+    expect(JSON.stringify(ev)).not.toContain('5 8 39');
+  });
+
+  it('tells "the model sent nothing" apart from "the parser refused it"', () => {
+    const noDate = freshCall();
+    recordToolEvent(noDate, 'file_tech_ticket', { ...TICKET_ARGS, date_of_birth: '' }, '{}', 1, {
+      agentSlug: 'tech',
+    });
+    expect(getAzulTimeline(noDate)![0].args.dobShape).toBe('(none)');
+
+    const structured = freshCall();
+    recordToolEvent(
+      structured, 'file_optical_ticket', { ...TICKET_ARGS, date_of_birth: { month: 5, day: 8, year: 1939 } },
+      '{}', 1, { agentSlug: 'optical' },
+    );
+    expect(getAzulTimeline(structured)![0].args.dobShape).toBe('(not a string)');
+  });
+
+  it('shapes the date on every filing tool, and on none of the others', () => {
+    for (const tool of ['create_ticket', 'file_surgery_ticket', 'file_optical_ticket',
+                        'file_tech_ticket', 'file_medical_records_ticket']) {
+      const callId = freshCall();
+      recordToolEvent(callId, tool, TICKET_ARGS, '{}', 1, { agentSlug: 'surgery' });
+      expect(getAzulTimeline(callId)![0].args.dobShape, tool).toBe('####-##-##');
+    }
+    // lookup_patient takes a date of birth too, but it is not where filing is
+    // refused, and every extra place a shape is written is another place to
+    // check for a leak.
+    const lookup = freshCall();
+    recordToolEvent(lookup, 'lookup_patient', TICKET_ARGS, '{}', 1, { agentSlug: 'surgery' });
+    expect(getAzulTimeline(lookup)![0].args).not.toHaveProperty('dobShape');
+  });
+
   it('records missing FIELD NAMES on a validation failure, not their values', () => {
     const callId = freshCall();
     recordToolEvent(

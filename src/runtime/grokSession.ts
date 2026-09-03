@@ -100,7 +100,10 @@ export interface GrokVoiceSessionHandlers {
    * post-tool follow-up on this boundary: settled dispatches alone cannot
    * say whether more function-call events from the same response are still
    * in flight (Codex review, PR #227 round 17). */
-  onResponseDone?: () => void;
+  /** Carries the raw server event, because usage rides on response.done and
+   * its shape is not modelled here — see src/runtime/tokenUsage.ts. The
+   * absorbed-error path passes nothing: no response finished, so no tokens. */
+  onResponseDone?: (raw?: unknown) => void;
   /** Caller finished a VAD turn. The bridge's dead-air watchdog arms on
    * this: a caller who answered and then hears silence is stuck, and the
    * max-duration ceiling is minutes away (hardening port from the sibling
@@ -401,7 +404,10 @@ export class GrokVoiceSession {
         // cancel), so consuming the debt here would leave the common case
         // tearing the call down.
         this.flushPendingSay();
-        this.handlers.onResponseDone?.();
+        // The RAW event goes with it: usage rides on response.done and its
+        // shape is not modelled in wireTypes, so the bridge reads it
+        // defensively rather than this layer declaring one (tokenUsage.ts).
+        this.handlers.onResponseDone?.(event);
         break;
       case "response.function_call_arguments.done": {
         // `arguments` is a JSON STRING on the wire. A payload that is not

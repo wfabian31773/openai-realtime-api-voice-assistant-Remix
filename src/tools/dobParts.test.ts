@@ -2,8 +2,8 @@
  * A birthday on a ticket is how staff find the right chart. Getting it wrong is
  * worse than not having it, so this parser refuses rather than guesses.
  */
-import { describe, it, expect } from 'vitest';
-import { normalizeDobParts } from './dobParts';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { normalizeDobParts, dobShape } from './dobParts';
 
 describe('the formats callers actually use', () => {
   const cases: Array<[string, string]> = [
@@ -180,5 +180,218 @@ describe('what it still refuses', () => {
     // The bug this file was written for: an unanchored m/d/y pattern matched
     // the tail of "2017-03-17" and put 73/03/2017 on a real ticket.
     expect(normalizeDobParts('2017-03-17')).toEqual({ year: '2017', month: '03', day: '17' });
+  });
+});
+
+/**
+ * SPANISH, because the practice takes Spanish calls every day.
+ *
+ * Bought on 2026-09-03 at 22:23: a patient rang tech, gave her whole request
+ * in Spanish, and it was refused. Her insurance had stopped covering her eye
+ * drops and she needed the prescription changed. Nothing was filed. The month
+ * table was English-only and I had rewritten this parser an hour earlier
+ * without once asking what language the month would be in.
+ */
+describe('a date of birth in Spanish', () => {
+  const cases: Array<[string, string]> = [
+    ['Mi fecha de nacimiento es 17 de febrero 1958', '1958-02-17'],
+    ['17 de febrero 1958', '1958-02-17'],
+    ['3 de enero 1960', '1960-01-03'],
+    ['15 de marzo 1971', '1971-03-15'],
+    ['1 de abril 1955', '1955-04-01'],
+    ['20 de mayo 1962', '1962-05-20'],
+    ['9 de agosto 1948', '1948-08-09'],
+    ['30 de septiembre 1970', '1970-09-30'],
+    ['25 de diciembre 1980', '1980-12-25'],
+    ['17 dic 1958', '1958-12-17'],
+    ['5 ene 1960', '1960-01-05'],
+  ];
+  for (const [spoken, iso] of cases) {
+    it(`"${spoken}"`, () => {
+      const p = normalizeDobParts(spoken);
+      expect(p && `${p.year}-${p.month}-${p.day}`).toBe(iso);
+    });
+  }
+
+  it('the stray "de" costs nothing', () => {
+    // The reader takes month words and numbers and ignores everything else, so
+    // a preposition in the middle of the date is not a special case.
+    expect(normalizeDobParts('17 de febrero 1958')).toEqual(
+      normalizeDobParts('17 febrero 1958'),
+    );
+  });
+
+  it('still will not read a Spanish month out of a longer word', () => {
+    // The "Marcus is March" bug, in the other language.
+    expect(normalizeDobParts('marzoso 17 1973')).toBeNull();
+  });
+
+  it('leaves English exactly as it was', () => {
+    expect(normalizeDobParts('March 17, 1973')).toEqual({ year: '1973', month: '03', day: '17' });
+    expect(normalizeDobParts('Date of birth is 7 26, 19 29')).toEqual({ year: '1929', month: '07', day: '26' });
+  });
+});
+
+/**
+ * A MONTH WORD LOOSE IN A SENTENCE IS NOT A MONTH.
+ *
+ * Codex, reviewing the Spanish months on PR #267, and both examples reproduced
+ * exactly as reported. Adding `ago` (agosto) and `set` (setiembre) made English
+ * utterances parse as dates:
+ *
+ *   "birthdate 5 13 45 a long time ago"  ->  nothing, a real date thrown away
+ *   "he was born 10 years ago in 2016"   ->  2016-08-10, a birthday INVENTED
+ *
+ * The second is the outcome this whole file exists to prevent.
+ *
+ * Deleting those two abbreviations would have closed those two examples and
+ * left the class open, because "may" is an English word too. The rule is
+ * structural instead: a day has to sit beside its month. Both locks are in —
+ * the rule, and the abbreviations dropped as well — so a mutation that removes
+ * either is still caught.
+ */
+describe('a month word loose in an English sentence', () => {
+  it('does not invent a birthday from "10 years ago in 2016"', () => {
+    expect(normalizeDobParts('he was born 10 years ago in 2016')).toBeNull();
+    expect(normalizeDobParts('10 years ago in 2016')).toBeNull();
+  });
+
+  it('still reads the real date when a stray month word follows it', () => {
+    expect(normalizeDobParts('birthdate 5 13 45 a long time ago')).toEqual(
+      { year: '1945', month: '05', day: '13' },
+    );
+    expect(normalizeDobParts('set the date 5 13 45')).toEqual(
+      { year: '1945', month: '05', day: '13' },
+    );
+  });
+
+  it('does not invent one from "may" either — the same class, in English', () => {
+    // The reason the fix is adjacency and not a blocklist of two words.
+    expect(normalizeDobParts('he may have been born 10 years ago in 2016')).toBeNull();
+  });
+
+  it('keeps every real form, where the day sits beside its month', () => {
+    for (const [spoken, iso] of [
+      ['August 10, 1962', '1962-08-10'],
+      ['17 March 1973', '1973-03-17'],
+      ['17 de febrero 1958', '1958-02-17'],
+      ['our date of birth is August 10, 1962', '1962-08-10'],
+      ['born 17 March 1973', '1973-03-17'],
+    ] as const) {
+      const p = normalizeDobParts(spoken);
+      expect(p && `${p.year}-${p.month}-${p.day}`, spoken).toBe(iso);
+    }
+  });
+
+  it('a linking word between the day and its month is still a date', () => {
+    // "17 DE febrero", "17 OF March" — one preposition, not a sentence.
+    expect(normalizeDobParts('17 of March 1973')).toEqual({ year: '1973', month: '03', day: '17' });
+  });
+});
+
+/**
+ * A TWO-DIGIT YEAR THAT LANDS IN THE FUTURE IS THE OTHER CENTURY.
+ *
+ * 2026-09-03, tech line, CA039096dc14b47e22b81724bad7c06823: a caller rang
+ * about prescriptions for a relative in a care centre and gave her birthday as
+ * "11 24 26". She was born in November 1926 — ninety-nine years old. The pivot
+ * ("over 30 means 19xx") read 26 as 2026, eleven weeks from now, and the year
+ * check let it through because 2026 is this year.
+ *
+ * A wrong date of birth silently matches the wrong patient, and this one was
+ * wrong by a century on exactly the patients least able to ring back and
+ * correct it.
+ *
+ * Time is pinned for the literal case, because whether "11 24 26" is in the
+ * future depends on what day it is — the point of the fix is that the calendar
+ * decides, so the test has to say which calendar.
+ */
+describe('a two-digit year the pivot puts in the future', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('reads "11 24 26" as 1926, not eleven weeks from now', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-03T22:34:55Z'));
+    expect(normalizeDobParts('11 24 26')).toEqual({ year: '1926', month: '11', day: '24' });
+  });
+
+  it('leaves a two-digit year that is already past alone', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-03T22:34:55Z'));
+    // Both sides of the pivot, both in the past, both unchanged by this fix.
+    expect(normalizeDobParts('5 8 39')).toEqual({ year: '1939', month: '05', day: '08' });
+    expect(normalizeDobParts('3-17-73')).toEqual({ year: '1973', month: '03', day: '17' });
+    expect(normalizeDobParts('9/2/48')).toEqual({ year: '1948', month: '09', day: '02' });
+    // A baby born this year is a real patient — 2020 is past, so it stays 2020.
+    expect(normalizeDobParts('1 1 20')).toEqual({ year: '2020', month: '01', day: '01' });
+  });
+
+  it('holds whatever day it is — a month from now is always the last century', () => {
+    // No fake timers: the same rule, expressed against the real clock, so this
+    // keeps testing the fix long after 2026-11-24 has gone past.
+    const soon = new Date();
+    soon.setDate(soon.getDate() + 30);
+    const spoken = `${soon.getMonth() + 1} ${soon.getDate()} ${String(soon.getFullYear()).slice(2)}`;
+    const p = normalizeDobParts(spoken);
+    expect(p?.year, spoken).toBe(String(soon.getFullYear() - 100));
+  });
+
+  it('still refuses a FOUR-digit year in the future — the pivot is not a way in', () => {
+    expect(normalizeDobParts(`11/24/${new Date().getFullYear() + 1}`)).toBeNull();
+    expect(normalizeDobParts(`${new Date().getFullYear() + 1}-11-24`)).toBeNull();
+  });
+});
+
+/**
+ * THE SHAPE OF WHAT ARRIVED, AND NOTHING ELSE.
+ *
+ * A refusal that says `missingFields: ["date_of_birth"]` is two different
+ * failures under one name — the model sent nothing, or it sent something the
+ * parser would not take — and they need opposite fixes. dobShape is what tells
+ * them apart on 2026-09-03's surgery call (CAf9b262f33921dee7df6274a16d90d001,
+ * refused four times for a date the caller had just confirmed back to the
+ * agent), and it goes into tool_timeline, so the test that matters most is the
+ * one proving it carries no birthday.
+ */
+describe('the shape a date of birth arrived in', () => {
+  it('keeps the shape and drops every digit and letter', () => {
+    expect(dobShape('5 8 39')).toBe('# # ##');
+    expect(dobShape('May 8th, 1939')).toBe('aaa #aa, ####');
+    expect(dobShape('03/17/1973')).toBe('##/##/####');
+    expect(dobShape('17 de febrero 1958')).toBe('## aa aaaaaaa ####');
+  });
+
+  it('says which refusal it was', () => {
+    // The model sent no date at all — a prompt problem, not a parser one.
+    expect(dobShape('')).toBe('(none)');
+    expect(dobShape('   ')).toBe('(none)');
+    expect(dobShape(null)).toBe('(none)');
+    expect(dobShape(undefined)).toBe('(none)');
+    // The model sent a structured object where a string was described.
+    expect(dobShape({ month: 5, day: 8, year: 1939 })).toBe('(not a string)');
+    expect(dobShape(19390508)).toBe('(not a string)');
+  });
+
+  it('cannot carry a birthday out — no digit and no letter survives', () => {
+    for (const spoken of [
+      '5 8 39',
+      'May 8th, 1939',
+      'my date of birth is June 17th, 1984',
+      'Jackie Bott, 5 8 39',
+      '17 de febrero 1958',
+      'nineteen twenty-nine',
+    ]) {
+      const shaped = dobShape(spoken);
+      expect(shaped, spoken).not.toMatch(/\p{Nd}/u);
+      expect(shaped, spoken).not.toMatch(/[b-z]/i);
+    }
+  });
+
+  it('is bounded — a whole sentence does not become a database column', () => {
+    const long = dobShape('x'.repeat(200));
+    expect(long.length).toBeLessThanOrEqual(61);
+    expect(long.endsWith('…')).toBe(true);
   });
 });

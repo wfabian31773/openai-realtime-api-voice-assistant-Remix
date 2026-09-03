@@ -27,6 +27,7 @@ import { eq } from 'drizzle-orm';
 import { shadowTap } from '../shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { callMetadataForDB } from './callMetadataStore';
 import type { DirectorAction } from '../director/director';
+import { dobShape } from '../tools/dobParts';
 
 export interface AzulToolEvent {
   at: string;               // ISO timestamp
@@ -161,6 +162,27 @@ function derivedFlags(tool: string, args: Record<string, unknown>): Record<strin
    * same discipline `missingFields` already uses in summarizeResult: a field
    * name is not a patient.
    */
+  /**
+   * WHY A DATE OF BIRTH WAS REFUSED — as a shape, never a value.
+   *
+   * The filing tools refuse with `missingFields: ["date_of_birth"]`, which is
+   * two different failures wearing one name: the model sent nothing, or the
+   * model sent something the parser would not take. They need opposite fixes,
+   * and until now the timeline could not tell them apart, because
+   * `date_of_birth` is correctly excluded from SAFE_ARG_KEYS and the row read
+   * `"args": {}`.
+   *
+   * On 2026-09-03 that cost the answer to a live one: surgery refused a caller
+   * four times for a date she had just confirmed back to the agent, and every
+   * form the transcript makes plausible parses on the deployed build.
+   *
+   * dobShape() replaces digits with `#` and letters with `a`, so this records
+   * "# # ##" or "(none)" — the same discipline as `recorded` above. A shape is
+   * not a birthday.
+   */
+  if (tool === 'create_ticket' || /^file_[a-z_]+_ticket$/.test(tool)) {
+    out.dobShape = dobShape(args?.date_of_birth);
+  }
   if (tool === 'record_pcp_intake') {
     const keys = Object.keys(args ?? {}).filter((k) => args?.[k] != null && args[k] !== '');
     out.recorded = keys;

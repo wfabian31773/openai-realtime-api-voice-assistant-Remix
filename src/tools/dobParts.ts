@@ -16,7 +16,16 @@ export function normalizeDobParts(
 ): { month: string; day: string; year: string } | null {
   const iso = normalize(spoken);
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
-  if (!m) return null;
+  if (!m) {
+    /**
+     * LIVE COUNTER, AND THE ONLY PLACE A REFUSAL SAYS WHY. Shape only — see
+     * dobShape. A refusal that names "(none)" is the model not sending the
+     * date; one that names "# # ##" is the parser, and they need opposite
+     * fixes.
+     */
+    console.info(`[DOB] refused a date of birth in the shape ${dobShape(spoken)}`);
+    return null;
+  }
   /**
    * DEPLOY MARKER AND LIVE COUNTER, 2026-09-03. Prints only for the form that
    * used to be refused, so its first appearance in the logs is proof the build
@@ -27,6 +36,49 @@ export function normalizeDobParts(
     console.info('[DOB] parsed a date of birth the caller said as bare digits — no separator');
   }
   return { year: m[1], month: m[2], day: m[3] };
+}
+
+/**
+ * WHAT SHAPE THE DATE ARRIVED IN — never a single character of what it said.
+ *
+ * 2026-09-03, surgery, CAf9b262f33921dee7df6274a16d90d001. Jackie Bott said
+ * "5 8 39", the agent read it back to her as May 8th 1939 and she confirmed
+ * it, and file_surgery_ticket was still refused four times for a missing date
+ * of birth. The agent then told her "I've got your details noted." Nothing was
+ * filed.
+ *
+ * Every form the transcript makes plausible — "5 8 39", "May 8th, 1939",
+ * "1939-05-08" — parses on the build that was live. So the refusal says the
+ * model passed something ELSE, and there is no way to find out what:
+ * `date_of_birth` is correctly absent from SAFE_ARG_KEYS, so tool_timeline
+ * records `"args": {}` and the one fact that would close the case is the one
+ * fact we throw away.
+ *
+ * The answer is the discipline `recorded` already uses for record_pcp_intake
+ * and `missingFields` for results: keep the SHAPE, drop the content. Digits
+ * become `#` and letters become `a`, so
+ *
+ *   "5 8 39"          ->  "# # ##"
+ *   "May 8th, 1939"   ->  "aaa #aa, ####"
+ *   ""                ->  "(none)"      the model sent no date at all
+ *   {month: 5, ...}   ->  "(not a string)"
+ *
+ * which tells the next refusal apart from every other refusal, and cannot
+ * identify anybody: a birthday is its digits, and there are none left.
+ */
+export function dobShape(spoken: unknown): string {
+  if (spoken == null) return '(none)';
+  if (typeof spoken !== 'string') return '(not a string)';
+  const raw = spoken.trim();
+  if (!raw) return '(none)';
+  const shaped = raw
+    .replace(/\s+/g, ' ')
+    .replace(/\p{Nd}/gu, '#')
+    .replace(/\p{L}/gu, 'a');
+  // A sentence, not a date, is the interesting case — but the whole sentence
+  // is not needed to see that, and an unbounded field on every ticket row is
+  // its own problem.
+  return shaped.length > 60 ? `${shaped.slice(0, 60)}\u2026` : shaped;
 }
 
 /**
@@ -68,7 +120,10 @@ function normalize(spoken: string): string {
   if (mdy) {
     const mo = mdy[1].padStart(2, '0');
     const d = mdy[2].padStart(2, '0');
-    const y = mdy[3].length === 2 ? (Number(mdy[3]) > 30 ? `19${mdy[3]}` : `20${mdy[3]}`) : mdy[3];
+    const y =
+      mdy[3].length === 2
+        ? String(expandTwoDigitYear(Number(mdy[3]), Number(mdy[1]), Number(mdy[2])))
+        : mdy[3];
     return valid(y, mo, d) ? `${y}-${mo}-${d}` : '';
   }
 
@@ -164,9 +219,54 @@ function joinSplitYear(hi: number, lo: number): number | null {
   return hi * 100 + lo;
 }
 
-/** A two-digit year, on the same pivot the anchored branch has always used. */
-function expandTwoDigitYear(y: number): number {
-  return y > 30 ? 1900 + y : 2000 + y;
+/**
+ * A two-digit year — and NOBODY HAS A BIRTHDAY IN THE FUTURE.
+ *
+ * The pivot has always been "over 30 means 19xx", which quietly breaks for the
+ * oldest patients on the line. On 2026-09-03 a caller rang tech about
+ * prescriptions for a relative in a care centre and gave "11 24 26": born
+ * November 1926, ninety-nine years old. The pivot read it as 2026, a date
+ * eleven weeks from now, and the year check let it through because 2026 is
+ * this year.
+ *
+ * A wrong date of birth silently matches the wrong patient, which every
+ * comment in this file says is worse than no date at all — and this one is
+ * wrong by a century, on exactly the patients least able to ring back and
+ * correct it.
+ *
+ * So the pivot is a first guess and the calendar is the arbiter: a two-digit
+ * year that lands in the future is the other century. Nothing else changes —
+ * "5 8 39" was already 1939 and stays 1939.
+ */
+function expandTwoDigitYear(y: number, month: number, day: number, now = new Date()): number {
+  const guess = y > 30 ? 1900 + y : 2000 + y;
+  // Month is 1-based here, 0-based in Date.
+  const asDate = new Date(guess, month - 1, day);
+  return asDate.getTime() > now.getTime() ? guess - 100 : guess;
+}
+
+/** Words that may sit between a day and its month: "17 DE febrero", "17 OF March". */
+const LINKING_WORDS = new Set(['de', 'of', 'del']);
+
+/**
+ * Is the day next to the month word, give or take a linking word?
+ *
+ * The day is whichever number sits nearest the month name — either side, since
+ * both "August 10" and "10 August" are ordinary. Anything further away, or
+ * separated by a real word, means the month word is part of a sentence rather
+ * than part of a date.
+ */
+function dayTouchesMonth(words: string[], monthAt: number, nums: { at: number }[]): boolean {
+  if (monthAt < 0 || nums.length === 0) return false;
+  return nums.some((n) => {
+    const lo = Math.min(n.at, monthAt);
+    const hi = Math.max(n.at, monthAt);
+    if (hi - lo === 1) return true;
+    for (let i = lo + 1; i < hi; i += 1) {
+      if (!LINKING_WORDS.has(words[i]!)) return false;
+    }
+    return hi - lo > 0;
+  });
 }
 
 function readDateFromAnything(raw: string): string {
@@ -201,6 +301,33 @@ function readDateFromAnything(raw: string): string {
   let month: number | null = null;
   let day: number | null = null;
   let year: number | null = null;
+
+  if (monthFromName !== null && !dayTouchesMonth(words, monthNameAt, nums)) {
+    /**
+     * A MONTH WORD FAR FROM ITS DAY IS NOT A DATE — it is an English sentence
+     * that happens to contain one.
+     *
+     * Codex, on this PR: adding `ago` (agosto) and `set` (setiembre) as month
+     * abbreviations broke English utterances. Verified exactly as reported:
+     *
+     *   "birthdate 5 13 45 a long time ago"  ->  nothing, a real date lost
+     *   "he was born 10 years ago in 2016"   ->  2016-08-10, INVENTED
+     *
+     * The second is the outcome this file exists to prevent: a wrong birthday
+     * on a real ticket, quietly matching the wrong patient.
+     *
+     * Dropping those two abbreviations would have closed exactly those two
+     * examples and left the class open — "may" is an English word too, and
+     * "he may have been born 10 years ago in 2016" fabricates the same way.
+     * So the rule is structural instead: the DAY has to sit beside its month,
+     * with nothing between them but a linking word. Every real form still
+     * passes — "August 10, 1962", "17 de febrero 1958", "17 March 1973" — and
+     * a month word loose in a sentence stops being read as a month at all,
+     * which lets the numeric path have the date it was always going to find.
+     */
+    monthFromName = null;
+    monthNameAt = -1;
+  }
 
   if (monthFromName !== null) {
     // "August 10 1962" / "10 August 1962" / "26 July 19 29"
@@ -239,7 +366,7 @@ function readDateFromAnything(raw: string): string {
     return '';
   }
 
-  if (year < 100) year = expandTwoDigitYear(year);
+  if (year < 100) year = expandTwoDigitYear(year, month, day);
   const mo = String(month).padStart(2, '0');
   const d = String(day).padStart(2, '0');
   const y = String(year);
@@ -260,23 +387,70 @@ function readDateFromAnything(raw: string): string {
  */
 export function monthNumberFromWord(word: string): string | undefined {
   const w = word.toLowerCase();
-  if (FULL_MONTHS.has(w)) return MONTHS[w.slice(0, 3)];
-  // Abbreviations only, exactly as written: "mar", "sept", "mar." handled by
-  // the caller stripping the stop.
-  if (w.length <= 4 && MONTHS[w.slice(0, 3)] && (w.length === 3 || w === 'sept')) {
-    return MONTHS[w.slice(0, 3)];
-  }
+  const full = FULL_MONTHS[w];
+  if (full) return full;
+  // Abbreviations, exactly as written — never a prefix of a longer word, which
+  // is how "Marcus" used to become March.
+  if ((w.length === 3 || w === 'sept') && ABBREVIATED_MONTHS[w]) return ABBREVIATED_MONTHS[w];
   return undefined;
 }
 
-const FULL_MONTHS = new Set([
-  'january', 'february', 'march', 'april', 'may', 'june',
-  'july', 'august', 'september', 'october', 'november', 'december',
-]);
+/**
+ * ENGLISH AND SPANISH.
+ *
+ * Southern California, and the practice takes Spanish calls every day: 285 of
+ * them on the queue lines in the fortnight to 2026-09-03, filing at a HIGHER
+ * rate than English. The month table was English-only until a patient rang
+ * tech at 22:23 that day, gave her whole request in Spanish including
+ * "mi fecha de nacimiento es 17 de febrero 1958", and had it refused — her
+ * insurance had stopped covering her eye drops and she needed the prescription
+ * changed. Nothing was filed.
+ *
+ * I had rewritten this parser an hour earlier and never asked what language
+ * the month would be in.
+ *
+ * The stray "de" costs nothing: the reader takes month words and numbers and
+ * ignores everything else, so "17 de febrero 1958" is a day, a month and a
+ * year with a preposition in the middle.
+ *
+ * NOT YET HERE, and they are real callers on these lines: Tagalog, Korean,
+ * Armenian, Farsi, Vietnamese, Russian and Arabic all appear in the runtime's
+ * own language table. A caller giving a date in any of them is still refused.
+ * That is a known gap rather than an oversight, and it needs the same evidence
+ * these two have before it is filled — which months actually arrive, spelled
+ * how, in real transcripts.
+ */
+const FULL_MONTHS: Record<string, string> = {
+  january: '01', february: '02', march: '03', april: '04',
+  may: '05', june: '06', july: '07', august: '08',
+  september: '09', october: '10', november: '11', december: '12',
 
-const MONTHS: Record<string, string> = {
+  enero: '01', febrero: '02', marzo: '03', abril: '04',
+  mayo: '05', junio: '06', julio: '07', agosto: '08',
+  septiembre: '09', setiembre: '09', octubre: '10',
+  noviembre: '11', diciembre: '12',
+};
+
+/** Three letters, plus the one four-letter form people actually write. */
+const ABBREVIATED_MONTHS: Record<string, string> = {
   jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
-  jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+  jul: '07', aug: '08', sep: '09', sept: '09', oct: '10', nov: '11', dec: '12',
+  /**
+   * Spanish abbreviations that differ from the English ones, `ago` (agosto)
+   * and `set` (setiembre) INCLUDED even though both are English words.
+   *
+   * They were dropped for one round as a second lock after Codex found them
+   * fabricating dates. A mutation then showed the lock was redundant: with the
+   * adjacency rule above, putting them back kills no test, because a month word
+   * loose in an English sentence is no longer read as a month at all. And they
+   * are not free to drop — "5 ago 1945" is a real Spanish date, and refusing
+   * it would trade a fixed bug for a new one.
+   *
+   * Two rules for one hazard is one place for them to drift apart. The
+   * structural rule stays; the blocklist goes. The rest — feb, mar, may, jun,
+   * jul, oct, nov — are already the same three letters in both languages.
+   */
+  ene: '01', abr: '04', ago: '08', set: '09', dic: '12',
 };
 
 const DAYS_IN_MONTH = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -287,6 +461,9 @@ function valid(year: string, month: string, day: string): boolean {
   const d = Number(day);
   if (mo < 1 || mo > 12 || d < 1) return false;
   if (d > DAYS_IN_MONTH[mo]) return false;
-  // A birth year in the future, or before living memory, is a mis-hear.
-  return y >= 1900 && y <= new Date().getFullYear();
+  // A birth year before living memory is a mis-hear — and a birthday in the
+  // FUTURE is one however plausible its year looks. 2026-11-24 passed the year
+  // check on 2026-09-03 and was eleven weeks away.
+  if (y < 1900) return false;
+  return new Date(y, mo - 1, d).getTime() <= Date.now();
 }
