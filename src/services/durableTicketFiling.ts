@@ -20,15 +20,19 @@
  * payload the tool built goes into the outbox exactly as it was going to be
  * POSTed, and comes back out exactly the same (see CREATE_TICKET_PAYLOAD_KIND).
  *
- * TWO THINGS THIS DOES NOT COVER, so nobody reads more into it than it does:
+ * ONE THING THIS DOES NOT COVER, so nobody reads more into it than it does:
  *
- *  - A caller who hangs up before the filing tool runs at all. Nothing has the
- *    payload in that case, because it was never built. That is the teardown
- *    sweep, and it is a separate piece of work.
  *  - A dead letter. After twelve attempts over ~3.5 hours the entry stops
  *    retrying. The payload is still there and still replayable, but nothing
  *    pages anyone — that is #46, the "tickets filed = 0" alarm, and until it
  *    exists a long outage is still found by a human noticing.
+ *
+ * The hangup hole — a caller who drops before the filing tool runs — is no
+ * longer this module's leftover. The four live queue lanes (optical, surgery,
+ * tech, records) now have `sweepQueueUnfiledCall`, the same class of teardown
+ * safety-net scheduling and PCP already had. It builds from conversation
+ * state the tools already wrote and sends the payload through THIS function,
+ * so a failed POST still durable-queues and never invents a ticket number.
  */
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
 // One-way edge: the registry does not import this module, the tools import both.

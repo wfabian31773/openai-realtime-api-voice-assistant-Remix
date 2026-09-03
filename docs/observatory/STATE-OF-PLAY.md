@@ -2,7 +2,8 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-09-03** (queue hangup sweep on the four live old-core
+lanes). Original note 2026-08-11 01:15 UTC (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
@@ -465,3 +466,31 @@ full detail per commit. In short:
 4. **answering-service took zero calls on 09-01** through 13:22 PT, after 38
    the day before and a steady 18–58 every weekday. Weekends are zero for it;
    this was not a weekend.
+
+---
+
+## 9. Queue hangup never filed — closed on the old core, 2026-09-03
+
+The hole: optical, surgery, tech and records have no `terminate_call`. The
+end-of-call sweep existed only for `azul-scheduling` and `pcp`. The four
+lanes fell through to `Promise.resolve()`. A caller who hung up after stating
+a request left nothing. Named at `durableTicketFiling.ts` as a separate piece
+of work and never done. 2026-09-02 was the live day that made it loud.
+
+The fix is a third narrow sweep, `sweepQueueUnfiledCall`, wired next to the
+other two. It files from conversation state already on the call. It does not
+re-resolve an office or a surgeon. A failed POST goes through
+`createTicketDurable` into the outbox. It never invents a ticket number.
+
+**Lanes:** optical, surgery, tech, records. **Not** answering-service, **not**
+the Grok runtime PRs.
+
+**How to see it:** `[QUEUE SWEEP]` lines on hangup. The ticket-filing alarm's
+unfiled-run plane is the health surface — hangups that stated a request
+should stop looking like lost calls. Measure the production number (queue
+calls with a stated request and no ticket at hangup) before and after the
+pull. Do not treat a green test as that measurement.
+
+**Still open:** a ghost with no stated request still files nothing; a hangup
+with no identity still files nothing; answering-service hangup is a different
+path; `lookup_patient` timeouts (#68) are unfixed.

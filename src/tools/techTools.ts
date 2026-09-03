@@ -58,7 +58,16 @@ registerTool({
   },
   handler: async (input): Promise<ToolResult> => {
     const { classifyTechRequest, TECH_DEPARTMENT_ID } = await import('./techTaxonomy');
-    const { classification, isCatchAll } = classifyTechRequest(str(input.request_description));
+    const description = str(input.request_description);
+    const { classification, isCatchAll } = classifyTechRequest(description);
+    const { rememberQueueCall } = await import('../services/queueCallState');
+    rememberQueueCall(str(input.call_sid), {
+      agentSlug: 'tech',
+      requestDescription: description,
+      departmentId: TECH_DEPARTMENT_ID,
+      requestTypeId: classification.requestTypeId,
+      requestReasonId: classification.requestReasonId,
+    });
 
     return {
       success: true,
@@ -132,6 +141,18 @@ registerTool({
     const phone = str(input.callback_number);
     const description = str(input.request_description);
     const callSid = str(input.call_sid);
+    {
+      const { rememberQueueCall } = await import('../services/queueCallState');
+      rememberQueueCall(callSid, {
+        agentSlug: 'tech',
+        firstName: first,
+        lastName: last,
+        callbackNumber: phone,
+        requestDescription: description,
+        verifiedLocation: str(input.location) || undefined,
+        lastProvider: str(input.provider) || undefined,
+      });
+    }
 
     const digits = phone.replace(/\D/g, '');
     if (digits.length < 10) {
@@ -362,7 +383,15 @@ registerTool({
     });
 
     if (!res.success || !res.ticketNumber) {
+      if (res.queued) {
+        const { rememberQueueCall } = await import('../services/queueCallState');
+        rememberQueueCall(callSid, { filedPending: true });
+      }
       return postFailureToolResult(res, 'file_tech_ticket');
+    }
+    {
+      const { rememberQueueCall } = await import('../services/queueCallState');
+      rememberQueueCall(callSid, { filedTicketNumber: res.ticketNumber });
     }
 
     return {

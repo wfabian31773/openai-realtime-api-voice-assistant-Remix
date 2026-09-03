@@ -377,6 +377,12 @@ Point a number you do not mind breaking at `POST https://<host>/voice/optical`
    call back or send you to another extension (standing instruction 10). A
    surgery *date* is the one exception to the HVA Hub rule.
 
+On the **old core** (not this Grok runtime), hangup without `file_*_ticket`
+is no longer a silent loss: `sweepQueueUnfiledCall` files from conversation
+state for optical / surgery / tech / records. This runbook is the Grok
+wire. That sweep is not wired here. A Grok hangup that never called the
+filing tool is still a miss on this path.
+
 ### The pass mark is the ticket, not the conversation
 
 A call that sounds good and files nothing is a failure. A stilted call that

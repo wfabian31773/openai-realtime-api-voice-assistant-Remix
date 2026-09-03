@@ -28,6 +28,7 @@ process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 const {
   rememberVerifiedIdentity,
   verifiedDobFor,
+  verifiedIdentityFor,
   resetVerifiedIdentities,
 } = await import('./verifiedIdentity');
 
@@ -46,6 +47,11 @@ describe('what the lookup verified is available to the tool that files', () => {
     // The model types the name it heard; the record holds the name it holds.
     rememberVerifiedIdentity(CALL, WAYNE);
     expect(verifiedDobFor(CALL, '  wayne ', 'FABIAN')).toBe('03/17/1973');
+  });
+
+  it('hands the hangup sweep the original casing, not the folded match key', () => {
+    rememberVerifiedIdentity(CALL, WAYNE);
+    expect(verifiedIdentityFor(CALL)).toEqual(WAYNE);
   });
 });
 
