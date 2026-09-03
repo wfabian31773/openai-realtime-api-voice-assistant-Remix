@@ -36,9 +36,22 @@ describe('it cannot transfer, and must not imply that it can', () => {
   });
 
   it('is told to say so plainly and offer the callback instead', () => {
-    expect(prompt).toMatch(/not able to transfer you/i);
-    expect(prompt).toMatch(/call you back/i);
-    expect(prompt).toMatch(/never say you will\s*\n?\s*put them through/i);
+    /**
+     * Matched on MEANING, not on one sentence. These were three literal regexes
+     * until 2026-09-03, when the operator ruled the reply must say it cannot
+     * transfer AND that a request is raised for staff to follow up. Rewording to
+     * carry that ruling broke two of the three, which is a guard failing on the
+     * phrasing rather than on the promise — the mistake queuePromptRulings.ts
+     * was written to avoid. So: the promise, however it is worded.
+     */
+    expect(prompt).toMatch(/not\s+able\s+to\s+transfer\s+(you|calls)|cannot\s+transfer/i);
+    // What it offers INSTEAD — a callback, or a request raised for staff.
+    expect(prompt).toMatch(/call\s+you\s+back|follow\s+up\s+with\s+you/i);
+    // Standing instruction 9: a transfer it cannot make must never be promised.
+    expect(prompt).toMatch(/never\s+say\s+you\s+will\s+put\s+them\s+through/i);
+    // The 2026-09-03 ruling's second half, absent before it.
+    expect(prompt).toMatch(/take\s+a\s+message/i);
+    expect(prompt).toMatch(/put\s+in\s+a\s+request/i);
   });
 
   it('is built without a handoff callback wired to anything', async () => {
