@@ -231,3 +231,60 @@ describe('a date of birth in Spanish', () => {
     expect(normalizeDobParts('Date of birth is 7 26, 19 29')).toEqual({ year: '1929', month: '07', day: '26' });
   });
 });
+
+/**
+ * A MONTH WORD LOOSE IN A SENTENCE IS NOT A MONTH.
+ *
+ * Codex, reviewing the Spanish months on PR #267, and both examples reproduced
+ * exactly as reported. Adding `ago` (agosto) and `set` (setiembre) made English
+ * utterances parse as dates:
+ *
+ *   "birthdate 5 13 45 a long time ago"  ->  nothing, a real date thrown away
+ *   "he was born 10 years ago in 2016"   ->  2016-08-10, a birthday INVENTED
+ *
+ * The second is the outcome this whole file exists to prevent.
+ *
+ * Deleting those two abbreviations would have closed those two examples and
+ * left the class open, because "may" is an English word too. The rule is
+ * structural instead: a day has to sit beside its month. Both locks are in —
+ * the rule, and the abbreviations dropped as well — so a mutation that removes
+ * either is still caught.
+ */
+describe('a month word loose in an English sentence', () => {
+  it('does not invent a birthday from "10 years ago in 2016"', () => {
+    expect(normalizeDobParts('he was born 10 years ago in 2016')).toBeNull();
+    expect(normalizeDobParts('10 years ago in 2016')).toBeNull();
+  });
+
+  it('still reads the real date when a stray month word follows it', () => {
+    expect(normalizeDobParts('birthdate 5 13 45 a long time ago')).toEqual(
+      { year: '1945', month: '05', day: '13' },
+    );
+    expect(normalizeDobParts('set the date 5 13 45')).toEqual(
+      { year: '1945', month: '05', day: '13' },
+    );
+  });
+
+  it('does not invent one from "may" either — the same class, in English', () => {
+    // The reason the fix is adjacency and not a blocklist of two words.
+    expect(normalizeDobParts('he may have been born 10 years ago in 2016')).toBeNull();
+  });
+
+  it('keeps every real form, where the day sits beside its month', () => {
+    for (const [spoken, iso] of [
+      ['August 10, 1962', '1962-08-10'],
+      ['17 March 1973', '1973-03-17'],
+      ['17 de febrero 1958', '1958-02-17'],
+      ['our date of birth is August 10, 1962', '1962-08-10'],
+      ['born 17 March 1973', '1973-03-17'],
+    ] as const) {
+      const p = normalizeDobParts(spoken);
+      expect(p && `${p.year}-${p.month}-${p.day}`, spoken).toBe(iso);
+    }
+  });
+
+  it('a linking word between the day and its month is still a date', () => {
+    // "17 DE febrero", "17 OF March" — one preposition, not a sentence.
+    expect(normalizeDobParts('17 of March 1973')).toEqual({ year: '1973', month: '03', day: '17' });
+  });
+});

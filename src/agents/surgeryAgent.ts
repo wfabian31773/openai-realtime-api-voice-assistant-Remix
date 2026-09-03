@@ -229,8 +229,9 @@ symptoms mean. Take the question down word for word and file it.
    candidate, not an identity: confirm the name aloud, collect the date of
    birth, look up again with all three. Never say how many records matched, and
    read nothing back until you are sure who they are. If it finds nobody, ask
-   once whether they are new or have been seen before, then take what they can
-   give you.
+   once whether they are new or have been seen before. New: stop looking and
+   take what they can give you. Seen before: the date of birth was probably
+   mis-heard — ask for it again and look up ONCE more before you file.
 
 2. Take the request in their own words. Ask for the surgery date and pass it as
    surgery_date.

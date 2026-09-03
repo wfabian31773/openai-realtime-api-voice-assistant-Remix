@@ -169,6 +169,30 @@ function expandTwoDigitYear(y: number): number {
   return y > 30 ? 1900 + y : 2000 + y;
 }
 
+/** Words that may sit between a day and its month: "17 DE febrero", "17 OF March". */
+const LINKING_WORDS = new Set(['de', 'of', 'del']);
+
+/**
+ * Is the day next to the month word, give or take a linking word?
+ *
+ * The day is whichever number sits nearest the month name — either side, since
+ * both "August 10" and "10 August" are ordinary. Anything further away, or
+ * separated by a real word, means the month word is part of a sentence rather
+ * than part of a date.
+ */
+function dayTouchesMonth(words: string[], monthAt: number, nums: { at: number }[]): boolean {
+  if (monthAt < 0 || nums.length === 0) return false;
+  return nums.some((n) => {
+    const lo = Math.min(n.at, monthAt);
+    const hi = Math.max(n.at, monthAt);
+    if (hi - lo === 1) return true;
+    for (let i = lo + 1; i < hi; i += 1) {
+      if (!LINKING_WORDS.has(words[i]!)) return false;
+    }
+    return hi - lo > 0;
+  });
+}
+
 function readDateFromAnything(raw: string): string {
   const flat = flatten(raw);
   if (!flat) return '';
@@ -201,6 +225,33 @@ function readDateFromAnything(raw: string): string {
   let month: number | null = null;
   let day: number | null = null;
   let year: number | null = null;
+
+  if (monthFromName !== null && !dayTouchesMonth(words, monthNameAt, nums)) {
+    /**
+     * A MONTH WORD FAR FROM ITS DAY IS NOT A DATE — it is an English sentence
+     * that happens to contain one.
+     *
+     * Codex, on this PR: adding `ago` (agosto) and `set` (setiembre) as month
+     * abbreviations broke English utterances. Verified exactly as reported:
+     *
+     *   "birthdate 5 13 45 a long time ago"  ->  nothing, a real date lost
+     *   "he was born 10 years ago in 2016"   ->  2016-08-10, INVENTED
+     *
+     * The second is the outcome this file exists to prevent: a wrong birthday
+     * on a real ticket, quietly matching the wrong patient.
+     *
+     * Dropping those two abbreviations would have closed exactly those two
+     * examples and left the class open — "may" is an English word too, and
+     * "he may have been born 10 years ago in 2016" fabricates the same way.
+     * So the rule is structural instead: the DAY has to sit beside its month,
+     * with nothing between them but a linking word. Every real form still
+     * passes — "August 10, 1962", "17 de febrero 1958", "17 March 1973" — and
+     * a month word loose in a sentence stops being read as a month at all,
+     * which lets the numeric path have the date it was always going to find.
+     */
+    monthFromName = null;
+    monthNameAt = -1;
+  }
 
   if (monthFromName !== null) {
     // "August 10 1962" / "10 August 1962" / "26 July 19 29"
@@ -308,8 +359,21 @@ const FULL_MONTHS: Record<string, string> = {
 const ABBREVIATED_MONTHS: Record<string, string> = {
   jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
   jul: '07', aug: '08', sep: '09', sept: '09', oct: '10', nov: '11', dec: '12',
-  // Spanish abbreviations that differ from the English ones. The rest — feb,
-  // mar, may, jun, jul, oct, nov — are already the same three letters.
+  /**
+   * Spanish abbreviations that differ from the English ones, `ago` (agosto)
+   * and `set` (setiembre) INCLUDED even though both are English words.
+   *
+   * They were dropped for one round as a second lock after Codex found them
+   * fabricating dates. A mutation then showed the lock was redundant: with the
+   * adjacency rule above, putting them back kills no test, because a month word
+   * loose in an English sentence is no longer read as a month at all. And they
+   * are not free to drop — "5 ago 1945" is a real Spanish date, and refusing
+   * it would trade a fixed bug for a new one.
+   *
+   * Two rules for one hazard is one place for them to drift apart. The
+   * structural rule stays; the blocklist goes. The rest — feb, mar, may, jun,
+   * jul, oct, nov — are already the same three letters in both languages.
+   */
   ene: '01', abr: '04', ago: '08', set: '09', dic: '12',
 };
 
