@@ -547,3 +547,88 @@ optical 32/54 critical, surgery 30/84, tech 79/149, records 14/26.
    ships in any client. Full transcripts, over public REST, to anyone holding
    it. Found because that is how the corpus was pulled from the sandbox.
    **Wayne's call; not changed.**
+
+### The first real run — optical, from Replit (later on 09-03)
+
+Run inside the Replit workspace by the Replit Agent on my request (the cloud
+sandbox cannot reach Postgres). **In the workspace, `DATABASE_URL` is the
+development database, not the Hub** — the first build matched zero rows for a
+day the Hub has 81 optical calls on. Every harness command on Replit needs the
+Hub URL substituted in:
+
+```
+DATABASE_URL="$PRODUCTION_DATABASE_URL" npx tsx scripts/build-replay-corpus.ts …
+DATABASE_URL="$PRODUCTION_DATABASE_URL" XAI_REGRESSION_MODEL=grok-4.6 npx tsx scripts/run-runtime-regression.ts …
+```
+
+Corpus: 54 conversations from 81 rows (same as the sandbox count). Model
+`grok-4.6`. 96 minutes wall clock, 598 model turns (median 9 per call, max
+40). **Zero** environment errors in the console: no connection, configuration
+or tool-failure lines. The delta is the agent's, not the environment's.
+
+| | old core (re-graded) | runtime optical agent (replayed) |
+|---|---|---|
+| calls with a critical failure | **32 / 54** | **39 / 54** |
+| per call | | 11 better, 25 same, 18 worse |
+| filed a ticket | **41 / 54** | **1 / 54** |
+
+| grader (critical) | old | new |
+|---|---|---|
+| callback_fields_completeness | 28 | 1 |
+| question_repetition | 4 | **33** |
+| human_request_deflection | 5 | 9 |
+| actionable_request_needs_ticket | 0 | 2 |
+
+**Read the filing row first.** 53 of 54 replays never called
+`file_optical_ticket`. That single fact explains most of the table: the
+callback-fields grader cannot fail on a call that filed nothing (so the 28→1
+"improvement" and most of the 11 "better" verdicts are an artifact of not
+filing), and question_repetition at 33 is the agent re-asking for the same
+missing field until the recorded caller lines ran out.
+
+**Which field.** From the redacted last agent line of each replay: 27 of 54
+ended still asking for an identity field, and the ask that dominates is the
+**ten-digit callback number** — asked 5 to 12 times in a dozen calls, and the
+closing line in roughly 25. The old core rarely asked for it: it confirms the
+caller-ID number ("is the number ending in 4254 the best one?"), so the
+recorded caller never says it, so the replayed agent never gets it, so it
+never files. Standing instruction 12 (confirm the callback number before
+filing) is doing exactly what it should; the harness is starving it.
+
+**Why the harness starves it.** `run-runtime-regression.ts:134` binds the lane
+once with `callerPhone: ""`, and the corpus carries no number — #258 kept it
+out on the stated ground that *"the Operations Hub call_logs table has no phone
+column at all"*. **That is wrong: `call_logs.from` exists and is E.164 on all
+81 optical rows of 09-02.** The runner's own `RegressionCorpusRow` type
+already declares `from?`; the builder never fills it, and its test bans it.
+
+So this run measures "the optical agent with caller ID stripped", which is a
+call that does not exist in production. **The 39/54 is not a number to act
+on.** It is the harness's first calibration result, and it found the
+instrument's largest error on the first day it had input.
+
+**Fix options — Wayne's call, because #258 made the no-phone rule a
+deliberate PHI control:**
+
+- **(A) synthetic number.** Runner binds each call with a fixed dummy phone.
+  No PHI, one-line change; the agent can confirm "the number you're calling
+  from", but caller-ID pre-context will always miss, so identity stays cold.
+- **(B) carry `from` in the corpus.** Faithful, but writes real numbers into
+  the (git-ignored) corpus files beside the transcripts they already hold.
+- **(C) fetch `from` at run time.** Corpus unchanged; the runner, which
+  already needs the Hub, reads `from` by call SID when it binds each call and
+  never writes it to disk. Faithful replay, same PHI footprint on disk as
+  today. **Recommended.**
+
+Any of them also needs the runner to bind the lane **per call** rather than
+once, because the phone is baked into the tool context at bind time.
+
+What the run *does* say, artifact or not: `human_request_deflection` went 5→9
+on identical caller lines, and two calls ended with an actionable request and
+no ticket that the old core had filed. Worth reading those transcripts (in
+`replay-out/optical-2026-09-02/results.json` on Replit) once the phone gap is
+closed and the run is repeated.
+
+Files on Replit (git-ignored): `replay-out/optical-2026-09-02/{results,summary,breakdown,breakdown2}.json`.
+The two `breakdown*.json` files are PHI-free aggregates written by the Replit
+Agent for this write-up.
