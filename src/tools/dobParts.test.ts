@@ -182,3 +182,52 @@ describe('what it still refuses', () => {
     expect(normalizeDobParts('2017-03-17')).toEqual({ year: '2017', month: '03', day: '17' });
   });
 });
+
+/**
+ * SPANISH, because the practice takes Spanish calls every day.
+ *
+ * Bought on 2026-09-03 at 22:23: a patient rang tech, gave her whole request
+ * in Spanish, and it was refused. Her insurance had stopped covering her eye
+ * drops and she needed the prescription changed. Nothing was filed. The month
+ * table was English-only and I had rewritten this parser an hour earlier
+ * without once asking what language the month would be in.
+ */
+describe('a date of birth in Spanish', () => {
+  const cases: Array<[string, string]> = [
+    ['Mi fecha de nacimiento es 17 de febrero 1958', '1958-02-17'],
+    ['17 de febrero 1958', '1958-02-17'],
+    ['3 de enero 1960', '1960-01-03'],
+    ['15 de marzo 1971', '1971-03-15'],
+    ['1 de abril 1955', '1955-04-01'],
+    ['20 de mayo 1962', '1962-05-20'],
+    ['9 de agosto 1948', '1948-08-09'],
+    ['30 de septiembre 1970', '1970-09-30'],
+    ['25 de diciembre 1980', '1980-12-25'],
+    ['17 dic 1958', '1958-12-17'],
+    ['5 ene 1960', '1960-01-05'],
+  ];
+  for (const [spoken, iso] of cases) {
+    it(`"${spoken}"`, () => {
+      const p = normalizeDobParts(spoken);
+      expect(p && `${p.year}-${p.month}-${p.day}`).toBe(iso);
+    });
+  }
+
+  it('the stray "de" costs nothing', () => {
+    // The reader takes month words and numbers and ignores everything else, so
+    // a preposition in the middle of the date is not a special case.
+    expect(normalizeDobParts('17 de febrero 1958')).toEqual(
+      normalizeDobParts('17 febrero 1958'),
+    );
+  });
+
+  it('still will not read a Spanish month out of a longer word', () => {
+    // The "Marcus is March" bug, in the other language.
+    expect(normalizeDobParts('marzoso 17 1973')).toBeNull();
+  });
+
+  it('leaves English exactly as it was', () => {
+    expect(normalizeDobParts('March 17, 1973')).toEqual({ year: '1973', month: '03', day: '17' });
+    expect(normalizeDobParts('Date of birth is 7 26, 19 29')).toEqual({ year: '1929', month: '07', day: '26' });
+  });
+});

@@ -260,24 +260,60 @@ function readDateFromAnything(raw: string): string {
  */
 export function monthNumberFromWord(word: string): string | undefined {
   const w = word.toLowerCase();
-  if (FULL_MONTHS.has(w)) return MONTHS[w.slice(0, 3)];
-  // Abbreviations only, exactly as written: "mar", "sept", "mar." handled by
-  // the caller stripping the stop.
-  if (w.length <= 4 && MONTHS[w.slice(0, 3)] && (w.length === 3 || w === 'sept')) {
-    return MONTHS[w.slice(0, 3)];
-  }
+  const full = FULL_MONTHS[w];
+  if (full) return full;
+  // Abbreviations, exactly as written — never a prefix of a longer word, which
+  // is how "Marcus" used to become March.
+  if ((w.length === 3 || w === 'sept') && ABBREVIATED_MONTHS[w]) return ABBREVIATED_MONTHS[w];
   return undefined;
 }
 
-const FULL_MONTHS = new Set([
-  'january', 'february', 'march', 'april', 'may', 'june',
-  'july', 'august', 'september', 'october', 'november', 'december',
-]);
+/**
+ * ENGLISH AND SPANISH.
+ *
+ * Southern California, and the practice takes Spanish calls every day: 285 of
+ * them on the queue lines in the fortnight to 2026-09-03, filing at a HIGHER
+ * rate than English. The month table was English-only until a patient rang
+ * tech at 22:23 that day, gave her whole request in Spanish including
+ * "mi fecha de nacimiento es 17 de febrero 1958", and had it refused — her
+ * insurance had stopped covering her eye drops and she needed the prescription
+ * changed. Nothing was filed.
+ *
+ * I had rewritten this parser an hour earlier and never asked what language
+ * the month would be in.
+ *
+ * The stray "de" costs nothing: the reader takes month words and numbers and
+ * ignores everything else, so "17 de febrero 1958" is a day, a month and a
+ * year with a preposition in the middle.
+ *
+ * NOT YET HERE, and they are real callers on these lines: Tagalog, Korean,
+ * Armenian, Farsi, Vietnamese, Russian and Arabic all appear in the runtime's
+ * own language table. A caller giving a date in any of them is still refused.
+ * That is a known gap rather than an oversight, and it needs the same evidence
+ * these two have before it is filled — which months actually arrive, spelled
+ * how, in real transcripts.
+ */
+const FULL_MONTHS: Record<string, string> = {
+  january: '01', february: '02', march: '03', april: '04',
+  may: '05', june: '06', july: '07', august: '08',
+  september: '09', october: '10', november: '11', december: '12',
 
-const MONTHS: Record<string, string> = {
-  jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
-  jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+  enero: '01', febrero: '02', marzo: '03', abril: '04',
+  mayo: '05', junio: '06', julio: '07', agosto: '08',
+  septiembre: '09', setiembre: '09', octubre: '10',
+  noviembre: '11', diciembre: '12',
 };
+
+/** Three letters, plus the one four-letter form people actually write. */
+const ABBREVIATED_MONTHS: Record<string, string> = {
+  jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+  jul: '07', aug: '08', sep: '09', sept: '09', oct: '10', nov: '11', dec: '12',
+  // Spanish abbreviations that differ from the English ones. The rest — feb,
+  // mar, may, jun, jul, oct, nov — are already the same three letters.
+  ene: '01', abr: '04', ago: '08', set: '09', dic: '12',
+};
+
+const MONTHS: Record<string, string> = ABBREVIATED_MONTHS;
 
 const DAYS_IN_MONTH = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
