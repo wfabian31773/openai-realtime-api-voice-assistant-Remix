@@ -73,10 +73,32 @@ registerTool({
   input_schema: {
     type: 'object',
     properties: {
+      /**
+       * LEAD THE ASK. Operator ruling, 2026-09-03:
+       *
+       *   *"We should be proactively structuring the conversation. On any
+       *   validation we should lead... May I please have your last name? May I
+       *   please have your date of birth? And when you ask for date of birth
+       *   it should say starting with the month, the day, and then the year.
+       *   This way you get it in the way you want it. It's kind of a guard.
+       *   If you just say can I have your date of birth, people give it to you
+       *   in any format they want."*
+       *
+       * These strings are the words the agent actually says: `validateInput`
+       * builds its refusal from `askAs`, and the model reads them in the
+       * schema. Changing them here changes all four queue lanes at once, which
+       * is why the wording lives with the field and not in four prompts.
+       *
+       * The date-of-birth guard is worth its characters twice over. Every
+       * parser fix on 2026-09-03 — separators, sentences, two-digit centuries
+       * — was widening what we accept AFTER the fact. Naming the order in the
+       * question narrows what arrives, which is the cheaper half and the one
+       * that was there before and got lost.
+       */
       phone: { type: 'string', description: 'Any format. The number they are calling from is usually best.', askAs: 'What is the best phone number for you?' },
-      first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'Can I get your first name?' },
-      last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'And your last name?' },
-      date_of_birth: { type: 'string', description: 'Any spoken format — "March 17th 1973", "03/17/1973".', askAs: 'And your date of birth?' },
+      first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'And may I please have your first name?' },
+      last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'May I please have your last name?' },
+      date_of_birth: { type: 'string', description: 'Any spoken format — "March 17th 1973", "03/17/1973".', askAs: 'And may I please have your date of birth, starting with the month, then the day, then the year?' },
     },
   },
   handler: async (input): Promise<ToolResult> => {

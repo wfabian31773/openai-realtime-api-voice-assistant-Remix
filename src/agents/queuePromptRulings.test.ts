@@ -91,6 +91,32 @@ const SHARED: readonly Ruling[] = [
     ],
   },
   {
+    /**
+     * Operator ruling, 2026-09-03:
+     *
+     *   *"We are not proactively structuring the conversation. On any
+     *   validation we should lead... May I please have your last name? May I
+     *   please have your date of birth? And when you ask for date of birth it
+     *   should say starting with the month, the day, and then the year. This
+     *   way you can get it in the way you want it. It's kind of a guard. If
+     *   you just say can I have your date of birth, people give it to you in
+     *   any format they want."*
+     *
+     * Both halves are asserted, and the ORDER half is the one worth the test.
+     * Every date-of-birth fix that day — separators, sentences in place of
+     * dates, two-digit centuries — widened what the parser accepts after the
+     * fact. Naming the order in the question narrows what arrives, and a
+     * mutation dropping it from one lane's prompt passed everything else.
+     */
+    source: 'Operator, 2026-09-03 — lead the ask, and name the date order in the question',
+    requires: [
+      ['may i please have'],
+      ['last name'],
+      ['starting with the month'],
+      ['then the day', 'the day, then the year'],
+    ],
+  },
+  {
     source: 'Standing instruction 12 — confirm the callback number BEFORE filing',
     requires: [['before you file', 'before the ticket', 'BEFORE you file']],
   },
@@ -145,6 +171,65 @@ const SURGERY_ONLY: readonly Ruling[] = [
   },
 ];
 
+/**
+ * RECORDS HAD NO PINNED RULINGS AT ALL, AND IT IS THE LANE WITH THE MOST
+ * DOMAIN RULES IN ITS PROMPT.
+ *
+ * Written BEFORE trimming records from 1,907 tokens, deliberately in that
+ * order: a trim is exactly the operation that drops a ruling quietly, and
+ * SHARED alone would not have noticed any of these going. Every one is
+ * something the records team or the law needs and no other lane has.
+ *
+ * It earned itself immediately. The trim's first draft wrapped "records have
+ * been sent" across a line break, which reads fine and is invisible to a
+ * substring check — the same way a line break once split "currently busy".
+ */
+const RECORDS_ONLY: readonly Ruling[] = [
+  {
+    /**
+     * The one field the filing tool refuses without. A patient asking for
+     * their own records starts a clock the practice must report on; a health
+     * plan or an attorney asking does not, and nobody can reconstruct which it
+     * was after the call.
+     */
+    source: 'Records — WHO IS ASKING, in what capacity, is required before filing',
+    requires: [
+      ['are you the patient', "on someone's behalf", 'on someone', 'behalf'],
+      ['capacity', 'parent', 'attorney', 'health plan', 'power of attorney'],
+    ],
+  },
+  {
+    source: 'Records — the caller may not be the patient; take both sets of details',
+    requires: [['may not be the patient', "caller's details separately", 'patient themselves']],
+  },
+  {
+    source: 'Records — never read anything from a record back to anyone',
+    requires: [['do not read', 'you do not read', 'never read'], ['diagnosis']],
+  },
+  {
+    source: 'Records — where they go and which dates, for a patient asking for their own',
+    requires: [['where should these be sent', 'where it goes', 'where they go'], ['dates']],
+  },
+  {
+    /**
+     * The counterweight to the two required fields above, and part of the same
+     * ruling: the tool refuses without an ANSWER, not without a good one. A
+     * caller must never be interrogated or turned away over a detail they
+     * genuinely do not have.
+     */
+    source: 'Records — an answer is all that is needed, not a good one; ask once',
+    requires: [['ask once', 'never interrogate', 'not a good one']],
+  },
+  {
+    source: 'Records — a wrong fax number sends a chart to a stranger; read it back digit by digit',
+    requires: [['digit by digit'], ['fax']],
+  },
+  {
+    source: 'Records — never say records have been sent, and never promise a date',
+    requires: [['have been sent', 'were already sent'], ['do not promise', 'not promise a date']],
+  },
+];
+
 const TECH_ONLY: readonly Ruling[] = [
   {
     source: 'Running out of glaucoma drops is not routine',
@@ -181,7 +266,7 @@ const records = buildRecordsPrompt({ callerPhone: '+17605551234' });
 check(surgery, [...SHARED, MEDICAL_SAFETY, ...SURGERY_ONLY], 'surgery prompt keeps every ruling');
 check(tech, [...SHARED, MEDICAL_SAFETY, ...TECH_ONLY], 'tech prompt keeps every ruling');
 check(optical, SHARED, 'optical prompt keeps every ruling');
-check(records, SHARED, 'records prompt keeps every ruling');
+check(records, [...SHARED, ...RECORDS_ONLY], 'records prompt keeps every ruling');
 
 describe('the trim actually happened', () => {
   /**
@@ -196,6 +281,24 @@ describe('the trim actually happened', () => {
 
   it('tech stays under 1,600 prompt tokens', () => {
     expect(Math.round(tech.length / 4)).toBeLessThan(1600);
+  });
+
+  /**
+   * OPTICAL AND RECORDS HAD NO CEILING AT ALL until 2026-09-03, which is how
+   * records became the fattest prompt in the fleet at 1,907 tokens while
+   * surgery — the one everybody watched — sat at 1,268.
+   *
+   * Operator, 2026-09-03: *"grok requires minimal prompting, we should not be
+   * near our ceilings."* Records trimmed to 1,679 the same afternoon; the
+   * headroom here is deliberately as tight as tech's, because tech's is the
+   * one that has actually caught something.
+   */
+  it('optical stays under 1,500 prompt tokens', () => {
+    expect(Math.round(optical.length / 4)).toBeLessThan(1500);
+  });
+
+  it('records stays under 1,750 prompt tokens', () => {
+    expect(Math.round(records.length / 4)).toBeLessThan(1750);
   });
 
   it('neither prompt carries a war story — those belong in code comments', () => {

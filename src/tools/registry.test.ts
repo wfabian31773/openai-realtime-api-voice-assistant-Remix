@@ -20,6 +20,10 @@ import {
 // Registration is an import side effect — the same way the HTTP server picks
 // them up. Without this the registry holds only the fixtures below.
 import './opticalTools';
+import './surgeryTools';
+import './techTools';
+import './medicalRecordsTools';
+import './sharedPatientTools';
 
 /** The real library, excluding the x_* fixtures this file registers. */
 const realTools = () => allTools().filter((t) => !t.name.startsWith('x_'));
@@ -318,6 +322,68 @@ describe('lookup_patient must not hand Optical a surgery center', () => {
     } else {
       expect(out).toMatchObject({ retryable: true });
       expect((out as { error: string }).error).toBeTruthy();
+    }
+  });
+});
+
+/**
+ * THE WORDS THE AGENT ACTUALLY SAYS WHEN IT ASKS FOR A DATE OF BIRTH.
+ *
+ * Operator ruling, 2026-09-03: *"when the agent says may I please have your
+ * date of birth, it should say starting with the month, the day, and then the
+ * year... it's kind of a guard. If you just say can I have your date of birth,
+ * people give it to you in any format they want."*
+ *
+ * `askAs` is not documentation — `validateInput` builds its refusal from it and
+ * the model reads it in the schema, so it IS the sentence a caller hears. The
+ * lane prompts carry the same ruling (queuePromptRulings.test.ts), but a
+ * mutation stripping the order from a tool's askAs passed every one of those:
+ * the prompt and the tool can drift apart, and the tool is what speaks on the
+ * re-ask, which is exactly the moment the caller already got it wrong once.
+ */
+describe('every tool that asks for a date of birth names the order', () => {
+  const asksForDob = () =>
+    realTools().filter((t) => t.input_schema.properties?.date_of_birth);
+
+  it('covers the four filing tools and the lookup', () => {
+    // If a lane stops asking, this should be a deliberate edit, not a silent
+    // drop that takes its ruling with it.
+    expect(asksForDob().map((t) => t.name).sort()).toEqual([
+      'file_optical_ticket',
+      'file_records_ticket',
+      'file_surgery_ticket',
+      'file_tech_ticket',
+      'lookup_patient',
+    ]);
+  });
+
+  for (const field of ['date_of_birth'] as const) {
+    it(`${field} asks for the month, then the day, then the year`, () => {
+      for (const t of asksForDob()) {
+        const ask = String(t.input_schema.properties[field]?.askAs ?? '');
+        expect(ask.toLowerCase(), t.name).toContain('starting with the month');
+        expect(ask.toLowerCase(), t.name).toContain('then the day, then the year');
+      }
+    });
+  }
+
+  it('leads with "may I please have" rather than a bare "and the..."', () => {
+    for (const t of asksForDob()) {
+      const ask = String(t.input_schema.properties.date_of_birth?.askAs ?? '');
+      expect(ask.toLowerCase(), t.name).toContain('may i please have');
+    }
+  });
+
+  /**
+   * The other half of the same afternoon. dobShape went live at 23:18 and the
+   * first three filing calls after it all recorded "(none)" — the model was not
+   * sending this field at all. It stays out of `required` on purpose, so the
+   * description is the only place left to say it.
+   */
+  it('tells the model to always send what the caller gave', () => {
+    for (const t of asksForDob().filter((t) => t.name.startsWith('file_'))) {
+      const d = String(t.input_schema.properties.date_of_birth?.description ?? '').toLowerCase();
+      expect(d, t.name).toContain('always pass this');
     }
   });
 });

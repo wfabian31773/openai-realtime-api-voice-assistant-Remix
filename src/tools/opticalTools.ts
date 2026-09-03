@@ -86,9 +86,24 @@ registerTool({
   input_schema: {
     type: 'object',
     properties: {
-      first_name: { type: 'string', description: "Patient's first name.", askAs: 'Can I get the first name?' },
-      last_name: { type: 'string', description: "Patient's last name.", askAs: 'And the last name?' },
-      date_of_birth: { type: 'string', description: 'Any spoken format.', askAs: 'And the date of birth?' },
+      first_name: { type: 'string', description: "Patient's first name.", askAs: 'May I please have the first name?' },
+      last_name: { type: 'string', description: "Patient's last name.", askAs: 'May I please have the last name?' },
+      /**
+       * LEAD THE ASK, AND ALWAYS SEND IT BACK. Two separate 2026-09-03 findings
+       * in one field; see sharedPatientTools for the operator's wording.
+       *
+       * The ORDER in the question is the guard — *"if you just say can I have
+       * your date of birth, people give it to you in any format they want"*.
+       *
+       * The description is the other half. dobShape went live at 23:18 and the
+       * first three filing calls after it all recorded "(none)": the model was
+       * not sending this field AT ALL. Those three filed anyway because
+       * lookup_patient had made a certain match and the handler fell back to the
+       * verified record — which is exactly why the loss looked random. It stays
+       * out of `required` (validateInput refuses before the handler, and that
+       * would kill the fallback), so the description is where it gets said.
+       */
+      date_of_birth: { type: 'string', description: 'What the caller said, exactly as they said it. ALWAYS pass this when they have given it — leaving it out is what refuses the ticket.', askAs: 'And may I please have the date of birth, starting with the month, then the day, then the year?' },
       callback_number: { type: 'string', description: 'Best number to reach them.', askAs: 'What is the best number to reach you?' },
       location: { type: 'string', description: 'The office, as returned by resolve_location.', askAs: 'Which of our offices do you usually visit?' },
       request_description: { type: 'string', description: "What they need, in their words.", askAs: 'What can we help you with?' },
@@ -253,7 +268,10 @@ registerTool({
       }
     }
     if (!parts) {
-      return missing(['date_of_birth'], 'I did not catch that date of birth — month, day and year?');
+      return missing(
+        ['date_of_birth'],
+        'I did not catch that — may I please have the date of birth, starting with the month, then the day, then the year?',
+      );
     }
 
     // Resolve the office to the ticketing app's numeric id BEFORE filing.
