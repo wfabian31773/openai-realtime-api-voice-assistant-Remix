@@ -75,7 +75,7 @@ function normalize(spoken: string): string {
   // "March 17, 1973" / "March 17th 1973" / "Mar 17 1973"
   const spokenMonth = /^([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$/i.exec(raw);
   if (spokenMonth) {
-    const mo = MONTHS[spokenMonth[1].toLowerCase().slice(0, 3)];
+    const mo = monthNumberFromWord(spokenMonth[1]!);
     if (!mo) return '';
     const d = spokenMonth[2].padStart(2, '0');
     return valid(spokenMonth[3], mo, d) ? `${spokenMonth[3]}-${mo}-${d}` : '';
@@ -84,108 +84,195 @@ function normalize(spoken: string): string {
   // "17 March 1973"
   const dayFirst = /^(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)\.?,?\s+(\d{4})$/i.exec(raw);
   if (dayFirst) {
-    const mo = MONTHS[dayFirst[2].toLowerCase().slice(0, 3)];
+    const mo = monthNumberFromWord(dayFirst[2]!);
     if (!mo) return '';
     const d = dayFirst[1].padStart(2, '0');
     return valid(dayFirst[3], mo, d) ? `${dayFirst[3]}-${mo}-${d}` : '';
   }
 
   /**
-   * THE CALLER SAID A SENTENCE, NOT A DATE.
+   * THE CALLER SAID A SENTENCE, NOT A DATE — SO READ THE DATE OUT OF IT.
    *
-   * Every pattern above is anchored ^...$, so one surrounding word throws the
-   * date away. On 2026-09-03 that was the direct cause of five calls where the
-   * agent told the caller their request was filed and nothing was:
+   * Every pattern above is anchored ^...$, so one surrounding word threw the
+   * date away. On 2026-09-03 that was the direct cause of EIGHT calls where
+   * the agent told the caller their request had been filed and nothing was:
    *
-   *   "our date of birth is August 10, 1962"   -> nothing   (optical 21:51)
-   *   "date of birth April 17, 1951"           -> nothing   (surgery 21:50)
-   *   "birthdate 5 13 45"                      -> nothing   (optical 21:07)
-   *   "T O C C O 10 7 63"                      -> nothing   (tech 20:55)
-   *   "March 17, 1973."                        -> nothing   (a full stop)
+   *   "our date of birth is August 10, 1962"   a rescheduling team, 21:51
+   *   "date of birth April 17, 1951"           a corneal graft, 21:50
+   *   "My date of birth is June 17th, 1984"    glasses to collect, 21:40
+   *   "birthdate 5 13 45"                      21:07
+   *   "T O C C O 10 7 63"                      20:55
+   *   "Date of birth is 7 26, 19 29"           antibiotics, 22:10
+   *   "Stanley Morrell, 5 31, 19 44"           a surgery schedule, 22:12
+   *   "March 17, 1973."                        a full stop is enough
    *
-   * while the bare date in each parsed perfectly. The tool's own schema invites
-   * it — date_of_birth is described to the model as "Any spoken format" — so
-   * the model passing the utterance verbatim is the model doing as it was told.
+   * The bare date in most of them parsed perfectly. The tool's own schema
+   * invites the sentence — date_of_birth is described to the model as "Any
+   * spoken format" — so the model passing the utterance verbatim was the model
+   * doing exactly as it was told.
    *
-   * THE ANCHORS STAY. This runs only after they have all failed, and it is a
-   * SEARCH, not a loosening: the same shapes, at word boundaries, anywhere in
-   * the string. Two rules keep it from guessing, because a wrong date of birth
-   * silently matches the wrong patient and is worse than no date at all:
+   * WHY THIS IS TOKENS AND NOT MORE REGEXES.
    *
-   *   1. EXACTLY ONE distinct valid date, or nothing. Two candidates is an
-   *      ambiguity, and an ambiguity is a refusal.
-   *   2. NO DIGITS MAY REMAIN once the date is removed. This is what stops a
-   *      spoken phone number becoming a birthday: "7 60 3 18 57 75" contains
-   *      "3 18 57", a real date, and leaves "7 60 75" behind — so it refuses.
-   *      A date inside a sentence leaves only words.
+   * The first attempt at this searched for the same anchored shapes inside the
+   * string and defended itself with a rule that no digits could be left over,
+   * so that a spoken phone number could never become a birthday. It cost two
+   * more patients within the hour: "7 26, 19 29" is a caller saying "nineteen
+   * twenty-nine", and the leftover rule threw the whole date away over the
+   * stray "29".
    *
-   * The unanchored pattern that once put 73/03/2017 on a real ticket did it by
-   * matching the TAIL of an ISO date; `\b` is why that cannot happen here, and
-   * there is a test for it.
+   * The operator settled it: *"if you are asking for a dob, you should treat
+   * whatever they give you as a dob, not a phone number. Who will give you a
+   * phone number when you ask for a dob? We should parse the date no matter
+   * how they give it to us."*
+   *
+   * He is right, and the guard was defending against something that does not
+   * happen. This function is only ever handed the `date_of_birth` ARGUMENT,
+   * which the model fills after asking for a birthday. So the question stops
+   * being "might this be a phone number" and becomes "what date did they say".
+   *
+   * WHAT STILL REFUSES, because these protect the patient rather than the
+   * parser: a date that is not real (13/45, 30 February), a year outside
+   * 1900..now, and a set of numbers that does not form ONE date. The shape
+   * rule replaces the leftover rule and does the same work more honestly — a
+   * phone number is six numeric groups and assembles into nothing.
    */
-  return searchInsideSentence(raw);
+  return readDateFromAnything(raw);
 }
 
-/** The same shapes as above, at word boundaries, for scanning a sentence. */
-const SEARCH_PATTERNS: readonly RegExp[] = [
-  /\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g,
-  /\b(\d{1,2})[\/\-.\s]+(\d{1,2})[\/\-.\s]+(\d{2}|\d{4})\b/g,
-  /\b([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/gi,
-  /\b(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)\.?,?\s+(\d{4})\b/gi,
-];
-
-interface Found {
-  iso: string;
-  /** The exact text matched, so the leftover-digit rule can remove it. */
-  text: string;
+/** Ordinals, separators and punctuation gone; month names left in place. */
+function flatten(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/(\d+)(st|nd|rd|th)\b/g, '$1')
+    .replace(/[\/\-.,]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function candidateFrom(which: number, m: RegExpExecArray): Found | null {
-  if (which === 0) {
-    const [, y, mo, d] = m;
-    const M = mo!.padStart(2, '0');
-    const D = d!.padStart(2, '0');
-    return valid(y!, M, D) ? { iso: `${y}-${M}-${D}`, text: m[0] } : null;
-  }
-  if (which === 1) {
-    const mo = m[1]!.padStart(2, '0');
-    const d = m[2]!.padStart(2, '0');
-    const y = m[3]!.length === 2 ? (Number(m[3]) > 30 ? `19${m[3]}` : `20${m[3]}`) : m[3]!;
-    return valid(y, mo, d) ? { iso: `${y}-${mo}-${d}`, text: m[0] } : null;
-  }
-  // Named month, either order.
-  const nameIdx = which === 2 ? 1 : 2;
-  const dayIdx = which === 2 ? 2 : 1;
-  const mo = MONTHS[m[nameIdx]!.toLowerCase().slice(0, 3)];
-  if (!mo) return null;
-  const d = m[dayIdx]!.padStart(2, '0');
-  const y = m[3]!;
-  return valid(y, mo, d) ? { iso: `${y}-${mo}-${d}`, text: m[0] } : null;
+/**
+ * Two spoken halves of a year — "nineteen twenty-nine" reaches us as "19 29".
+ *
+ * No century check here, deliberately. An earlier version rejected anything
+ * but 19xx and 20xx, and a mutation showed the check was dead: valid() already
+ * bounds the year to 1900..today, and every pair inside that range has 19 or
+ * 20 as its first half by arithmetic. Two rules saying the same thing is one
+ * rule and one place for them to drift apart, so this keeps the one that also
+ * catches every other way a year can be wrong.
+ */
+function joinSplitYear(hi: number, lo: number): number | null {
+  if (lo < 0 || lo > 99) return null;
+  return hi * 100 + lo;
 }
 
-function searchInsideSentence(raw: string): string {
-  const found: Found[] = [];
-  SEARCH_PATTERNS.forEach((re, which) => {
-    re.lastIndex = 0;
-    for (let m = re.exec(raw); m !== null; m = re.exec(raw)) {
-      const c = candidateFrom(which, m);
-      if (c) found.push(c);
+/** A two-digit year, on the same pivot the anchored branch has always used. */
+function expandTwoDigitYear(y: number): number {
+  return y > 30 ? 1900 + y : 2000 + y;
+}
+
+function readDateFromAnything(raw: string): string {
+  const flat = flatten(raw);
+  if (!flat) return '';
+
+  // Where the month name sits decides month-first from day-first.
+  let monthFromName: number | null = null;
+  let monthNameAt = -1;
+  const words = flat.split(' ');
+  words.forEach((w, i) => {
+    const m = monthNumberFromWord(w);
+    if (m && monthFromName === null) {
+      monthFromName = Number(m);
+      monthNameAt = i;
     }
   });
-  if (found.length === 0) return '';
-  // Rule 1: one date, or nothing. Different patterns reading the SAME date is
-  // agreement, not ambiguity, so compare the resolved values.
-  const distinct = new Set(found.map((f) => f.iso));
-  if (distinct.size !== 1) return '';
-  const hit = found[0]!;
-  // Rule 2: nothing numeric may be left over. This is the phone-number guard.
-  const leftover = raw.replace(hit.text, ' ');
-  if (/\d/.test(leftover)) return '';
+
+  const nums: { value: number; at: number; digits: number }[] = [];
+  words.forEach((w, i) => {
+    if (/^\d+$/.test(w)) nums.push({ value: Number(w), at: i, digits: w.length });
+  });
+
+  /**
+   * A YEAR IS TWO DIGITS OR FOUR, NEVER ONE. "9 2 4" is somebody being cut off
+   * mid-word, not the year 2004, and reading it as a date would put a wrong
+   * birthday on a ticket. Enforced on the token rather than the number so a
+   * leading zero cannot smuggle one through.
+   */
+  const yearDigitsOk = (n: { digits: number }) => n.digits === 2 || n.digits === 4;
+
+  let month: number | null = null;
+  let day: number | null = null;
+  let year: number | null = null;
+
+  if (monthFromName !== null) {
+    // "August 10 1962" / "10 August 1962" / "26 July 19 29"
+    month = monthFromName;
+    if (nums.length === 2) {
+      if (!yearDigitsOk(nums[1]!)) return '';
+      day = nums[0]!.value;
+      year = nums[1]!.value;
+    } else if (nums.length === 3) {
+      // The day, then a year said in two halves.
+      day = nums[0]!.value;
+      const joined = joinSplitYear(nums[1]!.value, nums[2]!.value);
+      if (joined === null) return '';
+      year = joined;
+    } else {
+      return '';
+    }
+    // A day written AFTER the year reads wrong; the month's position tells us
+    // nothing about that, so only accept the day before the year.
+    if (nums[0]!.at > nums[nums.length - 1]!.at) return '';
+  } else if (nums.length === 3) {
+    if (!yearDigitsOk(nums[2]!)) return '';
+    month = nums[0]!.value;
+    day = nums[1]!.value;
+    year = nums[2]!.value;
+  } else if (nums.length === 4) {
+    // "7 26 19 29" — month, day, and a year in two halves.
+    month = nums[0]!.value;
+    day = nums[1]!.value;
+    const joined = joinSplitYear(nums[2]!.value, nums[3]!.value);
+    if (joined === null) return '';
+    year = joined;
+  } else {
+    // Anything else is not one date. Six numeric groups is a phone number and
+    // assembles into nothing, which is the honest reason to refuse it.
+    return '';
+  }
+
+  if (year < 100) year = expandTwoDigitYear(year);
+  const mo = String(month).padStart(2, '0');
+  const d = String(day).padStart(2, '0');
+  const y = String(year);
+  if (!valid(y, mo, d)) return '';
   console.info(
-    '[DOB] read a date of birth out of the caller\'s sentence — the words around it used to lose it',
+    '[DOB] read a date of birth out of what the caller actually said — the words around it used to lose it',
   );
-  return hit.iso;
+  return `${y}-${mo}-${d}`;
 }
+
+/**
+ * A word that IS a month, not one that merely begins like one.
+ *
+ * The anchored branches read `MONTHS[word.slice(0, 3)]`, so "Marcus 17 1973"
+ * has always parsed as March 17th — a WRONG date of birth on a real ticket,
+ * which is the one outcome worse than no date at all. Found on 2026-09-03 by a
+ * test written for the new reader; the bug predates it.
+ */
+export function monthNumberFromWord(word: string): string | undefined {
+  const w = word.toLowerCase();
+  if (FULL_MONTHS.has(w)) return MONTHS[w.slice(0, 3)];
+  // Abbreviations only, exactly as written: "mar", "sept", "mar." handled by
+  // the caller stripping the stop.
+  if (w.length <= 4 && MONTHS[w.slice(0, 3)] && (w.length === 3 || w === 'sept')) {
+    return MONTHS[w.slice(0, 3)];
+  }
+  return undefined;
+}
+
+const FULL_MONTHS = new Set([
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+]);
 
 const MONTHS: Record<string, string> = {
   jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
