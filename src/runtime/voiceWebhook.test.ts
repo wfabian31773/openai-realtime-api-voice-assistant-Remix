@@ -15,6 +15,7 @@ import { CallSessionRegistry } from "./sessionRegistry";
 const AUTH_TOKEN = "test-auth-token";
 const LIVE_ENV = {
   TWILIO_AUTH_TOKEN: AUTH_TOKEN,
+  TWILIO_ACCOUNT_SID: "ACtest",
   XAI_API_KEY: "k",
   DATABASE_URL: "postgres://x",
 };
@@ -104,7 +105,7 @@ describe("webhook security posture", () => {
 
 describe("webhook readiness and lane gating", () => {
   it("speaks the controlled unavailable line when the process is not live-ready", () => {
-    const d = deps({ env: { TWILIO_AUTH_TOKEN: AUTH_TOKEN } });
+    const d = deps({ env: { TWILIO_AUTH_TOKEN: AUTH_TOKEN, TWILIO_ACCOUNT_SID: "ACtest" } });
     const res = handleVoiceWebhook("optical", signedRequest("/voice/optical", BODY), d);
     expect(res.status).toBe(200);
     expect(spoken(res.body)).toBe(RUNTIME_UNAVAILABLE_LINE);
@@ -256,5 +257,54 @@ describe("no unhandled throw reaches Twilio", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+/**
+ * TASK #54 — the greeting promises a recording, so the webhook starts one.
+ *
+ * The wiring is what matters here: the module's own rules are tested in
+ * callRecording.test.ts. What this pins is that the starter is called for a
+ * call the runtime will actually serve, is NOT called for one it refuses, and
+ * cannot take the call down.
+ */
+describe("the webhook does NOT start the recording, and why", () => {
+  /**
+   * It used to. That was a race the recording could only lose.
+   *
+   * An inbound call is not `in-progress` until Twilio has received and begun
+   * executing the returned TwiML — and this handler issued
+   * `recordings.create` BEFORE writing that response. Twilio rejects it with
+   * 21220, the exact error `callRecording.test.ts` models, so the greeting's
+   * recording disclosure would have been false on every call: the whole thing
+   * #54 exists to prevent (Codex, PR #247).
+   *
+   * The start moved to the Media Streams `start` frame, which Twilio only
+   * sends once it is executing this TwiML. What the webhook owns now is
+   * carrying the host forward so the callback URL built there points at the
+   * origin Twilio actually reached.
+   */
+  it("carries the host onto the registry entry for the start frame to use", () => {
+    const d = deps();
+    const res = handleVoiceWebhook("optical", signedRequest("/voice/optical", BODY), d);
+
+    expect(res.status).toBe(200);
+    const entry = d.registry.get(BODY.CallSid);
+    expect(entry?.host).toBeTruthy();
+    // The same host the stream URL uses — the callback has to be reachable
+    // at the same origin, or the recording never comes back.
+    expect(res.body).toContain(entry!.host!);
+  });
+
+  it("registers nothing for a call it refuses, so that call can never be recorded", () => {
+    // An unavailable lane gets the controlled spoken line and hangs up. With
+    // no entry there is no start frame and no recording — the "don't record a
+    // call we did not take" property now holds by construction rather than by
+    // a branch that could be reordered.
+    const d = deps({ laneIsAvailable: () => false });
+
+    handleVoiceWebhook("optical", signedRequest("/voice/optical", BODY), d);
+
+    expect(d.registry.get(BODY.CallSid)).toBeUndefined();
   });
 });

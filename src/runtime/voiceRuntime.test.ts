@@ -30,6 +30,10 @@ import { registerCallHandoff, registeredHandoffCount } from "../tools/handoffBro
 const AUTH_TOKEN = "test-auth-token";
 const ENV = {
   TWILIO_AUTH_TOKEN: AUTH_TOKEN,
+  // Required since task #54: the runtime starts Twilio's call recording over
+  // REST on the inbound path, so a lane without the account sid is not ready
+  // to answer — the greeting promises a recording it could not make.
+  TWILIO_ACCOUNT_SID: "ACtest",
   XAI_API_KEY: "xai-key",
   DATABASE_URL: "postgres://x",
 };
@@ -141,6 +145,7 @@ async function harness(
     openCallRow?: (row: unknown) => Promise<string | undefined>;
     callRowDeadlineMs?: number;
     env?: Record<string, string | undefined>;
+    startRecording?: (callSid: string, host: string) => void;
   } = {},
 ): Promise<Harness> {
   const app = express();
@@ -166,6 +171,7 @@ async function harness(
     callRowDeadlineMs: over.callRowDeadlineMs,
     fetchPrecontext: over.fetchPrecontext,
     resolveGreeting: over.resolveGreeting,
+    ...(over.startRecording ? { startRecording: over.startRecording } : {}),
     openCallRow:
       over.openCallRow ??
       (async (row) => {
@@ -1415,5 +1421,141 @@ describe("the database outranks the code, but not on the copy a lane must say", 
   it("uses the registry string when nothing is configured", () => {
     expect(chooseGreeting("optical", null, "Registry.")).toBe("Registry.");
     expect(chooseGreeting("optical", null, null)).toBe("");
+  });
+});
+
+/**
+ * THE RECORDING CALLBACK IS PUBLIC AND WAS UNAUTHENTICATED — Codex, PR #247.
+ *
+ * Its whole input is a CallSid and a URL. Without a signature check, anyone
+ * holding a CallSid could POST `RecordingStatus=completed` with a
+ * RecordingUrl of their choosing and overwrite the staff-facing recording
+ * link on a real patient's call. Every other runtime Twilio webhook already
+ * gated on this; this one was the exception.
+ *
+ * It still answers 200 either way. Twilio retries any non-2xx, and a retry
+ * storm from a caller that can never authenticate is worse than a dropped
+ * callback.
+ */
+describe("the recording-status callback authenticates before it writes", () => {
+  it("rejects an unsigned callback without writing, and still answers 200", async () => {
+    const h = await harness();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await fetch(`${h.base}/voice/recording-status`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          CallSid: "CAforged00000000000000000000000000",
+          RecordingStatus: "completed",
+          RecordingUrl: "https://attacker.example/evil.mp3",
+        }).toString(),
+      });
+
+      // 200, so Twilio does not retry — but nothing was accepted.
+      expect(res.status).toBe(200);
+      const rejected = warn.mock.calls.some((c) => String(c[0]).includes("REJECTED"));
+      expect(rejected).toBe(true);
+    } finally {
+      warn.mockRestore();
+      await h.close();
+    }
+  });
+});
+
+/**
+ * RECORDING STARTS ON THE START FRAME, NOT IN THE WEBHOOK — Codex, PR #247.
+ *
+ * An inbound call is not `in-progress` until Twilio has received and begun
+ * executing the TwiML, and the webhook issued `recordings.create` before
+ * writing that response. Twilio rejects that with 21220 and the greeting's
+ * recording disclosure is false for the whole call.
+ *
+ * This frame is Twilio saying it is executing our TwiML, so the call is live.
+ */
+describe("recording starts once the call is provably live", () => {
+  it("starts on the stream start frame, with the host the webhook was reached on", async () => {
+    const started: Array<[string, string]> = [];
+    const h = await harness({
+      startRecording: (sid, host) => started.push([sid, host]),
+      // The greeting has to actually say it — see the disclosure test below.
+      resolveGreeting: async () =>
+        "Thank you for calling Azul Vision. This call is recorded. How can I help?",
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CAREC1",
+      From: "+15551230000",
+      To: "+15559990000",
+    });
+    const { ws } = await openStream(h, "CAREC1", tokenFrom(answered.text));
+    await settle();
+
+    expect(started).toHaveLength(1);
+    expect(started[0][0]).toBe("CAREC1");
+    // The registry carried it from the webhook so the status callback lands
+    // on the same origin Twilio actually reached.
+    expect(started[0][1]).toBe(h.registry.get("CAREC1")?.host);
+    expect(started[0][1]).toBeTruthy();
+
+    ws.close();
+    await h.close();
+  });
+});
+
+/**
+ * RECORD ONLY A CALLER WHO WAS TOLD — Codex, PR #247.
+ *
+ * The first version of this recorded every lane it could claim. But
+ * MANDATORY_GREETING_COPY covers ONLY 'no-ivr' — optical, surgery, tech,
+ * records and answering-service carry no recording notice in their greetings
+ * at all — so it would have recorded those callers without ever telling them,
+ * in a California medical practice where callRecording.ts's own header says
+ * the disclosure IS how consent is obtained.
+ *
+ * Whether to make the disclosure mandatory fleet-wide is Wayne's decision.
+ * Until he makes it, the greeting decides, per call.
+ */
+describe("recording follows the disclosure, not the lane", () => {
+  it("does NOT record when the greeting never says the call is recorded", async () => {
+    const started: string[] = [];
+    const h = await harness({
+      startRecording: (sid) => started.push(sid),
+      resolveGreeting: async () => "Thank you for calling Azul Vision. How can I help you today?",
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CANODISC",
+      From: "+15551230000",
+      To: "+15559990000",
+    });
+    const { ws } = await openStream(h, "CANODISC", tokenFrom(answered.text));
+    await settle();
+
+    expect(started).toEqual([]);
+
+    ws.close();
+    await h.close();
+  });
+
+  it("is not fooled by a greeting that says the call is NOT recorded", async () => {
+    // The disclosure check is the same negation-aware predicate the no-ivr
+    // mandatory-copy rule uses, for the reason it was hardened in #244: an
+    // admin-editable field that says the opposite must not read as consent.
+    const started: string[] = [];
+    const h = await harness({
+      startRecording: (sid) => started.push(sid),
+      resolveGreeting: async () => "Thanks for calling. This call is not being recorded.",
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CANEGDISC",
+      From: "+15551230000",
+      To: "+15559990000",
+    });
+    const { ws } = await openStream(h, "CANEGDISC", tokenFrom(answered.text));
+    await settle();
+
+    expect(started).toEqual([]);
+
+    ws.close();
+    await h.close();
   });
 });

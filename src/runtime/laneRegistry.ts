@@ -46,7 +46,7 @@ import {
   pickLaneEnv,
   type GrokRuntimeVoiceConfig,
 } from "./config";
-import { normalizeSpokenLanguage } from "./language";
+import { normalizeSpokenLanguageOrNull } from "./language";
 
 /** What the runtime needs from a lane's registry entry. Structurally a
  * subset of AgentConfig in src/config/agents.ts. */
@@ -329,10 +329,29 @@ export async function resolveLane(
       // rosters: guessing which Grok voice 'sage' means is exactly the
       // kind of gap-filling that produces a line nobody chose.
       voiceName: pickLaneEnv(env, "XAI_VOICE_NAME", slug) ?? voice.voiceName,
-      // Language IS provider-neutral ('en', 'es'), so the lane's own
-      // registered value still counts.
-      language: normalizeSpokenLanguage(
-        pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug) ?? config.language ?? voice.language,
+      /**
+       * A REGISTERED 'en' IS NOT A CHOICE — Codex, PR #247.
+       *
+       * #55 made this `…OrNull` so an unset language sends no pin. It never
+       * reached null on any real lane: opticalAgentConfig, surgeryAgentConfig,
+       * answeringServiceAgentConfig and noIvrAgentConfig all carry
+       * `language: 'en'`, so this resolved to English and buildSessionConfig
+       * still emitted `language_hint: "en"` — the exact Spanish-call failure
+       * #55 exists to remove, untouched. My test missed it because the fake
+       * registry entry omitted `language` entirely, which is the one shape
+       * production never has.
+       *
+       * That 'en' is a leftover from when every agent config declared one,
+       * not a decision anyone made about this line, so it is treated as
+       * unestablished. An operator who genuinely wants a pin sets
+       * XAI_VOICE_LANGUAGE — per lane or fleet-wide — and that still wins.
+       * Otherwise language is established mid-call from what the caller
+       * actually speaks (setSpokenLanguage); see task #74, Wayne's to settle.
+       */
+      language: normalizeSpokenLanguageOrNull(
+        pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug) ??
+          nonDefaultLanguage(config.language) ??
+          nonDefaultLanguage(voice.language),
       ),
     },
     version: config.version ?? null,
@@ -346,4 +365,17 @@ export async function resolveLane(
 export async function defaultLaneSource(): Promise<LaneSource> {
   const { agentRegistry } = await import("../config/agents");
   return agentRegistry as unknown as LaneSource;
+}
+
+/**
+ * A registered language that is not the legacy 'en' default. Every production
+ * agent config carries 'en' from a time when declaring one was required, so
+ * 'en' there cannot be told apart from "nobody chose"; anything else was a
+ * deliberate choice and is honoured. See the language note in the lane voice
+ * block above.
+ */
+function nonDefaultLanguage(value: string | null | undefined): string | undefined {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) return undefined;
+  return trimmed.toLowerCase() === "en" ? undefined : trimmed;
 }

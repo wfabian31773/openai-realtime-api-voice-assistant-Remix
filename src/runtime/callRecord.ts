@@ -424,3 +424,48 @@ export async function persistRuntimeCall(
     return false;
   }
 }
+
+/**
+ * Attach a finished recording to the call's row, by CallSid.
+ *
+ * The runtime's recording is call-level, so `CallSid` is the only key Twilio
+ * sends back — see `handleRecordingStatus` in callRecording.ts for why the old
+ * core's conference-keyed handler could not be reused. Never throws: a
+ * recording that cannot be attached must not turn a 200 into a Twilio retry.
+ */
+export async function persistRecordingUrl(
+  callSid: string,
+  recordingUrl: string,
+): Promise<boolean> {
+  try {
+    const [{ db }, { callLogs }, { eq }] = await Promise.all([
+      import("../../server/db"),
+      import("../../shared/schema"),
+      import("drizzle-orm"),
+    ]);
+    const updated = await db
+      .update(callLogs)
+      .set({ recordingUrl })
+      .where(eq(callLogs.callSid, callSid))
+      .returning({ id: callLogs.id });
+    if (updated.length === 0) {
+      // Codex, PR #247: a callback that arrives before the call row exists
+      // matched nothing, and returning true here reported that as attached.
+      // Teardown's upsert carries no recordingUrl, so the recording would be
+      // detached permanently and silently. Saying so is the minimum; the
+      // caller decides whether to retry.
+      console.error(
+        `[RUNTIME RECORDING] ✗ no call_logs row for ${callSid} — recording NOT attached. ` +
+          `The callback beat the call row; the URL is lost unless it is re-sent.`,
+      );
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error(
+      `[RUNTIME RECORDING] ✗ could not attach recording to ${callSid}:`,
+      error,
+    );
+    return false;
+  }
+}

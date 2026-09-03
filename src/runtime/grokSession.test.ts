@@ -788,3 +788,40 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
     ).toBe(false);
   });
 });
+
+/**
+ * NO PIN UNLESS ONE WAS ESTABLISHED — task #55.
+ *
+ * `buildSessionConfig` used to send `language_hint: config.language` with
+ * config.language defaulted to "en", so every runtime call went out pinned to
+ * English before the caller had said a word. A hard pin produces confident
+ * nonsense on names and dates of birth — what every identity gate keys on —
+ * and the practice takes Spanish calls daily: on 2026-08-31 four optical
+ * callers asked for Spanish and a Spanish-speaking surgery caller could not
+ * file at all (.agents/memory/transcription-config.md).
+ *
+ * This mirrors the old core's rule in `buildTranscriptionConfig`: pin ONLY
+ * when the call established a language.
+ */
+describe("the STT language pin", () => {
+  it("sends NO language_hint when the lane established none", () => {
+    // Loaded the way production loads it, with no XAI_VOICE_LANGUAGE set —
+    // which is the state every lane is in today.
+    const cfg = buildSessionConfig(
+      loadGrokRuntimeVoiceConfig({ XAI_DRS_VOICE_NAME: "eve" }),
+      "instructions",
+      [...FIXTURE_TOOLS],
+    );
+    expect(cfg.audio.input.transcription).toEqual({});
+    expect(JSON.stringify(cfg)).not.toContain("language_hint");
+  });
+
+  it("sends the hint when a lane was deliberately configured for one", () => {
+    const cfg = buildSessionConfig(
+      { ...loadGrokRuntimeVoiceConfig({ XAI_DRS_VOICE_NAME: "eve" }), language: "es" },
+      "instructions",
+      [...FIXTURE_TOOLS],
+    );
+    expect(cfg.audio.input.transcription).toEqual({ language_hint: "es" });
+  });
+});

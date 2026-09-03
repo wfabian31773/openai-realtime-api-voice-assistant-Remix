@@ -60,6 +60,7 @@ import {
 import { releaseCallHandoff } from "../tools/handoffBroker";
 import {
   greetingStyleFor,
+  greetingDisclosesRecording,
   missingMandatoryCopy,
   personaliseGreeting,
 } from "../services/greetingPersonalisation";
@@ -136,6 +137,14 @@ import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
+import { persistRecordingUrl } from "./callRecord";
+import {
+  RECORDING_STATUS_PATH,
+  createRecordingStarter,
+  handleRecordingStatus,
+  type RecordingStarter,
+  type RecordingStatusBody,
+} from "./callRecording";
 import {
   handleAfterRedirect,
   handleVoiceWebhook,
@@ -143,6 +152,7 @@ import {
   VOICE_STREAM_PATH,
   type WebhookRequest,
   type WebhookResponse,
+  checkTwilioSignature,
 } from "./voiceWebhook";
 import {
   computeRuntimeReadiness,
@@ -248,6 +258,8 @@ export interface VoiceRuntimeOptions {
   resolveGreeting?: (slug: string) => Promise<string | null>;
   /** Opens the call_logs row. Injected for tests. */
   openCallRow?: CallLogInsert;
+  /** Test seam. Production builds one from env — see createRecordingStarter. */
+  startRecording?: RecordingStarter;
   /** Persists the finished call. Injected for tests. */
   persistCall?: (record: VoiceCallRecord) => Promise<boolean>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
@@ -372,6 +384,41 @@ export function mountVoiceRuntime(
     send(res, transfer.handleStatus(toWebhookRequest(req)));
   });
 
+  /**
+   * Task #54: the greeting promises a recording, so the runtime makes one and
+   * this is where Twilio returns it. Keyed on CallSid — the old core's
+   * /api/voice/recording-status reads ConferenceSid and would silently drop a
+   * call-level recording. See handleRecordingStatus.
+   */
+  app.post(RECORDING_STATUS_PATH, (req: Request, res: Response) => {
+    // AUTHENTICATE BEFORE WRITING. This endpoint is public and its only input
+    // is a CallSid and a URL, so without this anyone holding a CallSid could
+    // POST `RecordingStatus=completed` with a RecordingUrl of their choosing
+    // and overwrite the staff-facing recording link on a real patient's call
+    // (Codex, PR #247). Every other runtime Twilio webhook already gates on
+    // this; this one was the exception.
+    //
+    // Still always 200 — Twilio retries any non-2xx, and a retry storm from a
+    // caller that can never authenticate is worse than a dropped callback.
+    const webhookReq = toWebhookRequest(req);
+    const sig = checkTwilioSignature(webhookReq, env);
+    if (sig !== "valid") {
+      console.warn(
+        `[RUNTIME RECORDING] ✗ recording-status callback REJECTED (${sig}) — not writing anything.`,
+      );
+      res.status(200).type("text/plain").send("");
+      return;
+    }
+    const result = handleRecordingStatus(webhookReq.body as RecordingStatusBody);
+    console.log(result.log);
+    if (result.persist) {
+      // Fire-and-forget: Twilio gets its 200 either way, and persistRecordingUrl
+      // never throws.
+      void persistRecordingUrl(result.persist.callSid, result.persist.recordingUrl);
+    }
+    res.status(result.status).type("text/plain").send(result.body);
+  });
+
   app.get("/voice/health", (_req: Request, res: Response) => {
     const readiness = computeRuntimeReadiness(env);
     const destinations = transferDestinationStatus(env);
@@ -424,6 +471,18 @@ export function mountVoiceRuntime(
       }),
     );
   });
+
+  /**
+   * Task #54. Built once, not per call: the SDK client is constructed lazily
+   * inside it, so an unconfigured process still boots and still answers its
+   * health check — and readiness already refuses to take calls without the
+   * account sid, so a live call always has the means to record.
+   */
+  // Injectable for the same reason createTransport is: without a seam the
+  // start-frame trigger cannot be observed, and a mutation that deletes the
+  // call entirely reddens nothing (found by mutation check, PR #247).
+  const startRecording =
+    options.startRecording ?? createRecordingStarter({ env, log: (line) => console.log(line) });
 
   app.post("/voice/:slug", (req: Request, res: Response) => {
     const slug = String(req.params.slug ?? "");
@@ -684,6 +743,7 @@ export function mountVoiceRuntime(
                 }),
           },
         );
+
         if (!lane) {
           // The webhook let this through unseen and it turned out to be
           // unknown or disabled. Closing the socket runs the <Redirect>,
@@ -711,6 +771,58 @@ export function mountVoiceRuntime(
           twilioSocket.close();
           return;
         }
+
+        // The exact words this caller is about to hear. Settled here rather
+        // than inline at the bridge because the recording decision below
+        // depends on them.
+        const spokenGreeting =
+          personaliseGreeting(
+            chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
+            recognisedFirstName(precontext),
+            greetingStyleFor(entry.slug),
+          ) || null;
+
+        // RECORD ONLY A CALLER WHO WAS TOLD — Codex, PR #247.
+        //
+        // This started life at the top of startCall and recorded every lane
+        // it could claim. But MANDATORY_GREETING_COPY covers ONLY 'no-ivr':
+        // optical, surgery, tech, records and answering-service carry no
+        // recording notice in their greetings at all, so that would have
+        // recorded those callers without ever telling them — in a California
+        // medical practice, where callRecording.ts's own header says the
+        // disclosure IS how consent is obtained.
+        //
+        // So the greeting decides, per call. A lane whose words do not say it
+        // is not recorded, and the log says which lane and why rather than
+        // leaving a silent gap. Making the disclosure mandatory fleet-wide is
+        // Wayne's call, not something to infer from a review comment.
+        //
+        // Still safe on timing: the stream frame means Twilio is executing
+        // our TwiML (so the call is in-progress and 21220 cannot fire), and
+        // the bridge has not been built, so nothing has been spoken yet.
+        if (!greetingDisclosesRecording(spokenGreeting)) {
+          console.log(
+            `[RUNTIME RECORDING] ${entry.slug}: NOT recording — this lane's greeting ` +
+              `does not disclose it. Recording without the disclosure is a consent problem.`,
+          );
+        } else if (!entry.host) {
+          console.error(
+            `[RUNTIME RECORDING] ✗ no host on the registry entry for ${entry.callSid} — ` +
+              `NOT recording, and this lane's greeting says we are.`,
+          );
+        } else {
+          // Guarded even though the starter is documented as non-throwing: a
+          // caller must not lose a call over a recording.
+          try {
+            startRecording(entry.callSid, entry.host);
+          } catch (error) {
+            console.error(
+              `[RUNTIME RECORDING] ✗ starter threw for ${entry.callSid} — continuing the call:`,
+              error,
+            );
+          }
+        }
+
         knownLanes.add(entry.slug);
         // Open the call's row BEFORE the agent can run a tool. The agents'
         // own telemetry, identity stamping and ticket number all UPDATE
@@ -813,11 +925,7 @@ export function mountVoiceRuntime(
           // it does on the SIP path — an admin edit must be what the caller
           // hears, not what the code was shipped with. UNLESS it has dropped
           // copy the lane is required to say; see `chooseGreeting`.
-          greeting: personaliseGreeting(
-            chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
-            recognisedFirstName(precontext),
-            greetingStyleFor(entry.slug),
-          ) || null,
+          greeting: spokenGreeting,
           twilio: twilioSocket,
           createSession: (handlers) =>
             new GrokVoiceSession(

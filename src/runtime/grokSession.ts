@@ -143,9 +143,24 @@ export function buildSessionConfig(
     audio: {
       input: {
         format: AUDIO_FORMAT,
-        // The lane's configured language seeds the STT hint; a mid-call
-        // switch retargets it via setSpokenLanguage().
-        transcription: { language_hint: config.language },
+        /**
+         * NO PIN UNLESS ONE WAS ESTABLISHED — task #55.
+         *
+         * This used to send `language_hint: config.language`, and
+         * `config.language` defaulted to "en", so every runtime call was
+         * pinned to English before the caller had said a word. A hard pin
+         * produces confident nonsense on the fields every identity gate keys
+         * on — names and dates of birth — and the practice takes Spanish
+         * calls daily: on 2026-08-31 four optical callers asked for Spanish
+         * and a Spanish-speaking surgery caller could not file at all.
+         *
+         * Absent, the provider detects per utterance. A hint goes out only
+         * when a lane was deliberately configured for one, or once
+         * `setSpokenLanguage()` establishes it mid-call — which mirrors
+         * `buildTranscriptionConfig`'s rule on the old core: pin ONLY when
+         * the call established a language.
+         */
+        transcription: config.language ? { language_hint: config.language } : {},
         transport: "json",
       },
       output: {

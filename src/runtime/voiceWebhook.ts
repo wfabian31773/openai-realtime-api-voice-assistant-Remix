@@ -82,6 +82,15 @@ export interface WebhookDeps {
   /** Whether this slug can answer a call right now. Injected rather than
    * imported so the webhook stays testable without the agent tree. */
   laneIsAvailable: (slug: string) => boolean;
+  /**
+   * Starts Twilio's call recording, fire-and-forget — see callRecording.ts.
+   *
+   * The greeting tells the caller the call is being recorded and the
+   * compliance check refuses a greeting that drops that sentence, so this is
+   * what makes the sentence true (task #54). Injected, synchronous and
+   * non-throwing: the caller is waiting on the TwiML below, and a REST round
+   * trip in front of it is dead air.
+   */
 }
 
 function headerValue(
@@ -209,15 +218,30 @@ export function handleVoiceWebhook(
     return { status: 400, contentType: "text/plain", body: "missing CallSid" };
   }
 
+  const { host } = resolveRequestBase(req);
+
   const entry = deps.registry.register({
     callSid,
     slug,
     callerPhone: req.body.From ?? "",
     dialedNumber: req.body.To ?? "",
+    // Carried so the start frame can build a status-callback URL on the same
+    // origin Twilio actually reached us on.
+    host,
   });
-
-  const { host } = resolveRequestBase(req);
   const streamUrl = `wss://${host}${VOICE_STREAM_PATH}`;
+
+  // RECORDING IS NOT STARTED HERE. It used to be, and that was a race the
+  // recording could only lose: an inbound call is not `in-progress` until
+  // Twilio has received and begun executing the TwiML below, and this ran
+  // BEFORE that response was even written. `recordings.create` would be
+  // rejected with 21220 — the exact error callRecording.test.ts models — and
+  // the greeting's recording disclosure would be false on every call, which
+  // is the whole thing #54 exists to prevent (Codex, PR #247).
+  //
+  // It now fires on the Media Streams `start` frame instead, which Twilio
+  // only sends once it is executing this TwiML. See `startCall` in
+  // voiceRuntime.ts. The host is carried on the registry entry.
 
   return twimlResponse(
     200,

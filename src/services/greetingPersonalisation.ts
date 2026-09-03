@@ -378,6 +378,25 @@ export function lunchGreetingFor(
  * What a candidate greeting is missing for this lane, or [] when it is
  * complete (and always [] for a lane with nothing mandatory).
  */
+/**
+ * Does this greeting actually tell the caller the call is recorded?
+ *
+ * The `no-ivr` mandatory-copy rule already owns this predicate; this exposes
+ * it for every lane. Codex, PR #247: the runtime's recording start was
+ * unconditional, but MANDATORY_GREETING_COPY covers ONLY 'no-ivr' — optical,
+ * surgery, tech, records and answering-service carry no recording notice in
+ * their greetings at all. Recording those callers is a consent question in a
+ * California medical practice, not a config detail, so the runtime asks this
+ * before it records anything.
+ */
+export function greetingDisclosesRecording(greeting: string | null | undefined): boolean {
+  const clause = MANDATORY_GREETING_COPY['no-ivr']?.find(
+    (r) => r.label === 'recording disclosure',
+  );
+  if (!clause) return false;
+  return clause.present(String(greeting ?? ''));
+}
+
 export function missingMandatoryCopy(
   agentSlug: string | undefined,
   greeting: string | null | undefined,

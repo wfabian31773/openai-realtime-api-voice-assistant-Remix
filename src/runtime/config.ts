@@ -16,7 +16,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import { normalizeSpokenLanguage, type SpokenLanguage } from "./language";
+import { normalizeSpokenLanguage, normalizeSpokenLanguageOrNull, type SpokenLanguage } from "./language";
 
 export type GrokReasoningEffort = "none" | "high";
 
@@ -24,7 +24,14 @@ export interface GrokRuntimeVoiceConfig {
   apiKey: string;
   model: string;
   voiceName: string;
-  language: SpokenLanguage;
+  /**
+   * The lane's configured language, or null when nobody configured one.
+   *
+   * Null is NOT "English" — it means send no STT pin and let the provider
+   * detect. Task #55: defaulting this to "en" pinned every runtime call to
+   * English before the caller spoke.
+   */
+  language: SpokenLanguage | null;
   reasoningEffort: GrokReasoningEffort;
 }
 
@@ -67,7 +74,7 @@ export function loadGrokRuntimeVoiceConfig(
     apiKey: env.XAI_API_KEY ?? "",
     model: pickLaneEnv(env, "XAI_VOICE_MODEL", slug) ?? DEFAULT_MODEL,
     voiceName: pickLaneEnv(env, "XAI_VOICE_NAME", slug) ?? DEFAULT_VOICE,
-    language: normalizeSpokenLanguage(pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug) ?? "en"),
+    language: normalizeSpokenLanguageOrNull(pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug)),
     reasoningEffort: effortRaw === "none" ? "none" : "high",
   };
 }

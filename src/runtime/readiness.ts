@@ -60,6 +60,12 @@ export function computeRuntimeReadiness(
   // Webhook authentication. Without it every request is unauthenticated,
   // so the webhook refuses to serve a stream at all — see voiceWebhook.ts.
   if (!env.TWILIO_AUTH_TOKEN) missing.push("TWILIO_AUTH_TOKEN");
+  // Added with task #54. The runtime starts Twilio's call recording over REST
+  // on the inbound path, and the greeting promises that recording — so a line
+  // without the means to make one is not ready to answer. Nothing in the
+  // runtime made a REST call inbound before this, which is why the account sid
+  // was not already required alongside the auth token.
+  if (!env.TWILIO_ACCOUNT_SID) missing.push("TWILIO_ACCOUNT_SID");
   // The agents' tools read and write the practice's data, and the call
   // record is written at teardown. A process that can talk but cannot file
   // anything would take a real call and lose it: a controlled unavailable
