@@ -210,6 +210,21 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // says there is no ticket number because there is not one yet.
     'filed_pending',
     'department', 'requestType', 'escalated', 'patientFound',
+    /**
+     * HOW the patient was matched, and whether that counts as an identity.
+     *
+     * Neither is PHI — one is an enum from a fixed set
+     * ('phone' | 'name' | 'dob' | 'name_and_dob'), the other a boolean — and
+     * without them the timeline cannot answer the question that matters about
+     * lookup_patient: 2,819 calls to it in the fourteen days to 2026-09-03
+     * and not one of them says how the match was made.
+     *
+     * That blindness is why the name-only carry-forward hazard in
+     * sharedPatientTools.ts could not be fixed on 2026-09-03: BACKEND_HANDOFF
+     * forbids changing the ticket path on a number nobody can measure, so the
+     * measurement had to come first.
+     */
+    'matched_by', 'identity_is_certain',
     'say', // directive text — kept so the Phase 7 rubric can grade say-verbatim compliance
     /**
      * What a refused PCP gate told the model to do instead (src/pcp/refusals.ts).

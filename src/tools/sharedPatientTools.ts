@@ -169,7 +169,33 @@ registerTool({
     // needs it because it changes what may be SAID: an uncertain match is one
     // real person's record, but it is a guess among several, so the name must
     // be confirmed and the history must not be read back.
-    const certain = resolved.identity?.unique !== false;
+    const uniqueMatch = resolved.identity?.unique !== false;
+
+    /**
+     * A NAME-ONLY HIT IS NOT AN IDENTITY, AND THE TOOL SAYS SO NOW.
+     *
+     * `identity_is_certain` used to mean only "the match was unique". But
+     * `lookupPatient` falls back from name+DOB to the PHONE NUMBER and then to
+     * the NAME ALONE, and a lone Smith on file is unique — so a name-only hit
+     * on a common surname came back `found: true, identity_is_certain: true`,
+     * and it is somebody else's chart.
+     *
+     * Nothing stopped that except six lines of prompt telling the model to
+     * distrust this very field:
+     *
+     *   "THEN CHECK matched_by BEFORE YOU BELIEVE IT ... If matched_by is not
+     *    name_and_dob, treat it as NOT FOUND: say nothing about their
+     *    appointments, read no history back"
+     *
+     * A safety rule that holds only while the model obeys an instruction is
+     * not a safety rule. The check belongs here, where it cannot be talked
+     * out of, and the prompt lines it replaces are deleted (task #25 — the
+     * queue prompts carry workarounds written for a model that needed them).
+     *
+     * `phone` stays certain: it is the one field nobody mis-transcribed, and
+     * the service only reaches the phone fallback with a unique hit.
+     */
+    const certain = uniqueMatch && resolved.matchedBy !== 'name' && resolved.matchedBy !== 'dob';
 
     /**
      * PASS THE RECORD ALONG — operator instruction, 2026-09-01.
@@ -186,7 +212,29 @@ registerTool({
      * be confirmed out loud, which is the rule the identity_warning above
      * exists to enforce.
      */
-    if (certain) {
+    /**
+     * DELIBERATELY `uniqueMatch`, NOT `certain` — do not "tidy" this to the
+     * stricter flag above.
+     *
+     * This carry-forward is the operator's 2026-09-01 fix: it recovered 45
+     * calls in a fortnight that were refused for a date of birth the process
+     * was already holding, 23 of them for a patient this tool had identified.
+     * Narrowing it to `certain` would drop every phone-matched caller back
+     * into that gate and undo the fix.
+     *
+     * It stays safe on its own terms: `verifiedDobFor` only ever reads a
+     * remembered date back for the SAME NAME, so a unique phone match carries
+     * that person's date of birth and nobody else's.
+     *
+     * The remaining hazard is a unique NAME-ONLY match banking a date of birth
+     * for a caller who is not on file. It is pre-existing, it is invisible in
+     * the data today — `matched_by` was never recorded on the timeline, so
+     * 2,819 lookups in fourteen days say nothing about how often this happens
+     * — and BACKEND_HANDOFF forbids changing the ticket path on a number
+     * nobody can measure. That is why `matched_by` joins the recorded outcome
+     * below rather than being fixed blind here.
+     */
+    if (uniqueMatch) {
       const { rememberVerifiedIdentity } = await import('./verifiedIdentity');
       rememberVerifiedIdentity(str(input.call_sid), {
         firstName: resolved.patientData?.firstName,
