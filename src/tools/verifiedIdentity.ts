@@ -127,6 +127,28 @@ export function verifiedDobFor(
   return entry.dateOfBirth;
 }
 
+/**
+ * The whole identity verified for this call, or undefined.
+ *
+ * Added 2026-09-03 for the request sweep. Operator ruling that afternoon:
+ * *"no name no ticket."* The sweep files a caller's request from the
+ * transcript when the agent did not, and it must never invent a person to
+ * hang it on — so it asks here, and stays its hand when the answer is
+ * undefined.
+ *
+ * Same TTL and same call-sid validation as the date-of-birth read. It does
+ * NOT take a name to match against, because it is not answering "is this
+ * ticket for that person?" — it is answering "who did we establish this
+ * caller to be?", which is the question the sweep has.
+ */
+export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdentity | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = verified.get(callSid);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > TTL_MS) return undefined;
+  return { firstName: entry.firstName, lastName: entry.lastName, dateOfBirth: entry.dateOfBirth };
+}
+
 /** Tests only. */
 export function resetVerifiedIdentities(): void {
   verified.clear();

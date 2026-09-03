@@ -11,7 +11,6 @@ import {
   decideSweep,
   buildSweptTicket,
   sweepMarker,
-  UNIDENTIFIED_FIRST,
   type SweepInput,
 } from "./requestSweep";
 
@@ -23,6 +22,7 @@ function call(over: Partial<SweepInput> = {}): SweepInput {
     transcript: "AGENT: Thank you for calling.\nCALLER: I need a refill on my drops.",
     toolEvents: [],
     ticketAlreadyFiled: false,
+    verifiedName: { firstName: "Testpatient", lastName: "Example" },
     ...over,
   };
 }
@@ -139,7 +139,8 @@ describe("the ticket it builds", () => {
     transcript: "AGENT: How can I help?\nCALLER: I need to book a procedure my surgeon recommended.",
   });
   const d = decideSweep(input);
-  const t = buildSweptTicket(input, d.file ? d.callerSaid : "");
+  if (!d.file) throw new Error("fixture must be fileable");
+  const t = buildSweptTicket(input, d);
 
   it("routes to the queue's own department and its catch-all", () => {
     // The queue IS the classification (operator, 2026-08-11). Surgery is
@@ -154,9 +155,12 @@ describe("the ticket it builds", () => {
     expect(t.description).toContain("I need to book a procedure my surgeon recommended.");
   });
 
-  it("says plainly that nobody identified the caller", () => {
-    // Never invent a person. The number to call is what staff actually need.
-    expect(t.patientFirstName).toBe(UNIDENTIFIED_FIRST);
+  it("uses the name we verified, never one invented here", () => {
+    expect(t.patientFirstName).toBe("Testpatient");
+    expect(t.patientLastName).toBe("Example");
+  });
+
+  it("still carries the number staff have to ring", () => {
     expect(t.description).toContain(input.callerPhone);
   });
 
@@ -165,7 +169,7 @@ describe("the ticket it builds", () => {
   });
 
   it("is idempotent on the call — a retry and a backfill re-run collapse to one ticket", () => {
-    const again = buildSweptTicket(input, "different wording entirely");
+    const again = buildSweptTicket(input, { ...d, callerSaid: "different wording entirely" });
     expect(again.idempotencyKey).toBe(t.idempotencyKey);
     expect(t.idempotencyKey).toContain(input.callSid);
   });
@@ -184,5 +188,52 @@ describe("the marker", () => {
     expect(m).toContain("[REQUEST SWEEP]");
     expect(m).toContain("tech");
     expect(m).not.toMatch(/\+1\d{10}/);
+  });
+});
+
+
+/**
+ * NO NAME, NO TICKET. Operator ruling, 2026-09-03, given in answer to the
+ * question put to him: what identity goes on a swept ticket when nobody
+ * established one? None — and no ticket.
+ *
+ * An earlier draft filed these as "Unidentified Caller" with the phone number
+ * in the description, and create-ticket would have accepted it. These tests
+ * exist so that design cannot come back by accident.
+ */
+describe("no name, no ticket", () => {
+  it("does not file when no identity was established", () => {
+    const d = decideSweep(call({ verifiedName: undefined }));
+    expect(d).toEqual({ file: false, reason: "no-name" });
+  });
+
+  it("does not file on half a name", () => {
+    expect(decideSweep(call({ verifiedName: { firstName: "Given", lastName: "" } })).file).toBe(false);
+    expect(decideSweep(call({ verifiedName: { firstName: "", lastName: "Family" } })).file).toBe(false);
+  });
+
+  it("does not accept whitespace as a name", () => {
+    const d = decideSweep(call({ verifiedName: { firstName: "  ", lastName: "  " } }));
+    expect(d).toEqual({ file: false, reason: "no-name" });
+  });
+
+  it("reports no-name SEPARATELY from a silent line", () => {
+    // Two different problems. A nameless call has a real request in it and
+    // belongs on the operator's callback list; a silent one does not. Collapsing
+    // them into one counter would hide the population worth acting on.
+    const anonymous = decideSweep(call({ verifiedName: undefined }));
+    const silent = decideSweep(call({ transcript: "AGENT: Thank you for calling." }));
+    expect(anonymous).toEqual({ file: false, reason: "no-name" });
+    expect(silent).toEqual({ file: false, reason: "caller-said-nothing" });
+  });
+
+  it("checks the name LAST, so an already-filed call is not miscounted as nameless", () => {
+    const d = decideSweep(call({ verifiedName: undefined, ticketAlreadyFiled: true }));
+    expect(d).toEqual({ file: false, reason: "already-filed" });
+  });
+
+  it("files when the identity was verified", () => {
+    const d = decideSweep(call({ verifiedName: { firstName: "Given", lastName: "Family" } }));
+    expect(d.file).toBe(true);
   });
 });

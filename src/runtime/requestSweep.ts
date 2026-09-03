@@ -73,16 +73,26 @@ export interface SweepInput {
   /** True when the call already carries a ticket — from a filing tool that
    * succeeded, or from check_open_tickets attaching an existing one. */
   ticketAlreadyFiled: boolean;
+  /**
+   * WHO WE ESTABLISHED THE CALLER TO BE, or undefined.
+   *
+   * Operator ruling, 2026-09-03: **"no name no ticket."** Read from the
+   * identity `lookup_patient` verified during the call, which is a name off
+   * the record rather than one heard down a phone line. Undefined means this
+   * sweep does not file — see decideSweep.
+   */
+  verifiedName?: { firstName: string; lastName: string };
 }
 
 export type SweepDecision =
-  | { file: true; callerSaid: string }
+  | { file: true; callerSaid: string; firstName: string; lastName: string }
   | { file: false; reason: SweepSkipReason };
 
 export type SweepSkipReason =
   | "not-a-queue-lane"
   | "already-filed"
   | "caller-said-nothing"
+  | "no-name"
   | "no-department-catch-all";
 
 /**
@@ -147,25 +157,44 @@ export function decideSweep(input: SweepInput): SweepDecision {
   if (!otherReasonFor(departmentId)) {
     return { file: false, reason: "no-department-catch-all" };
   }
-  return { file: true, callerSaid: callerLines(input.transcript).join(" ") };
+  /**
+   * NO NAME, NO TICKET. Operator ruling, 2026-09-03, answering the question
+   * put to him directly: what identity goes on a swept ticket when nobody
+   * established one? His answer settles it — none, and no ticket.
+   *
+   * This is LAST on purpose. A call that reaches here and stops has a real
+   * request in it and an anonymous caller, which is a different problem from
+   * a silent line, and the skip reason is what tells the two apart in the
+   * counters. Those calls are not filed and are not lost either: they surface
+   * on the operator's callback list, where a person decides.
+   */
+  const first = input.verifiedName?.firstName?.trim();
+  const last = input.verifiedName?.lastName?.trim();
+  if (!first || !last) return { file: false, reason: "no-name" };
+  return {
+    file: true,
+    callerSaid: callerLines(input.transcript).join(" "),
+    firstName: first,
+    lastName: last,
+  };
 }
 
 /**
- * WHO THE TICKET IS FOR WHEN THE CALLER NEVER SAID.
+ * THERE IS NO PLACEHOLDER IDENTITY, DELIBERATELY.
  *
- * `create-ticket` requires a first and last name of at least one character —
- * it does NOT reject placeholders (that rule lives on the submit-ticket path,
- * which this does not use). So the honest thing is available: say plainly that
- * the identity was not established and put the number staff must call on the
- * ticket, rather than inventing a person.
+ * An earlier draft filed anonymous requests as "Unidentified Caller" with the
+ * phone number in the description. `create-ticket` would have accepted it — it
+ * rejects placeholder names only on the submit-ticket path, which this does
+ * not use — so the constraint here is the operator's, not the API's.
  *
- * The name is not a guess and must never become one. A caller who gave their
- * name in the transcript is a separate improvement and is NOT done here: doing
- * it properly means the model extracting it, not this module regexing for a
- * capitalised word, per standing instruction 3.
+ * Wayne, 2026-09-03, asked directly: **"no name no ticket."**
+ *
+ * Reading a name out of the transcript instead is not the workaround it looks
+ * like. Standing instruction 3 — *"why are you trying to determine what a
+ * first name is? You'll never ever get it to work like that"* — rules out this
+ * module regexing for a capitalised word, and it was right when it was said.
+ * The name used is the one `lookup_patient` verified against the record.
  */
-export const UNIDENTIFIED_FIRST = "Unidentified";
-export const UNIDENTIFIED_LAST = "Caller";
 
 export interface SweptTicket {
   departmentId: number;
@@ -186,15 +215,19 @@ export interface SweptTicket {
  * backfill all collapse to one ticket — the key is what held duplicate filing
  * to 3 calls in 2,086 when it was measured.
  */
-export function buildSweptTicket(input: SweepInput, callerSaid: string): SweptTicket {
+export function buildSweptTicket(
+  input: SweepInput,
+  decision: Extract<SweepDecision, { file: true }>,
+): SweptTicket {
   const departmentId = DEPARTMENT_BY_SLUG[input.slug]!;
   const other = otherReasonFor(departmentId)!;
+  const callerSaid = decision.callerSaid;
   return {
     departmentId,
     requestTypeId: other.requestTypeId,
     requestReasonId: other.requestReasonId,
-    patientFirstName: UNIDENTIFIED_FIRST,
-    patientLastName: UNIDENTIFIED_LAST,
+    patientFirstName: decision.firstName,
+    patientLastName: decision.lastName,
     patientPhone: input.callerPhone,
     description:
       `Recovered from the call recording — the agent did not file this request.\n\n` +
