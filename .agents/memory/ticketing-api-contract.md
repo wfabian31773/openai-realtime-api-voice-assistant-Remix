@@ -194,12 +194,18 @@ So attaching is the request being handled, not lost:
   fourteen days — so this is about the predicate meaning what it claims, not
   about the numbers moving.
 
-**What attaching costs, and it is an open question for Wayne:** the attach
-stamps the newest call's `call_sid`, `caller_phone` and `call_duration_seconds`
-onto the ticket, so the ORIGINATING call's linkage is overwritten. `SR-54155`
-carries two calls five minutes apart on 2026-08-24 and only the later one's
-details survive on it. Whether an attach should overwrite or append has not
-been decided.
+**Attaching overwrites the ticket's call fields, and that is DECIDED — leave it
+alone.** The attach stamps the newest call's `call_sid`, `caller_phone` and
+`call_duration_seconds` onto the ticket, so the originating call's linkage is
+replaced rather than kept alongside. `SR-54155` carries two calls five minutes
+apart on 2026-08-24 and only the later one's details survive on it.
+
+I raised this as a possible defect. Wayne, 2026-09-03: *"overwrite is fine,
+that's the most recent request anyway."* The ticket is a live request, not an
+audit log — staff working it need the number that just called, not the first
+one. Do not "fix" this, and do not re-raise it as data loss: the earlier call
+still has its own `call_logs` row carrying the same ticket number, so the
+association is recoverable from that side.
 
 This is also the answer to a question that was open for most of 2026-09-03:
 when a later caller lands on an earlier caller's ticket and the ticket's call
