@@ -136,6 +136,13 @@ export function buildSessionConfig(
   config: GrokRuntimeVoiceConfig,
   instructions: string,
   tools: GrokToolDefinition[],
+  /**
+   * The lane's domain vocabulary, biasing the transcriber toward surgeon
+   * names, office names and drug names (see keyterms.ts). Optional and
+   * omitted when absent: an unreachable directory must not stop a call, and
+   * an empty array would claim the practice has no vocabulary.
+   */
+  keyterms?: string[],
 ): GrokSessionConfig {
   return {
     voice: config.voiceName,
@@ -145,7 +152,10 @@ export function buildSessionConfig(
         format: AUDIO_FORMAT,
         // The lane's configured language seeds the STT hint; a mid-call
         // switch retargets it via setSpokenLanguage().
-        transcription: { language_hint: config.language },
+        transcription: {
+          language_hint: config.language,
+          ...(keyterms && keyterms.length > 0 ? { keyterms } : {}),
+        },
         transport: "json",
       },
       output: {

@@ -64,6 +64,43 @@ import {
   personaliseGreeting,
 } from "../services/greetingPersonalisation";
 
+import { loadedDirectory } from "../services/consoleDirectory";
+import { selectKeyterms } from "./keyterms";
+import { TECH_KEYTERMS } from "../config/techKeyterms";
+
+/**
+ * This lane's transcription vocabulary — surgeon names, office names and drug
+ * names — biasing Grok's ASR toward words it would otherwise mangle.
+ *
+ * Reads the directory snapshot ALREADY in memory and never fetches: this runs
+ * inside the synchronous createSession callback on the answer path, where an
+ * await would add latency to every call for data refreshed on a timer anyway.
+ * A cold process answers its first call or two with no keyterms and warms up
+ * behind them, which beats making a caller wait for reference data.
+ *
+ * Medication vocabulary is the practice's own (config/techKeyterms.ts, lifted
+ * from the Medication Requests classifier) rather than invented here, and it
+ * leads on tech because that is the medication queue.
+ *
+ * Never throws. Vocabulary is an optimisation; a call must not fail for want
+ * of it.
+ */
+function laneKeyterms(slug: string): string[] | undefined {
+  try {
+    const snap = loadedDirectory();
+    return selectKeyterms(
+      {
+        providers: snap ? [...snap.providers.values()] : [],
+        locations: snap ? [...snap.locations.values()] : [],
+        medications: TECH_KEYTERMS,
+      },
+      slug,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The first name a caller-ID match resolved to, or "" when there is none.
  *
@@ -822,7 +859,12 @@ export function mountVoiceRuntime(
           createSession: (handlers) =>
             new GrokVoiceSession(
               transport,
-              buildSessionConfig(lane.voice, lane.agent.instructions, lane.agent.tools),
+              buildSessionConfig(
+                lane.voice,
+                lane.agent.instructions,
+                lane.agent.tools,
+                laneKeyterms(entry.slug),
+              ),
               {
                 ...handlers,
                 // The handshake landing is what stands the setup deadline
