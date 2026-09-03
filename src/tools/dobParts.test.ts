@@ -81,3 +81,104 @@ describe('what it refuses', () => {
     expect(normalizeDobParts('March 1973')).toBeNull(); // no day — do not assume the 1st
   });
 });
+
+/**
+ * READ THE DATE HOWEVER THE CALLER SAID IT.
+ *
+ * Operator, 2026-09-03, after the first attempt at this cost two more
+ * patients: *"if you are asking for a dob, you should treat whatever they give
+ * you as a dob, not a phone number. Who will give you a phone number when you
+ * ask for a dob? We should parse the date no matter how they give it to us."*
+ *
+ * Every string below is a real caller's words from that afternoon, and every
+ * one of them was refused by the parser while the agent told the caller their
+ * request had been filed.
+ */
+describe('a date of birth however it was said', () => {
+  const cases: Array<[string, string, string]> = [
+    ['tech 22:10, a year in two halves', 'Date of birth is 7 26, 19 29', '1929-07-26'],
+    ['surgery 22:12, name then a split year', 'Stanley Morrell, 5 31, 19 44', '1944-05-31'],
+    ['tech 22:06, a specialty pharmacy', 'October 22nd, 1950', '1950-10-22'],
+    ['optical 21:40, a whole sentence', 'My name is Crystal. My date of birth is June 17th, 1984', '1984-06-17'],
+    ['optical 21:51, a lead-in', 'our date of birth is August 10, 1962', '1962-08-10'],
+    ['surgery 21:50', 'date of birth April 17, 1951', '1951-04-17'],
+    ['optical 21:07', 'birthdate 5 13 45', '1945-05-13'],
+    ['tech 20:55, after a spelled-out surname', 'T O C C O 10 7 63', '1963-10-07'],
+    ['a named month with a split year', 'July 26 19 29', '1929-07-26'],
+    ['a trailing full stop', 'March 17, 1973.', '1973-03-17'],
+    ['day before month', '17 March 1973', '1973-03-17'],
+    ['an abbreviated month', 'Sept 2 1948', '1948-09-02'],
+  ];
+  for (const [why, spoken, iso] of cases) {
+    it(`${why}: "${spoken}"`, () => {
+      const p = normalizeDobParts(spoken);
+      expect(p && `${p.year}-${p.month}-${p.day}`).toBe(iso);
+    });
+  }
+});
+
+/**
+ * WHAT STILL REFUSES — and note what is NOT on this list.
+ *
+ * The first version of this defended itself with a rule that no digits could
+ * be left over once the date was removed, so a spoken phone number could never
+ * become a birthday. That rule threw away "7 26, 19 29" over the stray "29"
+ * and cost two patients inside an hour. It is gone, and the operator's
+ * reasoning is why: this function only ever sees the `date_of_birth` ARGUMENT,
+ * which the model fills after asking for a birthday. Nobody answers that with
+ * a phone number.
+ *
+ * What refuses now protects the PATIENT rather than the parser: a date that is
+ * not real, a year nobody living was born in, and a set of numbers that is not
+ * one date. A phone number is refused by the shape rule as a side effect,
+ * which is the honest reason rather than a special case.
+ */
+describe('what it still refuses', () => {
+  it('rejects impossible dates rather than filing them', () => {
+    expect(normalizeDobParts('13/45/1973')).toBeNull();
+    expect(normalizeDobParts('02/30/1973')).toBeNull();
+    expect(normalizeDobParts('date of birth 13/45/1973')).toBeNull();
+  });
+
+  it('rejects a birth year nobody living was born in', () => {
+    expect(normalizeDobParts('03/17/1823')).toBeNull();
+    expect(normalizeDobParts(`03/17/${new Date().getFullYear() + 1}`)).toBeNull();
+    expect(normalizeDobParts(`date of birth 03/17/${new Date().getFullYear() + 1}`)).toBeNull();
+  });
+
+  it('rejects a split year that is not a century a patient was born in', () => {
+    // "19" and "20" only. Without that, any stray pair becomes a year.
+    expect(normalizeDobParts('7 26, 45 29')).toBeNull();
+  });
+
+  it('refuses numbers that do not form one date', () => {
+    // A phone number is six numeric groups and assembles into nothing. That is
+    // the shape rule doing its job, not a phone-number special case.
+    expect(normalizeDobParts('909 608 1832')).toBeNull();
+    expect(normalizeDobParts('7 60 3 18 57 75')).toBeNull();
+    expect(normalizeDobParts('call the pharmacy at 909 608 1832')).toBeNull();
+  });
+
+  it('still needs a day — a month and a year is not a birthday', () => {
+    expect(normalizeDobParts('March 1973')).toBeNull();
+    expect(normalizeDobParts('born March 1973')).toBeNull();
+  });
+
+  it('refuses what carries no date at all', () => {
+    expect(normalizeDobParts('')).toBeNull();
+    expect(normalizeDobParts('sometime in the seventies')).toBeNull();
+    expect(normalizeDobParts('nineteen seventy three')).toBeNull();
+  });
+
+  it('does not mistake a name that merely starts like a month', () => {
+    // "Marcus" begins "mar". Reading it as March would put a wrong birthday on
+    // a real ticket, which is the one outcome worse than no birthday.
+    expect(normalizeDobParts('Marcus 17 1973')).toBeNull();
+  });
+
+  it('still will not read a date out of the TAIL of an ISO date', () => {
+    // The bug this file was written for: an unanchored m/d/y pattern matched
+    // the tail of "2017-03-17" and put 73/03/2017 on a real ticket.
+    expect(normalizeDobParts('2017-03-17')).toEqual({ year: '2017', month: '03', day: '17' });
+  });
+});

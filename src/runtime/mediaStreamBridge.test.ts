@@ -102,6 +102,7 @@ function makeBridge(
     }),
     close: vi.fn(),
     getResponseEpoch: () => epoch,
+    setSpokenLanguage: vi.fn(),
   } satisfies BridgeSession;
 
   let handlers!: BridgeSessionHandlers;
@@ -956,6 +957,7 @@ describe("VoiceCallBridge — exactly-once teardown", () => {
     speak: vi.fn(),
           close: vi.fn(),
           getResponseEpoch: () => 0,
+          setSpokenLanguage: vi.fn(),
         };
       },
       onOutcome: () => {},
@@ -2253,5 +2255,128 @@ describe("the repeated-failure ceiling", () => {
     const events = records[0]?.toolEvents ?? [];
     expect(events).toHaveLength(6);
     expect(events.filter((e) => e.error === "ceiling:identical-args")).toHaveLength(3);
+  });
+});
+
+/**
+ * FOLLOWING THE CALLER'S LANGUAGE.
+ *
+ * Operator instruction, 2026-09-03: switch language mid-stream on the caller's
+ * input or request. `GrokVoiceSession.setSpokenLanguage` already existed and
+ * was called by nothing; these prove the bridge now calls it, and only when it
+ * should.
+ *
+ * Bought by CA54f824ae (tech, 21:28:21): a caller delivered her whole request
+ * in Spanish — refill, pharmacy, name, callback number — and hung up at 38
+ * seconds having heard only an English greeting.
+ */
+describe("set_spoken_language", () => {
+  function languageAgent(output: Record<string, unknown>): BoundAgent {
+    return makeAgent({
+      dispatch: vi.fn(async () => ({ ok: true, output: JSON.stringify(output) })),
+    });
+  }
+
+  async function settle(): Promise<void> {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  it("retargets the session when the tool returns a language", async () => {
+    const h = makeBridge({ agent: languageAgent({ success: true, language: "es" }) });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Spanish" });
+    await settle();
+    expect(h.session.setSpokenLanguage).toHaveBeenCalledWith("es");
+  });
+
+  it("runs the tool rather than replacing it — the normalization is the tool's", async () => {
+    const agent = languageAgent({ success: true, language: "tl" });
+    const h = makeBridge({ agent });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Tagalog" });
+    await settle();
+    expect(agent.dispatch).toHaveBeenCalledWith("set_spoken_language", { language: "Tagalog" });
+    // The WIRE gets the tool's normalized tag, never the caller's word for it.
+    expect(h.session.setSpokenLanguage).toHaveBeenCalledWith("tl");
+  });
+
+  it("does NOT touch the wire when the tool refuses", async () => {
+    const h = makeBridge({
+      agent: languageAgent({ success: false, missingFields: ["language"], message: "Which language?" }),
+    });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "" });
+    await settle();
+    expect(h.session.setSpokenLanguage).not.toHaveBeenCalled();
+  });
+
+  it("does NOT touch the wire for a REFUSAL THAT ECHOES A LANGUAGE BACK", async () => {
+    /**
+     * Found by a mutation: deleting `success !== true` from languageToSwitchTo
+     * killed no test, because the refusal above carries no `language` field at
+     * all. A refusal that echoes what it was asked for — the obvious shape for
+     * "I cannot serve Korean on this line" — would have retargeted the wire on
+     * a tool that said no. `success` is the authority, not the presence of a tag.
+     */
+    const h = makeBridge({
+      agent: languageAgent({ success: false, error: "unsupported_language", language: "ko" }),
+    });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Korean" });
+    await settle();
+    expect(h.session.setSpokenLanguage).not.toHaveBeenCalled();
+  });
+
+  it("drops a switch to the language already in use", async () => {
+    // The tool cannot know this — the bridge owns the live state. Without the
+    // guard every "still English" reading sends a redundant session.update.
+    const h = makeBridge({ agent: languageAgent({ success: true, language: "en" }) });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "English" });
+    await settle();
+    expect(h.session.setSpokenLanguage).not.toHaveBeenCalled();
+  });
+
+  it("switches back after a switch away", async () => {
+    // The stale-context trap this design avoids: with `current_language`
+    // injected at session construction, the second call here would be refused
+    // as a no-op because the frozen context still said "en".
+    const agent = makeAgent({
+      dispatch: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, output: JSON.stringify({ success: true, language: "es" }) })
+        .mockResolvedValueOnce({ ok: true, output: JSON.stringify({ success: true, language: "en" }) }),
+    });
+    const h = makeBridge({ agent });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Spanish" });
+    await settle();
+    h.handlers().onToolCall("c2", "set_spoken_language", { language: "English" });
+    await settle();
+    expect((h.session.setSpokenLanguage as unknown as { mock: { calls: string[][] } }).mock.calls)
+      .toEqual([["es"], ["en"]]);
+  });
+
+  it("is not a terminal tool — the call continues and the agent still speaks", async () => {
+    const h = makeBridge({ agent: languageAgent({ success: true, language: "es" }) });
+    h.newResponse();
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Spanish" });
+    // The follow-up is response-gated: released when the tool-carrying
+    // response finishes, exactly as create_ticket's is.
+    h.handlers().onResponseDone();
+    await settle();
+    expect(h.outcomes).toEqual([]);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers the model before it changes the wire", async () => {
+    // Reversed, a session.update could land between the model's call and its
+    // answer, and the next turn would be generated against a config the model
+    // was never told about.
+    const order: string[] = [];
+    const h = makeBridge({ agent: languageAgent({ success: true, language: "es" }) });
+    (h.session.sendToolResult as unknown as { mockImplementation: (f: () => void) => void })
+      .mockImplementation(() => { order.push("result"); });
+    (h.session.setSpokenLanguage as unknown as { mockImplementation: (f: () => void) => void })
+      .mockImplementation(() => { order.push("wire"); });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Spanish" });
+    await settle();
+    expect(order).toEqual(["result", "wire"]);
   });
 });

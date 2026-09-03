@@ -204,6 +204,40 @@ export const TOOL_DISPATCH_GRACE_MS = 15_000;
  * dispatched — see the TRANSPORT NOTE in the module doc. */
 export const DEFAULT_END_CALL_TOOL_NAMES = ["terminate_call", "end_call"];
 
+/**
+ * TRANSPORT NOTE — SET_SPOKEN_LANGUAGE. Same shape as the hangup above, and
+ * for the same reason: the tool decides, the transport acts.
+ *
+ * `set_spoken_language` (src/tools/languageTools.ts) normalises and validates
+ * the language the model heard, and returns the tag. Retargeting Grok's STT
+ * `language_hint` means a `session.update` on the live wire, which only the
+ * session can send — so the tool runs like any other and the switch follows
+ * ONLY on a result that says it should. A refusal (already speaking it,
+ * unreadable) reaches the model verbatim and nothing is sent.
+ *
+ * Operator instruction 2026-09-03: follow the caller's language mid-stream.
+ */
+export const DEFAULT_LANGUAGE_TOOL_NAMES = ["set_spoken_language"];
+
+/**
+ * DEPLOY MARKER AND LIVE COUNTER. Prints only when a call actually changes
+ * language, so its first appearance proves the build carrying this is live and
+ * its rate afterwards is how often callers were being ignored before. Carries
+ * the language tag and nothing else — never a transcript line, never a name.
+ */
+export function languageMarker(language: string): string {
+  return `[LANGUAGE] switching this call to ${language} — following the caller`;
+}
+
+/** The normalized tag a successful set_spoken_language result carries, or
+ * undefined when the tool refused. Deliberately strict — an empty or
+ * non-string language must not reach the wire as a hint. */
+export function languageToSwitchTo(output: Record<string, unknown>): string | undefined {
+  if (output.success !== true) return undefined;
+  const lang = output.language;
+  return typeof lang === "string" && lang.trim() ? lang.trim() : undefined;
+}
+
 /** How the call ended. One value per call, recorded exactly once. */
 export type CallOutcome =
   | "completed"
@@ -280,6 +314,9 @@ export interface BridgeSession {
   speak(text: string, opts?: { interruptible?: boolean }): void;
   close(): void;
   getResponseEpoch(): number;
+  /** Retarget the provider's STT `language_hint` mid-call and tell the model
+   * to follow the caller. See the TRANSPORT NOTE — SET_SPOKEN_LANGUAGE. */
+  setSpokenLanguage(language: string): void;
 }
 
 export interface TwilioSocket {
@@ -309,6 +346,12 @@ export interface VoiceCallBridgeDeps {
   persistCallRecord?: (record: VoiceCallRecord) => Promise<void>;
   /** Hangup tools to intercept. Defaults to DEFAULT_END_CALL_TOOL_NAMES. */
   endCallToolNames?: string[];
+  /** Overridable for the same reason endCallToolNames is: tests name their
+   * own, and a lane could rename the tool without touching the bridge. */
+  languageToolNames?: string[];
+  /** The lane's configured spoken language, so a switch to the language the
+   * session already uses is refused rather than sent. */
+  initialLanguage?: string;
   /**
    * What a tripped output guardrail does. "enforce" (default) cuts the line
    * mid-air and requests a safe replacement — the same interruption the SDK
@@ -363,6 +406,11 @@ export class VoiceCallBridge {
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
   private readonly endCallToolNames: Set<string>;
+  private readonly languageToolNames: Set<string>;
+  /** What the session is currently listening in. Seeded from the lane's
+   * configured language and moved only by a successful switch, so the tool
+   * can refuse a no-op instead of the wire carrying a redundant update. */
+  private spokenLanguage: string;
 
   private ended = false;
   private endedOutcome: CallOutcome | null = null;
@@ -519,6 +567,8 @@ export class VoiceCallBridge {
     this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as NodeJS.Timeout));
     this.endCallToolNames = new Set(deps.endCallToolNames ?? DEFAULT_END_CALL_TOOL_NAMES);
+    this.languageToolNames = new Set(deps.languageToolNames ?? DEFAULT_LANGUAGE_TOOL_NAMES);
+    this.spokenLanguage = deps.initialLanguage ?? "en";
     this.startedAtMs = deps.startedAtMs ?? Date.now();
     this.ceiling = new ToolCallCeiling(deps.toolCeiling ?? {});
 
@@ -1341,6 +1391,29 @@ export class VoiceCallBridge {
       this.ceiling.settle(name, args, toolSucceeded, output);
       if (this.ended) return;
       this.session.sendToolResult(callId, result.ok, output);
+      /**
+       * THE TRANSPORT STEP FOR A LANGUAGE SWITCH.
+       *
+       * Ordered exactly like the hangup below: the result reaches the model
+       * FIRST, then the wire changes. Reversed, a `session.update` could land
+       * between the model's call and its answer, and the turn that follows
+       * would be generated against a config the model has not been told about.
+       *
+       * `settled` is left to the shared path at the bottom — the agent still
+       * owes the caller words, now in their language, and this is not a
+       * terminal tool.
+       */
+      if (this.languageToolNames.has(name)) {
+        const next = languageToSwitchTo(output);
+        // A switch to the language already in use is dropped here rather than
+        // in the tool: this is the only place that knows what the session is
+        // actually listening in right now.
+        if (next && next !== this.spokenLanguage) {
+          this.spokenLanguage = next;
+          this.session.setSpokenLanguage(next);
+          console.info(languageMarker(next));
+        }
+      }
       if (this.endCallToolNames.has(name)) {
         if (guardsAllowedTermination(output)) {
           this.requestHangup();

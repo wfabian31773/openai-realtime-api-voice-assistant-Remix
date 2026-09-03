@@ -32,7 +32,16 @@ describe('it cannot transfer, and must not imply that it can', () => {
     for (const name of OPTICAL_TOOLS) {
       expect(name).not.toMatch(/transfer|handoff|escalat|human|operator/i);
     }
-    expect(OPTICAL_TOOLS).toHaveLength(5);
+    /**
+     * SIX SINCE 2026-09-03. The count is pinned so a tool cannot join this
+     * lane unnoticed — which is what it just caught. The sixth is
+     * `set_spoken_language`: it retargets the provider's speech recognition
+     * and nothing else. It cannot move the call, cannot reach a person, and
+     * cannot promise one, so it does not weaken standing instruction 9. The
+     * pattern above is the guard that matters; this is the tripwire.
+     */
+    expect(OPTICAL_TOOLS).toHaveLength(6);
+    expect(OPTICAL_TOOLS).toContain('set_spoken_language');
   });
 
   it('is told to say so plainly and offer the callback instead', () => {
