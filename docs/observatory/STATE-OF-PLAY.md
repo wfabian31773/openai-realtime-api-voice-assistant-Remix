@@ -465,3 +465,85 @@ full detail per commit. In short:
 4. **answering-service took zero calls on 09-01** through 13:22 PT, after 38
    the day before and a steady 18–58 every weekday. Weekends are zero for it;
    this was not a weekend.
+
+---
+
+## 11. The runtime regression harness — first run with a corpus (written 09-03)
+
+Wayne, 09-03: *"run the harness for the runtime agents."* The harness is
+`scripts/run-runtime-regression.ts` over `src/runtime/regression/`, fed by
+`scripts/build-replay-corpus.ts` (merged in #258). This is what a run needs,
+what was proven, and what was not.
+
+### What a run needs — all of it, or the numbers measure the environment
+
+| Variable | Why | Missing it looks like |
+|---|---|---|
+| `DATABASE_URL` (Hub, pooler `:6543`) | `lookup_patient` reads `Schedule` in-process; the corpus builder reads `call_logs` | `[ScheduleLookup] Error … Connection terminated` on every call; agent says "I don't have you on file", never files |
+| `DOMAIN` (the published `.replit.app` host) | tools build their base URL from it; the fallback is `localhost:8000` | every tool `ECONNREFUSED 127.0.0.1:443` (lost a whole smoke run to this) |
+| `TICKETING_SYSTEM_URL`, `TICKETING_API_KEY` | `resolve_location` and `check_open_tickets` go through `ticketingApiClient`, which **throws** without them | `tool_failed` on the office lookup; optical cannot resolve an office |
+| `VOICE_TOOL_API_KEY`, `XAI_API_KEY` | tool surface auth; the model | — |
+| `XAI_REGRESSION_MODEL` | a **chat** model with tool calling, not `grok-voice-*` | script exits at launch, by design |
+| `OPENAI_API_KEY` (any value) | `CallGradingService`'s constructor builds an OpenAI client; the deterministic graders never call it | import throws |
+
+Verified 09-03: `grok-4.6` and `grok-4.20-0309-reasoning` both answer the
+harness's request shape with a `tool_calls` entry. The runtime's voice model is
+`grok-voice-think-fast-2.0` with reasoning on; `grok-4.6` is the closest chat
+surface and is the recommendation. **No recorded decision on the model exists;
+that is Wayne's to make.**
+
+### Proven on 09-03 (offline, no patient dialled)
+
+- `src/runtime/regression` unit tests: 38 pass. `realLanes.test.ts` with
+  `RUNTIME_LANE_SMOKE=1`: all five served lanes bind (optical 5 tools /
+  ~1,287 prompt tokens, surgery 5 / ~2,636, tech 5 / ~1,508, records 5 /
+  ~1,764, answering-service 4 tools).
+- The corpus builder's selection, run against the real 2026-09-02
+  `call_logs` rows: **341 conversations from 484 calls** — optical 54 of 81,
+  surgery 84 of 121, tech 149 of 188, records 26 of 31; skipped 3 no-transcript,
+  111 agent-only, 29 caller said ≤ 6 words. Identical to the #258 numbers.
+- The CLI end to end on one optical call: 16 model turns, both sides graded
+  by the production referee, `results.json` + `summary.json` written. That run
+  is a **plumbing proof only** (see below), not a number.
+
+### Not proven, and why: the cloud sandbox cannot reach Postgres
+
+The Claude Code container carries HTTPS only; raw TCP to `:5432`/`:6543`
+times out. So `lookup_patient` failed on every turn of the plumbing run and
+the agent replayed as a cold, never-verifying agent — exactly the confound the
+table above warns about. **No regression numbers were produced. Run it on
+Replit**, where the secrets and the database are:
+
+```
+npx tsx scripts/build-replay-corpus.ts --agents optical --from 2026-09-02 \
+  --to 2026-09-02 --out replay-corpus/2026-09-02-optical
+XAI_REGRESSION_MODEL=grok-4.6 npx tsx scripts/run-runtime-regression.ts \
+  --slug optical --corpus replay-corpus/2026-09-02-optical \
+  --out replay-out/optical-2026-09-02 --limit 54
+```
+
+Repeat per lane with `--limit` set to the manifest's `calls` (surgery 84,
+tech 149, records 26). Baselines for the delta are in the 09-03 handoff:
+optical 32/54 critical, surgery 30/84, tech 79/149, records 14/26.
+
+### Traps found on the way — do not re-learn these
+
+1. **One corpus per lane.** A corpus row has no `agent_used`, and the runner
+   replays every row in the directory under the `--slug` it is given. The
+   builder's own usage example showed a four-lane corpus replayed as optical;
+   corrected in this commit.
+2. **The runner defaults `--limit` to 25.** Optical has 54 conversations;
+   omit the flag and half the lane is silently skipped.
+3. **`[DB] Connected to Supabase (direct)` proves nothing.** `server/db.ts:105`
+   prints it right after constructing the pool, before any socket opens. It
+   printed in a process that could not reach the database at all.
+4. **"Nothing is written to the database" is not quite true.** The tool
+   timeline flush runs an `UPDATE call_logs … WHERE call_sid = 'regression'`
+   at the end of each replayed call. Zero rows match, so it is harmless, but
+   it is a write attempt against production and it will show in the log.
+5. **`call_logs` and `call_turns` are readable — and writable — with the
+   public anon key.** Row-level security is OFF on both, no policies, and the
+   `anon` role holds INSERT/SELECT/UPDATE/DELETE/TRUNCATE. The publishable key
+   ships in any client. Full transcripts, over public REST, to anyone holding
+   it. Found because that is how the corpus was pulled from the sandbox.
+   **Wayne's call; not changed.**
