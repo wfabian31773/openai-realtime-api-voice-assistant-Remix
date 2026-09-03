@@ -16,6 +16,20 @@ describe('the formats callers actually use', () => {
     ['Mar 17 1973', '1973-03-17'],
     ['17 March 1973', '1973-03-17'],
     ['December 2, 1980', '1980-12-02'],
+
+    /**
+     * SPOKEN, WITH NO SEPARATOR AT ALL — the way a date of birth actually
+     * arrives from a voice call. Regression for CA60c32bb3 (tech, 2026-09-03
+     * 20:40 UTC): the caller said "9 2 48", the model read it back correctly
+     * as September 2nd 1948, and file_tech_ticket was refused five times for a
+     * missing date of birth before the call died with no ticket.
+     */
+    ['9 2 48', '1948-09-02'],
+    ['9 2 1948', '1948-09-02'],
+    ['09 02 1948', '1948-09-02'],
+    ['3 17 73', '1973-03-17'],
+    ['12  25  1990', '1990-12-25'],
+    ['09 - 02 - 1948', '1948-09-02'],
   ];
 
   for (const [spoken, iso] of cases) {
@@ -47,6 +61,18 @@ describe('what it refuses', () => {
 
   it('rejects a birth year in the future', () => {
     expect(normalizeDobParts(`03/17/${new Date().getFullYear() + 1}`)).toBeNull();
+  });
+
+  /**
+   * The separator widened on 2026-09-03; the YEAR rule did not. These are the
+   * things a bare-space date could have started matching and must not.
+   */
+  it('does not mistake a phone number or a partial date for a birthday', () => {
+    expect(normalizeDobParts('555 123 4567')).toBeNull();
+    expect(normalizeDobParts('818 624 6197')).toBeNull();
+    expect(normalizeDobParts('9 2 4')).toBeNull();    // one-digit year
+    expect(normalizeDobParts('9 2')).toBeNull();      // no year at all
+    expect(normalizeDobParts('13 45 73')).toBeNull(); // still not a real date
   });
 
   it('rejects what it cannot read at all', () => {
