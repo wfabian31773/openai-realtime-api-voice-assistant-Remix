@@ -39,6 +39,7 @@ import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '.
 import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
 import '../tools/opticalTools';
+import '../tools/languageTools';
 
 export interface OpticalAgentMetadata {
   callId?: string;
@@ -80,12 +81,26 @@ export const opticalAgentConfig = {
 };
 
 /** The five tools this queue needs, and deliberately nothing else. */
+/**
+ * `set_spoken_language` follows the caller's language mid-call (operator
+ * instruction, 2026-09-03). The tool normalises; the runtime performs the
+ * `session.update` — see the TRANSPORT NOTE — SET_SPOKEN_LANGUAGE in
+ * mediaStreamBridge.ts. No prompt line is added for it: the tool's own
+ * description carries the instruction, which is the point of giving Grok
+ * tools instead of paragraphs.
+ *
+ * The comment lives ABOVE this array, not inside it: serverRegistration.test
+ * parses these names straight out of the source, and an apostrophe in a
+ * comment between the brackets was read as a tool name.
+ */
 export const OPTICAL_TOOLS = [
   'lookup_patient',
   'resolve_location',
   'check_open_tickets',
   'classify_optical_request',
   'file_optical_ticket',
+
+  'set_spoken_language',
 ];
 
 export function buildOpticalPrompt(metadata: OpticalAgentMetadata): string {

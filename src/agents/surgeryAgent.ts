@@ -54,6 +54,7 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // check_open_tickets; surgeryTools brings the two this queue owns.
 import '../tools/sharedPatientTools';
 import '../tools/surgeryTools';
+import '../tools/languageTools';
 
 export interface SurgeryAgentMetadata {
   callId?: string;
@@ -94,12 +95,26 @@ export const surgeryAgentConfig = {
 };
 
 /** The five tools this queue needs, and deliberately nothing else. */
+/**
+ * `set_spoken_language` follows the caller's language mid-call (operator
+ * instruction, 2026-09-03). The tool normalises; the runtime performs the
+ * `session.update` — see the TRANSPORT NOTE — SET_SPOKEN_LANGUAGE in
+ * mediaStreamBridge.ts. No prompt line is added for it: the tool's own
+ * description carries the instruction, which is the point of giving Grok
+ * tools instead of paragraphs.
+ *
+ * The comment lives ABOVE this array, not inside it: serverRegistration.test
+ * parses these names straight out of the source, and an apostrophe in a
+ * comment between the brackets was read as a tool name.
+ */
 export const SURGERY_TOOLS = [
   'lookup_patient',
   'resolve_location',
   'check_open_tickets',
   'classify_surgery_request',
   'file_surgery_ticket',
+
+  'set_spoken_language',
 ];
 
 export function buildSurgeryPrompt(metadata: SurgeryAgentMetadata): string {
