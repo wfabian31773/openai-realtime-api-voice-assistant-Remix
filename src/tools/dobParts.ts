@@ -17,6 +17,15 @@ export function normalizeDobParts(
   const iso = normalize(spoken);
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
   if (!m) return null;
+  /**
+   * DEPLOY MARKER AND LIVE COUNTER, 2026-09-03. Prints only for the form that
+   * used to be refused, so its first appearance in the logs is proof the build
+   * carrying this fix is live, and its rate afterwards is how often the gap was
+   * actually costing a ticket. Never the value: a date of birth is PHI.
+   */
+  if (/^\d{1,2}\s+\d{1,2}\s+\d{2,4}$/.test(String(spoken ?? '').trim())) {
+    console.info('[DOB] parsed a date of birth the caller said as bare digits — no separator');
+  }
   return { year: m[1], month: m[2], day: m[3] };
 }
 
@@ -41,7 +50,21 @@ function normalize(spoken: string): string {
   // m/d/y and m-d-y, including two-digit years. Anchored, because an
   // unanchored month/day/year pattern once matched the TAIL of an ISO date and
   // put 73/03/2017 on a ticket.
-  const mdy = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2}|\d{4})$/.exec(raw);
+  //
+  // SPACE IS A SEPARATOR TOO. A caller does not say "nine slash two slash
+  // forty-eight" — they say "nine two forty-eight", and that is what lands in
+  // the argument, because every filing tool describes this field as "any
+  // spoken format". Until 2026-09-03 the separator class was punctuation only,
+  // so "9 2 48" parsed as nothing: on CA60c32bb3 (tech, 20:40 UTC) the model
+  // read the date back correctly as September 2nd 1948, called
+  // file_tech_ticket five times, was refused for a missing date of birth every
+  // time, and the call ended in dead air with no ticket filed.
+  //
+  // This widens the SEPARATOR only. The two-digit-year pivot below is
+  // untouched, so nothing that was rejected for being an ambiguous YEAR starts
+  // being accepted here — "9/2/48" and "9 2 48" now resolve the same way,
+  // which is the whole point.
+  const mdy = /^(\d{1,2})[\/\-.\s]+(\d{1,2})[\/\-.\s]+(\d{2}|\d{4})$/.exec(raw);
   if (mdy) {
     const mo = mdy[1].padStart(2, '0');
     const d = mdy[2].padStart(2, '0');
