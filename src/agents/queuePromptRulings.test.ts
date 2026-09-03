@@ -29,6 +29,8 @@ vi.hoisted(() => {
 
 import { buildSurgeryPrompt } from './surgeryAgent';
 import { buildTechPrompt } from './techAgent';
+import { buildOpticalPrompt } from './opticalAgent';
+import { buildRecordsPrompt } from './recordsAgent';
 
 /** One ruling, and the several ways a prompt might legitimately word it. */
 interface Ruling {
@@ -56,16 +58,45 @@ const SHARED: readonly Ruling[] = [
     requires: [['call you back', 'callback', 'call back']],
   },
   {
+    /**
+     * Operator ruling, 2026-09-03: when a caller asks for a representative the
+     * agent says it cannot transfer AND that it will take a message and raise a
+     * request for staff to follow up. Bought with three calls in twelve minutes
+     * — two hangups inside 45 seconds, and one caller who stayed three and a
+     * half minutes, said "release of information" twice, and got no ticket.
+     *
+     * Both halves are asserted. Saying only "I can't transfer you" is what the
+     * prompt already did, and it is not what was asked for.
+     */
+    source: 'Operator, 2026-09-03 — asked for a representative: cannot transfer, AND a request is raised',
+    requires: [
+      ['not able to transfer calls', 'cannot transfer calls', 'unable to transfer calls'],
+      ['take a message'],
+      ['put in a request', 'raise a request', 'request for'],
+    ],
+  },
+  {
+    /**
+     * The same ruling's negative half. On CA2accdcbf (records, 2026-09-03
+     * 20:43) the agent improvised "all of our agents are currently busy — I can
+     * have the team contact you as soon as they become available", which is a
+     * person the caller then waits for. The prompt forbade the OUTCOME but
+     * never named the sentence, so the model routed around it.
+     */
+    source: 'Operator, 2026-09-03 — never imply a human is about to become free',
+    requires: [
+      ['never imply', 'do not imply'],
+      ['currently busy'],
+      ['available'],
+    ],
+  },
+  {
     source: 'Standing instruction 12 — confirm the callback number BEFORE filing',
     requires: [['before you file', 'before the ticket', 'BEFORE you file']],
   },
   {
     source: 'Operator, 2026-08-13 — never ask a patient where our offices are',
     requires: [['never ask', 'do not ask'], ['office', 'city']],
-  },
-  {
-    source: 'Medical safety — no diagnosis, no medication advice (#53: the prompt IS the guardrail on queue lanes)',
-    requires: [['medical advice', 'do not give medical', 'not tell anyone whether']],
   },
   {
     source: 'Voice channel — nothing spoken may contain markup',
@@ -80,6 +111,24 @@ const SHARED: readonly Ruling[] = [
     requires: [['technical problem', 'system issue', 'not a fault']],
   },
 ];
+
+/**
+ * MEDICAL SAFETY IS NOT SHARED, AND THAT IS THE FINDING.
+ *
+ * Extending this file to optical and records on 2026-09-03 was supposed to be
+ * bookkeeping. It failed instead: neither prompt says anything about not giving
+ * medical advice. Surgery and tech both do.
+ *
+ * That is issue #53 — the queue lanes have no medical-safety guardrail of any
+ * kind, on either pipeline, and on these two lanes the prompt is not carrying
+ * it either. It is asserted below only where it actually exists, because a test
+ * that asserted it everywhere would have to be made to pass by inventing
+ * clinical wording nobody has ruled on. Escalated to the operator, not guessed.
+ */
+const MEDICAL_SAFETY: Ruling = {
+  source: 'Medical safety — no diagnosis, no medication advice (#53: the prompt IS the guardrail on queue lanes)',
+  requires: [['medical advice', 'do not give medical', 'not tell anyone whether']],
+};
 
 const SURGERY_ONLY: readonly Ruling[] = [
   {
@@ -119,9 +168,20 @@ function check(prompt: string, rulings: readonly Ruling[], label: string) {
 
 const surgery = buildSurgeryPrompt({ callerPhone: '+17605551234' });
 const tech = buildTechPrompt({ callerPhone: '+17605551234' });
+/**
+ * Optical and records carry the same shared rulings and were not covered here
+ * at all — the file was written alongside the surgery/tech trim. Optical is the
+ * lane with the most substantive calls today and records is the one that lost a
+ * request to the improvisation the ruling above now forbids, so neither is a
+ * lane where a silently dropped ruling would be noticed by anything else.
+ */
+const optical = buildOpticalPrompt({ callerPhone: '+17605551234' });
+const records = buildRecordsPrompt({ callerPhone: '+17605551234' });
 
-check(surgery, [...SHARED, ...SURGERY_ONLY], 'surgery prompt keeps every ruling');
-check(tech, [...SHARED, ...TECH_ONLY], 'tech prompt keeps every ruling');
+check(surgery, [...SHARED, MEDICAL_SAFETY, ...SURGERY_ONLY], 'surgery prompt keeps every ruling');
+check(tech, [...SHARED, MEDICAL_SAFETY, ...TECH_ONLY], 'tech prompt keeps every ruling');
+check(optical, SHARED, 'optical prompt keeps every ruling');
+check(records, SHARED, 'records prompt keeps every ruling');
 
 describe('the trim actually happened', () => {
   /**
