@@ -90,7 +90,101 @@ function normalize(spoken: string): string {
     return valid(dayFirst[3], mo, d) ? `${dayFirst[3]}-${mo}-${d}` : '';
   }
 
-  return '';
+  /**
+   * THE CALLER SAID A SENTENCE, NOT A DATE.
+   *
+   * Every pattern above is anchored ^...$, so one surrounding word throws the
+   * date away. On 2026-09-03 that was the direct cause of five calls where the
+   * agent told the caller their request was filed and nothing was:
+   *
+   *   "our date of birth is August 10, 1962"   -> nothing   (optical 21:51)
+   *   "date of birth April 17, 1951"           -> nothing   (surgery 21:50)
+   *   "birthdate 5 13 45"                      -> nothing   (optical 21:07)
+   *   "T O C C O 10 7 63"                      -> nothing   (tech 20:55)
+   *   "March 17, 1973."                        -> nothing   (a full stop)
+   *
+   * while the bare date in each parsed perfectly. The tool's own schema invites
+   * it — date_of_birth is described to the model as "Any spoken format" — so
+   * the model passing the utterance verbatim is the model doing as it was told.
+   *
+   * THE ANCHORS STAY. This runs only after they have all failed, and it is a
+   * SEARCH, not a loosening: the same shapes, at word boundaries, anywhere in
+   * the string. Two rules keep it from guessing, because a wrong date of birth
+   * silently matches the wrong patient and is worse than no date at all:
+   *
+   *   1. EXACTLY ONE distinct valid date, or nothing. Two candidates is an
+   *      ambiguity, and an ambiguity is a refusal.
+   *   2. NO DIGITS MAY REMAIN once the date is removed. This is what stops a
+   *      spoken phone number becoming a birthday: "7 60 3 18 57 75" contains
+   *      "3 18 57", a real date, and leaves "7 60 75" behind — so it refuses.
+   *      A date inside a sentence leaves only words.
+   *
+   * The unanchored pattern that once put 73/03/2017 on a real ticket did it by
+   * matching the TAIL of an ISO date; `\b` is why that cannot happen here, and
+   * there is a test for it.
+   */
+  return searchInsideSentence(raw);
+}
+
+/** The same shapes as above, at word boundaries, for scanning a sentence. */
+const SEARCH_PATTERNS: readonly RegExp[] = [
+  /\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g,
+  /\b(\d{1,2})[\/\-.\s]+(\d{1,2})[\/\-.\s]+(\d{2}|\d{4})\b/g,
+  /\b([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/gi,
+  /\b(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)\.?,?\s+(\d{4})\b/gi,
+];
+
+interface Found {
+  iso: string;
+  /** The exact text matched, so the leftover-digit rule can remove it. */
+  text: string;
+}
+
+function candidateFrom(which: number, m: RegExpExecArray): Found | null {
+  if (which === 0) {
+    const [, y, mo, d] = m;
+    const M = mo!.padStart(2, '0');
+    const D = d!.padStart(2, '0');
+    return valid(y!, M, D) ? { iso: `${y}-${M}-${D}`, text: m[0] } : null;
+  }
+  if (which === 1) {
+    const mo = m[1]!.padStart(2, '0');
+    const d = m[2]!.padStart(2, '0');
+    const y = m[3]!.length === 2 ? (Number(m[3]) > 30 ? `19${m[3]}` : `20${m[3]}`) : m[3]!;
+    return valid(y, mo, d) ? { iso: `${y}-${mo}-${d}`, text: m[0] } : null;
+  }
+  // Named month, either order.
+  const nameIdx = which === 2 ? 1 : 2;
+  const dayIdx = which === 2 ? 2 : 1;
+  const mo = MONTHS[m[nameIdx]!.toLowerCase().slice(0, 3)];
+  if (!mo) return null;
+  const d = m[dayIdx]!.padStart(2, '0');
+  const y = m[3]!;
+  return valid(y, mo, d) ? { iso: `${y}-${mo}-${d}`, text: m[0] } : null;
+}
+
+function searchInsideSentence(raw: string): string {
+  const found: Found[] = [];
+  SEARCH_PATTERNS.forEach((re, which) => {
+    re.lastIndex = 0;
+    for (let m = re.exec(raw); m !== null; m = re.exec(raw)) {
+      const c = candidateFrom(which, m);
+      if (c) found.push(c);
+    }
+  });
+  if (found.length === 0) return '';
+  // Rule 1: one date, or nothing. Different patterns reading the SAME date is
+  // agreement, not ambiguity, so compare the resolved values.
+  const distinct = new Set(found.map((f) => f.iso));
+  if (distinct.size !== 1) return '';
+  const hit = found[0]!;
+  // Rule 2: nothing numeric may be left over. This is the phone-number guard.
+  const leftover = raw.replace(hit.text, ' ');
+  if (/\d/.test(leftover)) return '';
+  console.info(
+    '[DOB] read a date of birth out of the caller\'s sentence — the words around it used to lose it',
+  );
+  return hit.iso;
 }
 
 const MONTHS: Record<string, string> = {
