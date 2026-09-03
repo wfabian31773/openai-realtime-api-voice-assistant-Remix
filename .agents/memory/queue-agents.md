@@ -22,7 +22,43 @@ and the HTTP surface run the same code.
 | Clinical Tech | `tech` | 3 | …, classify_tech_request, file_tech_ticket |
 | Medical Records | `records` | 16 | …, classify_records_request, file_records_ticket |
 
-**Adding the next one — SEVEN places, and the test only knows six.**
+## Hangup used to lose the request — the sweep that closes it
+
+The four live queue lanes have **no `terminate_call`**. The call ends when the
+caller hangs up, the provider drops, or teardown runs. Scheduling and PCP
+already had an end-of-call filing sweep. Until 2026-09-03 the four queues
+fell through to `Promise.resolve()` at `voiceAgentRoutes.ts` (the
+`azul-scheduling` / `pcp` ternary). `durableTicketFiling.ts` named that hole
+and called it a separate piece of work. On 2026-09-02 a large share of stated
+requests on those lines left with no ticket.
+
+`sweepQueueUnfiledCall` (`src/services/queueHangupSweep.ts`) is that piece.
+It is a third narrow sweep — queue vocabulary, not azul's booking
+dispositions and not PCP's director state. Lanes: **optical, surgery, tech,
+records**. Not answering-service (it has `terminate_call` and `create_ticket`).
+Not the Grok runtime.
+
+It builds from conversation state the tools already wrote (`queueCallState`,
+`verifiedIdentity`) and sends the payload through `createTicketDurable`. A
+failed POST durable-queues. It never invents a ticket number. It does not
+re-resolve an office or a surgeon — names already on the call travel as
+names. A ghost (caller-ID only, no stated request) files nothing, same
+lesson as azul's 2026-07-30 false tickets.
+
+**How to see it**
+
+| What happened | Log / health |
+|---|---|
+| Hangup with a stated request, no ticket yet | `[QUEUE SWEEP] <slug>: hangup with no ticket — filing from conversation state` |
+| Filed | `[QUEUE SWEEP] ✓ <slug> filed VA-…` |
+| POST failed, outbox holding it | `[QUEUE SWEEP] ✓ <slug> CAPTURED as <outboxId> — worker will retry` |
+| Ghost / already filed / open ticket already | `[QUEUE SWEEP] <slug>: no stated request` / `already has a ticket` / `open ticket already` |
+| Pull took | those lines exist at all. They did not before this change. |
+| Fleet health | the ticket-filing alarm's unfiled-run plane (`ticketFilingHealth`) should stop counting hangups that stated a request as lost calls. |
+
+No names, DOBs, phones, or transcripts on those lines.
+
+**Adding the next one — EIGHT places, and the test only knows six.**
 
 Put its slug in `QUEUE_LINES` in `agents/agentWiring.test.ts` FIRST. That
 table-driven test then names every code hookup you have not done:
@@ -33,6 +69,10 @@ table-driven test then names every code hookup you have not done:
 4. `PRECONTEXT_SLUGS`
 5. factory case in the switch
 6. greeting personalisation (`greetingStyleFor`)
+7. **`QUEUE_LANES` in `queueCallState.ts` and the teardown ternary in
+   `voiceAgentRoutes.ts`.** A new queue without those two is the 2026-09-02
+   hole again: hangup files nothing. `queueHangupSweep.test.ts` names the four
+   that are wired today.
 
 **7. A ROW IN THE `agents` TABLE (Operations Hub), which no test can catch.**
 

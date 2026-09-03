@@ -46,6 +46,9 @@ export interface VerifiedIdentity {
 
 interface Entry extends VerifiedIdentity {
   at: number;
+  /** As the record held it, for a hangup ticket. Match keys stay folded. */
+  displayFirstName: string;
+  displayLastName: string;
 }
 
 const verified = new Map<string, Entry>();
@@ -103,7 +106,14 @@ export function rememberVerifiedIdentity(
   const now = Date.now();
   sweep(now);
   verified.delete(callSid);
-  verified.set(callSid, { firstName, lastName, dateOfBirth, at: now });
+  verified.set(callSid, {
+    firstName,
+    lastName,
+    dateOfBirth,
+    displayFirstName: (identity.firstName ?? '').trim(),
+    displayLastName: (identity.lastName ?? '').trim(),
+    at: now,
+  });
 }
 
 /**
@@ -125,6 +135,22 @@ export function verifiedDobFor(
   if (Date.now() - entry.at > TTL_MS) return undefined;
   if (norm(firstName) !== entry.firstName || norm(lastName) !== entry.lastName) return undefined;
   return entry.dateOfBirth;
+}
+
+/**
+ * The person this call already verified, for a hangup payload. Returns
+ * undefined when nothing certain was remembered — never a guess.
+ */
+export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdentity | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = verified.get(callSid);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > TTL_MS) return undefined;
+  return {
+    firstName: entry.displayFirstName || entry.firstName,
+    lastName: entry.displayLastName || entry.lastName,
+    dateOfBirth: entry.dateOfBirth,
+  };
 }
 
 /** Tests only. */

@@ -8,6 +8,13 @@ what was *tried and got worse*. That is what follows.
 
 Read this before changing anything in the ticket path.
 
+**2026-09-03 — hangup on the four live queue lanes.** optical / surgery / tech
+/ records had no teardown sweep. Scheduling and PCP did. Hangup never built a
+payload. That hole is `sweepQueueUnfiledCall` now. Do not rebuild it. Do not
+treat a green test as the production number this is meant to move — measure
+queue hangups that stated a request and left with no ticket, before and after
+the pull. Answering-service and the Grok runtime are not this change.
+
 ---
 
 ## 0. Why this document exists, stated plainly

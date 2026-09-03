@@ -190,6 +190,7 @@ dividing by 14 are not.
 | Mirror verification | `src/services/patientVerification.ts` | Verifies against `patients_master`; refuses to guess between two people. |
 | Appointment answers | `src/services/appointmentAnswers.ts` | `Schedule.PersonID` join; excludes `Removed`. |
 | Replay tables | Operations Hub | `new_core_replay_summary`, `new_core_replay_index`, `ticket_agent_config` |
+| Queue hangup sweep | `src/services/queueHangupSweep.ts` | Old-core teardown for **optical / surgery / tech / records**. Those lanes have no `terminate_call`; until 2026-09-03 hangup fell through to `Promise.resolve()` and the request died. Builds from conversation state already on the call and files through `createTicketDurable`. Does **not** cover answering-service or the Grok runtime. |
 
 ---
 
@@ -302,7 +303,15 @@ of them a live counter as well as a marker:
 [TOOLS] file_surgery_ticket: kept the call's call_sid over the model's "unknown"
 [TICKET FILING] surgery: create-ticket REFUSED the payload (HTTP 400) — ...
 [PROMPTS] ✗ REFUSED a write to agent_prompts for "<slug>"
+[QUEUE SWEEP] optical: hangup with no ticket — filing from conversation state
+[QUEUE SWEEP] ✓ optical filed VA-…
+[QUEUE SWEEP] ✓ surgery CAPTURED as <outboxId> — worker will retry
 ```
+
+The `[QUEUE SWEEP]` lines fire only on a live queue-lane hangup that had a
+stated request and no ticket. Absence on a ghost call proves nothing; absence
+on a hangup that stated a request means the pull did not take. Never a name,
+DOB, phone, or transcript on those lines.
 
 One of them needs no log at all: after the deploy, **no create-ticket POST
 from a queue agent should carry a `callData.callSid` that does not begin with
@@ -347,6 +356,7 @@ Start there before debugging anything in these areas:
 |---|---|
 | debug "the agent won't call the tool" | `realtime-tool-schemas.md` |
 | build or change a queue agent | `queue-agents.md` |
+| debug a queue hangup that filed nothing | `queue-agents.md` (hangup sweep) |
 | file, route or classify a ticket | `ticketing-api-contract.md` |
 | touch ticket creation on the after-hours path | `ticket-creation-lock.md` |
 | quote a number at Wayne | `measurement-traps.md` |

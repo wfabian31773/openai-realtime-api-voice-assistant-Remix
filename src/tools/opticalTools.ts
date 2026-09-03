@@ -47,7 +47,17 @@ registerTool({
   },
   handler: async (input): Promise<ToolResult> => {
     const { classifyOptical, OPTICAL_DEPARTMENT_ID } = await import('./opticalTaxonomy');
-    const hit = classifyOptical(str(input.request_description));
+    const description = str(input.request_description);
+    const hit = classifyOptical(description);
+    const { rememberQueueCall } = await import('../services/queueCallState');
+    rememberQueueCall(str(input.call_sid), {
+      agentSlug: 'optical',
+      requestDescription: description,
+      departmentId: OPTICAL_DEPARTMENT_ID,
+      ...(hit
+        ? { requestTypeId: hit.requestTypeId, requestReasonId: hit.requestReasonId }
+        : {}),
+    });
     if (!hit) {
       return {
         success: true,
@@ -137,6 +147,18 @@ registerTool({
     const location = str(input.location);
     const description = str(input.request_description);
     const callSid = str(input.call_sid);
+    {
+      const { rememberQueueCall } = await import('../services/queueCallState');
+      rememberQueueCall(callSid, {
+        agentSlug: 'optical',
+        firstName: first,
+        lastName: last,
+        callbackNumber: phone,
+        requestDescription: description,
+        verifiedLocation: location || undefined,
+        lastProvider: str(input.provider) || undefined,
+      });
+    }
 
     const digits = phone.replace(/\D/g, '');
     if (digits.length < 10) {
@@ -504,9 +526,17 @@ registerTool({
     });
 
     if (!res.success || !res.ticketNumber) {
+      if (res.queued) {
+        const { rememberQueueCall } = await import('../services/queueCallState');
+        rememberQueueCall(callSid, { filedPending: true });
+      }
       // The POST failed. createTicketDurable has already put the payload in the
       // outbox if it could; this only decides what the agent says about it.
       return postFailureToolResult(res, 'file_optical_ticket');
+    }
+    {
+      const { rememberQueueCall } = await import('../services/queueCallState');
+      rememberQueueCall(callSid, { filedTicketNumber: res.ticketNumber });
     }
 
     return {

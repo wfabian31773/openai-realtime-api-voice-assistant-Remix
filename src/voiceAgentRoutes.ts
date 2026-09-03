@@ -4620,7 +4620,24 @@ async function observeCall(
      * (operator ruling 2026-08-17). Without this, a caller who hangs up during
      * that intake leaves nothing — which is a worse failure than the thin
      * 27-second ticket the blocking was introduced to prevent.
+     *
+     * THE FOUR QUEUE LANES get a third sweep, for a different hole.
+     *
+     * optical / surgery / tech / records have no terminate_call. The call
+     * ends when the caller hangs up, and until 2026-09-03 this branch was
+     * `Promise.resolve()` — the payload was never built. Snapshot the ids
+     * HERE, before this finally block deletes callMetadataForDB. The sweep
+     * files from conversation state the tools already wrote; it does not
+     * re-resolve an office or a surgeon.
      */
+    const queueSweepSnap = {
+      callId,
+      agentSlug: agentConfig?.id,
+      twilioCallSid: callMetadataForDB.get(callId)?.twilioCallSid,
+      from: callMetadataForDB.get(callId)?.from,
+      dbCallLogId: callMetadataForDB.get(callId)?.dbCallLogId,
+    };
+    const queueSweepSlug = agentConfig?.id;
     void (agentConfig?.id === 'azul-scheduling'
       ? import('./agents/azulSchedulingAgent').then(({ sweepAzulUnresolvedCall }) =>
           Promise.race([
@@ -4632,6 +4649,16 @@ async function observeCall(
       ? import('./agents/pcpAgent').then(({ sweepPcpUnfiledCall }) =>
           Promise.race([
             sweepPcpUnfiledCall(callId),
+            new Promise((resolve) => setTimeout(resolve, 25_000)),
+          ]),
+        )
+      : queueSweepSlug === 'optical' ||
+          queueSweepSlug === 'surgery' ||
+          queueSweepSlug === 'tech' ||
+          queueSweepSlug === 'records'
+      ? import('./services/queueHangupSweep').then(({ sweepQueueUnfiledCall }) =>
+          Promise.race([
+            sweepQueueUnfiledCall(queueSweepSnap),
             new Promise((resolve) => setTimeout(resolve, 25_000)),
           ]),
         )

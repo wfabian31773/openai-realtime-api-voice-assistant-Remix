@@ -193,6 +193,15 @@ registerTool({
         lastName: resolved.patientData?.lastName,
         dateOfBirth: resolved.patientData?.dateOfBirth,
       });
+      // Hangup sweep reads this. Carry the office and provider the record
+      // already gave us — do not look them up again at teardown.
+      const { rememberQueueCall } = await import('../services/queueCallState');
+      rememberQueueCall(str(input.call_sid), {
+        firstName: resolved.patientData?.firstName,
+        lastName: resolved.patientData?.lastName,
+        usualOffice: usualOffice ?? undefined,
+        lastProvider: resolved.lastProviderSeen ?? undefined,
+      });
     }
 
     return {
@@ -323,6 +332,9 @@ registerTool({
     // heard of, which is how a resolved office still failed to file.
     const fileable = hit.fileAs || sanitizeLocationName(hit.canonical).value || hit.canonical;
 
+    const { rememberQueueCall } = await import('../services/queueCallState');
+    rememberQueueCall(str(input.call_sid), { verifiedLocation: fileable });
+
     return {
       success: true,
       resolved: true,
@@ -365,6 +377,10 @@ registerTool({
     const phone = str(input.phone);
     const { SyncAgentService } = await import('../services/syncAgentService');
     const open = await SyncAgentService.checkOpenTickets(phone);
+    if (open.length > 0) {
+      const { rememberQueueCall } = await import('../services/queueCallState');
+      rememberQueueCall(str(input.call_sid), { existingOpenTicket: open[0].ticketNumber });
+    }
     return {
       success: true,
       has_open_tickets: open.length > 0,

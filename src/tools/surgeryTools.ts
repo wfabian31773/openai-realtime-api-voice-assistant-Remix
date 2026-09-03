@@ -62,9 +62,16 @@ registerTool({
   },
   handler: async (input): Promise<ToolResult> => {
     const { classifySurgeryRequest, SURGERY_DEPARTMENT_ID } = await import('./surgeryTaxonomy');
-    const { classification, isCatchAll, isLogistics } = classifySurgeryRequest(
-      str(input.request_description),
-    );
+    const description = str(input.request_description);
+    const { classification, isCatchAll, isLogistics } = classifySurgeryRequest(description);
+    const { rememberQueueCall } = await import('../services/queueCallState');
+    rememberQueueCall(str(input.call_sid), {
+      agentSlug: 'surgery',
+      requestDescription: description,
+      departmentId: SURGERY_DEPARTMENT_ID,
+      requestTypeId: classification.requestTypeId,
+      requestReasonId: classification.requestReasonId,
+    });
 
     return {
       success: true,
@@ -159,6 +166,18 @@ registerTool({
     const phone = str(input.callback_number);
     const description = str(input.request_description);
     const callSid = str(input.call_sid);
+    {
+      const { rememberQueueCall } = await import('../services/queueCallState');
+      rememberQueueCall(callSid, {
+        agentSlug: 'surgery',
+        firstName: first,
+        lastName: last,
+        callbackNumber: phone,
+        requestDescription: description,
+        verifiedLocation: str(input.location) || undefined,
+        lastProvider: str(input.surgeon) || undefined,
+      });
+    }
 
     const digits = phone.replace(/\D/g, '');
     if (digits.length < 10) {
@@ -688,7 +707,15 @@ registerTool({
       if (res.terminal && res.missingField === 'surgeon') {
         noteGateRefusal(callSid, SURGERY_FILE_TOOL, 'surgeon');
       }
+      if (res.queued) {
+        const { rememberQueueCall } = await import('../services/queueCallState');
+        rememberQueueCall(callSid, { filedPending: true });
+      }
       return postFailureToolResult(res, 'file_surgery_ticket');
+    }
+    {
+      const { rememberQueueCall } = await import('../services/queueCallState');
+      rememberQueueCall(callSid, { filedTicketNumber: res.ticketNumber });
     }
 
     return {

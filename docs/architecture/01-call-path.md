@@ -1242,17 +1242,25 @@ Visible: `[TOOLS] ← resolve_location Nms refused:spoken_location`,
 
 ### 2. The caller hangs up before `file_optical_ticket` runs
 
-There is nothing to catch it. The terminal-disposition sweep is gated to azul
-and pcp (`src/voiceAgentRoutes.ts:4713-4727`); the hang-up finalize net is gated
-to new-core lines (`:5001-5008`), which optical is not; and the queue tools do
-not use the outbox (`src/tools/opticalTools.ts:346` calls
-`ticketingApiClient.createTicket` directly, where
-`src/services/syncAgentService.ts:150-160` would have written a durable row
-first).
+Closed on the old-core queue path, 2026-09-03. The terminal-disposition sweep
+used to be gated to azul and pcp; the four live queue lanes
+(optical / surgery / tech / records) fell through to `Promise.resolve()`.
+Those lanes have no `terminate_call`, so hangup never built a payload.
 
-Visible: nothing at all. The tool timeline records the tools that *did* run
-(`src/services/toolTimeline.ts:489`), so the absence has to be inferred from
-`call_logs.ticket_number` being NULL with a substantive transcript.
+`sweepQueueUnfiledCall` now runs on teardown for those four slugs. It files
+from conversation state already on the call (`queueCallState` +
+`verifiedIdentity`) through `createTicketDurable`. A failed POST goes to the
+outbox. It does not invent a ticket number and it does not re-resolve an
+office or a surgeon.
+
+Still not covered here: answering-service (different tools), the Grok
+runtime, a ghost call with no stated request, and a hangup that never
+identified anyone.
+
+Visible: `[QUEUE SWEEP] <slug>: hangup with no ticket — filing from conversation state`,
+then `✓ filed VA-…` or `✓ CAPTURED as <outboxId>`. A hangup that stated a
+request and still has `call_logs.ticket_number` NULL with no outbox row
+means the pull did not take.
 
 ### 3. The POST fails — gateway down, timeout, non-JSON, or a 400 from the gate
 
