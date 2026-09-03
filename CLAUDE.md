@@ -308,6 +308,25 @@ One of them needs no log at all: after the deploy, **no create-ticket POST
 from a queue agent should carry a `callData.callSid` that does not begin with
 `CA`.** Before it, 6–8% of live POSTs did.
 
+Marker added 2026-09-03 on the runtime (`src/runtime/toolCeiling.ts`). It
+prints only when a repeated-failure loop is stopped, so it is a live counter
+too — and it never carries arguments, because they hold PHI:
+
+```
+[TOOL CEILING] file_optical_ticket not dispatched — 3 consecutive failures
+  with the same arguments; answering with the tool's own refusal and telling
+  the agent to speak to the caller
+```
+
+Its no-log check is the one that matters, and it is SQL:
+
+```sql
+-- After the deploy this should return nothing. Before it, one optical call
+-- on 2026-09-03 returned 118.
+SELECT call_sid, tool_call_count FROM call_logs
+WHERE voice_provider = 'grok' AND tool_call_count > 40;
+```
+
 Markers added 2026-09-03 to the ticket-filing alarm
 (`server/services/ticketFilingHealth.ts`, `ticketFilingPulse.ts`). The first
 prints every five minutes and now names what it did NOT count; the second

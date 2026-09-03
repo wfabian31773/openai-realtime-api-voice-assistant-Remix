@@ -109,6 +109,12 @@
 import type { BoundAgent } from "./agentBinding";
 import { CallTranscriptLog } from "./transcriptLog";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
+import {
+  ToolCallCeiling,
+  ceilingRefusal,
+  ceilingMarker,
+  type CeilingLimits,
+} from "./toolCeiling";
 
 /**
  * A tool's answer as an object the wire layer can spread into its payload.
@@ -327,6 +333,11 @@ export interface VoiceCallBridgeDeps {
   /** Injectable timers for tests. Defaults to global setTimeout/clearTimeout. */
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  /**
+   * Override the repeated-failure ceiling. Tests use it to reach the limits
+   * without a hundred iterations; production uses the defaults.
+   */
+  toolCeiling?: Partial<CeilingLimits>;
 }
 
 /** Exactly the GrokVoiceSessionHandlers subset the bridge supplies. Kept
@@ -496,6 +507,7 @@ export class VoiceCallBridge {
 
   private readonly transcriptLog = new CallTranscriptLog();
   private readonly toolEvents: ToolEvent[] = [];
+  private readonly ceiling: ToolCallCeiling;
   private agentTurns = 0;
   private interruptions = 0;
   private readonly startedAtMs: number;
@@ -508,6 +520,7 @@ export class VoiceCallBridge {
     this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as NodeJS.Timeout));
     this.endCallToolNames = new Set(deps.endCallToolNames ?? DEFAULT_END_CALL_TOOL_NAMES);
     this.startedAtMs = deps.startedAtMs ?? Date.now();
+    this.ceiling = new ToolCallCeiling(deps.toolCeiling ?? {});
 
     this.session = deps.createSession({
       onToolCall: (callId, name, args) => this.handleToolCall(callId, name, args),
@@ -1267,6 +1280,43 @@ export class VoiceCallBridge {
     // The hangup tool goes through this same path: its guards are the
     // agent's, and only its transport step is ours (see the TRANSPORT NOTE).
     void (async () => {
+      /**
+       * THE REPEATED-FAILURE CEILING (toolCeiling.ts).
+       *
+       * On 2026-09-03 the optical lane's fourteenth runtime call spent 144
+       * seconds calling `file_optical_ticket` 110 times, refused every time
+       * for the same missing date of birth, and the caller hung up with no
+       * ticket. The tool was right to refuse; the model was wrong to keep
+       * asking instead of speaking. Across 2,972 old-core queue calls in the
+       * fourteen days to that date, the highest tool-call count on any call
+       * is 24 — so this is a property of the model on THIS transport, which
+       * is why the ceiling is here and not in the tools.
+       *
+       * A stopped dispatch is still ANSWERED — with the tool's own last
+       * refusal wording — because an unanswered tool call stalls the turn
+       * forever, which is worse than the loop.
+       */
+      const verdict = this.ceiling.begin(name, args);
+      if (!verdict.allow) {
+        console.warn(ceilingMarker(name, verdict));
+        this.toolEvents.push({
+          name,
+          ok: false,
+          atMs: Date.now() - this.startedAtMs,
+          error: `ceiling:${verdict.reason}`,
+        });
+        if (this.ended) return;
+        this.session.sendToolResult(
+          callId,
+          false,
+          ceilingRefusal(name, verdict.reason, this.ceiling.lastFailureOutput(name)),
+        );
+        // The agent still owes the caller words, so this settles like any
+        // other refusal rather than short-circuiting the follow-up.
+        this.toolCallSettled(true);
+        return;
+      }
+
       const result = await this.deps.agent.dispatch(name, args);
       this.toolEvents.push({
         name,
@@ -1274,8 +1324,22 @@ export class VoiceCallBridge {
         atMs: Date.now() - this.startedAtMs,
         ...(result.error ? { error: result.error } : {}),
       });
-      if (this.ended) return;
       const output = decodeToolOutput(result.output);
+      /**
+       * `dispatch` answers `ok: true` whenever the tool RAN — a
+       * `missing([...])` refusal comes back ok. The ceiling counts what the
+       * tool actually decided, so the predicate has to read `success` out of
+       * the tool's own envelope, not the transport's.
+       */
+      const toolSucceeded =
+        result.ok &&
+        !(
+          output !== null &&
+          typeof output === "object" &&
+          (output as Record<string, unknown>).success === false
+        );
+      this.ceiling.settle(name, args, toolSucceeded, output);
+      if (this.ended) return;
       this.session.sendToolResult(callId, result.ok, output);
       if (this.endCallToolNames.has(name)) {
         if (guardsAllowedTermination(output)) {
@@ -1298,7 +1362,10 @@ export class VoiceCallBridge {
       this.toolCallSettled(true);
     })().catch(() => {
       // dispatch() is documented never to throw; if it somehow does, the
-      // call still gets an answer rather than a stalled turn.
+      // call still gets an answer rather than a stalled turn — and the
+      // ceiling's reservation is released, or one throw would wedge this
+      // tool shut for the rest of the call.
+      this.ceiling.settle(name, args, false, undefined);
       if (!this.ended) {
         this.session.sendToolResult(callId, false, { error: "dispatch_failed" });
         this.toolCallSettled(true);

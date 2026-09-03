@@ -74,6 +74,7 @@ function makeBridge(
     maxCallMs?: number;
     deadAirMs?: number;
     guardrailMode?: "enforce" | "log";
+    toolCeiling?: { identicalFailures?: number; perToolFailures?: number; perCallDispatches?: number };
   } = {},
 ) {
   const timers = makeTimers();
@@ -131,6 +132,7 @@ function makeBridge(
     deadAirMs: over.deadAirMs ?? 30_000,
     setTimer: timers.setTimer,
     clearTimer: timers.clearTimer,
+    toolCeiling: over.toolCeiling,
   });
 
   return {
@@ -2116,5 +2118,140 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     h.handlers().onConfigured();
     expect(h.session.speak).not.toHaveBeenCalled();
     expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the repeated-failure ceiling", () => {
+  /**
+   * CAc9f38039b80c47cf13cf5c15b79c1c37, optical, 2026-09-03 16:00:43 UTC:
+   * 110 × file_optical_ticket, every one refused for the same missing date
+   * of birth, 144 seconds, caller hung up with no ticket. The old core's
+   * highest tool-call count over 2,972 queue calls in the same fortnight
+   * is 24, so the loop is this transport's model, not the tool.
+   */
+  const DOB_REFUSAL = JSON.stringify({
+    success: false,
+    missingFields: ["date_of_birth"],
+    message: "I did not catch that date of birth — month, day and year?",
+  });
+
+  function refusingAgent() {
+    return makeAgent({
+      // `dispatch` answers ok:true whenever the tool RAN. A missing-field
+      // refusal is a tool that ran and said no — which is exactly why the
+      // ceiling cannot read `ok` and has to read the tool's own `success`.
+      dispatch: vi.fn(async () => ({ ok: true, output: DOB_REFUSAL })),
+    });
+  }
+
+  async function drive(h: ReturnType<typeof makeBridge>, times: number) {
+    for (let i = 0; i < times; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "file_optical_ticket", { first_name: "A", last_name: "B" });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+  }
+
+  it("stops dispatching after three identical failures, however many times the model asks", async () => {
+    const agent = refusingAgent();
+    const h = makeBridge({ agent });
+    await drive(h, 40);
+    expect(agent.dispatch).toHaveBeenCalledTimes(3);
+  });
+
+  it("still answers every single tool call — an unanswered call stalls the turn forever", async () => {
+    const agent = refusingAgent();
+    const h = makeBridge({ agent });
+    await drive(h, 40);
+    expect(h.session.sendToolResult).toHaveBeenCalledTimes(40);
+    const calls = (h.session.sendToolResult as unknown as {
+      mock: { calls: [string, boolean, Record<string, unknown>][] };
+    }).mock.calls;
+    // Every call_id the model sent got its own answer back, in order.
+    expect(calls.map((c) => c[0])).toEqual(
+      Array.from({ length: 40 }, (_, i) => `c${i}`),
+    );
+  });
+
+  it("answers a stopped dispatch with the tool's OWN wording, marked non-retryable", async () => {
+    const agent = refusingAgent();
+    const h = makeBridge({ agent });
+    await drive(h, 5);
+    const calls = (h.session.sendToolResult as unknown as {
+      mock: { calls: [string, boolean, Record<string, unknown>][] };
+    }).mock.calls;
+    expect(calls[4][1]).toBe(false);
+    expect(calls[4][2]).toEqual({
+      success: false,
+      retryable: false,
+      ceiling: "identical-args",
+      message: "I did not catch that date of birth — month, day and year?",
+    });
+  });
+
+  it("still asks the agent to speak — the caller is owed words, not silence", async () => {
+    const agent = refusingAgent();
+    const h = makeBridge({ agent });
+    h.newResponse();
+    // Four calls carried by one response: three dispatch, the fourth is
+    // stopped, and the follow-up is still owed and still coalesced to one.
+    for (let i = 0; i < 4; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "file_optical_ticket", { first_name: "A" });
+    }
+    h.handlers().onResponseDone();
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    expect(agent.dispatch).toHaveBeenCalledTimes(3);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it("never gets in the way of a tool that works", async () => {
+    // makeAgent's default dispatch succeeds.
+    const h = makeBridge();
+    for (let i = 0; i < 30; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "create_ticket", { reason: "refill" });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    expect(h.agent.dispatch).toHaveBeenCalledTimes(30);
+  });
+
+  it("a tool that recovers is not held against the rest of the call", async () => {
+    let fail = true;
+    const agent = makeAgent({
+      dispatch: vi.fn(async () =>
+        fail ? { ok: true, output: DOB_REFUSAL } : { ok: true, output: '{"success":true}' },
+      ),
+    });
+    const h = makeBridge({ agent });
+    await drive(h, 2);
+    fail = false;
+    await drive(h, 1); // succeeds, clearing the counters
+    fail = true;
+    await drive(h, 10);
+    // 2 failures + 1 success + 3 more failures before the ceiling.
+    expect(agent.dispatch).toHaveBeenCalledTimes(6);
+  });
+
+  it("the whole-call backstop stops a loop that keeps succeeding", async () => {
+    const h = makeBridge({ toolCeiling: { perCallDispatches: 5 } });
+    for (let i = 0; i < 20; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "create_ticket", { i });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    expect(h.agent.dispatch).toHaveBeenCalledTimes(5);
+  });
+
+  it("records each stopped dispatch on the call's tool timeline, so it is countable after the fact", async () => {
+    const records: VoiceCallRecord[] = [];
+    const agent = refusingAgent();
+    const h = makeBridge({ agent, persistCallRecord: async (r) => void records.push(r) });
+    await drive(h, 6);
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    const events = records[0]?.toolEvents ?? [];
+    expect(events).toHaveLength(6);
+    expect(events.filter((e) => e.error === "ceiling:identical-args")).toHaveLength(3);
   });
 });
