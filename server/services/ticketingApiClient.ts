@@ -2,6 +2,7 @@ import { getEnvironmentConfig } from '../../src/config/environment';
 import { shadowTap } from '../../src/shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { isNoTicketError } from './ticketingSyncPolicy';
 import type { PcpTicketPayload, PcpTicketResponse } from '../../src/pcp/pcpTicketing';
+import { noteTicketFiled } from './ticketFilingPulse';
 
 export interface CallData {
   callSid?: string;
@@ -733,6 +734,11 @@ export class TicketingApiClient {
         `[TICKETING API] ✓ Ticket created: ${response.ticketNumber} (ID: ${response.ticketId})`
       );
 
+      // The filing alarm's positive signal, recorded HERE rather than waiting
+      // on the fire-and-forget call_logs write-back below — see
+      // ticketFilingPulse.ts for the 2026-09-03 false alarm this closes.
+      noteTicketFiled();
+
       /**
        * WRITE THE TICKET NUMBER BACK TO THE CALL LOG — found 2026-08-13, and
        * it was the single biggest red number on the dashboard.
@@ -886,6 +892,7 @@ export class TicketingApiClient {
     console.log(
       `[TICKETING API] location-queue ticket ${r.ok ? `created${refiled ? ' (re-filed)' : ''}` : `FAILED ${r.status}`}: ${text.slice(0, 200)}`,
     );
+    if (r.ok) noteTicketFiled();
     return { ok: r.ok, status: r.status, text, ticketNumber, refiled };
   }
 
@@ -929,6 +936,7 @@ export class TicketingApiClient {
         console.info(
           `[TICKETING API] ✓ Ticket submitted: ${response.ticketNumber} (ID: ${response.ticketId})`
         );
+        noteTicketFiled();
 
         // Log lookup results for visibility
         console.info(`[TICKETING API] Lookup results:`, {
@@ -1068,6 +1076,8 @@ export class TicketingApiClient {
        * first number rather than flapping, and wrapped so a telemetry failure
        * can never fail a ticket that was actually filed.
        */
+      if (response?.success && response.ticketNumber) noteTicketFiled();
+
       if (response?.success && response.ticketNumber && params.callSid) {
         try {
           const { storage } = await import('../storage');

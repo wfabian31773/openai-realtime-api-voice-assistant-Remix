@@ -308,6 +308,23 @@ One of them needs no log at all: after the deploy, **no create-ticket POST
 from a queue agent should carry a `callData.callSid` that does not begin with
 `CA`.** Before it, 6–8% of live POSTs did.
 
+Markers added 2026-09-03 to the ticket-filing alarm
+(`server/services/ticketFilingHealth.ts`, `ticketFilingPulse.ts`). The first
+prints every five minutes and now names what it did NOT count; the second
+prints only when a run reached the threshold and was disconfirmed, so it is a
+live counter of false alarms prevented:
+
+```
+[ALERT SERVICE] Ticket filing OK — 3 call(s) since the last ticket
+  (2 greeting-only hangup(s) not counted), 0 held in the outbox
+[ALERT SERVICE] Ticket filing alarm HELD — a run of 12 reached the threshold
+  but a ticket was confirmed filed inside it; filing has not stopped
+```
+
+The alarm email now carries `greetingOnlySkipped` beside `unfiledRun`, so a
+future alert says how much of its run was hangups without anyone re-deriving
+it. On 2026-09-03 18:24:56 that ratio was 4 of 12.
+
 ---
 
 ## My recurring failure modes — check yourself against this list
