@@ -2001,7 +2001,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             });
             const openaiCostCents = pricing.providerCostCents ?? call.openaiCostCents ?? 0;
 
-            await storage.updateCallLog(call.id, {
+            await storage.updateCallLogPreservingReconciledCost(call.id, {
               duration: finalDuration,
               status: finalStatus,
               twilioCostCents: finalTwilioCostCents,
@@ -3301,7 +3301,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             });
 
             if (!dryRun) {
-              await storage.updateCallLog(call.id, {
+              await storage.updateCallLogPreservingReconciledCost(call.id, {
                 duration: finalDuration,
                 twilioCostCents: twilioCostCents ?? call.twilioCostCents,
                 // The total is rebuilt whether or not the PROVIDER cost moved.
@@ -3375,10 +3375,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
           twilioCostCents: 0,
         });
         if (!dryRun) {
+          /**
+           * Direct, and safe to be: the WHERE above takes only rows with NO
+           * cost at all (`isNull(openaiCostCents)`), and reconciliation
+           * always writes one — so a reconciled row cannot reach this
+           * statement. Every OTHER writer that prices a call goes through
+           * updateCallLogPreservingReconciledCost, which makes the decision
+           * in SQL (Codex, PR #268 round 8).
+           */
           await db.update(callLogs).set({
             openaiCostCents: pricing.providerCostCents ?? 0,
             costIsEstimated: true,
-          }).where(eq(callLogs.id, call.id));
+          }).where(and(eq(callLogs.id, call.id), isNull(callLogs.costReconciledAt)));
         }
         results.openaiCostsAdded++;
       }

@@ -81,6 +81,58 @@ describe('step 3 — one duration rate, everywhere', () => {
      */
     expect(src).toMatch(/pricing\.basis === "reconciled"/);
   });
+
+  /**
+   * THE GUARD AND THE WINDOW AROUND IT ARE DIFFERENT PROBLEMS.
+   *
+   * `priceVoiceCall`'s `costReconciledAt` check reads a snapshot taken before
+   * the Twilio fetch, and that fetch is slow enough for reconciliation to
+   * commit inside the window — after which the writer puts a duration
+   * estimate over xAI's own number while the timestamp stays populated
+   * (Codex, PR #268 round 8; round 2 added the guard, this closes the race).
+   *
+   * The decision is now made by the database in the same statement as the
+   * write, so every writer that prices a call has to go through it.
+   */
+  /**
+   * A SEPARATE LIST, because `files` above exists for the literal-rate check
+   * and never included callCostService — which is the file with THREE
+   * pricing sites. Reverting one of its writers passed the whole suite until
+   * this was noticed, which is the same mistake in a test that the code
+   * keeps making: the thing you did not look at is where it lives.
+   */
+  const pricingFiles = [
+    '../voiceAgentRoutes.ts',
+    '../../server/routes.ts',
+    './callCostService.ts',
+  ];
+
+  it('EVERY pricing site has a protected write, counted one for one', () => {
+    // Counted rather than merely present: a file with three pricing blocks
+    // and one protected write passed the presence check while two writers
+    // still clobbered a reconciled cost.
+    const count = (text: string, re: RegExp) => (text.match(re) ?? []).length;
+    for (const f of pricingFiles) {
+      const text = read(f);
+      const prices = count(text, /priceVoiceCall\(\{/g);
+      if (prices === 0) continue;
+      const protectedWrites =
+        count(text, /updateCallLogPreservingReconciledCost\(/g) +
+        // A direct db.update is fine when it carries the same guard in its WHERE.
+        count(text, /isNull\(callLogs\.costReconciledAt\)/g);
+      expect(protectedWrites, `${f}: ${prices} pricing site(s), ${protectedWrites} protected write(s)`)
+        .toBeGreaterThanOrEqual(prices);
+    }
+  });
+
+  it('the preserving update reads the COLUMN, in SQL, at write time', () => {
+    const storage = read('../../server/storage.ts');
+    expect(storage).toMatch(/updateCallLogPreservingReconciledCost/);
+    // Naming the column is the point — a CASE over a constant would pass a
+    // shape check and protect nothing.
+    expect(storage).toMatch(/const reconciled = sql`\$\{callLogs\.costReconciledAt\} IS NOT NULL`/);
+    expect(storage).toMatch(/CASE WHEN \$\{reconciled\}/);
+  });
 });
 
 describe('step 4 — price the model that actually ran', () => {

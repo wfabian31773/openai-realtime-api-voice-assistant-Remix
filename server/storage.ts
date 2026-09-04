@@ -82,6 +82,11 @@ export interface IStorage {
   // Call logs
   createCallLog(callLog: InsertCallLog): Promise<CallLog>;
   updateCallLog(id: string, updates: Partial<InsertCallLog>): Promise<CallLog>;
+  /** Same, but a reconciled provider cost is never overwritten — see the impl. */
+  updateCallLogPreservingReconciledCost(
+    id: string,
+    updates: Partial<InsertCallLog>,
+  ): Promise<CallLog>;
   getCallLogs(options?: {
     page?: number;
     limit?: number;
@@ -398,6 +403,72 @@ export class DatabaseStorage implements IStorage {
         .returning();
       return callLog;
     }, `updateCallLog(${id.slice(-8)})`);
+  }
+
+  /**
+   * Update a call log WITHOUT ever overwriting a reconciled provider cost.
+   *
+   * The in-memory `costReconciledAt` guard in `priceVoiceCall` is a snapshot
+   * taken at read time, and the Twilio fetch that sits between the read and
+   * the write is slow enough to make the race real: reconciliation can commit
+   * in that window, and the caller then writes a duration ESTIMATE over
+   * xAI's own number while `cost_reconciled_at` stays populated — a wrong
+   * figure wearing the badge of an authoritative one (Codex, PR #268 round 8;
+   * round 2 fixed the guard, this fixes the window around it).
+   *
+   * So the decision is made by the database, at write time, in the same
+   * statement. A row reconciled a millisecond ago keeps its cost, its total
+   * is still rebuilt from that cost plus whatever Twilio price is being
+   * written, and `cost_is_estimated` stays false because it is not an
+   * estimate.
+   *
+   * Every other column is written normally — this only defends the three
+   * cost fields, and only when they are actually part of the update.
+   */
+  async updateCallLogPreservingReconciledCost(
+    id: string,
+    updates: Partial<InsertCallLog>,
+  ): Promise<CallLog> {
+    const { openaiCostCents, totalCostCents, costIsEstimated, ...rest } = updates as
+      Partial<InsertCallLog> & {
+        openaiCostCents?: number;
+        totalCostCents?: number;
+        costIsEstimated?: boolean;
+      };
+    const touchesCost =
+      openaiCostCents !== undefined ||
+      totalCostCents !== undefined ||
+      costIsEstimated !== undefined;
+    if (!touchesCost) return this.updateCallLog(id, updates);
+
+    const reconciled = sql`${callLogs.costReconciledAt} IS NOT NULL`;
+    return await withRetry(async () => {
+      const [callLog] = await db
+        .update(callLogs)
+        .set({
+          ...rest,
+          ...(openaiCostCents === undefined
+            ? {}
+            : {
+                openaiCostCents: sql`CASE WHEN ${reconciled} THEN ${callLogs.openaiCostCents} ELSE ${openaiCostCents} END`,
+              }),
+          ...(totalCostCents === undefined
+            ? {}
+            : {
+                // Rebuilt from the PRESERVED provider cost when reconciled, so
+                // a later Twilio price still lands without disturbing the bill.
+                totalCostCents: sql`CASE WHEN ${reconciled} THEN COALESCE(${callLogs.openaiCostCents}, 0) + COALESCE(${callLogs.twilioCostCents}, 0) ELSE ${totalCostCents} END`,
+              }),
+          ...(costIsEstimated === undefined
+            ? {}
+            : {
+                costIsEstimated: sql`CASE WHEN ${reconciled} THEN false ELSE ${costIsEstimated} END`,
+              }),
+        } as Partial<InsertCallLog>)
+        .where(eq(callLogs.id, id))
+        .returning();
+      return callLog;
+    }, `updateCallLogPreservingReconciledCost(${id.slice(-8)})`);
   }
 
   async getCallLogBySid(callSid: string): Promise<CallLog | undefined> {

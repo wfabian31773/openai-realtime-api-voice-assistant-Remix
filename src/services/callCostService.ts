@@ -494,7 +494,7 @@ export class CallCostService {
       }
       updateData.totalCostCents = pricing.totalCostCents;
 
-      await storage.updateCallLog(callLogId, updateData);
+      await storage.updateCallLogPreservingReconciledCost(callLogId, updateData);
       
       console.info(`[COST] Retry successful for ${callLogId}: Duration=${actualDuration}s, Twilio=$${(twilioResult.costCents/100).toFixed(2)}, OpenAI=$${(((updateData.openaiCostCents ?? callLog.openaiCostCents ?? 0))/100).toFixed(2)}`);
       return true;
@@ -676,7 +676,7 @@ export class CallCostService {
         }
       }
 
-      await storage.updateCallLog(callLogId, updateData);
+      await storage.updateCallLogPreservingReconciledCost(callLogId, updateData);
       
       console.info(`[TWILIO RECONCILE] ${callLogId}: duration=${actualDuration}s, status=${twilioStatus}, cost=${costCents}c${updateData.durationMismatchFlag ? ' ⚠️ DURATION_MISMATCH' : ''}`);
       
@@ -762,7 +762,7 @@ export class CallCostService {
       });
       const openaiCostCents = pricing.providerCostCents ?? callLog.openaiCostCents ?? 0;
 
-      await storage.updateCallLog(callLogId, {
+      await storage.updateCallLogPreservingReconciledCost(callLogId, {
         openaiCostCents,
         totalCostCents: pricing.totalCostCents,
         costCalculatedAt: new Date(),

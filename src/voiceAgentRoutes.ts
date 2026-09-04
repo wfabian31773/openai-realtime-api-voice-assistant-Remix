@@ -7910,7 +7910,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         console.warn(`[STATUS CALLBACK] ⚠️ Twilio did not provide CallDuration, keeping costIsEstimated=true for reconciliation`);
       }
       
-      await storage.updateCallLog(callLog.id, updateData);
+      await storage.updateCallLogPreservingReconciledCost(callLog.id, updateData);
 
       // Update campaign contact if this was a campaign call
       if (callLog.campaignId && callLog.contactId) {

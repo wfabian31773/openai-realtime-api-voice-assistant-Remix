@@ -286,10 +286,22 @@ describe("the marker", () => {
 describe("the day query takes finalised rows only", () => {
   const src = readFileSync(new URL("./grokCostReconciler.ts", import.meta.url), "utf8");
 
-  it("filters to completed calls with a real duration", () => {
-    expect(src).toMatch(/AND status = 'completed'/);
+  it("excludes only IN-FLIGHT rows, not every non-completed one", () => {
+    expect(src).toMatch(/AND status <> 'in_progress'/);
     expect(src).toMatch(/AND duration IS NOT NULL/);
     expect(src).toMatch(/AND duration > 0/);
+  });
+
+  /**
+   * The first version of this filter said `status = 'completed'`, which also
+   * dropped the calls the runtime ends as `failed` — dead air and provider
+   * failures. xAI bills those: the audio happened. Dropping them spread the
+   * whole invoice across the survivors and left the failed row's estimate
+   * standing, so the stored total came out ABOVE the invoice (Codex,
+   * PR #268 round 8).
+   */
+  it("does NOT filter on 'completed', which would drop billable failed calls", () => {
+    expect(src).not.toMatch(/AND status = 'completed'/);
   });
 });
 

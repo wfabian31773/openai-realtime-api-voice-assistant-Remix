@@ -217,8 +217,25 @@ export function databasePorts(): ReconcilerPorts {
              * whole day across every row, that call included, because a
              * re-run writes all of them. A row briefly missing its share is
              * self-correcting; a row permanently stamped $0 is not.
+             *
+             * FINALISED, NOT COMPLETED. The first version of this filter
+             * tested status = completed, which also dropped every call the
+             * runtime ends as failed — dead air and provider failures — and
+             * xAI bills those: the audio happened. Dropping them spread the
+             * whole invoice across the survivors AND left the failed row's
+             * estimate standing, so the stored daily total came out ABOVE
+             * the invoice (Codex, PR #268 round 8). Measured the same day:
+             * 0 of 241 Grok rows are failed so far, so this has not bitten
+             * yet — but statusFor in callRecord.ts produces that status by
+             * design, so it is a question of when.
+             *
+             * in_progress is the only non-final state the runtime writes
+             * (callRecord.ts opens every row with it), so excluding that one
+             * status is the whole rule. The duration check then covers a
+             * finalised row that somehow has no billable seconds.
              */
-            AND status = 'completed'
+            AND status IS NOT NULL
+            AND status <> 'in_progress'
             AND duration IS NOT NULL
             AND duration > 0
             AND created_at >= $1::date
