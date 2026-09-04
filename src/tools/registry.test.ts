@@ -466,3 +466,61 @@ describe('the date-of-birth refusal tells the model what it got wrong', () => {
     }
   });
 });
+
+/**
+ * THE GATE IS NO LONGER TERMINAL — end to end, on all four lanes.
+ *
+ * The measurement this exists to change, from the cutover day:
+ *
+ *   gate hit           calls   still filed
+ *   optical location     11         9      <- had the ask-once escape
+ *   date_of_birth        23         0      <- did not
+ *
+ * Operator, 2026-09-04: *"coach the patient... if it doesn't work that way,
+ * then I say you file it anyway. But when you file it, where date of birth
+ * would be, you just put unavailable or unmatched."*
+ */
+describe('a request survives a date of birth we never get', () => {
+  const filingTools = () =>
+    realTools().filter((t) => /^file_[a-z_]+_ticket$/.test(t.name));
+
+  // A real Twilio SID shape: CA + 32 hex. gateAttempts refuses anything else
+  // (see isTwilioCallSid), which is the guard that stops a sentinel like
+  // "unknown" from letting every caller share one escape budget.
+  let n = 0;
+  const freshSid = () => `CA${(++n).toString(16).padStart(32, '0')}`;
+
+  const call = async (tool: string, dob: string | undefined, sid: string) =>
+    (await runTool(tool, {
+      first_name: 'Testpatient', last_name: 'Example',
+      callback_number: '5555550100', request_description: 'a refill',
+      requester: 'patient', location: 'Northridge', call_sid: sid,
+      ...(dob === undefined ? {} : { date_of_birth: dob }),
+    })) as any;
+
+  beforeEach(async () => {
+    const { resetGateAttempts } = await import('./gateAttempts');
+    resetGateAttempts();
+  });
+
+  it('refuses ONCE, so the caller is properly asked with the coaching wording', async () => {
+    for (const t of filingTools()) {
+      const first = await call(t.name, undefined, freshSid());
+      expect(first.missingFields, t.name).toContain('date_of_birth');
+      expect(String(first.message), t.name).toContain('starting with the month');
+    }
+  });
+
+  /**
+   * The whole point. Before this, the second attempt was another refusal, and
+   * the third, and the fourth — 23 calls, none of which ever filed.
+   */
+  it('does NOT refuse a second time — the gate stops being terminal', async () => {
+    for (const t of filingTools()) {
+      const sid = freshSid();
+      await call(t.name, undefined, sid);
+      const second = await call(t.name, undefined, sid);
+      expect(second.missingFields ?? [], `${t.name} refused twice`).not.toContain('date_of_birth');
+    }
+  });
+});

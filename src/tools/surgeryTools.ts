@@ -30,6 +30,7 @@ import { registerTool, missing, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
+import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 
 /** This tool's own name, for the per-call gate counter. */
 const SURGERY_FILE_TOOL = 'file_surgery_ticket';
@@ -271,25 +272,37 @@ registerTool({
         console.info('[surgery] date of birth taken from the verified record for this call');
       }
     }
+    /**
+     * ASK ONCE, THEN FILE IT ANYWAY. Operator ruling 2026-09-04, and the same
+     * ruling he gave for optical's office on 2026-09-01. The measurement that
+     * settles it: the location gate has this escape and recovered 9 of 11; this
+     * gate did not and recovered 0 of 23. See dobEscape.ts.
+     */
+    let dobStatus: DobStatus | null = null;
     if (!parts) {
-      /**
-       * THE REFUSAL THAT WAS TERMINAL. 2026-09-03: 23 calls hit this gate and
-       * ZERO of them ever filed, while the optical location gate was hit 11
-       * times and 9 recovered. The difference was diagnosability — see `fix`
-       * on MissingFields. The two branches below need OPPOSITE corrections and
-       * telling the model "ask again" for the first one IS the loop.
-       */
-      return missing(
-        ['date_of_birth'],
-        'I did not catch that — may I please have the date of birth, starting with the month, then the day, then the year?',
-        dob
-          ? 'The date_of_birth you sent could not be read as a date. Say the message to the caller, '
-            + 'then call this tool again with exactly what they say next.'
-          : 'You did not send the date_of_birth argument at all — that, not the caller, is why this '
-            + 'was refused. If they have ALREADY given you a date of birth, call this tool again '
-            + 'right now with date_of_birth set to what they said, and do NOT ask them again. Only '
-            + 'say the message if they have not given it yet.',
-      );
+      const escape = decideDobEscape(callSid, SURGERY_FILE_TOOL, dob);
+      if (escape.askAgain) {
+        /**
+         * The first refusal only, and it carries BOTH channels: `message` is
+         * the coaching line the agent says, `fix` is what the model itself got
+         * wrong. The two branches of `fix` need OPPOSITE corrections — telling
+         * the model "ask the caller again" when it simply omitted the argument
+         * is what built the loop.
+         */
+        return missing(
+          ['date_of_birth'],
+          'I did not catch that — may I please have the date of birth, starting with the month, then the day, then the year?',
+          dob
+            ? 'The date_of_birth you sent could not be read as a date. Say the message to the caller, '
+              + 'then call this tool again with exactly what they say next.'
+            : 'You did not send the date_of_birth argument at all — that, not the caller, is why this '
+              + 'was refused. If they have ALREADY given you a date of birth, call this tool again '
+              + 'right now with date_of_birth set to what they said, and do NOT ask them again. Only '
+              + 'say the message if they have not given it yet.',
+        );
+      }
+      dobStatus = escape.status;
+      console.info(dobEscapeMarker(SURGERY_FILE_TOOL, dobStatus, callSid));
     }
 
     // Resolve office and surgeon to the ticketing app's numeric ids when we
@@ -382,6 +395,18 @@ registerTool({
     const filedDescription = redirect
       ? `${redirect.note}\n\n${cleanDescription.value}`
       : cleanDescription.value;
+    /**
+     * THE STATUS GOES FIRST, ABOVE THE CALLER'S OWN WORDS.
+     *
+     * Operator, 2026-09-04: *"where date of birth would be, you just put
+     * unavailable or unmatched, so this way we know what was happening."*
+     * It cannot go in the birth columns — they are varchar(2)/(2)/(4) — so it
+     * goes where staff actually look, and first, because the point is that
+     * nobody matches this to a chart without checking the recording.
+     */
+    const filedDescriptionWithDobStatus = dobStatus
+      ? `${dobStatusNote(dobStatus)}\n\n${filedDescription}`
+      : filedDescription;
     if (redirect) {
       console.info(
         `[surgery] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
@@ -471,7 +496,16 @@ registerTool({
     // Walk the patient's own record only while the ticket is still unrouted,
     // and never on a request being redirected to a queue that does not route
     // by surgeon.
-    if (!lookup.providerId && !redirect && budgetLeft()) {
+    //
+    // AND NEVER WITHOUT A DATE OF BIRTH. The ladder's whole safety argument
+    // below is that it matches on name AND date of birth rather than falling
+    // back to the phone, because the phone matches a spouse, an adult child or
+    // the previous owner of a reassigned mobile — and we would attach THAT
+    // person's surgeon. When the date-of-birth escape has fired there is no
+    // date to match on, so the ladder cannot run safely and does not run at
+    // all. The ticket files unassigned, which is a real exit this queue
+    // already takes 1.5% of the time, not a lost request.
+    if (parts && !lookup.providerId && !redirect && budgetLeft()) {
       try {
         const { scheduleLookupService } = await import('../services/scheduleLookupService');
         /**
@@ -651,9 +685,17 @@ registerTool({
       patientPhone: normalizePhone(phone),
       patientEmail: str(input.email) || undefined,
       preferredContactMethod: 'phone',
-      patientBirthMonth: parts.month,
-      patientBirthDay: parts.day,
-      patientBirthYear: parts.year,
+      // Omitted entirely when the escape was taken. create-ticket takes these
+      // as optional (traced 2026-09-03), and the columns are varchar(2)/(2)/(4)
+      // so a word like "unavailable" could not be stored there even if we tried
+      // — the status rides in the description instead, which is what staff read.
+      ...(parts
+        ? {
+            patientBirthMonth: parts.month,
+            patientBirthDay: parts.day,
+            patientBirthYear: parts.year,
+          }
+        : {}),
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
       /**
@@ -699,7 +741,7 @@ registerTool({
       ...(filedOnSurgeryQueue && surgeonAskExhausted && !lookup.providerId
         ? { routingAskExhausted: true }
         : {}),
-      description: filedDescription,
+      description: filedDescriptionWithDobStatus,
       priority,
       callData: { agentUsed: 'surgery', ...(callSid ? { callSid } : {}) },
       // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
