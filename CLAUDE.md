@@ -167,7 +167,7 @@ discriminator; a NULL there is the old core.
 | **tech** | **Grok runtime** | 19:51:10 | 100 | 46/66 = **69.7%** | Before: 49/73 = 67.1% on the old core, same day. Busiest lane. |
 | **records** | **STILL OLD CORE** | — | 38 | 14/29 = 48.3% | The same-day CONTROL, and the reason the comparison is trustworthy. It also means records is missing every ruling shipped to the runtime lanes — on 2026-09-03 23:54 it said "all of our agents are currently busy… as soon as they become available", which #265 forbids, and asked for first and last name in one breath. |
 | **no-ivr** | old core | — | — | — | After-hours agent. All overnight and weekend volume (standing instruction 13). Queue lanes take nothing after 00:00 UTC / 5pm Pacific. |
-| **pcp** | **Grok runtime — BACK ON 2026-09-04 ~16:00 UTC** | 2026-09-04 ~16:00 | 3 test calls | — | Wayne switched it over himself and made three test calls. It had been OFF since Aug 10 (his decision — do not ask why it *was* off). Its two real days, 08-06 and 08-07, ran **216 and 203 calls** — more than surgery (107/day) and optical (79/day) COMBINED, and above tech's 165. At full volume it is the heaviest single queue lane. **A live defect is open on it: see below.** |
+| **pcp** | **Grok runtime — BACK ON 2026-09-04 ~16:00 UTC** | 2026-09-04 ~16:00 | 3 test calls | — | Wayne switched it over himself and made three test calls. It had been OFF since Aug 10 (his decision — do not ask why it *was* off). **TWO-DAY PEAK, not a steady-state rate:** it ran 08-06 and 08-07 at **216 and 203 calls**, then was switched off — so no average exists for it. Like-for-like on BUSIEST DAY: pcp 216 · tech 214 · surgery 161 · optical 119. An earlier version compared that peak against the other lanes' 15-16 day AVERAGES (165/107/79) and concluded pcp beat surgery+optical combined; that mixed two different windows and is withdrawn (Codex, PR #272). Peak-for-peak it is the busiest lane by a nose, on two days of evidence — its typical full-volume traffic is UNMEASURED. **A live defect is open on it: see below.** |
 | **azul-scheduling** (San Diego) | **OFF** | — | — | — | Gate B replay books 8 of 21. Not ready. Do not ask why. |
 | **answering-service** | old core | — | — | — | — |
 
@@ -183,13 +183,41 @@ Then `transferred_to_human = false`, `transfer_outcome` NULL,
 `runtime_outcome = agent_ended`. It filed PCP-57486 ("Service inquiry", noting
 the intake was incomplete) and ended the call. **No transfer was attempted.**
 
-This is exactly the case Wayne's transfer rule (below) says MUST transfer, and
-the lane is otherwise wired for it — `warmTransfer.ts`, `transferTwilioOps.ts`,
-the accept webhook mounted at `voiceRuntime.ts:448`, and `pcp` present in
-`RUNTIME_TRANSFER_READY_LANES`. So the mechanism exists and this call did not
-use it; the cause is NOT that the feature is missing. **Not yet root-caused.**
-At 200+ calls/day this means every entity that asks for a person gets a promise
-and a dial tone.
+**WHAT THIS DOES AND DOES NOT ESTABLISH.** The defect is the BROKEN PROMISE,
+and that stands whichever way the open question below is settled: the agent
+said it would connect the caller and then did not, and it did not say
+otherwise either. Nothing here establishes that this call was *required* to
+transfer — an earlier version of this section said it "MUST transfer", which
+silently resolved the operator's still-open question (entity + asks + the
+matter is ticketable) in one direction, inside the same section that marks it
+open. It was in fact recorded as a service inquiry and it DID file a ticket,
+which is what the "ticketable → ticket it" half of the rule asks for. The
+wrong part is the sentence spoken to the caller, not necessarily the routing.
+(Codex, PR #272.)
+
+**Scope: one observed call.** It proves the failure mode exists on this lane;
+it does not establish how often it happens. The runtime has three test calls
+in total. An earlier version said "at 200+ calls/day … every entity that asks
+for a person gets a promise and a dial tone" — both halves were unearned: the
+volume was extrapolated from two peak days, and "every" from a single call.
+
+**There IS a measured history for the shape, on the OLD core.** Over PCP's two
+full days (2026-08-06/07), of 67 substantive calls whose `agent_outcome` was
+`escalated`: **8 reached a human, 20 filed a ticket, and 47 produced NEITHER.**
+So "the agent decides it cannot handle the call, then does nothing" is a
+long-standing and concentrated loss on this lane, not something the pipeline
+change introduced. That is evidence the shape recurs; it is NOT evidence that
+those 47 should have been transferred — under the rule below most of them
+should have been TICKETED. What is wrong in both the history and the live call
+is ending with neither.
+
+**The mechanism is present in the tree** — `warmTransfer.ts`,
+`transferTwilioOps.ts`, the accept webhook mounted at `voiceRuntime.ts:448`,
+and `pcp` in `RUNTIME_TRANSFER_READY_LANES`. **Do not read that as ruling out
+"the feature was unreachable on this call":** `laneSupportStatus` refuses a
+transfer-capable lane outright when no handoff is injected for the deployment,
+and whether one was injected here was NOT checked. **Not root-caused, and the
+search is not narrowed.**
 
 **WAYNE'S PCP TRANSFER RULE (2026-09-04), replacing "anyone who asks goes through":**
 
@@ -284,12 +312,36 @@ is reading noise.
 I got this wrong for a whole afternoon on 2026-09-03 and reported filing rates
 understated by about a third. The instrument, not the fleet, was the problem.
 
-**THE AUTHORITY: a call filed a new ticket iff its `call_sid` appears on ANY
-ticket in the Support Center (`vsmcxhxeirkoobmjcrbn`). JOIN ON `call_sid`.
-DO NOT FILTER BY TICKET PREFIX.**
+**THE AUTHORITY: a call filed a new ticket iff its `call_sid` appears on a
+ticket whose prefix is a VALIDATED voice-filing prefix — today `VA-` and
+`PCP-`. Join on `call_sid`; treat the prefix set as a fact to be re-checked,
+never as a constant.**
 
-An earlier version of this line said "on a `VA-` ticket", and that was wrong in
-a way that silently reports ZERO rather than reporting an error.
+This line has now been wrong in both directions, and the second way is the
+instructive one.
+
+- It first said **`VA-` only**. That silently reports ZERO for a lane that
+  files under another prefix, which is how PCP's 210 tickets went missing.
+- I then changed it to **"any ticket, never filter by prefix"** — which
+  over-corrected, and counts a `T-` or `SR-` row as a voice filing when
+  neither has been established as one.
+
+**Why "36 + 36 rows against 40,707 cannot move a rate" was wrong**, since it is
+the third time I have made this exact mistake (see the cost denominators in
+#269 and #271): 40,707 is the FLEETWIDE total, and **nothing in this file is a
+fleetwide rate.** The rates here are per-lane, per-day, with n as low as 29-73
+calls. A handful of staff rows landing on one lane on one day moves such a rate
+by several points. Bounding an aggregate says nothing about the samples
+actually being quoted. (Codex, PR #272.)
+
+**So: `VA-` and `PCP-` are validated** (VA 40,707 of 40,930 carry a sid; PCP
+210 of 210). **`T-` and `SR-` are NOT** — they carry 36 sids each, provenance
+unknown, and must be CLASSIFIED before being either counted or excluded. Until
+someone does that, exclude them and know that is a floor.
+
+**A new sid-bearing prefix is a silent instrument change.** Re-run the census
+below before quoting any rate; if a prefix appears that is not in the validated
+set, classify it before you report anything.
 
 **PCP FILES UNDER `PCP-`, NOT `VA-`.** 210 tickets, every one carrying a real
 `call_sid`, going back to 2026-08-04 — the entire life of the line. A filing
@@ -305,22 +357,27 @@ SELECT split_part(ticket_number,'-',1) AS prefix, count(*),
 FROM tickets GROUP BY 1 ORDER BY 2 DESC;
 -- 2026-09-04: VA 40,930 (40,707 with sid) · T 6,079 (36) · SR 1,368 (36)
 --             TKT 1,045 (0, ended 2026-02-14) · PCP 210 (210) · DIAG 1 (0)
--- T- and SR- are mostly staff tickets, but 36 each DO carry a call_sid, so
--- even they are not safe to exclude by prefix.
+-- VALIDATED voice-filing prefixes: VA-, PCP-. T- and SR- carry 36 sids each
+-- with UNKNOWN provenance — classify them before counting them; excluding
+-- them (the current default) makes every rate here a floor, not a point.
 ```
 
 ```sql
--- The control that makes the join trustworthy, per day. Re-run it.
-SELECT count(*), count(call_sid) FROM tickets WHERE created_at::date = '<day>';
+-- The control that makes the join trustworthy, per day. Re-run it, and read
+-- the prefix column: this deliberately does NOT filter, so a day whose
+-- sid-bearing tickets are not all VA-/PCP- shows up here instead of silently.
+SELECT split_part(ticket_number,'-',1) AS prefix, count(*), count(call_sid)
+FROM tickets WHERE created_at::date = '<day>' GROUP BY 1 ORDER BY 2 DESC;
 -- 2026-09-03: 196 of 196 VA- tickets carried a real CA-prefixed sid.
 ```
 
 **FOUR WAYS TO GET THIS WRONG, all of which I did:**
 
-0. **FILTERING BY TICKET PREFIX.** The failure above. It does not error, it
-   returns a plausible zero, and a zero filing rate reads as a broken lane
-   rather than a broken query. Join on `call_sid` and let the prefix fall
-   where it may.
+0. **THE TICKET PREFIX SET, in either direction.** Filtering to a stale set
+   does not error — it returns a plausible zero, and a zero filing rate reads
+   as a broken lane rather than a broken query. Dropping the filter entirely
+   is the opposite error: it promotes unvalidated prefixes to authoritative.
+   Use the validated set, and re-run the census to find out when it changed.
 
 1. **`tool_timeline` DROPS ABOUT 35% OF SUCCESSFUL FILINGS.** On 2026-09-03,
    100 substantive queue calls read a real VA number to the caller and the
