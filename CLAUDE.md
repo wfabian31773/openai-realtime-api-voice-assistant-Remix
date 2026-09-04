@@ -448,6 +448,37 @@ SELECT count(*) FROM call_logs
  WHERE voice_provider = 'grok' AND cost_reconciled_at IS NULL;
 ```
 
+**THE COST-COLUMN GUARD HAS NEVER FIRED, AND THAT IS THE POINT.** Measured
+2026-09-04 while PR #268 was in review. Rounds 11–13 turned up six findings
+and four of them were the same sentence — "an estimate overwrites the
+reconciled bill" — so it was worth knowing whether that had ever actually
+happened before claiming the fixes mattered:
+
+| control | result |
+|---|---|
+| rows with `cost_reconciled_at` set, **all time, both pipelines** | **0 of 86,516** |
+| Grok rows priced at the correct `ceil(duration * 8/60)` | **241 of 241** |
+| Grok rows priced at OpenAI's `ceil(duration * 0.19)` | **0** |
+
+So every one of those defects is **latent, not live**. The reconciler has
+never run, so the guard's condition has never been true; and the admin
+recalculate button has never been pressed on a Grok row, or the second row
+would be under 241. This is the "before" number for
+`docs/BACKEND_HANDOFF.md`'s rule — re-run all three after the reconciler is
+switched on, and the first one going non-zero is the moment the guard starts
+mattering.
+
+```sql
+-- Re-run this trio before quoting anything about cost preservation.
+SELECT count(*) FILTER (WHERE cost_reconciled_at IS NOT NULL)             AS ever_reconciled,
+       count(*) FILTER (WHERE voice_provider = 'grok'
+                          AND openai_cost_cents = ceil(duration * 8.0/60)) AS at_grok_rate,
+       count(*) FILTER (WHERE voice_provider = 'grok'
+                          AND openai_cost_cents = ceil(duration * 0.19)
+                          AND openai_cost_cents <> ceil(duration * 8.0/60)) AS at_openai_rate
+FROM call_logs WHERE duration IS NOT NULL AND duration > 0;
+```
+
 ---
 
 ## THE OBSERVATORY WAS BLIND TO EVERY RUNTIME CALL — fixed 2026-09-04
