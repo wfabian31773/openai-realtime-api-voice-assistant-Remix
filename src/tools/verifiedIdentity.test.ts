@@ -28,6 +28,7 @@ process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 const {
   rememberVerifiedIdentity,
   verifiedDobFor,
+  verifiedIdentityFor,
   resetVerifiedIdentities,
 } = await import('./verifiedIdentity');
 
@@ -161,5 +162,67 @@ describe('end to end: the filing tool stops asking twice', () => {
     // should say what they said.
     const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
     expect(filed.patientBirthYear).toBe('1960');
+  });
+});
+
+/**
+ * AN UNCERTAIN MATCH IS NOT AN IDENTITY.
+ *
+ * `lookup_patient` reports `identity_is_certain: false` for a unique hit on a
+ * NAME alone, precisely so the agent does not treat it as the person — and
+ * then stored the candidate here anyway with the certainty dropped. The
+ * teardown sweep reads this map and files a request under the name, with
+ * nobody watching the call (Codex, PR #268 round 3).
+ *
+ * Filing one patient's request under another patient's name is worse than
+ * not filing it, and these lines get fathers and sons constantly.
+ */
+describe('the sweep only ever sees a CERTAIN identity', () => {
+  const SID = 'CA00000000000000000000000000000091';
+  beforeEach(() => resetVerifiedIdentities());
+
+  const remember = (certain: boolean) =>
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testpatient',
+      lastName: 'Example',
+      dateOfBirth: '1973-03-17',
+      certain,
+    });
+
+  it('returns the identity when the match was unambiguous', () => {
+    remember(true);
+    expect(verifiedIdentityFor(SID)).toMatchObject({
+      firstName: 'Testpatient',
+      lastName: 'Example',
+      certain: true,
+    });
+  });
+
+  it('returns NOTHING for a name-only match, so the sweep files no ticket', () => {
+    remember(false);
+    expect(verifiedIdentityFor(SID)).toBeUndefined();
+  });
+
+  it('treats a missing certainty as NOT certain', () => {
+    // A caller that forgets to say so must not get the benefit of the doubt
+    // on the one field this is about.
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testpatient',
+      lastName: 'Example',
+      dateOfBirth: '1973-03-17',
+    });
+    expect(verifiedIdentityFor(SID)).toBeUndefined();
+  });
+
+  /**
+   * verifiedDobFor answers a different question — "is this ticket for that
+   * same person?" — and applies its own name guard. Narrowing it is a
+   * ticket-path change that needs a before/after number, so it deliberately
+   * still sees an uncertain entry. Pinned so the difference is a decision
+   * rather than an oversight.
+   */
+  it('still lets verifiedDobFor see an uncertain entry, deliberately', () => {
+    remember(false);
+    expect(verifiedDobFor(SID, 'Testpatient', 'Example')).toBe('1973-03-17');
   });
 });

@@ -196,6 +196,56 @@ describe("what it refuses", () => {
   });
 });
 
+describe("a re-run of a day already reconciled", () => {
+  /**
+   * The six-hour schedule settles the previous UTC day more than once. On the
+   * second pass `readDay` returns costs the FIRST pass already replaced with
+   * xAI's own allocation — so counting them as "our estimate" compares the
+   * bill against itself and reports a drift near zero, hiding the one thing
+   * the drift exists to reveal: that the rate constant is wrong (Codex,
+   * PR #268 round 3).
+   */
+  it("does not count an already-reconciled row as an estimate", async () => {
+    const p = ports([
+      { callSid: "CA1", durationSeconds: 100, estimatedCents: 13, alreadyReconciled: true },
+      { callSid: "CA2", durationSeconds: 100, estimatedCents: 14 },
+    ]);
+    const out = await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(0.4) });
+    expect(out.reconciled).toBe(true);
+    // Only CA2's 14 cents was ever an estimate.
+    expect(out.estimatedTotalCents).toBe(14);
+    expect(out.estimateCoversCalls).toBe(1);
+  });
+
+  it("still allocates across EVERY call, reconciled or not", async () => {
+    const p = ports([
+      { callSid: "CA1", durationSeconds: 100, estimatedCents: 13, alreadyReconciled: true },
+      { callSid: "CA2", durationSeconds: 100, estimatedCents: 14 },
+    ]);
+    await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(0.4) });
+    // The day's charge is still split over the whole day.
+    expect(p.written.map((c) => c.callSid).sort()).toEqual(["CA1", "CA2"]);
+    expect(p.written.reduce((s, c) => s + c.costCents, 0)).toBe(40);
+  });
+
+  it("says out loud when the drift it reports is only partial", () => {
+    const line = reconcileMarker({
+      day: DAY, reconciled: true, callsUpdated: 200,
+      xaiTotalCents: 3368, estimatedTotalCents: 100, estimateCoversCalls: 7,
+    });
+    expect(line).toContain("partial");
+    expect(line).toContain("7 call(s)");
+  });
+
+  it("says nothing about partiality on a first run", () => {
+    const line = reconcileMarker({
+      day: DAY, reconciled: true, callsUpdated: 200,
+      xaiTotalCents: 3368, estimatedTotalCents: 3486, estimateCoversCalls: 200,
+    });
+    expect(line).not.toContain("partial");
+  });
+});
+
 describe("the marker", () => {
   it("states both totals and the direction of the gap", () => {
     const line = reconcileMarker({

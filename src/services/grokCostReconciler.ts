@@ -39,12 +39,29 @@ export interface ReconcileOutcome {
   /** What our estimate had said, in cents, before this ran. */
   estimatedTotalCents?: number;
   derivedCentsPerSecond?: number | null;
+  /**
+   * How many of the day's calls the `estimatedTotalCents` figure covers. Less
+   * than the day's call count means this is a re-run and the comparison is
+   * only over the rows not yet reconciled — stated rather than implied, so
+   * nobody reads a partial drift as the whole day's.
+   */
+  estimateCoversCalls?: number;
 }
 
 /** One row of the day, as the reconciler needs it. */
 export interface GrokCallRow extends CallToPrice {
   /** openai_cost_cents as it stands, so the drift can be reported. */
   estimatedCents: number;
+  /**
+   * This row was already reconciled by an earlier run.
+   *
+   * Its `estimatedCents` is no longer an estimate — it is xAI's own number
+   * from last time — so counting it in the drift would make the second run
+   * of a day report a discrepancy near zero and hide the very thing the
+   * drift exists to reveal: that our rate constant is wrong (Codex, PR #268
+   * round 3).
+   */
+  alreadyReconciled?: boolean;
 }
 
 export interface ReconcilerPorts {
@@ -70,10 +87,17 @@ export function reconcileMarker(outcome: ReconcileOutcome): string {
   // Sign before the dollar sign: "$-1.18" reads as a price, "-$1.18" reads as
   // the direction, and the direction is the whole point of the line.
   const signed = `${delta < 0 ? "-" : "+"}$${Math.abs(delta).toFixed(2)}`;
+  const partial =
+    outcome.estimateCoversCalls !== undefined &&
+    outcome.callsUpdated !== undefined &&
+    outcome.estimateCoversCalls < outcome.callsUpdated
+      ? ` The estimate figure covers only the ${outcome.estimateCoversCalls} call(s) not ` +
+        `already reconciled by an earlier run, so this drift is partial.`
+      : "";
   return (
     `[GROK COST] ${outcome.day}: reconciled ${outcome.callsUpdated} call(s) against xAI's own ` +
     `$${xai}; our estimate had said $${est} (${signed}). ` +
-    `These calls are no longer estimated.`
+    `These calls are no longer estimated.${partial}`
   );
 }
 
@@ -102,7 +126,11 @@ export async function reconcileGrokCostsForDay(
   // Cents, from dollars, rounded ONCE — at the day level, where a half-cent
   // is a half-cent rather than a bias repeated 241 times.
   const xaiTotalCents = Math.round(spend.value.totalUsd * 100);
-  const estimatedTotalCents = calls.reduce((s, c) => s + (c.estimatedCents || 0), 0);
+  // Only rows still carrying an ESTIMATE contribute to the estimate total.
+  // A reconciled row's cost is xAI's, and summing it back in would compare
+  // the bill against itself.
+  const stillEstimated = calls.filter((c) => !c.alreadyReconciled);
+  const estimatedTotalCents = stillEstimated.reduce((s, c) => s + (c.estimatedCents || 0), 0);
 
   const allocation = allocateDailyCost(calls, xaiTotalCents);
 
@@ -149,6 +177,7 @@ export async function reconcileGrokCostsForDay(
     callsUpdated,
     xaiTotalCents,
     estimatedTotalCents,
+    estimateCoversCalls: stillEstimated.length,
     derivedCentsPerSecond: allocation.derivedCentsPerSecond,
   };
   console.info(reconcileMarker(outcome));
@@ -167,7 +196,8 @@ export function databasePorts(): ReconcilerPorts {
       const { pool } = await import("../../server/db");
       const { rows } = await pool.query(
         `SELECT call_sid, COALESCE(duration, 0)::int AS duration,
-                COALESCE(openai_cost_cents, 0)::int AS estimated_cents
+                COALESCE(openai_cost_cents, 0)::int AS estimated_cents,
+                (cost_reconciled_at IS NOT NULL) AS already_reconciled
            FROM call_logs
           WHERE voice_provider = 'grok'
             AND call_sid IS NOT NULL
@@ -175,11 +205,19 @@ export function databasePorts(): ReconcilerPorts {
             AND created_at <  ($1::date + INTERVAL '1 day')`,
         [day],
       );
-      return rows.map((r: { call_sid: string; duration: number; estimated_cents: number }) => ({
-        callSid: r.call_sid,
-        durationSeconds: Number(r.duration) || 0,
-        estimatedCents: Number(r.estimated_cents) || 0,
-      }));
+      return rows.map(
+        (r: {
+          call_sid: string;
+          duration: number;
+          estimated_cents: number;
+          already_reconciled: boolean;
+        }) => ({
+          callSid: r.call_sid,
+          durationSeconds: Number(r.duration) || 0,
+          estimatedCents: Number(r.estimated_cents) || 0,
+          alreadyReconciled: Boolean(r.already_reconciled),
+        }),
+      );
     },
 
     async writeCosts(day, costs) {

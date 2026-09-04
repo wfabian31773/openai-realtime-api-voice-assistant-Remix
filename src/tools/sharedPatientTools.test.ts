@@ -55,6 +55,9 @@ await import('./sharedPatientTools');
 const run = (name: string, input: Record<string, unknown>) => getTool(name)!.handler(input) as Promise<any>;
 
 /** A found patient, in the shape scheduleLookupService returns. */
+/** What the mirror hands back. rememberVerifiedIdentity needs all three. */
+const RECORD = { firstName: 'Testpatient', lastName: 'Example', dateOfBirth: '1950-01-02' };
+
 const FOUND = {
   patientFound: true,
   patientName: 'Wayne Fabian',
@@ -163,6 +166,47 @@ describe('lookup_patient', () => {
     lookupPatient.mockResolvedValue({ ...FOUND, matchedBy: 'name_and_dob' });
     const r = await run('lookup_patient', { caller_phone: '+17605551234' });
     expect(r.identity_is_certain).toBe(true);
+  });
+
+  /**
+   * THE CERTAINTY HAS TO REACH THE MAP, not just the model.
+   *
+   * `identity_is_certain` was computed and reported, and then the candidate
+   * was stored in the shared identity map WITHOUT it — so the teardown sweep,
+   * which reads that map and files a request under the name with nobody
+   * watching, saw a name-only guess as a verified patient (Codex, PR #268
+   * round 3).
+   *
+   * The gate now lives in `verifiedIdentityFor`; these prove the thing that
+   * FEEDS it, because a gate nothing feeds is not a gate — the same shape as
+   * the reconciliation guard whose column was never selected.
+   */
+  const rememberedFor = async (matchedBy: string) => {
+    rememberVerifiedIdentity.mockClear();
+    lookupPatient.mockResolvedValue({ ...FOUND, matchedBy, patientData: RECORD });
+    const r = await run('lookup_patient', {
+      caller_phone: '+17605551234',
+      call_sid: 'CA00000000000000000000000000000077',
+    });
+    const calls = rememberVerifiedIdentity.mock.calls;
+    return { result: r, stored: calls[calls.length - 1]?.[1] as Record<string, unknown> | undefined };
+  };
+
+  it('stores a name-only match as NOT certain, so the sweep will not use it', async () => {
+    const { result, stored } = await rememberedFor('name');
+    expect(result.identity_is_certain).toBe(false);
+    // What reaches the map has to agree with what reached the model.
+    expect(stored?.certain).toBe(false);
+  });
+
+  it('stores a name-and-dob match as certain', async () => {
+    const { result, stored } = await rememberedFor('name_and_dob');
+    expect(result.identity_is_certain).toBe(true);
+    expect(stored?.certain).toBe(true);
+  });
+
+  it('stores a dob-only match as NOT certain', async () => {
+    expect((await rememberedFor('dob')).stored?.certain).toBe(false);
   });
 
   it('a non-unique match is never certain, whatever it matched on', async () => {

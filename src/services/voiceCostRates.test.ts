@@ -196,3 +196,26 @@ describe("pricing a call that has already been reconciled against the bill", () 
     expect(out.providerCostCents).toBe(14);
   });
 });
+
+/**
+ * The status callback asked only "is this token-derived?" to decide whether
+ * the cost is authoritative — so a Grok row already priced from xAI's invoice
+ * fell through and got `costIsEstimated = true` set on it, while
+ * `cost_reconciled_at` stayed populated. The cost survived; the LABEL was
+ * wrong, and the Observatory and QVO exports read the label (Codex, PR #268
+ * round 3).
+ */
+describe('a reconciled row reports a basis its callers can recognise', () => {
+  it('is neither of the estimate bases', () => {
+    const basis = priceVoiceCall({
+      voiceProvider: 'grok',
+      durationSeconds: 105,
+      twilioCostCents: 2,
+      existingOpenaiCostCents: 13,
+      costReconciledAt: new Date('2026-09-04T06:00:00Z'),
+    }).basis;
+    expect(basis).toBe('reconciled');
+    expect(basis).not.toBe('grok_duration');
+    expect(basis).not.toBe('openai_duration');
+  });
+});

@@ -62,9 +62,24 @@ describe('step 3 — one duration rate, everywhere', () => {
      */
     const src = read('../voiceAgentRoutes.ts');
     expect(src).toMatch(/updateData\.costIsEstimated = !hasTokenDerivedCost/);
-    // Token-derived is now what priceVoiceCall says it is, not a re-derived
+    // Authoritative is whatever priceVoiceCall SAYS it is, not a re-derived
     // null check that could drift from the decision.
-    expect(src).toMatch(/const hasTokenDerivedCost = pricing\.basis === "openai_tokens"/);
+    expect(src).toMatch(/hasTokenDerivedCost =\s*\n?\s*pricing\.basis === "openai_tokens"/);
+    /**
+     * And a reconciled row is authoritative too. This widened on 2026-09-04:
+     * a Grok row already priced from xAI's invoice fell through the
+     * tokens-only question and had `costIsEstimated = true` stamped on it
+     * while `cost_reconciled_at` stayed populated. The cost survived —
+     * priceVoiceCall's own guard holds — but the row then claimed to be both
+     * estimated and reconciled, and the Observatory and the QVO exports read
+     * the flag (Codex, PR #268 round 3).
+     *
+     * This assertion is a source scan and therefore proves only that the line
+     * exists. What it BEHAVES like is pinned in voiceCostRates.test.ts, where
+     * priceVoiceCall is called for real and asserted to return the
+     * `reconciled` basis rather than either estimate.
+     */
+    expect(src).toMatch(/pricing\.basis === "reconciled"/);
   });
 });
 

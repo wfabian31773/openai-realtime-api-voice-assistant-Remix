@@ -54,6 +54,12 @@ beforeEach(() => {
     firstName: "Testpatient",
     lastName: "Example",
     dateOfBirth: "1950-01-02",
+    // CERTAIN, because that is the only kind the sweep may act on. A unique
+    // hit on a NAME alone is reported by lookup_patient as
+    // identity_is_certain: false, and filing one patient's request under
+    // another patient's name is worse than not filing it (Codex, PR #268
+    // round 3). The uncertain case has its own test below.
+    certain: true,
   });
 });
 
@@ -149,6 +155,28 @@ describe("recovering a request the agent did not file", () => {
 });
 
 describe("no name, no ticket", () => {
+  /**
+   * The identity map used to hold a name-only candidate as though it were
+   * verified. This is the level it mattered at: the sweep files under that
+   * name with nobody watching the call.
+   */
+  it("does not file under a name-only match, any more than under no name", async () => {
+    resetVerifiedIdentities();
+    rememberVerifiedIdentity(SID, {
+      firstName: "Testpatient",
+      lastName: "Example",
+      dateOfBirth: "1950-01-02",
+      certain: false,
+    });
+    const file = filer();
+    const out = await runRequestSweep(
+      record({ toolEvents: [tool("file_tech_ticket", false)] }),
+      file,
+    );
+    expect(out).toEqual({ filed: false, reason: "no-name" });
+    expect(file.calls).toHaveLength(0);
+  });
+
   it("does not file when nobody was identified, and says so loudly", async () => {
     resetVerifiedIdentities();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

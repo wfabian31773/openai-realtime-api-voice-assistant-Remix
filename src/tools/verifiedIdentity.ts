@@ -42,6 +42,24 @@ export interface VerifiedIdentity {
   lastName: string;
   /** As the record holds it. Parsed by the caller, never displayed. */
   dateOfBirth: string;
+  /**
+   * The match was UNAMBIGUOUS — not a unique hit on a name or a date of
+   * birth alone.
+   *
+   * `lookup_patient` computes this (`sharedPatientTools.ts`: unique AND
+   * matchedBy is neither 'name' nor 'dob') and reports it to the model as
+   * `identity_is_certain: false`, precisely so the agent does not treat a
+   * name-only hit as the person. It then stored the candidate here anyway,
+   * with the certainty dropped on the floor — so anything reading this map
+   * saw a name-only guess as a verified identity (Codex, PR #268 round 3).
+   *
+   * That matters most for the teardown sweep, which files a request under
+   * this name with nobody watching. Wayne's standing instruction 6 is that
+   * verification "refuses to guess between two people"; a name is exactly
+   * the field that collides, and these lines get fathers and sons
+   * constantly.
+   */
+  certain: boolean;
 }
 
 interface Entry extends VerifiedIdentity {
@@ -96,6 +114,9 @@ export function rememberVerifiedIdentity(
   callSid: string | undefined,
   identity: Partial<VerifiedIdentity>,
 ): void {
+  // Absent means NOT certain. A caller that forgets to say so must not get
+  // the benefit of the doubt on a field this one is about.
+  const certain = identity.certain === true;
   /**
    * STORED AS THE RECORD SPELLS IT, MATCHED CASE-INSENSITIVELY.
    *
@@ -112,7 +133,7 @@ export function rememberVerifiedIdentity(
   const now = Date.now();
   sweep(now);
   verified.delete(callSid);
-  verified.set(callSid, { firstName, lastName, dateOfBirth, at: now });
+  verified.set(callSid, { firstName, lastName, dateOfBirth, certain, at: now });
 }
 
 /**
@@ -157,7 +178,27 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
   const entry = verified.get(callSid);
   if (!entry) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;
-  return { firstName: entry.firstName, lastName: entry.lastName, dateOfBirth: entry.dateOfBirth };
+  /**
+   * AN UNCERTAIN MATCH IS NOT AN IDENTITY, and this reader is the one that
+   * must not accept one. Its only caller is the teardown sweep, which puts
+   * this name on a ticket a human then acts on, with nobody watching the
+   * call. A unique hit on a NAME alone is exactly the case Wayne's
+   * instruction 6 refuses — and filing one patient's request under another
+   * patient's name is worse than not filing it, which is saying something,
+   * because "no name, no ticket" already costs 47 recoveries a day.
+   *
+   * `verifiedDobFor` deliberately keeps its existing behaviour: it answers a
+   * different question ("is this ticket for that same person?") and applies
+   * its own name guard, and narrowing it is a ticket-path change that
+   * BACKEND_HANDOFF says needs a before/after number. Raised, not done here.
+   */
+  if (!entry.certain) return undefined;
+  return {
+    firstName: entry.firstName,
+    lastName: entry.lastName,
+    dateOfBirth: entry.dateOfBirth,
+    certain: true,
+  };
 }
 
 /** Tests only. */

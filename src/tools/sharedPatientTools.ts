@@ -262,6 +262,11 @@ registerTool({
         firstName: resolved.patientData?.firstName,
         lastName: resolved.patientData?.lastName,
         dateOfBirth: resolved.patientData?.dateOfBirth,
+        // The same `certain` reported to the model as `identity_is_certain`.
+        // It was computed twenty lines up and then dropped here, so a
+        // name-only hit was stored as though it were a verified identity
+        // (Codex, PR #268 round 3).
+        certain,
       });
     }
 

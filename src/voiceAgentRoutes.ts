@@ -7845,7 +7845,19 @@ export function setupVoiceAgentRoutes(app: Express): void {
         durationSeconds: duration,
         twilioCostCents,
       });
-      const hasTokenDerivedCost = pricing.basis === "openai_tokens";
+      /**
+       * A RECONCILED ROW IS AUTHORITATIVE TOO.
+       *
+       * This asked only about tokens, so a Grok row already priced from
+       * xAI's invoice fell through and got `costIsEstimated = true` set on
+       * it — while `cost_reconciled_at` stayed populated. The cost survived
+       * (priceVoiceCall's guard holds), but the row then said both
+       * "estimated" and "reconciled at 06:00", and the Observatory and the
+       * QVO exports read the flag. A number that is right and labelled wrong
+       * is still a number nobody can trust (Codex, PR #268 round 3).
+       */
+      const hasTokenDerivedCost =
+        pricing.basis === "openai_tokens" || pricing.basis === "reconciled";
       const openaiCostCents = pricing.providerCostCents ?? callLog.openaiCostCents ?? 0;
       const totalCostCents = pricing.totalCostCents;
 
@@ -7887,7 +7899,11 @@ export function setupVoiceAgentRoutes(app: Express): void {
         updateData.costIsEstimated = !hasTokenDerivedCost;
         console.info(
           `[STATUS CALLBACK] ✓ TWILIO AUTHORITATIVE: Duration=${twilioProvidedDuration}s` +
-            (hasTokenDerivedCost ? ' (cost from tokens, preserved)' : ' (cost estimated from duration)'),
+            (pricing.basis === "reconciled"
+              ? ' (cost reconciled against the provider bill, preserved)'
+              : hasTokenDerivedCost
+                ? ' (cost from tokens, preserved)'
+                : ' (cost estimated from duration)'),
         );
       } else {
         // Twilio didn't provide duration - keep costIsEstimated true for reconciliation
