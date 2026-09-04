@@ -449,7 +449,7 @@ SELECT count(*) FROM call_logs
  WHERE voice_provider = 'grok' AND cost_reconciled_at IS NULL;
 ```
 
-## THE RECONCILER RAN, AND GROK COSTS 60% MORE THAN WE WERE BOOKING
+## THE RECONCILER RAN: xAI's INVOICE WAS $53.55, WE HAD BOOKED $34.66
 
 **2026-09-04 09:39 UTC, the first reconciliation ever performed.** Wayne set
 `XAI_MANAGEMENT_KEY` / `XAI_TEAM_ID` and republished; the nightly runner
@@ -458,7 +458,7 @@ settled 2026-09-03 and wrote 239 rows. `cost_reconciled_at` went from 0 of
 
 | 2026-09-03, 239 runtime calls | |
 |---|---|
-| seconds billed | 25,116 (418.6 min) |
+| seconds WE recorded (the allocation's denominator) | 25,116 (418.6 min) |
 | our estimate, `ceil(duration x 8/60)` per call | **$34.66** |
 | **xAI's actual invoice** | **$53.55** |
 | gap | **+$18.89 = +54% on our estimate** |
@@ -561,15 +561,23 @@ What the console actually supports, and nothing beyond it:
 **So trim prompts for latency and for the ceilings — the reasons that were
 always true and never needed a dollar figure.** Anyone wanting the billing
 argument for a trim has to get per-call units out of the `Voice` breakdown or
-`invoice/preview` first. **The voice minute is where the $20/day is.**
+`invoice/preview` first. **The voice line is where the $18.89 was on
+2026-09-03** — one measured day, not a daily rate.
 
 **What this changes, scoped to the one day that has been reconciled:** on
 2026-09-03 our estimate understated the invoice by about a third. **That
 percentage is NOT known to hold on any other day.** If the gap is a per-call
 minimum or a setup component rather than a rate, its size moves with the day's
 call-duration mix — a day of many short calls would carry a larger uplift than
-a day of few long ones. One day is one day. The direction (we under-book) is
-the part that generalises; the magnitude is not.
+a day of few long ones. One day is one day.
+
+**AND NOT EVEN THE DIRECTION IS SAFE.** An earlier version of this paragraph
+said the sign generalises even if the magnitude does not. It does not follow.
+Our estimate is `ceil(duration x 8/60)` PER CALL, which overstates on every
+call, and a per-call minimum on xAI's side also scales with call count — so on
+a different mix of calls the two move together and could offset or invert.
+Under-booking is established for 2026-09-03 and for no other day. (Codex,
+PR #269.)
 
 The runtime is materially more expensive per call than the estimate implied.
 Whether it is more expensive per *resolved request* is a different question and
