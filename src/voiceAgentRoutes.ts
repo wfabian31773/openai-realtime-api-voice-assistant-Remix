@@ -7841,6 +7841,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
         inputAudioTokens: callLog.inputAudioTokens,
         existingOpenaiCostCents: callLog.openaiCostCents,
+        costReconciledAt: (callLog as { costReconciledAt?: Date | null }).costReconciledAt,
         durationSeconds: duration,
         twilioCostCents,
       });

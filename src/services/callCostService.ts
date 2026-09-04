@@ -485,6 +485,7 @@ export class CallCostService {
         voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
         inputAudioTokens: callLog.inputAudioTokens,
         existingOpenaiCostCents: callLog.openaiCostCents,
+        costReconciledAt: (callLog as { costReconciledAt?: Date | null }).costReconciledAt,
         durationSeconds: actualDuration,
         twilioCostCents: twilioResult.costCents,
       });
@@ -647,6 +648,7 @@ export class CallCostService {
           voiceProvider: (existing as { voiceProvider?: string | null } | undefined)?.voiceProvider,
           inputAudioTokens: existing?.inputAudioTokens,
           existingOpenaiCostCents: existing?.openaiCostCents,
+          costReconciledAt: (existing as { costReconciledAt?: Date | null } | undefined)?.costReconciledAt,
           durationSeconds: actualDuration,
           twilioCostCents: costCents,
         });
@@ -754,6 +756,7 @@ export class CallCostService {
         voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
         inputAudioTokens: callLog.inputAudioTokens,
         existingOpenaiCostCents: callLog.openaiCostCents,
+        costReconciledAt: (callLog as { costReconciledAt?: Date | null }).costReconciledAt,
         durationSeconds,
         twilioCostCents,
       });

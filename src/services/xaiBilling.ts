@@ -110,8 +110,32 @@ export interface DailySpendLine {
 
 export interface DailySpend {
   day: string;
+  /** Spend for the VOICE workload only — see `sumDailyUsage`. */
   totalUsd: number;
+  /** The voice lines that made up the total. */
   lines: DailySpendLine[];
+  /** Descriptions that were present and deliberately excluded, for the log. */
+  ignored: DailySpendLine[];
+}
+
+/**
+ * Which billing lines are this runtime's voice calls.
+ *
+ * Found by Codex on PR #268: the request sent `filters: []` and the parser
+ * summed EVERY series, so a team that also runs text inference — grok-4, a
+ * batch job, anything — would have had that spend allocated across the day's
+ * phone calls. Those rows would then be marked reconciled at an inflated
+ * price, which is the one outcome this whole module exists to avoid.
+ *
+ * Matched on the description rather than by a server-side filter because the
+ * filter grammar is not documented and a filter we get subtly wrong returns
+ * a 400 that reads as an outage. Matching what came back is checkable.
+ *
+ * Overridable because the model name is a moving target — it is already
+ * per-lane settable through XAI_VOICE_MODEL.
+ */
+export function isVoiceBillingLine(description: string, needle = "grok-voice"): boolean {
+  return description.toLowerCase().includes(needle.toLowerCase());
 }
 
 /**
@@ -124,7 +148,11 @@ export interface DailySpend {
  * thing this module must never do is hand the reconciler a number that is
  * quietly too small.
  */
-export function sumDailyUsage(day: string, payload: unknown): BillingResult<DailySpend> {
+export function sumDailyUsage(
+  day: string,
+  payload: unknown,
+  voiceNeedle = "grok-voice",
+): BillingResult<DailySpend> {
   const root = payload as {
     timeSeries?: Array<{ groupLabels?: string[]; group?: string[]; dataPoints?: Array<{ values?: number[] }> }>;
     limitReached?: boolean;
@@ -145,9 +173,29 @@ export function sumDailyUsage(day: string, payload: unknown): BillingResult<Dail
     }
     lines.push({ description: label, usd });
   }
+  const voice = lines.filter((l) => isVoiceBillingLine(l.description, voiceNeedle));
+  const ignored = lines.filter((l) => !isVoiceBillingLine(l.description, voiceNeedle));
+
+  /**
+   * NO VOICE LINE IS NOT ZERO. If the day had calls but xAI reports no voice
+   * spend under a name we recognise, that is a model rename or a grouping
+   * change — and allocating $0 across the day would mark every call
+   * reconciled at nothing, silently. Refuse and name what DID come back.
+   */
+  if (voice.length === 0) {
+    return {
+      ok: false,
+      reason:
+        `xAI reported no billing line matching "${voiceNeedle}" for ${day}` +
+        (ignored.length
+          ? ` — the day's lines were: ${ignored.map((l) => l.description).join(", ")}`
+          : " — the day had no billing lines at all"),
+    };
+  }
+
   return {
     ok: true,
-    value: { day, totalUsd: lines.reduce((s, l) => s + l.usd, 0), lines },
+    value: { day, totalUsd: voice.reduce((s, l) => s + l.usd, 0), lines: voice, ignored },
   };
 }
 
@@ -199,6 +247,8 @@ export async function fetchDailySpend(
     fetchImpl?: FetchLike;
     timezone?: string;
     timeoutMs?: number;
+    /** Substring identifying the voice model on a billing line. */
+    voiceNeedle?: string;
   } = {},
 ): Promise<BillingResult<DailySpend>> {
   const setup = options.setup ?? readXaiBillingConfig();
@@ -220,5 +270,5 @@ export async function fetchDailySpend(
     options.timeoutMs ?? 15_000,
   );
   if (!res.ok) return res;
-  return sumDailyUsage(day, res.value);
+  return sumDailyUsage(day, res.value, options.voiceNeedle ?? "grok-voice");
 }

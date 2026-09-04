@@ -244,3 +244,59 @@ describe("no name, no ticket", () => {
     expect(d.file).toBe(true);
   });
 });
+
+/**
+ * THE CALLER CHASING A REQUEST THEY ALREADY MADE.
+ *
+ * Codex, PR #268 — the finding with a human cost. `check_open_tickets`
+ * succeeds, the agent reads the caller their existing VA number, no filing
+ * tool runs because none needed to, and the sweep would open a SECOND
+ * high-priority catch-all ticket for work already in progress.
+ *
+ * Measured size: on 2026-09-03 the transcript VA-proxy over-counted filings
+ * by 9 calls, every one of them exactly this — three from one number all
+ * quoting the same ticket. And every one of those callers was identified, so
+ * unlike the 47 the no-name rule stops, all 9 would have passed the gate.
+ */
+describe("a caller who rang to check on an existing request", () => {
+  const statusCheck = (over: Partial<SweepInput> = {}) =>
+    decideSweep(
+      call({
+        toolEvents: [
+          { name: "lookup_patient", succeeded: true },
+          { name: "check_open_tickets", succeeded: true },
+        ],
+        ...over,
+      }),
+    );
+
+  it("does not get a duplicate ticket opened for them at teardown", () => {
+    expect(statusCheck()).toEqual({ file: false, reason: "status-check" });
+  });
+
+  it("is skipped under its OWN reason, so the trade-off stays countable", () => {
+    // Not folded into "already-filed": that means a filing tool put a ticket
+    // on THIS call. Keeping them apart is what lets the operator see how
+    // often this fires and decide whether the trade is the right one.
+    const d = statusCheck();
+    expect(d.file).toBe(false);
+    if (!d.file) expect(d.reason).not.toBe("already-filed");
+  });
+
+  it("still sweeps when check_open_tickets was attempted and FAILED", () => {
+    // A failed lookup is not the caller being told anything, so their request
+    // is as unhandled as if the tool had never run.
+    const d = statusCheck({
+      toolEvents: [
+        { name: "lookup_patient", succeeded: true },
+        { name: "check_open_tickets", succeeded: false },
+      ],
+    });
+    expect(d.file).toBe(true);
+  });
+
+  it("still sweeps an ordinary call where no ticket tool ran at all", () => {
+    expect(decideSweep(call({ toolEvents: [{ name: "lookup_patient", succeeded: true }] })).file)
+      .toBe(true);
+  });
+});

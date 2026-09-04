@@ -81,20 +81,40 @@ async function defaultLookup(slug: string): Promise<string | undefined> {
 }
 
 /**
+ * How long a lookup may take before the call gives up on it.
+ *
+ * A BOUND, NOT A PREFERENCE. Codex found the failure on PR #268: a lookup
+ * that never settles — a wedged connection pool is the ordinary way — was
+ * cached as a pending promise for the life of the process. voiceRuntime's own
+ * deadline stops WAITING for the call row; it does not cancel this, so every
+ * later call on that lane awaited the same dead promise and never reached the
+ * insert at all. The calls still connect, but their row is absent while their
+ * tools run, and an absent row is not a cosmetic loss: flushAzulTimeline
+ * marks its events flushed whether or not a row was there to update, so the
+ * timeline is gone permanently.
+ *
+ * Well under the call-row deadline, because losing the join key costs a
+ * report and losing the row costs the call's whole timeline.
+ */
+export const AGENT_ID_LOOKUP_TIMEOUT_MS = 1_500;
+
+/**
  * The agents-table uuid for a lane slug, or undefined when there is no row.
  *
  * Never throws and never blocks a call: a caller who cannot be attributed is
  * still a caller to be answered, and the row is written either way — just
  * without the join key, exactly as it is today.
  *
- * A MISS IS NOT CACHED. If the slug is absent because someone has yet to add
- * the agents row, the next call must find it once they do, without a
- * redeploy — and the marker keeps printing until then, which makes it a live
- * counter of the gap rather than a single line lost in the boot log.
+ * A MISS IS NOT CACHED, and neither is a TIMEOUT. If the slug is absent
+ * because someone has yet to add the agents row, or because the database was
+ * briefly unreachable, the next call must find it once that changes, without
+ * a redeploy — and the marker keeps printing until then, which makes it a
+ * live counter of the gap rather than a single line lost in the boot log.
  */
 export async function resolveAgentId(
   slug: string,
   lookup: AgentIdLookup = defaultLookup,
+  timeoutMs: number = AGENT_ID_LOOKUP_TIMEOUT_MS,
 ): Promise<string | undefined> {
   const cached = cache.get(slug);
   if (cached) return cached;
@@ -109,7 +129,36 @@ export async function resolveAgentId(
   })();
   cache.set(slug, pending);
 
-  const resolved = await pending;
+  // The race is what makes the timeout real. Awaiting `pending` alone would
+  // inherit the hang the bound exists to prevent.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = Symbol("timeout");
+  const raced = await Promise.race([
+    pending,
+    new Promise<typeof timedOut>((resolve) => {
+      timer = setTimeout(() => resolve(timedOut), timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+
+  if (raced === timedOut) {
+    // Evict, so the NEXT call retries instead of inheriting this one's hang.
+    // The abandoned promise is left to settle or not on its own; it holds
+    // nothing but a row id and cannot wedge anything once it is unreferenced.
+    if (cache.get(slug) === pending) cache.delete(slug);
+    // Swallow a later rejection on the orphan — nothing is awaiting it now,
+    // and an unhandled rejection would take the process down.
+    void pending.catch(() => undefined);
+    console.info(
+      `[AGENT ID] lookup for "${slug}" exceeded ${timeoutMs}ms — this call's row is written ` +
+        `without agent_id and the next call retries; the lane is missing from the Observatory ` +
+        `and every cost and quality report until it succeeds`,
+    );
+    return undefined;
+  }
+
+  const resolved = raced;
   if (resolved === undefined) cache.delete(slug);
   if (resolved === undefined || !announced.has(slug)) {
     if (resolved !== undefined) announced.add(slug);

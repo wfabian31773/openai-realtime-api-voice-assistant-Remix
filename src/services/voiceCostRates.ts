@@ -40,13 +40,27 @@ export interface VoiceCallPricingInput {
   existingOpenaiCostCents?: number | null;
   durationSeconds: number;
   twilioCostCents: number;
+  /**
+   * Set when `grokCostReconciler` has already priced this call from xAI's
+   * own bill. THE ESTIMATE MUST NOT OVERWRITE THE BILL.
+   *
+   * Found by Codex on PR #268. Every other writer of these columns — the
+   * Twilio cost retry, the suspicious-duration repair, the status callback —
+   * calls this function again after the call is over, and the Grok branch
+   * below unconditionally returned duration x rate. On an early-UTC start
+   * the four-hour Twilio retry and the previous-day reconciler run together,
+   * so a reconciled row could be overwritten with the estimate WHILE KEEPING
+   * `cost_reconciled_at` set: a wrong number wearing the badge of an
+   * authoritative one, which is worse than never having reconciled at all.
+   */
+  costReconciledAt?: Date | string | null;
 }
 
 export interface VoiceCallPricing {
   /** Undefined means "leave the stored value alone". */
   providerCostCents?: number;
   totalCostCents: number;
-  basis: "grok_duration" | "openai_duration" | "openai_tokens";
+  basis: "grok_duration" | "openai_duration" | "openai_tokens" | "reconciled";
 }
 
 /**
@@ -60,6 +74,16 @@ export interface VoiceCallPricing {
  *   3. Tokens present  -> already authoritative; never clobber it.
  */
 export function priceVoiceCall(input: VoiceCallPricingInput): VoiceCallPricing {
+  // FIRST, ahead of everything: a reconciled row is finished. Its provider
+  // cost came from xAI's invoice and no estimate may replace it. The total
+  // is still rebuilt, because Twilio's own cost legitimately arrives later
+  // and belongs in it.
+  if (input.costReconciledAt) {
+    return {
+      totalCostCents: input.twilioCostCents + (input.existingOpenaiCostCents ?? 0),
+      basis: "reconciled",
+    };
+  }
   if (isGrokServedCall(input)) {
     const providerCostCents = Math.ceil(input.durationSeconds * GROK_COST_CENTS_PER_SECOND);
     return {

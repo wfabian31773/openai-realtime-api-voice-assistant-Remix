@@ -1995,6 +1995,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               voiceProvider: (call as { voiceProvider?: string | null }).voiceProvider,
               inputAudioTokens: call.inputAudioTokens,
               existingOpenaiCostCents: call.openaiCostCents,
+              costReconciledAt: (call as { costReconciledAt?: Date | null }).costReconciledAt,
               durationSeconds: finalDuration,
               twilioCostCents: finalTwilioCostCents,
             });
@@ -3288,6 +3289,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               voiceProvider: call.voiceProvider,
               inputAudioTokens: call.inputAudioTokens,
               existingOpenaiCostCents: call.openaiCostCents,
+              costReconciledAt: (call as { costReconciledAt?: Date | null }).costReconciledAt,
               durationSeconds: finalDuration,
               twilioCostCents: twilioCostCents ?? call.twilioCostCents ?? 0,
             });
@@ -3348,6 +3350,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           voiceProvider: call.voiceProvider,
           inputAudioTokens: null,
           existingOpenaiCostCents: null,
+          costReconciledAt: (call as { costReconciledAt?: Date | null }).costReconciledAt,
           durationSeconds: call.duration,
           twilioCostCents: 0,
         });

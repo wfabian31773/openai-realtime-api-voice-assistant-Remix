@@ -61,6 +61,39 @@ describe("resolving a lane slug to its agents-table id", () => {
     expect(lookup).toHaveBeenCalledTimes(2);
   });
 
+  /**
+   * THE HANG (Codex, PR #268). A lookup that never settles was cached as a
+   * pending promise forever, so every later call on the lane awaited it and
+   * never reached the call-row insert — and an absent row loses the call's
+   * whole timeline, because flushAzulTimeline marks its events flushed
+   * whether or not a row was there to update.
+   */
+  it("gives up on a lookup that never settles, instead of hanging every later call", async () => {
+    const never = () => new Promise<string | undefined>(() => {});
+    const started = Date.now();
+    await expect(resolveAgentId("wedged", never, 20)).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("EVICTS the timed-out lookup so the next call retries rather than inheriting it", async () => {
+    const settle: { fn: ((v: string | undefined) => void) | null } = { fn: null };
+    const hangs = () => new Promise<string | undefined>((r) => { settle.fn = r; });
+    expect(await resolveAgentId("wedged", hangs, 20)).toBeUndefined();
+    // The pool recovers; the very next call must succeed, with no redeploy.
+    expect(await resolveAgentId("wedged", async () => OPTICAL_ID, 20)).toBe(OPTICAL_ID);
+    settle.fn?.(undefined);
+  });
+
+  it("does not let the abandoned lookup's later rejection crash the process", async () => {
+    const reject: { fn: ((e: Error) => void) | null } = { fn: null };
+    const hangs = () => new Promise<string | undefined>((_r, rj) => { reject.fn = rj; });
+    await resolveAgentId("wedged", hangs, 20);
+    reject.fn?.(new Error("pool died after we stopped waiting"));
+    // If the orphan were unhandled this turns into an unhandledRejection.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(true).toBe(true);
+  });
+
   it("survives a database that is down — the call still gets logged", async () => {
     const boom = async () => {
       throw new Error("connection refused");

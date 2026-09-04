@@ -83,18 +83,64 @@ describe("the request xAI actually accepts", () => {
 });
 
 describe("reading a day's spend out of the response", () => {
-  it("sums every point of every series", () => {
+  it("sums every point of the VOICE series", () => {
     const out = sumDailyUsage("2026-09-03", {
       timeSeries: [
         { groupLabels: ["grok-voice-think-fast-2.0"], dataPoints: [{ values: [30.5] }, { values: [3.18] }] },
-        { groupLabels: ["grok-4"], dataPoints: [{ values: [1.0] }] },
+      ],
+    });
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.value.totalUsd).toBeCloseTo(33.68, 6);
+  });
+
+  /**
+   * THE ONE THAT MATTERS (Codex, PR #268). The team's text inference is not
+   * this runtime's phone calls. Summing it would allocate someone else's
+   * grok-4 batch job across the day's callers and mark every one of those
+   * rows reconciled at an inflated price — an authoritative-looking wrong
+   * number, which is strictly worse than the honest estimate it replaced.
+   */
+  it("EXCLUDES non-voice spend rather than allocating it across phone calls", () => {
+    const out = sumDailyUsage("2026-09-03", {
+      timeSeries: [
+        { groupLabels: ["grok-voice-think-fast-2.0"], dataPoints: [{ values: [33.68] }] },
+        { groupLabels: ["grok-4"], dataPoints: [{ values: [420.0] }] },
+        { groupLabels: ["grok-4-fast-reasoning"], dataPoints: [{ values: [12.5] }] },
       ],
     });
     expect(out.ok).toBe(true);
     if (out.ok) {
-      expect(out.value.totalUsd).toBeCloseTo(34.68, 6);
-      expect(out.value.lines).toHaveLength(2);
+      expect(out.value.totalUsd).toBeCloseTo(33.68, 6);
+      expect(out.value.lines).toHaveLength(1);
+      // What was excluded is reported, not silently dropped.
+      expect(out.value.ignored.map((l) => l.description)).toEqual(["grok-4", "grok-4-fast-reasoning"]);
     }
+  });
+
+  /**
+   * A rename must not read as a free day. Allocating $0 would mark every
+   * call reconciled at nothing, silently — the exact class of failure this
+   * module is built to refuse.
+   */
+  it("REFUSES when no line matches the voice model, and names what did come back", () => {
+    const out = sumDailyUsage("2026-09-03", {
+      timeSeries: [{ groupLabels: ["grok-4"], dataPoints: [{ values: [9.0] }] }],
+    });
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.reason).toContain("grok-voice");
+      expect(out.reason).toContain("grok-4");
+    }
+  });
+
+  it("takes a different needle when the model is renamed", () => {
+    const out = sumDailyUsage(
+      "2026-09-03",
+      { timeSeries: [{ groupLabels: ["grok-speech-3"], dataPoints: [{ values: [5] }] }] },
+      "grok-speech",
+    );
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.value.totalUsd).toBe(5);
   });
 
   /**
@@ -117,7 +163,9 @@ describe("reading a day's spend out of the response", () => {
 
   it("ignores a non-numeric value rather than turning the total into NaN", () => {
     const out = sumDailyUsage("2026-09-03", {
-      timeSeries: [{ groupLabels: ["m"], dataPoints: [{ values: [2] }, { values: [null as any] }] }],
+      timeSeries: [
+        { groupLabels: ["grok-voice-2"], dataPoints: [{ values: [2] }, { values: [null as any] }] },
+      ],
     });
     expect(out.ok).toBe(true);
     if (out.ok) expect(out.value.totalUsd).toBe(2);
@@ -125,7 +173,10 @@ describe("reading a day's spend out of the response", () => {
 
   it("labels an ungrouped series rather than dropping it", () => {
     const out = sumDailyUsage("2026-09-03", { timeSeries: [{ dataPoints: [{ values: [5] }] }] });
-    if (out.ok) expect(out.value.lines[0].description).toBe("(ungrouped)");
+    // Ungrouped is not identifiable as voice, so it is refused, not summed —
+    // and the reason names it so the grouping can be fixed.
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.reason).toContain("(ungrouped)");
   });
 });
 

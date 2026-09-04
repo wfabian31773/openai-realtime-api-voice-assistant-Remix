@@ -106,12 +106,14 @@ export async function runRequestSweep(
       transcript: record.transcript,
       toolEvents: record.toolEvents.map((e) => ({ name: e.name, succeeded: e.succeeded })),
       /**
-       * The tool events are the only evidence used. `check_open_tickets`
-       * finding an OLD open ticket is not this request being handled — a
-       * patient can have a ticket from last week and a new problem today — and
-       * the `call-<sid>` idempotency key already collapses a genuine race with
-       * the agent's own filing. So this stays false and `alreadyFiledByTool`
-       * is the gate.
+       * Still false, and still for the reason below — but the evidence that
+       * DOES matter now travels in `toolEvents`, where `decideSweep` reads a
+       * successful `check_open_tickets` and skips as "status-check".
+       *
+       * This flag means "a filing tool put a ticket on this call". A patient
+       * can have a ticket from last week and a new problem today, so an old
+       * ticket existing is not that, and the `call-<sid>` idempotency key
+       * already collapses a genuine race with the agent's own filing.
        */
       ticketAlreadyFiled: false,
       ...(identity

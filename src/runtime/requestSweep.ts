@@ -103,6 +103,7 @@ export type SweepSkipReason =
   | "already-filed"
   | "caller-said-nothing"
   | "no-name"
+  | "status-check"
   | "no-department-catch-all";
 
 /**
@@ -166,6 +167,33 @@ export function decideSweep(input: SweepInput): SweepDecision {
   }
   if (!callerSaidSomething(input.transcript)) {
     return { file: false, reason: "caller-said-nothing" };
+  }
+  /**
+   * THE CALLER WHO RANG TO CHASE A REQUEST THEY ALREADY MADE.
+   *
+   * Codex found this on PR #268 and it is the finding with a human cost:
+   * `check_open_tickets` succeeds, the agent correctly reads the caller
+   * their existing VA number, no FILING tool runs — because none needed to —
+   * and the sweep would then open a second, high-priority, catch-all ticket
+   * for a request the practice is already working.
+   *
+   * It is not hypothetical and the size is known. On 2026-09-03 the
+   * transcript `VA-#####` proxy over-counted filings by 9 calls, and every
+   * one of those was exactly this: a caller chasing an existing request,
+   * three of them from the same number quoting the same ticket. Those
+   * callers are all IDENTIFIED, so unlike the 47 the no-name rule stops,
+   * every one would have passed the gate below and produced a duplicate.
+   *
+   * So the tool succeeding is treated as the request being handled. The
+   * cost of the other reading — a caller who checks a status AND raises
+   * something new, whose new thing no filing tool captured — is real but
+   * smaller, and it is countable under this reason rather than invisible.
+   * Which way that trade should fall is the operator's call; this errs
+   * against inventing work for the staff, and makes the number visible so
+   * he can settle it with evidence rather than with a guess.
+   */
+  if (input.toolEvents.some((e) => e.name === "check_open_tickets" && e.succeeded)) {
+    return { file: false, reason: "status-check" };
   }
   if (!otherReasonFor(departmentId)) {
     return { file: false, reason: "no-department-catch-all" };
