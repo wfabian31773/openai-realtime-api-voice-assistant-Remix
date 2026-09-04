@@ -465,3 +465,105 @@ full detail per commit. In short:
 4. **answering-service took zero calls on 09-01** through 13:22 PT, after 38
    the day before and a steady 18–58 every weekday. Weekends are zero for it;
    this was not a weekend.
+
+---
+
+# 2026-09-03 — the runtime cutover, and the first day of real evidence
+
+Three queue lanes moved off the OpenAI SIP core onto the Grok Media Streams
+runtime: optical 15:24:58, surgery 19:43:57, tech 19:51:10 UTC. Records stayed
+on the old core and is therefore a same-day control, which is the only reason
+any of the numbers below can be trusted.
+
+## The headline: it is a wash, and that is the right result
+
+| lane | old core | Grok runtime |
+|---|---|---|
+| tech | 49/73 = 67.1% | 46/66 = **69.7%** |
+| surgery | 22/44 = 50.0% | 18/32 = **56.3%** |
+| optical | (no arm — cut over at 15:24) | 28/56 = **50.0%** |
+| records | 14/29 = 48.3% | *did not move* |
+
+Neither difference is significant at these n. **A pipeline swap that changes
+nothing about outcomes is a successful pipeline swap** — the ear, brain and
+mouth were replaced end to end and the patients could not tell. What the
+runtime buys is not a better number today; it is that everything below is now
+fixable by us rather than by a vendor.
+
+Two real differences, on the same calls: turn detection is better (tech callers
+say 353 characters against 333, in fewer transcript lines, at identical
+duration), and the agent talks in about twice as many short lines.
+
+## The finding that mattered
+
+**A refusal the model cannot diagnose is a refusal it repeats.**
+
+| gate hit | calls | still filed |
+|---|---|---|
+| `date_of_birth` | 23 | **0** |
+| optical `location` | 11 | 9 |
+
+Two refusals in one codebase. One survivable, one terminal, and the difference
+is not severity — it is whether anything the caller says can clear the gate. It
+could not: the model was omitting `date_of_birth` from the tool call entirely,
+heard "I did not catch that date of birth", said that to the caller, the caller
+repeated the date, and the model resent the same argument-less payload. An
+unwinnable loop, dressed as a caller problem.
+
+Most of the day was spent fixing the parser — separators, whole sentences,
+two-digit centuries, Spanish months. Every one of those was a real bug. **None
+of them was this one.** What settled it was `dobShape`: a PHI-free shape of what
+actually arrived (digits → `#`, letters → `a`), which read `"(none)"` on five
+refusals out of five within twenty minutes of going live.
+
+## Where the day's requests went
+
+53 substantive queue calls produced no ticket; 2 correctly so. The other 51:
+23 the date-of-birth gate, 12 asked for a human and hung up, 7 where no tool
+ever ran, 9 other. The date-of-birth calls average 2m49 — the longest in the
+set. Those callers gave everything asked of them and were failed at the end.
+
+## Identity is the root cause under most of it
+
+Caller-ID pre-context produced a usable name on **zero of 143** substantive
+queue calls, so nobody heard "Am I speaking with…?" all day. Of 132 distinct
+callers, **2** are in `si_persons` — the 3,774-row table pre-context reads — and
+**100** are in `patients_master`, which has 915,843. `lookup_patient` separately
+reads the Operations Hub appointment book rather than the mirror.
+
+That single fact explains the shape of the losses: a certain identity match is
+what lets the filing handler fall back to a verified date of birth, so calls
+with one mostly filed and calls without one mostly did not.
+
+## Shipped, and needing a pull before any of it counts
+
+- `MissingFields.fix` — a channel that tells the model what IT got wrong,
+  separate from `message`, which is what the agent says.
+- The teardown request sweep, wired into `voiceRuntime` after the call_logs
+  write. **It recovers only 6 of the 53 losses**; 47 skip on "no name, no
+  ticket", because the calls that get lost are exactly the calls where
+  identification failed.
+- "Lead the ask" — the operator's ruling, in the tool schemas so all four lanes
+  move together: last name, then "your date of birth, starting with the month,
+  then the day, then the year".
+- Greeting-already-played, appended by the runtime rather than the prompts.
+- Records trimmed 1,907 → 1,679 tokens, with ceilings added for optical and
+  records, which had never had one.
+
+## Open, and Wayne's to settle
+
+1. **"No name, no ticket" costs 47 of 53 recoveries.** The ruling was about what
+   identity goes on a swept ticket. The calls it blocks are the ones where we
+   never identified anyone — which is the whole population the sweep exists for.
+2. **Point pre-context at `patients_master` instead of `si_persons`** (2 → 100
+   of 132 callers), and `lookup_patient` at the mirror before the schedule. Both
+   are ticket-path changes and need a before/after number. Caveat that must
+   travel with them: 75 of those 100 numbers resolve to more than one person, so
+   this buys a name to CONFIRM, never an identity.
+3. **Records is still on the old core** and visibly missing the rulings shipped
+   to the runtime lanes — it used the "someone will become available" wording
+   #265 forbids, at 23:54.
+4. **Turkish months** — one evidenced call, and the table's own rule is evidence
+   first. Add now on one call, or wait?
+5. **#53 medical-safety wording** for optical and records. Needs clinical
+   language from Wayne; not to be invented.

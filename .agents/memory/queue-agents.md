@@ -566,3 +566,78 @@ The `spoken` side is deliberately far broader than the `claim` side, matched on
 STEMS: "it stings", "burning", "cloudy", "me duele", "veo borroso" all count.
 The first version used `\bstinging\b` and would have called "it stings so much"
 an invented symptom — the exact false accusation this must never make.
+
+## The first full day on the Grok runtime — 2026-09-03
+
+Read this with the line-status table in CLAUDE.md. Cutovers: optical 15:24:58,
+surgery 19:43:57, tech 19:51:10 UTC. **Records did not move**, which is what
+makes the comparison worth anything — it is a same-day control on the old core.
+
+### The cutover did not change the filing rate
+
+tech 67.1% → 69.7% (n=73 vs 66). surgery 50.0% → 56.3% (n=44 vs 32). Neither is
+significant. **The runtime matches the old core.** Anyone claiming a win or a
+regression from a single lane's afternoon is reading noise; the control is what
+tells you the day itself was ordinary.
+
+What did move: turn detection got better (callers say more, in fewer fragments,
+at the same duration) and the agent talks in about twice as many short lines.
+
+### Where the losses actually are
+
+53 substantive queue calls produced no ticket. Two of those were "what time do
+you close?" and correctly needed none. The other 51:
+
+| cause | calls | avg length |
+|---|---|---|
+| the date-of-birth gate | 23 | 2m49 |
+| asked for a human, then hung up | 12 | 1m12 |
+| no tool ever ran | 7 | 1m09 |
+| other | 9 | 1m50 |
+
+The date-of-birth calls are the longest, which is the cruel part: these are
+people who engaged fully, gave everything asked, and were failed at the last
+step. See `measurement-traps.md` for why that gate was terminal.
+
+### Three things about the tooling this surfaced
+
+1. **`resolve_location` was called with NO argument 34 times across 16 calls**,
+   because its description named a moment ("call it before you file a ticket")
+   and never a precondition. Only 5 of those 16 calls filed — the worst
+   recovery of any gate. A tool description must say when NOT to call it.
+2. **The repeated-failure ceiling keys on IDENTICAL arguments**, so a model that
+   varies them slightly gets more than three bites; observed 4–6 per call. It
+   did stop the 110-refusal disaster (one optical call, 16:00) — refusals per
+   call went 110 → 12 → 1–6 once it landed.
+3. **Ceiling stops are invisible in `tool_timeline`.** The ceiling
+   short-circuits before dispatch, so `wrapWithTelemetry` never runs and no
+   event is written. Console-only, uncountable from SQL. A safety mechanism
+   whose activations cannot be counted is one you cannot tune.
+
+### Identity is the root, and it is upstream of the agents
+
+Pre-context produced a usable name on **zero of 143** substantive queue calls,
+so no caller heard "Am I speaking with…?" all day. Of 132 distinct callers, 2
+are in `si_persons` (the 3,774-row table pre-context reads) and 100 are in
+`patients_master` (915,843). `lookup_patient` meanwhile reads the Operations Hub
+appointment book, not the mirror — `scheduleLookupService.ts` line 2 is
+`import { schedule }`.
+
+Outcome by what the lookup managed:
+
+| lookup_patient | calls | filed | DOB refusals |
+|---|---|---|---|
+| certain match | 69 | 39 | 2 |
+| no match | 53 | 24 | 17 |
+| matched but NOT certain | 4 | **0** | 2 |
+| never ran | 17 | **0** | 0 |
+
+A certain match is worth roughly twelve points of filing rate, because it is
+what lets the handler fall back to the verified date of birth. **Matched but
+uncertain files nothing, ever.**
+
+The caution that survives all of this: even reading the right table, 75 of 100
+phone numbers resolve to more than one person (average 2.2, and Wayne's own
+number resolves to eight). Pointing pre-context at `patients_master` buys a name
+to CONFIRM. It does not buy an identity, and treating it as one is the failure
+standing instruction 6 exists to prevent.
