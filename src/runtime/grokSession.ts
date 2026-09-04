@@ -119,9 +119,54 @@ export interface GrokVoiceSessionHandlers {
 /** Server-VAD tuning proven on live calls in the sibling repo: 0.85
  * threshold against phone-line noise, 500ms of silence to end a caller
  * turn, 333ms of pre-speech padding so first syllables are not clipped. */
+/**
+ * HOW HARD THE CALLER HAS TO TRY BEFORE WE HEAR THEM.
+ *
+ * `threshold` was 0.85 — xAI's documented default, and the top of a 0.1–0.9
+ * range. It is the single most consequential number on this transport and it
+ * had never been measured against anything.
+ *
+ * MEASURED 2026-09-03, the cutover day, on the two lanes that ran BOTH
+ * pipelines. "Barely heard" = a call lasting 30 seconds or more on which the
+ * caller was transcribed at most ONCE:
+ *
+ *   lane     old core (OpenAI)    this runtime (0.85)
+ *   surgery   6/46 = 13.0%          13/40 = 32.5%
+ *   tech      7/75 =  9.3%          18/76 = 23.7%
+ *
+ * Replicated independently on both lanes, roughly tripling. Two calls that day
+ * ran 132 and 155 seconds with the greeting played and the caller never
+ * audible at all.
+ *
+ * And it is BIMODAL, which is what identifies the cause. When the VAD does
+ * fire, this runtime captures MORE than the old core, not less — tech callers
+ * average 348 characters against 324, in fewer and longer segments. So speech
+ * is not being lost once it starts; segments are failing to START. That is a
+ * detection threshold set too high, not a transcription problem.
+ *
+ * 0.6 is a judgement, not a measurement — the measurement I have says "too
+ * high", not "exactly this". It is env-tunable precisely because the number
+ * that settles it is tomorrow's, not tonight's, and it must be movable without
+ * a deploy.
+ *
+ * THE RISK OF GOING TOO FAR THE OTHER WAY is a false trigger: the agent stops
+ * talking because of a cough, a television, a second voice in the room. That
+ * shows up as barge-ins, not as silence, so watch both numbers together:
+ *
+ *   -- barely-heard, the number this is meant to move DOWN
+ *   SELECT count(*) FILTER (WHERE lines <= 1)::numeric / count(*)
+ *   FROM (SELECT array_length(string_to_array(transcript, E'\nCALLER:'),1)-1 AS lines
+ *         FROM call_logs WHERE voice_provider='grok' AND duration >= 30
+ *           AND created_at >= '<after the deploy>') t;
+ *   -- and interruptions per call, which must NOT climb in exchange.
+ */
+const VAD_THRESHOLD = Number(process.env.RUNTIME_VAD_THRESHOLD ?? 0.6);
+
 const TURN_DETECTION = {
   type: "server_vad" as const,
-  threshold: 0.85,
+  // Clamped to the documented range: a typo in an env var must not silently
+  // disable turn detection on every live call.
+  threshold: Number.isFinite(VAD_THRESHOLD) ? Math.min(0.9, Math.max(0.1, VAD_THRESHOLD)) : 0.6,
   silence_duration_ms: 500,
   prefix_padding_ms: 333,
 };
