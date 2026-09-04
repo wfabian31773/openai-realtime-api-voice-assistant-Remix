@@ -28,8 +28,14 @@ function record(over: Partial<VoiceCallRecord> = {}): VoiceCallRecord {
   };
 }
 
-function tool(name: string, succeeded: boolean): ToolEvent {
-  return { name, ok: true, succeeded, atMs: 100 };
+function tool(name: string, succeeded: boolean, foundOpenTicket?: boolean): ToolEvent {
+  return {
+    name,
+    ok: true,
+    succeeded,
+    atMs: 100,
+    ...(foundOpenTicket === undefined ? {} : { foundOpenTicket }),
+  };
 }
 
 function filer(): SweepFiler & { calls: unknown[] } {
@@ -82,6 +88,42 @@ describe("recovering a request the agent did not file", () => {
     const file = filer();
     const out = await runRequestSweep(
       record({ toolEvents: [tool("lookup_patient", true), tool("file_tech_ticket", false)] }),
+      file,
+    );
+    expect(out.filed).toBe(true);
+  });
+
+  /**
+   * THE RUNNER HAS TO PASS THE FINDING THROUGH, not just the verdict.
+   *
+   * decideSweep's own tests prove the rule; these prove the mapping, because
+   * a runner that dropped `foundOpenTicket` would silently restore the round-1
+   * regression — the sweep would go back to firing on callers whose request
+   * the agent already handled, and nothing would look wrong (Codex, PR #268
+   * rounds 1 and 2).
+   */
+  it("leaves a caller who was READ their existing ticket alone", async () => {
+    const file = filer();
+    const out = await runRequestSweep(
+      record({
+        toolEvents: [tool("lookup_patient", true), tool("check_open_tickets", true, true)],
+      }),
+      file,
+    );
+    expect(out).toEqual({ filed: false, reason: "status-check" });
+    expect(file.calls).toHaveLength(0);
+  });
+
+  it("STILL recovers the ordinary call where the check found nothing", async () => {
+    const file = filer();
+    const out = await runRequestSweep(
+      record({
+        toolEvents: [
+          tool("lookup_patient", true),
+          tool("check_open_tickets", true, false),
+          tool("file_tech_ticket", false),
+        ],
+      }),
       file,
     );
     expect(out.filed).toBe(true);
