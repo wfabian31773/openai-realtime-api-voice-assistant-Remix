@@ -171,9 +171,17 @@ describe('human-request escalation', () => {
     const d = conversationLoopGuard.onCallerLine(callId, 'answering-service', 'Representative.');
     expect(d?.kind).toBe('human_request');
     expect(d?.text).toMatch(/CANNOT transfer calls/);
-    expect(d?.text).toMatch(/take a message and have the team contact you/);
-    expect(d?.text).toMatch(/never promise anyone will pick up/);
+    expect(d?.text).toMatch(/take the message/);
+    expect(d?.text).toMatch(/never promise that anyone will pick up/);
     expect(d?.text).toMatch(/Create the ticket NOW/); // the exit still rides along
+    // The directive used to dictate a sentence here — "take a message and have
+    // the team contact you as soon as they become available" — which records,
+    // optical, surgery and tech all forbid, and which overrode their prompts
+    // because answeringServiceAgent tells the model to follow a SERVER STATE
+    // CHECK exactly. It now defers to whatever the lane's own prompt rules.
+    // See src/services/noTransferDirective.test.ts for the invariant.
+    expect(d?.text).toMatch(/wording your own instructions give you/);
+    expect(d?.text).not.toMatch(/currently busy|become available/);
     conversationLoopGuard.releaseCall(callId);
   });
 
