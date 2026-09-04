@@ -161,6 +161,33 @@ describe("what it refuses", () => {
     expect(out.reason).toContain("deadlock");
   });
 
+  /**
+   * xAI billed for the day but every row has a null or zero duration. The
+   * allocation correctly hands out zeros — there is nothing to divide by —
+   * and writing them would mark every row reconciled and NOT-estimated at
+   * $0 against a positive invoice, then report success. Zeros wearing an
+   * authoritative badge are the worst thing this module can produce
+   * (Codex, PR #268 round 2).
+   */
+  it("REFUSES a positive bill with no billable seconds, rather than writing zeros", async () => {
+    const p = ports([
+      { callSid: "CA1", durationSeconds: 0, estimatedCents: 0 },
+      { callSid: "CA2", durationSeconds: 0, estimatedCents: 0 },
+    ]);
+    const out = await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(33.68) });
+    expect(out.reconciled).toBe(false);
+    expect(out.reason).toContain("no billable seconds");
+    expect(p.written).toEqual([]);
+  });
+
+  it("still reconciles a genuinely free day", async () => {
+    const p = ports([{ callSid: "CA1", durationSeconds: 0, estimatedCents: 0 }]);
+    const out = await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(0) });
+    // Nothing billed and nothing to bill for is consistent, not an error.
+    expect(out.reconciled).toBe(true);
+    expect(p.written.reduce((s, c) => s + c.costCents, 0)).toBe(0);
+  });
+
   it("is a no-op on a day the runtime served nothing", async () => {
     const p = ports([]);
     const out = await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(5) });

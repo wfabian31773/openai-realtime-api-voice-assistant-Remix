@@ -275,6 +275,18 @@ export interface ToolEvent {
    * it just was not written down.
    */
   succeeded: boolean;
+  /**
+   * The tool reported an EXISTING open ticket for this caller.
+   *
+   * Only `check_open_tickets` sets it, and it exists because `succeeded` is
+   * not the same question. That tool answers `success: true` with
+   * `has_open_tickets: false` when the caller has nothing open — so
+   * "it ran and worked" says nothing about whether anything was found, and
+   * every queue prompt tells the agent to run it before filing. Reading
+   * `succeeded` alone would therefore treat an ORDINARY call as a status
+   * check (Codex, PR #268 round 2).
+   */
+  foundOpenTicket?: boolean;
   /** ms from call start, so a timeline is readable without timestamps. */
   atMs: number;
   error?: string;
@@ -1422,10 +1434,21 @@ export class VoiceCallBridge {
           typeof output === "object" &&
           (output as Record<string, unknown>).success === false
         );
+      // What the tool's own envelope said it FOUND, as distinct from whether
+      // it worked. Read generically off the declared field rather than by
+      // special-casing a tool name here, so the transport keeps knowing
+      // nothing about any particular tool's meaning.
+      const declaredOpenTicket =
+        output !== null && typeof output === "object"
+          ? (output as Record<string, unknown>).has_open_tickets
+          : undefined;
       this.toolEvents.push({
         name,
         ok: result.ok,
         succeeded: toolSucceeded,
+        ...(typeof declaredOpenTicket === "boolean"
+          ? { foundOpenTicket: declaredOpenTicket }
+          : {}),
         atMs: Date.now() - this.startedAtMs,
         ...(result.error ? { error: result.error } : {}),
       });

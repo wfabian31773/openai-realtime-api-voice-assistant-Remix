@@ -59,6 +59,8 @@ const DEPARTMENT_BY_SLUG: Record<string, number> = {
 
 export interface SweepToolEvent {
   name: string;
+  /** `check_open_tickets` found an existing open ticket. See ToolEvent. */
+  foundOpenTicket?: boolean;
   /**
    * The tool DID ITS JOB — not merely that it ran.
    *
@@ -184,7 +186,15 @@ export function decideSweep(input: SweepInput): SweepDecision {
    * callers are all IDENTIFIED, so unlike the 47 the no-name rule stops,
    * every one would have passed the gate below and produced a duplicate.
    *
-   * So the tool succeeding is treated as the request being handled. The
+   * IT IS NOT ENOUGH THAT THE TOOL SUCCEEDED. `sharedPatientTools` answers
+   * `success: true` with `has_open_tickets: false` when the caller has
+   * nothing open, and every queue prompt tells the agent to run this tool
+   * before filing — so keying on `succeeded` alone would have skipped the
+   * sweep on the ORDINARY failure path it exists for, which is a worse bug
+   * than the duplicate it was fixing (Codex, PR #268 round 2). The skip
+   * requires the tool to have actually FOUND something.
+   *
+   * So a matched existing ticket is treated as the request being handled. The
    * cost of the other reading — a caller who checks a status AND raises
    * something new, whose new thing no filing tool captured — is real but
    * smaller, and it is countable under this reason rather than invisible.
@@ -192,7 +202,11 @@ export function decideSweep(input: SweepInput): SweepDecision {
    * against inventing work for the staff, and makes the number visible so
    * he can settle it with evidence rather than with a guess.
    */
-  if (input.toolEvents.some((e) => e.name === "check_open_tickets" && e.succeeded)) {
+  if (
+    input.toolEvents.some(
+      (e) => e.name === "check_open_tickets" && e.succeeded && e.foundOpenTicket === true,
+    )
+  ) {
     return { file: false, reason: "status-check" };
   }
   if (!otherReasonFor(departmentId)) {

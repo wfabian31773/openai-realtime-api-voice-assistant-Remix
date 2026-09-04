@@ -105,6 +105,31 @@ export async function reconcileGrokCostsForDay(
   const estimatedTotalCents = calls.reduce((s, c) => s + (c.estimatedCents || 0), 0);
 
   const allocation = allocateDailyCost(calls, xaiTotalCents);
+
+  /**
+   * xAI CHARGED FOR A DAY WITH NO BILLABLE SECONDS.
+   *
+   * The allocation hands every call zero — correctly, there is nothing to
+   * divide by — but writing that would mark every row reconciled and
+   * NOT-estimated at $0 while xAI's invoice says otherwise, and report
+   * success doing it. Zeros that claim to be authoritative are the worst
+   * output this module can produce, so an inconsistency between the bill and
+   * the durations is a reconciliation FAILURE, not a result (Codex, PR #268
+   * round 2).
+   */
+  if (xaiTotalCents > 0 && allocation.totalSeconds <= 0) {
+    return {
+      day,
+      reconciled: false,
+      reason:
+        `xAI billed $${(xaiTotalCents / 100).toFixed(2)} for ${day} but the ${calls.length} ` +
+        `runtime call(s) on record carry no billable seconds — durations are missing, so the ` +
+        `charge cannot be attributed and nothing was written`,
+      xaiTotalCents,
+      estimatedTotalCents,
+    };
+  }
+
   console.info(rateDriftMarker(day, allocation.derivedCentsPerSecond, GROK_COST_CENTS_PER_SECOND));
 
   let callsUpdated: number;

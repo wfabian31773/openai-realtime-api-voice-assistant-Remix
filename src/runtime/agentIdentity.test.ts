@@ -94,6 +94,24 @@ describe("resolving a lane slug to its agents-table id", () => {
     expect(true).toBe(true);
   });
 
+  /**
+   * THE SECOND CALLER (Codex, PR #268 round 2). Round 1 bounded the caller
+   * that STARTED the lookup and evicted on timeout — but a call arriving
+   * while it was still in flight got the cached promise raw, with no bound,
+   * so it inherited the exact hang the bound exists to prevent and the first
+   * caller's eviction did nothing for it.
+   */
+  it("bounds a caller that JOINS a lookup already in flight", async () => {
+    const never = () => new Promise<string | undefined>(() => {});
+    // First caller starts it and gives up.
+    const first = resolveAgentId("wedged", never, 30);
+    // Second caller joins the same in-flight lookup.
+    const second = resolveAgentId("wedged", never, 30);
+    const started = Date.now();
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it("survives a database that is down — the call still gets logged", async () => {
     const boom = async () => {
       throw new Error("connection refused");

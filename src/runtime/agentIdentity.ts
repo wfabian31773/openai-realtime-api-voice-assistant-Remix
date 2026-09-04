@@ -111,13 +111,65 @@ export const AGENT_ID_LOOKUP_TIMEOUT_MS = 1_500;
  * a redeploy — and the marker keeps printing until then, which makes it a
  * live counter of the gap rather than a single line lost in the boot log.
  */
+const TIMED_OUT = Symbol("agent-id-lookup-timeout");
+
+/**
+ * Wait for a lookup, but never longer than the bound.
+ *
+ * EVERY caller gets this, not just the one that started the lookup. A second
+ * call arriving on the same lane while the first is still in flight used to
+ * return the cached promise raw — so it inherited the hang the bound exists
+ * to prevent, and the first caller's eviction did nothing for it: it was
+ * already attached (Codex, PR #268 round 2). Its call row then never got
+ * inserted either, which is the failure that loses a whole call's timeline.
+ */
+async function awaitBounded(
+  slug: string,
+  pending: Promise<string | undefined>,
+  timeoutMs: number,
+): Promise<string | undefined | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const raced = await Promise.race([
+    pending,
+    new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return raced;
+}
+
+/** Drop a lookup that blew its deadline, and make sure nobody is left holding it. */
+function abandon(slug: string, pending: Promise<string | undefined>, timeoutMs: number): void {
+  // Only if it is still THE entry — a later caller may already have replaced it.
+  if (cache.get(slug) === pending) cache.delete(slug);
+  // Swallow a later rejection on the orphan: nothing awaits it now, and an
+  // unhandled rejection would take the process down.
+  void pending.catch(() => undefined);
+  console.info(
+    `[AGENT ID] lookup for "${slug}" exceeded ${timeoutMs}ms — this call's row is written ` +
+      `without agent_id and the next call retries; the lane is missing from the Observatory ` +
+      `and every cost and quality report until it succeeds`,
+  );
+}
+
 export async function resolveAgentId(
   slug: string,
   lookup: AgentIdLookup = defaultLookup,
   timeoutMs: number = AGENT_ID_LOOKUP_TIMEOUT_MS,
 ): Promise<string | undefined> {
   const cached = cache.get(slug);
-  if (cached) return cached;
+  if (cached) {
+    // Bounded too. Returning it raw is what let a wedged lookup hang every
+    // later call on the lane even after the first caller gave up.
+    const shared = await awaitBounded(slug, cached, timeoutMs);
+    if (shared === TIMED_OUT) {
+      abandon(slug, cached, timeoutMs);
+      return undefined;
+    }
+    return shared;
+  }
 
   const pending = (async () => {
     try {
@@ -129,32 +181,9 @@ export async function resolveAgentId(
   })();
   cache.set(slug, pending);
 
-  // The race is what makes the timeout real. Awaiting `pending` alone would
-  // inherit the hang the bound exists to prevent.
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = Symbol("timeout");
-  const raced = await Promise.race([
-    pending,
-    new Promise<typeof timedOut>((resolve) => {
-      timer = setTimeout(() => resolve(timedOut), timeoutMs);
-      if (typeof timer.unref === "function") timer.unref();
-    }),
-  ]);
-  if (timer) clearTimeout(timer);
-
-  if (raced === timedOut) {
-    // Evict, so the NEXT call retries instead of inheriting this one's hang.
-    // The abandoned promise is left to settle or not on its own; it holds
-    // nothing but a row id and cannot wedge anything once it is unreferenced.
-    if (cache.get(slug) === pending) cache.delete(slug);
-    // Swallow a later rejection on the orphan — nothing is awaiting it now,
-    // and an unhandled rejection would take the process down.
-    void pending.catch(() => undefined);
-    console.info(
-      `[AGENT ID] lookup for "${slug}" exceeded ${timeoutMs}ms — this call's row is written ` +
-        `without agent_id and the next call retries; the lane is missing from the Observatory ` +
-        `and every cost and quality report until it succeeds`,
-    );
+  const raced = await awaitBounded(slug, pending, timeoutMs);
+  if (raced === TIMED_OUT) {
+    abandon(slug, pending, timeoutMs);
     return undefined;
   }
 

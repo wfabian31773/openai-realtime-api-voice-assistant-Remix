@@ -264,7 +264,7 @@ describe("a caller who rang to check on an existing request", () => {
       call({
         toolEvents: [
           { name: "lookup_patient", succeeded: true },
-          { name: "check_open_tickets", succeeded: true },
+          { name: "check_open_tickets", succeeded: true, foundOpenTicket: true },
         ],
         ...over,
       }),
@@ -290,6 +290,39 @@ describe("a caller who rang to check on an existing request", () => {
       toolEvents: [
         { name: "lookup_patient", succeeded: true },
         { name: "check_open_tickets", succeeded: false },
+      ],
+    });
+    expect(d.file).toBe(true);
+  });
+
+  /**
+   * THE REGRESSION THAT ROUND 1's FIX INTRODUCED (Codex, PR #268 round 2).
+   *
+   * `sharedPatientTools` answers `success: true` with
+   * `has_open_tickets: false` when the caller has nothing open, and every
+   * queue prompt tells the agent to run this tool BEFORE filing. So keying
+   * the skip on "the tool succeeded" turned off the recovery sweep on the
+   * ordinary failure path — a strictly worse bug than the duplicate it was
+   * meant to prevent, and it would have been invisible: fewer tickets, no
+   * error anywhere.
+   */
+  it("SWEEPS when the tool ran fine and found NOTHING — the ordinary call", () => {
+    const d = statusCheck({
+      toolEvents: [
+        { name: "lookup_patient", succeeded: true },
+        { name: "check_open_tickets", succeeded: true, foundOpenTicket: false },
+        { name: "file_tech_ticket", succeeded: false },
+      ],
+    });
+    expect(d.file).toBe(true);
+  });
+
+  it("sweeps when the tool did not report either way", () => {
+    // An older record with no `foundOpenTicket` must not be read as a match.
+    const d = statusCheck({
+      toolEvents: [
+        { name: "lookup_patient", succeeded: true },
+        { name: "check_open_tickets", succeeded: true },
       ],
     });
     expect(d.file).toBe(true);

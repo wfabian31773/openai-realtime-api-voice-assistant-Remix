@@ -3251,6 +3251,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // reads as an un-reconciled OpenAI call (Codex, PR #227 round 14).
           inputAudioTokens: callLogs.inputAudioTokens,
           voiceProvider: callLogs.voiceProvider,
+          // And so does this. A guard whose input is never selected is not a
+          // guard: the cast below read `undefined` on every row, so this
+          // backfill would still have overwritten a reconciled Grok cost with
+          // the duration estimate — while leaving cost_reconciled_at set
+          // (Codex, PR #268 round 2).
+          costReconciledAt: callLogs.costReconciledAt,
         })
         .from(callLogs)
         .where(and(
@@ -3331,6 +3337,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           id: callLogs.id,
           duration: callLogs.duration,
           voiceProvider: callLogs.voiceProvider,
+          // Belt and braces: the WHERE below already excludes every
+          // reconciled row, because reconciliation always writes a cost and
+          // this only takes rows that have none. Selected anyway so the guard
+          // in priceVoiceCall is REAL here rather than a cast that silently
+          // reads undefined — a guard that cannot fire is worse than no
+          // guard, because the next reader believes it.
+          costReconciledAt: callLogs.costReconciledAt,
         })
         .from(callLogs)
         .where(and(

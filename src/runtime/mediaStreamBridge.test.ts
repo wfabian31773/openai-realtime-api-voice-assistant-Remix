@@ -730,6 +730,51 @@ describe("VoiceCallBridge — tool dispatch", () => {
     await Promise.resolve();
     expect(records[0].toolEvents[0]).toMatchObject({ ok: true, succeeded: true });
   });
+
+  /**
+   * "IT WORKED" AND "IT FOUND SOMETHING" ARE DIFFERENT QUESTIONS.
+   *
+   * check_open_tickets answers `success: true, has_open_tickets: false` for a
+   * caller with nothing open, and every queue prompt runs it before filing.
+   * The teardown sweep skips a call as a status check only when a ticket was
+   * actually matched — so the record has to carry the finding, not just the
+   * verdict, or the sweep turns itself off on every ordinary call (Codex,
+   * PR #268 round 2).
+   */
+  const runCheckOpenTickets = async (output: Record<string, unknown>) => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      persistCallRecord: async (r) => void records.push(r),
+      agent: makeAgent({
+        dispatch: vi.fn(async () => ({ ok: true, output: JSON.stringify(output) })),
+      }),
+    });
+    h.handlers().onToolCall("c1", "check_open_tickets", {});
+    await Promise.resolve();
+    await Promise.resolve();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    return records[0].toolEvents[0];
+  };
+
+  it("records that check_open_tickets FOUND an existing ticket", async () => {
+    expect(await runCheckOpenTickets({ success: true, has_open_tickets: true })).toMatchObject({
+      succeeded: true,
+      foundOpenTicket: true,
+    });
+  });
+
+  it("records that it ran fine and found NOTHING — not the same thing", async () => {
+    expect(await runCheckOpenTickets({ success: true, has_open_tickets: false })).toMatchObject({
+      succeeded: true,
+      foundOpenTicket: false,
+    });
+  });
+
+  it("leaves the field off entirely for a tool that does not report it", async () => {
+    const event = await runCheckOpenTickets({ success: true, ticket_number: "VA-1" });
+    expect("foundOpenTicket" in event).toBe(false);
+  });
 });
 
 describe("VoiceCallBridge — dead-air watchdog", () => {

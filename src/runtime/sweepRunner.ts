@@ -104,7 +104,11 @@ export async function runRequestSweep(
       slug: record.slug,
       callerPhone: record.callerPhone,
       transcript: record.transcript,
-      toolEvents: record.toolEvents.map((e) => ({ name: e.name, succeeded: e.succeeded })),
+      toolEvents: record.toolEvents.map((e) => ({
+        name: e.name,
+        succeeded: e.succeeded,
+        ...(e.foundOpenTicket === undefined ? {} : { foundOpenTicket: e.foundOpenTicket }),
+      })),
       /**
        * Still false, and still for the reason below — but the evidence that
        * DOES matter now travels in `toolEvents`, where `decideSweep` reads a
