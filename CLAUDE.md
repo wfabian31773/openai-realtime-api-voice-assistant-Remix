@@ -443,12 +443,65 @@ number is worse than one that writes nothing, because "estimated" is honest
 and a reconciled number is believed.
 
 ```sql
--- 241 of 241 today. Any number here is calls still priced from a constant.
+-- Was 241 of 241. Now 2 (both 2026-08-31, older than the nightly runner's
+-- yesterday-only window). Any number here is calls still priced from a constant.
 SELECT count(*) FROM call_logs
  WHERE voice_provider = 'grok' AND cost_reconciled_at IS NULL;
 ```
 
-**THE COST-COLUMN GUARD HAS NEVER FIRED, AND THAT IS THE POINT.** Measured
+## THE RECONCILER RAN, AND GROK COSTS 60% MORE THAN THE RATE CARD SAYS
+
+**2026-09-04 09:39 UTC, the first reconciliation ever performed.** Wayne set
+`XAI_MANAGEMENT_KEY` / `XAI_TEAM_ID` and republished; the nightly runner
+settled 2026-09-03 and wrote 239 rows. `cost_reconciled_at` went from 0 of
+86,516 to 239. **Do not re-derive these; re-measure before quoting them.**
+
+| 2026-09-03, 239 runtime calls | |
+|---|---|
+| seconds billed | 25,116 (418.6 min) |
+| our estimate, `ceil(duration x 8/60)` per call | **$34.66** |
+| **xAI's actual invoice** | **$53.55** |
+| gap | **+$18.89 = +54% on our estimate** |
+| derived rate | **12.79 c/min** against a published **8 c/min** — **+59.9%** |
+
+**THE 3.5% `Math.ceil` OVERSTATEMENT WAS TRUE AND IRRELEVANT.** It compared
+our estimate against `duration x published rate`. Both sides of that
+comparison were wrong about the bill. The rounding error was worth $1.18;
+being wrong about the rate is worth $18.89 on one day.
+
+**The cause is NOT established, and nobody should quote one yet.** Two
+candidates, and this file already named the first before the invoice arrived:
+
+- **`$0.004 / text input`, billed separately from the audio minute.** We have
+  never counted it. ~$20/day over 239 calls is ~5,000 units, which is the
+  right order of magnitude for a system prompt plus each turn.
+- **xAI bills a duration we do not report.** Session wall-clock including
+  setup, or a minimum increment per call, rather than the seconds Twilio
+  reports.
+
+`GET /v1/billing/teams/{team}/postpaid/invoice/preview` settles it — it
+returns `unitType`, `unitPrice` and `numUnits`, and `numUnits` is how many
+units **they** counted. That call is documented in `xaiBilling.ts` but not
+implemented; only the daily-usage endpoint is.
+
+**What this changes:** every Grok cost-per-call figure quoted before
+2026-09-04 is understated by about a third, including the comparison against
+the old core's token-derived cost. The runtime is materially more expensive
+per call than the estimate implied. Whether it is more expensive per
+*resolved request* is a different question and has not been measured.
+
+The allocation itself is sound and was checked, not assumed: the voice filter
+matches only `grok-voice` series so non-voice grok spend is excluded; 0 of 239
+reconciled rows are still flagged estimated; 0 have a total disagreeing with
+their parts.
+
+**THE GUARD NOW MATTERS.** It has a live population to defend for the first
+time — 239 rows carry an invoiced cost that an estimate must never overwrite.
+Everything below this line was written when that number was zero.
+
+---
+
+**THE COST-COLUMN GUARD HAD NEVER FIRED, AND THAT WAS THE POINT.** Measured
 2026-09-04 while PR #268 was in review. Rounds 11–13 turned up six findings
 and four of them were the same sentence — "an estimate overwrites the
 reconciled bill" — so it was worth knowing whether that had ever actually
