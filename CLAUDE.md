@@ -469,49 +469,60 @@ our estimate against `duration x published rate`. Both sides of that
 comparison were wrong about the bill. The rounding error was worth $1.18;
 being wrong about the rate is worth $18.89 on one day.
 
-### The cause: THE PROMPT IS BILLED ON EVERY TURN
+### The cause is INSIDE the voice rate, not the text tokens
 
-Settled the same morning from xAI's own usage export (2026-08-29 → 09-04),
-which carries `tokens` and `requests` columns the daily-spend endpoint does
-not. **The cutover is visible in one line:**
+**I got this wrong first and the correction is the useful part.** From the
+usage CSV alone — tokens up 364x on the cutover day, 4,570,953 of them — I
+concluded the gap was the separately-billed `$0.004 / text input` component,
+because 4.57M x $0.004/1k = $18.28 sits right on the $20.06 gap. **That fit
+was a coincidence.** The operator's console screenshot, which splits spend by
+API TYPE, killed it in one line:
 
-| day | usd | tokens | requests |
-|---|---|---|---|
-| 2026-09-02 (old core) | 17.73 | 12,542 | 230 |
-| **2026-09-03 (cutover)** | **58.90** | **4,570,953** | **3,275** |
-
-Tokens went up **364x**. That is the whole answer.
-
-| | |
+| API type, Aug 29 – Sep 4 | spend |
 |---|---|
-| audio, 418.6 min at the published $0.08 | $33.49 |
-| the gap to the invoice | **$20.06** |
-| 4,570,953 tokens at the published $0.004 / 1k | **$18.28** |
-| requests per call | **13.7** |
-| tokens per request | **1,396** — about one prompt |
+| **Voice** | **$104.04** |
+| **Text** | **$5.64** |
+| Image & Video / Storage | $0.00 |
 
-**Modelled per call: $0.1401 audio + $0.0765 text = $0.2166, against an
-actual $0.2241 — a 3.4% fit.** The residual is the token count including
-non-voice usage; the day's non-voice spend was $5.35 of the $58.90 total,
-which is also the cross-check that the `grok-voice` filter is working.
+Text is $5.64 for the WHOLE WEEK. On 2026-09-03 it is $5.35 of $58.90 — about
+a tenth. It cannot be a $20 gap.
 
-So the prompt is re-sent on every model request and billed as text input,
-about fourteen times a call. **Text is ~35% of what a call costs.** This is
-strongly consistent rather than proven — `invoice/preview` returns
-`unitType`/`numUnits` and would prove it — but it is enough to act on.
+**The token explosion is real and nearly free**, because prompt caching is
+working. The console's own text breakdown, with the rate each line implies:
 
-**PROMPT SIZE IS NOW A DOLLAR FIGURE, NOT A STYLE PREFERENCE.** Every 1,000
-tokens carried in a lane's prompt costs about **$0.055 per call** — 13.7
-requests x 1,000 tokens x $0.004/1k. At ~400 queue calls a day that is
-**~$22/day, ~$650/month, per 1,000 prompt tokens.** The operator's standing
-note — *"Grok requires minimal prompting, we should not be near our
-ceilings"* — was a latency judgement and turns out to be a billing one too.
-pcp's untrimmed 2,260-token prompt is the obvious first target.
+| | usage | spend | per 1k |
+|---|---|---|---|
+| prompt text tokens | 1.2M | $2.38 | $0.00198 |
+| **cached** prompt text tokens | **3.1M** | $1.53 | **$0.00049** |
+| reasoning text tokens | 272.5K | $1.63 | $0.00598 |
+| completion text tokens | 15.7K | $0.09 | $0.00573 |
 
-`GET /v1/billing/teams/{team}/postpaid/invoice/preview` would confirm the
-split directly — it returns `unitType`, `unitPrice` and `numUnits`, and
-`numUnits` is how many units **they** counted. Documented in
-`xaiBilling.ts`, not implemented; only the daily-usage endpoint is.
+**72% of prompt tokens are served from cache at a quarter of the price.** The
+prompt IS re-sent every turn — 3,275 requests for 239 calls, 13.7 per call —
+but it is billed at cache rates and comes to about $5, not $20.
+
+**So the gap is inside the Voice line: $53.55 for 418.6 minutes is
+`$0.1279/min` against a published `$0.08/min`.** We are charged ~60% more per
+voice minute than the rate card says. Whether that is a stale published rate,
+audio tokens billed on top of the minute, or a longer duration than Twilio
+reports is NOT established. **The console's Breakdown panel has a `Voice` tab
+beside the `Text` one; opening it gives the per-unit split the same way the
+text table above does, and that is the one click that settles it.**
+
+**What this cost me, recorded because it is the recurring failure:** I fitted
+a hypothesis to two aggregate numbers, got a 3.4% match, and wrote it into
+this file as settled. A per-component breakdown existed the whole time and I
+had not asked for it. *Before quoting a rate, find the control that proves
+the measure* — the same lesson as the `tool_timeline` filing rates, one
+section up.
+
+**Prompt size is a real but SECOND-ORDER cost lever.** 1,000 prompt tokens x
+13.7 requests = 13,700 tokens per call; at the observed ~72/28 cached/uncached
+mix that is about **$0.011 per call**, roughly **$4/day** at fleet volume —
+not the $0.055 and $22/day an earlier version of this section claimed from the
+uncached list price. Trim prompts for latency and for the ceilings, which are
+the reasons that were always true. **The voice minute is where the $20/day
+is.**
 
 **What this changes:** every Grok cost-per-call figure quoted before
 2026-09-04 is understated by about a third, including the comparison against
