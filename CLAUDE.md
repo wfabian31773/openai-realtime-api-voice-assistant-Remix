@@ -497,9 +497,13 @@ working. The console's own text breakdown, with the rate each line implies:
 | reasoning text tokens | 272.5K | $1.63 | $0.00598 |
 | completion text tokens | 15.7K | $0.09 | $0.00573 |
 
-**72% of prompt tokens are served from cache at a quarter of the price.** The
-prompt IS re-sent every turn — 3,275 requests for 239 calls, 13.7 per call —
-but it is billed at cache rates and comes to about $5, not $20.
+**72% of prompt tokens are served from cache at a quarter of the price**, which
+is why the token explosion is real and nearly free: the text lines above come
+to about $5 on the week, not $20. **No per-call figure belongs in that
+sentence** — an earlier version said "3,275 requests for 239 calls, 13.7 per
+call", which is the whole account's request count divided by the voice-call
+count, and the section below explains why that division is invalid. It was
+removed there and left standing here; see the note under the table.
 
 **So the gap is inside the Voice line: $53.55 for 418.6 minutes is
 `$0.1279/min` against a published `$0.08/min`.** We are charged ~60% more per
