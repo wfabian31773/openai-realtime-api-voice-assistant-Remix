@@ -668,3 +668,83 @@ so once at boot and does not schedule.
    pre-context → `patients_master`; records on the old core; Turkish months;
    #53 medical-safety wording.
 3. **Records stays untouched** — HHS corrective action plan work.
+
+---
+
+## PCP and records on the runtime — what is actually left (2026-09-04)
+
+Measured through `realLanes.test.ts`, the one harness that touches the real
+agent tree, with a transfer injected so pcp could be examined in the
+condition it would actually run in — which nobody had ever done, because pcp
+has spent its whole life on the refused side of that gate.
+
+**Both lanes bind cleanly today.** No skipped tools, no `strict` on any
+schema, no stringified prompt closure, a Grok voice rather than the
+registry's `sage`, and the knowledge pack correctly prefixed.
+
+| | pcp | records |
+|---|---|---|
+| tools resolved | 8, none skipped | 6, none skipped |
+| output guardrails carried | **3** | **0** |
+| prompt, total chars | 18,360 | 16,035 |
+| the lane's own share | **~2,260 tokens** | ~1,680 tokens |
+| what refuses it today | no transfer injected | nothing — it is served |
+
+### records
+
+**It is already servable and always was.** The only reason it is on the old
+core is that nothing has pointed it at the runtime. Nothing needs building.
+
+The thing to correct in this document's own earlier note: records is not
+"missing every ruling shipped to the runtime lanes". Its #265 wording landed
+in `recordsAgent.ts` at 21:04 UTC on 09-03 and the violation was observed at
+23:54 — **nearly three hours later, because the commit is on
+`claude/determined-brown-o5qsft` and has never been deployed.** `agent_prompts`
+is not read by the call path, so the prompt is the file, and the file is
+right. The split that actually matters:
+
+- **Prompt- and tool-level rulings** — the #265 wording, lead-the-ask, the
+  date-of-birth escape, `resolve_location` — records gets all of these on
+  merge and pull, **on the old core, with no cutover.**
+- **Runtime-level** — greeting-already-played, the VAD threshold, the tool
+  ceiling, the teardown sweep, `agent_id`, Grok cost — records gets **none**
+  of these until it moves.
+
+**Its one real gap is that it carries zero output guardrails**, on either
+pipeline (#53). So does optical, surgery and tech. See below.
+
+### pcp
+
+Everything is built. Two things are not settled, and neither is code:
+
+1. **The warm transfer has never been proven on a live call** (#30, six test
+   calls with Wayne, never run). Transfer is the entire point of this lane.
+   It is unit-tested through a fake Twilio and mounted on the runtime, and
+   that is not the same claim.
+2. **`PCP_HUMAN_AGENT_NUMBER` must be set** or the lane answers, sounds
+   healthy, and fails every transfer at `resolveHandoffDestination`. This is
+   now reported per lane at boot and on `/voice/health` rather than
+   discovered on a call.
+
+And one measurement worth acting on before it takes traffic: at **~2,260
+tokens** its prompt is a third larger than the trimmed queue lanes, and it
+has never been trimmed for Grok. The standing note is *"Grok requires minimal
+prompting, we should not be near our ceilings."*
+
+### The guardrail gap, with a number on it at last
+
+The four queue lanes carry **no output guardrails on either pipeline**. Before
+proposing the existing `medicalSafetyGuardrails` for them, they were dry-run
+over **400 real queue calls / 2,704 agent lines**:
+
+- **One** trip in the whole corpus, and it was **wrong** — the agent reading
+  the caller's own words back ("you mentioned you have questions about your
+  recovery from cataract surgery"). In enforce mode that line is cut
+  mid-sentence.
+- With the exclusion added for it: **zero** trips.
+
+So the cost of switching them on is now measured at nothing, and the same
+pattern was misfiring on no-ivr, after-hours and azul-scheduling the whole
+time. **Turning them on for the queue lanes is still Wayne's call** — #53
+says the clinical language is his, and the generic pair may not be what he
+wants for records in particular.
