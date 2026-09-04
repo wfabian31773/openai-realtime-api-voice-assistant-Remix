@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   toCallLogRow,
   toConflictUpdate,
@@ -6,6 +6,7 @@ import {
   openRuntimeCall,
 } from "./callRecord";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import { resetAgentIdCache } from "./agentIdentity";
 
 function record(over: Partial<VoiceCallRecord> = {}): VoiceCallRecord {
   return {
@@ -250,7 +251,38 @@ describe("persistRuntimeCall", () => {
 });
 
 
+/** The real uuids, so a copy-paste into SQL actually resolves. */
+const AGENTS_TABLE = { optical: "5c01c386-621e-41c1-a501-82b3cc36c09c" };
+
 describe("openRuntimeCall — the row has to exist while the call runs", () => {
+  beforeEach(() => resetAgentIdCache());
+
+  /**
+   * The lane must still be logged when it has no agents row. Losing the join
+   * key costs a report; refusing the row costs the call's whole timeline,
+   * because flushAzulTimeline marks its events flushed whether or not a row
+   * was there to update.
+   */
+  it("still writes the row when the slug has no agents row", async () => {
+    const spy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      const insert = vi.fn(async () => "row-9");
+      const id = await openRuntimeCall(
+        { callSid: "CA-9", slug: "unlisted", callerPhone: "", dialedNumber: "", startedAtMs: Date.now() },
+        insert,
+        process.env,
+        async () => undefined,
+      );
+      expect(id).toBe("row-9");
+      const [row] = insert.mock.calls[0] as unknown as [Record<string, unknown>];
+      expect(row.agentUsed).toBe("unlisted");
+      // Omitted, not null: the column has a foreign key to agents.id.
+      expect("agentId" in row).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("creates the row before any tool can fire", async () => {
     // flushAzulTimeline issues UPDATE ... WHERE call_sid = ?, then marks its
     // events flushed regardless of rows affected (toolTimeline.ts:559-569).
@@ -270,6 +302,8 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
         startedAtMs: claimedAtMs,
       },
       insert,
+      process.env,
+      async () => AGENTS_TABLE.optical,
     );
     // The id is returned, because the agents poll for it.
     expect(id).toBe("row-1");
@@ -278,6 +312,11 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
     expect(row.status).toBe("in_progress");
     expect(row.direction).toBe("inbound");
     expect(row.agentUsed).toBe("optical");
+    // THE JOIN KEY. `agentUsed` is the slug; every per-agent report in this
+    // app joins the agents table on the uuid, and the runtime wrote none —
+    // 239 of 239 runtime rows had it NULL, measured 2026-09-04, which is why
+    // three live lanes vanished from the Observatory at their cutover.
+    expect(row.agentId).toBe(AGENTS_TABLE.optical);
     expect(row.agentVersion).toBe("v1.4.0");
     expect(row.from).toBe("+15551234567");
     // The CLAIM time, not the insert time: this insert runs after the
@@ -312,6 +351,7 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
       },
       insert,
       { APP_ENV: "production" },
+      async () => AGENTS_TABLE.optical,
     );
     const [row] = insert.mock.calls[0] as unknown as [Record<string, unknown>];
     expect(row.environment).toBe("production");
@@ -325,6 +365,8 @@ describe("openRuntimeCall — the row has to exist while the call runs", () => {
         async () => {
           throw new Error("db down");
         },
+        process.env,
+        async () => AGENTS_TABLE.optical,
       );
       expect(id).toBeUndefined();
     } finally {

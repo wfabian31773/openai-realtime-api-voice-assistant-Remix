@@ -30,6 +30,10 @@ export interface OpsHubScorecard {
   telephonyErrors: number;
   outcomes: Record<string, number>;
   avgDurationSec: number | null;
+  /** Calls served by the Media Streams runtime (voice_provider = 'grok'). */
+  runtimeCalls: number;
+  /** Calls served by the OpenAI SIP core (voice_provider NULL). */
+  legacyCalls: number;
 }
 
 export async function opsHubAgentScorecards(days = 30): Promise<OpsHubScorecard[]> {
@@ -46,7 +50,9 @@ export async function opsHubAgentScorecards(days = 30): Promise<OpsHubScorecard[
            COUNT(cl.id) FILTER (WHERE cl.total_turns > 45)::int AS long_calls,
            ROUND(AVG(cl.interruption_count)::numeric, 2) AS avg_interruptions,
            COUNT(cl.id) FILTER (WHERE cl.twilio_error_code IS NOT NULL)::int AS telephony_errors,
-           ROUND(AVG(cl.duration)::numeric, 0) AS avg_duration_sec
+           ROUND(AVG(cl.duration)::numeric, 0) AS avg_duration_sec,
+           COUNT(cl.id) FILTER (WHERE cl.voice_provider = 'grok')::int AS runtime_calls,
+           COUNT(cl.id) FILTER (WHERE cl.voice_provider IS DISTINCT FROM 'grok')::int AS legacy_calls
     FROM agents a
     LEFT JOIN call_logs cl
       ON cl.agent_id = a.id AND cl.created_at >= NOW() - make_interval(days => $1::int)
@@ -82,6 +88,8 @@ export async function opsHubAgentScorecards(days = 30): Promise<OpsHubScorecard[
     telephonyErrors: r.telephony_errors,
     outcomes: outcomeMap.get(r.agent_id) ?? {},
     avgDurationSec: r.avg_duration_sec === null ? null : Number(r.avg_duration_sec),
+    runtimeCalls: Number(r.runtime_calls) || 0,
+    legacyCalls: Number(r.legacy_calls) || 0,
   }));
 }
 
@@ -928,6 +936,19 @@ export interface OpsHubTodayAgent {
   criticalsToday: number;
   qualityToday: number | null;
   outcomesToday: Record<string, number>;
+  /**
+   * Which stack served today's calls. `voice_provider = 'grok'` is the Media
+   * Streams runtime; NULL is the OpenAI SIP core.
+   *
+   * The Observatory had no idea this column existed, which meant the biggest
+   * thing that has ever happened to these agents — three lanes moving to a
+   * different pipeline on 2026-09-03, one lane deliberately left behind as
+   * the control — was invisible on the one screen built to watch them. A
+   * card reading "tech: 100 calls" with no pipeline on it cannot tell you
+   * whether you are looking at the new stack or the old.
+   */
+  runtimeCallsToday: number;
+  legacyCallsToday: number;
 }
 
 export interface SageActiveCall {
@@ -970,7 +991,13 @@ export async function todayOverview(): Promise<TodayOverview> {
            COUNT(cl.id)::int AS calls_today,
            COUNT(cl.id) FILTER (WHERE cl.status IN ('in_progress','ringing','initiated'))::int AS active_now,
            COUNT(cl.id) FILTER (WHERE COALESCE(((cl.grader_results::jsonb)->'summary'->>'criticalFailures')::int, 0) > 0)::int AS criticals_today,
-           ROUND(AVG(cl.quality_score)::numeric, 2) AS quality_today
+           ROUND(AVG(cl.quality_score)::numeric, 2) AS quality_today,
+           -- The legacy bucket is IS DISTINCT FROM, not <>: voice_provider is
+           -- NULL on every old-core row, so <> 'grok' evaluates to NULL for
+           -- them, which FILTER treats as false — the two buckets would then
+           -- silently fail to add up to calls_today.
+           COUNT(cl.id) FILTER (WHERE cl.voice_provider = 'grok')::int AS runtime_calls_today,
+           COUNT(cl.id) FILTER (WHERE cl.voice_provider IS DISTINCT FROM 'grok')::int AS legacy_calls_today
     FROM agents a
     LEFT JOIN call_logs cl
       ON cl.agent_id = a.id
@@ -1152,6 +1179,8 @@ export async function todayOverview(): Promise<TodayOverview> {
       criticalsToday: r.criticals_today,
       qualityToday: r.quality_today === null ? null : Number(r.quality_today),
       outcomesToday: outcomeMap.get(r.agent_id) ?? {},
+      runtimeCallsToday: Number(r.runtime_calls_today) || 0,
+      legacyCallsToday: Number(r.legacy_calls_today) || 0,
     })),
     sage,
     lastCallLogAtMs,

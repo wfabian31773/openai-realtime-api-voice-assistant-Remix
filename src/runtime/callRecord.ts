@@ -36,6 +36,7 @@
  */
 
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
 
 /**
  * Identity the runtime was TOLD, never identity it inferred. Supplied by
@@ -305,6 +306,14 @@ export interface RuntimeCallOpenRow {
   to: string;
   dialedNumber: string;
   agentUsed: string;
+  /**
+   * The agents-table uuid. `agentUsed` carries the slug, but every per-agent
+   * report joins on THIS — so a row without it is not mis-attributed, it is
+   * absent. See src/runtime/agentIdentity.ts for the measurement that found
+   * 239 runtime calls missing from the Observatory for exactly this reason.
+   * Optional because a lane with no agents row must still be logged.
+   */
+  agentId?: string;
   agentVersion?: string;
   status: "in_progress";
   startTime: Date;
@@ -374,8 +383,16 @@ export async function openRuntimeCall(
   },
   insert: CallLogInsert = defaultOpenInsert,
   env: Record<string, string | undefined> = process.env,
+  agentIdLookup?: AgentIdLookup,
 ): Promise<string | undefined> {
   try {
+    // Resolved BEFORE the insert, not patched on afterwards: the row is
+    // read the moment it lands (flushAzulTimeline, stampVerifiedIdentity),
+    // and a row that is briefly unattributed is a row some report samples
+    // while it is. Awaiting it costs one cached map read after the first
+    // call on each lane, and a failure yields undefined rather than
+    // throwing, so the call is still logged exactly as it is today.
+    const agentId = await resolveAgentId(context.slug, agentIdLookup);
     return await insert({
       callSid: context.callSid,
       direction: "inbound",
@@ -383,6 +400,7 @@ export async function openRuntimeCall(
       to: context.dialedNumber,
       dialedNumber: context.dialedNumber,
       agentUsed: context.slug,
+      ...(agentId ? { agentId } : {}),
       ...(context.agentVersion ? { agentVersion: context.agentVersion } : {}),
       status: "in_progress",
       // The claim time, not `new Date()`: this insert runs only after the
