@@ -1754,7 +1754,10 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
           
           // CRITICAL: DO NOT save duration - TWILIO IS THE SOURCE OF TRUTH
           // Let Twilio status callback set the authoritative duration
-          await storage.updateCallLog(callMeta.dbCallLogId, {
+          // Preserving, because this sets cost_is_estimated. A reconciled
+          // row must not be relabelled an estimate — the badge and the
+          // number have to agree in both directions.
+          await storage.updateCallLogPreservingReconciledCost(callMeta.dbCallLogId, {
             status: 'transferred',
             endTime,
             // DO NOT SET DURATION - Twilio status callback will set it
@@ -4720,7 +4723,8 @@ async function observeCall(
         // finalized 4 of 5, and this block never ran for them.
         void flushLoopTelemetry(callId, callMeta.dbCallLogId);
 
-        await storage.updateCallLog(callMeta.dbCallLogId, {
+        // Preserving, for the same reason as the handoff teardown above.
+        await storage.updateCallLogPreservingReconciledCost(callMeta.dbCallLogId, {
           status: 'completed',
           endTime,
           // DO NOT SET DURATION HERE - Twilio status callback will set it

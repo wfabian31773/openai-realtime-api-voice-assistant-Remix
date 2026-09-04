@@ -9,7 +9,9 @@
  * efficient and if we are getting an roi."*
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';
@@ -123,6 +125,62 @@ describe('step 3 — one duration rate, everywhere', () => {
       expect(protectedWrites, `${f}: ${prices} pricing site(s), ${protectedWrites} protected write(s)`)
         .toBeGreaterThanOrEqual(prices);
     }
+  });
+
+  /**
+   * AND THE ONE ABOVE COULD NOT SEE THE WRITER THAT WAS ACTUALLY BROKEN.
+   *
+   * It counts `priceVoiceCall` sites against protected writes, so a writer
+   * that prices some OTHER way contributes nothing to either side and is
+   * invisible. `updateCallCosts` — the admin recalculate button — computed
+   * its own OpenAI estimate from synthesised audio metrics and wrote it
+   * raw, and this file said the file was fully protected the whole time
+   * (Codex, PR #268 round 11). Three more went the same way unnoticed: two
+   * teardown writes setting cost_is_estimated and the Twilio backfill sweep
+   * rebuilding total_cost_cents.
+   *
+   * So the invariant is stated over the COLUMNS instead of over the pricing
+   * calls, and it walks the whole tree rather than a hand-kept list — the
+   * two things every previous version of this pin got wrong. It needs no
+   * knowledge of how a number was arrived at: these three columns are not
+   * written through the unguarded door, by anyone, ever.
+   */
+  it('NOTHING writes the three defended columns through the raw door', () => {
+    const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
+    const DEFENDED = ['openaiCostCents', 'totalCostCents', 'costIsEstimated'];
+
+    /** The argument list of the call whose opening paren is at `open`. */
+    const callArguments = (src: string, open: number): string => {
+      let depth = 0;
+      for (let i = open; i < src.length; i++) {
+        if (src[i] === '(') depth++;
+        else if (src[i] === ')' && --depth === 0) return src.slice(open, i + 1);
+      }
+      return src.slice(open);
+    };
+
+    const offenders: string[] = [];
+    for (const dir of ['src', 'server', 'client']) {
+      const entries = readdirSync(join(repoRoot, dir), { recursive: true, withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
+        const path = join(entry.parentPath, entry.name);
+        const src = readFileSync(path, 'utf8');
+        // `.updateCallLog(` cannot match the preserving method — the next
+        // character after updateCallLog there is 'P', not '('.
+        for (const m of src.matchAll(/\.updateCallLog\(/g)) {
+          const args = callArguments(src, m.index + m[0].length - 1);
+          const wrote = DEFENDED.filter((c) => new RegExp(`\\b${c}\\s*:`).test(args));
+          if (wrote.length === 0) continue;
+          const line = src.slice(0, m.index).split('\n').length;
+          offenders.push(
+            `${relative(repoRoot, path)}:${line} writes ${wrote.join(', ')} through storage.updateCallLog`,
+          );
+        }
+      }
+    }
+    expect(offenders, offenders.join('\n')).toEqual([]);
   });
 
   it('the preserving update reads the COLUMN, in SQL, at write time', () => {

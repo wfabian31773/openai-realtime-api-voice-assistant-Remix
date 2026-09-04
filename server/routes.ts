@@ -4567,7 +4567,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           });
 
           if (applyChanges) {
-            await storage.updateCallLog(dbCall.id, {
+            // Preserving. This rebuilds total_cost_cents, and a reconciled
+            // row's total must be rebuilt from the invoiced provider cost in
+            // SQL at write time — not from a value this loop read minutes
+            // earlier, and not at all if the estimate has since changed.
+            await storage.updateCallLogPreservingReconciledCost(dbCall.id, {
               twilioCostCents: newCostCents,
               totalCostCents: newCostCents + (dbCall.openaiCostCents || 0),
             });
