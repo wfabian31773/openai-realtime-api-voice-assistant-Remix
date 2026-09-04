@@ -363,9 +363,8 @@ FROM tickets
 WHERE call_sid LIKE 'CA%'          -- NOT `IS NOT NULL`. See above.
   AND created_at::date = '<day>'
 GROUP BY 1;
--- as of 2026-09-04 17:22 UTC, all time, real SIDs only:
---   agent 40,716 · staff 37 · UNKNOWN 29 · dropped as sentinel: 216 rows / 60 values
--- 2026-09-03: agent 197 · staff 1 · UNKNOWN 0
+-- All-time totals live in THE CENSUS above; do not copy them here.
+-- 2026-09-03 (the day this file publishes rates for): agent 197 · staff 1 · UNKNOWN 0
 ```
 
 **On 2026-09-03 the unknown bucket is EMPTY**, so the rates published in this
@@ -389,16 +388,40 @@ disproving it. Recorded in full because the pattern matters more than the rule:
    absence cannot classify anything — and checking the real metadata proved
    the claim false:
 
-| sid-bearing rows, **as of 2026-09-04 17:16 UTC** | human `created_by_id` | `agent_used` set | both | neither |
+<a id="census"></a>
+### THE CENSUS — the only place in this file that states these numbers
+
+**Every figure below is as of `2026-09-04 17:23:05 UTC`, real `CA%` SIDs only.**
+Nothing else in this section restates them; other paragraphs say "see the
+census" and stop. That rule exists because eight separate stale copies were
+caught in this file today, each one fixed in prose while a near-duplicate
+survived in a query or a bullet. **If you add a number here, do not repeat it
+elsewhere — link to it.**
+
+| | value |
+|---|---|
+| calls with any ticket | 40,783 |
+| **agent-filed** | **40,717** |
+| unknown-provenance only | 29 |
+| staff-created | 37 |
+| the `VA-`/`PCP-` prefix rule would match | 40,710 |
+| … **real filings it misses** | **7** |
+| … filings it wrongly counts | **0** |
+| dropped as sentinel `call_sid` | 216 rows across 60 distinct values |
+
+Provenance census on the two prefixes that raised the question:
+
+| sid-bearing rows | human `created_by_id` | `agent_used` set | both | neither |
 |---|---|---|---|---|
 | `T-` (37) | **37** | 6 | **6** | 0 |
 | `SR-` (36) | **0** | **7** | 0 | **29** |
 | `VA-` control (6,495) | 0 | **6,494** | — | 1 |
 | `PCP-` control (210) | 0 | **210** | — | 0 |
 
-**THAT TIMESTAMP IS NOT DECORATION.** An hour earlier the same query returned
-`T-` = 36 rows with 5 both. `tickets` is live; a row landed mid-analysis. Any
-figure here quoted without its as-of time is already drifting.
+**THE TIMESTAMP IS NOT DECORATION.** Seven minutes earlier the same query
+returned `T-` = 36 rows with **5** both, and the prefix rule's overcount read
+**1** before sentinels were excluded. `tickets` is live and a row landed
+mid-analysis. **Re-run before quoting; a bare number here is already drifting.**
 
 `T-` is genuinely staff — every row has a named human creator. **`SR-` is
 not:** 7 of 36 carry `agent_used`, i.e. they ARE agent filings, and 29 are
@@ -413,16 +436,12 @@ would have dropped real filings.
    Fixed by the precedence rule at the top — a human creator wins, and unknown
    is a reported bucket rather than silence. (Codex, PR #272.)
 
-**What the prefix rule costs, re-measured under the three-bucket rule** (the
-first version of this line was computed under the superseded
-`agent_used IS NOT NULL` test and is withdrawn): of **40,841** calls with any
-ticket, **40,774** are agent-filed; the `VA-`/`PCP-` rule matches **40,768**,
-**missing 7 real filings and counting 1 that is not one**, with a further
-**30 calls whose only tickets are UNKNOWN provenance** — which the prefix rule
-silently scores as non-filings.
-
-These counts drift: `tickets` is live and grew between two runs an hour apart.
-Quote them with the date you ran them, or re-run.
+**What the prefix rule costs: see [the census](#census).** It misses real
+filings and silently scores unknown-provenance calls as non-filings. Two
+earlier versions of this paragraph restated those totals inline and both went
+stale within the hour — once from the superseded `agent_used IS NOT NULL`
+test, once from counting sentinel `call_sid`s. That is why this paragraph now
+names no numbers.
 
 **`agent_used` is also immune to the failure that started this:** a new lane
 gets a new prefix but still stamps the column, so it cannot silently zero
@@ -466,7 +485,8 @@ SELECT split_part(ticket_number,'-',1) AS prefix, count(*) AS tickets,
 FROM tickets WHERE created_at::date = '<day>' AND call_sid LIKE 'CA%' 
 GROUP BY 1 ORDER BY 2 DESC;
 -- Precedence, same as the rule at the top: a human creator wins. Do NOT
--- shorten this to `agent_used IS NOT NULL` — 5 staff rows carry both fields.
+-- shorten this to `agent_used IS NOT NULL` — staff rows carry BOTH fields
+-- (see the census for how many; the count drifts, the rule does not).
 -- 2026-09-04 whole-table shape: VA 40,930 · T 6,079 · SR 1,368 · TKT 1,045
 --   (ended 2026-02-14) · PCP 210 · DIAG 1
 -- agent_used coverage on known agent lanes: VA 6,494/6,495 · PCP 210/210.
