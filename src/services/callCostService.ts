@@ -447,12 +447,25 @@ export class CallCostService {
     try {
       const openaiCalc = this.calculateOpenAICost(audioMetrics);
       
+      /**
+       * A FETCH THAT DID NOT HAPPEN IS NOT A PRICE OF ZERO.
+       *
+       * `twilioCostCents` starts at 0 and stays there when there is no
+       * callSid, or when Twilio has not finalised the leg yet — and writing
+       * that 0 replaces a price Twilio already gave us on an earlier pass.
+       * `resolveTwilioCostWrite` cannot catch it: a genuine zero IS a price on
+       * some legs, so the guard accepts it and has no way to tell the two
+       * apart. Only the caller knows, so only the caller can decide not to
+       * send it. Surfaced by the round-12 race test.
+       */
       let twilioCostCents = 0;
+      let twilioFetched = false;
       
       if (callSid) {
         const twilioResult = await this.fetchTwilioCost(callSid);
         if (twilioResult) {
           twilioCostCents = twilioResult.costCents;
+          twilioFetched = true;
         }
       }
 
@@ -465,39 +478,52 @@ export class CallCostService {
         return null;
       }
 
+      // The price the total is built from: the one just fetched, or the one
+      // already stored. Never the initialiser.
+      const effectiveTwilioCents = twilioFetched ? twilioCostCents : (callLog.twilioCostCents ?? 0);
+
       const pricing = priceVoiceCall({
         voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
         inputAudioTokens: callLog.inputAudioTokens,
         existingOpenaiCostCents: callLog.openaiCostCents,
         costReconciledAt: (callLog as { costReconciledAt?: Date | null }).costReconciledAt,
         durationSeconds: callLog.duration ?? 0,
-        twilioCostCents,
+        twilioCostCents: effectiveTwilioCents,
       });
 
-      /**
-       * REPORT WHAT WAS STORED, NOT WHAT WAS COMPUTED. An undefined
-       * providerCostCents means the stored figure stands — an invoice or a
-       * token-derived cost — so echoing the estimate back would tell the
-       * operator their recalculation landed when it deliberately did not.
-       */
-      const costs: CallCosts = {
-        twilioCostCents,
-        openaiCostCents: pricing.providerCostCents ?? callLog.openaiCostCents ?? 0,
-        totalCostCents: pricing.totalCostCents,
-        audioInputMinutes: openaiCalc.inputMinutes,
-        audioOutputMinutes: openaiCalc.outputMinutes,
-      };
-      
-      await storage.updateCallLogPreservingReconciledCost(callLogId, {
-        twilioCostCents: costs.twilioCostCents,
+      const stored = await storage.updateCallLogPreservingReconciledCost(callLogId, {
+        ...(twilioFetched ? { twilioCostCents } : {}),
         ...(pricing.providerCostCents === undefined
           ? {}
           : { openaiCostCents: pricing.providerCostCents }),
-        totalCostCents: costs.totalCostCents,
-        audioInputMinutes: costs.audioInputMinutes,
-        audioOutputMinutes: costs.audioOutputMinutes,
+        totalCostCents: pricing.totalCostCents,
+        audioInputMinutes: openaiCalc.inputMinutes,
+        audioOutputMinutes: openaiCalc.outputMinutes,
         costCalculatedAt: new Date(),
       });
+
+      /**
+       * REPORT THE ROW THE DATABASE RETURNED, NOT THE ONE WE PLANNED TO WRITE.
+       *
+       * The read above is a snapshot, and reconciliation can commit between it
+       * and this statement — that race is the entire reason the guard lives in
+       * SQL rather than in an `if` here. When it happens the guard does its job
+       * and keeps the invoice, but a response assembled from the snapshot would
+       * still hand the operator the estimate and call it stored: the same wrong
+       * number wearing the same badge, one layer up (Codex, PR #268 round 12).
+       *
+       * `.returning()` gives the post-update row, so this is what is actually
+       * on disk. The fallbacks cover only a row deleted mid-statement, where
+       * there is no post-update row to read.
+       */
+      const costs: CallCosts = {
+        twilioCostCents: stored?.twilioCostCents ?? effectiveTwilioCents,
+        openaiCostCents:
+          stored?.openaiCostCents ?? pricing.providerCostCents ?? callLog.openaiCostCents ?? 0,
+        totalCostCents: stored?.totalCostCents ?? pricing.totalCostCents,
+        audioInputMinutes: openaiCalc.inputMinutes,
+        audioOutputMinutes: openaiCalc.outputMinutes,
+      };
       
       console.info(`[COST] Updated call ${callLogId} (${pricing.basis}): Twilio $${(twilioCostCents/100).toFixed(2)}, provider $${(costs.openaiCostCents/100).toFixed(2)}, Total $${(costs.totalCostCents/100).toFixed(2)}`);
       

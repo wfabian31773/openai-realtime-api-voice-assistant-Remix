@@ -731,6 +731,54 @@ tokens** its prompt is a third larger than the trimmed queue lanes, and it
 has never been trimmed for Grok. The standing note is *"Grok requires minimal
 prompting, we should not be near our ceilings."*
 
+#### The pcp prompt, measured section by section (2026-09-04)
+
+Built the net before touching anything: `src/agents/pcpPromptRulings.test.ts`,
+the pcp equivalent of `queuePromptRulings.test.ts`, which pcp never had —
+because pcp spent its whole life refused by the runtime, so nobody measured
+it. **23 rulings, matched on meaning rather than phrasing**, each traced to a
+standing instruction or to a dated incident already recorded in `pcpAgent.ts`.
+It is green against the prompt as it stands today, which is the only way to
+tell a trim from a regression later.
+
+Then the coverage runs the other way — delete each section and see which
+rulings stop holding:
+
+| section | ~tokens | unique rulings lost if deleted |
+|---|---|---|
+| `## FIRST, ALWAYS: WHAT IS THIS CALL ABOUT?` | 391 | 4 |
+| `# TWO THINGS ABOUT THE LAST THIRTY SECONDS` | 287 | 2 |
+| `# IF A PATIENT REACHES YOU, TAKE THEIR REQUEST` | 261 | 2 |
+| `# WHEN A TOOL SAYS NO` | 249 | 2 |
+| `# ONE QUESTION. THEN STOP TALKING.` | 226 | 2 |
+| `# CONNECTING SOMEONE TO A PERSON` | 167 | 3 |
+| `# HOW YOU SPEAK` | 130 | 2 |
+| `## HOW YOU KNOW WHAT TO ASK` | 121 | **0** |
+| `# SAFETY` | 94 | 2 |
+| `# THE DIRECTOR DECIDES, NOT YOU` | 71 | **0** |
+| `# MEDICAL RECORDS` | 68 | 1 |
+| `# WHAT YOU DO` | 49 | **0** |
+
+**THE FINDING: the pcp prompt is dense, not fat.** Twenty-three rulings in
+2,260 tokens. Only three sections carry no unique ruling and together they are
+241 tokens — and two of those three are the SAME instruction stated twice
+(*"ask only the next question `record_pcp_intake` gives you"*), which is the
+one honest redundancy in the file. Even they are not pure duplicates:
+`# THE DIRECTOR DECIDES` alone says the director also decides whether a
+transfer is available, and `## HOW YOU KNOW` alone carries the four-step loop
+and *"you do not have the list"* — the #201 lesson, where showing the model
+the intake order stopped it inventing a sequence and started it reciting one.
+
+So a trim that gets pcp near the queue lanes' 1,500–1,800 means **dropping
+rulings, not prose**, and which ones is Wayne's call, not mine. The three
+zero-ruling sections are named in the test file with the reason each is kept,
+and a NEW section carrying no ruling now fails rather than joining them
+quietly.
+
+The ceiling is pinned at **2,300 — where the prompt already is.** It asserts
+one thing today: that pcp does not grow while nobody is looking. Lowering it
+is the point of the trim.
+
 ### The guardrail gap, with a number on it at last
 
 The four queue lanes carry **no output guardrails on either pipeline**. Before

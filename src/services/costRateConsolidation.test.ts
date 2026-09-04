@@ -159,6 +159,48 @@ describe('step 3 — one duration rate, everywhere', () => {
       return src.slice(open);
     };
 
+    /**
+     * THE BLOCK THE CALL SITS IN, walked backwards through braces.
+     *
+     * The first version of this scan read only the text between the call's own
+     * parentheses, so it saw an inline object literal and nothing else. A
+     * writer that builds `updateData` over twenty lines and then passes the
+     * NAME was invisible to it, and `twilioInsightsService.ts` was doing
+     * exactly that with total_cost_cents and cost_is_estimated while this test
+     * reported the tree clean (Codex, PR #268 round 12). Two levels out
+     * reaches past the enclosing `if`/`try` to the method body, which is where
+     * such an object is assembled.
+     */
+    const enclosingBlock = (src: string, at: number, levels = 2): string => {
+      let start = at;
+      for (let level = 0; level < levels; level++) {
+        let depth = 0;
+        let found = -1;
+        for (let i = start; i >= 0; i--) {
+          if (src[i] === '}') depth++;
+          else if (src[i] === '{') {
+            if (depth === 0) { found = i; break; }
+            depth--;
+          }
+        }
+        if (found === -1) return src.slice(0, at);
+        start = found - 1;
+      }
+      return src.slice(start, at);
+    };
+
+    /** The braced object literal that starts at or after `from`. */
+    const objectLiteralAt = (src: string, from: number): string => {
+      const open = src.indexOf('{', from);
+      if (open === -1) return '';
+      let depth = 0;
+      for (let i = open; i < src.length; i++) {
+        if (src[i] === '{') depth++;
+        else if (src[i] === '}' && --depth === 0) return src.slice(open, i + 1);
+      }
+      return src.slice(open);
+    };
+
     const offenders: string[] = [];
     for (const dir of ['src', 'server', 'client']) {
       const entries = readdirSync(join(repoRoot, dir), { recursive: true, withFileTypes: true });
@@ -171,11 +213,46 @@ describe('step 3 — one duration rate, everywhere', () => {
         // character after updateCallLog there is 'P', not '('.
         for (const m of src.matchAll(/\.updateCallLog\(/g)) {
           const args = callArguments(src, m.index + m[0].length - 1);
-          const wrote = DEFENDED.filter((c) => new RegExp(`\\b${c}\\s*:`).test(args));
-          if (wrote.length === 0) continue;
+          // Inline literal: the columns are right there.
+          const wrote = new Set(DEFENDED.filter((c) => new RegExp(`\\b${c}\\s*:`).test(args)));
+
+          /**
+           * Identifier argument: the columns were put on the object earlier.
+           * Every name mentioned after the id is a candidate — `updateData`,
+           * `{ ...updateData }`, `patch` — and each is confirmed against the
+           * enclosing block in one of the only two ways such an object is
+           * built. Over-approximating the CANDIDATES is safe; the two
+           * confirmations are what keep it from crying wolf on an inline
+           * literal's own keys and values.
+           */
+          const secondArgOnward = args.slice(args.indexOf(',') + 1);
+          const candidates = new Set(
+            [...secondArgOnward.matchAll(/[A-Za-z_$][\w$]*/g)].map((r) => r[0]),
+          );
+          if (candidates.size > 0) {
+            const block = enclosingBlock(src, m.index);
+            for (const name of candidates) {
+              for (const c of DEFENDED) {
+                if (wrote.has(c)) continue;
+                // 1. assigned onto it:  updateData.totalCostCents = ...
+                //                       updateData['totalCostCents'] = ...
+                const assigned = new RegExp(
+                  `\\b${name}\\s*(?:\\.${c}\\b|\\[\\s*['"\`]${c}['"\`]\\s*\\])\\s*=`,
+                );
+                if (assigned.test(block)) { wrote.add(c); continue; }
+                // 2. declared with it:  const patch = { totalCostCents: 1 }
+                const decl = new RegExp(`\\b(?:const|let|var)\\s+${name}\\b[^=;]*=\\s*\\{`);
+                const dm = decl.exec(block);
+                if (dm && new RegExp(`\\b${c}\\s*:`).test(objectLiteralAt(block, dm.index))) {
+                  wrote.add(c);
+                }
+              }
+            }
+          }
+          if (wrote.size === 0) continue;
           const line = src.slice(0, m.index).split('\n').length;
           offenders.push(
-            `${relative(repoRoot, path)}:${line} writes ${wrote.join(', ')} through storage.updateCallLog`,
+            `${relative(repoRoot, path)}:${line} writes ${[...wrote].join(', ')} through storage.updateCallLog`,
           );
         }
       }
