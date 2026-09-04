@@ -486,11 +486,38 @@ export function compareBilledUnits(
     ourUnits: null,
     ratio: null,
     caveats,
-    verdict:
-      `xAI bills this line in "${line.unitType}", which is not a duration. ` +
-      `The per-second allocation's denominator is wrong for it — do not split ` +
-      `this line by call seconds.`,
+    verdict: withAllocationCaveat(
+      `xAI bills this line in "${line.unitType}", which is not a duration, so there ` +
+        `is no ratio to take. Note this does NOT by itself condemn a per-second ` +
+        `split: a unit that accrues at a constant rate per second (audio tokens, ` +
+        `say) would still be recovered exactly by splitting on seconds.`,
+    ),
   };
+}
+
+/**
+ * THE ONE THING NO AGGREGATE CAN ESTABLISH, appended by construction so a
+ * branch cannot omit it.
+ *
+ * Three verdicts, three ways of getting this wrong, and I got all three:
+ *   ratio ~ 1  said "splitting by call seconds is sound" - but 1 and 119
+ *              minutes each billed as 60 preserves the total exactly
+ *   ratio > 1  said a per-call minimum is being distributed wrongly - but a
+ *              UNIFORM 1.5x on every call gives the same aggregate ratio and
+ *              a per-second split stays exactly right
+ *   non-duration said do not split by seconds - but a unit accruing per
+ *              second is recovered perfectly by doing so
+ *
+ * Each is the same error: a per-call conclusion from an aggregate observation.
+ * Only per-call billing data settles it, and this endpoint does not carry any.
+ * (Codex, PR #271.)
+ */
+const ALLOCATION_UNPROVEN =
+  "Per-call allocation stays UNPROVEN either way: an aggregate cannot show how " +
+  "any individual call was billed, and only per-call billing data can.";
+
+function withAllocationCaveat(finding: string): string {
+  return `${finding} ${ALLOCATION_UNPROVEN}`;
 }
 
 /**
@@ -520,26 +547,23 @@ function verdictFor(ratio: number | null, unit: string, period: ComparisonPeriod
     );
   }
   if (ratio >= 0.98 && ratio <= 1.02) {
-    return (
-      `xAI's TOTAL ${unit} match ours (ratio ${ratio.toFixed(3)}). That rules out a gross ` +
-      `duration difference as the cause of the gap, leaving the rate card or a ` +
-      `surcharge. It does NOT establish that each call is billed in proportion to ` +
-      `its own duration — identical totals are consistent with a per-call minimum ` +
-      `that merely redistributes between calls, so the per-call allocation remains ` +
-      `unproven.`
+    return withAllocationCaveat(
+      `xAI's TOTAL ${unit} match ours (ratio ${ratio.toFixed(3)}). That rules out a ` +
+        `gross duration difference as the cause of the gap, leaving the rate card ` +
+        `or a surcharge.`,
     );
   }
   if (ratio > 1.02) {
-    return (
-      `xAI counted ${ratio.toFixed(2)}x the ${unit} we recorded. They bill a longer ` +
-      `duration than Twilio reports — setup, wall-clock, or a per-call minimum. ` +
-      `A per-call minimum is NOT proportional to duration, so the per-second ` +
-      `allocation is distributing it wrongly across calls.`
+    return withAllocationCaveat(
+      `xAI counted ${ratio.toFixed(2)}x the TOTAL ${unit} we recorded, so they bill a ` +
+        `longer duration than Twilio reports. The aggregate cannot say WHICH: a ` +
+        `uniform multiplier on every call (a per-second split would stay exactly ` +
+        `right) and a flat per-call minimum (it would not) produce the same ratio.`,
     );
   }
-  return (
-    `xAI counted FEWER ${unit} than we recorded (ratio ${ratio.toFixed(3)}) — ` +
-    `check the timezone of both sides before reading anything into it.`
+  return withAllocationCaveat(
+    `xAI counted FEWER TOTAL ${unit} than we recorded (ratio ${ratio.toFixed(3)}) — ` +
+      `check the timezone of both sides before reading anything into it.`,
   );
 }
 

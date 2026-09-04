@@ -15,6 +15,7 @@ import {
   fetchDailySpend,
   type FetchLike,
   parseInvoicePreview,
+  type UnitComparison,
   compareBilledUnits,
   fetchInvoicePreview,
 } from "./xaiBilling";
@@ -369,7 +370,7 @@ describe('compareBilledUnits — the question five rounds of review could not se
     // PER-CALL property: 1 and 119 minutes each billed as 60 preserves the
     // 120-minute total and breaks a duration-proportional split.
     expect(c.verdict).not.toContain('sound');
-    expect(c.verdict).toContain('per-call allocation remains');
+    expect(c.verdict).toContain('UNPROVEN');
   });
 
   it('every result carries the two things it cannot see', () => {
@@ -399,7 +400,12 @@ describe('compareBilledUnits — the question five rounds of review could not se
     );
     expect(c.ratio).toBeGreaterThan(1.5);
     expect(c.verdict).toContain('longer duration than Twilio reports');
-    expect(c.verdict).toContain('per-call minimum is NOT proportional to duration');
+    // It must NOT conclude the allocation is wrong. A uniform 1.5x on every
+    // call gives this same aggregate ratio while a per-second split stays
+    // exactly right; only a flat per-call minimum breaks it, and the
+    // aggregate cannot tell them apart.
+    expect(c.verdict).toContain('cannot say WHICH');
+    expect(c.verdict).toContain('UNPROVEN');
   });
 
   it('a non-duration unit says the allocation denominator itself is wrong', () => {
@@ -411,7 +417,31 @@ describe('compareBilledUnits — the question five rounds of review could not se
     expect(c.ourUnits).toBeNull();
     expect(c.ratio).toBeNull();
     expect(c.verdict).toContain('not a duration');
-    expect(c.verdict).toContain('do not split');
+    // And must not condemn the split on the unit label alone: audio tokens
+    // accruing at a constant rate per second are recovered exactly by it.
+    expect(c.verdict).not.toContain('do not split');
+    expect(c.verdict).toContain('constant rate per second');
+    expect(c.verdict).toContain('UNPROVEN');
+  });
+
+  /**
+   * THE INVARIANT, checked across every branch rather than per branch. Three
+   * verdicts existed and all three drew a per-call conclusion from an
+   * aggregate; fixing them one at a time is what let the second and third
+   * survive a round each.
+   */
+  it('NO verdict ever claims the per-call allocation is settled', () => {
+    const cases: UnitComparison[] = [
+      compareBilledUnits(MINUTES, OUR_SECONDS, ALIGNED),
+      compareBilledUnits({ ...MINUTES, numUnits: 669.4 }, OUR_SECONDS, ALIGNED),
+      compareBilledUnits({ ...MINUTES, numUnits: 300 }, OUR_SECONDS, ALIGNED),
+      compareBilledUnits({ ...MINUTES, unitType: 'audio_tokens', numUnits: 13_387_500 }, OUR_SECONDS, ALIGNED),
+      compareBilledUnits({ ...MINUTES, unitType: 'seconds', numUnits: 25_116 }, OUR_SECONDS, ALIGNED),
+    ];
+    for (const c of cases) {
+      expect(c.verdict, `verdict omits the allocation caveat: ${c.verdict}`).toContain('UNPROVEN');
+      expect(c.verdict).not.toMatch(/allocation is (sound|correct|right)/i);
+    }
   });
 
   it('handles seconds as the unit', () => {
