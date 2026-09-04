@@ -538,12 +538,18 @@ function caveatsFor(period: ComparisonPeriod): readonly string[] {
 }
 
 function verdictFor(ratio: number | null, unit: string, period: ComparisonPeriod): string {
-  if (ratio === null) return `no ${unit} recorded on our side — nothing to compare`;
+  // These two early returns bypassed withAllocationCaveat() and so shipped a
+  // verdict without ALLOCATION_UNPROVEN — in the two most inconclusive cases,
+  // where a caller displaying only `verdict` most needs the warning. The
+  // invariant test did not catch it because it exercised neither (Codex, #271).
+  if (ratio === null) {
+    return withAllocationCaveat(`No ${unit} recorded on our side — nothing to compare.`);
+  }
   if (!period.periodVerifiedAligned) {
-    return (
-      `ratio ${ratio.toFixed(3)}, but the period alignment has not been verified — ` +
-      `read nothing into this until ourSeconds is known to cover the same window ` +
-      `as the invoice preview.`
+    return withAllocationCaveat(
+      `Ratio ${ratio.toFixed(3)}, but the period alignment has not been verified — ` +
+        `read nothing into this until ourSeconds is known to cover the same window ` +
+        `as the invoice preview.`,
     );
   }
   if (ratio >= 0.98 && ratio <= 1.02) {

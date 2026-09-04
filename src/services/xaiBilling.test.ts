@@ -383,6 +383,7 @@ describe('compareBilledUnits — the question five rounds of review could not se
   it('refuses to interpret a ratio when the period is not verified aligned', () => {
     const c = compareBilledUnits(MINUTES, OUR_SECONDS, UNALIGNED);
     expect(c.verdict).toContain('period alignment has not been verified');
+    expect(c.verdict).toContain('UNPROVEN');
     expect(c.verdict).not.toContain('rules out');
     expect(c.caveats[0]).toContain('PERIOD ALIGNMENT NOT VERIFIED');
   });
@@ -437,6 +438,10 @@ describe('compareBilledUnits — the question five rounds of review could not se
       compareBilledUnits({ ...MINUTES, numUnits: 300 }, OUR_SECONDS, ALIGNED),
       compareBilledUnits({ ...MINUTES, unitType: 'audio_tokens', numUnits: 13_387_500 }, OUR_SECONDS, ALIGNED),
       compareBilledUnits({ ...MINUTES, unitType: 'seconds', numUnits: 25_116 }, OUR_SECONDS, ALIGNED),
+      // The two early returns. Omitting them is how the first version of this
+      // "iterate every branch" test failed to iterate every branch.
+      compareBilledUnits(MINUTES, 0, ALIGNED),
+      compareBilledUnits(MINUTES, OUR_SECONDS, UNALIGNED),
     ];
     for (const c of cases) {
       expect(c.verdict, `verdict omits the allocation caveat: ${c.verdict}`).toContain('UNPROVEN');
@@ -461,6 +466,7 @@ describe('compareBilledUnits — the question five rounds of review could not se
     );
     expect(c.ratio).toBeNull();
     expect(c.verdict).toContain('nothing to compare');
+    expect(c.verdict).toContain('UNPROVEN');
   });
 });
 
