@@ -340,8 +340,9 @@ REPORTED RATHER THAN ASSUMED. Never a ticket prefix.**
    positive evidence; a set `agent_used` is not.**
 2. else `agent_used IS NOT NULL` → **AGENT FILING.**
 3. else → **UNKNOWN, and it must be reported as unknown.** NULL is not proof
-   of a non-filing. 29 calls sit here on real SIDs; folding them into the
-   denominator as "did not file" understates the rate by assumption.
+   of a non-filing. Calls sit in this bucket (count: see the census); folding
+   them into the denominator as "did not file" understates the rate by
+   assumption.
 
 **AND THE `call_sid` MUST BE A REAL TWILIO SID — `LIKE 'CA%'`.** `call_sid IS
 NOT NULL` is not enough: **216 ticket rows carry sentinels** ("unknown",
@@ -363,8 +364,8 @@ FROM tickets
 WHERE call_sid LIKE 'CA%'          -- NOT `IS NOT NULL`. See above.
   AND created_at::date = '<day>'
 GROUP BY 1;
--- All-time totals live in THE CENSUS above; do not copy them here.
--- 2026-09-03 (the day this file publishes rates for): agent 197 · staff 1 · UNKNOWN 0
+-- All-time totals live in THE CENSUS above; do not copy them here. The
+-- 2026-09-03 day figures are stated ONCE, under "Effect of the change" below.
 ```
 
 **On 2026-09-03 the unknown bucket is EMPTY**, so the rates published in this
@@ -424,15 +425,16 @@ returned `T-` = 36 rows with **5** both, and the prefix rule's overcount read
 mid-analysis. **Re-run before quoting; a bare number here is already drifting.**
 
 `T-` is genuinely staff — every row has a named human creator. **`SR-` is
-not:** 7 of 36 carry `agent_used`, i.e. they ARE agent filings, and 29 are
-unattributed. So "all 72 are staff tickets" was wrong, and excluding them all
+not:** some carry `agent_used`, i.e. they ARE agent filings, and the rest are
+unattributed (counts: see the census). So "all 72 are staff tickets" was wrong, and excluding them all
 would have dropped real filings.
 
 4. **"`agent_used IS NOT NULL`, full stop".** The table directly above already
    showed why that fails and I published it without reading it that way:
    **`T-` rows have BOTH** a human creator and `agent_used`, so the predicate
-   counts staff tickets as agent filings; and **29 `SR-` rows plus 1 `VA-` row
-   have NEITHER**, so NULL means unknown provenance, not a proven non-filing.
+   counts staff tickets as agent filings; and **`SR-` rows plus a `VA-` row
+   have NEITHER** (counts: see the census), so NULL means unknown provenance,
+   not a proven non-filing.
    Fixed by the precedence rule at the top — a human creator wins, and unknown
    is a reported bucket rather than silence. (Codex, PR #272.)
 
@@ -457,11 +459,16 @@ which is the call's own record; the ticket's copy is for provenance only.** I
 nearly wrote a new trap here of exactly the kind this section exists to
 prevent.
 
-**Effect of the change on the published 2026-09-03 numbers, measured:** filed
-calls go **196 → 198** — the new rule adds 2 and loses 0, so it strictly
-dominates the old one that day. Which lanes those 2 belong to is NOT settled
+**Effect of the change on the published 2026-09-03 numbers, re-measured under
+the precedence rule with real SIDs.** This is the ONLY place the 09-03 day
+figures are stated: **agent 197 · staff 1 · UNKNOWN 0**, against the old
+`VA-` rule's **196** — the new rule adds **1** and loses 0, so it strictly
+dominates the old one that day.
+The earlier version of this line said +2, which came from the superseded
+`agent_used IS NOT NULL` test counting that day's one STAFF ticket as an agent
+filing (Codex, PR #272). Which lane the added call belongs to is NOT settled
 here, because settling it needs the `call_logs` join rather than the
-unreliable ticket column, and that has not been run. Two calls cannot overturn
+unreliable ticket column, and that has not been run. One call cannot overturn
 the "filing rate is FLAT" headline (tech +2.6 points at n≈66, surgery +6.3 at
 n≈32), but the per-lane percentages in the table above were derived under the
 old rule and have not been re-derived under this one.
@@ -487,9 +494,10 @@ GROUP BY 1 ORDER BY 2 DESC;
 -- Precedence, same as the rule at the top: a human creator wins. Do NOT
 -- shorten this to `agent_used IS NOT NULL` — staff rows carry BOTH fields
 -- (see the census for how many; the count drifts, the rule does not).
--- 2026-09-04 whole-table shape: VA 40,930 · T 6,079 · SR 1,368 · TKT 1,045
---   (ended 2026-02-14) · PCP 210 · DIAG 1
--- agent_used coverage on known agent lanes: VA 6,494/6,495 · PCP 210/210.
+-- This control is per-DAY and real-SID only, so its output is a day's shape,
+-- NOT the whole-table figures that used to be pasted here (those were produced
+-- by a different, unfiltered query and could not be reproduced from this one —
+-- Codex, PR #272). For all-time totals see THE CENSUS; do not copy them here.
 -- Do NOT reintroduce a prefix filter here. It was wrong three times.
 ```
 
