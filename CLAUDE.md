@@ -344,11 +344,15 @@ REPORTED RATHER THAN ASSUMED. Never a ticket prefix.**
    them into the denominator as "did not file" understates the rate by
    assumption.
 
-**AND THE `call_sid` MUST BE A REAL TWILIO SID — `LIKE 'CA%'`.** `call_sid IS
-NOT NULL` is not enough: **216 ticket rows carry sentinels** ("unknown",
-"latest", "none", bare uuids) across only **60 distinct values**, so
-`count(DISTINCT call_sid)` both invents calls that never happened and collapses
-unrelated tickets into them. This file already documented that 14% of POSTs
+**AND THE `call_sid` MUST PASS THE CANONICAL VALIDATOR — `~* '^CA[0-9a-f]{32}$'`,
+the SQL form of `isTwilioCallSid` (`src/tools/callSid.ts`).** `LIKE 'CA%'` is
+NOT enough: `CAunknown` passes it and recreates the very problem. Today that
+loose form admits exactly 1 junk row — which is a fact about today, not about
+the rule (Codex, PR #272). `call_sid IS
+NOT NULL` is not enough: ticket rows carry sentinels ("unknown", "latest",
+"none", bare uuids) across far fewer distinct values than rows (counts: see
+the census), so `count(DISTINCT call_sid)` both invents calls that never
+happened and collapses unrelated tickets into them. This file already documented that 14% of POSTs
 once carried no usable CallSid — I wrote a rule on `IS NOT NULL` directly
 beneath that knowledge. (Codex, PR #272; see also
 `docs/BACKEND_HANDOFF.md`.)
@@ -361,7 +365,7 @@ SELECT CASE WHEN created_by_id IS NOT NULL THEN 'staff'
             ELSE 'UNKNOWN' END                     AS provenance,
        count(DISTINCT call_sid)
 FROM tickets
-WHERE call_sid LIKE 'CA%'          -- NOT `IS NOT NULL`. See above.
+WHERE call_sid ~* '^CA[0-9a-f]{32}$'   -- NOT `IS NOT NULL`, NOT `LIKE 'CA%'`.
   AND created_at::date = '<day>'
 GROUP BY 1;
 -- All-time totals live in THE CENSUS above; do not copy them here. The
@@ -380,7 +384,7 @@ version of this did, including the one that had already published the table
 disproving it. Recorded in full because the pattern matters more than the rule:
 
 1. **`VA-` only.** Silently reports ZERO for a lane filing under another
-   prefix. PCP's 210 tickets went missing this way.
+   prefix. Every PCP ticket went missing this way (count: see the census).
 2. **"any ticket, never filter by prefix".** Over-corrected — counts staff
    tickets as agent filings.
 3. **"`VA-` + `PCP-`, and the other 72 sid-bearing rows are staff".** I
@@ -474,8 +478,8 @@ n≈32), but the per-lane percentages in the table above were derived under the
 old rule and have not been re-derived under this one.
 
 **How the prefix trap was found, kept because the discovery route matters.**
-PCP files under `PCP-`. 210 tickets, every one carrying a real `call_sid`,
-back to 2026-08-04 — the entire life of the line. The old `LIKE 'VA-%'` rule
+PCP files under `PCP-`, for the entire life of the line back to 2026-08-04
+(counts: see the census). The old `LIKE 'VA-%'` rule
 missed all of them and concluded the lane files nothing. It surfaced only
 because tickets turned up for calls whose `tool_timeline` claimed no tool had
 run: **two broken instruments disagreeing is what exposed the first one.** Had
@@ -489,7 +493,7 @@ SELECT split_part(ticket_number,'-',1) AS prefix, count(*) AS tickets,
        count(*) FILTER (WHERE created_by_id IS NULL
                           AND agent_used IS NOT NULL)                       AS agent,
        count(*) FILTER (WHERE created_by_id IS NULL AND agent_used IS NULL) AS UNKNOWN
-FROM tickets WHERE created_at::date = '<day>' AND call_sid LIKE 'CA%' 
+FROM tickets WHERE created_at::date = '<day>' AND call_sid ~* '^CA[0-9a-f]{32}$' 
 GROUP BY 1 ORDER BY 2 DESC;
 -- Precedence, same as the rule at the top: a human creator wins. Do NOT
 -- shorten this to `agent_used IS NOT NULL` — staff rows carry BOTH fields
@@ -506,7 +510,8 @@ GROUP BY 1 ORDER BY 2 DESC;
 0. **USING THE TICKET PREFIX AT ALL.** Every variant of this failed: too
    narrow returns a plausible zero (a broken lane, not a broken query); too
    wide counts staff tickets as agent filings; a hand-validated set still
-   missed 7 real filings and needed re-validating whenever a lane changed.
+   missed real filings (count: see the census) and needed re-validating
+   whenever a lane changed.
    `agent_used` is the provenance field and was in the table the whole time.
    If you find yourself reasoning about ticket-number naming to decide what a
    call did, stop — you are inferring provenance instead of reading it.
