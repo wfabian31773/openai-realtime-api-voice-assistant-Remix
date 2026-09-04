@@ -354,6 +354,29 @@ over every queue call since each lane's own cutover. Do not re-derive these.**
   another language during the opening.
 - **Nothing else failed all day.** No timeouts, no transport errors, no
   provider failures. The entire error inventory is the table above.
+- **THE VAD THRESHOLD WAS TOO HIGH, and this is the one number that changed
+  overnight.** xAI's `threshold` takes 0.1–0.9 and defaults to 0.85; we were
+  running the default. "Barely heard" — a call of 30s+ where the caller was
+  transcribed at most ONCE — on the two lanes that ran both pipelines:
+
+  | lane | old core | runtime at 0.85 |
+  |---|---|---|
+  | surgery | 6/46 = 13.0% | 13/40 = **32.5%** |
+  | tech | 7/75 = 9.3% | 18/76 = **23.7%** |
+
+  Bimodal, which is what names the cause: when the VAD DOES fire the runtime
+  captures MORE than the old core (tech 348 chars vs 324, in fewer longer
+  segments). Segments are failing to start, not to finish.
+  **Now 0.6, env-tunable via `RUNTIME_VAD_THRESHOLD`, clamped to 0.1–0.9.**
+  0.6 is a judgement; "too high" is the measurement. Re-measure both numbers
+  together — barely-heard must fall AND interruptions per call must not climb,
+  because the opposite failure is the agent stopping for a cough.
+- **Grok reports NO token usage.** 0 of 18 calls after the telemetry landed
+  carried any, and xAI's Voice Agent docs do not document a `usage` object on
+  `response.done`. The old core reports it on 172 of 184 (avg 20,859 cached
+  input tokens against 2,545 uncached — the cache does almost all the work).
+  So cost-per-call is not comparable between pipelines today, and
+  `total_cost_cents` on a grok row is not built from token counts.
 
 ---
 
