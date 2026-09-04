@@ -292,3 +292,40 @@ describe('a Twilio fetch that did not happen', () => {
     expect(write?.update).not.toHaveProperty('twilioCostCents');
   });
 });
+
+describe('the diagnostic line agrees with itself', () => {
+  /**
+   * The log is how a cost recalculation is read after the fact, and it printed
+   * the zero-valued initialiser while the total it printed beside it included
+   * the retained price — a 7-cent price reported as $0.00 inside a total of
+   * $0.32 (Codex, PR #268 round 13). A line that contradicts its own
+   * arithmetic is worse than no line: it sends the next person looking for a
+   * bug in the total.
+   *
+   * Asserted on the emitted text rather than on the source, because the first
+   * pass at round 13 fixed the value and NOTHING went red.
+   */
+  it('logs the Twilio price that was actually retained', async () => {
+    const row = seed({ id: 'logged', duration: 128, twilioCostCents: 7 });
+
+    const lines: string[] = [];
+    const original = console.info;
+    console.info = (...a: unknown[]) => { lines.push(a.join(' ')); };
+    try {
+      await callCostService.updateCallCosts(row.id, null, asTheRouteCallsIt(128));
+    } finally {
+      console.info = original;
+    }
+
+    const line = lines.find((l) => l.includes('[COST] Updated call logged'));
+    expect(line, 'the recalculation must say what it did').toBeTruthy();
+    expect(line).toContain('Twilio $0.07');
+    expect(line).not.toContain('Twilio $0.00');
+
+    // And the three figures on the line must add up.
+    const [twilio, provider, total] = [...line!.matchAll(/\$(\d+\.\d\d)/g)].map((m) =>
+      Math.round(Number(m[1]) * 100),
+    );
+    expect(twilio + provider, `${twilio} + ${provider} should be ${total}`).toBe(total);
+  });
+});

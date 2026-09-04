@@ -2,7 +2,7 @@
 // Reference: blueprint:javascript_database and blueprint:javascript_log_in_with_replit
 
 import { withRetry } from './services/dbResilience';
-import { resolveTwilioCostWrite } from './reconciledCostWrite';
+import { buildPreservedCostSet } from './preservedCostSet';
 import {
   users,
   agents,
@@ -430,73 +430,22 @@ export class DatabaseStorage implements IStorage {
     id: string,
     updates: Partial<InsertCallLog>,
   ): Promise<CallLog> {
-    const { openaiCostCents, totalCostCents, costIsEstimated, ...rest } = updates as
-      Partial<InsertCallLog> & {
-        openaiCostCents?: number;
-        totalCostCents?: number;
-        costIsEstimated?: boolean;
-      };
-    const touchesCost =
-      openaiCostCents !== undefined ||
-      totalCostCents !== undefined ||
-      costIsEstimated !== undefined;
-    if (!touchesCost) return this.updateCallLog(id, updates);
-
-    const reconciled = sql`${callLogs.costReconciledAt} IS NOT NULL`;
     /**
-     * The Twilio price to build the total from.
-     *
-     * POSTGRES EVALUATES A SET EXPRESSION AGAINST THE PRE-UPDATE ROW. So
-     * referencing the twilio_cost_cents COLUMN here reads the OLD value even
-     * when this same statement is writing a new one — and the total came out
-     * inconsistent with its own two components all over again, on exactly the
-     * paths that exist to correct a Twilio price (Codex, PR #268 round 9).
-     *
-     * The incoming value wins when there is one; the column is the fallback
-     * for an update that leaves the Twilio price alone.
+     * The clause itself lives in server/preservedCostSet.ts, where drizzle can
+     * render it offline and a test can assert the SQL that actually goes to
+     * the database rather than the shape of the code that builds it.
      */
-    /**
-     * ONE decision, used for the column AND the total — see the module. A
-     * value refused for one and written to the other is how a negative price
-     * ended up stored beside a total that did not include it.
-     */
-    const twilio = resolveTwilioCostWrite(updates);
-    if (twilio.rejected) {
-      // Do not persist a price that is not one. The column keeps what it had,
-      // and the total below reads that same stored value, so the two agree.
-      delete (rest as { twilioCostCents?: unknown }).twilioCostCents;
+    const built = buildPreservedCostSet(updates as Record<string, unknown>);
+    if (!built.touchesCost) return this.updateCallLog(id, updates);
+    if (built.rejectedTwilio) {
       console.warn(
         `[COST] refused an invalid twilioCostCents on ${id.slice(-8)} — the stored price stands`,
       );
     }
-    const twilioForTotal =
-      twilio.value === null
-        ? sql`COALESCE(${callLogs.twilioCostCents}, 0)`
-        : sql`${twilio.value}`;
     return await withRetry(async () => {
       const [callLog] = await db
         .update(callLogs)
-        .set({
-          ...rest,
-          ...(openaiCostCents === undefined
-            ? {}
-            : {
-                openaiCostCents: sql`CASE WHEN ${reconciled} THEN ${callLogs.openaiCostCents} ELSE ${openaiCostCents} END`,
-              }),
-          ...(totalCostCents === undefined
-            ? {}
-            : {
-                // Rebuilt from the PRESERVED provider cost when reconciled, so
-                // a later Twilio price still lands without disturbing the bill
-                // — and from the INCOMING Twilio price, not the stale column.
-                totalCostCents: sql`CASE WHEN ${reconciled} THEN COALESCE(${callLogs.openaiCostCents}, 0) + ${twilioForTotal} ELSE ${totalCostCents} END`,
-              }),
-          ...(costIsEstimated === undefined
-            ? {}
-            : {
-                costIsEstimated: sql`CASE WHEN ${reconciled} THEN false ELSE ${costIsEstimated} END`,
-              }),
-        } as Partial<InsertCallLog>)
+        .set(built.set as Partial<InsertCallLog>)
         .where(eq(callLogs.id, id))
         .returning();
       return callLog;

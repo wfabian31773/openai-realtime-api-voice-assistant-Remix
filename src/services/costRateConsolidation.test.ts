@@ -260,40 +260,41 @@ describe('step 3 — one duration rate, everywhere', () => {
     expect(offenders, offenders.join('\n')).toEqual([]);
   });
 
-  it('the preserving update reads the COLUMN, in SQL, at write time', () => {
-    const storage = read('../../server/storage.ts');
-    expect(storage).toMatch(/updateCallLogPreservingReconciledCost/);
-    // Naming the column is the point — a CASE over a constant would pass a
-    // shape check and protect nothing.
-    expect(storage).toMatch(/const reconciled = sql`\$\{callLogs\.costReconciledAt\} IS NOT NULL`/);
-    expect(storage).toMatch(/CASE WHEN \$\{reconciled\}/);
-  });
-
   /**
-   * Postgres evaluates a SET expression against the PRE-update row, so
-   * referencing the twilio_cost_cents column in the rebuilt total reads the
-   * OLD price even when the same statement is writing a new one — and the
-   * total came out inconsistent with its own components again, on exactly the
-   * paths whose job is correcting a Twilio price (Codex, PR #268 round 9).
+   * THESE TWO CHECKS USED TO READ server/storage.ts AS TEXT, and both are
+   * gone — replaced, not dropped, by something strictly stronger.
+   *
+   * They asserted that the SET clause named the column and consumed the
+   * resolved Twilio value. A source scan is all that was possible while the
+   * clause lived inside a method that needs a database to reach, and its
+   * limits showed twice on this PR: a mutation ignoring the incoming value
+   * passed cleanly (round 9), and so did a total rebuilt from the stale
+   * column (round 10). Drizzle renders a query with no connection, so the
+   * clause now lives in server/preservedCostSet.ts and
+   * server/preservedCostSet.test.ts reads THE GENERATED SQL for every case
+   * these two approximated.
+   *
+   * What is left here is the structural half a rendering test cannot cover:
+   * that the clause stays somewhere it can be rendered at all.
    */
-  it('rebuilds the total from the INCOMING Twilio price, not the stale column', () => {
+  it('the preserving clause is built where a test can render it', () => {
     const storage = read('../../server/storage.ts');
-    // The DECISION lives in reconciledCostWrite.ts and is tested there; this
-    // only checks the SQL consumes it. A scan cannot see whether a value is
-    // consulted, which is how a mutation ignoring it entirely passed here.
-    expect(storage).toMatch(/resolveTwilioCostWrite\(updates\)/);
-    // And a refused price must be dropped from the WRITE too, not merely
-    // excluded from the total — otherwise the column and the total disagree.
-    expect(storage).toMatch(/delete \(rest as \{ twilioCostCents\?: unknown \}\)\.twilioCostCents/);
-    // And the resolved value must actually REACH the total. Checking only
-    // that the helper is called let a fallback-on-both-branches mutation
-    // through: the total quietly read the stale column again.
-    expect(storage).toMatch(/:\s*sql`\$\{twilio\.value\}`/);
-    // The total's CASE must use the resolved value, never the column directly.
-    const rebuilt = storage.match(/totalCostCents: sql`CASE WHEN[^`]*`/)?.[0] ?? '';
-    expect(rebuilt, 'the total is rebuilt from something').not.toBe('');
-    expect(rebuilt).toContain('${twilioForTotal}');
-    expect(rebuilt).not.toContain('callLogs.twilioCostCents');
+    // storage.ts delegates and does not assemble SQL of its own...
+    expect(storage).toMatch(/buildPreservedCostSet\(/);
+    expect(
+      storage.slice(
+        storage.indexOf('async updateCallLogPreservingReconciledCost'),
+        storage.indexOf('async getCallLogBySid'),
+      ),
+      'the clause has drifted back into the untestable place',
+    ).not.toMatch(/CASE WHEN/);
+    // ...and the module it delegates to imports no database.
+    const clause = read('../../server/preservedCostSet.ts');
+    expect(clause).not.toMatch(/from ['"]\.\/db['"]/);
+    // The guard is read from the COLUMN. A CASE over a constant would pass a
+    // shape check and protect nothing.
+    expect(clause).toMatch(/callLogs\.costReconciledAt\} IS NOT NULL/);
+    expect(clause).toMatch(/resolveTwilioCostWrite\(/);
   });
 });
 

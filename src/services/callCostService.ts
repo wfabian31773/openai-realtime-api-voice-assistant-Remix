@@ -525,7 +525,11 @@ export class CallCostService {
         audioOutputMinutes: openaiCalc.outputMinutes,
       };
       
-      console.info(`[COST] Updated call ${callLogId} (${pricing.basis}): Twilio $${(twilioCostCents/100).toFixed(2)}, provider $${(costs.openaiCostCents/100).toFixed(2)}, Total $${(costs.totalCostCents/100).toFixed(2)}`);
+      // Report the RETAINED price, not the initialiser. A run that fetched
+      // nothing keeps the stored Twilio price and includes it in the total, so
+      // logging the zero made the line disagree with its own total
+      // (Codex, PR #268 round 13).
+      console.info(`[COST] Updated call ${callLogId} (${pricing.basis}): Twilio $${(costs.twilioCostCents/100).toFixed(2)}, provider $${(costs.openaiCostCents/100).toFixed(2)}, Total $${(costs.totalCostCents/100).toFixed(2)}`);
       
       return costs;
     } catch (error) {
