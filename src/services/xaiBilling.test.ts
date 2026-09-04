@@ -426,26 +426,61 @@ describe('compareBilledUnits — the question five rounds of review could not se
   });
 
   /**
-   * THE INVARIANT, checked across every branch rather than per branch. Three
-   * verdicts existed and all three drew a per-call conclusion from an
-   * aggregate; fixing them one at a time is what let the second and third
-   * survive a round each.
+   * THE INVARIANT, over a GENERATED input space rather than a hand-written
+   * list of branches.
+   *
+   * The previous version of this test listed the branches by hand, and the
+   * bug it was written to catch — two early returns that skipped the caveat —
+   * survived it, because the list omitted those same two. A list of branches
+   * maintained by the person adding a branch is not a check on that person.
+   *
+   * So the cases are now the cross-product of every input DIMENSION that
+   * `compareBilledUnits` reads: the unit type, the ratio it works out to, our
+   * denominator, and whether the period is verified. A branch added later is
+   * covered if it is reachable from these inputs, without anyone remembering
+   * to add it here.
+   *
+   * The invariant also holds by construction now — the caveat is appended at
+   * `compareBilledUnits`' single return and the wording functions cannot
+   * append it — so this test's job is to catch a future return that bypasses
+   * that site, not to enumerate today's branches.
    */
   it('NO verdict ever claims the per-call allocation is settled', () => {
-    const cases: UnitComparison[] = [
-      compareBilledUnits(MINUTES, OUR_SECONDS, ALIGNED),
-      compareBilledUnits({ ...MINUTES, numUnits: 669.4 }, OUR_SECONDS, ALIGNED),
-      compareBilledUnits({ ...MINUTES, numUnits: 300 }, OUR_SECONDS, ALIGNED),
-      compareBilledUnits({ ...MINUTES, unitType: 'audio_tokens', numUnits: 13_387_500 }, OUR_SECONDS, ALIGNED),
-      compareBilledUnits({ ...MINUTES, unitType: 'seconds', numUnits: 25_116 }, OUR_SECONDS, ALIGNED),
-      // The two early returns. Omitting them is how the first version of this
-      // "iterate every branch" test failed to iterate every branch.
-      compareBilledUnits(MINUTES, 0, ALIGNED),
-      compareBilledUnits(MINUTES, OUR_SECONDS, UNALIGNED),
-    ];
+    const unitTypes = ['minutes', 'min', 'seconds', 'sec', 'audio_tokens', 'tokens', 'requests', ''];
+    // Chosen to straddle every threshold in findingFor: below 0.98, inside
+    // the 0.98-1.02 band on both edges, and above 1.02.
+    const unitCounts = [0, 1, 209.3, 410.2, 418.6, 427, 669.4, 25_116, 13_387_500];
+    const ourSecondsValues = [0, 1, OUR_SECONDS];
+    const periods = [ALIGNED, UNALIGNED];
+
+    const cases: UnitComparison[] = [];
+    for (const unitType of unitTypes) {
+      for (const numUnits of unitCounts) {
+        for (const ourSeconds of ourSecondsValues) {
+          for (const period of periods) {
+            cases.push(compareBilledUnits({ ...MINUTES, unitType, numUnits }, ourSeconds, period));
+          }
+        }
+      }
+    }
+
+    expect(cases).toHaveLength(
+      unitTypes.length * unitCounts.length * ourSecondsValues.length * periods.length,
+    );
+    // The space must actually reach every shape of outcome, or "all cases
+    // pass" would be satisfiable by a space that exercises one branch.
+    expect(cases.some((c) => c.ratio === null && c.ourUnits === null)).toBe(true); // non-duration
+    expect(cases.some((c) => c.ratio === null && c.ourUnits !== null)).toBe(true); // zero denominator
+    expect(cases.some((c) => c.ratio !== null && c.ratio > 1.02)).toBe(true);
+    expect(cases.some((c) => c.ratio !== null && c.ratio < 0.98)).toBe(true);
+    expect(cases.some((c) => c.ratio !== null && c.ratio >= 0.98 && c.ratio <= 1.02)).toBe(true);
+
     for (const c of cases) {
       expect(c.verdict, `verdict omits the allocation caveat: ${c.verdict}`).toContain('UNPROVEN');
       expect(c.verdict).not.toMatch(/allocation is (sound|correct|right)/i);
+      // The caveat is appended once, at one site. Twice means a branch
+      // appended it for itself as well.
+      expect(c.verdict.match(/UNPROVEN/g)).toHaveLength(1);
     }
   });
 

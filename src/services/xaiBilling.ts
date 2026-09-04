@@ -469,35 +469,67 @@ export function compareBilledUnits(
   ourSeconds: number,
   period: ComparisonPeriod,
 ): UnitComparison {
-  const base = { unitType: line.unitType, billedUnits: line.numUnits, unitPrice: line.unitPrice };
-  const caveats = caveatsFor(period);
-
-  if (MINUTE_UNITS.test(line.unitType)) {
-    const ourUnits = ourSeconds / 60;
-    const ratio = ourUnits > 0 ? line.numUnits / ourUnits : null;
-    return { ...base, ourUnits, ratio, caveats, verdict: verdictFor(ratio, "minutes", period) };
-  }
-  if (SECOND_UNITS.test(line.unitType)) {
-    const ratio = ourSeconds > 0 ? line.numUnits / ourSeconds : null;
-    return { ...base, ourUnits: ourSeconds, ratio, caveats, verdict: verdictFor(ratio, "seconds", period) };
-  }
+  const measured = measureAgainstOurs(line, ourSeconds);
+  // THE SINGLE SITE WHERE A VERDICT IS MADE. Every branch above produces a
+  // FINDING, never a verdict, so no branch can ship without the caveat — the
+  // property holds by construction rather than by a test remembering to
+  // enumerate the branch. Two early returns in findingFor() previously
+  // bypassed the caveat, and the test written to catch that had itself
+  // hand-listed the cases and omitted those same two (Codex, PR #271).
   return {
-    ...base,
-    ourUnits: null,
-    ratio: null,
-    caveats,
+    unitType: line.unitType,
+    billedUnits: line.numUnits,
+    unitPrice: line.unitPrice,
+    ourUnits: measured.ourUnits,
+    ratio: measured.ratio,
+    caveats: caveatsFor(period),
     verdict: withAllocationCaveat(
-      `xAI bills this line in "${line.unitType}", which is not a duration, so there ` +
-        `is no ratio to take. Note this does NOT by itself condemn a per-second ` +
-        `split: a unit that accrues at a constant rate per second (audio tokens, ` +
-        `say) would still be recovered exactly by splitting on seconds.`,
+      measured.unit === null
+        ? nonDurationFinding(line.unitType)
+        : findingFor(measured.ratio, measured.unit, period),
     ),
   };
 }
 
 /**
- * THE ONE THING NO AGGREGATE CAN ESTABLISH, appended by construction so a
- * branch cannot omit it.
+ * The unit question alone: what did xAI count, and what is the same quantity
+ * as we measured it? Separated from the verdict so the branches that decide
+ * the arithmetic cannot also decide the wording.
+ */
+function measureAgainstOurs(
+  line: InvoiceLine,
+  ourSeconds: number,
+): { ourUnits: number | null; ratio: number | null; unit: string | null } {
+  if (MINUTE_UNITS.test(line.unitType)) {
+    const ourUnits = ourSeconds / 60;
+    return { ourUnits, ratio: ourUnits > 0 ? line.numUnits / ourUnits : null, unit: "minutes" };
+  }
+  if (SECOND_UNITS.test(line.unitType)) {
+    return {
+      ourUnits: ourSeconds,
+      ratio: ourSeconds > 0 ? line.numUnits / ourSeconds : null,
+      unit: "seconds",
+    };
+  }
+  return { ourUnits: null, ratio: null, unit: null };
+}
+
+function nonDurationFinding(unitType: string): string {
+  return (
+    `xAI bills this line in "${unitType}", which is not a duration, so there ` +
+    `is no ratio to take. Note this does NOT by itself condemn a per-second ` +
+    `split: a unit that accrues at a constant rate per second (audio tokens, ` +
+    `say) would still be recovered exactly by splitting on seconds.`
+  );
+}
+
+/**
+ * THE ONE THING NO AGGREGATE CAN ESTABLISH. It is appended at exactly one
+ * site — compareBilledUnits' single return — and the functions that choose
+ * the wording (findingFor, nonDurationFinding) cannot append it at all. So a
+ * branch added later omits it only by rewriting the return itself, not by
+ * being forgotten. The earlier arrangement had every branch append it for
+ * itself, and two of them did not.
  *
  * Three verdicts, three ways of getting this wrong, and I got all three:
  *   ratio ~ 1  said "splitting by call seconds is sound" - but 1 and 119
@@ -537,39 +569,40 @@ function caveatsFor(period: ComparisonPeriod): readonly string[] {
   ];
 }
 
-function verdictFor(ratio: number | null, unit: string, period: ComparisonPeriod): string {
-  // These two early returns bypassed withAllocationCaveat() and so shipped a
-  // verdict without ALLOCATION_UNPROVEN — in the two most inconclusive cases,
-  // where a caller displaying only `verdict` most needs the warning. The
-  // invariant test did not catch it because it exercised neither (Codex, #271).
+/**
+ * The wording alone, and DELIBERATELY NOT the caveat: this function cannot
+ * append it, so adding a branch here cannot omit it. Its single caller does
+ * that once, outside every branch.
+ */
+function findingFor(ratio: number | null, unit: string, period: ComparisonPeriod): string {
   if (ratio === null) {
-    return withAllocationCaveat(`No ${unit} recorded on our side — nothing to compare.`);
+    return `No ${unit} recorded on our side — nothing to compare.`;
   }
   if (!period.periodVerifiedAligned) {
-    return withAllocationCaveat(
+    return (
       `Ratio ${ratio.toFixed(3)}, but the period alignment has not been verified — ` +
-        `read nothing into this until ourSeconds is known to cover the same window ` +
-        `as the invoice preview.`,
+      `read nothing into this until ourSeconds is known to cover the same window ` +
+      `as the invoice preview.`
     );
   }
   if (ratio >= 0.98 && ratio <= 1.02) {
-    return withAllocationCaveat(
+    return (
       `xAI's TOTAL ${unit} match ours (ratio ${ratio.toFixed(3)}). That rules out a ` +
-        `gross duration difference as the cause of the gap, leaving the rate card ` +
-        `or a surcharge.`,
+      `gross duration difference as the cause of the gap, leaving the rate card ` +
+      `or a surcharge.`
     );
   }
   if (ratio > 1.02) {
-    return withAllocationCaveat(
+    return (
       `xAI counted ${ratio.toFixed(2)}x the TOTAL ${unit} we recorded, so they bill a ` +
-        `longer duration than Twilio reports. The aggregate cannot say WHICH: a ` +
-        `uniform multiplier on every call (a per-second split would stay exactly ` +
-        `right) and a flat per-call minimum (it would not) produce the same ratio.`,
+      `longer duration than Twilio reports. The aggregate cannot say WHICH: a ` +
+      `uniform multiplier on every call (a per-second split would stay exactly ` +
+      `right) and a flat per-call minimum (it would not) produce the same ratio.`
     );
   }
-  return withAllocationCaveat(
+  return (
     `xAI counted FEWER TOTAL ${unit} than we recorded (ratio ${ratio.toFixed(3)}) — ` +
-      `check the timezone of both sides before reading anything into it.`,
+    `check the timezone of both sides before reading anything into it.`
   );
 }
 
