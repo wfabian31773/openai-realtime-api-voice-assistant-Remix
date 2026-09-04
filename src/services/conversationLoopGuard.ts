@@ -197,14 +197,53 @@ const AGENT_EXIT: Record<string, string> = {
  *     wrongly assuming a lane cannot take a message is the more harmful
  *     error of the two.
  */
+/**
+ * A CLOSED SET. Not strings — strings are prose, and prose is where a sentence
+ * hides. `mustDo: ['Reply: I cannot connect calls']` typechecks against
+ * `string[]` and passes every shape and phrase check ever written; against
+ * this union it does not compile (Codex, PR #270).
+ */
+export type DirectiveAction =
+  | "STATE_THE_LIMITATION_FIRST"
+  | "USE_YOUR_OWN_WORDING"
+  | "TAKE_THE_MESSAGE"
+  | "REPEAT_THE_SAME_ANSWER_IF_ASKED_AGAIN";
+
+export type DirectiveProhibition = "NEVER_PROMISE_A_PICKUP";
+
+export type DirectiveSituation = "CALLER_ASKED_FOR_A_PERSON_ON_A_NO_TRANSFER_LINE";
+
 export interface NoTransferDirectiveSpec {
-  /** The server-side fact the agent must act on. Never a line to read out. */
-  readonly situation: string;
+  /** The server-side fact the agent must act on. A token, never a line. */
+  readonly situation: DirectiveSituation;
   /** Behaviours, in order. Each is something to DO. */
-  readonly mustDo: readonly string[];
+  readonly mustDo: readonly DirectiveAction[];
   /** Prohibited ACTIONS. Never prohibited wording — that is the prompt's. */
-  readonly mustNot: readonly string[];
+  readonly mustNot: readonly DirectiveProhibition[];
 }
+
+/**
+ * The ONLY place any of this becomes English. A new action means adding a
+ * token above and its sentence here, which is a visible, reviewable edit in
+ * one file — not a string typed at a call site.
+ */
+const SITUATION_TEXT: Record<DirectiveSituation, string> = {
+  CALLER_ASKED_FOR_A_PERSON_ON_A_NO_TRANSFER_LINE:
+    "The caller asked to reach a person, and this line CANNOT transfer calls.",
+};
+
+const ACTION_TEXT: Record<DirectiveAction, string> = {
+  STATE_THE_LIMITATION_FIRST: "Tell them so NOW, before collecting anything else.",
+  USE_YOUR_OWN_WORDING:
+    "If your own instructions give you wording for this moment, use it; otherwise state plainly, in your own words, that you cannot connect calls.",
+  TAKE_THE_MESSAGE: "Then take the message.",
+  REPEAT_THE_SAME_ANSWER_IF_ASKED_AGAIN:
+    "If they ask again, give that SAME answer rather than improvising a new one.",
+};
+
+const PROHIBITION_TEXT: Record<DirectiveProhibition, string> = {
+  NEVER_PROMISE_A_PICKUP: "Never promise that anyone will pick up.",
+};
 
 /**
  * THE STRUCTURE IS THE GUARANTEE. There is no field here in which a sentence
@@ -214,25 +253,25 @@ export interface NoTransferDirectiveSpec {
  * removes the channel (Codex, PR #270).
  */
 export function noTransferDirectiveSpec(agentSlug: string): NoTransferDirectiveSpec {
-  const canTakeMessage = filesTickets(agentSlug);
   return {
-    situation:
-      'The caller asked to reach a person, and this line CANNOT transfer calls.',
+    situation: "CALLER_ASKED_FOR_A_PERSON_ON_A_NO_TRANSFER_LINE",
     mustDo: [
-      'Tell them so NOW, before collecting anything else',
-      'If your own instructions give you wording for this moment, use it; otherwise state plainly, in your own words, that you cannot connect calls',
-      ...(canTakeMessage ? ['Then take the message'] : []),
-      'If they ask again, give that SAME answer rather than improvising a new one',
+      "STATE_THE_LIMITATION_FIRST",
+      "USE_YOUR_OWN_WORDING",
+      ...(filesTickets(agentSlug) ? (["TAKE_THE_MESSAGE"] as const) : []),
+      "REPEAT_THE_SAME_ANSWER_IF_ASKED_AGAIN",
     ],
-    mustNot: ['Never promise that anyone will pick up'],
+    mustNot: ["NEVER_PROMISE_A_PICKUP"],
   };
 }
 
-/** The only place a spec becomes text. Renders behaviour; renders no speech. */
+/** Tokens in, English out. No caller supplies a word of it. */
 export function renderDirective(spec: NoTransferDirectiveSpec): string {
-  return [`SERVER STATE CHECK: ${spec.situation}`, ...spec.mustDo, ...spec.mustNot]
-    .map((part) => (part.endsWith('.') ? part : `${part}.`))
-    .join(' ');
+  return [
+    `SERVER STATE CHECK: ${SITUATION_TEXT[spec.situation]}`,
+    ...spec.mustDo.map((a) => ACTION_TEXT[a]),
+    ...spec.mustNot.map((p) => PROHIBITION_TEXT[p]),
+  ].join(" ");
 }
 
 function exitFor(agentSlug: string): string {

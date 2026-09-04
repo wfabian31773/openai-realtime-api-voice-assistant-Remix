@@ -59,6 +59,17 @@ import { buildOpticalPrompt } from '../agents/opticalAgent';
 import { buildSurgeryPrompt } from '../agents/surgeryAgent';
 import { buildTechPrompt } from '../agents/techAgent';
 
+/**
+ * What the guard appends after the rendered directive. Mirrored from
+ * `exitFor`, which is module-private: a lane that files tickets gets the
+ * default exit, one that does not gets nothing.
+ */
+function exitTextFor(slug: string): string {
+  return filesTickets(slug)
+    ? 'Create the ticket NOW with whatever you have — the caller\u2019s phone number is attached automatically from caller ID, and missing fields may stay blank. A partial ticket the team can call back on beats a complete interview the caller never finishes.'
+    : '';
+}
+
 /** The real path: a caller on a no-transfer lane asking for a person. */
 function directiveFor(slug: string): string {
   const callId = `test-${slug}-${Math.random()}`;
@@ -122,9 +133,32 @@ describe('the directive has no channel for speech', () => {
        * exactly what the renderer produced, so a hand-written sentence cannot
        * be concatenated on at the call site.
        */
-      it('is rendered from the spec and nothing else', () => {
+      it('is EXACTLY the rendered spec plus the lane exit — nothing appended', () => {
+        // startsWith() was the first version of this and it does not enforce
+        // "nothing else": a sentence concatenated AFTER the rendered text
+        // still starts with it. Compare the whole string (Codex, PR #270).
         const rendered = renderDirective(noTransferDirectiveSpec(slug));
-        expect(directiveFor(slug).startsWith(rendered)).toBe(true);
+        const exit = exitTextFor(slug);
+        expect(directiveFor(slug)).toBe(exit ? `${rendered} ${exit}` : rendered);
+      });
+
+      /**
+       * The type is the guarantee, and this is what makes it one: every token
+       * the spec can carry is a member of a closed union, so prose cannot be
+       * put in a field at all. `mustDo: ['Reply: I cannot connect calls']`
+       * does not compile.
+       */
+      it('carries only tokens from the closed vocabulary', () => {
+        const spec = noTransferDirectiveSpec(slug);
+        const ACTIONS = [
+          'STATE_THE_LIMITATION_FIRST',
+          'USE_YOUR_OWN_WORDING',
+          'TAKE_THE_MESSAGE',
+          'REPEAT_THE_SAME_ANSWER_IF_ASKED_AGAIN',
+        ];
+        expect(ACTIONS).toEqual(expect.arrayContaining([...spec.mustDo]));
+        expect(spec.mustNot).toEqual(['NEVER_PROMISE_A_PICKUP']);
+        expect(spec.situation).toBe('CALLER_ASKED_FOR_A_PERSON_ON_A_NO_TRANSFER_LINE');
       });
 
       it('never orders the sentence the 2026-09-03 ruling forbids', () => {
