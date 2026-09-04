@@ -20,7 +20,7 @@
  * "asked again", live and post-mortem.
  */
 
-import { canTransfer } from '../config/agentCapabilities';
+import { canTransfer, filesTickets } from '../config/agentCapabilities';
 
 /** Topics an agent asks callers about. A line is bucketed by the FIRST
  *  topic it matches; unmatched lines are not counted, so the guard
@@ -177,11 +177,45 @@ const AGENT_EXIT: Record<string, string> = {
  * it. The guard's job is to force the honest answer to be given NOW and to
  * stop the loop — not to supply the words.
  */
-const NO_TRANSFER_HUMAN_DIRECTIVE =
-  'SERVER STATE CHECK: The caller asked to reach a person, and this line CANNOT transfer calls. Tell them so NOW, before collecting anything else, using the wording your own instructions give you for this — say what you cannot do, then what you can. Then take the message. If they ask again, repeat that SAME wording rather than improvising a new answer, and never promise that anyone will pick up.';
+/**
+ * Derived per lane, because two facts differ between lanes and getting either
+ * wrong is a promise the line cannot keep:
+ *
+ *   - WORDING. Most no-transfer lanes rule their own sentence for this moment.
+ *     Some have none: `appointment-confirmation` has no human-request script,
+ *     and an unregistered slug falls back to the conservative cannot-transfer
+ *     default with no prompt behind it at all. Pointing those at "your own
+ *     instructions" and stopping would leave the model improvising at exactly
+ *     the guarded moment, so the directive names the SHAPE of the answer as a
+ *     fallback — still not a sentence, so it cannot contradict a lane that
+ *     does have a ruling.
+ *   - WHETHER A MESSAGE CAN BE TAKEN AT ALL. `filesTickets` is false for
+ *     `appointment-confirmation` — outbound confirmation calls, 60-90s, no
+ *     ticket path. Telling it to take a message promises a callback nothing
+ *     will create. An UNREGISTERED slug is a different case and deliberately
+ *     not this one: `UNKNOWN_AGENT` sets `filesTickets: true`, because
+ *     wrongly assuming a lane cannot take a message is the more harmful
+ *     error of the two.
+ */
+function noTransferHumanDirective(agentSlug: string): string {
+  return (
+    'SERVER STATE CHECK: The caller asked to reach a person, and this line CANNOT transfer calls. ' +
+    'Tell them so NOW, before collecting anything else. If your own instructions give you wording for ' +
+    'this moment, use it; otherwise state plainly, in your own words, that you cannot connect calls. ' +
+    (filesTickets(agentSlug) ? 'Then take the message. ' : '') +
+    'If they ask again, give that SAME answer rather than improvising a new one, and never promise ' +
+    'that anyone will pick up.'
+  );
+}
 
 function exitFor(agentSlug: string): string {
-  return AGENT_EXIT[agentSlug] ?? AGENT_EXIT.default;
+  const explicit = AGENT_EXIT[agentSlug];
+  if (explicit) return explicit;
+  // The default exit ends in "Create the ticket NOW". On a lane that files no
+  // tickets that is an instruction it cannot carry out, and it contradicts the
+  // directive above, which for the same reason does not offer to take a
+  // message. Say nothing rather than something false.
+  return filesTickets(agentSlug) ? AGENT_EXIT.default : '';
 }
 
 class ConversationLoopGuard {
@@ -280,7 +314,10 @@ class ConversationLoopGuard {
       // ask; agents that can actually transfer get the escalation directive
       // on the second.
       if (cap === HUMAN_REQUEST_CAP_NO_TRANSFER) {
-        return { kind: 'human_request', text: `${NO_TRANSFER_HUMAN_DIRECTIVE} ${exitFor(agentSlug)}` };
+        return {
+          kind: 'human_request',
+          text: `${noTransferHumanDirective(agentSlug)} ${exitFor(agentSlug)}`.trim(),
+        };
       }
       return {
         kind: 'human_request',

@@ -180,7 +180,7 @@ describe('human-request escalation', () => {
     // because answeringServiceAgent tells the model to follow a SERVER STATE
     // CHECK exactly. It now defers to whatever the lane's own prompt rules.
     // See src/services/noTransferDirective.test.ts for the invariant.
-    expect(d?.text).toMatch(/wording your own instructions give you/);
+    expect(d?.text).toMatch(/your own instructions give you wording/);
     expect(d?.text).not.toMatch(/currently busy|become available/);
     conversationLoopGuard.releaseCall(callId);
   });
