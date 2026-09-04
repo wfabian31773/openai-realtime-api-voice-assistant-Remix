@@ -145,14 +145,51 @@ export async function reconcileGrokCostsForDay(
    * the durations is a reconciliation FAILURE, not a result (Codex, PR #268
    * round 2).
    */
-  if (xaiTotalCents > 0 && allocation.totalSeconds <= 0) {
+  /**
+   * A FINALISED CALL WITH NO BILLABLE SECONDS MEANS THE DAY IS NOT READY.
+   *
+   * xAI bills the audio; if a call finished and we cannot say how long it
+   * was, its share of the invoice is unknown and every other row's share is
+   * therefore wrong. Allocating anyway spreads that call's money across its
+   * neighbours and marks them authoritative, so the stored day exceeds the
+   * invoice — and because later writers preserve a reconciled cost, it stays
+   * wrong (Codex, PR #268 round 16). The status callback explicitly permits
+   * a terminal update with no CallDuration, so this is reachable.
+   *
+   * ZERO IS REFUSED ALONGSIDE NULL, which is stricter than it looks and is
+   * the point: Twilio's own reconciler writes `duration` later, so a row
+   * reading zero now may read ninety seconds in an hour. Reconciling it at
+   * $0 today is the permanent-zero trap round 7 closed for in-flight calls,
+   * arriving by a different door.
+   *
+   * ONLY WHEN THERE IS A BILL TO DIVIDE. A day xAI charged nothing for costs
+   * every call nothing, whatever their durations turn out to be — there is
+   * no share to get wrong, so a free day still reconciles. The durations only
+   * matter as the denominator.
+   *
+   * This also subsumes the round-2 guard it replaces, which refused a
+   * positive bill when NO call had seconds. That was the same failure with
+   * every row affected rather than one; both now come out here, and the
+   * reason says which.
+   *
+   * Refusing is self-correcting — the next run reconciles the whole day once
+   * the durations land — and it is what this module chooses everywhere else:
+   * a number that is not right is worse than no number, because "estimated"
+   * is honest and "reconciled" is believed.
+   */
+  const withoutSeconds = calls.filter((c) => !(c.durationSeconds > 0));
+  if (xaiTotalCents > 0 && withoutSeconds.length > 0) {
+    const everyOne = withoutSeconds.length === calls.length;
     return {
       day,
       reconciled: false,
-      reason:
-        `xAI billed $${(xaiTotalCents / 100).toFixed(2)} for ${day} but the ${calls.length} ` +
-        `runtime call(s) on record carry no billable seconds — durations are missing, so the ` +
-        `charge cannot be attributed and nothing was written`,
+      reason: everyOne
+        ? `xAI billed $${(xaiTotalCents / 100).toFixed(2)} for ${day} but all ${calls.length} ` +
+          `runtime call(s) on record carry no billable seconds — the charge cannot be ` +
+          `attributed and nothing was written`
+        : `${withoutSeconds.length} of ${calls.length} finalised runtime call(s) on ${day} carry ` +
+          `no billable seconds (e.g. ${withoutSeconds[0]!.callSid}) — xAI billed for those too, ` +
+          `so allocating the invoice across the rest would overstate every row; nothing was written`,
       xaiTotalCents,
       estimatedTotalCents,
     };
@@ -231,13 +268,23 @@ export function databasePorts(): ReconcilerPorts {
              *
              * in_progress is the only non-final state the runtime writes
              * (callRecord.ts opens every row with it), so excluding that one
-             * status is the whole rule. The duration check then covers a
-             * finalised row that somehow has no billable seconds.
+             * status is the whole rule.
+             *
+             * AND THERE IS NO DURATION FILTER HERE, DELIBERATELY. There was,
+             * and it was the same bug in a third costume: a finalised row
+             * with a null or zero duration was hidden from the read, but xAI
+             * still billed for that call, so the allocator spread the whole
+             * invoice across the remaining rows and stamped them
+             * authoritative — the stored day summing to MORE than the
+             * invoice, on every re-run (Codex, PR #268 round 16). The status
+             * callback explicitly permits a terminal update with no
+             * CallDuration, so this is reachable rather than theoretical.
+             *
+             * Such a row is not something to filter, it is a day that cannot
+             * be attributed yet. The caller refuses it; see below.
              */
             AND status IS NOT NULL
             AND status <> 'in_progress'
-            AND duration IS NOT NULL
-            AND duration > 0
             AND created_at >= $1::date
             AND created_at <  ($1::date + INTERVAL '1 day')`,
         [day],

@@ -181,6 +181,40 @@ describe("what it refuses", () => {
     expect(p.written).toEqual([]);
   });
 
+  /**
+   * ROUND 16. The round-2 case above is every row; this is one row among
+   * many, which is the shape that actually reaches production — the status
+   * callback permits a terminal update with no CallDuration.
+   */
+  it("REFUSES a day where even ONE finalised call has no billable duration", async () => {
+    const p = ports([
+      { callSid: "CA1", durationSeconds: 120, estimatedCents: 16 },
+      { callSid: "CA2", durationSeconds: 90, estimatedCents: 12 },
+      { callSid: "CA3", durationSeconds: 0, estimatedCents: 0 }, // finalised, no duration
+    ]);
+    const out = await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(33.68) });
+    expect(out.reconciled).toBe(false);
+    // The reason has to name the blocker, or the refusal is undiagnosable.
+    expect(out.reason).toContain("CA3");
+    expect(out.reason).toContain("1 of 3");
+    // Nothing written — not even for the two rows that DO have durations.
+    expect(p.written).toEqual([]);
+  });
+
+  it("reconciles the same day once the missing duration lands", async () => {
+    // Refusing is self-correcting: this is the next run.
+    const p = ports([
+      { callSid: "CA1", durationSeconds: 120, estimatedCents: 16 },
+      { callSid: "CA2", durationSeconds: 90, estimatedCents: 12 },
+      { callSid: "CA3", durationSeconds: 30, estimatedCents: 4 },
+    ]);
+    const out = await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(33.68) });
+    expect(out.reconciled).toBe(true);
+    // And the whole invoice is allocated, to the cent, across all three.
+    expect(p.written.reduce((s, c) => s + c.costCents, 0)).toBe(3368);
+    expect(p.written).toHaveLength(3);
+  });
+
   it("still reconciles a genuinely free day", async () => {
     const p = ports([{ callSid: "CA1", durationSeconds: 0, estimatedCents: 0 }]);
     const out = await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(0) });
@@ -288,8 +322,22 @@ describe("the day query takes finalised rows only", () => {
 
   it("excludes only IN-FLIGHT rows, not every non-completed one", () => {
     expect(src).toMatch(/AND status <> 'in_progress'/);
-    expect(src).toMatch(/AND duration IS NOT NULL/);
-    expect(src).toMatch(/AND duration > 0/);
+  });
+
+  /**
+   * AND THIS PIN USED TO REQUIRE THE OPPOSITE.
+   *
+   * It asserted `AND duration IS NOT NULL` and `AND duration > 0` were in the
+   * query, which is how the round-16 defect was held in place: a finalised
+   * row with no duration was hidden from the read, xAI billed for it anyway,
+   * and the allocator spread the whole invoice over the rest and stamped them
+   * authoritative. Filtering was never the right answer — the day is simply
+   * not attributable yet, and the caller refuses it. Behaviourally covered
+   * above; the scan only stops the filter creeping back.
+   */
+  it("does NOT hide a finalised row that has no duration", () => {
+    expect(src).not.toMatch(/AND duration IS NOT NULL/);
+    expect(src).not.toMatch(/AND duration > 0/);
   });
 
   /**
