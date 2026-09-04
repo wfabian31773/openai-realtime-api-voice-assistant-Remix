@@ -14,6 +14,10 @@ import {
   sumDailyUsage,
   fetchDailySpend,
   type FetchLike,
+  parseInvoicePreview,
+  type UnitComparison,
+  compareBilledUnits,
+  fetchInvoicePreview,
 } from "./xaiBilling";
 
 const SETUP = {
@@ -284,5 +288,260 @@ describe("fetching, and every way it can decline", () => {
     });
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.reason).toContain("not JSON");
+  });
+});
+
+// ─── invoice/preview ─────────────────────────────────────────────────────────
+
+describe('parseInvoicePreview', () => {
+  const line = (over: Record<string, unknown> = {}) => ({
+    description: 'grok-voice-think-fast-2.0',
+    unitType: 'minutes',
+    unitPrice: 0.08,
+    numUnits: 418.6,
+    amount: 33.49,
+    ...over,
+  });
+
+  it('reads the fields the endpoint exists for', () => {
+    const r = parseInvoicePreview({ lineItems: [line()] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.lines[0]).toMatchObject({ unitType: 'minutes', numUnits: 418.6, unitPrice: 0.08 });
+  });
+
+  it.each(['lineItems', 'lines', 'items'])('accepts the array under %s', (key) => {
+    expect(parseInvoicePreview({ [key]: [line()] }).ok).toBe(true);
+  });
+
+  it('accepts numeric strings, which billing APIs return for money', () => {
+    const r = parseInvoicePreview({ lineItems: [line({ numUnits: '418.6', unitPrice: '0.08' })] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.lines[0].numUnits).toBe(418.6);
+  });
+
+  /**
+   * The whole point of the endpoint is a number. A line we cannot read has no
+   * answer in it, and defaulting to 0 would look exactly like one — the same
+   * reasoning as "no voice line is not zero" in sumDailyUsage.
+   */
+  it('REFUSES a line whose numUnits cannot be read, rather than defaulting it', () => {
+    const r = parseInvoicePreview({ lineItems: [line({ numUnits: null })] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('cannot read');
+  });
+
+  it('refuses when no line matches the voice needle, and names what came back', () => {
+    const r = parseInvoicePreview({ lineItems: [line({ description: 'grok-4-text' })] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('grok-4-text');
+  });
+
+  it('refuses a body with no line items at all', () => {
+    expect(parseInvoicePreview({}).ok).toBe(false);
+  });
+
+  /**
+   * Parsing runs AFTER request()'s try/catch, so a throw here would escape
+   * fetchInvoicePreview's never-throws contract rather than being reported.
+   */
+  it.each([null, 'a string', 42, []])('refuses a %s line item without throwing', (entry) => {
+    let r: ReturnType<typeof parseInvoicePreview>;
+    expect(() => { r = parseInvoicePreview({ lineItems: [entry] }); }).not.toThrow();
+    expect(r!.ok).toBe(false);
+  });
+});
+
+describe('compareBilledUnits — the question five rounds of review could not settle', () => {
+  const OUR_SECONDS = 25_116; // 2026-09-03, the reconciled day: 418.6 minutes
+  const ALIGNED = { ourPeriod: '2026-09-03', periodVerifiedAligned: true };
+  const UNALIGNED = { ourPeriod: '2026-09-03', periodVerifiedAligned: false };
+  const MINUTES = { unitType: 'minutes', unitPrice: 0.08, numUnits: 418.6, amountUsd: 33.49, description: 'grok-voice' };
+
+  it('xAI counted OUR minutes -> the duration is not the gap', () => {
+    const c = compareBilledUnits(
+      { unitType: 'minutes', unitPrice: 0.08, numUnits: 418.6, amountUsd: 33.49, description: 'grok-voice' },
+      OUR_SECONDS,
+      ALIGNED,
+    );
+    expect(c.ratio).toBeCloseTo(1, 2);
+    expect(c.verdict).toContain('rules out a gross duration difference');
+    // The over-claim this replaced. Agreeing TOTALS cannot establish a
+    // PER-CALL property: 1 and 119 minutes each billed as 60 preserves the
+    // 120-minute total and breaks a duration-proportional split.
+    expect(c.verdict).not.toContain('sound');
+    expect(c.verdict).toContain('UNPROVEN');
+  });
+
+  it('every result carries the two things it cannot see', () => {
+    const c = compareBilledUnits(MINUTES, OUR_SECONDS, ALIGNED);
+    expect(c.caveats).toHaveLength(2);
+    expect(c.caveats.join(' ')).toContain('totals only');
+    expect(c.caveats.join(' ')).toContain('INDIVIDUAL call');
+  });
+
+  it('refuses to interpret a ratio when the period is not verified aligned', () => {
+    const c = compareBilledUnits(MINUTES, OUR_SECONDS, UNALIGNED);
+    expect(c.verdict).toContain('period alignment has not been verified');
+    expect(c.verdict).toContain('UNPROVEN');
+    expect(c.verdict).not.toContain('rules out');
+    expect(c.caveats[0]).toContain('PERIOD ALIGNMENT NOT VERIFIED');
+  });
+
+  /**
+   * The case that would invalidate the current allocation. 669.4 minutes is
+   * the 418.6 we recorded plus a 63-second per-call minimum over 239 calls —
+   * one concrete way the gap could be duration rather than rate.
+   */
+  it('xAI counted MORE than our minutes -> the per-second split is distributing it wrongly', () => {
+    const c = compareBilledUnits(
+      { unitType: 'minutes', unitPrice: 0.08, numUnits: 669.4, amountUsd: 53.55, description: 'grok-voice' },
+      OUR_SECONDS,
+      ALIGNED,
+    );
+    expect(c.ratio).toBeGreaterThan(1.5);
+    expect(c.verdict).toContain('longer duration than Twilio reports');
+    // It must NOT conclude the allocation is wrong. A uniform 1.5x on every
+    // call gives this same aggregate ratio while a per-second split stays
+    // exactly right; only a flat per-call minimum breaks it, and the
+    // aggregate cannot tell them apart.
+    expect(c.verdict).toContain('cannot say WHICH');
+    expect(c.verdict).toContain('UNPROVEN');
+  });
+
+  it('a non-duration unit says the allocation denominator itself is wrong', () => {
+    const c = compareBilledUnits(
+      { unitType: 'audio_tokens', unitPrice: 0.000004, numUnits: 13_387_500, amountUsd: 53.55, description: 'grok-voice' },
+      OUR_SECONDS,
+      ALIGNED,
+    );
+    expect(c.ourUnits).toBeNull();
+    expect(c.ratio).toBeNull();
+    expect(c.verdict).toContain('not a duration');
+    // And must not condemn the split on the unit label alone: audio tokens
+    // accruing at a constant rate per second are recovered exactly by it.
+    expect(c.verdict).not.toContain('do not split');
+    expect(c.verdict).toContain('constant rate per second');
+    expect(c.verdict).toContain('UNPROVEN');
+  });
+
+  /**
+   * THE INVARIANT, over a GENERATED input space rather than a hand-written
+   * list of branches.
+   *
+   * The previous version of this test listed the branches by hand, and the
+   * bug it was written to catch — two early returns that skipped the caveat —
+   * survived it, because the list omitted those same two. A list of branches
+   * maintained by the person adding a branch is not a check on that person.
+   *
+   * So the cases are now the cross-product of every input DIMENSION that
+   * `compareBilledUnits` reads: the unit type, the ratio it works out to, our
+   * denominator, and whether the period is verified. A branch added later is
+   * covered if it is reachable from these inputs, without anyone remembering
+   * to add it here.
+   *
+   * The invariant also holds by construction now — the caveat is appended at
+   * `compareBilledUnits`' single return and the wording functions cannot
+   * append it — so this test's job is to catch a future return that bypasses
+   * that site, not to enumerate today's branches.
+   */
+  it('NO verdict ever claims the per-call allocation is settled', () => {
+    const unitTypes = ['minutes', 'min', 'seconds', 'sec', 'audio_tokens', 'tokens', 'requests', ''];
+    // Chosen to straddle every threshold in findingFor: below 0.98, inside
+    // the 0.98-1.02 band on both edges, and above 1.02.
+    const unitCounts = [0, 1, 209.3, 410.2, 418.6, 427, 669.4, 25_116, 13_387_500];
+    const ourSecondsValues = [0, 1, OUR_SECONDS];
+    const periods = [ALIGNED, UNALIGNED];
+
+    const cases: UnitComparison[] = [];
+    for (const unitType of unitTypes) {
+      for (const numUnits of unitCounts) {
+        for (const ourSeconds of ourSecondsValues) {
+          for (const period of periods) {
+            cases.push(compareBilledUnits({ ...MINUTES, unitType, numUnits }, ourSeconds, period));
+          }
+        }
+      }
+    }
+
+    expect(cases).toHaveLength(
+      unitTypes.length * unitCounts.length * ourSecondsValues.length * periods.length,
+    );
+    // The space must actually reach every shape of outcome, or "all cases
+    // pass" would be satisfiable by a space that exercises one branch.
+    expect(cases.some((c) => c.ratio === null && c.ourUnits === null)).toBe(true); // non-duration
+    expect(cases.some((c) => c.ratio === null && c.ourUnits !== null)).toBe(true); // zero denominator
+    expect(cases.some((c) => c.ratio !== null && c.ratio > 1.02)).toBe(true);
+    expect(cases.some((c) => c.ratio !== null && c.ratio < 0.98)).toBe(true);
+    expect(cases.some((c) => c.ratio !== null && c.ratio >= 0.98 && c.ratio <= 1.02)).toBe(true);
+
+    for (const c of cases) {
+      expect(c.verdict, `verdict omits the allocation caveat: ${c.verdict}`).toContain('UNPROVEN');
+      expect(c.verdict).not.toMatch(/allocation is (sound|correct|right)/i);
+      // The caveat is appended once, at one site. Twice means a branch
+      // appended it for itself as well.
+      expect(c.verdict.match(/UNPROVEN/g)).toHaveLength(1);
+    }
+  });
+
+  it('handles seconds as the unit', () => {
+    const c = compareBilledUnits(
+      { unitType: 'seconds', unitPrice: 0.00133, numUnits: 25_116, amountUsd: 33.49, description: 'grok-voice' },
+      OUR_SECONDS,
+      ALIGNED,
+    );
+    expect(c.ratio).toBeCloseTo(1, 3);
+  });
+
+  it('says so rather than dividing by zero when we recorded nothing', () => {
+    const c = compareBilledUnits(
+      { unitType: 'minutes', unitPrice: 0.08, numUnits: 10, amountUsd: 0.8, description: 'grok-voice' },
+      0,
+      ALIGNED,
+    );
+    expect(c.ratio).toBeNull();
+    expect(c.verdict).toContain('nothing to compare');
+    expect(c.verdict).toContain('UNPROVEN');
+  });
+});
+
+describe('fetchInvoicePreview', () => {
+  const setup = { configured: true as const, config: { baseUrl: 'https://management-api.x.ai', managementKey: 'k', teamId: 't' } };
+
+  it('GETs the documented path with the management key', async () => {
+    let seen: { url: string; init?: Record<string, unknown> } | null = null;
+    const fetchImpl = (async (url: string, init?: Record<string, unknown>) => {
+      seen = { url, init };
+      return { ok: true, status: 200, text: async () => JSON.stringify({ lineItems: [
+        { description: 'grok-voice-think-fast-2.0', unitType: 'minutes', unitPrice: 0.08, numUnits: 418.6, amount: 33.49 },
+      ] }) };
+    }) as never;
+    const r = await fetchInvoicePreview({ setup, fetchImpl });
+    expect(r.ok).toBe(true);
+    expect(seen!.url).toBe('https://management-api.x.ai/v1/billing/teams/t/postpaid/invoice/preview');
+    expect(seen!.init!.method).toBe('GET');
+    expect((seen!.init!.headers as Record<string, string>).Authorization).toBe('Bearer k');
+    // A GET must not carry a body — some gateways reject one outright.
+    expect(seen!.init!.body).toBeUndefined();
+  });
+
+  it('names the missing variables when unconfigured, and does not call out', async () => {
+    let called = false;
+    const fetchImpl = (async () => { called = true; throw new Error('should not be reached'); }) as never;
+    const r = await fetchInvoicePreview({ setup: { configured: false, missing: ['XAI_MANAGEMENT_KEY'] }, fetchImpl });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('XAI_MANAGEMENT_KEY');
+    expect(called).toBe(false);
+  });
+
+  /** An error body from a billing endpoint can echo account details. */
+  it('reports the status and never the body on an HTTP error', async () => {
+    const fetchImpl = (async () => ({ ok: false, status: 403, text: async () => 'team_id=SECRET org=SECRET' })) as never;
+    const r = await fetchInvoicePreview({ setup, fetchImpl });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain('403');
+      expect(r.reason).not.toContain('SECRET');
+    }
   });
 });

@@ -230,16 +230,27 @@ async function post(
   fetchImpl: FetchLike,
   timeoutMs: number,
 ): Promise<BillingResult<unknown>> {
+  return request(config, path, "POST", body, fetchImpl, timeoutMs);
+}
+
+async function request(
+  config: XaiBillingConfig,
+  path: string,
+  method: "GET" | "POST",
+  body: unknown,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<BillingResult<unknown>> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetchImpl(`${config.baseUrl}${path}`, {
-      method: "POST",
+      method,
       headers: {
         Authorization: `Bearer ${config.managementKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: controller.signal,
     });
     const text = await res.text();
@@ -295,4 +306,334 @@ export async function fetchDailySpend(
   );
   if (!res.ok) return res;
   return sumDailyUsage(day, res.value, options.voiceNeedle ?? "grok-voice");
+}
+
+// ─── invoice/preview: what xAI COUNTED ───────────────────────────────────────
+//
+// The daily-usage endpoint above answers "how much". This one answers "how
+// many of what", and that is the question five rounds of review could not
+// settle from spend alone: our estimate was 60% below the invoice on
+// 2026-09-03, and the three live explanations — a stale published rate, audio
+// tokens billed on top of the minute, or a billed duration longer than the one
+// Twilio reports — are indistinguishable while the only numbers available are
+// dollars.
+//
+// `numUnits` distinguishes them, because it is xAI's own count. Compare it
+// against the seconds we recorded:
+//
+//   units ≈ our minutes          -> the rate card is wrong, or something is
+//                                   billed on top of the minute
+//   units >> our minutes         -> they bill a longer duration than we record
+//                                   (setup, wall-clock, or a per-call minimum)
+//   unitType is not a duration   -> the whole per-minute model is wrong and the
+//                                   allocation's denominator must change
+//
+// And `unitPrice` is the rate stated BY xAI, rather than transcribed from a
+// pricing page by someone who may be reading a stale one.
+
+export interface InvoiceLine {
+  /** What xAI is counting: minutes, tokens, requests. Their word, not ours. */
+  unitType: string;
+  /** Their rate, in dollars per unit. */
+  unitPrice: number;
+  /** HOW MANY THEY COUNTED. The number this endpoint exists for. */
+  numUnits: number;
+  amountUsd: number;
+  description: string;
+}
+
+export interface InvoicePreview {
+  lines: InvoiceLine[];
+  /** Lines not matching the voice needle, kept so a rename is visible. */
+  ignored: InvoiceLine[];
+}
+
+function readNumber(raw: Record<string, unknown>, ...names: string[]): number | null {
+  for (const name of names) {
+    const v = raw[name];
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+  }
+  return null;
+}
+
+/**
+ * Pure, so the shape xAI return is pinned by a test rather than discovered in
+ * production — the same reason `buildDailyUsageRequest` is pure.
+ *
+ * A line whose numUnits or unitType cannot be read is REFUSED rather than
+ * defaulted. This endpoint exists to answer a question with a number; a line
+ * we cannot read has no answer in it, and a zero would look like one.
+ */
+export function parseInvoicePreview(
+  raw: unknown,
+  voiceNeedle = "grok-voice",
+): BillingResult<InvoicePreview> {
+  const root = raw as Record<string, unknown> | null;
+  const rawLines =
+    (root?.lineItems as unknown[]) ?? (root?.lines as unknown[]) ?? (root?.items as unknown[]);
+  if (!Array.isArray(rawLines)) {
+    return { ok: false, reason: "xAI invoice preview had no line items array" };
+  }
+
+  const lines: InvoiceLine[] = [];
+  const unreadable: string[] = [];
+  for (const entry of rawLines) {
+    // A null or non-object entry would throw on the first property read, and
+    // this function is called AFTER request()'s try/catch — so it would break
+    // fetchInvoicePreview's never-throws contract rather than refusing.
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      unreadable.push("(entry that was not an object)");
+      continue;
+    }
+    const l = entry as Record<string, unknown>;
+    const description = String(l.description ?? l.name ?? l.model ?? "");
+    const unitType = typeof l.unitType === "string" ? l.unitType : "";
+    const numUnits = readNumber(l, "numUnits", "units", "quantity");
+    const unitPrice = readNumber(l, "unitPrice", "price");
+    const amountUsd = readNumber(l, "amount", "amountUsd", "usd");
+    if (!unitType || numUnits === null || unitPrice === null || amountUsd === null) {
+      unreadable.push(description || "(unnamed line)");
+      continue;
+    }
+    lines.push({ unitType, unitPrice, numUnits, amountUsd, description });
+  }
+
+  if (unreadable.length) {
+    return {
+      ok: false,
+      reason:
+        `xAI invoice preview returned line(s) missing unitType/numUnits/unitPrice/amount ` +
+        `(${unreadable.join(", ")}) — a line we cannot read cannot answer what they counted`,
+    };
+  }
+
+  const voice = lines.filter((l) => isVoiceBillingLine(l.description, voiceNeedle));
+  const ignored = lines.filter((l) => !isVoiceBillingLine(l.description, voiceNeedle));
+  if (voice.length === 0) {
+    return {
+      ok: false,
+      reason:
+        `xAI invoice preview had no line matching "${voiceNeedle}"` +
+        (ignored.length ? ` — lines present: ${ignored.map((l) => l.description).join(", ")}` : ""),
+    };
+  }
+  return { ok: true, value: { lines: voice, ignored } };
+}
+
+export interface UnitComparison {
+  unitType: string;
+  /** What xAI counted. */
+  billedUnits: number;
+  /** The same quantity as WE measure it, converted to xAI's unit where we can. */
+  ourUnits: number | null;
+  /** billedUnits / ourUnits, or null when the unit is not a duration. */
+  ratio: number | null;
+  /** xAI's own stated price per unit. */
+  unitPrice: number;
+  /** What this rules in or out, in one line an operator can act on. */
+  verdict: string;
+  /**
+   * ALWAYS PRESENT. Two things this comparison cannot see, stated on every
+   * result so a caller cannot read a ratio without them:
+   *   - whether ourSeconds covers exactly the invoice's billing window
+   *   - that agreeing TOTALS say nothing about any individual call
+   */
+  caveats: readonly string[];
+}
+
+export interface ComparisonPeriod {
+  /** What ourSeconds covers, e.g. "2026-09-03". For the caller's own record. */
+  readonly ourPeriod: string;
+  /**
+   * Has the caller checked that ourPeriod matches the invoice's billing
+   * window? invoice/preview takes no date — it returns the CURRENT period —
+   * so nothing here can verify it, and an unaligned comparison produces a
+   * ratio that measures the date range rather than xAI's semantics.
+   */
+  readonly periodVerifiedAligned: boolean;
+}
+
+const MINUTE_UNITS = /minute|min\b/i;
+const SECOND_UNITS = /second|sec\b/i;
+
+/**
+ * THE ANSWER, when it arrives. Everything else in this module is plumbing.
+ *
+ * `ourSeconds` is the summed `call_logs.duration` for the same period — the
+ * denominator the allocation currently splits by, and the one whose
+ * correctness is the open question.
+ */
+export function compareBilledUnits(
+  line: InvoiceLine,
+  ourSeconds: number,
+  period: ComparisonPeriod,
+): UnitComparison {
+  const measured = measureAgainstOurs(line, ourSeconds);
+  // THE SINGLE SITE WHERE A VERDICT IS MADE. Every branch above produces a
+  // FINDING, never a verdict, so no branch can ship without the caveat — the
+  // property holds by construction rather than by a test remembering to
+  // enumerate the branch. Two early returns in findingFor() previously
+  // bypassed the caveat, and the test written to catch that had itself
+  // hand-listed the cases and omitted those same two (Codex, PR #271).
+  return {
+    unitType: line.unitType,
+    billedUnits: line.numUnits,
+    unitPrice: line.unitPrice,
+    ourUnits: measured.ourUnits,
+    ratio: measured.ratio,
+    caveats: caveatsFor(period),
+    verdict: withAllocationCaveat(
+      measured.unit === null
+        ? nonDurationFinding(line.unitType)
+        : findingFor(measured.ratio, measured.unit, period),
+    ),
+  };
+}
+
+/**
+ * The unit question alone: what did xAI count, and what is the same quantity
+ * as we measured it? Separated from the verdict so the branches that decide
+ * the arithmetic cannot also decide the wording.
+ */
+function measureAgainstOurs(
+  line: InvoiceLine,
+  ourSeconds: number,
+): { ourUnits: number | null; ratio: number | null; unit: string | null } {
+  if (MINUTE_UNITS.test(line.unitType)) {
+    const ourUnits = ourSeconds / 60;
+    return { ourUnits, ratio: ourUnits > 0 ? line.numUnits / ourUnits : null, unit: "minutes" };
+  }
+  if (SECOND_UNITS.test(line.unitType)) {
+    return {
+      ourUnits: ourSeconds,
+      ratio: ourSeconds > 0 ? line.numUnits / ourSeconds : null,
+      unit: "seconds",
+    };
+  }
+  return { ourUnits: null, ratio: null, unit: null };
+}
+
+function nonDurationFinding(unitType: string): string {
+  return (
+    `xAI bills this line in "${unitType}", which is not a duration, so there ` +
+    `is no ratio to take. Note this does NOT by itself condemn a per-second ` +
+    `split: a unit that accrues at a constant rate per second (audio tokens, ` +
+    `say) would still be recovered exactly by splitting on seconds.`
+  );
+}
+
+/**
+ * THE ONE THING NO AGGREGATE CAN ESTABLISH. It is appended at exactly one
+ * site — compareBilledUnits' single return — and the functions that choose
+ * the wording (findingFor, nonDurationFinding) cannot append it at all. So a
+ * branch added later omits it only by rewriting the return itself, not by
+ * being forgotten. The earlier arrangement had every branch append it for
+ * itself, and two of them did not.
+ *
+ * Three verdicts, three ways of getting this wrong, and I got all three:
+ *   ratio ~ 1  said "splitting by call seconds is sound" - but 1 and 119
+ *              minutes each billed as 60 preserves the total exactly
+ *   ratio > 1  said a per-call minimum is being distributed wrongly - but a
+ *              UNIFORM 1.5x on every call gives the same aggregate ratio and
+ *              a per-second split stays exactly right
+ *   non-duration said do not split by seconds - but a unit accruing per
+ *              second is recovered perfectly by doing so
+ *
+ * Each is the same error: a per-call conclusion from an aggregate observation.
+ * Only per-call billing data settles it, and this endpoint does not carry any.
+ * (Codex, PR #271.)
+ */
+const ALLOCATION_UNPROVEN =
+  "Per-call allocation stays UNPROVEN either way: an aggregate cannot show how " +
+  "any individual call was billed, and only per-call billing data can.";
+
+function withAllocationCaveat(finding: string): string {
+  return `${finding} ${ALLOCATION_UNPROVEN}`;
+}
+
+/**
+ * ON EVERY RESULT, not only the ambiguous ones. The second caveat is the one
+ * that cost a review round: an earlier version's "ratio ~ 1" verdict said
+ * "splitting by call seconds is sound", which infers a PER-CALL property from
+ * an AGGREGATE agreement. Calls of 1 and 119 minutes each billed as 60 keep
+ * the 120-minute total intact while making a duration-proportional split
+ * badly wrong (Codex, PR #271).
+ */
+function caveatsFor(period: ComparisonPeriod): readonly string[] {
+  return [
+    period.periodVerifiedAligned
+      ? `period alignment was asserted by the caller for ${period.ourPeriod} — invoice/preview takes no date and returns the CURRENT billing window, so nothing here can check it`
+      : `PERIOD ALIGNMENT NOT VERIFIED: ourSeconds covers ${period.ourPeriod}, and invoice/preview returns the CURRENT billing window. This ratio may be measuring a date-range mismatch rather than anything about xAI's billing`,
+    `totals only: agreeing aggregates cannot establish that any INDIVIDUAL call's billed duration is proportional to its own. Per-call allocation stays unproven without per-call billing data`,
+  ];
+}
+
+/**
+ * The wording alone, and DELIBERATELY NOT the caveat: this function cannot
+ * append it, so adding a branch here cannot omit it. Its single caller does
+ * that once, outside every branch.
+ */
+function findingFor(ratio: number | null, unit: string, period: ComparisonPeriod): string {
+  if (ratio === null) {
+    return `No ${unit} recorded on our side — nothing to compare.`;
+  }
+  if (!period.periodVerifiedAligned) {
+    return (
+      `Ratio ${ratio.toFixed(3)}, but the period alignment has not been verified — ` +
+      `read nothing into this until ourSeconds is known to cover the same window ` +
+      `as the invoice preview.`
+    );
+  }
+  if (ratio >= 0.98 && ratio <= 1.02) {
+    return (
+      `xAI's TOTAL ${unit} match ours (ratio ${ratio.toFixed(3)}). That rules out a ` +
+      `gross duration difference as the cause of the gap, leaving the rate card ` +
+      `or a surcharge.`
+    );
+  }
+  if (ratio > 1.02) {
+    return (
+      `xAI counted ${ratio.toFixed(2)}x the TOTAL ${unit} we recorded, so they bill a ` +
+      `longer duration than Twilio reports. The aggregate cannot say WHICH: a ` +
+      `uniform multiplier on every call (a per-second split would stay exactly ` +
+      `right) and a flat per-call minimum (it would not) produce the same ratio.`
+    );
+  }
+  return (
+    `xAI counted FEWER TOTAL ${unit} than we recorded (ratio ${ratio.toFixed(3)}) — ` +
+    `check the timezone of both sides before reading anything into it.`
+  );
+}
+
+/** The live call. Never throws; returns the reason instead. */
+export async function fetchInvoicePreview(
+  options: {
+    setup?: XaiBillingSetup;
+    fetchImpl?: FetchLike;
+    timeoutMs?: number;
+    voiceNeedle?: string;
+  } = {},
+): Promise<BillingResult<InvoicePreview>> {
+  const setup = options.setup ?? readXaiBillingConfig();
+  if (!setup.configured) {
+    return {
+      ok: false,
+      reason:
+        `xAI billing is not configured — set ${setup.missing.join(" and ")}. ` +
+        `The management key is created at xAI Console -> Settings -> Management Keys ` +
+        `and is NOT the same credential as XAI_API_KEY.`,
+    };
+  }
+  const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
+  const res = await request(
+    setup.config,
+    `/v1/billing/teams/${encodeURIComponent(setup.config.teamId)}/postpaid/invoice/preview`,
+    "GET",
+    undefined,
+    fetchImpl,
+    options.timeoutMs ?? 15_000,
+  );
+  if (!res.ok) return res;
+  return parseInvoicePreview(res.value, options.voiceNeedle ?? "grok-voice");
 }
