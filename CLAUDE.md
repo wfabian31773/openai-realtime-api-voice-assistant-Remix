@@ -324,19 +324,40 @@ is reading noise.
 I got this wrong for a whole afternoon on 2026-09-03 and reported filing rates
 understated by about a third. The instrument, not the fleet, was the problem.
 
-**THE AUTHORITY: a call filed a new ticket iff a ticket carrying its
-`call_sid` has `agent_used IS NOT NULL`. That column is the agent's own
-provenance stamp. DO NOT USE THE TICKET PREFIX FOR THIS AT ALL.**
+**THE AUTHORITY — THREE BUCKETS WITH PRECEDENCE, AND AN UNKNOWN THAT IS
+REPORTED RATHER THAN ASSUMED. Never a ticket prefix.**
+
+1. `created_by_id IS NOT NULL` → **STAFF.** A named human made it. This wins
+   over `agent_used`, because 5 `T-` rows carry BOTH and they are staff
+   tickets — a human creator is positive evidence, a set `agent_used` is not.
+2. else `agent_used IS NOT NULL` → **AGENT FILING.**
+3. else → **UNKNOWN, and it must be reported as unknown.** NULL is not proof
+   of a non-filing. 30 calls sit here (29 `SR-`, 1 `VA-`); folding them into
+   the denominator as "did not file" understates the rate by assumption.
 
 ```sql
--- The filing test. No prefix anywhere in it.
-SELECT count(DISTINCT call_sid) FROM tickets
-WHERE call_sid IS NOT NULL AND agent_used IS NOT NULL AND created_at::date = '<day>';
+-- The filing test. Report all three; never let bucket 3 vanish into bucket 2's
+-- complement, and never reintroduce a prefix filter.
+SELECT CASE WHEN created_by_id IS NOT NULL THEN 'staff'
+            WHEN agent_used   IS NOT NULL THEN 'agent'
+            ELSE 'UNKNOWN' END                     AS provenance,
+       count(DISTINCT call_sid)
+FROM tickets WHERE call_sid IS NOT NULL AND created_at::date = '<day>'
+GROUP BY 1;
+-- all time: agent 40,773 · staff 36 · UNKNOWN 30
+-- 2026-09-03: agent 197 · staff 1 · UNKNOWN 0
 ```
 
-**This section has now been wrong three times, each time because I reached for
-a naming convention instead of the provenance field that was always there.**
-Recorded in full because the pattern matters more than the rule:
+**On 2026-09-03 the unknown bucket is EMPTY**, so the rates published in this
+file are not exposed to it. That is a measured fact about one day, not a
+property of the rule — check bucket 3 before quoting any other day.
+
+**This section has now been wrong FOUR times.** The first three reached for a
+naming convention; the fourth reached for a single column and called it
+complete. The through-line is not "prefixes are bad" — it is **adopting one
+signal as definitive without enumerating how it fails**, which is what every
+version of this did, including the one that had already published the table
+disproving it. Recorded in full because the pattern matters more than the rule:
 
 1. **`VA-` only.** Silently reports ZERO for a lane filing under another
    prefix. PCP's 210 tickets went missing this way.
@@ -360,20 +381,32 @@ not:** 7 of 36 carry `agent_used`, i.e. they ARE agent filings, and 29 are
 unattributed. So "all 72 are staff tickets" was wrong, and excluding them all
 would have dropped real filings.
 
-**What the prefix rule actually costs, measured:** of 40,835 calls with any
-ticket, 40,774 were agent-filed; the `VA-`/`PCP-` rule matches 40,763,
-**misses 12 real agent filings and counts 1 that is not one.** Small in
-aggregate — and that is exactly the argument I have now had to withdraw twice,
-because nothing in this file is an aggregate rate. Use `agent_used`; there is
-no reason to accept even 13 known-wrong rows when the correct field is sitting
-in the same table.
+4. **"`agent_used IS NOT NULL`, full stop".** The table directly above already
+   showed why that fails and I published it without reading it that way:
+   **5 `T-` rows have BOTH** a human creator and `agent_used`, so the predicate
+   counts staff tickets as agent filings; and **29 `SR-` rows plus 1 `VA-` row
+   have NEITHER**, so NULL means unknown provenance, not a proven non-filing.
+   Fixed by the precedence rule at the top — a human creator wins, and unknown
+   is a reported bucket rather than silence. (Codex, PR #272.)
+
+**What the prefix rule costs, re-measured under the three-bucket rule** (the
+first version of this line was computed under the superseded
+`agent_used IS NOT NULL` test and is withdrawn): of **40,841** calls with any
+ticket, **40,774** are agent-filed; the `VA-`/`PCP-` rule matches **40,768**,
+**missing 7 real filings and counting 1 that is not one**, with a further
+**30 calls whose only tickets are UNKNOWN provenance** — which the prefix rule
+silently scores as non-filings.
+
+These counts drift: `tickets` is live and grew between two runs an hour apart.
+Quote them with the date you ran them, or re-run.
 
 **`agent_used` is also immune to the failure that started this:** a new lane
 gets a new prefix but still stamps the column, so it cannot silently zero
 itself.
 
-**BUT USE ONLY ITS PRESENCE, NEVER ITS VALUE.** `agent_used IS NOT NULL` is
-sound provenance. `agent_used = '<lane>'` is NOT lane attribution — on
+**AND NEVER USE ITS VALUE, even where its presence is used.** Presence alone
+is not sound either — that is failure 4 above, which the precedence rule fixes.
+The value is separately unusable: `agent_used = '<lane>'` is NOT lane attribution — on
 2026-09-03 the ticket-side column read `unknown` on **91** rows and a bare uuid
 on **3**, and grouping the day by it reported **optical = 1** when optical
 actually filed 28. **Attribute a call to a lane with `call_logs.agent_used`,
@@ -401,11 +434,15 @@ they agreed, the wrong answer would have looked confirmed.
 ```sql
 -- The control, per day. It uses agent_used (provenance), and reports the
 -- prefix only so a prefix-shaped surprise is visible rather than silent.
-SELECT split_part(ticket_number,'-',1) AS prefix,
-       count(*)                                        AS tickets,
-       count(*) FILTER (WHERE agent_used IS NOT NULL)  AS agent_filed,
-       count(*) FILTER (WHERE created_by_id IS NOT NULL) AS human_created
-FROM tickets WHERE created_at::date = '<day>' GROUP BY 1 ORDER BY 2 DESC;
+SELECT split_part(ticket_number,'-',1) AS prefix, count(*) AS tickets,
+       count(*) FILTER (WHERE created_by_id IS NOT NULL)                    AS staff,
+       count(*) FILTER (WHERE created_by_id IS NULL
+                          AND agent_used IS NOT NULL)                       AS agent,
+       count(*) FILTER (WHERE created_by_id IS NULL AND agent_used IS NULL) AS UNKNOWN
+FROM tickets WHERE created_at::date = '<day>' AND call_sid IS NOT NULL
+GROUP BY 1 ORDER BY 2 DESC;
+-- Precedence, same as the rule at the top: a human creator wins. Do NOT
+-- shorten this to `agent_used IS NOT NULL` — 5 staff rows carry both fields.
 -- 2026-09-04 whole-table shape: VA 40,930 · T 6,079 · SR 1,368 · TKT 1,045
 --   (ended 2026-02-14) · PCP 210 · DIAG 1
 -- agent_used coverage on known agent lanes: VA 6,494/6,495 · PCP 210/210.
