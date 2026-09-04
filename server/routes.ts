@@ -1995,12 +1995,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
               voiceProvider: (call as { voiceProvider?: string | null }).voiceProvider,
               inputAudioTokens: call.inputAudioTokens,
               existingOpenaiCostCents: call.openaiCostCents,
+              costReconciledAt: (call as { costReconciledAt?: Date | null }).costReconciledAt,
               durationSeconds: finalDuration,
               twilioCostCents: finalTwilioCostCents,
             });
             const openaiCostCents = pricing.providerCostCents ?? call.openaiCostCents ?? 0;
 
-            await storage.updateCallLog(call.id, {
+            await storage.updateCallLogPreservingReconciledCost(call.id, {
               duration: finalDuration,
               status: finalStatus,
               twilioCostCents: finalTwilioCostCents,
@@ -3250,6 +3251,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // reads as an un-reconciled OpenAI call (Codex, PR #227 round 14).
           inputAudioTokens: callLogs.inputAudioTokens,
           voiceProvider: callLogs.voiceProvider,
+          // And so does this. A guard whose input is never selected is not a
+          // guard: the cast below read `undefined` on every row, so this
+          // backfill would still have overwritten a reconciled Grok cost with
+          // the duration estimate — while leaving cost_reconciled_at set
+          // (Codex, PR #268 round 2).
+          costReconciledAt: callLogs.costReconciledAt,
         })
         .from(callLogs)
         .where(and(
@@ -3288,14 +3295,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
               voiceProvider: call.voiceProvider,
               inputAudioTokens: call.inputAudioTokens,
               existingOpenaiCostCents: call.openaiCostCents,
+              costReconciledAt: (call as { costReconciledAt?: Date | null }).costReconciledAt,
               durationSeconds: finalDuration,
               twilioCostCents: twilioCostCents ?? call.twilioCostCents ?? 0,
             });
 
             if (!dryRun) {
-              await storage.updateCallLog(call.id, {
+              await storage.updateCallLogPreservingReconciledCost(call.id, {
                 duration: finalDuration,
                 twilioCostCents: twilioCostCents ?? call.twilioCostCents,
+                // The total is rebuilt whether or not the PROVIDER cost moved.
+                // On a reconciled row priceVoiceCall deliberately leaves the
+                // provider cost alone and returns a total that folds in the new
+                // Twilio price — and this update used to discard it, leaving a
+                // total that no longer equalled its own two components
+                // (Codex, PR #268 round 4).
+                totalCostCents: pricing.totalCostCents,
                 ...(pricing.providerCostCents !== undefined
                   ? { openaiCostCents: pricing.providerCostCents, costIsEstimated: true }
                   : {}),
@@ -3329,6 +3344,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           id: callLogs.id,
           duration: callLogs.duration,
           voiceProvider: callLogs.voiceProvider,
+          // Belt and braces: the WHERE below already excludes every
+          // reconciled row, because reconciliation always writes a cost and
+          // this only takes rows that have none. Selected anyway so the guard
+          // in priceVoiceCall is REAL here rather than a cast that silently
+          // reads undefined — a guard that cannot fire is worse than no
+          // guard, because the next reader believes it.
+          costReconciledAt: callLogs.costReconciledAt,
         })
         .from(callLogs)
         .where(and(
@@ -3348,14 +3370,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
           voiceProvider: call.voiceProvider,
           inputAudioTokens: null,
           existingOpenaiCostCents: null,
+          costReconciledAt: (call as { costReconciledAt?: Date | null }).costReconciledAt,
           durationSeconds: call.duration,
           twilioCostCents: 0,
         });
         if (!dryRun) {
+          /**
+           * Direct, and safe to be: the WHERE above takes only rows with NO
+           * cost at all (`isNull(openaiCostCents)`), and reconciliation
+           * always writes one — so a reconciled row cannot reach this
+           * statement. Every OTHER writer that prices a call goes through
+           * updateCallLogPreservingReconciledCost, which makes the decision
+           * in SQL (Codex, PR #268 round 8).
+           */
           await db.update(callLogs).set({
             openaiCostCents: pricing.providerCostCents ?? 0,
             costIsEstimated: true,
-          }).where(eq(callLogs.id, call.id));
+          }).where(and(eq(callLogs.id, call.id), isNull(callLogs.costReconciledAt)));
         }
         results.openaiCostsAdded++;
       }
@@ -4536,7 +4567,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           });
 
           if (applyChanges) {
-            await storage.updateCallLog(dbCall.id, {
+            // Preserving. This rebuilds total_cost_cents, and a reconciled
+            // row's total must be rebuilt from the invoiced provider cost in
+            // SQL at write time — not from a value this loop read minutes
+            // earlier, and not at all if the estimate has since changed.
+            await storage.updateCallLogPreservingReconciledCost(dbCall.id, {
               twilioCostCents: newCostCents,
               totalCostCents: newCostCents + (dbCall.openaiCostCents || 0),
             });

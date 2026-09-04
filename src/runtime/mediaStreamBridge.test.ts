@@ -677,6 +677,104 @@ describe("VoiceCallBridge — tool dispatch", () => {
     ]);
     expect(JSON.stringify(records[0].toolEvents)).not.toContain("Wayne");
   });
+
+  /**
+   * A REFUSAL IS `ok: true` AND `succeeded: false`, AND THE RECORD MUST SAY SO.
+   *
+   * `dispatch` answers ok whenever the tool RAN, so a refused
+   * `file_*_ticket` — the commonest thing that happens on these lanes — comes
+   * back ok with no error. Anything downstream asking "was a ticket filed?"
+   * has to read `succeeded`.
+   *
+   * This test exists because the request sweep asked that question of `ok`
+   * and would therefore have skipped recovery on every call it was built for.
+   * A mutation putting `ok` back into the recorded event passed the whole
+   * suite before this was written.
+   */
+  it("records a REFUSED tool as ok-but-not-succeeded", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      persistCallRecord: async (r) => void records.push(r),
+      agent: makeAgent({
+        dispatch: vi.fn(async () => ({
+          ok: true,
+          output: JSON.stringify({ success: false, missingFields: ["date_of_birth"] }),
+        })),
+      }),
+    });
+    h.handlers().onToolCall("c1", "file_surgery_ticket", { first_name: "Wayne" });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].toolEvents).toEqual([
+      { name: "file_surgery_ticket", ok: true, succeeded: false, atMs: expect.any(Number) },
+    ]);
+  });
+
+  it("records a tool that actually worked as succeeded", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      persistCallRecord: async (r) => void records.push(r),
+      agent: makeAgent({
+        dispatch: vi.fn(async () => ({
+          ok: true,
+          output: JSON.stringify({ success: true, ticket_number: "VA-1" }),
+        })),
+      }),
+    });
+    h.handlers().onToolCall("c1", "file_surgery_ticket", {});
+    await Promise.resolve();
+    await Promise.resolve();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].toolEvents[0]).toMatchObject({ ok: true, succeeded: true });
+  });
+
+  /**
+   * "IT WORKED" AND "IT FOUND SOMETHING" ARE DIFFERENT QUESTIONS.
+   *
+   * check_open_tickets answers `success: true, has_open_tickets: false` for a
+   * caller with nothing open, and every queue prompt runs it before filing.
+   * The teardown sweep skips a call as a status check only when a ticket was
+   * actually matched — so the record has to carry the finding, not just the
+   * verdict, or the sweep turns itself off on every ordinary call (Codex,
+   * PR #268 round 2).
+   */
+  const runCheckOpenTickets = async (output: Record<string, unknown>) => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      persistCallRecord: async (r) => void records.push(r),
+      agent: makeAgent({
+        dispatch: vi.fn(async () => ({ ok: true, output: JSON.stringify(output) })),
+      }),
+    });
+    h.handlers().onToolCall("c1", "check_open_tickets", {});
+    await Promise.resolve();
+    await Promise.resolve();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    return records[0].toolEvents[0];
+  };
+
+  it("records that check_open_tickets FOUND an existing ticket", async () => {
+    expect(await runCheckOpenTickets({ success: true, has_open_tickets: true })).toMatchObject({
+      succeeded: true,
+      foundOpenTicket: true,
+    });
+  });
+
+  it("records that it ran fine and found NOTHING — not the same thing", async () => {
+    expect(await runCheckOpenTickets({ success: true, has_open_tickets: false })).toMatchObject({
+      succeeded: true,
+      foundOpenTicket: false,
+    });
+  });
+
+  it("leaves the field off entirely for a tool that does not report it", async () => {
+    const event = await runCheckOpenTickets({ success: true, ticket_number: "VA-1" });
+    expect("foundOpenTicket" in event).toBe(false);
+  });
 });
 
 describe("VoiceCallBridge — dead-air watchdog", () => {
@@ -2205,6 +2303,37 @@ describe("the repeated-failure ceiling", () => {
     for (let i = 0; i < 12; i += 1) await Promise.resolve();
     expect(agent.dispatch).toHaveBeenCalledTimes(3);
     expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * A CEILING STOP IS NOT A FILED TICKET.
+   *
+   * The stopped call never reaches the tool, so nothing was filed — and the
+   * teardown request sweep reads exactly this field to decide whether the
+   * caller's request still needs recovering. A ceiling stop recorded as
+   * succeeded would make the sweep skip the most broken call on the line: the
+   * one that hit the same refusal three times running.
+   *
+   * Written after a mutation setting this to true passed the whole suite.
+   */
+  it("records a ceiling stop as not succeeded, so the sweep still recovers the request", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      agent: refusingAgent(),
+      persistCallRecord: async (r) => void records.push(r),
+    });
+    for (let i = 0; i < 4; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "file_optical_ticket", { first_name: "A" });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    const events = records[0]!.toolEvents;
+    expect(events).toHaveLength(4);
+    expect(events.every((e) => e.succeeded === false)).toBe(true);
+    // The fourth is the stopped one, and it is marked as such.
+    expect(events[3]).toMatchObject({ ok: false, error: expect.stringContaining("ceiling:") });
   });
 
   it("never gets in the way of a tool that works", async () => {

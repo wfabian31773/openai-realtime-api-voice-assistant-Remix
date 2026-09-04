@@ -224,7 +224,16 @@ export class TwilioInsightsService {
         }
       }
 
-      await storage.updateCallLog(callLogId, updateData);
+      /**
+       * PRESERVING, because the block above assigns total_cost_cents and
+       * cost_is_estimated. Its read of openai_cost_cents is a snapshot, and
+       * Grok reconciliation can commit between that read and this write — the
+       * total would then be rebuilt from the OLD estimated provider cost and
+       * stored beside the new invoiced one, with cost_reconciled_at still set.
+       * The guard rebuilds it in SQL from whatever the column actually holds
+       * (Codex, PR #268 round 12).
+       */
+      await storage.updateCallLogPreservingReconciledCost(callLogId, updateData);
 
       console.log(`[TWILIO INSIGHTS] ✓ Saved insights to call log ${callLogId} (${Object.keys(updateData).length - 1} fields)`);
       return true;

@@ -20,6 +20,10 @@ import {
 // Registration is an import side effect — the same way the HTTP server picks
 // them up. Without this the registry holds only the fixtures below.
 import './opticalTools';
+import './surgeryTools';
+import './techTools';
+import './medicalRecordsTools';
+import './sharedPatientTools';
 
 /** The real library, excluding the x_* fixtures this file registers. */
 const realTools = () => allTools().filter((t) => !t.name.startsWith('x_'));
@@ -318,6 +322,205 @@ describe('lookup_patient must not hand Optical a surgery center', () => {
     } else {
       expect(out).toMatchObject({ retryable: true });
       expect((out as { error: string }).error).toBeTruthy();
+    }
+  });
+});
+
+/**
+ * THE WORDS THE AGENT ACTUALLY SAYS WHEN IT ASKS FOR A DATE OF BIRTH.
+ *
+ * Operator ruling, 2026-09-03: *"when the agent says may I please have your
+ * date of birth, it should say starting with the month, the day, and then the
+ * year... it's kind of a guard. If you just say can I have your date of birth,
+ * people give it to you in any format they want."*
+ *
+ * `askAs` is not documentation — `validateInput` builds its refusal from it and
+ * the model reads it in the schema, so it IS the sentence a caller hears. The
+ * lane prompts carry the same ruling (queuePromptRulings.test.ts), but a
+ * mutation stripping the order from a tool's askAs passed every one of those:
+ * the prompt and the tool can drift apart, and the tool is what speaks on the
+ * re-ask, which is exactly the moment the caller already got it wrong once.
+ */
+describe('every tool that asks for a date of birth names the order', () => {
+  const asksForDob = () =>
+    realTools().filter((t) => t.input_schema.properties?.date_of_birth);
+
+  it('covers the four filing tools and the lookup', () => {
+    // If a lane stops asking, this should be a deliberate edit, not a silent
+    // drop that takes its ruling with it.
+    expect(asksForDob().map((t) => t.name).sort()).toEqual([
+      'file_optical_ticket',
+      'file_records_ticket',
+      'file_surgery_ticket',
+      'file_tech_ticket',
+      'lookup_patient',
+    ]);
+  });
+
+  for (const field of ['date_of_birth'] as const) {
+    it(`${field} asks for the month, then the day, then the year`, () => {
+      for (const t of asksForDob()) {
+        const ask = String(t.input_schema.properties[field]?.askAs ?? '');
+        expect(ask.toLowerCase(), t.name).toContain('starting with the month');
+        expect(ask.toLowerCase(), t.name).toContain('then the day, then the year');
+      }
+    });
+  }
+
+  it('leads with "may I please have" rather than a bare "and the..."', () => {
+    for (const t of asksForDob()) {
+      const ask = String(t.input_schema.properties.date_of_birth?.askAs ?? '');
+      expect(ask.toLowerCase(), t.name).toContain('may i please have');
+    }
+  });
+
+  /**
+   * The other half of the same afternoon. dobShape went live at 23:18 and the
+   * first three filing calls after it all recorded "(none)" — the model was not
+   * sending this field at all. It stays out of `required` on purpose, so the
+   * description is the only place left to say it.
+   */
+  it('tells the model to always send what the caller gave', () => {
+    for (const t of asksForDob().filter((t) => t.name.startsWith('file_'))) {
+      const d = String(t.input_schema.properties.date_of_birth?.description ?? '').toLowerCase();
+      expect(d, t.name).toContain('always pass this');
+    }
+  });
+});
+
+/**
+ * A REFUSAL THE MODEL CANNOT DIAGNOSE IS A REFUSAL IT REPEATS.
+ *
+ * 2026-09-03, measured over every queue call since the cutovers:
+ *
+ *   gate hit              calls   still filed
+ *   date_of_birth           23         0
+ *   optical location        11         9
+ *
+ * Both are refusals. One was survivable and one was terminal, and the whole
+ * difference is that the caller could satisfy the location gate and could not
+ * satisfy the date-of-birth gate — the model was omitting the argument, heard
+ * "I did not catch that date of birth", said that to the caller, and sent the
+ * same argument-less payload again. dobShape recorded "(none)" on every
+ * observed refusal.
+ *
+ * `fix` is the channel that tells the model what IT did wrong, as opposed to
+ * `message`, which tells it what to SAY. These pin that the two branches give
+ * opposite corrections, because "ask the caller again" for an absent argument
+ * is precisely the loop.
+ */
+describe('the date-of-birth refusal tells the model what it got wrong', () => {
+  const filingTools = () =>
+    realTools().filter((t) => /^file_[a-z_]+_ticket$/.test(t.name));
+
+  const refuse = async (tool: { name: string }, dob: string | undefined) => {
+    const res: any = await runTool(tool.name, {
+      first_name: 'Testpatient', last_name: 'Example',
+      callback_number: '5555550100', request_description: 'a refill',
+      // Each lane's OTHER gates, satisfied, so every case below reaches the
+      // date-of-birth check rather than stopping at optical's location gate.
+      requester: 'patient', location: 'Northridge',
+      ...(dob === undefined ? {} : { date_of_birth: dob }),
+    });
+    return res;
+  };
+
+  it('covers all four lanes', () => {
+    expect(filingTools().map((t) => t.name).sort()).toEqual([
+      'file_optical_ticket', 'file_records_ticket', 'file_surgery_ticket', 'file_tech_ticket',
+    ]);
+  });
+
+  it('when the argument is ABSENT it says so, and says not to ask again', async () => {
+    for (const t of filingTools()) {
+      const res = await refuse(t, undefined);
+      expect(res.missingFields, t.name).toContain('date_of_birth');
+      expect(String(res.fix), t.name).toContain('did not send the date_of_birth argument');
+      expect(String(res.fix), t.name).toContain('do NOT ask them again');
+    }
+  });
+
+  it('when the argument is UNREADABLE it asks for it again — the opposite correction', async () => {
+    for (const t of filingTools()) {
+      const res = await refuse(t, 'sometime in the seventies');
+      expect(res.missingFields, t.name).toContain('date_of_birth');
+      expect(String(res.fix), t.name).toContain('could not be read as a date');
+      expect(String(res.fix), t.name).not.toContain('did not send');
+    }
+  });
+
+  it('the two branches are never the same text', async () => {
+    for (const t of filingTools()) {
+      const absent = await refuse(t, undefined);
+      const unreadable = await refuse(t, 'sometime in the seventies');
+      expect(absent.fix, t.name).not.toBe(unreadable.fix);
+    }
+  });
+
+  it('`message` stays the speakable line and carries no instructions to the model', async () => {
+    for (const t of filingTools()) {
+      const res = await refuse(t, undefined);
+      expect(String(res.message), t.name).toContain('starting with the month');
+      expect(String(res.message).toLowerCase(), t.name).not.toContain('argument');
+      expect(String(res.message).toLowerCase(), t.name).not.toContain('call this tool');
+    }
+  });
+});
+
+/**
+ * THE GATE IS NO LONGER TERMINAL — end to end, on all four lanes.
+ *
+ * The measurement this exists to change, from the cutover day:
+ *
+ *   gate hit           calls   still filed
+ *   optical location     11         9      <- had the ask-once escape
+ *   date_of_birth        23         0      <- did not
+ *
+ * Operator, 2026-09-04: *"coach the patient... if it doesn't work that way,
+ * then I say you file it anyway. But when you file it, where date of birth
+ * would be, you just put unavailable or unmatched."*
+ */
+describe('a request survives a date of birth we never get', () => {
+  const filingTools = () =>
+    realTools().filter((t) => /^file_[a-z_]+_ticket$/.test(t.name));
+
+  // A real Twilio SID shape: CA + 32 hex. gateAttempts refuses anything else
+  // (see isTwilioCallSid), which is the guard that stops a sentinel like
+  // "unknown" from letting every caller share one escape budget.
+  let n = 0;
+  const freshSid = () => `CA${(++n).toString(16).padStart(32, '0')}`;
+
+  const call = async (tool: string, dob: string | undefined, sid: string) =>
+    (await runTool(tool, {
+      first_name: 'Testpatient', last_name: 'Example',
+      callback_number: '5555550100', request_description: 'a refill',
+      requester: 'patient', location: 'Northridge', call_sid: sid,
+      ...(dob === undefined ? {} : { date_of_birth: dob }),
+    })) as any;
+
+  beforeEach(async () => {
+    const { resetGateAttempts } = await import('./gateAttempts');
+    resetGateAttempts();
+  });
+
+  it('refuses ONCE, so the caller is properly asked with the coaching wording', async () => {
+    for (const t of filingTools()) {
+      const first = await call(t.name, undefined, freshSid());
+      expect(first.missingFields, t.name).toContain('date_of_birth');
+      expect(String(first.message), t.name).toContain('starting with the month');
+    }
+  });
+
+  /**
+   * The whole point. Before this, the second attempt was another refusal, and
+   * the third, and the fourth — 23 calls, none of which ever filed.
+   */
+  it('does NOT refuse a second time — the gate stops being terminal', async () => {
+    for (const t of filingTools()) {
+      const sid = freshSid();
+      await call(t.name, undefined, sid);
+      const second = await call(t.name, undefined, sid);
+      expect(second.missingFields ?? [], `${t.name} refused twice`).not.toContain('date_of_birth');
     }
   });
 });

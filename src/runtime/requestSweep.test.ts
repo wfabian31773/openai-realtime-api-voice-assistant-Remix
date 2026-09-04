@@ -11,6 +11,7 @@ import {
   decideSweep,
   buildSweptTicket,
   sweepMarker,
+  SWEPT_TICKET_DESCRIPTION,
   type SweepInput,
 } from "./requestSweep";
 
@@ -66,7 +67,7 @@ describe("when NOT to file", () => {
   });
 
   it("skips when a filing tool already succeeded", () => {
-    const d = decideSweep(call({ toolEvents: [{ name: "file_tech_ticket", ok: true }] }));
+    const d = decideSweep(call({ toolEvents: [{ name: "file_tech_ticket", succeeded: true }] }));
     expect(d).toEqual({ file: false, reason: "already-filed" });
   });
 
@@ -85,14 +86,21 @@ describe("when NOT to file", () => {
 
   it("does NOT count a REFUSED filing tool as filed", () => {
     /**
-     * The distinction the tool ceiling was reviewed over: dispatch answers ok
-     * whenever the tool RAN, refusal included. Reading `ok` alone would have
-     * skipped every call this exists for — CAc940b441 called
-     * file_surgery_ticket four times and filed nothing.
+     * The distinction the tool ceiling was reviewed over, and the one that
+     * nearly made this whole module a no-op.
+     *
+     * A runtime ToolEvent's `ok` means dispatch RAN the tool. A
+     * `missing([...])` refusal comes back `ok: true` AND WITHOUT AN `error` —
+     * nothing failed at the transport. The first version of this test invented
+     * an `error: "validation"` the bridge never sets, so it passed while the
+     * predicate underneath it read `ok` and would have called every refused
+     * ticket a filed one — skipping the sweep on all five calls at the top of
+     * requestSweep.ts. The fixture below is now the shape the bridge actually
+     * produces.
      */
     const events = [
-      { name: "file_surgery_ticket", ok: true, error: "validation" },
-      { name: "file_surgery_ticket", ok: true, error: "validation" },
+      { name: "file_surgery_ticket", succeeded: false },
+      { name: "file_surgery_ticket", succeeded: false },
     ];
     expect(alreadyFiledByTool(events)).toBe(false);
     expect(decideSweep(call({ slug: "surgery", toolEvents: events })).file).toBe(true);
@@ -114,7 +122,7 @@ describe("the five calls this was built for", () => {
     // ambiguous lookup and never classified or filed.
     const d = decideSweep(call({
       transcript: "AGENT: Could you give me your name?\nCALLER: My pharmacy sent a refill request nine days ago and nothing has come through.",
-      toolEvents: [{ name: "lookup_patient", ok: true }, { name: "lookup_patient", ok: true }],
+      toolEvents: [{ name: "lookup_patient", succeeded: true }, { name: "lookup_patient", succeeded: true }],
     }));
     expect(d.file).toBe(true);
   });
@@ -125,8 +133,8 @@ describe("the five calls this was built for", () => {
       slug: "surgery",
       transcript: "CALLER: I need an appointment for a graft with my surgeon.\nAGENT: I've logged your request.",
       toolEvents: [
-        { name: "lookup_patient", ok: true },
-        { name: "file_surgery_ticket", ok: true, error: "validation" },
+        { name: "lookup_patient", succeeded: true },
+        { name: "file_surgery_ticket", succeeded: false },
       ],
     }));
     expect(d.file).toBe(true);
@@ -151,8 +159,11 @@ describe("the ticket it builds", () => {
     expect(t.requestReasonId).toBe(535);
   });
 
-  it("carries the caller's own words, not a summary", () => {
-    expect(t.description).toContain("I need to book a procedure my surgeon recommended.");
+  it("carries the caller's own words to STAFF, not a summary", () => {
+    // Staff still get every word — they just get it somewhere the patient
+    // is not texted. Losing the transcript entirely would make the ticket
+    // unactionable, which is the trade the leak was buying.
+    expect(t.staffNote).toContain("I need to book a procedure my surgeon recommended.");
   });
 
   it("uses the name we verified, never one invented here", () => {
@@ -160,8 +171,52 @@ describe("the ticket it builds", () => {
     expect(t.patientLastName).toBe("Example");
   });
 
-  it("still carries the number staff have to ring", () => {
-    expect(t.description).toContain(input.callerPhone);
+  /**
+   * THE DESCRIPTION IS A PATIENT-FACING SMS BODY (BACKEND_HANDOFF section 6,
+   * and opticalTools sanitizes it to GSM-7 for that reason).
+   *
+   * THIS TEST USED TO ASSERT THE BUG. Round 5 took the annotation, the call
+   * reference and the callback number out of the description and pinned what
+   * was left — `expect(t.description).toBe(d.callerSaid)` — on the reasoning
+   * that the ordinary filing tools put the caller's own words there. They do
+   * not: their description is written by the MODEL, which has isolated the
+   * request. `callerSaid` is every CALLER line joined, so the pin was
+   * guarding the identity interview's passage into an SMS — the caller's
+   * name and full date of birth among it (Codex, PR #268 round 14).
+   *
+   * So it now asserts the opposite, and asserts it on the FIXTURE'S OWN PHI
+   * rather than on a shape, because a shape check is what let this stand.
+   */
+  it("puts nothing from the call in the patient-facing description", () => {
+    expect(t.description).toBe(SWEPT_TICKET_DESCRIPTION);
+    // Nothing the caller said.
+    expect(t.description).not.toContain("book a procedure");
+    expect(t.description).not.toContain(d.callerSaid);
+    // No identity, no date of birth, no number, no internals.
+    expect(t.description).not.toContain(t.patientFirstName);
+    expect(t.description).not.toContain(t.patientLastName);
+    expect(t.description).not.toContain(input.callerPhone);
+    expect(t.description).not.toContain(input.callSid);
+    expect(t.description).not.toContain("Recovered");
+    expect(t.description).not.toContain("the agent did not file");
+  });
+
+  /**
+   * The description is a fixed string, so it can be checked once against the
+   * constraint every SMS body has: one GSM-7 segment, no smart punctuation.
+   * `opticalTools` sanitizes free text for this; a constant should not need
+   * sanitizing at all.
+   */
+  it("is a single plain GSM-7 segment", () => {
+    expect(SWEPT_TICKET_DESCRIPTION.length).toBeLessThanOrEqual(160);
+    expect(SWEPT_TICKET_DESCRIPTION).toMatch(/^[ -~]+$/);
+  });
+
+  it("carries the number staff have to ring, and the call reference, STAFF-side", () => {
+    expect(t.staffNote).toContain(input.callerPhone);
+    expect(t.staffNote).toContain(input.callSid);
+    // patientPhone is a structured field and is where the number belongs.
+    expect(t.patientPhone).toBe(input.callerPhone);
   });
 
   it("files high, because nobody has looked at it and the caller may have been told it was done", () => {
@@ -234,6 +289,161 @@ describe("no name, no ticket", () => {
 
   it("files when the identity was verified", () => {
     const d = decideSweep(call({ verifiedName: { firstName: "Given", lastName: "Family" } }));
+    expect(d.file).toBe(true);
+  });
+});
+
+/**
+ * THE CALLER CHASING A REQUEST THEY ALREADY MADE.
+ *
+ * Codex, PR #268 — the finding with a human cost. `check_open_tickets`
+ * succeeds, the agent reads the caller their existing VA number, no filing
+ * tool runs because none needed to, and the sweep would open a SECOND
+ * high-priority catch-all ticket for work already in progress.
+ *
+ * Measured size: on 2026-09-03 the transcript VA-proxy over-counted filings
+ * by 9 calls, every one of them exactly this — three from one number all
+ * quoting the same ticket. And every one of those callers was identified, so
+ * unlike the 47 the no-name rule stops, all 9 would have passed the gate.
+ */
+describe("a caller who rang to check on an existing request", () => {
+  const statusCheck = (over: Partial<SweepInput> = {}) =>
+    decideSweep(
+      call({
+        toolEvents: [
+          { name: "lookup_patient", succeeded: true },
+          { name: "check_open_tickets", succeeded: true, foundOpenTicket: true },
+        ],
+        ...over,
+      }),
+    );
+
+  it("does not get a duplicate ticket opened for them at teardown", () => {
+    expect(statusCheck()).toEqual({ file: false, reason: "status-check" });
+  });
+
+  it("is skipped under its OWN reason, so the trade-off stays countable", () => {
+    // Not folded into "already-filed": that means a filing tool put a ticket
+    // on THIS call. Keeping them apart is what lets the operator see how
+    // often this fires and decide whether the trade is the right one.
+    const d = statusCheck();
+    expect(d.file).toBe(false);
+    if (!d.file) expect(d.reason).not.toBe("already-filed");
+  });
+
+  it("still sweeps when check_open_tickets was attempted and FAILED", () => {
+    // A failed lookup is not the caller being told anything, so their request
+    // is as unhandled as if the tool had never run.
+    const d = statusCheck({
+      toolEvents: [
+        { name: "lookup_patient", succeeded: true },
+        { name: "check_open_tickets", succeeded: false },
+      ],
+    });
+    expect(d.file).toBe(true);
+  });
+
+  /**
+   * THE REGRESSION THAT ROUND 1's FIX INTRODUCED (Codex, PR #268 round 2).
+   *
+   * `sharedPatientTools` answers `success: true` with
+   * `has_open_tickets: false` when the caller has nothing open, and every
+   * queue prompt tells the agent to run this tool BEFORE filing. So keying
+   * the skip on "the tool succeeded" turned off the recovery sweep on the
+   * ordinary failure path — a strictly worse bug than the duplicate it was
+   * meant to prevent, and it would have been invisible: fewer tickets, no
+   * error anywhere.
+   */
+  it("SWEEPS when the tool ran fine and found NOTHING — the ordinary call", () => {
+    const d = statusCheck({
+      toolEvents: [
+        { name: "lookup_patient", succeeded: true },
+        { name: "check_open_tickets", succeeded: true, foundOpenTicket: false },
+        { name: "file_tech_ticket", succeeded: false },
+      ],
+    });
+    expect(d.file).toBe(true);
+  });
+
+  it("sweeps when the tool did not report either way", () => {
+    // An older record with no `foundOpenTicket` must not be read as a match.
+    const d = statusCheck({
+      toolEvents: [
+        { name: "lookup_patient", succeeded: true },
+        { name: "check_open_tickets", succeeded: true },
+      ],
+    });
+    expect(d.file).toBe(true);
+  });
+
+  it("still sweeps an ordinary call where no ticket tool ran at all", () => {
+    expect(decideSweep(call({ toolEvents: [{ name: "lookup_patient", succeeded: true }] })).file)
+      .toBe(true);
+  });
+});
+
+/**
+ * Identified, then hung up (Codex, PR #268 round 4).
+ *
+ * "Yes, this is Mary Smith" and a spoken date of birth are not FILLER, so a
+ * successful lookup followed by a hang-up produced a high-priority catch-all
+ * ticket containing nothing but the identity interview.
+ *
+ * The rule is deliberately the narrowest one that works: it suppresses a call
+ * only when EVERY caller line is used up by their own name and a date. Any
+ * request contains something else — which is what the second half of these
+ * tests is for.
+ */
+describe("a caller who only identified themselves", () => {
+  const withTranscript = (lines: string) =>
+    decideSweep(
+      call({
+        transcript: lines,
+        verifiedName: { firstName: "Mary", lastName: "Smith" },
+        toolEvents: [{ name: "lookup_patient", succeeded: true }],
+      }),
+    );
+
+  it("is not swept — there is no request in a name", () => {
+    const d = withTranscript(
+      "AGENT: May I have your last name?\nCALLER: Smith.\n" +
+        "AGENT: And your date of birth?\nCALLER: March seventeenth, nineteen fifty.",
+    );
+    expect(d).toEqual({ file: false, reason: "identity-only" });
+  });
+
+  it("is not swept when they confirm who they are", () => {
+    expect(withTranscript("AGENT: Am I speaking with Mary Smith?\nCALLER: Yes, this is Mary Smith.").file)
+      .toBe(false);
+  });
+
+  it("is not swept for a numeric date of birth either", () => {
+    expect(withTranscript("AGENT: Date of birth?\nCALLER: 03 17 1950").file).toBe(false);
+  });
+
+  it("gets its OWN reason, so it is countable against the other skips", () => {
+    const d = withTranscript("CALLER: Mary Smith.");
+    if (!d.file) expect(d.reason).toBe("identity-only");
+  });
+
+  /** The half that matters more: a request must still get through. */
+  it.each([
+    "AGENT: How can I help?\nCALLER: Mary Smith. I need a refill on my drops.",
+    "AGENT: Name?\nCALLER: Smith.\nAGENT: And?\nCALLER: My glasses broke.",
+    "CALLER: This is Mary Smith and I want to reschedule.",
+    "CALLER: I'm calling about my surgery date.",
+  ])("STILL sweeps a real request: %j", (transcript) => {
+    expect(withTranscript(transcript).file).toBe(true);
+  });
+
+  it("sweeps when the caller said something we cannot attribute to identity", () => {
+    // No verified name at all — nothing to subtract, so everything counts.
+    const d = decideSweep(
+      call({
+        transcript: "CALLER: My drops ran out.",
+        verifiedName: { firstName: "Mary", lastName: "Smith" },
+      }),
+    );
     expect(d.file).toBe(true);
   });
 });

@@ -155,33 +155,35 @@ Green tests did not prevent any of the regressions listed there.
 
 ## Line status — check this before saying anything about what is on or off
 
-Volumes re-measured from `call_logs` on **2026-09-01 20:25 UTC**; the
-decisions are Wayne's and are unchanged. Update this table whenever it
-changes, and re-measure rather than copying the numbers forward.
+**2026-09-03 was the runtime cutover.** Three queue lanes moved off the OpenAI
+SIP core onto the Grok Media Streams runtime, each at its own moment, and each
+one is a same-day A/B you can still measure. `voice_provider = 'grok'` is the
+discriminator; a NULL there is the old core.
 
-| Line | State | Volume (7d avg) | Who decided | Why |
-|---|---|---|---|---|
-| **tech** (queue) | **LIVE** — the busiest line in the fleet | **85.6/day**, 1,330 in 14d, 69% file a ticket | Wayne, Aug 13 | Clinical Tech Support, dept 3. It is the medication queue. *(This row said "Built, number pending" until 2026-09-01. It has been live and carrying more calls than anything else for weeks.)* |
-| **surgery** (queue) | **LIVE** | 64.7/day, 945 in 14d, **37% file a ticket** | Wayne, Aug 12 | Dept 2. The low filing rate is not mystery: 181 calls in 14 days were refused by the ticketing app for a missing surgeon. See #48. |
-| **no-ivr** | **LIVE** — also the after-hours agent | 52.4/day, 874 in 14d | — | Wayne's quality benchmark; produces the best transcripts. Carries all overnight and weekend volume (standing instruction 13). |
-| **optical** (queue) | **LIVE** | 37.1/day, 632 in 14d, 45% file a ticket | Wayne, Aug 12 | Forwarded optical overflow. *"Optical works like a charm."* Dept 1. |
-| **answering-service** | **LIVE**, old core (`/api/voice/answering-service`) | 16.1/day, 272 in 14d — **but zero so far on 2026-09-01** | — | Was 579 calls on Aug 10 and 491 on Aug 12, then 18–58/day on weekdays and 0 at weekends. **The zero today is not the weekend pattern and it is not explained here — ask Wayne, do not guess.** |
-| **records** (queue) | **LIVE — new since 2026-08-31** | 4.4/day, 31 in 14d and **all 31 in the last two days** | — | Dept 16, Medical Records. It was not taking calls when this table was last written. |
-| **pcp** | **OFF** in Twilio | 18 in 14d, last one 2026-08-31 | Wayne decided, **I recommended it and sequenced it as step 1** | Transfer failures seen Friday; complaints from surgery centers; medical-facing. *"I just cannot see the disasters I was seeing on Friday on that line."* Was ~200 calls/day. The trickle is consistent with direct dials, not with the line being back. |
-| **azul-scheduling** (San Diego) | **OFF** | **zero calls in 14 days** | Wayne, Aug 10–11 | Gate B replay: **books 8 of 21** the old core booked. Not ready. Was ~80 calls/day. |
-| **claude-as** | Test number only | — | — | The Claude pipeline. **Unproven — zero clean end-to-end calls.** |
+| Line | Pipeline | Cutover (UTC) | Calls 09-03 | Filed (substantive) | Notes |
+|---|---|---|---|---|---|
+| **optical** | **Grok runtime** | 15:24:58 | 84 | 28/56 = **50.0%** | First lane over. Only 2 old-core calls that day, so it has NO same-day before-arm. |
+| **surgery** | **Grok runtime** | 19:43:57 | 55 | 18/32 = **56.3%** | Before: 22/44 = 50.0% on the old core, same day. |
+| **tech** | **Grok runtime** | 19:51:10 | 100 | 46/66 = **69.7%** | Before: 49/73 = 67.1% on the old core, same day. Busiest lane. |
+| **records** | **STILL OLD CORE** | — | 38 | 14/29 = 48.3% | The same-day CONTROL, and the reason the comparison is trustworthy. It also means records is missing every ruling shipped to the runtime lanes — on 2026-09-03 23:54 it said "all of our agents are currently busy… as soon as they become available", which #265 forbids, and asked for first and last name in one breath. |
+| **no-ivr** | old core | — | — | — | After-hours agent. All overnight and weekend volume (standing instruction 13). Queue lanes take nothing after 00:00 UTC / 5pm Pacific. |
+| **pcp** | **OFF** in Twilio | — | — | — | Wayne's decision, Aug 10. Do not ask why. |
+| **azul-scheduling** (San Diego) | **OFF** | — | — | — | Gate B replay books 8 of 21. Not ready. Do not ask why. |
+| **answering-service** | old core | — | — | — | — |
 
-**Queue lines take no calls after hours** — Nextiva routes everything to the
-after-hours agent. See standing instruction 13.
+**THE HEADLINE OF THE CUTOVER: filing rate is FLAT.** tech +2.6 points, surgery
++6.3 — neither is significant at these n. The runtime matches the old core. It
+is not better and it is not worse, and anyone claiming either without a control
+is reading noise.
 
-**Do not ask Wayne why PCP or San Diego are off. It is written above.**
+**What DID change, measured on the same calls:**
 
-**A measurement trap in this table's own source:** `call_logs` has ZERO rows
-fleet-wide on 2026-08-25 and 2026-08-26, so any "14-day" figure is really over
-twelve days. The daily counts above are unaffected; averages computed by
-dividing by 14 are not.
-
----
+- **Turn detection is better.** tech callers said MORE (353 vs 333 characters)
+  in FEWER transcript lines (6.0 vs 7.7) at the SAME duration (128s). Less
+  fragmentation, no lost speech. `call_logs.total_turns` fell 16.1 → 9.7 and
+  is counting something else — do not quote it.
+- **The agent speaks in about twice as many short lines** (tech 7.4 → 9.3,
+  surgery 4.8 → 8.2). Not yet judged good or bad.
 
 ## What already exists — do NOT rebuild these
 
@@ -190,6 +192,14 @@ dividing by 14 are not.
 | Mirror verification | `src/services/patientVerification.ts` | Verifies against `patients_master`; refuses to guess between two people. |
 | Appointment answers | `src/services/appointmentAnswers.ts` | `Schedule.PersonID` join; excludes `Removed`. |
 | Replay tables | Operations Hub | `new_core_replay_summary`, `new_core_replay_index`, `ticket_agent_config` |
+| Date-of-birth parsing | `src/tools/dobParts.ts` | Reads a date out of a whole spoken sentence, English + Spanish months, two-digit centuries. **Turkish is a known, evidenced gap.** Also exports `dobShape` — the PHI-free shape of what arrived, which is the only way to tell "the model sent nothing" from "the parser refused it". |
+| The teardown request sweep | `src/runtime/requestSweep.ts` (decides) + `sweepRunner.ts` (files) | If the caller made a request and no filing tool succeeded, files it from the transcript at teardown. Wired in `voiceRuntime.ts` AFTER the call_logs write. Recovers only 6 of 53 today — see the open question about "no name, no ticket". |
+| Mid-call language switching | `src/tools/languageTools.ts` + the bridge's transport step | `set_spoken_language`; result to the model BEFORE the wire changes. Proven live 2026-09-03 on a Turkish caller. |
+| Repeated-failure ceiling | `src/runtime/toolCeiling.ts` | Stops a tool loop. **Keys on IDENTICAL arguments**, so a model that varies them gets more than 3 bites — observed 4–6. Its stops are INVISIBLE in `tool_timeline` (it short-circuits before dispatch, so `wrapWithTelemetry` never runs); console-only, uncountable from SQL. |
+| Grok cost from the bill | `src/services/grokCostAllocation.ts` + `xaiBilling.ts` + `grokCostReconciler.ts` | Splits xAI's authoritative daily total across the day's calls by seconds. **Dormant without `XAI_MANAGEMENT_KEY` / `XAI_TEAM_ID`.** |
+| The runtime's agents-table id | `src/runtime/agentIdentity.ts` | slug → `agents.id`, cached per lane. Without it every runtime call is absent from five per-agent reports. |
+| Pipeline label on a card | `client/src/lib/pipelineSplit.ts` | Says which stack served a lane's calls, and warns on a mid-day cutover. |
+| "Greeting already played" | `src/runtime/greetingAlreadyPlayed.ts` | Appended by the RUNTIME, not the prompts — the transport is what plays the greeting, and tech has 16 tokens of ceiling headroom. |
 
 ---
 
@@ -229,6 +239,45 @@ dividing by 14 are not.
 
 ---
 
+## HOW TO MEASURE WHETHER A CALL FILED — read this before quoting any rate
+
+I got this wrong for a whole afternoon on 2026-09-03 and reported filing rates
+understated by about a third. The instrument, not the fleet, was the problem.
+
+**THE AUTHORITY: a call filed a new ticket iff its `call_sid` appears on a
+`VA-` ticket in the Support Center (`vsmcxhxeirkoobmjcrbn`).**
+
+```sql
+-- the control that makes the join trustworthy. Re-run it before trusting it.
+SELECT count(*), count(call_sid) FROM tickets
+WHERE created_at::date = '<day>' AND ticket_number LIKE 'VA-%';
+-- 2026-09-03: 196 of 196 carry a real CA-prefixed sid. T- tickets are staff.
+```
+
+**THREE WAYS TO GET THIS WRONG, all of which I did:**
+
+1. **`tool_timeline` DROPS ABOUT 35% OF SUCCESSFUL FILINGS.** On 2026-09-03,
+   100 substantive queue calls read a real VA number to the caller and the
+   timeline recorded 65. Three consecutive calls (VA-57425, VA-57428,
+   VA-57429) had a real ticket and NO filing event in the timeline at all.
+   That is #77, and it is live on the runtime, not historical.
+   **The timeline IS reliable for refusals** (`outcome.missingFields`) — use it
+   for those and nothing else.
+2. **The transcript `VA-#####` proxy OVER-counts.** It caught 9 extra calls on
+   2026-09-03 — every one a caller ringing to chase an existing request and
+   `check_open_tickets` correctly reading it back to them. Three separate calls
+   from one number all quote VA-57151. That is the tool working, not a filing.
+3. **2.6% of tickets carry a `call_sid` from a LATER call** (5 of 196, average
+   49 minutes later, sometimes a different caller entirely). Call attribution
+   is being overwritten after the fact — related to #71. Small enough not to
+   move a rate, big enough to ruin a single-call forensic.
+
+**And `call_logs.total_turns` counts something that is not transcript turns.**
+It fell 16.1 → 9.7 across the tech cutover while the callers actually said
+MORE. Count `CALLER:` lines in the transcript instead.
+
+---
+
 ## Measured numbers — use these, don't re-derive them
 
 - **Gate B replay** (same corpus, same referee), failure rates:
@@ -265,6 +314,198 @@ them as current.
   events, 314 calls. It is the first tool every queue call runs. Unfixed (#68).
 - **Ticket write-back is NOT broken** (it was on the list as if it were):
   187 vs 184, 183 vs 178, 145 vs 139 on clean days — 97–98%.
+
+**The runtime's first full day, 2026-09-03. Measured with the authority above,
+over every queue call since each lane's own cutover. Do not re-derive these.**
+
+- **A REFUSAL THE MODEL CANNOT DIAGNOSE IS A REFUSAL IT REPEATS.** This is the
+  finding of the day and it generalises past dates of birth:
+
+  | gate hit | calls | still filed |
+  |---|---|---|
+  | `date_of_birth` | **23** | **0** |
+  | optical `location` | 11 | 9 |
+  | `resolve_location` called with no argument | 14 | 5 |
+  | no gate at all | 121 | 83 |
+
+  Both of the first two are refusals. One killed every call it touched and the
+  other was survivable, and the difference is not severity — it is whether the
+  CALLER's answer can satisfy it. The model was omitting `date_of_birth`
+  entirely, so no answer ever could. Fixed by giving `MissingFields` a `fix`
+  channel that tells the model what IT got wrong, separate from `message`,
+  which is what the agent SAYS.
+- **The model does not send `date_of_birth` unless told to.** `dobShape` was
+  `"(none)"` on 5 of 5 observed refusals. Calls filed anyway when
+  `lookup_patient` made a CERTAIN match and the handler fell back to the
+  verified record — which is exactly why the loss looked random.
+- **53 substantive queue calls produced no ticket** (2 of them correctly — they
+  were "what time do you close?"). The taxonomy:
+  23 the date-of-birth gate · 12 asked for a human then hung up ·
+  7 no tool ever ran · 9 other.
+- **The teardown sweep as built recovers only 6 of those 53.** 47 skip on
+  "no name, no ticket", because the calls that get lost are exactly the calls
+  where identification failed. The identity rule selects against the population
+  it exists to serve. **Open question for Wayne.**
+- **Pre-context produced a usable name on ZERO of 143 substantive queue calls.**
+  Of 132 distinct callers: **2** are in `si_persons` (3,774 rows — the table
+  pre-context reads) and **100** are in `patients_master` (915,843). Of those
+  100, only 25 resolve to exactly ONE person; 75 resolve to several (average
+  2.2). So pointing pre-context at the mirror is worth 2 → 100, but it buys a
+  name to CONFIRM, never an identity.
+- **13 calls played the greeting twice or three times**, averaging 175s against
+  a fleet average of 89. Six of the seven worst were a caller asking for
+  another language during the opening.
+- **Nothing else failed all day.** No timeouts, no transport errors, no
+  provider failures. The entire error inventory is the table above.
+- **THE VAD THRESHOLD WAS TOO HIGH, and this is the one number that changed
+  overnight.** xAI's `threshold` takes 0.1–0.9 and defaults to 0.85; we were
+  running the default. "Barely heard" — a call of 30s+ where the caller was
+  transcribed at most ONCE — on the two lanes that ran both pipelines:
+
+  | lane | old core | runtime at 0.85 |
+  |---|---|---|
+  | surgery | 6/46 = 13.0% | 13/40 = **32.5%** |
+  | tech | 7/75 = 9.3% | 18/76 = **23.7%** |
+
+  Bimodal, which is what names the cause: when the VAD DOES fire the runtime
+  captures MORE than the old core (tech 348 chars vs 324, in fewer longer
+  segments). Segments are failing to start, not to finish.
+  **Now 0.6, env-tunable via `RUNTIME_VAD_THRESHOLD`, clamped to 0.1–0.9.**
+  0.6 is a judgement; "too high" is the measurement. Re-measure both numbers
+  together — barely-heard must fall AND interruptions per call must not climb,
+  because the opposite failure is the agent stopping for a cough.
+- **Grok reports NO token usage.** 0 of 18 calls after the telemetry landed
+  carried any, and xAI's Voice Agent docs do not document a `usage` object on
+  `response.done`. The old core reports it on 172 of 184 (avg 20,859 cached
+  input tokens against 2,545 uncached — the cache does almost all the work).
+  So cost-per-call is not comparable between pipelines today, and
+  `total_cost_cents` on a grok row is not built from token counts.
+  **The route is the bill, not the wire** — see the cost section below.
+
+---
+
+## WHAT A CALL COSTS — and why the Grok number was never a measurement
+
+**Measured 2026-09-04, all 241 Grok rows on disk.** Every one carries
+`cost_is_estimated = true` and `cost_reconciled_at` NULL. Those two columns
+have existed since the schema was written and until now had never once been
+used on any row, either pipeline.
+
+| | |
+|---|---|
+| summed seconds | 25,259 (421 min) |
+| exact at the published $0.08/min | **$33.68** |
+| what is actually stored | **$34.86** |
+| overstatement from `Math.ceil` alone | **$1.18 = 3.5%** |
+
+Every row matched `Math.ceil(duration * 8/60)` exactly — 0 mismatches — so
+the formula is applied consistently. It is the **per-call ceil** that
+inflates, in the same direction on every single call. Do not quote a Grok
+cost-per-call as a measurement, and do not compare it against the old core's
+token-derived cost: one is a bill, the other is a constant times a duration.
+
+**xAI's published rates for `grok-voice-think-fast-2.0`: `$0.08 / min audio`
+AND, separately, `$0.004 / text input`.** We have only ever counted the
+first. Whether the second is material is not a thing to reason about — it is
+a thing the invoice answers.
+
+**THE ROUTE IS xAI'S MANAGEMENT API, which is a different host and a
+different credential from the one the runtime already uses.**
+
+```
+base     https://management-api.x.ai          (NOT api.x.ai)
+auth     Authorization: Bearer <management key>
+key      xAI Console -> Settings -> Management Keys   (NOT XAI_API_KEY —
+         the inference key cannot read billing)
+team     console.x.ai/team/default/settings/team
+
+POST /v1/billing/teams/{team}/usage    -> spend per day (TIME_UNIT_DAY)
+GET  /v1/billing/teams/{team}/postpaid/invoice/preview
+     -> unitType, unitPrice, numUnits, amount
+```
+
+`invoice/preview` is the more interesting one: `unitPrice` is xAI's flat rate
+stated by xAI rather than transcribed from a pricing page, and `numUnits` is
+**how many units they counted**, which is the only way to learn whether they
+bill the duration Twilio reports.
+
+**The method, which is Wayne's:** a flat per-minute rate means cost is
+proportional to duration and nothing else, so a day's authoritative total
+splits across that day's calls by their seconds. That is not an estimate —
+it **sums to what xAI actually charged**, and it absorbs any component we are
+not counting. Built in `src/services/grokCostAllocation.ts` (largest
+remainder: no cent invented, none lost, deterministic), `xaiBilling.ts` and
+`grokCostReconciler.ts`.
+
+**It is DORMANT until `XAI_MANAGEMENT_KEY` and `XAI_TEAM_ID` are set.** It
+says so once at boot and does not schedule — a reconciler that writes a wrong
+number is worse than one that writes nothing, because "estimated" is honest
+and a reconciled number is believed.
+
+```sql
+-- 241 of 241 today. Any number here is calls still priced from a constant.
+SELECT count(*) FROM call_logs
+ WHERE voice_provider = 'grok' AND cost_reconciled_at IS NULL;
+```
+
+**THE COST-COLUMN GUARD HAS NEVER FIRED, AND THAT IS THE POINT.** Measured
+2026-09-04 while PR #268 was in review. Rounds 11–13 turned up six findings
+and four of them were the same sentence — "an estimate overwrites the
+reconciled bill" — so it was worth knowing whether that had ever actually
+happened before claiming the fixes mattered:
+
+| control | result |
+|---|---|
+| rows with `cost_reconciled_at` set, **all time, both pipelines** | **0 of 86,516** |
+| Grok rows priced at the correct `ceil(duration * 8/60)` | **241 of 241** |
+| Grok rows priced at OpenAI's `ceil(duration * 0.19)` | **0** |
+
+So every one of those defects is **latent, not live**. The reconciler has
+never run, so the guard's condition has never been true; and the admin
+recalculate button has never been pressed on a Grok row, or the second row
+would be under 241. This is the "before" number for
+`docs/BACKEND_HANDOFF.md`'s rule — re-run all three after the reconciler is
+switched on, and the first one going non-zero is the moment the guard starts
+mattering.
+
+```sql
+-- Re-run this trio before quoting anything about cost preservation.
+SELECT count(*) FILTER (WHERE cost_reconciled_at IS NOT NULL)             AS ever_reconciled,
+       count(*) FILTER (WHERE voice_provider = 'grok'
+                          AND openai_cost_cents = ceil(duration * 8.0/60)) AS at_grok_rate,
+       count(*) FILTER (WHERE voice_provider = 'grok'
+                          AND openai_cost_cents = ceil(duration * 0.19)
+                          AND openai_cost_cents <> ceil(duration * 8.0/60)) AS at_openai_rate
+FROM call_logs WHERE duration IS NOT NULL AND duration > 0;
+```
+
+---
+
+## THE OBSERVATORY WAS BLIND TO EVERY RUNTIME CALL — fixed 2026-09-04
+
+Measured over every call since 09-01: **100% of old-core rows carried
+`agent_id`; 0 of 239 runtime rows did.** The runtime opened its `call_logs`
+row with the lane slug and nothing else, and the slug is not what anything
+reads. Five places join `agents` on the uuid — the Observatory scorecard and
+today view, the cost analytics (`routes.ts:2281`), the quality and sentiment
+analytics (`routes.ts:2463`), and `storage.ts:523`. So at 15:24:58 on 09-03,
+the moment optical cut over, it stopped existing in all five. **Not wrong,
+ABSENT — and an absent lane looks like a quiet lane.**
+
+- Fixed at the source: `src/runtime/agentIdentity.ts` resolves slug →
+  `agents.id`, once per lane per process. A miss is deliberately **not**
+  cached, so a lane whose agents row is added later is picked up without a
+  redeploy.
+- **259 existing rows were backfilled** from the slug they already carried
+  (every slug matched exactly one agent). Reversal snapshot kept in
+  `call_logs_agent_id_backfill_20260904`. Yesterday's cutover is visible.
+- The Observatory also had no concept of `voice_provider`, so the cutover
+  itself was invisible on the one screen built to watch these agents. Each
+  card now names its pipeline and says **"mixed pipelines — do not read these
+  as one population"** on a lane that cut over mid-day.
+
+Still not attributable, and left alone: 98 rows with a NULL `agent_used`
+(Nov–Jan), 14 `greeter`, 5 `claude-as`. None are current lanes.
 
 ---
 
@@ -327,6 +568,28 @@ SELECT call_sid, tool_call_count FROM call_logs
 WHERE voice_provider = 'grok' AND tool_call_count > 40;
 ```
 
+Markers added 2026-09-03 (late), all on `claude/determined-brown-o5qsft`.
+Each prints only when the thing it watches happens, so each is a live counter:
+
+```
+[DOB] refused a date of birth in the shape # # ##      <- and "(none)" is the
+[DOB] refused a date of birth in the shape (none)         one that matters
+[REQUEST SWEEP] tech: recovered request filed as VA-… (CA…)
+[REQUEST SWEEP] surgery: a request was made and nobody was identified —
+  not filed, needs a callback (CA…)
+[TOKENS] usage reported by the provider on this response: <keys>
+```
+
+`dobShape` also lands in SQL, which is how the date-of-birth question was
+finally settled — the log line is convenience, this is the evidence:
+
+```sql
+SELECT e->'args'->>'dobShape', count(*)
+FROM call_logs c, LATERAL jsonb_array_elements(c.tool_timeline->'events') e
+WHERE e->'args' ? 'dobShape' GROUP BY 1;
+-- "(none)" means the MODEL omitted the field. Anything else means the parser.
+```
+
 Markers added 2026-09-03 to the ticket-filing alarm
 (`server/services/ticketFilingHealth.ts`, `ticketFilingPulse.ts`). The first
 prints every five minutes and now names what it did NOT count; the second
@@ -364,7 +627,14 @@ it. On 2026-09-03 18:24:56 that ratio was 4 of 12.
    Optical could file a ticket when Surgery could not. Two paths through the same
    code, one working: diff them before theorising. See
    `.agents/memory/realtime-tool-schemas.md`.
-8. **Accepting a constraint as immovable.** I treated "the API has no way to
+8. **Quoting a number without checking the instrument.** 2026-09-03: I
+   reported filing rates all afternoon from `tool_timeline`, which silently
+   drops a third of successful filings. Every number was understated and I only
+   caught it because three consecutive calls read out a ticket number the
+   timeline said did not exist. **Before quoting a rate, find the control that
+   proves the measure** — see the measurement section above.
+
+9. **Accepting a constraint as immovable.** I treated "the API has no way to
    express *no category*" as the end of the discussion. Wayne: *"why don't you
    just create one?"* Ask whether the constraint can be changed before designing
    around it.

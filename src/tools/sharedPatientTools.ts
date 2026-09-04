@@ -73,10 +73,32 @@ registerTool({
   input_schema: {
     type: 'object',
     properties: {
+      /**
+       * LEAD THE ASK. Operator ruling, 2026-09-03:
+       *
+       *   *"We should be proactively structuring the conversation. On any
+       *   validation we should lead... May I please have your last name? May I
+       *   please have your date of birth? And when you ask for date of birth
+       *   it should say starting with the month, the day, and then the year.
+       *   This way you get it in the way you want it. It's kind of a guard.
+       *   If you just say can I have your date of birth, people give it to you
+       *   in any format they want."*
+       *
+       * These strings are the words the agent actually says: `validateInput`
+       * builds its refusal from `askAs`, and the model reads them in the
+       * schema. Changing them here changes all four queue lanes at once, which
+       * is why the wording lives with the field and not in four prompts.
+       *
+       * The date-of-birth guard is worth its characters twice over. Every
+       * parser fix on 2026-09-03 — separators, sentences, two-digit centuries
+       * — was widening what we accept AFTER the fact. Naming the order in the
+       * question narrows what arrives, which is the cheaper half and the one
+       * that was there before and got lost.
+       */
       phone: { type: 'string', description: 'Any format. The number they are calling from is usually best.', askAs: 'What is the best phone number for you?' },
-      first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'Can I get your first name?' },
-      last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'And your last name?' },
-      date_of_birth: { type: 'string', description: 'Any spoken format — "March 17th 1973", "03/17/1973".', askAs: 'And your date of birth?' },
+      first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'And may I please have your first name?' },
+      last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'May I please have your last name?' },
+      date_of_birth: { type: 'string', description: 'Any spoken format — "March 17th 1973", "03/17/1973".', askAs: 'And may I please have your date of birth, starting with the month, then the day, then the year?' },
     },
   },
   handler: async (input): Promise<ToolResult> => {
@@ -240,6 +262,11 @@ registerTool({
         firstName: resolved.patientData?.firstName,
         lastName: resolved.patientData?.lastName,
         dateOfBirth: resolved.patientData?.dateOfBirth,
+        // The same `certain` reported to the model as `identity_is_certain`.
+        // It was computed twenty lines up and then dropped here, so a
+        // name-only hit was stored as though it were a verified identity
+        // (Codex, PR #268 round 3).
+        certain,
       });
     }
 
@@ -284,11 +311,25 @@ registerTool({
   name: 'resolve_location',
   layer: 'agent',
   timeoutMs: 4000,
+  /**
+   * "BEFORE YOU FILE A TICKET" WAS READ AS "ALWAYS", AND IT COST 14 CALLS.
+   *
+   * 2026-09-03: this tool was called with NO ARGUMENT 34 times across 16 calls.
+   * `spoken_location` is in `required`, so validateInput refused every one
+   * before the handler ran — and only 5 of those 16 calls went on to file, the
+   * worst recovery rate of any gate that day.
+   *
+   * The old wording named a MOMENT ("before you file") and never named a
+   * PRECONDITION, so a model with nothing to resolve called it anyway, on
+   * schedule, and burnt a turn asking a question standing instruction 10
+   * forbids — "never ask a patient where our offices are".
+   */
   description:
-    'Turn what the caller said about an office into the real office name. Call it ' +
-    'with their words — "the Encinitas one", "Azul Vision Redlands" — before you ' +
-    'file a ticket. A ticket without a location is harder to route, so if this ' +
-    'cannot resolve it, ask the caller which office they visit.',
+    'Turn what the caller said about an office into the real office name — ' +
+    '"the Encinitas one", "Azul Vision Redlands". ONLY call this when the caller ' +
+    'has actually named a place; there is nothing to resolve otherwise, and ' +
+    'calling it empty just wastes a turn. If they have not named one, use the ' +
+    'office already on their record instead.',
   input_schema: {
     type: 'object',
     properties: {

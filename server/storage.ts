@@ -2,6 +2,7 @@
 // Reference: blueprint:javascript_database and blueprint:javascript_log_in_with_replit
 
 import { withRetry } from './services/dbResilience';
+import { buildPreservedCostSet } from './preservedCostSet';
 import {
   users,
   agents,
@@ -82,6 +83,11 @@ export interface IStorage {
   // Call logs
   createCallLog(callLog: InsertCallLog): Promise<CallLog>;
   updateCallLog(id: string, updates: Partial<InsertCallLog>): Promise<CallLog>;
+  /** Same, but a reconciled provider cost is never overwritten — see the impl. */
+  updateCallLogPreservingReconciledCost(
+    id: string,
+    updates: Partial<InsertCallLog>,
+  ): Promise<CallLog>;
   getCallLogs(options?: {
     page?: number;
     limit?: number;
@@ -398,6 +404,52 @@ export class DatabaseStorage implements IStorage {
         .returning();
       return callLog;
     }, `updateCallLog(${id.slice(-8)})`);
+  }
+
+  /**
+   * Update a call log WITHOUT ever overwriting a reconciled provider cost.
+   *
+   * The in-memory `costReconciledAt` guard in `priceVoiceCall` is a snapshot
+   * taken at read time, and the Twilio fetch that sits between the read and
+   * the write is slow enough to make the race real: reconciliation can commit
+   * in that window, and the caller then writes a duration ESTIMATE over
+   * xAI's own number while `cost_reconciled_at` stays populated — a wrong
+   * figure wearing the badge of an authoritative one (Codex, PR #268 round 8;
+   * round 2 fixed the guard, this fixes the window around it).
+   *
+   * So the decision is made by the database, at write time, in the same
+   * statement. A row reconciled a millisecond ago keeps its cost, its total
+   * is still rebuilt from that cost plus whatever Twilio price is being
+   * written, and `cost_is_estimated` stays false because it is not an
+   * estimate.
+   *
+   * Every other column is written normally — this only defends the three
+   * cost fields, and only when they are actually part of the update.
+   */
+  async updateCallLogPreservingReconciledCost(
+    id: string,
+    updates: Partial<InsertCallLog>,
+  ): Promise<CallLog> {
+    /**
+     * The clause itself lives in server/preservedCostSet.ts, where drizzle can
+     * render it offline and a test can assert the SQL that actually goes to
+     * the database rather than the shape of the code that builds it.
+     */
+    const built = buildPreservedCostSet(updates as Record<string, unknown>);
+    if (!built.touchesCost) return this.updateCallLog(id, updates);
+    if (built.rejectedTwilio) {
+      console.warn(
+        `[COST] refused an invalid twilioCostCents on ${id.slice(-8)} — the stored price stands`,
+      );
+    }
+    return await withRetry(async () => {
+      const [callLog] = await db
+        .update(callLogs)
+        .set(built.set as Partial<InsertCallLog>)
+        .where(eq(callLogs.id, id))
+        .returning();
+      return callLog;
+    }, `updateCallLogPreservingReconciledCost(${id.slice(-8)})`);
   }
 
   async getCallLogBySid(callSid: string): Promise<CallLog | undefined> {

@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import apiClient from '@/lib/apiClient'
+import { describePipeline } from '@/lib/pipelineSplit'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   Telescope,
@@ -135,6 +136,10 @@ interface OpsHubTodayAgent {
   activeNow: number
   criticalsToday: number
   qualityToday: number | null
+  /** voice_provider = 'grok' — the Media Streams runtime. */
+  runtimeCallsToday: number
+  /** voice_provider NULL — the OpenAI SIP core. */
+  legacyCallsToday: number
   outcomesToday: Record<string, number>
 }
 interface SageActiveCall {
@@ -402,6 +407,36 @@ function adherenceTone(a: number | null, sampled: number): Tone {
   if (a >= 0.9) return 'green'
   if (a >= 0.6) return 'amber'
   return 'red'
+}
+
+/**
+ * WHICH PIPELINE SERVED THESE CALLS.
+ *
+ * The Observatory had no idea `voice_provider` existed. Three lanes moved to
+ * the Media Streams runtime on 2026-09-03 at three separate moments, records
+ * deliberately stayed on the OpenAI SIP core as the same-day control, and
+ * none of that was visible on the one screen built to watch these agents — a
+ * card reading "tech: 100 calls" cannot tell you which stack you are looking
+ * at, and during a cutover that is the only question worth asking.
+ *
+ * Renders nothing when a lane is entirely on one pipeline and idle, and says
+ * "mixed" plainly when a lane cut over mid-day, because that is precisely the
+ * day whose numbers must not be read as one population.
+ */
+function PipelineLine({ runtime, legacy }: { runtime: number; legacy: number }) {
+  const { kind, label } = describePipeline({ runtime, legacy })
+  if (kind === 'idle') return null
+  return (
+    <p
+      className={
+        kind === 'mixed'
+          ? 'text-xs font-medium text-amber-700 dark:text-amber-400'
+          : 'text-xs text-muted-foreground'
+      }
+    >
+      {label}
+    </p>
+  )
 }
 
 function StatusDot({ tone }: { tone: Tone }) {
@@ -1808,6 +1843,7 @@ function CommandCenterTab({
                       <p className="text-xs text-muted-foreground">quality</p>
                     </div>
                   </div>
+                  <PipelineLine runtime={a.runtimeCallsToday} legacy={a.legacyCallsToday} />
                   {Object.keys(a.outcomesToday).length > 0 && (
                     <p className="text-xs text-muted-foreground">
                       {Object.entries(a.outcomesToday)

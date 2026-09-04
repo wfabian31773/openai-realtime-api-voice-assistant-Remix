@@ -28,6 +28,7 @@
  */
 import { registerTool, missing, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
+import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 
 // ---------------------------------------------------------------- what kind
@@ -95,9 +96,24 @@ registerTool({
   input_schema: {
     type: 'object',
     properties: {
-      first_name: { type: 'string', description: "Patient's first name.", askAs: 'Can I get the first name?' },
-      last_name: { type: 'string', description: "Patient's last name.", askAs: 'And the last name?' },
-      date_of_birth: { type: 'string', description: 'Any spoken format.', askAs: 'And the date of birth?' },
+      first_name: { type: 'string', description: "Patient's first name.", askAs: 'May I please have the first name?' },
+      last_name: { type: 'string', description: "Patient's last name.", askAs: 'May I please have the last name?' },
+      /**
+       * LEAD THE ASK, AND ALWAYS SEND IT BACK. Two separate 2026-09-03 findings
+       * in one field; see sharedPatientTools for the operator's wording.
+       *
+       * The ORDER in the question is the guard — *"if you just say can I have
+       * your date of birth, people give it to you in any format they want"*.
+       *
+       * The description is the other half. dobShape went live at 23:18 and the
+       * first three filing calls after it all recorded "(none)": the model was
+       * not sending this field AT ALL. Those three filed anyway because
+       * lookup_patient had made a certain match and the handler fell back to the
+       * verified record — which is exactly why the loss looked random. It stays
+       * out of `required` (validateInput refuses before the handler, and that
+       * would kill the fallback), so the description is where it gets said.
+       */
+      date_of_birth: { type: 'string', description: 'What the caller said, exactly as they said it. ALWAYS pass this when they have given it — leaving it out is what refuses the ticket.', askAs: 'And may I please have the date of birth, starting with the month, then the day, then the year?' },
       callback_number: { type: 'string', description: 'Best number to reach them.', askAs: 'What is the best number to reach you?' },
       request_description: { type: 'string', description: 'What they need, in their words.', askAs: 'What can we help you with?' },
       request_reason_id: { type: 'string', description: 'From classify_tech_request.' },
@@ -229,8 +245,37 @@ registerTool({
         console.info('[tech] date of birth taken from the verified record for this call');
       }
     }
+    /**
+     * ASK ONCE, THEN FILE IT ANYWAY. Operator ruling 2026-09-04, and the same
+     * ruling he gave for optical's office on 2026-09-01. The measurement that
+     * settles it: the location gate has this escape and recovered 9 of 11; this
+     * gate did not and recovered 0 of 23. See dobEscape.ts.
+     */
+    let dobStatus: DobStatus | null = null;
     if (!parts) {
-      return missing(['date_of_birth'], 'I did not catch that date of birth — month, day and year?');
+      const escape = decideDobEscape(callSid, 'file_tech_ticket', dob);
+      if (escape.askAgain) {
+        /**
+         * The first refusal only, and it carries BOTH channels: `message` is
+         * the coaching line the agent says, `fix` is what the model itself got
+         * wrong. The two branches of `fix` need OPPOSITE corrections — telling
+         * the model "ask the caller again" when it simply omitted the argument
+         * is what built the loop.
+         */
+        return missing(
+          ['date_of_birth'],
+          'I did not catch that — may I please have the date of birth, starting with the month, then the day, then the year?',
+          dob
+            ? 'The date_of_birth you sent could not be read as a date. Say the message to the caller, '
+              + 'then call this tool again with exactly what they say next.'
+            : 'You did not send the date_of_birth argument at all — that, not the caller, is why this '
+              + 'was refused. If they have ALREADY given you a date of birth, call this tool again '
+              + 'right now with date_of_birth set to what they said, and do NOT ask them again. Only '
+              + 'say the message if they have not given it yet.',
+        );
+      }
+      dobStatus = escape.status;
+      console.info(dobEscapeMarker('file_tech_ticket', dobStatus, callSid));
     }
 
     // Resolve the prescriber and office to ids when we have names. Not a gate:
@@ -322,6 +367,32 @@ registerTool({
     const filedDescription = redirect
       ? `${redirect.note}\n\n${cleanDescription.value}`
       : cleanDescription.value;
+    /**
+     * THE STATUS GOES FIRST, ABOVE THE CALLER'S OWN WORDS.
+     *
+     * Operator, 2026-09-04: *"where date of birth would be, you just put
+     * unavailable or unmatched, so this way we know what was happening."*
+     * It cannot go in the birth columns — they are varchar(2)/(2)/(4) — so it
+     * goes where staff actually look, and first, because the point is that
+     * nobody matches this to a chart without checking the recording.
+     */
+    /**
+     * THE STATUS DOES NOT GO IN THE DESCRIPTION.
+     *
+     * That field becomes the body of a patient-facing SMS — `opticalTools`
+     * sanitizes it to GSM-7 for exactly that reason, and BACKEND_HANDOFF
+     * section 6 lists "annotating unrouted tickets in description" among the
+     * changes caught in review. Prepending "Confirm identity from the call
+     * recording before matching this to a chart" would have texted the
+     * caller an instruction meant for staff (Codex, PR #268 round 5).
+     *
+     * The operator's ruling — *"where date of birth would be, you just put
+     * unavailable or unmatched, so this way we know what was happening"* —
+     * is about STAFF knowing. `callData` carries it to the ticket's own
+     * call-metadata columns, which no message to the patient reads.
+     */
+    const filedDescriptionWithDobStatus = filedDescription;
+    const dobStaffNote = dobStatus ? dobStatusNote(dobStatus) : undefined;
     if (redirect) {
       console.info(
         `[tech] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
@@ -346,16 +417,29 @@ registerTool({
       patientPhone: normalizePhone(phone),
       patientEmail: str(input.email) || undefined,
       preferredContactMethod: 'phone',
-      patientBirthMonth: parts.month,
-      patientBirthDay: parts.day,
-      patientBirthYear: parts.year,
+      // Omitted entirely when the escape was taken. create-ticket takes these
+      // as optional (traced 2026-09-03), and the columns are varchar(2)/(2)/(4)
+      // so a word like "unavailable" could not be stored there even if we tried
+      // — the status rides in the description instead, which is what staff read.
+      ...(parts
+        ? {
+            patientBirthMonth: parts.month,
+            patientBirthDay: parts.day,
+            patientBirthYear: parts.year,
+          }
+        : {}),
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
       lastProviderSeen: cleanProvider || undefined,
-      description: filedDescription,
+      description: filedDescriptionWithDobStatus,
       priority,
-      callData: { agentUsed: 'tech', ...(callSid ? { callSid } : {}) },
+      callData: {
+        agentUsed: 'tech',
+        ...(callSid ? { callSid } : {}),
+        // Staff-only. Never the description — that is an SMS body.
+        ...(dobStaffNote ? { transcript: dobStaffNote } : {}),
+      },
       // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
       // a real Twilio SID, when the retry lands on someone else's key.
       ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}` } : {}),

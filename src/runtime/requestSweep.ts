@@ -48,6 +48,7 @@
  * request survives a gate that was never the server's.
  */
 import { otherReasonFor } from "../tools/otherReason";
+import { monthNumberFromWord } from "../tools/dobParts";
 
 /** The lanes this runs on. Each is a queue whose department is its routing. */
 const DEPARTMENT_BY_SLUG: Record<string, number> = {
@@ -59,8 +60,20 @@ const DEPARTMENT_BY_SLUG: Record<string, number> = {
 
 export interface SweepToolEvent {
   name: string;
-  ok: boolean;
-  error?: string;
+  /** `check_open_tickets` found an existing open ticket. See ToolEvent. */
+  foundOpenTicket?: boolean;
+  /**
+   * The tool DID ITS JOB — not merely that it ran.
+   *
+   * This field replaced `ok`, and the reason is the whole point of the sweep.
+   * `ok` on a runtime ToolEvent means dispatch reached the handler; a
+   * `missing([...])` refusal comes back `ok: true` with no error. So
+   * `alreadyFiledByTool`, reading `ok`, counted a REFUSED `file_*_ticket` as a
+   * filed ticket — and would have skipped the sweep on every one of the calls
+   * listed at the top of this file. Caught while wiring it in, before it ran
+   * on a live call.
+   */
+  succeeded: boolean;
 }
 
 export interface SweepInput {
@@ -93,6 +106,8 @@ export type SweepSkipReason =
   | "already-filed"
   | "caller-said-nothing"
   | "no-name"
+  | "status-check"
+  | "identity-only"
   | "no-department-catch-all";
 
 /**
@@ -137,12 +152,85 @@ export function callerSaidSomething(transcript: string): boolean {
 }
 
 /**
- * A filing tool that RAN AND SUCCEEDED. `ok` alone is not enough — dispatch
- * answers ok whenever the tool ran at all, refusal included, which is the
- * distinction that cost the tool ceiling a round of review.
+ * A caller who identified themselves and then hung up has not made a request.
+ *
+ * `callerSaidSomething` counts any non-filler line, and "Yes, this is Mary
+ * Smith" and a spoken date of birth are not filler — so a lookup that
+ * succeeded followed by a hang-up produced a high-priority catch-all ticket
+ * containing nothing but the identity interview (Codex, PR #268 round 4).
+ *
+ * DELIBERATELY THE NARROWEST POSSIBLE VERSION. It suppresses a call only when
+ * EVERY caller line is exhausted by that caller's own name and a date — words
+ * they were asked for. Any request contains something else, so this cannot
+ * swallow one; the failure mode it accepts is filing the occasional
+ * identity-only ticket, which is the right direction to err on a path whose
+ * whole purpose is not losing requests.
+ *
+ * It does NOT try to decide what a request is. That is a judgement about
+ * conversation content, it belongs to the operator, and standing instruction
+ * 3 is that meaning is the model's job and not a regex's. This only asks
+ * whether anything was said at all beyond the identifiers.
+ */
+export function saidMoreThanTheirOwnIdentity(
+  transcript: string,
+  identity: { firstName?: string; lastName?: string } | undefined,
+): boolean {
+  const own = new Set(
+    [identity?.firstName, identity?.lastName]
+      .flatMap((n) => (n ?? "").toLowerCase().split(/\s+/))
+      .filter(Boolean),
+  );
+  for (const line of callerLines(transcript)) {
+    if (isFiller(line)) continue;
+    const words = line
+      .toLowerCase()
+      .replace(/[.,!?¿¡'"]/g, " ")
+      .split(/\s+/)
+      .filter(Boolean);
+    const leftover = words.filter(
+      (w) =>
+        !own.has(w) &&
+        !FILLER.has(w) &&
+        !IDENTITY_WORDS.has(w) &&
+        // Bare numbers and ordinals: a spoken date, a year, "the 17th".
+        !/^\d{1,4}(st|nd|rd|th)?$/.test(w) &&
+        monthNumberFromWord(w) === undefined &&
+        !NUMBER_WORDS.has(w),
+    );
+    if (leftover.length > 0) return true;
+  }
+  return false;
+}
+
+/** The scaffolding around an identity answer: "this is", "my name is". */
+const IDENTITY_WORDS = new Set([
+  "this", "is", "it", "i", "am", "my", "name", "the", "of", "birth", "date",
+  "was", "born", "on", "in", "a", "and", "speaking", "here", "that", "s",
+  "im", "its", "mr", "mrs", "ms", "dr", "junior", "senior", "jr", "sr",
+]);
+
+/** Spoken numbers, so "March seventeenth nineteen seventy three" is a date. */
+const NUMBER_WORDS = new Set([
+  "zero", "oh", "one", "two", "three", "four", "five", "six", "seven", "eight",
+  "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+  "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty",
+  "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "thousand",
+  "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
+  "ninth", "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth",
+  "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth",
+  "twentieth", "thirtieth", "twenty-first", "twenty-second",
+]);
+
+/**
+ * A filing tool that RAN AND SUCCEEDED.
+ *
+ * The distinction is not pedantic: it is the difference between this sweep
+ * doing its job and doing nothing at all. Dispatch answers ok whenever the
+ * tool ran, refusal included — the same trap the tool ceiling hit in review —
+ * so this reads the tool's own verdict and nothing else.
  */
 export function alreadyFiledByTool(events: readonly SweepToolEvent[]): boolean {
-  return events.some((e) => /^file_.*_ticket$/.test(e.name) && e.ok && !e.error);
+  return events.some((e) => /^file_.*_ticket$/.test(e.name) && e.succeeded);
 }
 
 export function decideSweep(input: SweepInput): SweepDecision {
@@ -154,8 +242,59 @@ export function decideSweep(input: SweepInput): SweepDecision {
   if (!callerSaidSomething(input.transcript)) {
     return { file: false, reason: "caller-said-nothing" };
   }
+  /**
+   * THE CALLER WHO RANG TO CHASE A REQUEST THEY ALREADY MADE.
+   *
+   * Codex found this on PR #268 and it is the finding with a human cost:
+   * `check_open_tickets` succeeds, the agent correctly reads the caller
+   * their existing VA number, no FILING tool runs — because none needed to —
+   * and the sweep would then open a second, high-priority, catch-all ticket
+   * for a request the practice is already working.
+   *
+   * It is not hypothetical and the size is known. On 2026-09-03 the
+   * transcript `VA-#####` proxy over-counted filings by 9 calls, and every
+   * one of those was exactly this: a caller chasing an existing request,
+   * three of them from the same number quoting the same ticket. Those
+   * callers are all IDENTIFIED, so unlike the 47 the no-name rule stops,
+   * every one would have passed the gate below and produced a duplicate.
+   *
+   * IT IS NOT ENOUGH THAT THE TOOL SUCCEEDED. `sharedPatientTools` answers
+   * `success: true` with `has_open_tickets: false` when the caller has
+   * nothing open, and every queue prompt tells the agent to run this tool
+   * before filing — so keying on `succeeded` alone would have skipped the
+   * sweep on the ORDINARY failure path it exists for, which is a worse bug
+   * than the duplicate it was fixing (Codex, PR #268 round 2). The skip
+   * requires the tool to have actually FOUND something.
+   *
+   * So a matched existing ticket is treated as the request being handled. The
+   * cost of the other reading — a caller who checks a status AND raises
+   * something new, whose new thing no filing tool captured — is real but
+   * smaller, and it is countable under this reason rather than invisible.
+   * Which way that trade should fall is the operator's call; this errs
+   * against inventing work for the staff, and makes the number visible so
+   * he can settle it with evidence rather than with a guess.
+   */
+  if (
+    input.toolEvents.some(
+      (e) => e.name === "check_open_tickets" && e.succeeded && e.foundOpenTicket === true,
+    )
+  ) {
+    return { file: false, reason: "status-check" };
+  }
   if (!otherReasonFor(departmentId)) {
     return { file: false, reason: "no-department-catch-all" };
+  }
+  /**
+   * IDENTIFIED, THEN HUNG UP. Everything the caller said was their own name
+   * and a date — the two things the agent asked them for. There is no request
+   * in that, and filing one puts an identity interview on the staff queue at
+   * high priority (Codex, PR #268 round 4).
+   *
+   * Placed AFTER the cheap checks and BEFORE the name gate, so its skips are
+   * counted separately from both silence and anonymity.
+   */
+  if (!saidMoreThanTheirOwnIdentity(input.transcript, input.verifiedName)) {
+    return { file: false, reason: "identity-only" };
   }
   /**
    * NO NAME, NO TICKET. Operator ruling, 2026-09-03, answering the question
@@ -196,7 +335,27 @@ export function decideSweep(input: SweepInput): SweepDecision {
  * The name used is the one `lookup_patient` verified against the record.
  */
 
+/**
+ * The description every swept ticket carries, verbatim.
+ *
+ * A CONSTANT ON PURPOSE. It is a patient-facing SMS body and this path has no
+ * model to write one safely, so there is nothing call-specific to vary and
+ * nothing that could leak by accident. Plain GSM-7, so it stays one segment.
+ *
+ * The wording is a placeholder for the operator's: it states the fact and
+ * promises only what standing instruction 10 already promises — that somebody
+ * follows up. Change the words freely; do not put anything from the call in
+ * them.
+ */
+export const SWEPT_TICKET_DESCRIPTION =
+  "Callback request taken during your call. A team member will follow up with you.";
+
 export interface SweptTicket {
+  /** Staff-only. Travels in callData, never in the patient-facing description. */
+  staffNote: string;
+  /** The lane that answered. Travels so `callData.agentUsed` names the queue
+   * a human would recognise, the same string every other filing path uses. */
+  slug: string;
   departmentId: number;
   requestTypeId: number;
   requestReasonId: number;
@@ -223,22 +382,73 @@ export function buildSweptTicket(
   const other = otherReasonFor(departmentId)!;
   const callerSaid = decision.callerSaid;
   return {
+    slug: input.slug,
     departmentId,
     requestTypeId: other.requestTypeId,
     requestReasonId: other.requestReasonId,
     patientFirstName: decision.firstName,
     patientLastName: decision.lastName,
     patientPhone: input.callerPhone,
-    description:
-      `Recovered from the call recording — the agent did not file this request.\n\n` +
-      `What the caller said, in their own words:\n${callerSaid}\n\n` +
-      `Call back on ${input.callerPhone}. Call reference ${input.callSid}.`,
+    /**
+     * THE DESCRIPTION IS A PATIENT-FACING SMS BODY. Nothing from the call
+     * goes in it — not the annotation, and NOT THE CALLER'S OWN WORDS.
+     *
+     * Round 5 took the recovery annotation, the call reference and the
+     * callback number out of here and left `callerSaid`, on the reasoning
+     * that the four ordinary filing tools put "the request, in the caller's
+     * own words" in the description. That reasoning was wrong, and the
+     * comment that stated it sat directly above the line that broke it
+     * (Codex, PR #268 round 14).
+     *
+     * THE ORDINARY TOOLS DO NOT PUT THE TRANSCRIPT THERE. Their description
+     * is written by the MODEL, which has isolated the request from the rest
+     * of the call. This sweep runs at teardown with no model, and
+     * `callerSaid` is every CALLER line joined — so on the normal recovered
+     * path it carries the identity interview: the caller's name, their full
+     * date of birth, and whatever else they said. All of it texted back to
+     * the number on the ticket, unencrypted, and to a stranger if that
+     * number was mis-keyed.
+     *
+     * Isolating the request from the interview is extraction, and extraction
+     * is the model's job, not a regex's — the operator settled that. With no
+     * model here there is no safe way to quote the caller at all, so the
+     * description says only that a request was taken. Everything the caller
+     * said goes to staff below, where the patient never sees it.
+     */
+    description: SWEPT_TICKET_DESCRIPTION,
+    /**
+     * The staff side. `callData` maps to the ticket's own call-metadata
+     * columns and is not part of any message to the patient, so the
+     * annotation, the call reference AND the caller's own words belong
+     * here — where the person picking the ticket up sees them and the
+     * caller never does. Losing the transcript entirely would have made the
+     * ticket unactionable, which is the trade the leak was buying.
+     */
+    staffNote:
+      `Recovered at teardown — the agent did not file this request.\n` +
+      `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +
+      `What the caller said: ${callerSaid}`,
     // Not "medium". Nobody has looked at this request yet and the caller has
     // been told nothing true about it; on three of today's five the agent said
     // it was filed when it was not.
     priority: "high",
     callSid: input.callSid,
-    idempotencyKey: `sweep:${input.callSid}`,
+    /**
+     * THE SAME KEY THE AGENT'S OWN TOOLS USE — `call-<sid>`, deliberately.
+     *
+     * A sweep-specific key would make this idempotent only against itself. On
+     * `call-<sid>` it is idempotent against the AGENT too: if a filing POST is
+     * sitting in the outbox waiting to retry when the call ends, the sweep and
+     * the retry collide on one key and the caller gets one ticket, not two.
+     * `alreadyFiledByTool` cannot see that case — the tool did not succeed —
+     * so this is the second lock under it, and duplicate filing measured 3 in
+     * 2,086 with this key in place.
+     *
+     * It also inherits the guard in durableTicketFiling: only a real Twilio
+     * sid is keyed. A sentinel would produce one key shared by every caller
+     * who hit it, and the second one's request would be silently dropped.
+     */
+    idempotencyKey: `call-${input.callSid}`,
   };
 }
 

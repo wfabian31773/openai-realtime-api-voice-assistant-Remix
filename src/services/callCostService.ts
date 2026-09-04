@@ -347,7 +347,17 @@ export class CallCostService {
       
       const totalCostCents = twilioCostCents + tokenCost.totalCostCents;
       
-      await storage.updateCallLog(callLogId, {
+      /**
+       * PRESERVING, like every other writer of these three columns.
+       *
+       * A token-derived cost is the most accurate figure the OpenAI core
+       * produces, so this is not an estimate clobbering a bill — but it is
+       * still an unconditional write of openai_cost_cents, total_cost_cents
+       * and cost_is_estimated, and that shape is what every finding on this
+       * PR has turned out to be. The guard costs nothing on a row that was
+       * never reconciled, and on one that was it keeps the invoice.
+       */
+      await storage.updateCallLogPreservingReconciledCost(callLogId, {
         twilioCostCents,
         openaiCostCents: tokenCost.totalCostCents,
         totalCostCents,
@@ -400,6 +410,35 @@ export class CallCostService {
     }
   }
 
+  /**
+   * Recalculate one call's cost from audio metrics. The manual/backfill path.
+   *
+   * THE ROW DECIDES WHOSE RATE APPLIES — not this function's arguments.
+   *
+   * Its only caller is POST /api/call-logs/:id/calculate-costs, which has no
+   * audio metrics at all: it synthesises them from the duration at a fixed
+   * 70/30 split. So this was never an audio measurement — it was a duration
+   * estimate in audio clothing, at a blended rate of
+   * 0.7 x 6 + 0.3 x 24 = 11.4 c/min = 0.19 c/sec, which is EXACTLY the
+   * calibrated OPENAI_COST_CENTS_PER_SECOND the decision module already
+   * applies. The rate is therefore unchanged for an ordinary OpenAI-served
+   * call; only the rounding moves, two Math.rounds becoming one Math.ceil,
+   * worth at most two cents on a call. What actually changes is the two
+   * kinds of row this path had no business repricing at all
+   * (Codex, PR #268 round 11):
+   *
+   *   - a GROK row was charged at OpenAI's rate, inventing OpenAI spend
+   *     against the one comparison this migration exists to make;
+   *   - a RECONCILED row had xAI's invoiced figure replaced by a duration
+   *     estimate while `cost_reconciled_at` stayed set — a wrong number
+   *     wearing the badge of an authoritative one, which is worse than
+   *     never having reconciled at all.
+   *
+   * Belt and braces: the decision refuses to produce a provider cost for
+   * those rows, AND the write goes through the preserving update, which
+   * re-checks the column in SQL at write time. Every other writer of these
+   * three columns does both; this one did neither.
+   */
   async updateCallCosts(
     callLogId: string, 
     callSid: string | null, 
@@ -408,35 +447,89 @@ export class CallCostService {
     try {
       const openaiCalc = this.calculateOpenAICost(audioMetrics);
       
+      /**
+       * A FETCH THAT DID NOT HAPPEN IS NOT A PRICE OF ZERO.
+       *
+       * `twilioCostCents` starts at 0 and stays there when there is no
+       * callSid, or when Twilio has not finalised the leg yet — and writing
+       * that 0 replaces a price Twilio already gave us on an earlier pass.
+       * `resolveTwilioCostWrite` cannot catch it: a genuine zero IS a price on
+       * some legs, so the guard accepts it and has no way to tell the two
+       * apart. Only the caller knows, so only the caller can decide not to
+       * send it. Surfaced by the round-12 race test.
+       */
       let twilioCostCents = 0;
+      let twilioFetched = false;
       
       if (callSid) {
         const twilioResult = await this.fetchTwilioCost(callSid);
         if (twilioResult) {
           twilioCostCents = twilioResult.costCents;
+          twilioFetched = true;
         }
       }
-      
-      const totalCostCents = twilioCostCents + openaiCalc.costCents;
-      
+
+      // Read the row before pricing it. Without this the function cannot
+      // tell a Grok call from an OpenAI one, or a reconciled row from a
+      // fresh one — their token columns are identically null.
+      const callLog = await storage.getCallLog(callLogId);
+      if (!callLog) {
+        console.warn(`[COST] ${callLogId} no longer exists — nothing recalculated`);
+        return null;
+      }
+
+      // The price the total is built from: the one just fetched, or the one
+      // already stored. Never the initialiser.
+      const effectiveTwilioCents = twilioFetched ? twilioCostCents : (callLog.twilioCostCents ?? 0);
+
+      const pricing = priceVoiceCall({
+        voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
+        inputAudioTokens: callLog.inputAudioTokens,
+        existingOpenaiCostCents: callLog.openaiCostCents,
+        costReconciledAt: (callLog as { costReconciledAt?: Date | null }).costReconciledAt,
+        durationSeconds: callLog.duration ?? 0,
+        twilioCostCents: effectiveTwilioCents,
+      });
+
+      const stored = await storage.updateCallLogPreservingReconciledCost(callLogId, {
+        ...(twilioFetched ? { twilioCostCents } : {}),
+        ...(pricing.providerCostCents === undefined
+          ? {}
+          : { openaiCostCents: pricing.providerCostCents }),
+        totalCostCents: pricing.totalCostCents,
+        audioInputMinutes: openaiCalc.inputMinutes,
+        audioOutputMinutes: openaiCalc.outputMinutes,
+        costCalculatedAt: new Date(),
+      });
+
+      /**
+       * REPORT THE ROW THE DATABASE RETURNED, NOT THE ONE WE PLANNED TO WRITE.
+       *
+       * The read above is a snapshot, and reconciliation can commit between it
+       * and this statement — that race is the entire reason the guard lives in
+       * SQL rather than in an `if` here. When it happens the guard does its job
+       * and keeps the invoice, but a response assembled from the snapshot would
+       * still hand the operator the estimate and call it stored: the same wrong
+       * number wearing the same badge, one layer up (Codex, PR #268 round 12).
+       *
+       * `.returning()` gives the post-update row, so this is what is actually
+       * on disk. The fallbacks cover only a row deleted mid-statement, where
+       * there is no post-update row to read.
+       */
       const costs: CallCosts = {
-        twilioCostCents,
-        openaiCostCents: openaiCalc.costCents,
-        totalCostCents,
+        twilioCostCents: stored?.twilioCostCents ?? effectiveTwilioCents,
+        openaiCostCents:
+          stored?.openaiCostCents ?? pricing.providerCostCents ?? callLog.openaiCostCents ?? 0,
+        totalCostCents: stored?.totalCostCents ?? pricing.totalCostCents,
         audioInputMinutes: openaiCalc.inputMinutes,
         audioOutputMinutes: openaiCalc.outputMinutes,
       };
       
-      await storage.updateCallLog(callLogId, {
-        twilioCostCents: costs.twilioCostCents,
-        openaiCostCents: costs.openaiCostCents,
-        totalCostCents: costs.totalCostCents,
-        audioInputMinutes: costs.audioInputMinutes,
-        audioOutputMinutes: costs.audioOutputMinutes,
-        costCalculatedAt: new Date(),
-      });
-      
-      console.info(`[COST] Updated call ${callLogId}: Twilio $${(twilioCostCents/100).toFixed(2)}, OpenAI $${(openaiCalc.costCents/100).toFixed(2)}, Total $${(totalCostCents/100).toFixed(2)}`);
+      // Report the RETAINED price, not the initialiser. A run that fetched
+      // nothing keeps the stored Twilio price and includes it in the total, so
+      // logging the zero made the line disagree with its own total
+      // (Codex, PR #268 round 13).
+      console.info(`[COST] Updated call ${callLogId} (${pricing.basis}): Twilio $${(costs.twilioCostCents/100).toFixed(2)}, provider $${(costs.openaiCostCents/100).toFixed(2)}, Total $${(costs.totalCostCents/100).toFixed(2)}`);
       
       return costs;
     } catch (error) {
@@ -485,6 +578,7 @@ export class CallCostService {
         voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
         inputAudioTokens: callLog.inputAudioTokens,
         existingOpenaiCostCents: callLog.openaiCostCents,
+        costReconciledAt: (callLog as { costReconciledAt?: Date | null }).costReconciledAt,
         durationSeconds: actualDuration,
         twilioCostCents: twilioResult.costCents,
       });
@@ -493,7 +587,7 @@ export class CallCostService {
       }
       updateData.totalCostCents = pricing.totalCostCents;
 
-      await storage.updateCallLog(callLogId, updateData);
+      await storage.updateCallLogPreservingReconciledCost(callLogId, updateData);
       
       console.info(`[COST] Retry successful for ${callLogId}: Duration=${actualDuration}s, Twilio=$${(twilioResult.costCents/100).toFixed(2)}, OpenAI=$${(((updateData.openaiCostCents ?? callLog.openaiCostCents ?? 0))/100).toFixed(2)}`);
       return true;
@@ -647,6 +741,7 @@ export class CallCostService {
           voiceProvider: (existing as { voiceProvider?: string | null } | undefined)?.voiceProvider,
           inputAudioTokens: existing?.inputAudioTokens,
           existingOpenaiCostCents: existing?.openaiCostCents,
+          costReconciledAt: (existing as { costReconciledAt?: Date | null } | undefined)?.costReconciledAt,
           durationSeconds: actualDuration,
           twilioCostCents: costCents,
         });
@@ -674,7 +769,7 @@ export class CallCostService {
         }
       }
 
-      await storage.updateCallLog(callLogId, updateData);
+      await storage.updateCallLogPreservingReconciledCost(callLogId, updateData);
       
       console.info(`[TWILIO RECONCILE] ${callLogId}: duration=${actualDuration}s, status=${twilioStatus}, cost=${costCents}c${updateData.durationMismatchFlag ? ' ⚠️ DURATION_MISMATCH' : ''}`);
       
@@ -754,12 +849,13 @@ export class CallCostService {
         voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
         inputAudioTokens: callLog.inputAudioTokens,
         existingOpenaiCostCents: callLog.openaiCostCents,
+        costReconciledAt: (callLog as { costReconciledAt?: Date | null }).costReconciledAt,
         durationSeconds,
         twilioCostCents,
       });
       const openaiCostCents = pricing.providerCostCents ?? callLog.openaiCostCents ?? 0;
 
-      await storage.updateCallLog(callLogId, {
+      await storage.updateCallLogPreservingReconciledCost(callLogId, {
         openaiCostCents,
         totalCostCents: pricing.totalCostCents,
         costCalculatedAt: new Date(),
