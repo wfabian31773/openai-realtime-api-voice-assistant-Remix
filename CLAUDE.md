@@ -372,6 +372,24 @@ in the same table.
 gets a new prefix but still stamps the column, so it cannot silently zero
 itself.
 
+**BUT USE ONLY ITS PRESENCE, NEVER ITS VALUE.** `agent_used IS NOT NULL` is
+sound provenance. `agent_used = '<lane>'` is NOT lane attribution — on
+2026-09-03 the ticket-side column read `unknown` on **91** rows and a bare uuid
+on **3**, and grouping the day by it reported **optical = 1** when optical
+actually filed 28. **Attribute a call to a lane with `call_logs.agent_used`,
+which is the call's own record; the ticket's copy is for provenance only.** I
+nearly wrote a new trap here of exactly the kind this section exists to
+prevent.
+
+**Effect of the change on the published 2026-09-03 numbers, measured:** filed
+calls go **196 → 198** — the new rule adds 2 and loses 0, so it strictly
+dominates the old one that day. Which lanes those 2 belong to is NOT settled
+here, because settling it needs the `call_logs` join rather than the
+unreliable ticket column, and that has not been run. Two calls cannot overturn
+the "filing rate is FLAT" headline (tech +2.6 points at n≈66, surgery +6.3 at
+n≈32), but the per-lane percentages in the table above were derived under the
+old rule and have not been re-derived under this one.
+
 **How the prefix trap was found, kept because the discovery route matters.**
 PCP files under `PCP-`. 210 tickets, every one carrying a real `call_sid`,
 back to 2026-08-04 — the entire life of the line. The old `LIKE 'VA-%'` rule
