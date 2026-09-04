@@ -208,8 +208,20 @@ So "the agent decides it cannot handle the call, then does nothing" is a
 long-standing and concentrated loss on this lane, not something the pipeline
 change introduced. That is evidence the shape recurs; it is NOT evidence that
 those 47 should have been transferred — under the rule below most of them
-should have been TICKETED. What is wrong in both the history and the live call
-is ending with neither.
+should have been TICKETED.
+
+**THESE ARE TWO DIFFERENT DEFECTS. Do not merge them.** An earlier version of
+this paragraph ended "what is wrong in both is ending with neither", which is
+false of the live call: **it DID file PCP-57486.** Its ticket path worked.
+
+| | what failed |
+|---|---|
+| the live 2026-09-04 call | **the spoken promise** — said it would connect, then did not, and did not say otherwise. Filed a ticket. |
+| the 47 historical calls | **neither a transfer NOR a ticket** — the request left no trace at all. |
+
+They may share a cause and they may not. Sending follow-up work toward
+missing-ticket handling on the basis of the live call would be chasing the
+wrong defect, since that call's ticket filed. (Codex, PR #272.)
 
 **The mechanism is present in the tree** — `warmTransfer.ts`,
 `transferTwilioOps.ts`, the accept webhook mounted at `voiceRuntime.ts:448`,
@@ -334,10 +346,28 @@ calls. A handful of staff rows landing on one lane on one day moves such a rate
 by several points. Bounding an aggregate says nothing about the samples
 actually being quoted. (Codex, PR #272.)
 
-**So: `VA-` and `PCP-` are validated** (VA 40,707 of 40,930 carry a sid; PCP
-210 of 210). **`T-` and `SR-` are NOT** — they carry 36 sids each, provenance
-unknown, and must be CLASSIFIED before being either counted or excluded. Until
-someone does that, exclude them and know that is a floor.
+**THE 72 `T-`/`SR-` SID-BEARING ROWS ARE NOW CLASSIFIED — they are STAFF
+tickets, not agent filings.** This was an open unknown that made the rule a
+floor rather than an authority; it is measured now, so it is neither.
+
+| control | result |
+|---|---|
+| calls whose ONLY ticket is `T-`/`SR-` | **72 of 72** (none also has a VA/PCP ticket) |
+| of those, carrying any agent-output marker | **0 of 72** |
+| `VA-` control, same markers | **2,919 of 6,494 = 45%** |
+
+Markers are the agent's own structures — `[Intake incomplete`, `REASON FOR
+CALL:`, `Voice Agent`, `[BACKFILL`. If those 72 were agent filings, roughly 45%
+should carry one; **zero do**, and reading them shows staff prose and staff
+shorthand ("pt c/i", "sx", first person). So excluding them from an AGENT
+filing rate is correct, and **the rule is an iff for what this section
+measures — did the VOICE AGENT file.**
+
+Two things that follow, and they are not the same:
+- **Agent filing rate** (what every number in this file means): `VA-` + `PCP-`.
+- **"Did the caller's request get recorded at all?"** — a DIFFERENT question,
+  and for it those 72 calls DID produce a ticket, written by a person. Do not
+  answer one with the other.
 
 **A new sid-bearing prefix is a silent instrument change.** Re-run the census
 below before quoting any rate; if a prefix appears that is not in the validated
@@ -357,9 +387,10 @@ SELECT split_part(ticket_number,'-',1) AS prefix, count(*),
 FROM tickets GROUP BY 1 ORDER BY 2 DESC;
 -- 2026-09-04: VA 40,930 (40,707 with sid) · T 6,079 (36) · SR 1,368 (36)
 --             TKT 1,045 (0, ended 2026-02-14) · PCP 210 (210) · DIAG 1 (0)
--- VALIDATED voice-filing prefixes: VA-, PCP-. T- and SR- carry 36 sids each
--- with UNKNOWN provenance — classify them before counting them; excluding
--- them (the current default) makes every rate here a floor, not a point.
+-- AGENT-filing prefixes: VA-, PCP-. T- and SR- carry 36 sids each and were
+-- CLASSIFIED 2026-09-04 as STAFF tickets (0 of 72 carry an agent marker vs 45%
+-- of VA-); excluding them from an agent filing rate is correct, not a floor.
+-- A prefix NOT in this list is unclassified: classify it before reporting.
 ```
 
 ```sql
