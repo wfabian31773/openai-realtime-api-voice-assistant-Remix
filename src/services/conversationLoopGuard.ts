@@ -197,15 +197,42 @@ const AGENT_EXIT: Record<string, string> = {
  *     wrongly assuming a lane cannot take a message is the more harmful
  *     error of the two.
  */
-function noTransferHumanDirective(agentSlug: string): string {
-  return (
-    'SERVER STATE CHECK: The caller asked to reach a person, and this line CANNOT transfer calls. ' +
-    'Tell them so NOW, before collecting anything else. If your own instructions give you wording for ' +
-    'this moment, use it; otherwise state plainly, in your own words, that you cannot connect calls. ' +
-    (filesTickets(agentSlug) ? 'Then take the message. ' : '') +
-    'If they ask again, give that SAME answer rather than improvising a new one, and never promise ' +
-    'that anyone will pick up.'
-  );
+export interface NoTransferDirectiveSpec {
+  /** The server-side fact the agent must act on. Never a line to read out. */
+  readonly situation: string;
+  /** Behaviours, in order. Each is something to DO. */
+  readonly mustDo: readonly string[];
+  /** Prohibited ACTIONS. Never prohibited wording — that is the prompt's. */
+  readonly mustNot: readonly string[];
+}
+
+/**
+ * THE STRUCTURE IS THE GUARANTEE. There is no field here in which a sentence
+ * for the agent to speak can be placed, so the server cannot dictate wording
+ * without visibly abusing a field named for something else. A phrase blocklist
+ * detects dictation after the fact and can always be worded around; this
+ * removes the channel (Codex, PR #270).
+ */
+export function noTransferDirectiveSpec(agentSlug: string): NoTransferDirectiveSpec {
+  const canTakeMessage = filesTickets(agentSlug);
+  return {
+    situation:
+      'The caller asked to reach a person, and this line CANNOT transfer calls.',
+    mustDo: [
+      'Tell them so NOW, before collecting anything else',
+      'If your own instructions give you wording for this moment, use it; otherwise state plainly, in your own words, that you cannot connect calls',
+      ...(canTakeMessage ? ['Then take the message'] : []),
+      'If they ask again, give that SAME answer rather than improvising a new one',
+    ],
+    mustNot: ['Never promise that anyone will pick up'],
+  };
+}
+
+/** The only place a spec becomes text. Renders behaviour; renders no speech. */
+export function renderDirective(spec: NoTransferDirectiveSpec): string {
+  return [`SERVER STATE CHECK: ${spec.situation}`, ...spec.mustDo, ...spec.mustNot]
+    .map((part) => (part.endsWith('.') ? part : `${part}.`))
+    .join(' ');
 }
 
 function exitFor(agentSlug: string): string {
@@ -316,7 +343,7 @@ class ConversationLoopGuard {
       if (cap === HUMAN_REQUEST_CAP_NO_TRANSFER) {
         return {
           kind: 'human_request',
-          text: `${noTransferHumanDirective(agentSlug)} ${exitFor(agentSlug)}`.trim(),
+          text: `${renderDirective(noTransferDirectiveSpec(agentSlug))} ${exitFor(agentSlug)}`.trim(),
         };
       }
       return {

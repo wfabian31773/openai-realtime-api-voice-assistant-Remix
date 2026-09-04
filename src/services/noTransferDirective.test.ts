@@ -23,22 +23,22 @@
  * someone — I'm not a person and I can't connect calls" while the same
  * directive said never to say you are "not a person".
  *
- * TWO THINGS THIS FILE GOT WRONG ON ITS FIRST DRAFT, both found in review:
+ * THREE THINGS THIS FILE GOT WRONG BEFORE ARRIVING HERE, all found in review:
  *
- *   1. It listed the lanes by hand. That hid `appointment-confirmation` — a
- *      no-transfer lane with NO human-request wording in its prompt and, worse,
- *      `filesTickets: false` — and hid every unregistered slug, which falls
- *      back to the conservative cannot-transfer default. The lane set is now
- *      DERIVED from the capability registry, so a lane cannot hide from it.
- *      (An unregistered slug still gets `filesTickets: true`; the conservative
- *      default differs per field, and a first draft of this file asserted it
- *      was false for both. The mutation run said otherwise.)
- *   2. Its load-bearing assertion banned quote CHARACTERS. That is not the
- *      invariant: it rejects a directive that legitimately names a field like
- *      callback_number, while `Say verbatim: I cannot transfer calls.` dictates
- *      speech and passes. Punctuation was never the property. What follows
- *      tests the two things that actually matter — no verbatim-dictation
- *      instruction, and no conflict with the lane's own prompt.
+ *   1. It listed the lanes by hand, hiding `appointment-confirmation` (a
+ *      no-transfer lane with no human-request wording AND `filesTickets:
+ *      false`) and every unregistered slug. The lane set is now DERIVED.
+ *   2. Its load-bearing assertion banned quote CHARACTERS — overbroad (a
+ *      directive naming `callback_number` fails) and trivially routed around
+ *      (`Say verbatim: I cannot transfer calls.` passes).
+ *   3. Its replacement was a finite phrase blocklist, which is the same
+ *      weakness one step removed: `Respond with: …` is not on the list.
+ *
+ * WHAT ACTUALLY HOLDS NOW IS THE TYPE. `NoTransferDirectiveSpec` has three
+ * fields — `situation`, `mustDo`, `mustNot` — and **no field in which a
+ * sentence for the agent to speak can be placed**. Dictation is not detected
+ * after the fact; there is nowhere to put it. The phrase check survives below
+ * as a secondary net and is explicitly no longer the guarantee.
  */
 import { describe, it, expect, vi } from 'vitest';
 
@@ -48,7 +48,11 @@ vi.hoisted(() => {
   process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 });
 
-import { conversationLoopGuard } from './conversationLoopGuard';
+import {
+  conversationLoopGuard,
+  noTransferDirectiveSpec,
+  renderDirective,
+} from './conversationLoopGuard';
 import { AGENT_CAPABILITIES, canTransfer, filesTickets } from '../config/agentCapabilities';
 import { buildRecordsPrompt } from '../agents/recordsAgent';
 import { buildOpticalPrompt } from '../agents/opticalAgent';
@@ -65,10 +69,10 @@ function directiveFor(slug: string): string {
 }
 
 /**
- * Derived, never listed. Plus one slug that is deliberately NOT in the
- * registry: `capabilitiesOf` answers "cannot transfer" for anything unknown,
- * so a lane configured in the database and never added here still receives
- * this directive, and it is the case with the least behind it.
+ * Derived, never listed. Plus one slug deliberately NOT in the registry:
+ * `capabilitiesOf` answers "cannot transfer" for anything unknown, so a lane
+ * configured only in the database still receives this directive, and it is
+ * the case with the least behind it.
  */
 const UNREGISTERED = 'lane-that-only-exists-in-the-database';
 const NO_TRANSFER_LANES: readonly string[] = [
@@ -76,7 +80,7 @@ const NO_TRANSFER_LANES: readonly string[] = [
   UNREGISTERED,
 ];
 
-/** Instructions that hand the model a script. The failure was one of these. */
+/** Secondary net only. See the header: the type is what holds. */
 const DICTATION = [
   'say this',
   'say exactly',
@@ -85,15 +89,13 @@ const DICTATION = [
   'word-for-word',
   'word for word',
   'these exact words',
-  'the following sentence',
   'repeat the following',
+  'respond with:',
   'without adding or rephrasing',
 ];
 
-describe('the no-transfer directive dictates behaviour, never wording', () => {
+describe('the directive has no channel for speech', () => {
   it('covers every no-transfer lane in the registry, plus an unregistered one', () => {
-    // Guards the guard: if someone adds a no-transfer lane, it joins this
-    // suite automatically. A shrinking set means the derivation broke.
     expect(NO_TRANSFER_LANES.length).toBeGreaterThanOrEqual(6);
     expect(NO_TRANSFER_LANES).toContain('appointment-confirmation');
     expect(canTransfer(UNREGISTERED)).toBe(false);
@@ -102,15 +104,27 @@ describe('the no-transfer directive dictates behaviour, never wording', () => {
   for (const slug of NO_TRANSFER_LANES) {
     describe(slug, () => {
       /**
-       * THE LOAD-BEARING ASSERTION. Not "contains no quote marks" — that is
-       * punctuation, and a future author would delete the quotes rather than
-       * give the wording back to the prompt. This is the instruction itself.
+       * THE LOAD-BEARING ASSERTION, and it is now about SHAPE rather than
+       * content. `situation` is a server-side fact, `mustDo` and `mustNot` are
+       * behaviours. There is no `say`, no `script`, no `wording`. A future
+       * author who wants to dictate a sentence has to add a field — which
+       * fails here — or smuggle it inside a field named for behaviour, which
+       * is a visible abuse rather than an invisible edit to a string.
        */
-      it('never tells the agent to say something verbatim', () => {
-        const text = directiveFor(slug).toLowerCase();
-        for (const phrase of DICTATION) {
-          expect(text, `directive dictates speech: ${JSON.stringify(phrase)}`).not.toContain(phrase);
-        }
+      it('exposes only behaviour fields — nowhere to put a sentence', () => {
+        const spec = noTransferDirectiveSpec(slug);
+        expect(Object.keys(spec).sort()).toEqual(['mustDo', 'mustNot', 'situation']);
+      });
+
+      /**
+       * And nothing may be appended outside the structure. The guard adds the
+       * lane's exit after the rendered spec; everything before that must be
+       * exactly what the renderer produced, so a hand-written sentence cannot
+       * be concatenated on at the call site.
+       */
+      it('is rendered from the spec and nothing else', () => {
+        const rendered = renderDirective(noTransferDirectiveSpec(slug));
+        expect(directiveFor(slug).startsWith(rendered)).toBe(true);
       });
 
       it('never orders the sentence the 2026-09-03 ruling forbids', () => {
@@ -121,12 +135,20 @@ describe('the no-transfer directive dictates behaviour, never wording', () => {
       });
 
       /**
-       * The mirror-image failure, and the reason "ban the bad phrases" is not
-       * the fix: the old directive ALSO forbade wording an approved prompt
-       * uses. A directive that bans a phrase is dictating too.
+       * The mirror-image failure, and the reason "ban the bad phrases" was
+       * never the fix: the old directive ALSO forbade wording an approved
+       * prompt uses. A directive that bans a phrase is dictating too.
        */
       it('does not forbid wording an approved prompt uses', () => {
         expect(directiveFor(slug).toLowerCase()).not.toContain('not a person');
+      });
+
+      /** Secondary net. Cheap, and it would have caught the 2026-08-17 text. */
+      it('carries no verbatim-dictation instruction', () => {
+        const text = directiveFor(slug).toLowerCase();
+        for (const phrase of DICTATION) {
+          expect(text, `directive dictates speech: ${JSON.stringify(phrase)}`).not.toContain(phrase);
+        }
       });
 
       it('still does the guard\'s actual job', () => {
@@ -137,10 +159,9 @@ describe('the no-transfer directive dictates behaviour, never wording', () => {
 
       /**
        * `appointment-confirmation` files no tickets. Telling it to take a
-       * message or create one promises a callback that nothing will produce —
-       * the same class of defect as the dictated sentence, just pointed at
-       * the caller instead of the prompt. Driven off `filesTickets` rather
-       * than a slug, so it follows the registry wherever it goes.
+       * message promises a callback nothing will produce — the same class of
+       * defect as the dictated sentence, pointed at the caller instead of the
+       * prompt. Driven off `filesTickets`, so it follows the registry.
        */
       it('promises a message only where the lane can actually file one', () => {
         const text = directiveFor(slug).toLowerCase();
@@ -174,7 +195,7 @@ describe('directive and prompt do not contradict each other', () => {
       const hay = prompt.toLowerCase();
       const text = directiveFor(slug).toLowerCase();
       // These phrases appear in the prompt AS PROHIBITIONS, so their presence
-      // there is the ruling; it is only the directive that must not carry them.
+      // there is the ruling; only the directive must not carry them.
       for (const banned of ['currently busy', 'as soon as someone']) {
         if (hay.includes(banned)) {
           expect(

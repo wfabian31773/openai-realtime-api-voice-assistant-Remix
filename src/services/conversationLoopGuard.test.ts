@@ -172,7 +172,7 @@ describe('human-request escalation', () => {
     expect(d?.kind).toBe('human_request');
     expect(d?.text).toMatch(/CANNOT transfer calls/);
     expect(d?.text).toMatch(/take the message/);
-    expect(d?.text).toMatch(/never promise that anyone will pick up/);
+    expect(d?.text).toMatch(/never promise that anyone will pick up/i);
     expect(d?.text).toMatch(/Create the ticket NOW/); // the exit still rides along
     // The directive used to dictate a sentence here — "take a message and have
     // the team contact you as soon as they become available" — which records,
