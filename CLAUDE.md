@@ -449,7 +449,7 @@ SELECT count(*) FROM call_logs
  WHERE voice_provider = 'grok' AND cost_reconciled_at IS NULL;
 ```
 
-## THE RECONCILER RAN: xAI's INVOICE WAS $53.55, WE HAD BOOKED $34.66
+## THE RECONCILER RAN: xAI REPORTED $53.55 OF VOICE SPEND, WE HAD BOOKED $34.66
 
 **2026-09-04 09:39 UTC, the first reconciliation ever performed.** Wayne set
 `XAI_MANAGEMENT_KEY` / `XAI_TEAM_ID` and republished; the nightly runner
@@ -460,9 +460,17 @@ settled 2026-09-03 and wrote 239 rows. `cost_reconciled_at` went from 0 of
 |---|---|
 | seconds WE recorded (the allocation's denominator) | 25,116 (418.6 min) |
 | our estimate, `ceil(duration x 8/60)` per call | **$34.66** |
-| **xAI's actual invoice** | **$53.55** |
+| **xAI-reported Voice spend** (`POST /usage`) | **$53.55** |
 | gap | **+$18.89 = +54% on our estimate** |
 | spend / OUR minutes | **12.79 c/min** — a RATIO, not xAI's unit price. See below. |
+
+**AND IT IS SPEND, NOT AN INVOICE.** The reconciler calls
+`POST /v1/billing/teams/{team}/usage` and nothing else. `invoice/preview` —
+the endpoint that returns line items, `unitType`, `unitPrice` and `numUnits` —
+**has never been called.** Every "xAI's actual invoice" in an earlier version
+of this section, and in PR #269, was this usage total wearing a word it had
+not earned: it says what they charged, not what they counted or how. (Codex,
+PR #269.)
 
 **THE 3.5% `Math.ceil` OVERSTATEMENT WAS TRUE AND IRRELEVANT.** It compared
 our estimate against `duration x published rate`. Both sides of that
@@ -509,8 +517,9 @@ count, and the section below explains why that division is invalid. It was
 removed there and left standing here; see the note under the table.
 
 **So the gap is inside the Voice line, and the careful statement of it is:
-voice spend was about 60% above `$0.08 x the duration WE recorded`.** That is
-all the arithmetic supports.
+xAI-reported voice spend was about 60% above `$0.08 x the duration WE
+recorded`.** Both nouns matter — reported spend, our duration. That is all the
+arithmetic supports.
 
 **IT IS NOT "WE ARE CHARGED 12.79 c/min".** An earlier version said exactly
 that, and it is the same mistake as the token division one section down,
@@ -565,7 +574,7 @@ argument for a trim has to get per-call units out of the `Voice` breakdown or
 2026-09-03** — one measured day, not a daily rate.
 
 **What this changes, scoped to the one day that has been reconciled:** on
-2026-09-03 our estimate understated the invoice by about a third. **That
+2026-09-03 our estimate understated xAI's reported spend by about a third. **That
 percentage is NOT known to hold on any other day.** If the gap is a per-call
 minimum or a setup component rather than a rate, its size moves with the day's
 call-duration mix — a day of many short calls would carry a larger uplift than
@@ -579,9 +588,13 @@ a different mix of calls the two move together and could offset or invert.
 Under-booking is established for 2026-09-03 and for no other day. (Codex,
 PR #269.)
 
-The runtime is materially more expensive per call than the estimate implied.
-Whether it is more expensive per *resolved request* is a different question and
-has not been measured.
+**On 2026-09-03, average Voice spend per call exceeded our average estimate.**
+That is the scoped form, and it is as far as this goes: an earlier version said
+"the runtime is materially more expensive per call", which is categorical, and
+sat directly below the paragraph withdrawing even the direction. It also spoke
+per CALL when the measurement is an aggregate average and the per-call shares
+are an apportionment. Whether the runtime is more expensive per *resolved
+request* is a different question again and has not been measured.
 
 **WHAT THE ALLOCATION IS PROVEN TO DO, AND WHAT IT IS NOT.** Checked, not
 assumed: the voice filter matches only the `grok-voice` series so non-voice
