@@ -93,6 +93,29 @@ export function noteGateRefusal(callSid: string | undefined, tool: string, field
   return n;
 }
 
+/**
+ * A per-call FACT rather than a count — same map, so same TTL, same ceiling,
+ * same recency eviction, same "a sentinel is not a call" rule.
+ *
+ * `dobEscape` kept its own module-global Set for one such fact and it had
+ * none of those: production never removed an entry, the only clearing
+ * function was test-only, and an unvalidated key meant "unknown" and "latest"
+ * accumulated too. A voice process that stays up for weeks grows it forever
+ * (Codex, PR #268 round 15). Anything per-call and boolean belongs here now,
+ * where the bounding was already solved.
+ */
+const FACT_TOOL = "__fact";
+
+/** Record a per-call fact. Ignored, like every write here, for a sentinel. */
+export function noteCallFact(callSid: string | undefined, fact: string): void {
+  noteGateRefusal(callSid, FACT_TOOL, fact);
+}
+
+/** Whether this call recorded that fact, within the TTL. */
+export function callFactNoted(callSid: string | undefined, fact: string): boolean {
+  return gateRefusalsSoFar(callSid, FACT_TOOL, fact) > 0;
+}
+
 /** Tests only. */
 export function resetGateAttempts(): void {
   attempts.clear();

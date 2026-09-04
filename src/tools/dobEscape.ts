@@ -44,7 +44,13 @@
  *   unmatched   — they gave us something and it would not read as a date.
  *                 The recording has the answer; the transcript may too.
  */
-import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
+import {
+  gateRefusalsSoFar,
+  noteGateRefusal,
+  noteCallFact,
+  callFactNoted,
+  resetGateAttempts,
+} from './gateAttempts';
 
 /**
  * Calls where the caller DID say something we could not read as a date.
@@ -57,14 +63,19 @@ import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
  * looking for nothing — while the date sits on the recording (Codex, PR #268
  * round 4).
  *
- * Keyed by call, and it only ever grows within a call, so a later empty
- * payload cannot erase what an earlier one showed.
+ * Recorded once per call and never unset within it, so a later empty payload
+ * cannot erase what an earlier one showed. It is stored in the per-call gate
+ * state rather than a Set of its own, which is what gives it a TTL, a size
+ * ceiling and the sentinel-key guard — see `noteCallFact`.
  */
-const spokeADate = new Set<string>();
+const SPOKE_A_DATE = "spoke_a_date";
 
-/** Tests only, and the per-call state resets with gateAttempts. */
+/**
+ * Tests only. The fact itself now lives in the per-call gate state, which
+ * already expires and is already capped, so clearing that clears this.
+ */
 export function resetDobHistory(): void {
-  spokeADate.clear();
+  resetGateAttempts();
 }
 
 export type DobStatus = 'unavailable' | 'unmatched';
@@ -88,7 +99,7 @@ export function decideDobEscape(
 ): DobDecision {
   // Recorded BEFORE the first-ask branch returns, so an unreadable date on
   // attempt one is remembered even though that attempt only asks again.
-  if (spokenDob) spokeADate.add(callSid);
+  if (spokenDob) noteCallFact(callSid, SPOKE_A_DATE);
 
   const askedAlready = gateRefusalsSoFar(callSid, toolName, 'date_of_birth') > 0;
   if (!askedAlready) {
@@ -99,7 +110,7 @@ export function decideDobEscape(
   // just the payload in hand. "unavailable" sends nobody to the recording.
   return {
     askAgain: false,
-    status: spokenDob || spokeADate.has(callSid) ? 'unmatched' : 'unavailable',
+    status: spokenDob || callFactNoted(callSid, SPOKE_A_DATE) ? 'unmatched' : 'unavailable',
   };
 }
 
