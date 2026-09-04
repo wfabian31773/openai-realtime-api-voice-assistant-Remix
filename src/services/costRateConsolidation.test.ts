@@ -133,6 +133,26 @@ describe('step 3 — one duration rate, everywhere', () => {
     expect(storage).toMatch(/const reconciled = sql`\$\{callLogs\.costReconciledAt\} IS NOT NULL`/);
     expect(storage).toMatch(/CASE WHEN \$\{reconciled\}/);
   });
+
+  /**
+   * Postgres evaluates a SET expression against the PRE-update row, so
+   * referencing the twilio_cost_cents column in the rebuilt total reads the
+   * OLD price even when the same statement is writing a new one — and the
+   * total came out inconsistent with its own components again, on exactly the
+   * paths whose job is correcting a Twilio price (Codex, PR #268 round 9).
+   */
+  it('rebuilds the total from the INCOMING Twilio price, not the stale column', () => {
+    const storage = read('../../server/storage.ts');
+    // The DECISION lives in reconciledCostWrite.ts and is tested there; this
+    // only checks the SQL consumes it. A scan cannot see whether a value is
+    // consulted, which is how a mutation ignoring it entirely passed here.
+    expect(storage).toMatch(/twilioCostForRebuiltTotal\(updates\)/);
+    // The total's CASE must use the resolved value, never the column directly.
+    const rebuilt = storage.match(/totalCostCents: sql`CASE WHEN[^`]*`/)?.[0] ?? '';
+    expect(rebuilt, 'the total is rebuilt from something').not.toBe('');
+    expect(rebuilt).toContain('${twilioForTotal}');
+    expect(rebuilt).not.toContain('callLogs.twilioCostCents');
+  });
 });
 
 describe('step 4 — price the model that actually ran', () => {

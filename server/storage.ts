@@ -2,6 +2,7 @@
 // Reference: blueprint:javascript_database and blueprint:javascript_log_in_with_replit
 
 import { withRetry } from './services/dbResilience';
+import { twilioCostForRebuiltTotal } from './reconciledCostWrite';
 import {
   users,
   agents,
@@ -442,6 +443,23 @@ export class DatabaseStorage implements IStorage {
     if (!touchesCost) return this.updateCallLog(id, updates);
 
     const reconciled = sql`${callLogs.costReconciledAt} IS NOT NULL`;
+    /**
+     * The Twilio price to build the total from.
+     *
+     * POSTGRES EVALUATES A SET EXPRESSION AGAINST THE PRE-UPDATE ROW. So
+     * referencing the twilio_cost_cents COLUMN here reads the OLD value even
+     * when this same statement is writing a new one — and the total came out
+     * inconsistent with its own two components all over again, on exactly the
+     * paths that exist to correct a Twilio price (Codex, PR #268 round 9).
+     *
+     * The incoming value wins when there is one; the column is the fallback
+     * for an update that leaves the Twilio price alone.
+     */
+    const incomingTwilio = twilioCostForRebuiltTotal(updates);
+    const twilioForTotal =
+      incomingTwilio === null
+        ? sql`COALESCE(${callLogs.twilioCostCents}, 0)`
+        : sql`${incomingTwilio}`;
     return await withRetry(async () => {
       const [callLog] = await db
         .update(callLogs)
@@ -456,8 +474,9 @@ export class DatabaseStorage implements IStorage {
             ? {}
             : {
                 // Rebuilt from the PRESERVED provider cost when reconciled, so
-                // a later Twilio price still lands without disturbing the bill.
-                totalCostCents: sql`CASE WHEN ${reconciled} THEN COALESCE(${callLogs.openaiCostCents}, 0) + COALESCE(${callLogs.twilioCostCents}, 0) ELSE ${totalCostCents} END`,
+                // a later Twilio price still lands without disturbing the bill
+                // — and from the INCOMING Twilio price, not the stale column.
+                totalCostCents: sql`CASE WHEN ${reconciled} THEN COALESCE(${callLogs.openaiCostCents}, 0) + ${twilioForTotal} ELSE ${totalCostCents} END`,
               }),
           ...(costIsEstimated === undefined
             ? {}
