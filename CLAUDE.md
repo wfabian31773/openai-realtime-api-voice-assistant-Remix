@@ -449,7 +449,7 @@ SELECT count(*) FROM call_logs
  WHERE voice_provider = 'grok' AND cost_reconciled_at IS NULL;
 ```
 
-## THE RECONCILER RAN, AND GROK COSTS 60% MORE THAN THE RATE CARD SAYS
+## THE RECONCILER RAN, AND GROK COSTS 60% MORE THAN WE WERE BOOKING
 
 **2026-09-04 09:39 UTC, the first reconciliation ever performed.** Wayne set
 `XAI_MANAGEMENT_KEY` / `XAI_TEAM_ID` and republished; the nightly runner
@@ -462,7 +462,7 @@ settled 2026-09-03 and wrote 239 rows. `cost_reconciled_at` went from 0 of
 | our estimate, `ceil(duration x 8/60)` per call | **$34.66** |
 | **xAI's actual invoice** | **$53.55** |
 | gap | **+$18.89 = +54% on our estimate** |
-| derived rate | **12.79 c/min** against a published **8 c/min** — **+59.9%** |
+| spend / OUR minutes | **12.79 c/min** — a RATIO, not xAI's unit price. See below. |
 
 **THE 3.5% `Math.ceil` OVERSTATEMENT WAS TRUE AND IRRELEVANT.** It compared
 our estimate against `duration x published rate`. Both sides of that
@@ -505,13 +505,29 @@ call", which is the whole account's request count divided by the voice-call
 count, and the section below explains why that division is invalid. It was
 removed there and left standing here; see the note under the table.
 
-**So the gap is inside the Voice line: $53.55 for 418.6 minutes is
-`$0.1279/min` against a published `$0.08/min`.** We are charged ~60% more per
-voice minute than the rate card says. Whether that is a stale published rate,
-audio tokens billed on top of the minute, or a longer duration than Twilio
-reports is NOT established. **The console's Breakdown panel has a `Voice` tab
-beside the `Text` one; opening it gives the per-unit split the same way the
-text table above does, and that is the one click that settles it.**
+**So the gap is inside the Voice line, and the careful statement of it is:
+voice spend was about 60% above `$0.08 x the duration WE recorded`.** That is
+all the arithmetic supports.
+
+**IT IS NOT "WE ARE CHARGED 12.79 c/min".** An earlier version said exactly
+that, and it is the same mistake as the token division one section down,
+committed a third time: 12.79 is $53.55 divided by OUR 418.6 minutes, and
+xAI's unit price is $53.55 divided by THEIR unit count, which we do not have.
+The very next sentence already conceded that xAI may count a duration we do
+not report — so if that is what happened, 12.79 is not a rate at all, it is
+our own denominator wearing a rate's units. Asserting it assigned the whole
+discrepancy to the rate card before anything had established that is where it
+lives. (Codex, PR #269.)
+
+The three live candidates, none of them ruled out: a stale published rate;
+audio tokens billed on top of the minute; or a billed duration longer than
+Twilio's — session wall-clock including setup, or a per-call minimum.
+
+**`numUnits` is the number that separates them**, because it is how many units
+xAI counted. `GET /v1/billing/teams/{team}/postpaid/invoice/preview` returns
+it alongside `unitType` and `unitPrice`, and the console's Breakdown panel has
+a `Voice` tab beside the `Text` one that gives the same split the text table
+above came from. Either settles it; neither has been opened.
 
 **What this cost me, recorded because it is the recurring failure:** I fitted
 a hypothesis to two aggregate numbers, got a 3.4% match, and wrote it into
