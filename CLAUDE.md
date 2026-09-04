@@ -167,9 +167,49 @@ discriminator; a NULL there is the old core.
 | **tech** | **Grok runtime** | 19:51:10 | 100 | 46/66 = **69.7%** | Before: 49/73 = 67.1% on the old core, same day. Busiest lane. |
 | **records** | **STILL OLD CORE** | — | 38 | 14/29 = 48.3% | The same-day CONTROL, and the reason the comparison is trustworthy. It also means records is missing every ruling shipped to the runtime lanes — on 2026-09-03 23:54 it said "all of our agents are currently busy… as soon as they become available", which #265 forbids, and asked for first and last name in one breath. |
 | **no-ivr** | old core | — | — | — | After-hours agent. All overnight and weekend volume (standing instruction 13). Queue lanes take nothing after 00:00 UTC / 5pm Pacific. |
-| **pcp** | **OFF** in Twilio | — | — | — | Wayne's decision, Aug 10. Do not ask why. |
+| **pcp** | **Grok runtime — BACK ON 2026-09-04 ~16:00 UTC** | 2026-09-04 ~16:00 | 3 test calls | — | Wayne switched it over himself and made three test calls. It had been OFF since Aug 10 (his decision — do not ask why it *was* off). Its two real days, 08-06 and 08-07, ran **216 and 203 calls** — more than surgery (107/day) and optical (79/day) COMBINED, and above tech's 165. At full volume it is the heaviest single queue lane. **A live defect is open on it: see below.** |
 | **azul-scheduling** (San Diego) | **OFF** | — | — | — | Gate B replay books 8 of 21. Not ready. Do not ask why. |
 | **answering-service** | old core | — | — | — | — |
+
+### PCP LIVE DEFECT — the agent promises a transfer and does not make one
+
+Found in Wayne's own test calls, 2026-09-04 16:11 (`CAa37f1a422d120c200d2038c1314a32aa`).
+A caller from a surgery center asked for a representative. The agent said:
+
+> "Give me one moment while I connect you with our PCP team — I'll stay right
+> here with you."
+
+Then `transferred_to_human = false`, `transfer_outcome` NULL,
+`runtime_outcome = agent_ended`. It filed PCP-57486 ("Service inquiry", noting
+the intake was incomplete) and ended the call. **No transfer was attempted.**
+
+This is exactly the case Wayne's transfer rule (below) says MUST transfer, and
+the lane is otherwise wired for it — `warmTransfer.ts`, `transferTwilioOps.ts`,
+the accept webhook mounted at `voiceRuntime.ts:448`, and `pcp` present in
+`RUNTIME_TRANSFER_READY_LANES`. So the mechanism exists and this call did not
+use it; the cause is NOT that the feature is missing. **Not yet root-caused.**
+At 200+ calls/day this means every entity that asks for a person gets a promise
+and a dial tone.
+
+**WAYNE'S PCP TRANSFER RULE (2026-09-04), replacing "anyone who asks goes through":**
+
+- Default is to take the request and file the ticket. **Never auto-transfer.**
+- Transfer only when BOTH: the caller **asks** for a representative, AND the
+  caller is an **entity** — doctor's office, medical group, surgery center,
+  insurance — **not a patient**.
+- Ticketable → ticket it. Not ticketable → let it through on request.
+- **OPEN:** an entity asks for a rep about something that IS ticketable — does
+  the ask win or the ticket win? Not yet answered. Do not assume.
+- The entity test is the model's read of what the caller SAYS. There is no
+  verification behind it.
+
+**Also observed on those calls, not yet fixed:** the agent asks "What is your
+role?" and then "What is your professional relationship to this patient?" and
+gets the same answer twice; it asked seven questions before reaching the
+patient even when the caller opened with name and purpose; no callback number
+was captured on either ticket (standing instruction 12); and no recording
+disclosure was spoken. Wayne also wants the voice changed — which voice is his
+call, unanswered.
 
 **THE HEADLINE OF THE CUTOVER: filing rate is FLAT.** tech +2.6 points, surgery
 +6.3 — neither is significant at these n. The runtime matches the old core. It
@@ -244,23 +284,53 @@ is reading noise.
 I got this wrong for a whole afternoon on 2026-09-03 and reported filing rates
 understated by about a third. The instrument, not the fleet, was the problem.
 
-**THE AUTHORITY: a call filed a new ticket iff its `call_sid` appears on a
-`VA-` ticket in the Support Center (`vsmcxhxeirkoobmjcrbn`).**
+**THE AUTHORITY: a call filed a new ticket iff its `call_sid` appears on ANY
+ticket in the Support Center (`vsmcxhxeirkoobmjcrbn`). JOIN ON `call_sid`.
+DO NOT FILTER BY TICKET PREFIX.**
+
+An earlier version of this line said "on a `VA-` ticket", and that was wrong in
+a way that silently reports ZERO rather than reporting an error.
+
+**PCP FILES UNDER `PCP-`, NOT `VA-`.** 210 tickets, every one carrying a real
+`call_sid`, going back to 2026-08-04 — the entire life of the line. A filing
+measurement that filters `ticket_number LIKE 'VA-%'` misses **all** of them and
+concludes the PCP lane files nothing. Caught 2026-09-04 only because tickets
+turned up for calls whose `tool_timeline` said no tool had run.
 
 ```sql
--- the control that makes the join trustworthy. Re-run it before trusting it.
-SELECT count(*), count(call_sid) FROM tickets
-WHERE created_at::date = '<day>' AND ticket_number LIKE 'VA-%';
--- 2026-09-03: 196 of 196 carry a real CA-prefixed sid. T- tickets are staff.
+-- Every prefix, and how many carry a call_sid. Re-run before trusting a rate;
+-- a lane that adopts a new prefix silently zeroes itself under a prefix filter.
+SELECT split_part(ticket_number,'-',1) AS prefix, count(*),
+       count(call_sid) AS with_sid, min(created_at)::date, max(created_at)::date
+FROM tickets GROUP BY 1 ORDER BY 2 DESC;
+-- 2026-09-04: VA 40,930 (40,707 with sid) · T 6,079 (36) · SR 1,368 (36)
+--             TKT 1,045 (0, ended 2026-02-14) · PCP 210 (210) · DIAG 1 (0)
+-- T- and SR- are mostly staff tickets, but 36 each DO carry a call_sid, so
+-- even they are not safe to exclude by prefix.
 ```
 
-**THREE WAYS TO GET THIS WRONG, all of which I did:**
+```sql
+-- The control that makes the join trustworthy, per day. Re-run it.
+SELECT count(*), count(call_sid) FROM tickets WHERE created_at::date = '<day>';
+-- 2026-09-03: 196 of 196 VA- tickets carried a real CA-prefixed sid.
+```
+
+**FOUR WAYS TO GET THIS WRONG, all of which I did:**
+
+0. **FILTERING BY TICKET PREFIX.** The failure above. It does not error, it
+   returns a plausible zero, and a zero filing rate reads as a broken lane
+   rather than a broken query. Join on `call_sid` and let the prefix fall
+   where it may.
 
 1. **`tool_timeline` DROPS ABOUT 35% OF SUCCESSFUL FILINGS.** On 2026-09-03,
    100 substantive queue calls read a real VA number to the caller and the
    timeline recorded 65. Three consecutive calls (VA-57425, VA-57428,
    VA-57429) had a real ticket and NO filing event in the timeline at all.
    That is #77, and it is live on the runtime, not historical.
+   **On PCP the drop is 100%, not 35%.** All three runtime calls on
+   2026-09-04 recorded ZERO timeline events and NULL `tool_call_count`, and
+   two of them filed real tickets (PCP-57486, PCP-57487). Do not read an
+   empty timeline as "no tool ran" on any runtime lane, and never on PCP.
    **The timeline IS reliable for refusals** (`outcome.missingFields`) — use it
    for those and nothing else.
 2. **The transcript `VA-#####` proxy OVER-counts.** It caught 9 extra calls on
