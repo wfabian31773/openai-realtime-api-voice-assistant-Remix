@@ -241,8 +241,24 @@ export function databasePorts(): ReconcilerPorts {
               AND c.voice_provider = 'grok'`,
           [costs.map((c) => c.callSid), costs.map((c) => c.costCents)],
         );
+        /**
+         * ALL OR NOTHING MEANS ALL. If a row was deleted, or stopped being a
+         * Grok row, between `readDay` and this update, Postgres updates fewer
+         * rows than the allocation covers — and committing that leaves the
+         * survivors summing to LESS than xAI billed while every one of them
+         * claims to be authoritative (Codex, PR #268 round 5). The whole
+         * point of the transaction is that a half-allocated day cannot exist.
+         */
+        const updated = result.rowCount ?? 0;
+        if (updated !== costs.length) {
+          await client.query("ROLLBACK");
+          throw new Error(
+            `allocation covers ${costs.length} call(s) but only ${updated} row(s) matched — ` +
+              `the day changed underneath the read; nothing was written`,
+          );
+        }
         await client.query("COMMIT");
-        return result.rowCount ?? 0;
+        return updated;
       } catch (error) {
         await client.query("ROLLBACK").catch(() => undefined);
         throw error;

@@ -498,9 +498,23 @@ registerTool({
      * goes where staff actually look, and first, because the point is that
      * nobody matches this to a chart without checking the recording.
      */
-    const routedDescriptionWithDobStatus = dobStatus
-      ? `${dobStatusNote(dobStatus)}\n\n${routedDescription}`
-      : routedDescription;
+    /**
+     * THE STATUS DOES NOT GO IN THE DESCRIPTION.
+     *
+     * That field becomes the body of a patient-facing SMS — `opticalTools`
+     * sanitizes it to GSM-7 for exactly that reason, and BACKEND_HANDOFF
+     * section 6 lists "annotating unrouted tickets in description" among the
+     * changes caught in review. Prepending "Confirm identity from the call
+     * recording before matching this to a chart" would have texted the
+     * caller an instruction meant for staff (Codex, PR #268 round 5).
+     *
+     * The operator's ruling — *"where date of birth would be, you just put
+     * unavailable or unmatched, so this way we know what was happening"* —
+     * is about STAFF knowing. `callData` carries it to the ticket's own
+     * call-metadata columns, which no message to the patient reads.
+     */
+    const routedDescriptionWithDobStatus = routedDescription;
+    const dobStaffNote = dobStatus ? dobStatusNote(dobStatus) : undefined;
     /**
      * ONLY WHILE THE TICKET IS STILL OPTICAL'S — Codex, PR #244.
      *
@@ -562,7 +576,12 @@ registerTool({
       lastProviderSeen: cleanProvider || undefined,
       description: routedDescriptionWithDobStatus,
       priority: filedPriority,
-      callData: { agentUsed: 'optical', ...(callSid ? { callSid } : {}) },
+      callData: {
+        agentUsed: 'optical',
+        ...(callSid ? { callSid } : {}),
+        // Staff-only. Never the description — that is an SMS body.
+        ...(dobStaffNote ? { transcript: dobStaffNote } : {}),
+      },
       // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
       // a real Twilio SID, when the retry lands on someone else's key.
       ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}` } : {}),

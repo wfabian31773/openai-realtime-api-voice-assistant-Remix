@@ -67,7 +67,20 @@ describe('the ticket a caller gets when we never got their date of birth', () =>
     }
   });
 
-  it('says UNAVAILABLE at the top of the description when none was ever given', async () => {
+  /**
+   * THE STATUS IS FOR STAFF, AND THE DESCRIPTION IS AN SMS BODY.
+   *
+   * It was prepended to `description`, which becomes the body of a
+   * patient-facing text — so the caller would have been sent "Confirm
+   * identity from the call recording before matching this to a chart"
+   * (Codex, PR #268 round 5; BACKEND_HANDOFF section 6 lists this exact
+   * mistake as one caught in review before).
+   *
+   * The operator's ruling is that STAFF should know what happened, and
+   * callData carries it to the ticket's own call-metadata columns, which no
+   * message to the patient reads.
+   */
+  it('says UNAVAILABLE to STAFF, and never in the patient-facing description', async () => {
     for (const tool of LANES) {
       createTicketDurable.mockClear();
       const sid = freshSid();
@@ -75,9 +88,10 @@ describe('the ticket a caller gets when we never got their date of birth', () =>
       await file(tool, sid);
       const calls = createTicketDurable.mock.calls;
       const payload = calls[calls.length - 1]?.[0] as any;
-      expect(String(payload.description), tool).toContain('DATE OF BIRTH UNAVAILABLE');
-      expect(String(payload.description).indexOf('DATE OF BIRTH'), tool).toBe(0);
-      // The caller's own words still travel underneath it.
+      expect(String(payload.callData?.transcript ?? ''), tool).toContain('DATE OF BIRTH UNAVAILABLE');
+      expect(String(payload.description), tool).not.toContain('DATE OF BIRTH');
+      expect(String(payload.description), tool).not.toContain('recording');
+      // The caller's own words are what the description carries.
       expect(String(payload.description), tool).toContain('my drops ran out');
     }
   });
@@ -90,8 +104,20 @@ describe('the ticket a caller gets when we never got their date of birth', () =>
       await file(tool, sid, 'sometime in the seventies');
       const calls = createTicketDurable.mock.calls;
       const payload = calls[calls.length - 1]?.[0] as any;
-      expect(String(payload.description), tool).toContain('DATE OF BIRTH UNMATCHED');
-      expect(String(payload.description), tool).toContain('recording');
+      const staff = String(payload.callData?.transcript ?? '');
+      expect(staff, tool).toContain('DATE OF BIRTH UNMATCHED');
+      expect(staff, tool).toContain('recording');
+      expect(String(payload.description), tool).not.toContain('DATE OF BIRTH');
+    }
+  });
+
+  it('sends no staff note at all when the date read fine', async () => {
+    for (const tool of LANES) {
+      createTicketDurable.mockClear();
+      await file(tool, freshSid(), 'March 17, 1973');
+      const calls = createTicketDurable.mock.calls;
+      const payload = calls[calls.length - 1]?.[0] as any;
+      expect(payload.callData?.transcript, tool).toBeUndefined();
     }
   });
 

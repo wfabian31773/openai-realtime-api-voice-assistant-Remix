@@ -73,7 +73,13 @@ const defaultFiler: SweepFiler = async (ticket) => {
     preferredContactMethod: "phone",
     description: ticket.description,
     priority: ticket.priority,
-    callData: { agentUsed: ticket.slug, callSid: ticket.callSid },
+    callData: {
+      agentUsed: ticket.slug,
+      callSid: ticket.callSid,
+      // Staff-only, and the ONLY place the recovery annotation appears. The
+      // description is a patient-facing SMS body (BACKEND_HANDOFF section 6).
+      transcript: ticket.staffNote,
+    },
     idempotencyKey: ticket.idempotencyKey,
   });
   return {

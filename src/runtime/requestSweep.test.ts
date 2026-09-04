@@ -167,8 +167,24 @@ describe("the ticket it builds", () => {
     expect(t.patientLastName).toBe("Example");
   });
 
-  it("still carries the number staff have to ring", () => {
-    expect(t.description).toContain(input.callerPhone);
+  /**
+   * THE DESCRIPTION IS A PATIENT-FACING SMS BODY (BACKEND_HANDOFF section 6,
+   * and opticalTools sanitizes it to GSM-7 for that reason). It used to carry
+   * the recovery annotation, the call reference and the callback number — all
+   * of which the caller would have been texted back (Codex, PR #268 round 5).
+   */
+  it("puts ONLY the caller's own words in the patient-facing description", () => {
+    expect(t.description).toBe(d.callerSaid);
+    expect(t.description).not.toContain(input.callSid);
+    expect(t.description).not.toContain("Recovered");
+    expect(t.description).not.toContain("the agent did not file");
+  });
+
+  it("carries the number staff have to ring, and the call reference, STAFF-side", () => {
+    expect(t.staffNote).toContain(input.callerPhone);
+    expect(t.staffNote).toContain(input.callSid);
+    // patientPhone is a structured field and is where the number belongs.
+    expect(t.patientPhone).toBe(input.callerPhone);
   });
 
   it("files high, because nobody has looked at it and the caller may have been told it was done", () => {

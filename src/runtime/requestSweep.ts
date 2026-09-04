@@ -336,6 +336,8 @@ export function decideSweep(input: SweepInput): SweepDecision {
  */
 
 export interface SweptTicket {
+  /** Staff-only. Travels in callData, never in the patient-facing description. */
+  staffNote: string;
   /** The lane that answered. Travels so `callData.agentUsed` names the queue
    * a human would recognise, the same string every other filing path uses. */
   slug: string;
@@ -372,9 +374,29 @@ export function buildSweptTicket(
     patientFirstName: decision.firstName,
     patientLastName: decision.lastName,
     patientPhone: input.callerPhone,
-    description:
-      `Recovered from the call recording — the agent did not file this request.\n\n` +
-      `What the caller said, in their own words:\n${callerSaid}\n\n` +
+    /**
+     * THE DESCRIPTION IS A PATIENT-FACING SMS BODY. Nothing else goes in it.
+     *
+     * `docs/BACKEND_HANDOFF.md` lists "annotating unrouted tickets in
+     * description" among the changes caught in review for exactly this
+     * reason, and `opticalTools.ts` sanitizes it to GSM-7 before sending
+     * because it leaves as a text message. This filed the recovery
+     * annotation, the call reference, the callback number and the caller's
+     * whole concatenated transcript into it — every one of which the caller
+     * would have received back (Codex, PR #268 round 5).
+     *
+     * So the description now carries what the four ordinary filing tools
+     * carry: the request, in the caller's own words, and nothing more.
+     */
+    description: callerSaid,
+    /**
+     * The staff side. `callData` maps to the ticket's own call-metadata
+     * columns and is not part of any message to the patient, so the
+     * annotation and the call reference belong here — where the person
+     * picking the ticket up sees them and the caller never does.
+     */
+    staffNote:
+      `Recovered at teardown — the agent did not file this request.\n` +
       `Call back on ${input.callerPhone}. Call reference ${input.callSid}.`,
     // Not "medium". Nobody has looked at this request yet and the caller has
     // been told nothing true about it; on three of today's five the agent said
