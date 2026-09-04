@@ -7,7 +7,12 @@
  * that matters most — that a lane with no agents row still gets logged.
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { resolveAgentId, resetAgentIdCache, agentIdMarker } from "./agentIdentity";
+import {
+  resolveAgentId,
+  resetAgentIdCache,
+  agentIdMarker,
+  AGENT_ID_LOOKUP_TIMEOUT_MS,
+} from "./agentIdentity";
 
 const OPTICAL_ID = "5c01c386-621e-41c1-a501-82b3cc36c09c";
 
@@ -117,6 +122,23 @@ describe("resolving a lane slug to its agents-table id", () => {
       throw new Error("connection refused");
     };
     await expect(resolveAgentId("optical", boom)).resolves.toBeUndefined();
+  });
+});
+
+describe("the lookup's time budget", () => {
+  /**
+   * `voiceRuntime` puts a 2,000ms deadline on the WHOLE of openRuntimeCall,
+   * and this lookup runs before the insert inside it. At 1,500ms a slow but
+   * SUCCESSFUL lookup left only 500ms for the insert, and an insert that then
+   * missed started the agent with no row — identity and timeline writes
+   * landing on nothing, permanently (Codex, PR #268 round 6).
+   *
+   * Pinned as a number rather than a comment because the failure it prevents
+   * is invisible: the row does eventually appear.
+   */
+  it("leaves the insert most of the call-row deadline", () => {
+    const CALL_ROW_DEADLINE_MS = 2_000; // voiceRuntime.ts
+    expect(AGENT_ID_LOOKUP_TIMEOUT_MS).toBeLessThanOrEqual(CALL_ROW_DEADLINE_MS * 0.25);
   });
 });
 

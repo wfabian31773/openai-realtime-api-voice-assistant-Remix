@@ -92,3 +92,33 @@ describe("the payload a swept request produces", () => {
     expect((await filed()).patientPhone).toBe(PHONE);
   });
 });
+
+/**
+ * THE CONVERSION, which is where the outbox outcome was being lost.
+ *
+ * `createTicketDurable` answers `success: false, queued: true` when the
+ * ticketing API is unreachable and the outbox took the payload. The runner's
+ * own tests use a filer double and therefore skip this mapping entirely —
+ * the same blind spot that hid the staff-note drop and `foundOpenTicket`
+ * (Codex, PR #268 round 6).
+ */
+describe("when the ticketing app is down and the outbox takes it", () => {
+  it("counts as recovered, with no ticket number invented", async () => {
+    createTicketDurable.mockResolvedValueOnce({
+      success: false,
+      queued: true,
+    } as never);
+    const out = await runRequestSweep(record());
+    expect(out.filed).toBe(true);
+    expect(out.ticketNumber).toBeUndefined();
+  });
+
+  it("a genuine refusal is still a failure", async () => {
+    createTicketDurable.mockResolvedValueOnce({
+      success: false,
+      error: "Validation failed",
+    } as never);
+    const out = await runRequestSweep(record());
+    expect(out).toEqual({ filed: false, reason: "create-failed" });
+  });
+});

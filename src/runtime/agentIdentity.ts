@@ -93,10 +93,22 @@ async function defaultLookup(slug: string): Promise<string | undefined> {
  * marks its events flushed whether or not a row was there to update, so the
  * timeline is gone permanently.
  *
- * Well under the call-row deadline, because losing the join key costs a
- * report and losing the row costs the call's whole timeline.
+ * SMALL ON PURPOSE, and the arithmetic is the reason. `voiceRuntime` puts a
+ * 2,000ms deadline on the WHOLE of `openRuntimeCall`, and this lookup runs
+ * before the insert inside it — so every millisecond spent here is a
+ * millisecond the insert does not have. At 1,500ms a slow-but-successful
+ * lookup left 500ms for the insert, and an insert that then missed would
+ * start the agent with no row at all: identity and timeline writes landing on
+ * nothing, permanently, because flushAzulTimeline marks its events flushed
+ * either way (Codex, PR #268 round 6).
+ *
+ * 300ms leaves 1,700ms — more than the insert had before this lookup existed
+ * at all. It is a single indexed select against a thirteen-row table, and it
+ * is cached after the first call on each lane, so the budget is generous for
+ * what it buys. Losing the join key costs a report; losing the row costs the
+ * call's whole timeline, and the row wins every time.
  */
-export const AGENT_ID_LOOKUP_TIMEOUT_MS = 1_500;
+export const AGENT_ID_LOOKUP_TIMEOUT_MS = 300;
 
 /**
  * The agents-table uuid for a lane slug, or undefined when there is no row.

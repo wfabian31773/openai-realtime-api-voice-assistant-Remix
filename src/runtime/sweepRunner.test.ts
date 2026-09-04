@@ -242,3 +242,62 @@ describe("PHI never reaches a log line", () => {
     }
   });
 });
+
+/**
+ * THE TICKETING APP IS DOWN AND THE OUTBOX TOOK IT.
+ *
+ * `createTicketDurable` answers `success: false, queued: true` — no number
+ * yet, payload durably persisted for the retry worker. Reading only the
+ * ticket number called that a failure and logged that a recovered request
+ * could not be filed, corrupting the sweep's counts and its outage
+ * diagnostics at exactly the moment an outage is what you are diagnosing
+ * (Codex, PR #268 round 6).
+ */
+describe("a request the outbox accepted while the API was down", () => {
+  const queuedFiler = (): SweepFiler & { calls: unknown[] } => {
+    const calls: unknown[] = [];
+    const fn = (async (ticket: unknown) => {
+      calls.push(ticket);
+      return { success: true, queued: true };
+    }) as SweepFiler & { calls: unknown[] };
+    fn.calls = calls;
+    return fn;
+  };
+
+  it("counts as recovered — the request is not lost", async () => {
+    const out = await runRequestSweep(
+      record({ toolEvents: [tool("file_tech_ticket", false)] }),
+      queuedFiler(),
+    );
+    expect(out.filed).toBe(true);
+  });
+
+  it("reports no ticket number, because there is not one yet", async () => {
+    const out = await runRequestSweep(
+      record({ toolEvents: [tool("file_tech_ticket", false)] }),
+      queuedFiler(),
+    );
+    expect(out.ticketNumber).toBeUndefined();
+  });
+
+  it("says QUEUED in the log, not filed — the two are different facts", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      await runRequestSweep(record({ toolEvents: [tool("file_tech_ticket", false)] }), queuedFiler());
+      const lines = info.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(lines).toContain("QUEUED in the outbox");
+      expect(lines).not.toContain("filed as undefined");
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("a genuine failure is still a failure", async () => {
+    const failing = (async () => ({ success: false, error: "Validation failed" })) as SweepFiler;
+    const out = await runRequestSweep(
+      record({ toolEvents: [tool("file_tech_ticket", false)] }),
+      failing,
+    );
+    expect(out).toEqual({ filed: false, reason: "create-failed" });
+  });
+});

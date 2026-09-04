@@ -47,6 +47,8 @@ export interface SweepOutcome {
 export type SweepFiler = (ticket: ReturnType<typeof buildSweptTicket>) => Promise<{
   success: boolean;
   ticketNumber?: string;
+  /** Durably queued in the outbox; a number will follow from the retry worker. */
+  queued?: boolean;
   error?: string;
 }>;
 
@@ -82,9 +84,25 @@ const defaultFiler: SweepFiler = async (ticket) => {
     },
     idempotencyKey: ticket.idempotencyKey,
   });
+  /**
+   * A QUEUED REQUEST IS A RECOVERED REQUEST.
+   *
+   * When the ticketing API is down but the outbox write succeeded,
+   * `createTicketDurable` answers `success: false, queued: true` — there is
+   * no ticket number YET, and the payload is durably persisted for the retry
+   * worker. Reading only the ticket number called that a failure and logged
+   * that a recovered request could not be filed, which corrupts the sweep's
+   * counts and its outage diagnostics at precisely the moment an outage is
+   * the thing being diagnosed (Codex, PR #268 round 6).
+   *
+   * The distinction is kept rather than flattened: `ticketNumber` is still
+   * absent, so nothing downstream can read a number that does not exist.
+   */
+  const queued = (res as { queued?: boolean }).queued === true;
   return {
-    success: Boolean(res.success && res.ticketNumber),
+    success: Boolean((res.success && res.ticketNumber) || queued),
     ...(res.ticketNumber ? { ticketNumber: res.ticketNumber } : {}),
+    ...(queued && !res.ticketNumber ? { queued: true } : {}),
     ...(res.error ? { error: res.error } : {}),
   };
 };
@@ -165,8 +183,14 @@ export async function runRequestSweep(
       );
       return { filed: false, reason: "create-failed" };
     }
+    // Two true outcomes, and the log distinguishes them: a number in hand, or
+    // durably queued while the ticketing app is unreachable. Both mean the
+    // request is not lost, which is what this sweep is counted on for.
     console.info(
-      `[REQUEST SWEEP] ${record.slug}: recovered request filed as ${res.ticketNumber} (${record.callSid})`,
+      res.ticketNumber
+        ? `[REQUEST SWEEP] ${record.slug}: recovered request filed as ${res.ticketNumber} (${record.callSid})`
+        : `[REQUEST SWEEP] ${record.slug}: recovered request QUEUED in the outbox — the ticketing ` +
+          `app is unreachable; the retry worker will file it (${record.callSid})`,
     );
     return { filed: true, ...(res.ticketNumber ? { ticketNumber: res.ticketNumber } : {}) };
   } catch (err) {
