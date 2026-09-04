@@ -328,8 +328,16 @@ understated by about a third. The instrument, not the fleet, was the problem.
 REPORTED RATHER THAN ASSUMED. Never a ticket prefix.**
 
 1. `created_by_id IS NOT NULL` → **STAFF.** A named human made it. This wins
-   over `agent_used`, because 5 `T-` rows carry BOTH and they are staff
-   tickets — a human creator is positive evidence, a set `agent_used` is not.
+   over `agent_used`, and the direction was CHECKED rather than assumed.
+
+   The worry was the reverse case: if staff can re-own a ticket the agent
+   created, a human creator would be stamped on a genuine agent filing and
+   this precedence would silently reclassify real filings as staff. **Read all
+   of the both-fields rows: every one is staff prose** — "Pt ci", "PT C/I",
+   "hello team", "sx", Spanish-speaker notes — and their `agent_used` values
+   are mostly bare UUIDs rather than lane slugs. They are staff tickets
+   carrying a stray value, not agent filings re-owned. **A human creator is
+   positive evidence; a set `agent_used` is not.**
 2. else `agent_used IS NOT NULL` → **AGENT FILING.**
 3. else → **UNKNOWN, and it must be reported as unknown.** NULL is not proof
    of a non-filing. 30 calls sit here (29 `SR-`, 1 `VA-`); folding them into
@@ -369,12 +377,16 @@ disproving it. Recorded in full because the pattern matters more than the rule:
    absence cannot classify anything — and checking the real metadata proved
    the claim false:
 
-| sid-bearing rows | human `created_by_id` | `agent_used` set | neither |
-|---|---|---|---|
-| `T-` (36) | **36** (26 distinct people) | 5 | 0 |
-| `SR-` (36) | **0** | **7** | **29** |
-| `VA-` control (6,495) | 0 | **6,494** | 1 |
-| `PCP-` control (210) | 0 | **210** | 0 |
+| sid-bearing rows, **as of 2026-09-04 17:16 UTC** | human `created_by_id` | `agent_used` set | both | neither |
+|---|---|---|---|---|
+| `T-` (37) | **37** | 6 | **6** | 0 |
+| `SR-` (36) | **0** | **7** | 0 | **29** |
+| `VA-` control (6,495) | 0 | **6,494** | — | 1 |
+| `PCP-` control (210) | 0 | **210** | — | 0 |
+
+**THAT TIMESTAMP IS NOT DECORATION.** An hour earlier the same query returned
+`T-` = 36 rows with 5 both. `tickets` is live; a row landed mid-analysis. Any
+figure here quoted without its as-of time is already drifting.
 
 `T-` is genuinely staff — every row has a named human creator. **`SR-` is
 not:** 7 of 36 carry `agent_used`, i.e. they ARE agent filings, and 29 are
@@ -383,7 +395,7 @@ would have dropped real filings.
 
 4. **"`agent_used IS NOT NULL`, full stop".** The table directly above already
    showed why that fails and I published it without reading it that way:
-   **5 `T-` rows have BOTH** a human creator and `agent_used`, so the predicate
+   **`T-` rows have BOTH** a human creator and `agent_used`, so the predicate
    counts staff tickets as agent filings; and **29 `SR-` rows plus 1 `VA-` row
    have NEITHER**, so NULL means unknown provenance, not a proven non-filing.
    Fixed by the precedence rule at the top — a human creator wins, and unknown
