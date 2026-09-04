@@ -379,6 +379,13 @@ export function parseInvoicePreview(
   const lines: InvoiceLine[] = [];
   const unreadable: string[] = [];
   for (const entry of rawLines) {
+    // A null or non-object entry would throw on the first property read, and
+    // this function is called AFTER request()'s try/catch — so it would break
+    // fetchInvoicePreview's never-throws contract rather than refusing.
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      unreadable.push("(entry that was not an object)");
+      continue;
+    }
     const l = entry as Record<string, unknown>;
     const description = String(l.description ?? l.name ?? l.model ?? "");
     const unitType = typeof l.unitType === "string" ? l.unitType : "";
@@ -426,6 +433,25 @@ export interface UnitComparison {
   unitPrice: number;
   /** What this rules in or out, in one line an operator can act on. */
   verdict: string;
+  /**
+   * ALWAYS PRESENT. Two things this comparison cannot see, stated on every
+   * result so a caller cannot read a ratio without them:
+   *   - whether ourSeconds covers exactly the invoice's billing window
+   *   - that agreeing TOTALS say nothing about any individual call
+   */
+  caveats: readonly string[];
+}
+
+export interface ComparisonPeriod {
+  /** What ourSeconds covers, e.g. "2026-09-03". For the caller's own record. */
+  readonly ourPeriod: string;
+  /**
+   * Has the caller checked that ourPeriod matches the invoice's billing
+   * window? invoice/preview takes no date — it returns the CURRENT period —
+   * so nothing here can verify it, and an unaligned comparison produces a
+   * ratio that measures the date range rather than xAI's semantics.
+   */
+  readonly periodVerifiedAligned: boolean;
 }
 
 const MINUTE_UNITS = /minute|min\b/i;
@@ -438,22 +464,28 @@ const SECOND_UNITS = /second|sec\b/i;
  * denominator the allocation currently splits by, and the one whose
  * correctness is the open question.
  */
-export function compareBilledUnits(line: InvoiceLine, ourSeconds: number): UnitComparison {
+export function compareBilledUnits(
+  line: InvoiceLine,
+  ourSeconds: number,
+  period: ComparisonPeriod,
+): UnitComparison {
   const base = { unitType: line.unitType, billedUnits: line.numUnits, unitPrice: line.unitPrice };
+  const caveats = caveatsFor(period);
 
   if (MINUTE_UNITS.test(line.unitType)) {
     const ourUnits = ourSeconds / 60;
-    return { ...base, ourUnits, ratio: ourUnits > 0 ? line.numUnits / ourUnits : null,
-      verdict: verdictFor(ourUnits > 0 ? line.numUnits / ourUnits : null, "minutes") };
+    const ratio = ourUnits > 0 ? line.numUnits / ourUnits : null;
+    return { ...base, ourUnits, ratio, caveats, verdict: verdictFor(ratio, "minutes", period) };
   }
   if (SECOND_UNITS.test(line.unitType)) {
-    return { ...base, ourUnits: ourSeconds, ratio: ourSeconds > 0 ? line.numUnits / ourSeconds : null,
-      verdict: verdictFor(ourSeconds > 0 ? line.numUnits / ourSeconds : null, "seconds") };
+    const ratio = ourSeconds > 0 ? line.numUnits / ourSeconds : null;
+    return { ...base, ourUnits: ourSeconds, ratio, caveats, verdict: verdictFor(ratio, "seconds", period) };
   }
   return {
     ...base,
     ourUnits: null,
     ratio: null,
+    caveats,
     verdict:
       `xAI bills this line in "${line.unitType}", which is not a duration. ` +
       `The per-second allocation's denominator is wrong for it — do not split ` +
@@ -461,13 +493,40 @@ export function compareBilledUnits(line: InvoiceLine, ourSeconds: number): UnitC
   };
 }
 
-function verdictFor(ratio: number | null, unit: string): string {
+/**
+ * ON EVERY RESULT, not only the ambiguous ones. The second caveat is the one
+ * that cost a review round: an earlier version's "ratio ~ 1" verdict said
+ * "splitting by call seconds is sound", which infers a PER-CALL property from
+ * an AGGREGATE agreement. Calls of 1 and 119 minutes each billed as 60 keep
+ * the 120-minute total intact while making a duration-proportional split
+ * badly wrong (Codex, PR #271).
+ */
+function caveatsFor(period: ComparisonPeriod): readonly string[] {
+  return [
+    period.periodVerifiedAligned
+      ? `period alignment was asserted by the caller for ${period.ourPeriod} — invoice/preview takes no date and returns the CURRENT billing window, so nothing here can check it`
+      : `PERIOD ALIGNMENT NOT VERIFIED: ourSeconds covers ${period.ourPeriod}, and invoice/preview returns the CURRENT billing window. This ratio may be measuring a date-range mismatch rather than anything about xAI's billing`,
+    `totals only: agreeing aggregates cannot establish that any INDIVIDUAL call's billed duration is proportional to its own. Per-call allocation stays unproven without per-call billing data`,
+  ];
+}
+
+function verdictFor(ratio: number | null, unit: string, period: ComparisonPeriod): string {
   if (ratio === null) return `no ${unit} recorded on our side — nothing to compare`;
+  if (!period.periodVerifiedAligned) {
+    return (
+      `ratio ${ratio.toFixed(3)}, but the period alignment has not been verified — ` +
+      `read nothing into this until ourSeconds is known to cover the same window ` +
+      `as the invoice preview.`
+    );
+  }
   if (ratio >= 0.98 && ratio <= 1.02) {
     return (
-      `xAI counted the same ${unit} we did (ratio ${ratio.toFixed(3)}). ` +
-      `The duration is NOT the gap — so the rate card is stale or something is ` +
-      `billed on top of the minute. Splitting by call seconds is sound.`
+      `xAI's TOTAL ${unit} match ours (ratio ${ratio.toFixed(3)}). That rules out a gross ` +
+      `duration difference as the cause of the gap, leaving the rate card or a ` +
+      `surcharge. It does NOT establish that each call is billed in proportion to ` +
+      `its own duration — identical totals are consistent with a per-call minimum ` +
+      `that merely redistributes between calls, so the per-call allocation remains ` +
+      `unproven.`
     );
   }
   if (ratio > 1.02) {
@@ -480,7 +539,7 @@ function verdictFor(ratio: number | null, unit: string): string {
   }
   return (
     `xAI counted FEWER ${unit} than we recorded (ratio ${ratio.toFixed(3)}) — ` +
-    `check the period and timezone of both sides before reading anything into it.`
+    `check the timezone of both sides before reading anything into it.`
   );
 }
 

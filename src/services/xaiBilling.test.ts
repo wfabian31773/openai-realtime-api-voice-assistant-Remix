@@ -339,19 +339,51 @@ describe('parseInvoicePreview', () => {
   it('refuses a body with no line items at all', () => {
     expect(parseInvoicePreview({}).ok).toBe(false);
   });
+
+  /**
+   * Parsing runs AFTER request()'s try/catch, so a throw here would escape
+   * fetchInvoicePreview's never-throws contract rather than being reported.
+   */
+  it.each([null, 'a string', 42, []])('refuses a %s line item without throwing', (entry) => {
+    let r: ReturnType<typeof parseInvoicePreview>;
+    expect(() => { r = parseInvoicePreview({ lineItems: [entry] }); }).not.toThrow();
+    expect(r!.ok).toBe(false);
+  });
 });
 
 describe('compareBilledUnits — the question five rounds of review could not settle', () => {
   const OUR_SECONDS = 25_116; // 2026-09-03, the reconciled day: 418.6 minutes
+  const ALIGNED = { ourPeriod: '2026-09-03', periodVerifiedAligned: true };
+  const UNALIGNED = { ourPeriod: '2026-09-03', periodVerifiedAligned: false };
+  const MINUTES = { unitType: 'minutes', unitPrice: 0.08, numUnits: 418.6, amountUsd: 33.49, description: 'grok-voice' };
 
   it('xAI counted OUR minutes -> the duration is not the gap', () => {
     const c = compareBilledUnits(
       { unitType: 'minutes', unitPrice: 0.08, numUnits: 418.6, amountUsd: 33.49, description: 'grok-voice' },
       OUR_SECONDS,
+      ALIGNED,
     );
     expect(c.ratio).toBeCloseTo(1, 2);
-    expect(c.verdict).toContain('duration is NOT the gap');
-    expect(c.verdict).toContain('Splitting by call seconds is sound');
+    expect(c.verdict).toContain('rules out a gross duration difference');
+    // The over-claim this replaced. Agreeing TOTALS cannot establish a
+    // PER-CALL property: 1 and 119 minutes each billed as 60 preserves the
+    // 120-minute total and breaks a duration-proportional split.
+    expect(c.verdict).not.toContain('sound');
+    expect(c.verdict).toContain('per-call allocation remains');
+  });
+
+  it('every result carries the two things it cannot see', () => {
+    const c = compareBilledUnits(MINUTES, OUR_SECONDS, ALIGNED);
+    expect(c.caveats).toHaveLength(2);
+    expect(c.caveats.join(' ')).toContain('totals only');
+    expect(c.caveats.join(' ')).toContain('INDIVIDUAL call');
+  });
+
+  it('refuses to interpret a ratio when the period is not verified aligned', () => {
+    const c = compareBilledUnits(MINUTES, OUR_SECONDS, UNALIGNED);
+    expect(c.verdict).toContain('period alignment has not been verified');
+    expect(c.verdict).not.toContain('rules out');
+    expect(c.caveats[0]).toContain('PERIOD ALIGNMENT NOT VERIFIED');
   });
 
   /**
@@ -363,6 +395,7 @@ describe('compareBilledUnits — the question five rounds of review could not se
     const c = compareBilledUnits(
       { unitType: 'minutes', unitPrice: 0.08, numUnits: 669.4, amountUsd: 53.55, description: 'grok-voice' },
       OUR_SECONDS,
+      ALIGNED,
     );
     expect(c.ratio).toBeGreaterThan(1.5);
     expect(c.verdict).toContain('longer duration than Twilio reports');
@@ -373,6 +406,7 @@ describe('compareBilledUnits — the question five rounds of review could not se
     const c = compareBilledUnits(
       { unitType: 'audio_tokens', unitPrice: 0.000004, numUnits: 13_387_500, amountUsd: 53.55, description: 'grok-voice' },
       OUR_SECONDS,
+      ALIGNED,
     );
     expect(c.ourUnits).toBeNull();
     expect(c.ratio).toBeNull();
@@ -384,6 +418,7 @@ describe('compareBilledUnits — the question five rounds of review could not se
     const c = compareBilledUnits(
       { unitType: 'seconds', unitPrice: 0.00133, numUnits: 25_116, amountUsd: 33.49, description: 'grok-voice' },
       OUR_SECONDS,
+      ALIGNED,
     );
     expect(c.ratio).toBeCloseTo(1, 3);
   });
@@ -392,6 +427,7 @@ describe('compareBilledUnits — the question five rounds of review could not se
     const c = compareBilledUnits(
       { unitType: 'minutes', unitPrice: 0.08, numUnits: 10, amountUsd: 0.8, description: 'grok-voice' },
       0,
+      ALIGNED,
     );
     expect(c.ratio).toBeNull();
     expect(c.verdict).toContain('nothing to compare');
