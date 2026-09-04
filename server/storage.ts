@@ -2,7 +2,7 @@
 // Reference: blueprint:javascript_database and blueprint:javascript_log_in_with_replit
 
 import { withRetry } from './services/dbResilience';
-import { twilioCostForRebuiltTotal } from './reconciledCostWrite';
+import { resolveTwilioCostWrite } from './reconciledCostWrite';
 import {
   users,
   agents,
@@ -455,11 +455,24 @@ export class DatabaseStorage implements IStorage {
      * The incoming value wins when there is one; the column is the fallback
      * for an update that leaves the Twilio price alone.
      */
-    const incomingTwilio = twilioCostForRebuiltTotal(updates);
+    /**
+     * ONE decision, used for the column AND the total — see the module. A
+     * value refused for one and written to the other is how a negative price
+     * ended up stored beside a total that did not include it.
+     */
+    const twilio = resolveTwilioCostWrite(updates);
+    if (twilio.rejected) {
+      // Do not persist a price that is not one. The column keeps what it had,
+      // and the total below reads that same stored value, so the two agree.
+      delete (rest as { twilioCostCents?: unknown }).twilioCostCents;
+      console.warn(
+        `[COST] refused an invalid twilioCostCents on ${id.slice(-8)} — the stored price stands`,
+      );
+    }
     const twilioForTotal =
-      incomingTwilio === null
+      twilio.value === null
         ? sql`COALESCE(${callLogs.twilioCostCents}, 0)`
-        : sql`${incomingTwilio}`;
+        : sql`${twilio.value}`;
     return await withRetry(async () => {
       const [callLog] = await db
         .update(callLogs)

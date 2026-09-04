@@ -1,31 +1,49 @@
 /**
- * WHICH TWILIO PRICE THE REBUILT TOTAL USES — as a pure decision.
+ * THE TWILIO PRICE A COST-PRESERVING UPDATE USES — as a pure decision, used
+ * for BOTH the column and the rebuilt total, so the two cannot disagree.
  *
  * Extracted for the reason `voiceCostRates.ts` was extracted from
- * `callCostService`: the rule lives inside a SQL builder that needs a
- * database, so nothing could test it and a source scan could only see the
- * shape. A mutation that ignored the incoming value entirely passed a
- * shape check cleanly (Codex, PR #268 round 9 — and then the mutation pass
- * on the fix for it).
+ * callCostService: the rule lives inside a SQL builder that needs a database,
+ * so nothing could test it and a source scan could only see the shape. A
+ * mutation that ignored the incoming value entirely passed such a scan
+ * cleanly (Codex, PR #268 round 9).
  *
- * THE RULE, and why it exists: Postgres evaluates a SET expression against
- * the PRE-update row, so a total rebuilt by naming `twilio_cost_cents` reads
- * the OLD price even when the same statement is writing a new one. The paths
- * that reach this code are the ones whose whole job is correcting a Twilio
- * price, so the old value is exactly the wrong one.
+ * ONE VALUE, TWO USES — and that is the whole design. The first version
+ * answered only "what should the TOTAL use", and a negative price then took
+ * the fallback for the total while still being spread into the column: the
+ * row ended up with a negative twilio_cost_cents and a total built from the
+ * previous, non-negative one. Refusing a value for one half of a statement
+ * and writing it in the other half recreates the exact inconsistency this
+ * path exists to prevent (Codex, PR #268 round 10).
+ *
+ * WHY THE TOTAL CANNOT JUST NAME THE COLUMN: Postgres evaluates a SET
+ * expression against the PRE-update row, so a total rebuilt from
+ * `twilio_cost_cents` reads the OLD price even while the same statement
+ * writes a new one — on exactly the paths whose job is correcting that price.
  */
 
-/**
- * The Twilio cost to build a reconciled row's total from.
- *
- * A number means "use this, it is arriving in this same statement". `null`
- * means "there is no new price, read the stored column".
- */
-export function twilioCostForRebuiltTotal(
+export interface TwilioCostWrite {
+  /**
+   * The price to write AND to build the total from, or null for "leave the
+   * column alone and read the stored value". Never one without the other.
+   */
+  value: number | null;
+  /** True when the caller supplied something this refused. */
+  rejected: boolean;
+}
+
+export function resolveTwilioCostWrite(
   updates: { twilioCostCents?: number | null } | null | undefined,
-): number | null {
-  const incoming = updates?.twilioCostCents;
-  if (typeof incoming !== "number" || !Number.isFinite(incoming)) return null;
-  // A negative price is not a price. Fall back rather than write nonsense.
-  return incoming < 0 ? null : incoming;
+): TwilioCostWrite {
+  if (!updates || !("twilioCostCents" in updates)) return { value: null, rejected: false };
+  const incoming = updates.twilioCostCents;
+  // Absent or explicitly null: nothing to write, read the stored column.
+  if (incoming === undefined || incoming === null) return { value: null, rejected: false };
+  // A negative or non-finite price is not a price. Refusing it for the total
+  // and writing it to the column would be worse than either alone.
+  if (typeof incoming !== "number" || !Number.isFinite(incoming) || incoming < 0) {
+    return { value: null, rejected: true };
+  }
+  // A genuine zero IS a price — Twilio reports it on some legs.
+  return { value: incoming, rejected: false };
 }

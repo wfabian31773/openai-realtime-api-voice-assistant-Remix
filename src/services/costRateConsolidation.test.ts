@@ -146,7 +146,14 @@ describe('step 3 — one duration rate, everywhere', () => {
     // The DECISION lives in reconciledCostWrite.ts and is tested there; this
     // only checks the SQL consumes it. A scan cannot see whether a value is
     // consulted, which is how a mutation ignoring it entirely passed here.
-    expect(storage).toMatch(/twilioCostForRebuiltTotal\(updates\)/);
+    expect(storage).toMatch(/resolveTwilioCostWrite\(updates\)/);
+    // And a refused price must be dropped from the WRITE too, not merely
+    // excluded from the total — otherwise the column and the total disagree.
+    expect(storage).toMatch(/delete \(rest as \{ twilioCostCents\?: unknown \}\)\.twilioCostCents/);
+    // And the resolved value must actually REACH the total. Checking only
+    // that the helper is called let a fallback-on-both-branches mutation
+    // through: the total quietly read the stale column again.
+    expect(storage).toMatch(/:\s*sql`\$\{twilio\.value\}`/);
     // The total's CASE must use the resolved value, never the column directly.
     const rebuilt = storage.match(/totalCostCents: sql`CASE WHEN[^`]*`/)?.[0] ?? '';
     expect(rebuilt, 'the total is rebuilt from something').not.toBe('');
