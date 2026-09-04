@@ -28,6 +28,7 @@ const { rememberVerifiedIdentity, resetVerifiedIdentities } = await import(
   "../tools/verifiedIdentity"
 );
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import { SWEPT_TICKET_DESCRIPTION } from "./requestSweep";
 
 const SID = "CA00000000000000000000000000000042";
 const PHONE = "+15555550100";
@@ -66,9 +67,33 @@ describe("the payload a swept request produces", () => {
     return calls[calls.length - 1]?.[0] as any;
   };
 
-  it("puts the caller's own words in the patient-facing description", async () => {
+  /**
+   * THIS TEST USED TO ASSERT THE BUG, and it is the one that mattered most
+   * because it reads the payload that actually leaves.
+   *
+   * Round 5 pinned "the caller's own words" in the description on the
+   * reasoning that the four ordinary filing tools do the same. They do not:
+   * their description is written by the MODEL, which has isolated the
+   * request from the rest of the call. The sweep runs at teardown with no
+   * model, and its `callerSaid` is every CALLER line joined — so this pin
+   * was guarding the identity interview's passage into a patient-facing SMS,
+   * the caller's name and full date of birth among it (Codex, PR #268
+   * round 14).
+   */
+  it("puts NOTHING from the call in the patient-facing description", async () => {
     const p = await filed();
-    expect(p.description).toContain("I need a refill on my drops");
+    expect(p.description).toBe(SWEPT_TICKET_DESCRIPTION);
+    expect(String(p.description)).not.toContain("I need a refill on my drops");
+    // The fixture's own PHI, named rather than checked by shape — a shape
+    // check is exactly what let the leak stand for two rounds.
+    expect(String(p.description)).not.toContain("Testpatient");
+    expect(String(p.description)).not.toContain("Example");
+    expect(String(p.description)).not.toContain("1950");
+  });
+
+  it("still gets the caller's own words to STAFF, so the ticket stays actionable", async () => {
+    const p = await filed();
+    expect(String(p.callData?.transcript ?? "")).toContain("I need a refill on my drops");
   });
 
   it("keeps the recovery annotation and the call reference OUT of it", async () => {

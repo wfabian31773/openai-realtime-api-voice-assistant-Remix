@@ -11,6 +11,7 @@ import {
   decideSweep,
   buildSweptTicket,
   sweepMarker,
+  SWEPT_TICKET_DESCRIPTION,
   type SweepInput,
 } from "./requestSweep";
 
@@ -158,8 +159,11 @@ describe("the ticket it builds", () => {
     expect(t.requestReasonId).toBe(535);
   });
 
-  it("carries the caller's own words, not a summary", () => {
-    expect(t.description).toContain("I need to book a procedure my surgeon recommended.");
+  it("carries the caller's own words to STAFF, not a summary", () => {
+    // Staff still get every word — they just get it somewhere the patient
+    // is not texted. Losing the transcript entirely would make the ticket
+    // unactionable, which is the trade the leak was buying.
+    expect(t.staffNote).toContain("I need to book a procedure my surgeon recommended.");
   });
 
   it("uses the name we verified, never one invented here", () => {
@@ -169,15 +173,43 @@ describe("the ticket it builds", () => {
 
   /**
    * THE DESCRIPTION IS A PATIENT-FACING SMS BODY (BACKEND_HANDOFF section 6,
-   * and opticalTools sanitizes it to GSM-7 for that reason). It used to carry
-   * the recovery annotation, the call reference and the callback number — all
-   * of which the caller would have been texted back (Codex, PR #268 round 5).
+   * and opticalTools sanitizes it to GSM-7 for that reason).
+   *
+   * THIS TEST USED TO ASSERT THE BUG. Round 5 took the annotation, the call
+   * reference and the callback number out of the description and pinned what
+   * was left — `expect(t.description).toBe(d.callerSaid)` — on the reasoning
+   * that the ordinary filing tools put the caller's own words there. They do
+   * not: their description is written by the MODEL, which has isolated the
+   * request. `callerSaid` is every CALLER line joined, so the pin was
+   * guarding the identity interview's passage into an SMS — the caller's
+   * name and full date of birth among it (Codex, PR #268 round 14).
+   *
+   * So it now asserts the opposite, and asserts it on the FIXTURE'S OWN PHI
+   * rather than on a shape, because a shape check is what let this stand.
    */
-  it("puts ONLY the caller's own words in the patient-facing description", () => {
-    expect(t.description).toBe(d.callerSaid);
+  it("puts nothing from the call in the patient-facing description", () => {
+    expect(t.description).toBe(SWEPT_TICKET_DESCRIPTION);
+    // Nothing the caller said.
+    expect(t.description).not.toContain("book a procedure");
+    expect(t.description).not.toContain(d.callerSaid);
+    // No identity, no date of birth, no number, no internals.
+    expect(t.description).not.toContain(t.patientFirstName);
+    expect(t.description).not.toContain(t.patientLastName);
+    expect(t.description).not.toContain(input.callerPhone);
     expect(t.description).not.toContain(input.callSid);
     expect(t.description).not.toContain("Recovered");
     expect(t.description).not.toContain("the agent did not file");
+  });
+
+  /**
+   * The description is a fixed string, so it can be checked once against the
+   * constraint every SMS body has: one GSM-7 segment, no smart punctuation.
+   * `opticalTools` sanitizes free text for this; a constant should not need
+   * sanitizing at all.
+   */
+  it("is a single plain GSM-7 segment", () => {
+    expect(SWEPT_TICKET_DESCRIPTION.length).toBeLessThanOrEqual(160);
+    expect(SWEPT_TICKET_DESCRIPTION).toMatch(/^[ -~]+$/);
   });
 
   it("carries the number staff have to ring, and the call reference, STAFF-side", () => {

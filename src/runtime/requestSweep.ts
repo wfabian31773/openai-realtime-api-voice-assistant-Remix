@@ -335,6 +335,21 @@ export function decideSweep(input: SweepInput): SweepDecision {
  * The name used is the one `lookup_patient` verified against the record.
  */
 
+/**
+ * The description every swept ticket carries, verbatim.
+ *
+ * A CONSTANT ON PURPOSE. It is a patient-facing SMS body and this path has no
+ * model to write one safely, so there is nothing call-specific to vary and
+ * nothing that could leak by accident. Plain GSM-7, so it stays one segment.
+ *
+ * The wording is a placeholder for the operator's: it states the fact and
+ * promises only what standing instruction 10 already promises — that somebody
+ * follows up. Change the words freely; do not put anything from the call in
+ * them.
+ */
+export const SWEPT_TICKET_DESCRIPTION =
+  "Callback request taken during your call. A team member will follow up with you.";
+
 export interface SweptTicket {
   /** Staff-only. Travels in callData, never in the patient-facing description. */
   staffNote: string;
@@ -375,29 +390,44 @@ export function buildSweptTicket(
     patientLastName: decision.lastName,
     patientPhone: input.callerPhone,
     /**
-     * THE DESCRIPTION IS A PATIENT-FACING SMS BODY. Nothing else goes in it.
+     * THE DESCRIPTION IS A PATIENT-FACING SMS BODY. Nothing from the call
+     * goes in it — not the annotation, and NOT THE CALLER'S OWN WORDS.
      *
-     * `docs/BACKEND_HANDOFF.md` lists "annotating unrouted tickets in
-     * description" among the changes caught in review for exactly this
-     * reason, and `opticalTools.ts` sanitizes it to GSM-7 before sending
-     * because it leaves as a text message. This filed the recovery
-     * annotation, the call reference, the callback number and the caller's
-     * whole concatenated transcript into it — every one of which the caller
-     * would have received back (Codex, PR #268 round 5).
+     * Round 5 took the recovery annotation, the call reference and the
+     * callback number out of here and left `callerSaid`, on the reasoning
+     * that the four ordinary filing tools put "the request, in the caller's
+     * own words" in the description. That reasoning was wrong, and the
+     * comment that stated it sat directly above the line that broke it
+     * (Codex, PR #268 round 14).
      *
-     * So the description now carries what the four ordinary filing tools
-     * carry: the request, in the caller's own words, and nothing more.
+     * THE ORDINARY TOOLS DO NOT PUT THE TRANSCRIPT THERE. Their description
+     * is written by the MODEL, which has isolated the request from the rest
+     * of the call. This sweep runs at teardown with no model, and
+     * `callerSaid` is every CALLER line joined — so on the normal recovered
+     * path it carries the identity interview: the caller's name, their full
+     * date of birth, and whatever else they said. All of it texted back to
+     * the number on the ticket, unencrypted, and to a stranger if that
+     * number was mis-keyed.
+     *
+     * Isolating the request from the interview is extraction, and extraction
+     * is the model's job, not a regex's — the operator settled that. With no
+     * model here there is no safe way to quote the caller at all, so the
+     * description says only that a request was taken. Everything the caller
+     * said goes to staff below, where the patient never sees it.
      */
-    description: callerSaid,
+    description: SWEPT_TICKET_DESCRIPTION,
     /**
      * The staff side. `callData` maps to the ticket's own call-metadata
      * columns and is not part of any message to the patient, so the
-     * annotation and the call reference belong here — where the person
-     * picking the ticket up sees them and the caller never does.
+     * annotation, the call reference AND the caller's own words belong
+     * here — where the person picking the ticket up sees them and the
+     * caller never does. Losing the transcript entirely would have made the
+     * ticket unactionable, which is the trade the leak was buying.
      */
     staffNote:
       `Recovered at teardown — the agent did not file this request.\n` +
-      `Call back on ${input.callerPhone}. Call reference ${input.callSid}.`,
+      `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +
+      `What the caller said: ${callerSaid}`,
     // Not "medium". Nobody has looked at this request yet and the caller has
     // been told nothing true about it; on three of today's five the agent said
     // it was filed when it was not.

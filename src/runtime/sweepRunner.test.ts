@@ -80,7 +80,15 @@ describe("recovering a request the agent did not file", () => {
     expect(t.patientFirstName).toBe("Testpatient");
     expect(t.patientPhone).toBe("+15555550100");
     expect(t.priority).toBe("high");
-    expect(String(t.description)).toContain("I need a refill on my drops.");
+    /**
+     * The caller's words reach STAFF and never the description — the
+     * description is a patient-facing SMS body and this path has no model
+     * to isolate the request from the identity interview (Codex, PR #268
+     * round 14). Asserted end to end here, not just on the builder, because
+     * the runner is what actually shapes the payload that leaves.
+     */
+    expect(String(t.description)).not.toContain("I need a refill on my drops.");
+    expect(String(t.staffNote)).toContain("I need a refill on my drops.");
   });
 
   /**
