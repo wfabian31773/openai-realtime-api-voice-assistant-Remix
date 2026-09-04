@@ -14,6 +14,7 @@ import {
   type GrokCallRow,
   previousUtcDay,
   startGrokCostReconciler,
+  mapDayRow,
 } from "./grokCostReconciler";
 import type { FetchLike, XaiBillingSetup } from "./xaiBilling";
 
@@ -186,11 +187,11 @@ describe("what it refuses", () => {
    * many, which is the shape that actually reaches production — the status
    * callback permits a terminal update with no CallDuration.
    */
-  it("REFUSES a day where even ONE finalised call has no billable duration", async () => {
+  it("REFUSES a day where even ONE finalised call has an UNKNOWN duration", async () => {
     const p = ports([
       { callSid: "CA1", durationSeconds: 120, estimatedCents: 16 },
       { callSid: "CA2", durationSeconds: 90, estimatedCents: 12 },
-      { callSid: "CA3", durationSeconds: 0, estimatedCents: 0 }, // finalised, no duration
+      { callSid: "CA3", durationSeconds: 0, estimatedCents: 0, durationUnknown: true },
     ]);
     const out = await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(33.68) });
     expect(out.reconciled).toBe(false);
@@ -213,6 +214,30 @@ describe("what it refuses", () => {
     // And the whole invoice is allocated, to the cent, across all three.
     expect(p.written.reduce((s, c) => s + c.costCents, 0)).toBe(3368);
     expect(p.written).toHaveLength(3);
+  });
+
+  /**
+   * ROUND 17, AND IT IS THE COUNTERWEIGHT TO ROUND 16 — my fix for that one
+   * blocked on any zero, which is a worse bug than the one it fixed.
+   *
+   * Zero is a FINAL answer here, not a pending one. `toCallLogRow` rounds a
+   * sub-500ms call to 0 seconds, and `reconcileTwilioCallData` explicitly
+   * skips a terminal call whose Twilio duration is 0 — so nothing will ever
+   * raise it. Blocking on it left every real call that day estimated
+   * forever, and an immediate hangup is routine on a line taking 400 calls
+   * a day.
+   */
+  it("does NOT block on a genuinely zero-second call — it just takes no share", async () => {
+    const p = ports([
+      { callSid: "CA1", durationSeconds: 120, estimatedCents: 16 },
+      { callSid: "CA2", durationSeconds: 80, estimatedCents: 11 },
+      { callSid: "CA3", durationSeconds: 0, estimatedCents: 0 }, // 400ms hangup, known
+    ]);
+    const out = await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(33.68) });
+    expect(out.reconciled).toBe(true);
+    // The whole invoice still lands, and the zero-second call takes none of it.
+    expect(p.written.reduce((s, c) => s + c.costCents, 0)).toBe(3368);
+    expect(p.written.find((c) => c.callSid === "CA3")?.costCents).toBe(0);
   });
 
   it("still reconciles a genuinely free day", async () => {
@@ -317,7 +342,48 @@ describe("the marker", () => {
  * round 7). Later writers then preserve the zero, because the row claims to
  * be reconciled.
  */
+describe("what the day query's row becomes", () => {
+  /**
+   * BEHAVIOURAL, because the source pin below cannot be. Every other test
+   * here substitutes the ports, so the real readDay and this mapping were
+   * exercised by nothing — a mutation deleting the NULL/zero distinction
+   * from the SQL *and* the mapping passed the whole suite.
+   */
+  const row = (over: Partial<Parameters<typeof mapDayRow>[0]> = {}) =>
+    mapDayRow({
+      call_sid: "CA1",
+      duration: 120,
+      duration_unknown: false,
+      estimated_cents: 16,
+      already_reconciled: false,
+      ...over,
+    });
+
+  it("marks a NULL duration as unknown, so the caller can block on it", () => {
+    // Postgres COALESCEs the NULL to 0 in `duration`; the flag is the only
+    // thing that still knows it was NULL.
+    expect(row({ duration: 0, duration_unknown: true }).durationUnknown).toBe(true);
+  });
+
+  it("leaves a genuine zero UNflagged, so it does not block the day", () => {
+    expect(row({ duration: 0, duration_unknown: false }).durationUnknown).toBeUndefined();
+    expect(row({ duration: 0, duration_unknown: false }).durationSeconds).toBe(0);
+  });
+
+  it("carries the estimate and the reconciled flag through", () => {
+    const r = row({ estimated_cents: 41, already_reconciled: true });
+    expect(r.estimatedCents).toBe(41);
+    expect(r.alreadyReconciled).toBe(true);
+  });
+});
+
 describe("the day query takes finalised rows only", () => {
+  it("asks Postgres for the NULL/zero distinction the COALESCE destroys", () => {
+    // The mapping above can only report what the query selects.
+    expect(readFileSync(new URL("./grokCostReconciler.ts", import.meta.url), "utf8"))
+      .toMatch(/\(duration IS NULL\) AS duration_unknown/);
+  });
+
   const src = readFileSync(new URL("./grokCostReconciler.ts", import.meta.url), "utf8");
 
   it("excludes only IN-FLIGHT rows, not every non-completed one", () => {

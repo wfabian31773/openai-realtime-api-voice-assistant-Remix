@@ -62,6 +62,54 @@ export interface GrokCallRow extends CallToPrice {
    * round 3).
    */
   alreadyReconciled?: boolean;
+  /**
+   * `duration` was NULL on this row — we do not know how long the call was.
+   *
+   * NOT the same as a duration of zero, and the whole reason this flag
+   * exists rather than a number doing double duty. A zero is a final answer
+   * (`toCallLogRow` rounds a sub-500ms call to it, and
+   * `reconcileTwilioCallData` skips a terminal call whose Twilio duration is
+   * 0, so nothing raises it later); a NULL is a pending one. Conflating them
+   * either overstates the day (treating unknown as zero) or blocks it
+   * forever (treating zero as unknown) — this PR shipped each of those in
+   * turn, rounds 16 and 17.
+   *
+   * Absent means known, so a fixture that does not care reads as a real
+   * duration.
+   */
+  durationUnknown?: boolean;
+}
+
+/** One row of the day query, as Postgres hands it back. */
+export interface DayQueryRow {
+  call_sid: string;
+  duration: number;
+  duration_unknown: boolean;
+  estimated_cents: number;
+  already_reconciled: boolean;
+}
+
+/**
+ * The day query's row, as the reconciler needs it.
+ *
+ * EXPORTED SO IT CAN BE TESTED. Every test of this module substitutes the
+ * ports, so the real `readDay` — and this mapping inside it — was exercised
+ * by nothing: a mutation deleting the NULL/zero distinction from both the
+ * SQL and the mapping passed the entire suite (Codex, PR #268 round 17,
+ * found while mutation-checking the fix for it). The same lesson as
+ * `preservedCostSet.ts` two rounds earlier: logic that only runs behind a
+ * database is logic nothing checks, so it moves somewhere it can be called.
+ */
+export function mapDayRow(r: DayQueryRow): GrokCallRow {
+  return {
+    callSid: r.call_sid,
+    durationSeconds: Number(r.duration) || 0,
+    // The COALESCE in the query makes NULL and 0 identical in `duration`,
+    // and they mean opposite things — see the guard in the caller.
+    ...(r.duration_unknown ? { durationUnknown: true as const } : {}),
+    estimatedCents: Number(r.estimated_cents) || 0,
+    alreadyReconciled: Boolean(r.already_reconciled),
+  };
 }
 
 export interface ReconcilerPorts {
@@ -146,50 +194,65 @@ export async function reconcileGrokCostsForDay(
    * round 2).
    */
   /**
-   * A FINALISED CALL WITH NO BILLABLE SECONDS MEANS THE DAY IS NOT READY.
+   * A FINALISED CALL WHOSE DURATION WE DO NOT KNOW BLOCKS THE DAY.
    *
-   * xAI bills the audio; if a call finished and we cannot say how long it
-   * was, its share of the invoice is unknown and every other row's share is
-   * therefore wrong. Allocating anyway spreads that call's money across its
-   * neighbours and marks them authoritative, so the stored day exceeds the
-   * invoice — and because later writers preserve a reconciled cost, it stays
-   * wrong (Codex, PR #268 round 16). The status callback explicitly permits
-   * a terminal update with no CallDuration, so this is reachable.
+   * xAI bills the audio; if a call finished and its duration is NULL, its
+   * share of the invoice is unknown and every other row's share is therefore
+   * wrong. Allocating anyway spreads that call's money across its neighbours
+   * and marks them authoritative, so the stored day exceeds the invoice — and
+   * because later writers preserve a reconciled cost, it stays wrong
+   * (Codex, PR #268 round 16).
    *
-   * ZERO IS REFUSED ALONGSIDE NULL, which is stricter than it looks and is
-   * the point: Twilio's own reconciler writes `duration` later, so a row
-   * reading zero now may read ninety seconds in an hour. Reconciling it at
-   * $0 today is the permanent-zero trap round 7 closed for in-flight calls,
-   * arriving by a different door.
+   * A KNOWN ZERO IS NOT UNKNOWN, and conflating them was my fix for round 16
+   * and a worse bug than the one it fixed (Codex, round 17). Zero is a real,
+   * final answer here: `toCallLogRow` rounds a sub-500ms call to 0 seconds,
+   * and `reconcileTwilioCallData` explicitly SKIPS a terminal call whose
+   * Twilio duration is 0 — so nothing will ever raise it. Blocking on zero
+   * meant a single immediate hangup left every real call that day estimated
+   * forever, on a fleet where hangups are routine. A zero-second call simply
+   * takes a zero-cent share, which is what a call with no audio costs.
    *
    * ONLY WHEN THERE IS A BILL TO DIVIDE. A day xAI charged nothing for costs
-   * every call nothing, whatever their durations turn out to be — there is
-   * no share to get wrong, so a free day still reconciles. The durations only
-   * matter as the denominator.
-   *
-   * This also subsumes the round-2 guard it replaces, which refused a
-   * positive bill when NO call had seconds. That was the same failure with
-   * every row affected rather than one; both now come out here, and the
-   * reason says which.
+   * every call nothing whatever the durations, so a free day still
+   * reconciles. Durations are only the denominator.
    *
    * Refusing is self-correcting — the next run reconciles the whole day once
-   * the durations land — and it is what this module chooses everywhere else:
+   * the duration lands — and it is what this module chooses everywhere else:
    * a number that is not right is worse than no number, because "estimated"
    * is honest and "reconciled" is believed.
    */
-  const withoutSeconds = calls.filter((c) => !(c.durationSeconds > 0));
-  if (xaiTotalCents > 0 && withoutSeconds.length > 0) {
-    const everyOne = withoutSeconds.length === calls.length;
+  const unknownDuration = calls.filter((c) => c.durationUnknown);
+  if (xaiTotalCents > 0 && unknownDuration.length > 0) {
     return {
       day,
       reconciled: false,
-      reason: everyOne
-        ? `xAI billed $${(xaiTotalCents / 100).toFixed(2)} for ${day} but all ${calls.length} ` +
-          `runtime call(s) on record carry no billable seconds — the charge cannot be ` +
-          `attributed and nothing was written`
-        : `${withoutSeconds.length} of ${calls.length} finalised runtime call(s) on ${day} carry ` +
-          `no billable seconds (e.g. ${withoutSeconds[0]!.callSid}) — xAI billed for those too, ` +
-          `so allocating the invoice across the rest would overstate every row; nothing was written`,
+      reason:
+        `${unknownDuration.length} of ${calls.length} finalised runtime call(s) on ${day} have ` +
+        `no recorded duration (e.g. ${unknownDuration[0]!.callSid}) — xAI billed for those too, ` +
+        `so allocating the invoice across the rest would overstate every row; nothing was written`,
+      xaiTotalCents,
+      estimatedTotalCents,
+    };
+  }
+
+  /**
+   * xAI CHARGED FOR A DAY WITH NO BILLABLE SECONDS ANYWHERE.
+   *
+   * Distinct from the guard above: every duration is KNOWN, and every one is
+   * zero, against a positive invoice. The allocation hands out zeros —
+   * correctly, there is nothing to divide by — but writing them would mark
+   * every row reconciled and NOT-estimated at $0 while the invoice says
+   * otherwise, and report success doing it. Zeros wearing an authoritative
+   * badge are the worst output this module can produce (Codex, round 2).
+   */
+  if (xaiTotalCents > 0 && allocation.totalSeconds <= 0) {
+    return {
+      day,
+      reconciled: false,
+      reason:
+        `xAI billed $${(xaiTotalCents / 100).toFixed(2)} for ${day} but the ${calls.length} ` +
+        `runtime call(s) on record carry no billable seconds — the charge cannot be attributed ` +
+        `and nothing was written`,
       xaiTotalCents,
       estimatedTotalCents,
     };
@@ -233,6 +296,7 @@ export function databasePorts(): ReconcilerPorts {
       const { pool } = await import("../../server/db");
       const { rows } = await pool.query(
         `SELECT call_sid, COALESCE(duration, 0)::int AS duration,
+                (duration IS NULL) AS duration_unknown,
                 COALESCE(openai_cost_cents, 0)::int AS estimated_cents,
                 (cost_reconciled_at IS NOT NULL) AS already_reconciled
            FROM call_logs
@@ -289,19 +353,7 @@ export function databasePorts(): ReconcilerPorts {
             AND created_at <  ($1::date + INTERVAL '1 day')`,
         [day],
       );
-      return rows.map(
-        (r: {
-          call_sid: string;
-          duration: number;
-          estimated_cents: number;
-          already_reconciled: boolean;
-        }) => ({
-          callSid: r.call_sid,
-          durationSeconds: Number(r.duration) || 0,
-          estimatedCents: Number(r.estimated_cents) || 0,
-          alreadyReconciled: Boolean(r.already_reconciled),
-        }),
-      );
+      return rows.map(mapDayRow);
     },
 
     async writeCosts(day, costs) {
