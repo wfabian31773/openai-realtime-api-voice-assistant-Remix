@@ -51,6 +51,7 @@ import {
   type GrokTransport,
 } from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
+import { laneRoster, formatLaneRoster, type LaneReadiness } from "./laneRoster";
 import {
   createRuntimeTransfer,
   transferDestinationStatus,
@@ -413,6 +414,26 @@ export function mountVoiceRuntime(
       : `[voice-runtime] warm transfer armed (accept: https://${transferDomain}${TRANSFER_ACCEPT_PATH})`,
   );
 
+  /**
+   * Say at boot which lanes this deployment can serve. `laneSupportStatus`
+   * has always been pure and always returned a reason; nothing ever printed
+   * it, so the only way to find out a lane was refused was to point a number
+   * at it and listen. Resolved lazily and never awaited on the boot path —
+   * the lane source imports the whole agent tree, and a health report must
+   * not be the thing that delays the first call.
+   */
+  const rosterFor = async (): Promise<LaneReadiness[]> =>
+    laneRoster(await laneSource(), env, {
+      transferAvailable: transfer.unavailableReason === null,
+    });
+  void rosterFor()
+    .then((roster) => {
+      for (const line of formatLaneRoster(roster)) console.log(line);
+    })
+    .catch((error) => {
+      console.error("[voice-runtime] could not report the lane roster:", error);
+    });
+
   app.post(TRANSFER_ACCEPT_PATH, (req: Request, res: Response) => {
     send(res, transfer.handleAccept(toWebhookRequest(req)));
   });
@@ -421,9 +442,12 @@ export function mountVoiceRuntime(
     send(res, transfer.handleStatus(toWebhookRequest(req)));
   });
 
-  app.get("/voice/health", (_req: Request, res: Response) => {
+  app.get("/voice/health", async (_req: Request, res: Response) => {
     const readiness = computeRuntimeReadiness(env);
     const destinations = transferDestinationStatus(env);
+    // Never let a roster failure take the health endpoint down with it: the
+    // endpoint's first job is to answer at all.
+    const lanes = await rosterFor().catch(() => null);
     res.json({
       marker: VOICE_RUNTIME_DEPLOY_MARKER,
       // The cached prefix every lane shares. Reported so a change in the
@@ -459,6 +483,11 @@ export function mountVoiceRuntime(
       // Per LANE, because the two use different numbers and one can work
       // while the other does not. Booleans, never the numbers themselves.
       transferDestinations: { clinical: destinations.clinical, pcp: destinations.pcp },
+      // Per lane: can this deployment answer a call on it, and if not, the
+      // sentence why. `transferWarning` is the second gate — a lane that IS
+      // served but whose transfer has nowhere to dial, which reads as
+      // healthy everywhere else (Codex, PR #236, per-lane this time).
+      lanes,
       activeCalls: registry.activeCount(),
     });
   });
