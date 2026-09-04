@@ -340,19 +340,31 @@ REPORTED RATHER THAN ASSUMED. Never a ticket prefix.**
    positive evidence; a set `agent_used` is not.**
 2. else `agent_used IS NOT NULL` → **AGENT FILING.**
 3. else → **UNKNOWN, and it must be reported as unknown.** NULL is not proof
-   of a non-filing. 30 calls sit here (29 `SR-`, 1 `VA-`); folding them into
-   the denominator as "did not file" understates the rate by assumption.
+   of a non-filing. 29 calls sit here on real SIDs; folding them into the
+   denominator as "did not file" understates the rate by assumption.
+
+**AND THE `call_sid` MUST BE A REAL TWILIO SID — `LIKE 'CA%'`.** `call_sid IS
+NOT NULL` is not enough: **216 ticket rows carry sentinels** ("unknown",
+"latest", "none", bare uuids) across only **60 distinct values**, so
+`count(DISTINCT call_sid)` both invents calls that never happened and collapses
+unrelated tickets into them. This file already documented that 14% of POSTs
+once carried no usable CallSid — I wrote a rule on `IS NOT NULL` directly
+beneath that knowledge. (Codex, PR #272; see also
+`docs/BACKEND_HANDOFF.md`.)
 
 ```sql
--- The filing test. Report all three; never let bucket 3 vanish into bucket 2's
--- complement, and never reintroduce a prefix filter.
+-- The filing test. Three buckets, real SIDs only, and bucket 3 never vanishes
+-- into bucket 2's complement. No prefix filter, ever.
 SELECT CASE WHEN created_by_id IS NOT NULL THEN 'staff'
             WHEN agent_used   IS NOT NULL THEN 'agent'
             ELSE 'UNKNOWN' END                     AS provenance,
        count(DISTINCT call_sid)
-FROM tickets WHERE call_sid IS NOT NULL AND created_at::date = '<day>'
+FROM tickets
+WHERE call_sid LIKE 'CA%'          -- NOT `IS NOT NULL`. See above.
+  AND created_at::date = '<day>'
 GROUP BY 1;
--- all time: agent 40,773 · staff 36 · UNKNOWN 30
+-- as of 2026-09-04 17:22 UTC, all time, real SIDs only:
+--   agent 40,716 · staff 37 · UNKNOWN 29 · dropped as sentinel: 216 rows / 60 values
 -- 2026-09-03: agent 197 · staff 1 · UNKNOWN 0
 ```
 
@@ -451,7 +463,7 @@ SELECT split_part(ticket_number,'-',1) AS prefix, count(*) AS tickets,
        count(*) FILTER (WHERE created_by_id IS NULL
                           AND agent_used IS NOT NULL)                       AS agent,
        count(*) FILTER (WHERE created_by_id IS NULL AND agent_used IS NULL) AS UNKNOWN
-FROM tickets WHERE created_at::date = '<day>' AND call_sid IS NOT NULL
+FROM tickets WHERE created_at::date = '<day>' AND call_sid LIKE 'CA%' 
 GROUP BY 1 ORDER BY 2 DESC;
 -- Precedence, same as the rule at the top: a human creator wins. Do NOT
 -- shorten this to `agent_used IS NOT NULL` — 5 staff rows carry both fields.
@@ -466,7 +478,7 @@ GROUP BY 1 ORDER BY 2 DESC;
 0. **USING THE TICKET PREFIX AT ALL.** Every variant of this failed: too
    narrow returns a plausible zero (a broken lane, not a broken query); too
    wide counts staff tickets as agent filings; a hand-validated set still
-   missed 12 real filings and needed re-validating whenever a lane changed.
+   missed 7 real filings and needed re-validating whenever a lane changed.
    `agent_used` is the provenance field and was in the table the whole time.
    If you find yourself reasoning about ticket-number naming to decide what a
    call did, stop — you are inferring provenance instead of reading it.
