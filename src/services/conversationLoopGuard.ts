@@ -150,35 +150,10 @@ const AGENT_EXIT: Record<string, string> = {
     'Create the ticket NOW with whatever you have — the caller’s phone number is attached automatically from caller ID, and missing fields may stay blank. A partial ticket the team can call back on beats a complete interview the caller never finishes.',
 };
 
-/**
- * What to do — NOT what to say — when a caller asks for a human on a line that
- * cannot transfer: name the limitation, offer the real alternative, then act.
- *
- * THIS DIRECTIVE MUST NEVER DICTATE A SENTENCE, and that is the whole point of
- * its current shape. Between 2026-08-17 and today it did, word-for-word:
- *
- *   "All of our agents are currently busy at the moment — I can take a message
- *    and have the team contact you as soon as they become available."
- *
- * Every no-transfer prompt rules its own wording for this moment, and this
- * directive outranked all of them — `answeringServiceAgent` says explicitly
- * "If a SERVER STATE CHECK system message appears mid-call... follow it
- * exactly". So it contradicted two live prompts at once:
- *
- *   - RECORDS (and optical, surgery, tech) forbid that exact sentence, on the
- *     operator's 2026-09-03 ruling: never imply a human is about to come free,
- *     no "currently busy", no "as soon as someone's available". The server was
- *     ordering the violation the prompt was written to prevent.
- *   - ANSWERING SERVICE's approved script opens "I'm not able to transfer you
- *     to someone — I'm not a person and I can't connect calls", while this
- *     directive said never to say you are "not a person".
- *
- * A ruling lives in the lane's prompt, where the operator can read and change
- * it. The guard's job is to force the honest answer to be given NOW and to
- * stop the loop — not to supply the words.
- */
+/** What to say to a caller asking for a human on an agent that cannot
+ *  transfer: name the limitation, offer the real alternative, then act. */
 const NO_TRANSFER_HUMAN_DIRECTIVE =
-  'SERVER STATE CHECK: The caller asked to reach a person, and this line CANNOT transfer calls. Tell them so NOW, before collecting anything else, using the wording your own instructions give you for this — say what you cannot do, then what you can. Then take the message. If they ask again, repeat that SAME wording rather than improvising a new answer, and never promise that anyone will pick up.';
+  'SERVER STATE CHECK: The caller asked to reach a person, and this line CANNOT transfer calls. Say this, word-for-word, without adding or rephrasing: "All of our agents are currently busy at the moment — I can take a message and have the team contact you as soon as they become available." Then take the message. If they ask again, repeat the SAME sentence — never improvise around it, never say you are "not a person", never promise anyone will pick up.';
 
 function exitFor(agentSlug: string): string {
   return AGENT_EXIT[agentSlug] ?? AGENT_EXIT.default;
