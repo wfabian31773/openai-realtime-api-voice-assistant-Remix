@@ -324,91 +324,85 @@ is reading noise.
 I got this wrong for a whole afternoon on 2026-09-03 and reported filing rates
 understated by about a third. The instrument, not the fleet, was the problem.
 
-**THE AUTHORITY: a call filed a new ticket iff its `call_sid` appears on a
-ticket whose prefix is a VALIDATED voice-filing prefix — today `VA-` and
-`PCP-`. Join on `call_sid`; treat the prefix set as a fact to be re-checked,
-never as a constant.**
-
-This line has now been wrong in both directions, and the second way is the
-instructive one.
-
-- It first said **`VA-` only**. That silently reports ZERO for a lane that
-  files under another prefix, which is how PCP's 210 tickets went missing.
-- I then changed it to **"any ticket, never filter by prefix"** — which
-  over-corrected, and counts a `T-` or `SR-` row as a voice filing when
-  neither has been established as one.
-
-**Why "36 + 36 rows against 40,707 cannot move a rate" was wrong**, since it is
-the third time I have made this exact mistake (see the cost denominators in
-#269 and #271): 40,707 is the FLEETWIDE total, and **nothing in this file is a
-fleetwide rate.** The rates here are per-lane, per-day, with n as low as 29-73
-calls. A handful of staff rows landing on one lane on one day moves such a rate
-by several points. Bounding an aggregate says nothing about the samples
-actually being quoted. (Codex, PR #272.)
-
-**THE 72 `T-`/`SR-` SID-BEARING ROWS ARE NOW CLASSIFIED — they are STAFF
-tickets, not agent filings.** This was an open unknown that made the rule a
-floor rather than an authority; it is measured now, so it is neither.
-
-| control | result |
-|---|---|
-| calls whose ONLY ticket is `T-`/`SR-` | **72 of 72** (none also has a VA/PCP ticket) |
-| of those, carrying any agent-output marker | **0 of 72** |
-| `VA-` control, same markers | **2,919 of 6,494 = 45%** |
-
-Markers are the agent's own structures — `[Intake incomplete`, `REASON FOR
-CALL:`, `Voice Agent`, `[BACKFILL`. If those 72 were agent filings, roughly 45%
-should carry one; **zero do**, and reading them shows staff prose and staff
-shorthand ("pt c/i", "sx", first person). So excluding them from an AGENT
-filing rate is correct, and **the rule is an iff for what this section
-measures — did the VOICE AGENT file.**
-
-Two things that follow, and they are not the same:
-- **Agent filing rate** (what every number in this file means): `VA-` + `PCP-`.
-- **"Did the caller's request get recorded at all?"** — a DIFFERENT question,
-  and for it those 72 calls DID produce a ticket, written by a person. Do not
-  answer one with the other.
-
-**A new sid-bearing prefix is a silent instrument change.** Re-run the census
-below before quoting any rate; if a prefix appears that is not in the validated
-set, classify it before you report anything.
-
-**PCP FILES UNDER `PCP-`, NOT `VA-`.** 210 tickets, every one carrying a real
-`call_sid`, going back to 2026-08-04 — the entire life of the line. A filing
-measurement that filters `ticket_number LIKE 'VA-%'` misses **all** of them and
-concludes the PCP lane files nothing. Caught 2026-09-04 only because tickets
-turned up for calls whose `tool_timeline` said no tool had run.
+**THE AUTHORITY: a call filed a new ticket iff a ticket carrying its
+`call_sid` has `agent_used IS NOT NULL`. That column is the agent's own
+provenance stamp. DO NOT USE THE TICKET PREFIX FOR THIS AT ALL.**
 
 ```sql
--- Every prefix, and how many carry a call_sid. Re-run before trusting a rate;
--- a lane that adopts a new prefix silently zeroes itself under a prefix filter.
-SELECT split_part(ticket_number,'-',1) AS prefix, count(*),
-       count(call_sid) AS with_sid, min(created_at)::date, max(created_at)::date
-FROM tickets GROUP BY 1 ORDER BY 2 DESC;
--- 2026-09-04: VA 40,930 (40,707 with sid) · T 6,079 (36) · SR 1,368 (36)
---             TKT 1,045 (0, ended 2026-02-14) · PCP 210 (210) · DIAG 1 (0)
--- AGENT-filing prefixes: VA-, PCP-. T- and SR- carry 36 sids each and were
--- CLASSIFIED 2026-09-04 as STAFF tickets (0 of 72 carry an agent marker vs 45%
--- of VA-); excluding them from an agent filing rate is correct, not a floor.
--- A prefix NOT in this list is unclassified: classify it before reporting.
+-- The filing test. No prefix anywhere in it.
+SELECT count(DISTINCT call_sid) FROM tickets
+WHERE call_sid IS NOT NULL AND agent_used IS NOT NULL AND created_at::date = '<day>';
 ```
 
+**This section has now been wrong three times, each time because I reached for
+a naming convention instead of the provenance field that was always there.**
+Recorded in full because the pattern matters more than the rule:
+
+1. **`VA-` only.** Silently reports ZERO for a lane filing under another
+   prefix. PCP's 210 tickets went missing this way.
+2. **"any ticket, never filter by prefix".** Over-corrected — counts staff
+   tickets as agent filings.
+3. **"`VA-` + `PCP-`, and the other 72 sid-bearing rows are staff".** I
+   established that by the ABSENCE of agent-output text markers. Codex pointed
+   out those markers appear on only 45% of KNOWN agent filings, so their
+   absence cannot classify anything — and checking the real metadata proved
+   the claim false:
+
+| sid-bearing rows | human `created_by_id` | `agent_used` set | neither |
+|---|---|---|---|
+| `T-` (36) | **36** (26 distinct people) | 5 | 0 |
+| `SR-` (36) | **0** | **7** | **29** |
+| `VA-` control (6,495) | 0 | **6,494** | 1 |
+| `PCP-` control (210) | 0 | **210** | 0 |
+
+`T-` is genuinely staff — every row has a named human creator. **`SR-` is
+not:** 7 of 36 carry `agent_used`, i.e. they ARE agent filings, and 29 are
+unattributed. So "all 72 are staff tickets" was wrong, and excluding them all
+would have dropped real filings.
+
+**What the prefix rule actually costs, measured:** of 40,835 calls with any
+ticket, 40,774 were agent-filed; the `VA-`/`PCP-` rule matches 40,763,
+**misses 12 real agent filings and counts 1 that is not one.** Small in
+aggregate — and that is exactly the argument I have now had to withdraw twice,
+because nothing in this file is an aggregate rate. Use `agent_used`; there is
+no reason to accept even 13 known-wrong rows when the correct field is sitting
+in the same table.
+
+**`agent_used` is also immune to the failure that started this:** a new lane
+gets a new prefix but still stamps the column, so it cannot silently zero
+itself.
+
+**How the prefix trap was found, kept because the discovery route matters.**
+PCP files under `PCP-`. 210 tickets, every one carrying a real `call_sid`,
+back to 2026-08-04 — the entire life of the line. The old `LIKE 'VA-%'` rule
+missed all of them and concluded the lane files nothing. It surfaced only
+because tickets turned up for calls whose `tool_timeline` claimed no tool had
+run: **two broken instruments disagreeing is what exposed the first one.** Had
+they agreed, the wrong answer would have looked confirmed.
+
 ```sql
--- The control that makes the join trustworthy, per day. Re-run it, and read
--- the prefix column: this deliberately does NOT filter, so a day whose
--- sid-bearing tickets are not all VA-/PCP- shows up here instead of silently.
-SELECT split_part(ticket_number,'-',1) AS prefix, count(*), count(call_sid)
+-- The control, per day. It uses agent_used (provenance), and reports the
+-- prefix only so a prefix-shaped surprise is visible rather than silent.
+SELECT split_part(ticket_number,'-',1) AS prefix,
+       count(*)                                        AS tickets,
+       count(*) FILTER (WHERE agent_used IS NOT NULL)  AS agent_filed,
+       count(*) FILTER (WHERE created_by_id IS NOT NULL) AS human_created
 FROM tickets WHERE created_at::date = '<day>' GROUP BY 1 ORDER BY 2 DESC;
--- 2026-09-03: 196 of 196 VA- tickets carried a real CA-prefixed sid.
+-- 2026-09-04 whole-table shape: VA 40,930 · T 6,079 · SR 1,368 · TKT 1,045
+--   (ended 2026-02-14) · PCP 210 · DIAG 1
+-- agent_used coverage on known agent lanes: VA 6,494/6,495 · PCP 210/210.
+-- Do NOT reintroduce a prefix filter here. It was wrong three times.
 ```
 
 **FOUR WAYS TO GET THIS WRONG, all of which I did:**
 
-0. **THE TICKET PREFIX SET, in either direction.** Filtering to a stale set
-   does not error — it returns a plausible zero, and a zero filing rate reads
-   as a broken lane rather than a broken query. Dropping the filter entirely
-   is the opposite error: it promotes unvalidated prefixes to authoritative.
-   Use the validated set, and re-run the census to find out when it changed.
+0. **USING THE TICKET PREFIX AT ALL.** Every variant of this failed: too
+   narrow returns a plausible zero (a broken lane, not a broken query); too
+   wide counts staff tickets as agent filings; a hand-validated set still
+   missed 12 real filings and needed re-validating whenever a lane changed.
+   `agent_used` is the provenance field and was in the table the whole time.
+   If you find yourself reasoning about ticket-number naming to decide what a
+   call did, stop — you are inferring provenance instead of reading it.
 
 1. **`tool_timeline` DROPS ABOUT 35% OF SUCCESSFUL FILINGS.** On 2026-09-03,
    100 substantive queue calls read a real VA number to the caller and the
