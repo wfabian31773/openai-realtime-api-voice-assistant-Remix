@@ -196,6 +196,9 @@ is reading noise.
 | The teardown request sweep | `src/runtime/requestSweep.ts` (decides) + `sweepRunner.ts` (files) | If the caller made a request and no filing tool succeeded, files it from the transcript at teardown. Wired in `voiceRuntime.ts` AFTER the call_logs write. Recovers only 6 of 53 today — see the open question about "no name, no ticket". |
 | Mid-call language switching | `src/tools/languageTools.ts` + the bridge's transport step | `set_spoken_language`; result to the model BEFORE the wire changes. Proven live 2026-09-03 on a Turkish caller. |
 | Repeated-failure ceiling | `src/runtime/toolCeiling.ts` | Stops a tool loop. **Keys on IDENTICAL arguments**, so a model that varies them gets more than 3 bites — observed 4–6. Its stops are INVISIBLE in `tool_timeline` (it short-circuits before dispatch, so `wrapWithTelemetry` never runs); console-only, uncountable from SQL. |
+| Grok cost from the bill | `src/services/grokCostAllocation.ts` + `xaiBilling.ts` + `grokCostReconciler.ts` | Splits xAI's authoritative daily total across the day's calls by seconds. **Dormant without `XAI_MANAGEMENT_KEY` / `XAI_TEAM_ID`.** |
+| The runtime's agents-table id | `src/runtime/agentIdentity.ts` | slug → `agents.id`, cached per lane. Without it every runtime call is absent from five per-agent reports. |
+| Pipeline label on a card | `client/src/lib/pipelineSplit.ts` | Says which stack served a lane's calls, and warns on a mid-day cutover. |
 | "Greeting already played" | `src/runtime/greetingAlreadyPlayed.ts` | Appended by the RUNTIME, not the prompts — the transport is what plays the greeting, and tech has 16 tokens of ceiling headroom. |
 
 ---
@@ -377,6 +380,101 @@ over every queue call since each lane's own cutover. Do not re-derive these.**
   input tokens against 2,545 uncached — the cache does almost all the work).
   So cost-per-call is not comparable between pipelines today, and
   `total_cost_cents` on a grok row is not built from token counts.
+  **The route is the bill, not the wire** — see the cost section below.
+
+---
+
+## WHAT A CALL COSTS — and why the Grok number was never a measurement
+
+**Measured 2026-09-04, all 241 Grok rows on disk.** Every one carries
+`cost_is_estimated = true` and `cost_reconciled_at` NULL. Those two columns
+have existed since the schema was written and until now had never once been
+used on any row, either pipeline.
+
+| | |
+|---|---|
+| summed seconds | 25,259 (421 min) |
+| exact at the published $0.08/min | **$33.68** |
+| what is actually stored | **$34.86** |
+| overstatement from `Math.ceil` alone | **$1.18 = 3.5%** |
+
+Every row matched `Math.ceil(duration * 8/60)` exactly — 0 mismatches — so
+the formula is applied consistently. It is the **per-call ceil** that
+inflates, in the same direction on every single call. Do not quote a Grok
+cost-per-call as a measurement, and do not compare it against the old core's
+token-derived cost: one is a bill, the other is a constant times a duration.
+
+**xAI's published rates for `grok-voice-think-fast-2.0`: `$0.08 / min audio`
+AND, separately, `$0.004 / text input`.** We have only ever counted the
+first. Whether the second is material is not a thing to reason about — it is
+a thing the invoice answers.
+
+**THE ROUTE IS xAI'S MANAGEMENT API, which is a different host and a
+different credential from the one the runtime already uses.**
+
+```
+base     https://management-api.x.ai          (NOT api.x.ai)
+auth     Authorization: Bearer <management key>
+key      xAI Console -> Settings -> Management Keys   (NOT XAI_API_KEY —
+         the inference key cannot read billing)
+team     console.x.ai/team/default/settings/team
+
+POST /v1/billing/teams/{team}/usage    -> spend per day (TIME_UNIT_DAY)
+GET  /v1/billing/teams/{team}/postpaid/invoice/preview
+     -> unitType, unitPrice, numUnits, amount
+```
+
+`invoice/preview` is the more interesting one: `unitPrice` is xAI's flat rate
+stated by xAI rather than transcribed from a pricing page, and `numUnits` is
+**how many units they counted**, which is the only way to learn whether they
+bill the duration Twilio reports.
+
+**The method, which is Wayne's:** a flat per-minute rate means cost is
+proportional to duration and nothing else, so a day's authoritative total
+splits across that day's calls by their seconds. That is not an estimate —
+it **sums to what xAI actually charged**, and it absorbs any component we are
+not counting. Built in `src/services/grokCostAllocation.ts` (largest
+remainder: no cent invented, none lost, deterministic), `xaiBilling.ts` and
+`grokCostReconciler.ts`.
+
+**It is DORMANT until `XAI_MANAGEMENT_KEY` and `XAI_TEAM_ID` are set.** It
+says so once at boot and does not schedule — a reconciler that writes a wrong
+number is worse than one that writes nothing, because "estimated" is honest
+and a reconciled number is believed.
+
+```sql
+-- 241 of 241 today. Any number here is calls still priced from a constant.
+SELECT count(*) FROM call_logs
+ WHERE voice_provider = 'grok' AND cost_reconciled_at IS NULL;
+```
+
+---
+
+## THE OBSERVATORY WAS BLIND TO EVERY RUNTIME CALL — fixed 2026-09-04
+
+Measured over every call since 09-01: **100% of old-core rows carried
+`agent_id`; 0 of 239 runtime rows did.** The runtime opened its `call_logs`
+row with the lane slug and nothing else, and the slug is not what anything
+reads. Five places join `agents` on the uuid — the Observatory scorecard and
+today view, the cost analytics (`routes.ts:2281`), the quality and sentiment
+analytics (`routes.ts:2463`), and `storage.ts:523`. So at 15:24:58 on 09-03,
+the moment optical cut over, it stopped existing in all five. **Not wrong,
+ABSENT — and an absent lane looks like a quiet lane.**
+
+- Fixed at the source: `src/runtime/agentIdentity.ts` resolves slug →
+  `agents.id`, once per lane per process. A miss is deliberately **not**
+  cached, so a lane whose agents row is added later is picked up without a
+  redeploy.
+- **259 existing rows were backfilled** from the slug they already carried
+  (every slug matched exactly one agent). Reversal snapshot kept in
+  `call_logs_agent_id_backfill_20260904`. Yesterday's cutover is visible.
+- The Observatory also had no concept of `voice_provider`, so the cutover
+  itself was invisible on the one screen built to watch these agents. Each
+  card now names its pipeline and says **"mixed pipelines — do not read these
+  as one population"** on a lane that cut over mid-day.
+
+Still not attributable, and left alone: 98 rows with a NULL `agent_used`
+(Nov–Jan), 14 `greeter`, 5 `claude-as`. None are current lanes.
 
 ---
 

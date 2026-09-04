@@ -567,3 +567,104 @@ with one mostly filed and calls without one mostly did not.
    first. Add now on one call, or wait?
 5. **#53 medical-safety wording** for optical and records. Needs clinical
    language from Wayne; not to be invented.
+
+---
+
+# 2026-09-04 — the instruments, after Wayne said the Observatory was wrong
+
+He was right, and it was one missing column.
+
+## The Observatory had stopped counting three of the four queue lanes
+
+Measured over every call since 09-01:
+
+| pipeline | calls | rows carrying `agent_id` |
+|---|---|---|
+| old core (SIP) | 1,315 | 1,315 (100%) |
+| grok runtime | 239 | **0** |
+
+The runtime opened its `call_logs` row with the lane slug and nothing else.
+Five reports join `agents` on the uuid — the Observatory scorecard, the
+Observatory today view, the cost analytics (`routes.ts:2281`), the quality
+and sentiment analytics (`routes.ts:2463`), and `storage.ts:523`. So at
+15:24:58 on 09-03, the moment optical cut over, it stopped existing in all
+five. **Not wrong, ABSENT** — and an absent lane is indistinguishable from a
+quiet one, which is why nothing looked broken.
+
+`shared/schema.ts:549` had anticipated exactly this in a comment — *"even if
+agentId is null"* — but nothing implemented the fallback.
+
+Fixed at the source rather than by teaching five call sites a second join:
+`src/runtime/agentIdentity.ts`, one cached lookup per lane per process. A
+miss is deliberately **not** cached, so a lane whose agents row is added
+later is picked up without a redeploy and its marker keeps printing until it
+is. **259 existing rows were backfilled** from the slug they already carried
+(every slug matched exactly one agent; reversal snapshot in
+`call_logs_agent_id_backfill_20260904`), so the cutover day is visible again.
+
+The Observatory also had **no concept of `voice_provider` anywhere** — server
+or client — so the biggest thing that has ever happened to these agents was
+invisible on the one screen built to watch them. Each card now names its
+pipeline and warns *"mixed pipelines — do not read these as one population"*
+on a lane that cut over mid-day.
+
+Left alone, deliberately: 98 rows with a NULL `agent_used` (Nov–Jan), 14
+`greeter`, 5 `claude-as`. No current lane among them.
+
+## The Grok cost was never a measurement
+
+All 241 Grok rows carry `cost_is_estimated = true` and `cost_reconciled_at`
+NULL. Both columns have existed since the schema was written and had never
+been used on any row, either pipeline. The price is
+`Math.ceil(duration * 8/60)` from a constant nobody had checked against a
+bill.
+
+| | |
+|---|---|
+| summed seconds | 25,259 (421 min) |
+| exact at the published $0.08/min | $33.68 |
+| stored | $34.86 |
+| overstatement from `Math.ceil` alone | **$1.18 = 3.5%** |
+
+Zero rows deviated from the formula, so the bias is the rounding, applied in
+the same direction 241 times.
+
+Wayne's method is the right one and it is now built: xAI run a **management
+API** (`management-api.x.ai`, a separate credential from `XAI_API_KEY`) with
+`POST /v1/billing/teams/{team}/usage` for spend per day and
+`GET .../postpaid/invoice/preview` for `unitPrice` and `numUnits`. A flat
+per-minute rate means a day's authoritative total can be split across that
+day's calls by seconds — an allocation that **sums to what xAI actually
+charged**, and that absorbs anything we are not counting. xAI bill
+`$0.004 / text input` separately from the audio minute and we never have.
+
+`invoice/preview` is the sharper instrument of the two, because `numUnits` is
+how many units **they** counted, which is the only way to find out whether
+they bill the duration Twilio reports.
+
+**It is dormant until `XAI_MANAGEMENT_KEY` and `XAI_TEAM_ID` exist.** It says
+so once at boot and does not schedule.
+
+## Also shipped today
+
+- **The date-of-birth gate stops being terminal** (`src/tools/dobEscape.ts`).
+  Ask once with the coaching wording, then file anyway marked `unavailable`
+  (never given) or `unmatched` (given, unreadable). This is the same ruling
+  Wayne gave for optical's office on 09-01, and the cutover day measured both
+  side by side: the location gate **had** that escape and recovered 9 of 11;
+  the date-of-birth gate did not and recovered **0 of 23**.
+  The status goes at the top of the description, not in the birth columns —
+  those are `varchar(2)/(2)/(4)` in the ticketing app and the word does not
+  fit. A dedicated ticket field is the proper fix and is proposed, not built.
+
+## Open, and Wayne's to settle
+
+1. **The two xAI credentials.** `XAI_MANAGEMENT_KEY` (Console → Settings →
+   Management Keys — NOT the inference key) and `XAI_TEAM_ID`
+   (console.x.ai/team/default/settings/team). One reconciliation run then
+   answers whether $0.08/min is the real rate and whether the text-input
+   charge is material.
+2. Everything still open from 09-03 below, unchanged: "no name, no ticket";
+   pre-context → `patients_master`; records on the old core; Turkish months;
+   #53 medical-safety wording.
+3. **Records stays untouched** — HHS corrective action plan work.
