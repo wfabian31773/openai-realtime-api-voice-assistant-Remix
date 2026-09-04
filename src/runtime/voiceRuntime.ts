@@ -51,6 +51,7 @@ import {
   type GrokTransport,
 } from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
+import { laneRoster, formatLaneRoster, type LaneReadiness } from "./laneRoster";
 import {
   createRuntimeTransfer,
   transferDestinationStatus,
@@ -63,6 +64,43 @@ import {
   missingMandatoryCopy,
   personaliseGreeting,
 } from "../services/greetingPersonalisation";
+
+import { loadedDirectory } from "../services/consoleDirectory";
+import { selectKeyterms } from "./keyterms";
+import { TECH_KEYTERMS } from "../config/techKeyterms";
+
+/**
+ * This lane's transcription vocabulary — surgeon names, office names and drug
+ * names — biasing Grok's ASR toward words it would otherwise mangle.
+ *
+ * Reads the directory snapshot ALREADY in memory and never fetches: this runs
+ * inside the synchronous createSession callback on the answer path, where an
+ * await would add latency to every call for data refreshed on a timer anyway.
+ * A cold process answers its first call or two with no keyterms and warms up
+ * behind them, which beats making a caller wait for reference data.
+ *
+ * Medication vocabulary is the practice's own (config/techKeyterms.ts, lifted
+ * from the Medication Requests classifier) rather than invented here, and it
+ * leads on tech because that is the medication queue.
+ *
+ * Never throws. Vocabulary is an optimisation; a call must not fail for want
+ * of it.
+ */
+function laneKeyterms(slug: string): string[] | undefined {
+  try {
+    const snap = loadedDirectory();
+    return selectKeyterms(
+      {
+        providers: snap ? [...snap.providers.values()] : [],
+        locations: snap ? [...snap.locations.values()] : [],
+        medications: TECH_KEYTERMS,
+      },
+      slug,
+    );
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * The first name a caller-ID match resolved to, or "" when there is none.
@@ -136,6 +174,8 @@ import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
+import { runRequestSweep } from "./sweepRunner";
+import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
 import {
   handleAfterRedirect,
   handleVoiceWebhook,
@@ -208,6 +248,15 @@ const PRECONTEXT_DEADLINE_MS = 1_500;
  */
 const CALL_ROW_DEADLINE_MS = 2_000;
 
+/**
+ * How long teardown waits for the call_logs write before sweeping anyway.
+ *
+ * Generous — this is teardown, the caller is gone and nothing is holding a
+ * socket for it — but finite, because the sweep is what saves the request
+ * and it must not be hostage to a database that has stopped answering.
+ */
+const PERSIST_BEFORE_SWEEP_MS = 5_000;
+
 /** Resolve within a bound, or null. Never throws. */
 async function withinOrNull<T>(work: Promise<T>, ms: number): Promise<T | null> {
   return Promise.race([
@@ -223,6 +272,8 @@ export interface VoiceRuntimeOptions {
   env?: Record<string, string | undefined>;
   /** Overridable so tests never import the agent tree. */
   laneSource?: LaneSource;
+  /** Overridable so the wedged-pool test does not wait five seconds. */
+  persistBeforeSweepMs?: number;
   registry?: CallSessionRegistry;
   /** How long a media-stream socket may stay open without claiming a call.
    * Defaults to STREAM_CLAIM_DEADLINE_MS. */
@@ -250,6 +301,15 @@ export interface VoiceRuntimeOptions {
   openCallRow?: CallLogInsert;
   /** Persists the finished call. Injected for tests. */
   persistCall?: (record: VoiceCallRecord) => Promise<boolean>;
+  /**
+   * The teardown request sweep. Injected for tests, and settable to a no-op
+   * to turn it off without a deploy.
+   *
+   * Runs AFTER the call_logs write on every finished call: if the caller made
+   * a request and no ticket was filed, it files what they said. See
+   * requestSweep.ts for why, and sweepRunner.ts for the rules it holds to.
+   */
+  sweepCall?: (record: VoiceCallRecord) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -332,6 +392,7 @@ export function mountVoiceRuntime(
   // agent (and their database and API clients), which must not happen at
   // boot or in a health check.
   const persistCall = options.persistCall ?? persistRuntimeCall;
+  const sweepCall = options.sweepCall ?? runRequestSweep;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -364,6 +425,26 @@ export function mountVoiceRuntime(
       : `[voice-runtime] warm transfer armed (accept: https://${transferDomain}${TRANSFER_ACCEPT_PATH})`,
   );
 
+  /**
+   * Say at boot which lanes this deployment can serve. `laneSupportStatus`
+   * has always been pure and always returned a reason; nothing ever printed
+   * it, so the only way to find out a lane was refused was to point a number
+   * at it and listen. Resolved lazily and never awaited on the boot path —
+   * the lane source imports the whole agent tree, and a health report must
+   * not be the thing that delays the first call.
+   */
+  const rosterFor = async (): Promise<LaneReadiness[]> =>
+    laneRoster(await laneSource(), env, {
+      transferAvailable: transfer.unavailableReason === null,
+    });
+  void rosterFor()
+    .then((roster) => {
+      for (const line of formatLaneRoster(roster)) console.log(line);
+    })
+    .catch((error) => {
+      console.error("[voice-runtime] could not report the lane roster:", error);
+    });
+
   app.post(TRANSFER_ACCEPT_PATH, (req: Request, res: Response) => {
     send(res, transfer.handleAccept(toWebhookRequest(req)));
   });
@@ -372,9 +453,12 @@ export function mountVoiceRuntime(
     send(res, transfer.handleStatus(toWebhookRequest(req)));
   });
 
-  app.get("/voice/health", (_req: Request, res: Response) => {
+  app.get("/voice/health", async (_req: Request, res: Response) => {
     const readiness = computeRuntimeReadiness(env);
     const destinations = transferDestinationStatus(env);
+    // Never let a roster failure take the health endpoint down with it: the
+    // endpoint's first job is to answer at all.
+    const lanes = await rosterFor().catch(() => null);
     res.json({
       marker: VOICE_RUNTIME_DEPLOY_MARKER,
       // The cached prefix every lane shares. Reported so a change in the
@@ -410,6 +494,11 @@ export function mountVoiceRuntime(
       // Per LANE, because the two use different numbers and one can work
       // while the other does not. Booleans, never the numbers themselves.
       transferDestinations: { clinical: destinations.clinical, pcp: destinations.pcp },
+      // Per lane: can this deployment answer a call on it, and if not, the
+      // sentence why. `transferWarning` is the second gate — a lane that IS
+      // served but whose transfer has nowhere to dial, which reads as
+      // healthy everywhere else (Codex, PR #236, per-lane this time).
+      lanes,
       activeCalls: registry.activeCount(),
     });
   });
@@ -791,6 +880,19 @@ export function mountVoiceRuntime(
         const transport = options.createTransport
           ? options.createTransport({ apiKey: lane.voice.apiKey, model: lane.voice.model })
           : new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
+        /**
+         * ONE GREETING, KNOWN TO BOTH SIDES.
+         *
+         * Hoisted out of the bridge options because the SESSION now needs it
+         * too — see withGreetingAlreadyPlayed. The bridge speaks it; the model
+         * has to be told it was spoken.
+         */
+        const spokenGreeting =
+          personaliseGreeting(
+            chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
+            recognisedFirstName(precontext),
+            greetingStyleFor(entry.slug),
+          ) || null;
         bridge = new VoiceCallBridge({
           context,
           startedAtMs,
@@ -813,16 +915,17 @@ export function mountVoiceRuntime(
           // it does on the SIP path — an admin edit must be what the caller
           // hears, not what the code was shipped with. UNLESS it has dropped
           // copy the lane is required to say; see `chooseGreeting`.
-          greeting: personaliseGreeting(
-            chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
-            recognisedFirstName(precontext),
-            greetingStyleFor(entry.slug),
-          ) || null,
+          greeting: spokenGreeting,
           twilio: twilioSocket,
           createSession: (handlers) =>
             new GrokVoiceSession(
               transport,
-              buildSessionConfig(lane.voice, lane.agent.instructions, lane.agent.tools),
+              buildSessionConfig(
+                lane.voice,
+                withGreetingAlreadyPlayed(lane.agent.instructions, spokenGreeting),
+                lane.agent.tools,
+                laneKeyterms(entry.slug),
+              ),
               {
                 ...handlers,
                 // The handshake landing is what stands the setup deadline
@@ -852,7 +955,39 @@ export function mountVoiceRuntime(
             // A successful transfer has no pending legs left; no-op then.
             transfer.abandonFor(entry.callSid);
           },
-          persistCallRecord: (record) => persistCall(record).then(() => undefined),
+          /**
+           * THE RECORD FIRST, THEN THE SWEEP.
+           *
+           * Ordered, not raced. The call_logs row is the evidence every
+           * measurement is built on and it must land whatever the sweep does;
+           * the sweep in turn reads nothing from the row, so a failed write
+           * does not stop a request being recovered. `runRequestSweep` never
+           * throws — the catch here is the second lock, not the first.
+           *
+           * The bridge fires this and does not wait: teardown must not hold a
+           * socket open for a ticket POST.
+           */
+          persistCallRecord: async (record) => {
+            /**
+             * BOUNDED, because an unbounded await here throws the request
+             * away. `persistCall` is a database upsert, and a wedged pool
+             * makes it never settle — at which point the sweep never runs,
+             * teardown completes, and a substantive request is lost even
+             * though the ticketing API was healthy the whole time. The
+             * bridge fires this without awaiting, so nothing upstream would
+             * ever notice (Codex, PR #268 round 7).
+             *
+             * The order still matters and is unchanged: the row first,
+             * because it is the evidence every measurement is built on. But
+             * the sweep reads nothing from it, so a slow or failed write is
+             * no reason to abandon the caller's request.
+             */
+            await withinOrNull(
+              persistCall(record),
+              options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
+            );
+            await sweepCall(record).catch(() => undefined);
+          },
         });
         // Connect AFTER the bridge exists: a connection that fails then has
         // somewhere to report to and the call tears down cleanly, instead

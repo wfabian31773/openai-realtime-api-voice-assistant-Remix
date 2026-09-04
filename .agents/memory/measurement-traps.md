@@ -275,3 +275,143 @@ one in another, and alerts on the second.
 I reported that as the cause of the 43% gap and **it was not**:
 `other_cost_cents` is $0.00 every day — essentially all spend here is voice.
 Real bug, immaterial effect. Check the magnitude before naming a cause.
+
+## The instrument that drops a third of what it counts (2026-09-03)
+
+I reported filing rates to Wayne all afternoon from `call_logs.tool_timeline`
+and every one was understated by about a third. The fleet was fine. The
+instrument was not.
+
+`tool_timeline` recorded 65 successful filings on a day when 100 substantive
+queue calls read a real `VA-` number to the caller. Three consecutive calls
+(VA-57425, VA-57428, VA-57429) had a real ticket in the Support Center with the
+right patient and the right department, and **no filing event in the timeline at
+all**. That is #77, and it is live on the runtime rather than historical.
+
+**The authority is the Support Center, joined on `call_sid`:**
+
+```sql
+-- 196 of 196 VA- tickets on 2026-09-03 carry a real CA-prefixed sid.
+-- Re-run this control before trusting the join on any other day.
+SELECT count(*), count(call_sid) FROM tickets
+WHERE created_at::date = '<day>' AND ticket_number LIKE 'VA-%';
+```
+
+`tool_timeline` remains **reliable for refusals** — `outcome.missingFields` is
+written faithfully. It is successes that go missing. So the shape of an honest
+query is: refusals from the timeline, successes from the ticket table.
+
+### The proxy that looks safe and over-counts
+
+`transcript ~ 'VA-[0-9]{5}'` seems like a clean read of "the agent told the
+caller a ticket number". It caught 9 extra calls, and every one was
+`check_open_tickets` correctly reading back an EXISTING ticket to a caller
+chasing one — three separate calls from a single number all quote VA-57151.
+The tool working is not the tool filing.
+
+### And the attribution moves after the fact
+
+5 of 196 tickets (2.6%) carry a `call_sid` belonging to a call that started an
+average of 49 minutes LATER, sometimes from a different phone entirely. Too
+small to move a rate; large enough to ruin a single-call forensic, because the
+ticket will point at the wrong call. Related to #71.
+
+### `total_turns` is not turns
+
+It fell 16.1 → 9.7 across the tech cutover, which reads as "the agent stopped
+listening". The callers actually said MORE: 353 characters against 333, in
+fewer transcript lines, at the same call duration. Count `CALLER:` lines in the
+transcript. Do not quote `total_turns` for anything.
+
+## A refusal the model cannot diagnose is a refusal it repeats (2026-09-03)
+
+Not a measurement trap so much as the thing measurement finally caught, and it
+belongs here because the *shape* of the query is what found it.
+
+| gate hit | calls | still filed |
+|---|---|---|
+| `date_of_birth` | 23 | **0** |
+| optical `location` | 11 | 9 |
+
+Two refusals in the same codebase, one terminal and one survivable. Comparing
+them is what located the bug — the same control discipline as
+`realtime-tool-schemas.md`, where Optical filing and Surgery not filing was the
+diff that found the strict-mode kill.
+
+The difference is not severity. It is whether the CALLER's answer can satisfy
+the gate. A location refusal is fixable by the caller. A date-of-birth refusal
+was not, because the model was omitting the argument entirely, so no answer the
+caller gave could ever change the outcome. `dobShape` — a PHI-free shape of
+what arrived, digits to `#` and letters to `a` — recorded `"(none)"` on every
+observed refusal, which is what settled it after hours of arguing about the
+parser.
+
+**Generalise this: when a gate refuses, ask whether anything the caller can say
+would clear it. If not, the refusal is a loop and the model needs to be told
+what IT did wrong, not what to say.** That is what `MissingFields.fix` is for.
+
+---
+
+## A cost that is a constant times a duration is not a measurement
+
+**2026-09-04.** Every Grok row on disk — 241 of them — carries
+`cost_is_estimated = true` and `cost_reconciled_at` NULL, and its
+`openai_cost_cents` is `Math.ceil(duration * 8/60)` from
+`GROK_COST_CENTS_PER_SECOND` in `src/services/voiceCostRates.ts`. That
+constant came from xAI's published `$0.08 / min` and has never been checked
+against a bill.
+
+Two traps in one number.
+
+**1. The per-call ceil biases in ONE direction, every time.**
+
+| | |
+|---|---|
+| summed seconds | 25,259 (421 min) |
+| exact at $0.08/min | $33.68 |
+| stored | $34.86 |
+| overstatement | **$1.18 = 3.5%** |
+
+Zero rows deviated from the formula, so it is not a bug in the application —
+it is the rounding, and rounding up 241 times is not noise, it is a trend.
+**Round at the aggregate, never per row**, whenever a rate is applied to many
+small quantities.
+
+**2. It sits beside a number built a completely different way.** On the old
+core, `openai_cost_cents` is derived from reported tokens (172 of 184 rows).
+On grok it is duration times a guess. On 2026-09-03 the two read $17.01 and
+$15.86 per call, which looks exactly like "the runtime is 7% cheaper" and is
+not a comparison at all. **Before comparing two cost columns, ask what each
+one is made of.**
+
+The fix is not a better constant. It is `grokCostReconciler.ts`, which takes
+xAI's own daily total from their management API and splits it across the
+day's calls by seconds — an allocation that sums to the actual charge, and
+that absorbs components we do not know about (xAI bill `$0.004 / text input`
+separately from the audio minute, and we have never counted it).
+
+---
+
+## An absent row and a quiet lane look identical
+
+**2026-09-04.** 239 of 239 runtime calls had `call_logs.agent_id` NULL while
+100% of old-core rows carried it, because the runtime opened its row with the
+lane slug only. Five per-agent reports join `agents` on the uuid, so from
+each lane's cutover moment it simply **stopped appearing** in all five — the
+Observatory scorecard read as though optical, surgery and tech had gone
+quiet.
+
+This is the same shape as `tool_timeline` dropping a third of successful
+filings: **the instrument omitted rows rather than mis-valuing them**, and an
+omission has no error bar. Nothing looked wrong.
+
+The control that would have caught it in one query, and which is worth
+running against any per-agent number before quoting it:
+
+```sql
+SELECT voice_provider, count(*) AS calls, count(agent_id) AS with_agent_id
+  FROM call_logs WHERE created_at >= '<day>' GROUP BY 1;
+```
+
+If `with_agent_id` is not `calls`, every per-agent report is under-counting
+by the difference and none of them will say so.

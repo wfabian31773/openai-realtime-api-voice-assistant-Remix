@@ -39,6 +39,11 @@ vi.mock('../services/scheduleLookupService', () => ({
 vi.mock('../services/syncAgentService', () => ({
   SyncAgentService: { checkOpenTickets: (...a: unknown[]) => checkOpenTickets(...a) },
 }));
+const rememberVerifiedIdentity = vi.fn();
+vi.mock('./verifiedIdentity', () => ({
+  rememberVerifiedIdentity: (...a: unknown[]) => rememberVerifiedIdentity(...a),
+  verifiedDobFor: () => null,
+}));
 vi.mock('../services/consoleDirectory', () => ({
   lookupLocation: (...a: unknown[]) => lookupLocation(...a),
   isDirectoryConfigured: () => isDirectoryConfigured(),
@@ -50,6 +55,9 @@ await import('./sharedPatientTools');
 const run = (name: string, input: Record<string, unknown>) => getTool(name)!.handler(input) as Promise<any>;
 
 /** A found patient, in the shape scheduleLookupService returns. */
+/** What the mirror hands back. rememberVerifiedIdentity needs all three. */
+const RECORD = { firstName: 'Testpatient', lastName: 'Example', dateOfBirth: '1950-01-02' };
+
 const FOUND = {
   patientFound: true,
   patientName: 'Wayne Fabian',
@@ -121,6 +129,158 @@ describe('lookup_patient', () => {
     expect(r.missingFields).toEqual(expect.arrayContaining(['last_name', 'date_of_birth']));
     expect(r.missingFields).not.toContain('first_name');
     expect(lookupPatient).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A NAME-ONLY HIT IS NOT AN IDENTITY — moved out of the prompt, 2026-09-03.
+   *
+   * `lookupPatient` falls back name+DOB -> phone -> NAME ALONE. A lone Smith
+   * on file is unique, so a name-only hit used to come back
+   * `identity_is_certain: true` and it is somebody else's chart. The only
+   * thing stopping the agent reading that chart aloud was six lines of prompt
+   * telling it to distrust the field. It is the tool's job now.
+   */
+  it('a NAME-ONLY match is not certain, however unique it is', async () => {
+    lookupPatient.mockResolvedValue({ ...FOUND, matchedBy: 'name' });
+    const r = await run('lookup_patient', { caller_phone: '+17605551234' });
+    expect(r.found).toBe(true);
+    expect(r.identity_is_certain).toBe(false);
+    expect(r.matched_by).toBe('name');
+    // The warning is what tells the agent to confirm rather than assume.
+    expect(r.identity_warning).toBeTruthy();
+  });
+
+  it('a DOB-ONLY match is not certain either', async () => {
+    lookupPatient.mockResolvedValue({ ...FOUND, matchedBy: 'dob' });
+    const r = await run('lookup_patient', { caller_phone: '+17605551234' });
+    expect(r.identity_is_certain).toBe(false);
+  });
+
+  it('a unique PHONE match stays certain — the one field nobody mis-transcribes', async () => {
+    lookupPatient.mockResolvedValue({ ...FOUND, matchedBy: 'phone' });
+    const r = await run('lookup_patient', { caller_phone: '+17605551234' });
+    expect(r.identity_is_certain).toBe(true);
+  });
+
+  it('a unique NAME_AND_DOB match is certain', async () => {
+    lookupPatient.mockResolvedValue({ ...FOUND, matchedBy: 'name_and_dob' });
+    const r = await run('lookup_patient', { caller_phone: '+17605551234' });
+    expect(r.identity_is_certain).toBe(true);
+  });
+
+  /**
+   * THE CERTAINTY HAS TO REACH THE MAP, not just the model.
+   *
+   * `identity_is_certain` was computed and reported, and then the candidate
+   * was stored in the shared identity map WITHOUT it — so the teardown sweep,
+   * which reads that map and files a request under the name with nobody
+   * watching, saw a name-only guess as a verified patient (Codex, PR #268
+   * round 3).
+   *
+   * The gate now lives in `verifiedIdentityFor`; these prove the thing that
+   * FEEDS it, because a gate nothing feeds is not a gate — the same shape as
+   * the reconciliation guard whose column was never selected.
+   */
+  const rememberedFor = async (matchedBy: string) => {
+    rememberVerifiedIdentity.mockClear();
+    lookupPatient.mockResolvedValue({ ...FOUND, matchedBy, patientData: RECORD });
+    const r = await run('lookup_patient', {
+      caller_phone: '+17605551234',
+      call_sid: 'CA00000000000000000000000000000077',
+    });
+    const calls = rememberVerifiedIdentity.mock.calls;
+    return { result: r, stored: calls[calls.length - 1]?.[1] as Record<string, unknown> | undefined };
+  };
+
+  it('stores a name-only match as NOT certain, so the sweep will not use it', async () => {
+    const { result, stored } = await rememberedFor('name');
+    expect(result.identity_is_certain).toBe(false);
+    // What reaches the map has to agree with what reached the model.
+    expect(stored?.certain).toBe(false);
+  });
+
+  it('stores a name-and-dob match as certain', async () => {
+    const { result, stored } = await rememberedFor('name_and_dob');
+    expect(result.identity_is_certain).toBe(true);
+    expect(stored?.certain).toBe(true);
+  });
+
+  it('stores a dob-only match as NOT certain', async () => {
+    expect((await rememberedFor('dob')).stored?.certain).toBe(false);
+  });
+
+  it('a non-unique match is never certain, whatever it matched on', async () => {
+    for (const matchedBy of ['phone', 'name_and_dob', 'name', 'dob']) {
+      lookupPatient.mockResolvedValue({
+        ...FOUND, matchedBy, identity: { unique: false, candidateCount: 8 },
+      });
+      const r = await run('lookup_patient', { caller_phone: '+17605551234' });
+      expect(r.identity_is_certain).toBe(false);
+    }
+  });
+
+  it('still carries the date of birth forward on a unique phone match — the 09-01 fix', async () => {
+    /**
+     * THE REGRESSION THIS GUARDS. `rememberVerifiedIdentity` is gated on
+     * `uniqueMatch`, NOT on the stricter `identity_is_certain` beside it.
+     * Narrowing it would drop every phone-matched caller back into the
+     * date-of-birth gate — the one the operator's 2026-09-01 fix emptied,
+     * worth 45 refused calls in a fortnight, 23 of them for a patient this
+     * tool had already identified.
+     *
+     * A first draft of this test used `vi.doMock` after import, so the mock
+     * never bound and it asserted a flag that was true either way. It passed
+     * while the regression was live. The mock is hoisted now and the
+     * assertion is on the call itself.
+     */
+    lookupPatient.mockResolvedValue({
+      ...FOUND,
+      matchedBy: 'phone',
+      patientData: { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17' },
+    });
+    const r = await run('lookup_patient', { caller_phone: '+17605551234', call_sid: 'CA1' });
+    expect(r.identity_is_certain).toBe(true);
+    expect(rememberVerifiedIdentity).toHaveBeenCalledWith(
+      'CA1',
+      expect.objectContaining({ dateOfBirth: '1973-03-17' }),
+    );
+  });
+
+  it('carries it forward on a unique NAME-ONLY match too, though that is not an identity', async () => {
+    /**
+     * Deliberate and load-bearing: the two flags mean different things. The
+     * match is not certain enough to READ HISTORY BACK, and `identity_is_certain`
+     * says so — but the record is still the only one on file for that name, and
+     * `verifiedDobFor` only ever reads a date back for the SAME NAME.
+     *
+     * The residual hazard (a caller of that name who is NOT on file) is
+     * pre-existing and unmeasurable today: `matched_by` was never recorded on
+     * the timeline, so 2,819 lookups in fourteen days say nothing about how
+     * often it happens. It is recorded now; the fix waits for the number.
+     */
+    lookupPatient.mockResolvedValue({
+      ...FOUND,
+      matchedBy: 'name',
+      patientData: { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17' },
+    });
+    const r = await run('lookup_patient', { caller_phone: '+17605551234', call_sid: 'CA2' });
+    expect(r.identity_is_certain).toBe(false);
+    expect(rememberVerifiedIdentity).toHaveBeenCalled();
+  });
+
+  it('never carries a date of birth forward from a NON-UNIQUE match', async () => {
+    // Wayne's own number resolves to eight records in the mirror. Banking one
+    // of their dates of birth would file a ticket against the wrong person —
+    // a phone match is a candidate to confirm, never an identity.
+    lookupPatient.mockResolvedValue({
+      ...FOUND,
+      matchedBy: 'phone',
+      identity: { unique: false, candidateCount: 8 },
+      patientData: { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17' },
+    });
+    const r = await run('lookup_patient', { caller_phone: '+17605551234', call_sid: 'CA3' });
+    expect(r.identity_is_certain).toBe(false);
+    expect(rememberVerifiedIdentity).not.toHaveBeenCalled();
   });
 
   it('reports "not found" as a success, not a failure', async () => {

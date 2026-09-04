@@ -158,3 +158,57 @@ smart punctuation in the description. Found from one curly apostrophe in
 
 Neither is load-bearing for the queue agents, which carry their own IDs. Both
 will bite whoever trusts them next.
+
+---
+
+## Ticket number prefixes — three sources, and all three are real
+
+Established 2026-09-03 from the operator, after a filing-alarm investigation
+turned up `T-` and `SR-` numbers sitting on `call_logs` rows and I did not know
+what either was.
+
+| prefix | who creates it |
+|---|---|
+| `VA-` | the voice agents |
+| `T-`  | **staff**, by hand in the ticketing app |
+| `SR-` | the **online form for surgery coordinators** |
+
+**A non-`VA-` number on a call row does NOT mean something else filed for us.**
+It means `check_open_tickets` found the caller's already-open ticket and the
+agent attached the call to it instead of opening a duplicate. The evidence is
+unambiguous: over the fourteen days to 2026-09-03, all ten non-`VA-` numbers on
+queue call rows belong to tickets that were created **before** the call that
+carries them — by fourteen seconds in one case and two days in another — and
+every one of those tickets has a `call_sid`, while the staff tickets nobody
+called about have `call_sid` null.
+
+So attaching is the request being handled, not lost:
+
+- `call_logs.ticket_number IS NOT NULL` is the right test for "this call's
+  request was taken", whatever the prefix. The filing alarm
+  (`ticketFilingHealth.ts`) deliberately does NOT restrict itself to `VA-`.
+  Excluding the others would make it blind to requests that were properly
+  handled, and would let a few hand-filed tickets during an outage look like
+  the agents were still working.
+- Volume is small either way — 9 `T-` and 2 `SR-` against 1,560 `VA-` in
+  fourteen days — so this is about the predicate meaning what it claims, not
+  about the numbers moving.
+
+**Attaching overwrites the ticket's call fields, and that is DECIDED — leave it
+alone.** The attach stamps the newest call's `call_sid`, `caller_phone` and
+`call_duration_seconds` onto the ticket, so the originating call's linkage is
+replaced rather than kept alongside. `SR-54155` carries two calls five minutes
+apart on 2026-08-24 and only the later one's details survive on it.
+
+I raised this as a possible defect. Wayne, 2026-09-03: *"overwrite is fine,
+that's the most recent request anyway."* The ticket is a live request, not an
+audit log — staff working it need the number that just called, not the first
+one. Do not "fix" this, and do not re-raise it as data loss: the earlier call
+still has its own `call_logs` row carrying the same ticket number, so the
+association is recoverable from that side.
+
+This is also the answer to a question that was open for most of 2026-09-03:
+when a later caller lands on an earlier caller's ticket and the ticket's call
+fields change, that is **this** path — the `check_open_tickets` dedupe — and
+not the `update-call-data` retry sweep in #71/#77. Do not re-investigate it as
+a write-back bug.

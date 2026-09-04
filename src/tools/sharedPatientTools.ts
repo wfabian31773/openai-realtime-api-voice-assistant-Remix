@@ -73,10 +73,32 @@ registerTool({
   input_schema: {
     type: 'object',
     properties: {
+      /**
+       * LEAD THE ASK. Operator ruling, 2026-09-03:
+       *
+       *   *"We should be proactively structuring the conversation. On any
+       *   validation we should lead... May I please have your last name? May I
+       *   please have your date of birth? And when you ask for date of birth
+       *   it should say starting with the month, the day, and then the year.
+       *   This way you get it in the way you want it. It's kind of a guard.
+       *   If you just say can I have your date of birth, people give it to you
+       *   in any format they want."*
+       *
+       * These strings are the words the agent actually says: `validateInput`
+       * builds its refusal from `askAs`, and the model reads them in the
+       * schema. Changing them here changes all four queue lanes at once, which
+       * is why the wording lives with the field and not in four prompts.
+       *
+       * The date-of-birth guard is worth its characters twice over. Every
+       * parser fix on 2026-09-03 — separators, sentences, two-digit centuries
+       * — was widening what we accept AFTER the fact. Naming the order in the
+       * question narrows what arrives, which is the cheaper half and the one
+       * that was there before and got lost.
+       */
       phone: { type: 'string', description: 'Any format. The number they are calling from is usually best.', askAs: 'What is the best phone number for you?' },
-      first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'Can I get your first name?' },
-      last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'And your last name?' },
-      date_of_birth: { type: 'string', description: 'Any spoken format — "March 17th 1973", "03/17/1973".', askAs: 'And your date of birth?' },
+      first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'And may I please have your first name?' },
+      last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'May I please have your last name?' },
+      date_of_birth: { type: 'string', description: 'Any spoken format — "March 17th 1973", "03/17/1973".', askAs: 'And may I please have your date of birth, starting with the month, then the day, then the year?' },
     },
   },
   handler: async (input): Promise<ToolResult> => {
@@ -169,7 +191,33 @@ registerTool({
     // needs it because it changes what may be SAID: an uncertain match is one
     // real person's record, but it is a guess among several, so the name must
     // be confirmed and the history must not be read back.
-    const certain = resolved.identity?.unique !== false;
+    const uniqueMatch = resolved.identity?.unique !== false;
+
+    /**
+     * A NAME-ONLY HIT IS NOT AN IDENTITY, AND THE TOOL SAYS SO NOW.
+     *
+     * `identity_is_certain` used to mean only "the match was unique". But
+     * `lookupPatient` falls back from name+DOB to the PHONE NUMBER and then to
+     * the NAME ALONE, and a lone Smith on file is unique — so a name-only hit
+     * on a common surname came back `found: true, identity_is_certain: true`,
+     * and it is somebody else's chart.
+     *
+     * Nothing stopped that except six lines of prompt telling the model to
+     * distrust this very field:
+     *
+     *   "THEN CHECK matched_by BEFORE YOU BELIEVE IT ... If matched_by is not
+     *    name_and_dob, treat it as NOT FOUND: say nothing about their
+     *    appointments, read no history back"
+     *
+     * A safety rule that holds only while the model obeys an instruction is
+     * not a safety rule. The check belongs here, where it cannot be talked
+     * out of, and the prompt lines it replaces are deleted (task #25 — the
+     * queue prompts carry workarounds written for a model that needed them).
+     *
+     * `phone` stays certain: it is the one field nobody mis-transcribed, and
+     * the service only reaches the phone fallback with a unique hit.
+     */
+    const certain = uniqueMatch && resolved.matchedBy !== 'name' && resolved.matchedBy !== 'dob';
 
     /**
      * PASS THE RECORD ALONG — operator instruction, 2026-09-01.
@@ -186,12 +234,39 @@ registerTool({
      * be confirmed out loud, which is the rule the identity_warning above
      * exists to enforce.
      */
-    if (certain) {
+    /**
+     * DELIBERATELY `uniqueMatch`, NOT `certain` — do not "tidy" this to the
+     * stricter flag above.
+     *
+     * This carry-forward is the operator's 2026-09-01 fix: it recovered 45
+     * calls in a fortnight that were refused for a date of birth the process
+     * was already holding, 23 of them for a patient this tool had identified.
+     * Narrowing it to `certain` would drop every phone-matched caller back
+     * into that gate and undo the fix.
+     *
+     * It stays safe on its own terms: `verifiedDobFor` only ever reads a
+     * remembered date back for the SAME NAME, so a unique phone match carries
+     * that person's date of birth and nobody else's.
+     *
+     * The remaining hazard is a unique NAME-ONLY match banking a date of birth
+     * for a caller who is not on file. It is pre-existing, it is invisible in
+     * the data today — `matched_by` was never recorded on the timeline, so
+     * 2,819 lookups in fourteen days say nothing about how often this happens
+     * — and BACKEND_HANDOFF forbids changing the ticket path on a number
+     * nobody can measure. That is why `matched_by` joins the recorded outcome
+     * below rather than being fixed blind here.
+     */
+    if (uniqueMatch) {
       const { rememberVerifiedIdentity } = await import('./verifiedIdentity');
       rememberVerifiedIdentity(str(input.call_sid), {
         firstName: resolved.patientData?.firstName,
         lastName: resolved.patientData?.lastName,
         dateOfBirth: resolved.patientData?.dateOfBirth,
+        // The same `certain` reported to the model as `identity_is_certain`.
+        // It was computed twenty lines up and then dropped here, so a
+        // name-only hit was stored as though it were a verified identity
+        // (Codex, PR #268 round 3).
+        certain,
       });
     }
 
@@ -236,11 +311,25 @@ registerTool({
   name: 'resolve_location',
   layer: 'agent',
   timeoutMs: 4000,
+  /**
+   * "BEFORE YOU FILE A TICKET" WAS READ AS "ALWAYS", AND IT COST 14 CALLS.
+   *
+   * 2026-09-03: this tool was called with NO ARGUMENT 34 times across 16 calls.
+   * `spoken_location` is in `required`, so validateInput refused every one
+   * before the handler ran — and only 5 of those 16 calls went on to file, the
+   * worst recovery rate of any gate that day.
+   *
+   * The old wording named a MOMENT ("before you file") and never named a
+   * PRECONDITION, so a model with nothing to resolve called it anyway, on
+   * schedule, and burnt a turn asking a question standing instruction 10
+   * forbids — "never ask a patient where our offices are".
+   */
   description:
-    'Turn what the caller said about an office into the real office name. Call it ' +
-    'with their words — "the Encinitas one", "Azul Vision Redlands" — before you ' +
-    'file a ticket. A ticket without a location is harder to route, so if this ' +
-    'cannot resolve it, ask the caller which office they visit.',
+    'Turn what the caller said about an office into the real office name — ' +
+    '"the Encinitas one", "Azul Vision Redlands". ONLY call this when the caller ' +
+    'has actually named a place; there is nothing to resolve otherwise, and ' +
+    'calling it empty just wastes a turn. If they have not named one, use the ' +
+    'office already on their record instead.',
   input_schema: {
     type: 'object',
     properties: {

@@ -632,3 +632,334 @@ closed and the run is repeated.
 Files on Replit (git-ignored): `replay-out/optical-2026-09-02/{results,summary,breakdown,breakdown2}.json`.
 The two `breakdown*.json` files are PHI-free aggregates written by the Replit
 Agent for this write-up.
+
+---
+
+# 2026-09-03 — the runtime cutover, and the first day of real evidence
+
+Three queue lanes moved off the OpenAI SIP core onto the Grok Media Streams
+runtime: optical 15:24:58, surgery 19:43:57, tech 19:51:10 UTC. Records stayed
+on the old core and is therefore a same-day control, which is the only reason
+any of the numbers below can be trusted.
+
+## The headline: it is a wash, and that is the right result
+
+| lane | old core | Grok runtime |
+|---|---|---|
+| tech | 49/73 = 67.1% | 46/66 = **69.7%** |
+| surgery | 22/44 = 50.0% | 18/32 = **56.3%** |
+| optical | (no arm — cut over at 15:24) | 28/56 = **50.0%** |
+| records | 14/29 = 48.3% | *did not move* |
+
+Neither difference is significant at these n. **A pipeline swap that changes
+nothing about outcomes is a successful pipeline swap** — the ear, brain and
+mouth were replaced end to end and the patients could not tell. What the
+runtime buys is not a better number today; it is that everything below is now
+fixable by us rather than by a vendor.
+
+Two real differences, on the same calls: turn detection is better (tech callers
+say 353 characters against 333, in fewer transcript lines, at identical
+duration), and the agent talks in about twice as many short lines.
+
+## The finding that mattered
+
+**A refusal the model cannot diagnose is a refusal it repeats.**
+
+| gate hit | calls | still filed |
+|---|---|---|
+| `date_of_birth` | 23 | **0** |
+| optical `location` | 11 | 9 |
+
+Two refusals in one codebase. One survivable, one terminal, and the difference
+is not severity — it is whether anything the caller says can clear the gate. It
+could not: the model was omitting `date_of_birth` from the tool call entirely,
+heard "I did not catch that date of birth", said that to the caller, the caller
+repeated the date, and the model resent the same argument-less payload. An
+unwinnable loop, dressed as a caller problem.
+
+Most of the day was spent fixing the parser — separators, whole sentences,
+two-digit centuries, Spanish months. Every one of those was a real bug. **None
+of them was this one.** What settled it was `dobShape`: a PHI-free shape of what
+actually arrived (digits → `#`, letters → `a`), which read `"(none)"` on five
+refusals out of five within twenty minutes of going live.
+
+## Where the day's requests went
+
+53 substantive queue calls produced no ticket; 2 correctly so. The other 51:
+23 the date-of-birth gate, 12 asked for a human and hung up, 7 where no tool
+ever ran, 9 other. The date-of-birth calls average 2m49 — the longest in the
+set. Those callers gave everything asked of them and were failed at the end.
+
+## Identity is the root cause under most of it
+
+Caller-ID pre-context produced a usable name on **zero of 143** substantive
+queue calls, so nobody heard "Am I speaking with…?" all day. Of 132 distinct
+callers, **2** are in `si_persons` — the 3,774-row table pre-context reads — and
+**100** are in `patients_master`, which has 915,843. `lookup_patient` separately
+reads the Operations Hub appointment book rather than the mirror.
+
+That single fact explains the shape of the losses: a certain identity match is
+what lets the filing handler fall back to a verified date of birth, so calls
+with one mostly filed and calls without one mostly did not.
+
+## Shipped, and needing a pull before any of it counts
+
+- `MissingFields.fix` — a channel that tells the model what IT got wrong,
+  separate from `message`, which is what the agent says.
+- The teardown request sweep, wired into `voiceRuntime` after the call_logs
+  write. **It recovers only 6 of the 53 losses**; 47 skip on "no name, no
+  ticket", because the calls that get lost are exactly the calls where
+  identification failed.
+- "Lead the ask" — the operator's ruling, in the tool schemas so all four lanes
+  move together: last name, then "your date of birth, starting with the month,
+  then the day, then the year".
+- Greeting-already-played, appended by the runtime rather than the prompts.
+- Records trimmed 1,907 → 1,679 tokens, with ceilings added for optical and
+  records, which had never had one.
+
+## Open, and Wayne's to settle
+
+1. **"No name, no ticket" costs 47 of 53 recoveries.** The ruling was about what
+   identity goes on a swept ticket. The calls it blocks are the ones where we
+   never identified anyone — which is the whole population the sweep exists for.
+2. **Point pre-context at `patients_master` instead of `si_persons`** (2 → 100
+   of 132 callers), and `lookup_patient` at the mirror before the schedule. Both
+   are ticket-path changes and need a before/after number. Caveat that must
+   travel with them: 75 of those 100 numbers resolve to more than one person, so
+   this buys a name to CONFIRM, never an identity.
+3. **Records is still on the old core** and visibly missing the rulings shipped
+   to the runtime lanes — it used the "someone will become available" wording
+   #265 forbids, at 23:54.
+4. **Turkish months** — one evidenced call, and the table's own rule is evidence
+   first. Add now on one call, or wait?
+5. **#53 medical-safety wording** for optical and records. Needs clinical
+   language from Wayne; not to be invented.
+
+---
+
+# 2026-09-04 — the instruments, after Wayne said the Observatory was wrong
+
+He was right, and it was one missing column.
+
+## The Observatory had stopped counting three of the four queue lanes
+
+Measured over every call since 09-01:
+
+| pipeline | calls | rows carrying `agent_id` |
+|---|---|---|
+| old core (SIP) | 1,315 | 1,315 (100%) |
+| grok runtime | 239 | **0** |
+
+The runtime opened its `call_logs` row with the lane slug and nothing else.
+Five reports join `agents` on the uuid — the Observatory scorecard, the
+Observatory today view, the cost analytics (`routes.ts:2281`), the quality
+and sentiment analytics (`routes.ts:2463`), and `storage.ts:523`. So at
+15:24:58 on 09-03, the moment optical cut over, it stopped existing in all
+five. **Not wrong, ABSENT** — and an absent lane is indistinguishable from a
+quiet one, which is why nothing looked broken.
+
+`shared/schema.ts:549` had anticipated exactly this in a comment — *"even if
+agentId is null"* — but nothing implemented the fallback.
+
+Fixed at the source rather than by teaching five call sites a second join:
+`src/runtime/agentIdentity.ts`, one cached lookup per lane per process. A
+miss is deliberately **not** cached, so a lane whose agents row is added
+later is picked up without a redeploy and its marker keeps printing until it
+is. **259 existing rows were backfilled** from the slug they already carried
+(every slug matched exactly one agent; reversal snapshot in
+`call_logs_agent_id_backfill_20260904`), so the cutover day is visible again.
+
+The Observatory also had **no concept of `voice_provider` anywhere** — server
+or client — so the biggest thing that has ever happened to these agents was
+invisible on the one screen built to watch them. Each card now names its
+pipeline and warns *"mixed pipelines — do not read these as one population"*
+on a lane that cut over mid-day.
+
+Left alone, deliberately: 98 rows with a NULL `agent_used` (Nov–Jan), 14
+`greeter`, 5 `claude-as`. No current lane among them.
+
+## The Grok cost was never a measurement
+
+All 241 Grok rows carry `cost_is_estimated = true` and `cost_reconciled_at`
+NULL. Both columns have existed since the schema was written and had never
+been used on any row, either pipeline. The price is
+`Math.ceil(duration * 8/60)` from a constant nobody had checked against a
+bill.
+
+| | |
+|---|---|
+| summed seconds | 25,259 (421 min) |
+| exact at the published $0.08/min | $33.68 |
+| stored | $34.86 |
+| overstatement from `Math.ceil` alone | **$1.18 = 3.5%** |
+
+Zero rows deviated from the formula, so the bias is the rounding, applied in
+the same direction 241 times.
+
+Wayne's method is the right one and it is now built: xAI run a **management
+API** (`management-api.x.ai`, a separate credential from `XAI_API_KEY`) with
+`POST /v1/billing/teams/{team}/usage` for spend per day and
+`GET .../postpaid/invoice/preview` for `unitPrice` and `numUnits`. A flat
+per-minute rate means a day's authoritative total can be split across that
+day's calls by seconds — an allocation that **sums to what xAI actually
+charged**, and that absorbs anything we are not counting. xAI bill
+`$0.004 / text input` separately from the audio minute and we never have.
+
+`invoice/preview` is the sharper instrument of the two, because `numUnits` is
+how many units **they** counted, which is the only way to find out whether
+they bill the duration Twilio reports.
+
+**It is dormant until `XAI_MANAGEMENT_KEY` and `XAI_TEAM_ID` exist.** It says
+so once at boot and does not schedule.
+
+## Also shipped today
+
+- **The date-of-birth gate stops being terminal** (`src/tools/dobEscape.ts`).
+  Ask once with the coaching wording, then file anyway marked `unavailable`
+  (never given) or `unmatched` (given, unreadable). This is the same ruling
+  Wayne gave for optical's office on 09-01, and the cutover day measured both
+  side by side: the location gate **had** that escape and recovered 9 of 11;
+  the date-of-birth gate did not and recovered **0 of 23**.
+  The status goes at the top of the description, not in the birth columns —
+  those are `varchar(2)/(2)/(4)` in the ticketing app and the word does not
+  fit. A dedicated ticket field is the proper fix and is proposed, not built.
+
+## Open, and Wayne's to settle
+
+1. **The two xAI credentials.** `XAI_MANAGEMENT_KEY` (Console → Settings →
+   Management Keys — NOT the inference key) and `XAI_TEAM_ID`
+   (console.x.ai/team/default/settings/team). One reconciliation run then
+   answers whether $0.08/min is the real rate and whether the text-input
+   charge is material.
+2. Everything still open from 09-03 below, unchanged: "no name, no ticket";
+   pre-context → `patients_master`; records on the old core; Turkish months;
+   #53 medical-safety wording.
+3. **Records stays untouched** — HHS corrective action plan work.
+
+---
+
+## PCP and records on the runtime — what is actually left (2026-09-04)
+
+Measured through `realLanes.test.ts`, the one harness that touches the real
+agent tree, with a transfer injected so pcp could be examined in the
+condition it would actually run in — which nobody had ever done, because pcp
+has spent its whole life on the refused side of that gate.
+
+**Both lanes bind cleanly today.** No skipped tools, no `strict` on any
+schema, no stringified prompt closure, a Grok voice rather than the
+registry's `sage`, and the knowledge pack correctly prefixed.
+
+| | pcp | records |
+|---|---|---|
+| tools resolved | 8, none skipped | 6, none skipped |
+| output guardrails carried | **3** | **0** |
+| prompt, total chars | 18,360 | 16,035 |
+| the lane's own share | **~2,260 tokens** | ~1,680 tokens |
+| what refuses it today | no transfer injected | nothing — it is served |
+
+### records
+
+**It is already servable and always was.** The only reason it is on the old
+core is that nothing has pointed it at the runtime. Nothing needs building.
+
+The thing to correct in this document's own earlier note: records is not
+"missing every ruling shipped to the runtime lanes". Its #265 wording landed
+in `recordsAgent.ts` at 21:04 UTC on 09-03 and the violation was observed at
+23:54 — **nearly three hours later, because the commit is on
+`claude/determined-brown-o5qsft` and has never been deployed.** `agent_prompts`
+is not read by the call path, so the prompt is the file, and the file is
+right. The split that actually matters:
+
+- **Prompt- and tool-level rulings** — the #265 wording, lead-the-ask, the
+  date-of-birth escape, `resolve_location` — records gets all of these on
+  merge and pull, **on the old core, with no cutover.**
+- **Runtime-level** — greeting-already-played, the VAD threshold, the tool
+  ceiling, the teardown sweep, `agent_id`, Grok cost — records gets **none**
+  of these until it moves.
+
+**Its one real gap is that it carries zero output guardrails**, on either
+pipeline (#53). So does optical, surgery and tech. See below.
+
+### pcp
+
+Everything is built. Two things are not settled, and neither is code:
+
+1. **The warm transfer has never been proven on a live call** (#30, six test
+   calls with Wayne, never run). Transfer is the entire point of this lane.
+   It is unit-tested through a fake Twilio and mounted on the runtime, and
+   that is not the same claim.
+2. **`PCP_HUMAN_AGENT_NUMBER` must be set** or the lane answers, sounds
+   healthy, and fails every transfer at `resolveHandoffDestination`. This is
+   now reported per lane at boot and on `/voice/health` rather than
+   discovered on a call.
+
+And one measurement worth acting on before it takes traffic: at **~2,260
+tokens** its prompt is a third larger than the trimmed queue lanes, and it
+has never been trimmed for Grok. The standing note is *"Grok requires minimal
+prompting, we should not be near our ceilings."*
+
+#### The pcp prompt, measured section by section (2026-09-04)
+
+Built the net before touching anything: `src/agents/pcpPromptRulings.test.ts`,
+the pcp equivalent of `queuePromptRulings.test.ts`, which pcp never had —
+because pcp spent its whole life refused by the runtime, so nobody measured
+it. **23 rulings, matched on meaning rather than phrasing**, each traced to a
+standing instruction or to a dated incident already recorded in `pcpAgent.ts`.
+It is green against the prompt as it stands today, which is the only way to
+tell a trim from a regression later.
+
+Then the coverage runs the other way — delete each section and see which
+rulings stop holding:
+
+| section | ~tokens | unique rulings lost if deleted |
+|---|---|---|
+| `## FIRST, ALWAYS: WHAT IS THIS CALL ABOUT?` | 391 | 4 |
+| `# TWO THINGS ABOUT THE LAST THIRTY SECONDS` | 287 | 2 |
+| `# IF A PATIENT REACHES YOU, TAKE THEIR REQUEST` | 261 | 2 |
+| `# WHEN A TOOL SAYS NO` | 249 | 2 |
+| `# ONE QUESTION. THEN STOP TALKING.` | 226 | 2 |
+| `# CONNECTING SOMEONE TO A PERSON` | 167 | 3 |
+| `# HOW YOU SPEAK` | 130 | 2 |
+| `## HOW YOU KNOW WHAT TO ASK` | 121 | **0** |
+| `# SAFETY` | 94 | 2 |
+| `# THE DIRECTOR DECIDES, NOT YOU` | 71 | **0** |
+| `# MEDICAL RECORDS` | 68 | 1 |
+| `# WHAT YOU DO` | 49 | **0** |
+
+**THE FINDING: the pcp prompt is dense, not fat.** Twenty-three rulings in
+2,260 tokens. Only three sections carry no unique ruling and together they are
+241 tokens — and two of those three are the SAME instruction stated twice
+(*"ask only the next question `record_pcp_intake` gives you"*), which is the
+one honest redundancy in the file. Even they are not pure duplicates:
+`# THE DIRECTOR DECIDES` alone says the director also decides whether a
+transfer is available, and `## HOW YOU KNOW` alone carries the four-step loop
+and *"you do not have the list"* — the #201 lesson, where showing the model
+the intake order stopped it inventing a sequence and started it reciting one.
+
+So a trim that gets pcp near the queue lanes' 1,500–1,800 means **dropping
+rulings, not prose**, and which ones is Wayne's call, not mine. The three
+zero-ruling sections are named in the test file with the reason each is kept,
+and a NEW section carrying no ruling now fails rather than joining them
+quietly.
+
+The ceiling is pinned at **2,300 — where the prompt already is.** It asserts
+one thing today: that pcp does not grow while nobody is looking. Lowering it
+is the point of the trim.
+
+### The guardrail gap, with a number on it at last
+
+The four queue lanes carry **no output guardrails on either pipeline**. Before
+proposing the existing `medicalSafetyGuardrails` for them, they were dry-run
+over **400 real queue calls / 2,704 agent lines**:
+
+- **One** trip in the whole corpus, and it was **wrong** — the agent reading
+  the caller's own words back ("you mentioned you have questions about your
+  recovery from cataract surgery"). In enforce mode that line is cut
+  mid-sentence.
+- With the exclusion added for it: **zero** trips.
+
+So the cost of switching them on is now measured at nothing, and the same
+pattern was misfiring on no-ivr, after-hours and azul-scheduling the whole
+time. **Turning them on for the queue lanes is still Wayne's call** — #53
+says the clinical language is his, and the generic pair may not be what he
+wants for records in particular.

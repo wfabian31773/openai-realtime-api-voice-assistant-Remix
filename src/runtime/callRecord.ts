@@ -36,6 +36,7 @@
  */
 
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
 
 /**
  * Identity the runtime was TOLD, never identity it inferred. Supplied by
@@ -245,6 +246,28 @@ export function toCallLogRow(
     // calls on VoiceCallRecord, for logs and tests, and off the row.
     totalTurns: record.agentTurns,
     interruptionCount: record.interruptions,
+    /**
+     * WHAT THE CALL COST — the columns the old core has always written and the
+     * runtime never did.
+     *
+     * Spread conditionally, so a call the provider reported nothing for leaves
+     * them NULL rather than writing zeros. That distinction is the finding:
+     * on 2026-09-03, 179 completed runtime calls carried NULL in every one of
+     * these while the old core's 185 over the same hours reported 77.0% of
+     * input tokens served from cache. Zeros here would have made a missing
+     * feed look like a free call and hidden it again.
+     */
+    ...(record.usage
+      ? {
+          inputTextTokens: record.usage.inputTextTokens,
+          inputAudioTokens: record.usage.inputAudioTokens,
+          outputTextTokens: record.usage.outputTextTokens,
+          outputAudioTokens: record.usage.outputAudioTokens,
+          inputCachedTokens: record.usage.inputCachedTokens,
+          inputCachedTextTokens: record.usage.inputCachedTextTokens,
+          inputCachedAudioTokens: record.usage.inputCachedAudioTokens,
+        }
+      : {}),
     // Counted from real wire events, not estimated from wall time — the
     // distinction the column exists to record.
     telemetrySource: "realtime_events",
@@ -283,6 +306,14 @@ export interface RuntimeCallOpenRow {
   to: string;
   dialedNumber: string;
   agentUsed: string;
+  /**
+   * The agents-table uuid. `agentUsed` carries the slug, but every per-agent
+   * report joins on THIS — so a row without it is not mis-attributed, it is
+   * absent. See src/runtime/agentIdentity.ts for the measurement that found
+   * 239 runtime calls missing from the Observatory for exactly this reason.
+   * Optional because a lane with no agents row must still be logged.
+   */
+  agentId?: string;
   agentVersion?: string;
   status: "in_progress";
   startTime: Date;
@@ -352,8 +383,16 @@ export async function openRuntimeCall(
   },
   insert: CallLogInsert = defaultOpenInsert,
   env: Record<string, string | undefined> = process.env,
+  agentIdLookup?: AgentIdLookup,
 ): Promise<string | undefined> {
   try {
+    // Resolved BEFORE the insert, not patched on afterwards: the row is
+    // read the moment it lands (flushAzulTimeline, stampVerifiedIdentity),
+    // and a row that is briefly unattributed is a row some report samples
+    // while it is. Awaiting it costs one cached map read after the first
+    // call on each lane, and a failure yields undefined rather than
+    // throwing, so the call is still logged exactly as it is today.
+    const agentId = await resolveAgentId(context.slug, agentIdLookup);
     return await insert({
       callSid: context.callSid,
       direction: "inbound",
@@ -361,6 +400,7 @@ export async function openRuntimeCall(
       to: context.dialedNumber,
       dialedNumber: context.dialedNumber,
       agentUsed: context.slug,
+      ...(agentId ? { agentId } : {}),
       ...(context.agentVersion ? { agentVersion: context.agentVersion } : {}),
       status: "in_progress",
       // The claim time, not `new Date()`: this insert runs only after the

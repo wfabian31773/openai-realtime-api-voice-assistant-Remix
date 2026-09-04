@@ -282,6 +282,19 @@ async function load(): Promise<Snapshot | null> {
 }
 
 /** Current snapshot, refreshing if stale. Never throws; returns null if unavailable. */
+/**
+ * The snapshot ALREADY in memory, or null — never a fetch.
+ *
+ * The voice runtime builds its keyterm list inside a synchronous
+ * `createSession` callback on the call path, where an await would add latency
+ * to every answer for data that is refreshed on a timer anyway. A cold process
+ * answers its first call or two without keyterms and warms up behind them;
+ * that is the right trade against making a caller wait.
+ */
+export function loadedDirectory(): Snapshot | null {
+  return snapshot;
+}
+
 export async function getDirectory(): Promise<Snapshot | null> {
   if (snapshot && Date.now() - snapshot.loadedAt < REFRESH_MS) return snapshot;
   if (inFlight) return inFlight;

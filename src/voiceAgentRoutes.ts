@@ -1754,7 +1754,10 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
           
           // CRITICAL: DO NOT save duration - TWILIO IS THE SOURCE OF TRUTH
           // Let Twilio status callback set the authoritative duration
-          await storage.updateCallLog(callMeta.dbCallLogId, {
+          // Preserving, because this sets cost_is_estimated. A reconciled
+          // row must not be relabelled an estimate — the badge and the
+          // number have to agree in both directions.
+          await storage.updateCallLogPreservingReconciledCost(callMeta.dbCallLogId, {
             status: 'transferred',
             endTime,
             // DO NOT SET DURATION - Twilio status callback will set it
@@ -4720,7 +4723,8 @@ async function observeCall(
         // finalized 4 of 5, and this block never ran for them.
         void flushLoopTelemetry(callId, callMeta.dbCallLogId);
 
-        await storage.updateCallLog(callMeta.dbCallLogId, {
+        // Preserving, for the same reason as the handoff teardown above.
+        await storage.updateCallLogPreservingReconciledCost(callMeta.dbCallLogId, {
           status: 'completed',
           endTime,
           // DO NOT SET DURATION HERE - Twilio status callback will set it
@@ -7841,10 +7845,23 @@ export function setupVoiceAgentRoutes(app: Express): void {
         voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
         inputAudioTokens: callLog.inputAudioTokens,
         existingOpenaiCostCents: callLog.openaiCostCents,
+        costReconciledAt: (callLog as { costReconciledAt?: Date | null }).costReconciledAt,
         durationSeconds: duration,
         twilioCostCents,
       });
-      const hasTokenDerivedCost = pricing.basis === "openai_tokens";
+      /**
+       * A RECONCILED ROW IS AUTHORITATIVE TOO.
+       *
+       * This asked only about tokens, so a Grok row already priced from
+       * xAI's invoice fell through and got `costIsEstimated = true` set on
+       * it — while `cost_reconciled_at` stayed populated. The cost survived
+       * (priceVoiceCall's guard holds), but the row then said both
+       * "estimated" and "reconciled at 06:00", and the Observatory and the
+       * QVO exports read the flag. A number that is right and labelled wrong
+       * is still a number nobody can trust (Codex, PR #268 round 3).
+       */
+      const hasTokenDerivedCost =
+        pricing.basis === "openai_tokens" || pricing.basis === "reconciled";
       const openaiCostCents = pricing.providerCostCents ?? callLog.openaiCostCents ?? 0;
       const totalCostCents = pricing.totalCostCents;
 
@@ -7886,14 +7903,18 @@ export function setupVoiceAgentRoutes(app: Express): void {
         updateData.costIsEstimated = !hasTokenDerivedCost;
         console.info(
           `[STATUS CALLBACK] ✓ TWILIO AUTHORITATIVE: Duration=${twilioProvidedDuration}s` +
-            (hasTokenDerivedCost ? ' (cost from tokens, preserved)' : ' (cost estimated from duration)'),
+            (pricing.basis === "reconciled"
+              ? ' (cost reconciled against the provider bill, preserved)'
+              : hasTokenDerivedCost
+                ? ' (cost from tokens, preserved)'
+                : ' (cost estimated from duration)'),
         );
       } else {
         // Twilio didn't provide duration - keep costIsEstimated true for reconciliation
         console.warn(`[STATUS CALLBACK] ⚠️ Twilio did not provide CallDuration, keeping costIsEstimated=true for reconciliation`);
       }
       
-      await storage.updateCallLog(callLog.id, updateData);
+      await storage.updateCallLogPreservingReconciledCost(callLog.id, updateData);
 
       // Update campaign contact if this was a campaign call
       if (callLog.campaignId && callLog.contactId) {

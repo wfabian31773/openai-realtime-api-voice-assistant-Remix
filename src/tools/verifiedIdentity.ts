@@ -40,8 +40,36 @@ import { isTwilioCallSid } from './callSid';
 export interface VerifiedIdentity {
   firstName: string;
   lastName: string;
-  /** As the record holds it. Parsed by the caller, never displayed. */
-  dateOfBirth: string;
+  /**
+   * As the record holds it. Parsed by the caller, never displayed.
+   *
+   * OPTIONAL, because a verified NAME and a carried-forward date of birth are
+   * two different things. A certain unique phone match whose schedule row has
+   * no date of birth used to store nothing at all — so the sweep reported
+   * "no-name" and dropped a recoverable request from a caller we had
+   * positively identified (Codex, PR #268 round 7). `verifiedDobFor` still
+   * refuses to answer without one; only `verifiedIdentityFor` is satisfied by
+   * a name.
+   */
+  dateOfBirth?: string;
+  /**
+   * The match was UNAMBIGUOUS — not a unique hit on a name or a date of
+   * birth alone.
+   *
+   * `lookup_patient` computes this (`sharedPatientTools.ts`: unique AND
+   * matchedBy is neither 'name' nor 'dob') and reports it to the model as
+   * `identity_is_certain: false`, precisely so the agent does not treat a
+   * name-only hit as the person. It then stored the candidate here anyway,
+   * with the certainty dropped on the floor — so anything reading this map
+   * saw a name-only guess as a verified identity (Codex, PR #268 round 3).
+   *
+   * That matters most for the teardown sweep, which files a request under
+   * this name with nobody watching. Wayne's standing instruction 6 is that
+   * verification "refuses to guess between two people"; a name is exactly
+   * the field that collides, and these lines get fathers and sons
+   * constantly.
+   */
+  certain: boolean;
 }
 
 interface Entry extends VerifiedIdentity {
@@ -96,20 +124,45 @@ export function rememberVerifiedIdentity(
   callSid: string | undefined,
   identity: Partial<VerifiedIdentity>,
 ): void {
-  const firstName = norm(identity.firstName);
-  const lastName = norm(identity.lastName);
+  // Absent means NOT certain. A caller that forgets to say so must not get
+  // the benefit of the doubt on a field this one is about.
+  const certain = identity.certain === true;
+  /**
+   * STORED AS THE RECORD SPELLS IT, MATCHED CASE-INSENSITIVELY.
+   *
+   * These used to be stored lower-cased, because the only reader compared them
+   * and never showed them. The request sweep now puts this name on a ticket a
+   * human reads, and "testpatient example" on a patient record is wrong in a
+   * way nobody would have caught from a passing test. Matching is unchanged —
+   * `norm` is applied at the comparison instead of at the write.
+   */
+  const firstName = (identity.firstName ?? '').trim();
+  const lastName = (identity.lastName ?? '').trim();
   const dateOfBirth = (identity.dateOfBirth ?? '').trim();
-  if (!isTwilioCallSid(callSid) || !firstName || !lastName || !dateOfBirth) return;
+  // A NAME IS ENOUGH TO REMEMBER. The date of birth is a bonus that the
+  // filing tools carry forward; its absence is not a reason to forget who
+  // the caller is.
+  if (!isTwilioCallSid(callSid) || !firstName || !lastName) return;
   const now = Date.now();
   sweep(now);
   verified.delete(callSid);
-  verified.set(callSid, { firstName, lastName, dateOfBirth, at: now });
+  verified.set(callSid, {
+    firstName,
+    lastName,
+    ...(dateOfBirth ? { dateOfBirth } : {}),
+    certain,
+    at: now,
+  });
 }
 
 /**
  * The date of birth we verified for this call, IF the ticket is for that same
  * person. Returns undefined otherwise — including for a caller filing on
- * somebody else's behalf, which is the case this must never guess at.
+ * somebody else's behalf, which is the case this must never guess at, and
+ * now also for a caller we identified from a record that simply has no date
+ * of birth on it. That entry still exists so the sweep knows who called; it
+ * just has no date to carry forward, and answering undefined is exactly
+ * right (Codex, PR #268 round 7).
  */
 export function verifiedDobFor(
   callSid: string | undefined,
@@ -123,8 +176,52 @@ export function verifiedDobFor(
   const entry = verified.get(callSid);
   if (!entry) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;
-  if (norm(firstName) !== entry.firstName || norm(lastName) !== entry.lastName) return undefined;
+  if (norm(firstName) !== norm(entry.firstName) || norm(lastName) !== norm(entry.lastName)) {
+    return undefined;
+  }
   return entry.dateOfBirth;
+}
+
+/**
+ * The whole identity verified for this call, or undefined.
+ *
+ * Added 2026-09-03 for the request sweep. Operator ruling that afternoon:
+ * *"no name no ticket."* The sweep files a caller's request from the
+ * transcript when the agent did not, and it must never invent a person to
+ * hang it on — so it asks here, and stays its hand when the answer is
+ * undefined.
+ *
+ * Same TTL and same call-sid validation as the date-of-birth read. It does
+ * NOT take a name to match against, because it is not answering "is this
+ * ticket for that person?" — it is answering "who did we establish this
+ * caller to be?", which is the question the sweep has.
+ */
+export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdentity | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = verified.get(callSid);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > TTL_MS) return undefined;
+  /**
+   * AN UNCERTAIN MATCH IS NOT AN IDENTITY, and this reader is the one that
+   * must not accept one. Its only caller is the teardown sweep, which puts
+   * this name on a ticket a human then acts on, with nobody watching the
+   * call. A unique hit on a NAME alone is exactly the case Wayne's
+   * instruction 6 refuses — and filing one patient's request under another
+   * patient's name is worse than not filing it, which is saying something,
+   * because "no name, no ticket" already costs 47 recoveries a day.
+   *
+   * `verifiedDobFor` deliberately keeps its existing behaviour: it answers a
+   * different question ("is this ticket for that same person?") and applies
+   * its own name guard, and narrowing it is a ticket-path change that
+   * BACKEND_HANDOFF says needs a before/after number. Raised, not done here.
+   */
+  if (!entry.certain) return undefined;
+  return {
+    firstName: entry.firstName,
+    lastName: entry.lastName,
+    ...(entry.dateOfBirth ? { dateOfBirth: entry.dateOfBirth } : {}),
+    certain: true,
+  };
 }
 
 /** Tests only. */

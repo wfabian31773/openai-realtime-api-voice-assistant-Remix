@@ -39,6 +39,7 @@ import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '.
 import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
 import '../tools/opticalTools';
+import '../tools/languageTools';
 
 export interface OpticalAgentMetadata {
   callId?: string;
@@ -80,12 +81,26 @@ export const opticalAgentConfig = {
 };
 
 /** The five tools this queue needs, and deliberately nothing else. */
+/**
+ * `set_spoken_language` follows the caller's language mid-call (operator
+ * instruction, 2026-09-03). The tool normalises; the runtime performs the
+ * `session.update` — see the TRANSPORT NOTE — SET_SPOKEN_LANGUAGE in
+ * mediaStreamBridge.ts. No prompt line is added for it: the tool's own
+ * description carries the instruction, which is the point of giving Grok
+ * tools instead of paragraphs.
+ *
+ * The comment lives ABOVE this array, not inside it: serverRegistration.test
+ * parses these names straight out of the source, and an apostrophe in a
+ * comment between the brackets was read as a tool name.
+ */
 export const OPTICAL_TOOLS = [
   'lookup_patient',
   'resolve_location',
   'check_open_tickets',
   'classify_optical_request',
   'file_optical_ticket',
+
+  'set_spoken_language',
 ];
 
 export function buildOpticalPrompt(metadata: OpticalAgentMetadata): string {
@@ -175,18 +190,30 @@ and that is enough.
 The filing tool routes it to the right team and tells you which in routed_to.
 Use THAT name when you say what happens next, never one you guessed at.
 
+# SPEAK THEIR LANGUAGE
+If the caller is not speaking English, call set_spoken_language and continue in
+their language. Never tell them you cannot help them in it.
+
 # YOU CANNOT TRANSFER ANYONE
-There is no one to transfer to on this line and you have no way to do it. If
-they ask for a person, say so plainly and offer what you can actually deliver:
-"I'm not able to transfer you, but I can take this down and have the optical
-team at your office call you back." Then take the request. Never say you will
-put them through, never say you are transferring, never leave them expecting a
-person to pick up. Promising a transfer you cannot make is worse than saying no.
+No one to transfer to, and no way to do it. When they ask for a person —
+representative, agent, someone in the department — say what you cannot do and
+what you can, then do it: "I'm not able to transfer calls. What I can do is
+take a message and put in a request for the optical team at your office to
+follow up with you." Never say you will put them through, and never imply
+someone is about to come free: no "they're currently busy", no "as soon as
+someone's available".
 
 # APPOINTMENTS
 If they want to book, change or cancel an appointment, take the request in their
 own words and file it — the tool routes it to our scheduling hub. Do not attempt
 to schedule anything yourself, and do not tell them to call another number.
+
+# LEAD THE ASK — ONE AT A TIME, IN THESE WORDS
+  "May I please have your last name?"
+  "And may I please have your date of birth, starting with the month,
+   then the day, then the year?"
+Never both in one breath, never a bare "date of birth" — say the order every
+time. Asked open, people answer in any shape, and the shape is what loses it.
 
 # HOW A CALL RUNS
 1. Find them. Call lookup_patient as soon as you have their phone number, or

@@ -204,6 +204,16 @@ async function startVoiceServer() {
     // Start daily OpenAI cost reconciliation scheduler
     dailyOpenaiReconciliation.startDailySchedule();
     
+    // The same thing for Grok, which never had it. OpenAI calls have been
+    // reconciled against OpenAI's own billing since the line above existed;
+    // every Grok call ever served is still marked cost_is_estimated = true,
+    // priced from a rate constant nobody has checked against a bill. Dormant
+    // and silent without XAI_MANAGEMENT_KEY / XAI_TEAM_ID — it says so once
+    // at boot and does not schedule.
+    import('./services/grokCostReconciler').then(({ startGrokCostReconciler }) => {
+      startGrokCostReconciler();
+    }).catch(err => console.error('[STARTUP] Failed to start Grok cost reconciler:', err));
+
     // Start grader-based push alerting (checks every 15 min)
     systemAlertService.startGraderAlertSchedule();
 

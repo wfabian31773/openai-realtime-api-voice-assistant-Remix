@@ -569,8 +569,22 @@ class SystemAlertService {
 
       const verdict = assessTicketFiling(snapshot);
       if (!verdict.stalled) {
+        /**
+         * The marker for the 2026-09-03 precision work, and a live counter:
+         * this line only ever says "held" when a run reached the threshold and
+         * a CONFIRMED filing inside its span disconfirmed it. Before the
+         * change that run was an email saying filing had stopped.
+         */
+        if (verdict.suppressedByConfirmedFiling) {
+          console.log(
+            `[ALERT SERVICE] Ticket filing alarm HELD — a run of ${verdict.unfiledRun} reached the ` +
+              'threshold but a ticket was confirmed filed inside it; filing has not stopped',
+          );
+          return;
+        }
         console.log(
-          `[ALERT SERVICE] Ticket filing OK — ${verdict.unfiledRun} call(s) since the last ticket, ` +
+          `[ALERT SERVICE] Ticket filing OK — ${verdict.unfiledRun} call(s) since the last ticket ` +
+            `(${verdict.greetingOnlySkipped} greeting-only hangup(s) not counted), ` +
             `${verdict.outboxHeld} held in the outbox`,
         );
         return;
@@ -582,6 +596,7 @@ class SystemAlertService {
         message: `TICKET FILING HAS STOPPED: ${verdict.reason}`,
         details: {
           unfiledRun: verdict.unfiledRun,
+          greetingOnlySkipped: verdict.greetingOnlySkipped,
           minutesSinceLastFiled: verdict.minutesSinceLastFiled,
           outboxHeld: verdict.outboxHeld,
         },

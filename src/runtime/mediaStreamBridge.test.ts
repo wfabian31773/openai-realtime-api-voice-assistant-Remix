@@ -74,6 +74,7 @@ function makeBridge(
     maxCallMs?: number;
     deadAirMs?: number;
     guardrailMode?: "enforce" | "log";
+    toolCeiling?: { identicalFailures?: number; perToolFailures?: number; perCallDispatches?: number };
   } = {},
 ) {
   const timers = makeTimers();
@@ -101,6 +102,7 @@ function makeBridge(
     }),
     close: vi.fn(),
     getResponseEpoch: () => epoch,
+    setSpokenLanguage: vi.fn(),
   } satisfies BridgeSession;
 
   let handlers!: BridgeSessionHandlers;
@@ -131,6 +133,7 @@ function makeBridge(
     deadAirMs: over.deadAirMs ?? 30_000,
     setTimer: timers.setTimer,
     clearTimer: timers.clearTimer,
+    toolCeiling: over.toolCeiling,
   });
 
   return {
@@ -674,6 +677,104 @@ describe("VoiceCallBridge — tool dispatch", () => {
     ]);
     expect(JSON.stringify(records[0].toolEvents)).not.toContain("Wayne");
   });
+
+  /**
+   * A REFUSAL IS `ok: true` AND `succeeded: false`, AND THE RECORD MUST SAY SO.
+   *
+   * `dispatch` answers ok whenever the tool RAN, so a refused
+   * `file_*_ticket` — the commonest thing that happens on these lanes — comes
+   * back ok with no error. Anything downstream asking "was a ticket filed?"
+   * has to read `succeeded`.
+   *
+   * This test exists because the request sweep asked that question of `ok`
+   * and would therefore have skipped recovery on every call it was built for.
+   * A mutation putting `ok` back into the recorded event passed the whole
+   * suite before this was written.
+   */
+  it("records a REFUSED tool as ok-but-not-succeeded", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      persistCallRecord: async (r) => void records.push(r),
+      agent: makeAgent({
+        dispatch: vi.fn(async () => ({
+          ok: true,
+          output: JSON.stringify({ success: false, missingFields: ["date_of_birth"] }),
+        })),
+      }),
+    });
+    h.handlers().onToolCall("c1", "file_surgery_ticket", { first_name: "Wayne" });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].toolEvents).toEqual([
+      { name: "file_surgery_ticket", ok: true, succeeded: false, atMs: expect.any(Number) },
+    ]);
+  });
+
+  it("records a tool that actually worked as succeeded", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      persistCallRecord: async (r) => void records.push(r),
+      agent: makeAgent({
+        dispatch: vi.fn(async () => ({
+          ok: true,
+          output: JSON.stringify({ success: true, ticket_number: "VA-1" }),
+        })),
+      }),
+    });
+    h.handlers().onToolCall("c1", "file_surgery_ticket", {});
+    await Promise.resolve();
+    await Promise.resolve();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].toolEvents[0]).toMatchObject({ ok: true, succeeded: true });
+  });
+
+  /**
+   * "IT WORKED" AND "IT FOUND SOMETHING" ARE DIFFERENT QUESTIONS.
+   *
+   * check_open_tickets answers `success: true, has_open_tickets: false` for a
+   * caller with nothing open, and every queue prompt runs it before filing.
+   * The teardown sweep skips a call as a status check only when a ticket was
+   * actually matched — so the record has to carry the finding, not just the
+   * verdict, or the sweep turns itself off on every ordinary call (Codex,
+   * PR #268 round 2).
+   */
+  const runCheckOpenTickets = async (output: Record<string, unknown>) => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      persistCallRecord: async (r) => void records.push(r),
+      agent: makeAgent({
+        dispatch: vi.fn(async () => ({ ok: true, output: JSON.stringify(output) })),
+      }),
+    });
+    h.handlers().onToolCall("c1", "check_open_tickets", {});
+    await Promise.resolve();
+    await Promise.resolve();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    return records[0].toolEvents[0];
+  };
+
+  it("records that check_open_tickets FOUND an existing ticket", async () => {
+    expect(await runCheckOpenTickets({ success: true, has_open_tickets: true })).toMatchObject({
+      succeeded: true,
+      foundOpenTicket: true,
+    });
+  });
+
+  it("records that it ran fine and found NOTHING — not the same thing", async () => {
+    expect(await runCheckOpenTickets({ success: true, has_open_tickets: false })).toMatchObject({
+      succeeded: true,
+      foundOpenTicket: false,
+    });
+  });
+
+  it("leaves the field off entirely for a tool that does not report it", async () => {
+    const event = await runCheckOpenTickets({ success: true, ticket_number: "VA-1" });
+    expect("foundOpenTicket" in event).toBe(false);
+  });
 });
 
 describe("VoiceCallBridge — dead-air watchdog", () => {
@@ -954,6 +1055,7 @@ describe("VoiceCallBridge — exactly-once teardown", () => {
     speak: vi.fn(),
           close: vi.fn(),
           getResponseEpoch: () => 0,
+          setSpokenLanguage: vi.fn(),
         };
       },
       onOutcome: () => {},
@@ -2116,5 +2218,294 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     h.handlers().onConfigured();
     expect(h.session.speak).not.toHaveBeenCalled();
     expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the repeated-failure ceiling", () => {
+  /**
+   * CAc9f38039b80c47cf13cf5c15b79c1c37, optical, 2026-09-03 16:00:43 UTC:
+   * 110 × file_optical_ticket, every one refused for the same missing date
+   * of birth, 144 seconds, caller hung up with no ticket. The old core's
+   * highest tool-call count over 2,972 queue calls in the same fortnight
+   * is 24, so the loop is this transport's model, not the tool.
+   */
+  const DOB_REFUSAL = JSON.stringify({
+    success: false,
+    missingFields: ["date_of_birth"],
+    message: "I did not catch that date of birth — month, day and year?",
+  });
+
+  function refusingAgent() {
+    return makeAgent({
+      // `dispatch` answers ok:true whenever the tool RAN. A missing-field
+      // refusal is a tool that ran and said no — which is exactly why the
+      // ceiling cannot read `ok` and has to read the tool's own `success`.
+      dispatch: vi.fn(async () => ({ ok: true, output: DOB_REFUSAL })),
+    });
+  }
+
+  async function drive(h: ReturnType<typeof makeBridge>, times: number) {
+    for (let i = 0; i < times; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "file_optical_ticket", { first_name: "A", last_name: "B" });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+  }
+
+  it("stops dispatching after three identical failures, however many times the model asks", async () => {
+    const agent = refusingAgent();
+    const h = makeBridge({ agent });
+    await drive(h, 40);
+    expect(agent.dispatch).toHaveBeenCalledTimes(3);
+  });
+
+  it("still answers every single tool call — an unanswered call stalls the turn forever", async () => {
+    const agent = refusingAgent();
+    const h = makeBridge({ agent });
+    await drive(h, 40);
+    expect(h.session.sendToolResult).toHaveBeenCalledTimes(40);
+    const calls = (h.session.sendToolResult as unknown as {
+      mock: { calls: [string, boolean, Record<string, unknown>][] };
+    }).mock.calls;
+    // Every call_id the model sent got its own answer back, in order.
+    expect(calls.map((c) => c[0])).toEqual(
+      Array.from({ length: 40 }, (_, i) => `c${i}`),
+    );
+  });
+
+  it("answers a stopped dispatch with the tool's OWN wording, marked non-retryable", async () => {
+    const agent = refusingAgent();
+    const h = makeBridge({ agent });
+    await drive(h, 5);
+    const calls = (h.session.sendToolResult as unknown as {
+      mock: { calls: [string, boolean, Record<string, unknown>][] };
+    }).mock.calls;
+    expect(calls[4][1]).toBe(false);
+    expect(calls[4][2]).toEqual({
+      success: false,
+      retryable: false,
+      ceiling: "identical-args",
+      message: "I did not catch that date of birth — month, day and year?",
+    });
+  });
+
+  it("still asks the agent to speak — the caller is owed words, not silence", async () => {
+    const agent = refusingAgent();
+    const h = makeBridge({ agent });
+    h.newResponse();
+    // Four calls carried by one response: three dispatch, the fourth is
+    // stopped, and the follow-up is still owed and still coalesced to one.
+    for (let i = 0; i < 4; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "file_optical_ticket", { first_name: "A" });
+    }
+    h.handlers().onResponseDone();
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    expect(agent.dispatch).toHaveBeenCalledTimes(3);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * A CEILING STOP IS NOT A FILED TICKET.
+   *
+   * The stopped call never reaches the tool, so nothing was filed — and the
+   * teardown request sweep reads exactly this field to decide whether the
+   * caller's request still needs recovering. A ceiling stop recorded as
+   * succeeded would make the sweep skip the most broken call on the line: the
+   * one that hit the same refusal three times running.
+   *
+   * Written after a mutation setting this to true passed the whole suite.
+   */
+  it("records a ceiling stop as not succeeded, so the sweep still recovers the request", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({
+      agent: refusingAgent(),
+      persistCallRecord: async (r) => void records.push(r),
+    });
+    for (let i = 0; i < 4; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "file_optical_ticket", { first_name: "A" });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    const events = records[0]!.toolEvents;
+    expect(events).toHaveLength(4);
+    expect(events.every((e) => e.succeeded === false)).toBe(true);
+    // The fourth is the stopped one, and it is marked as such.
+    expect(events[3]).toMatchObject({ ok: false, error: expect.stringContaining("ceiling:") });
+  });
+
+  it("never gets in the way of a tool that works", async () => {
+    // makeAgent's default dispatch succeeds.
+    const h = makeBridge();
+    for (let i = 0; i < 30; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "create_ticket", { reason: "refill" });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    expect(h.agent.dispatch).toHaveBeenCalledTimes(30);
+  });
+
+  it("a tool that recovers is not held against the rest of the call", async () => {
+    let fail = true;
+    const agent = makeAgent({
+      dispatch: vi.fn(async () =>
+        fail ? { ok: true, output: DOB_REFUSAL } : { ok: true, output: '{"success":true}' },
+      ),
+    });
+    const h = makeBridge({ agent });
+    await drive(h, 2);
+    fail = false;
+    await drive(h, 1); // succeeds, clearing the counters
+    fail = true;
+    await drive(h, 10);
+    // 2 failures + 1 success + 3 more failures before the ceiling.
+    expect(agent.dispatch).toHaveBeenCalledTimes(6);
+  });
+
+  it("the whole-call backstop stops a loop that keeps succeeding", async () => {
+    const h = makeBridge({ toolCeiling: { perCallDispatches: 5 } });
+    for (let i = 0; i < 20; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "create_ticket", { i });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    expect(h.agent.dispatch).toHaveBeenCalledTimes(5);
+  });
+
+  it("records each stopped dispatch on the call's tool timeline, so it is countable after the fact", async () => {
+    const records: VoiceCallRecord[] = [];
+    const agent = refusingAgent();
+    const h = makeBridge({ agent, persistCallRecord: async (r) => void records.push(r) });
+    await drive(h, 6);
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    const events = records[0]?.toolEvents ?? [];
+    expect(events).toHaveLength(6);
+    expect(events.filter((e) => e.error === "ceiling:identical-args")).toHaveLength(3);
+  });
+});
+
+/**
+ * FOLLOWING THE CALLER'S LANGUAGE.
+ *
+ * Operator instruction, 2026-09-03: switch language mid-stream on the caller's
+ * input or request. `GrokVoiceSession.setSpokenLanguage` already existed and
+ * was called by nothing; these prove the bridge now calls it, and only when it
+ * should.
+ *
+ * Bought by CA54f824ae (tech, 21:28:21): a caller delivered her whole request
+ * in Spanish — refill, pharmacy, name, callback number — and hung up at 38
+ * seconds having heard only an English greeting.
+ */
+describe("set_spoken_language", () => {
+  function languageAgent(output: Record<string, unknown>): BoundAgent {
+    return makeAgent({
+      dispatch: vi.fn(async () => ({ ok: true, output: JSON.stringify(output) })),
+    });
+  }
+
+  async function settle(): Promise<void> {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  it("retargets the session when the tool returns a language", async () => {
+    const h = makeBridge({ agent: languageAgent({ success: true, language: "es" }) });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Spanish" });
+    await settle();
+    expect(h.session.setSpokenLanguage).toHaveBeenCalledWith("es");
+  });
+
+  it("runs the tool rather than replacing it — the normalization is the tool's", async () => {
+    const agent = languageAgent({ success: true, language: "tl" });
+    const h = makeBridge({ agent });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Tagalog" });
+    await settle();
+    expect(agent.dispatch).toHaveBeenCalledWith("set_spoken_language", { language: "Tagalog" });
+    // The WIRE gets the tool's normalized tag, never the caller's word for it.
+    expect(h.session.setSpokenLanguage).toHaveBeenCalledWith("tl");
+  });
+
+  it("does NOT touch the wire when the tool refuses", async () => {
+    const h = makeBridge({
+      agent: languageAgent({ success: false, missingFields: ["language"], message: "Which language?" }),
+    });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "" });
+    await settle();
+    expect(h.session.setSpokenLanguage).not.toHaveBeenCalled();
+  });
+
+  it("does NOT touch the wire for a REFUSAL THAT ECHOES A LANGUAGE BACK", async () => {
+    /**
+     * Found by a mutation: deleting `success !== true` from languageToSwitchTo
+     * killed no test, because the refusal above carries no `language` field at
+     * all. A refusal that echoes what it was asked for — the obvious shape for
+     * "I cannot serve Korean on this line" — would have retargeted the wire on
+     * a tool that said no. `success` is the authority, not the presence of a tag.
+     */
+    const h = makeBridge({
+      agent: languageAgent({ success: false, error: "unsupported_language", language: "ko" }),
+    });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Korean" });
+    await settle();
+    expect(h.session.setSpokenLanguage).not.toHaveBeenCalled();
+  });
+
+  it("drops a switch to the language already in use", async () => {
+    // The tool cannot know this — the bridge owns the live state. Without the
+    // guard every "still English" reading sends a redundant session.update.
+    const h = makeBridge({ agent: languageAgent({ success: true, language: "en" }) });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "English" });
+    await settle();
+    expect(h.session.setSpokenLanguage).not.toHaveBeenCalled();
+  });
+
+  it("switches back after a switch away", async () => {
+    // The stale-context trap this design avoids: with `current_language`
+    // injected at session construction, the second call here would be refused
+    // as a no-op because the frozen context still said "en".
+    const agent = makeAgent({
+      dispatch: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, output: JSON.stringify({ success: true, language: "es" }) })
+        .mockResolvedValueOnce({ ok: true, output: JSON.stringify({ success: true, language: "en" }) }),
+    });
+    const h = makeBridge({ agent });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Spanish" });
+    await settle();
+    h.handlers().onToolCall("c2", "set_spoken_language", { language: "English" });
+    await settle();
+    expect((h.session.setSpokenLanguage as unknown as { mock: { calls: string[][] } }).mock.calls)
+      .toEqual([["es"], ["en"]]);
+  });
+
+  it("is not a terminal tool — the call continues and the agent still speaks", async () => {
+    const h = makeBridge({ agent: languageAgent({ success: true, language: "es" }) });
+    h.newResponse();
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Spanish" });
+    // The follow-up is response-gated: released when the tool-carrying
+    // response finishes, exactly as create_ticket's is.
+    h.handlers().onResponseDone();
+    await settle();
+    expect(h.outcomes).toEqual([]);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers the model before it changes the wire", async () => {
+    // Reversed, a session.update could land between the model's call and its
+    // answer, and the next turn would be generated against a config the model
+    // was never told about.
+    const order: string[] = [];
+    const h = makeBridge({ agent: languageAgent({ success: true, language: "es" }) });
+    (h.session.sendToolResult as unknown as { mockImplementation: (f: () => void) => void })
+      .mockImplementation(() => { order.push("result"); });
+    (h.session.setSpokenLanguage as unknown as { mockImplementation: (f: () => void) => void })
+      .mockImplementation(() => { order.push("wire"); });
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Spanish" });
+    await settle();
+    expect(order).toEqual(["result", "wire"]);
   });
 });

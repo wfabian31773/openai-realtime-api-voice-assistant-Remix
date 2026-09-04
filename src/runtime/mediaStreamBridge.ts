@@ -108,7 +108,14 @@
 
 import type { BoundAgent } from "./agentBinding";
 import { CallTranscriptLog } from "./transcriptLog";
+import { CallUsage, usageSummaryMarker, type UsageTotals } from "./tokenUsage";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
+import {
+  ToolCallCeiling,
+  ceilingRefusal,
+  ceilingMarker,
+  type CeilingLimits,
+} from "./toolCeiling";
 
 /**
  * A tool's answer as an object the wire layer can spread into its payload.
@@ -198,6 +205,40 @@ export const TOOL_DISPATCH_GRACE_MS = 15_000;
  * dispatched — see the TRANSPORT NOTE in the module doc. */
 export const DEFAULT_END_CALL_TOOL_NAMES = ["terminate_call", "end_call"];
 
+/**
+ * TRANSPORT NOTE — SET_SPOKEN_LANGUAGE. Same shape as the hangup above, and
+ * for the same reason: the tool decides, the transport acts.
+ *
+ * `set_spoken_language` (src/tools/languageTools.ts) normalises and validates
+ * the language the model heard, and returns the tag. Retargeting Grok's STT
+ * `language_hint` means a `session.update` on the live wire, which only the
+ * session can send — so the tool runs like any other and the switch follows
+ * ONLY on a result that says it should. A refusal (already speaking it,
+ * unreadable) reaches the model verbatim and nothing is sent.
+ *
+ * Operator instruction 2026-09-03: follow the caller's language mid-stream.
+ */
+export const DEFAULT_LANGUAGE_TOOL_NAMES = ["set_spoken_language"];
+
+/**
+ * DEPLOY MARKER AND LIVE COUNTER. Prints only when a call actually changes
+ * language, so its first appearance proves the build carrying this is live and
+ * its rate afterwards is how often callers were being ignored before. Carries
+ * the language tag and nothing else — never a transcript line, never a name.
+ */
+export function languageMarker(language: string): string {
+  return `[LANGUAGE] switching this call to ${language} — following the caller`;
+}
+
+/** The normalized tag a successful set_spoken_language result carries, or
+ * undefined when the tool refused. Deliberately strict — an empty or
+ * non-string language must not reach the wire as a hint. */
+export function languageToSwitchTo(output: Record<string, unknown>): string | undefined {
+  if (output.success !== true) return undefined;
+  const lang = output.language;
+  return typeof lang === "string" && lang.trim() ? lang.trim() : undefined;
+}
+
 /** How the call ended. One value per call, recorded exactly once. */
 export type CallOutcome =
   | "completed"
@@ -212,7 +253,40 @@ export type CallOutcome =
  * runtime never interprets a tool's arguments or its result. */
 export interface ToolEvent {
   name: string;
+  /**
+   * The tool RAN. Not that it worked.
+   *
+   * `dispatch` answers ok whenever it reached the handler at all — a
+   * `missing([...])` refusal comes back `ok: true` with no `error`, because
+   * nothing went wrong at the transport. Anything asking "did this tool do
+   * its job?" must read `succeeded`, not this.
+   */
   ok: boolean;
+  /**
+   * The tool DID ITS JOB — `ok`, and its own envelope did not say
+   * `success: false`.
+   *
+   * Required, not optional, and that is the point: `alreadyFiledByTool` in
+   * the request sweep was written against `ok` and would therefore have read
+   * every REFUSED `file_*_ticket` as a filed ticket — skipping the sweep on
+   * exactly the calls it exists to recover. Making this a field every
+   * producer must fill is what stops the next reader making the same
+   * assumption. The bridge already computed the value for the tool ceiling;
+   * it just was not written down.
+   */
+  succeeded: boolean;
+  /**
+   * The tool reported an EXISTING open ticket for this caller.
+   *
+   * Only `check_open_tickets` sets it, and it exists because `succeeded` is
+   * not the same question. That tool answers `success: true` with
+   * `has_open_tickets: false` when the caller has nothing open — so
+   * "it ran and worked" says nothing about whether anything was found, and
+   * every queue prompt tells the agent to run it before filing. Reading
+   * `succeeded` alone would therefore treat an ORDINARY call as a status
+   * check (Codex, PR #268 round 2).
+   */
+  foundOpenTicket?: boolean;
   /** ms from call start, so a timeline is readable without timestamps. */
   atMs: number;
   error?: string;
@@ -243,6 +317,11 @@ export interface VoiceCallRecord {
   firstTranscriptAtMs?: number;
   /** When the last transcript of any kind arrived. */
   lastTranscriptAtMs?: number;
+  /**
+   * What the provider reported this call cost, or undefined when it reported
+   * nothing. Undefined leaves the columns NULL on purpose — see CallUsage.
+   */
+  usage?: UsageTotals;
 }
 
 export interface VoiceCallContext {
@@ -274,6 +353,9 @@ export interface BridgeSession {
   speak(text: string, opts?: { interruptible?: boolean }): void;
   close(): void;
   getResponseEpoch(): number;
+  /** Retarget the provider's STT `language_hint` mid-call and tell the model
+   * to follow the caller. See the TRANSPORT NOTE — SET_SPOKEN_LANGUAGE. */
+  setSpokenLanguage(language: string): void;
 }
 
 export interface TwilioSocket {
@@ -303,6 +385,12 @@ export interface VoiceCallBridgeDeps {
   persistCallRecord?: (record: VoiceCallRecord) => Promise<void>;
   /** Hangup tools to intercept. Defaults to DEFAULT_END_CALL_TOOL_NAMES. */
   endCallToolNames?: string[];
+  /** Overridable for the same reason endCallToolNames is: tests name their
+   * own, and a lane could rename the tool without touching the bridge. */
+  languageToolNames?: string[];
+  /** The lane's configured spoken language, so a switch to the language the
+   * session already uses is refused rather than sent. */
+  initialLanguage?: string;
   /**
    * What a tripped output guardrail does. "enforce" (default) cuts the line
    * mid-air and requests a safe replacement — the same interruption the SDK
@@ -327,6 +415,11 @@ export interface VoiceCallBridgeDeps {
   /** Injectable timers for tests. Defaults to global setTimeout/clearTimeout. */
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  /**
+   * Override the repeated-failure ceiling. Tests use it to reach the limits
+   * without a hundred iterations; production uses the defaults.
+   */
+  toolCeiling?: Partial<CeilingLimits>;
 }
 
 /** Exactly the GrokVoiceSessionHandlers subset the bridge supplies. Kept
@@ -341,7 +434,8 @@ export interface BridgeSessionHandlers {
   onSpeechStopped: () => void;
   /** The carrying response finished delivering everything — the boundary
    * the post-tool follow-up waits for. */
-  onResponseDone: () => void;
+  /** Carries the raw event: usage rides on it (tokenUsage.ts). */
+  onResponseDone: (raw?: unknown) => void;
   onCallerTranscript: (transcript: string, itemId?: string) => void;
   onError: (err: Error) => void;
   onClosed: () => void;
@@ -352,6 +446,11 @@ export class VoiceCallBridge {
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
   private readonly endCallToolNames: Set<string>;
+  private readonly languageToolNames: Set<string>;
+  /** What the session is currently listening in. Seeded from the lane's
+   * configured language and moved only by a successful switch, so the tool
+   * can refuse a no-op instead of the wire carrying a redundant update. */
+  private spokenLanguage: string;
 
   private ended = false;
   private endedOutcome: CallOutcome | null = null;
@@ -495,7 +594,10 @@ export class VoiceCallBridge {
   private deadAirCause: "utterance" | "response" | null = null;
 
   private readonly transcriptLog = new CallTranscriptLog();
+  /** What the provider says this call cost. See tokenUsage.ts. */
+  private readonly usage = new CallUsage();
   private readonly toolEvents: ToolEvent[] = [];
+  private readonly ceiling: ToolCallCeiling;
   private agentTurns = 0;
   private interruptions = 0;
   private readonly startedAtMs: number;
@@ -507,7 +609,10 @@ export class VoiceCallBridge {
     this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as NodeJS.Timeout));
     this.endCallToolNames = new Set(deps.endCallToolNames ?? DEFAULT_END_CALL_TOOL_NAMES);
+    this.languageToolNames = new Set(deps.languageToolNames ?? DEFAULT_LANGUAGE_TOOL_NAMES);
+    this.spokenLanguage = deps.initialLanguage ?? "en";
     this.startedAtMs = deps.startedAtMs ?? Date.now();
+    this.ceiling = new ToolCallCeiling(deps.toolCeiling ?? {});
 
     this.session = deps.createSession({
       onToolCall: (callId, name, args) => this.handleToolCall(callId, name, args),
@@ -517,7 +622,7 @@ export class VoiceCallBridge {
       onAudioDone: (transcript) => this.handleAudioDone(transcript),
       onSpeechStarted: () => this.handleCallerSpeechStarted(),
       onSpeechStopped: () => this.handleCallerSpeechStopped(),
-      onResponseDone: () => this.handleResponseDone(),
+      onResponseDone: (raw) => this.handleResponseDone(raw),
       onCallerTranscript: (text, itemId) => {
         if (this.ended) return;
         this.noteTranscript("caller");
@@ -1225,7 +1330,11 @@ export class VoiceCallBridge {
 
   /** The wire finished delivering a response — every function call it
    * carried has been observed by now. */
-  private handleResponseDone(): void {
+  private handleResponseDone(raw?: unknown): void {
+    // Usage is accumulated even on a torn-down call: the response that just
+    // finished was still billed, and a teardown racing the last response
+    // should not silently drop its tokens.
+    if (raw !== undefined) this.usage.add(raw);
     if (this.ended) return;
     this.awaitingToolResponseDone = false;
     this.maybeRequestFollowUp();
@@ -1267,16 +1376,108 @@ export class VoiceCallBridge {
     // The hangup tool goes through this same path: its guards are the
     // agent's, and only its transport step is ours (see the TRANSPORT NOTE).
     void (async () => {
+      /**
+       * THE REPEATED-FAILURE CEILING (toolCeiling.ts).
+       *
+       * On 2026-09-03 the optical lane's fourteenth runtime call spent 144
+       * seconds calling `file_optical_ticket` 110 times, refused every time
+       * for the same missing date of birth, and the caller hung up with no
+       * ticket. The tool was right to refuse; the model was wrong to keep
+       * asking instead of speaking. Across 2,972 old-core queue calls in the
+       * fourteen days to that date, the highest tool-call count on any call
+       * is 24 — so this is a property of the model on THIS transport, which
+       * is why the ceiling is here and not in the tools.
+       *
+       * A stopped dispatch is still ANSWERED — with the tool's own last
+       * refusal wording — because an unanswered tool call stalls the turn
+       * forever, which is worse than the loop.
+       */
+      const verdict = this.ceiling.begin(name, args);
+      if (!verdict.allow) {
+        console.warn(ceilingMarker(name, verdict));
+        this.toolEvents.push({
+          name,
+          ok: false,
+          succeeded: false,
+          atMs: Date.now() - this.startedAtMs,
+          error: `ceiling:${verdict.reason}`,
+        });
+        if (this.ended) return;
+        this.session.sendToolResult(
+          callId,
+          false,
+          ceilingRefusal(name, verdict.reason, this.ceiling.lastFailureOutput(name)),
+        );
+        // The agent still owes the caller words, so this settles like any
+        // other refusal rather than short-circuiting the follow-up.
+        this.toolCallSettled(true);
+        return;
+      }
+
       const result = await this.deps.agent.dispatch(name, args);
+      const output = decodeToolOutput(result.output);
+      /**
+       * `dispatch` answers `ok: true` whenever the tool RAN — a
+       * `missing([...])` refusal comes back ok. The ceiling counts what the
+       * tool actually decided, so the predicate has to read `success` out of
+       * the tool's own envelope, not the transport's.
+       *
+       * Computed BEFORE the event is recorded, so the record carries the same
+       * answer the ceiling acts on. It used to be worked out below the push,
+       * which is how the durable record ended up with only the transport's
+       * `ok` on it and the sweep ended up reading the wrong field.
+       */
+      const toolSucceeded =
+        result.ok &&
+        !(
+          output !== null &&
+          typeof output === "object" &&
+          (output as Record<string, unknown>).success === false
+        );
+      // What the tool's own envelope said it FOUND, as distinct from whether
+      // it worked. Read generically off the declared field rather than by
+      // special-casing a tool name here, so the transport keeps knowing
+      // nothing about any particular tool's meaning.
+      const declaredOpenTicket =
+        output !== null && typeof output === "object"
+          ? (output as Record<string, unknown>).has_open_tickets
+          : undefined;
       this.toolEvents.push({
         name,
         ok: result.ok,
+        succeeded: toolSucceeded,
+        ...(typeof declaredOpenTicket === "boolean"
+          ? { foundOpenTicket: declaredOpenTicket }
+          : {}),
         atMs: Date.now() - this.startedAtMs,
         ...(result.error ? { error: result.error } : {}),
       });
+      this.ceiling.settle(name, args, toolSucceeded, output);
       if (this.ended) return;
-      const output = decodeToolOutput(result.output);
       this.session.sendToolResult(callId, result.ok, output);
+      /**
+       * THE TRANSPORT STEP FOR A LANGUAGE SWITCH.
+       *
+       * Ordered exactly like the hangup below: the result reaches the model
+       * FIRST, then the wire changes. Reversed, a `session.update` could land
+       * between the model's call and its answer, and the turn that follows
+       * would be generated against a config the model has not been told about.
+       *
+       * `settled` is left to the shared path at the bottom — the agent still
+       * owes the caller words, now in their language, and this is not a
+       * terminal tool.
+       */
+      if (this.languageToolNames.has(name)) {
+        const next = languageToSwitchTo(output);
+        // A switch to the language already in use is dropped here rather than
+        // in the tool: this is the only place that knows what the session is
+        // actually listening in right now.
+        if (next && next !== this.spokenLanguage) {
+          this.spokenLanguage = next;
+          this.session.setSpokenLanguage(next);
+          console.info(languageMarker(next));
+        }
+      }
       if (this.endCallToolNames.has(name)) {
         if (guardsAllowedTermination(output)) {
           this.requestHangup();
@@ -1298,7 +1499,10 @@ export class VoiceCallBridge {
       this.toolCallSettled(true);
     })().catch(() => {
       // dispatch() is documented never to throw; if it somehow does, the
-      // call still gets an answer rather than a stalled turn.
+      // call still gets an answer rather than a stalled turn — and the
+      // ceiling's reservation is released, or one throw would wedge this
+      // tool shut for the rest of the call.
+      this.ceiling.settle(name, args, false, undefined);
       if (!this.ended) {
         this.session.sendToolResult(callId, false, { error: "dispatch_failed" });
         this.toolCallSettled(true);
@@ -1446,6 +1650,9 @@ export class VoiceCallBridge {
     this.endedOutcome = outcome;
     this.deps.onOutcome(outcome);
 
+    const usageAtTeardown = this.usage.result();
+    if (usageAtTeardown) console.info(usageSummaryMarker(usageAtTeardown));
+
     if (this.deps.persistCallRecord) {
       const persist = this.deps.persistCallRecord;
       const record: VoiceCallRecord = {
@@ -1457,6 +1664,7 @@ export class VoiceCallBridge {
         outcome,
         transcript: this.transcriptLog.render(),
         toolEvents: [...this.toolEvents],
+        ...(usageAtTeardown ? { usage: usageAtTeardown } : {}),
         agentTurns: this.agentTurns,
         interruptions: this.interruptions,
         startedAtMs: this.startedAtMs,
