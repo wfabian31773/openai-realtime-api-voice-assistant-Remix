@@ -174,6 +174,7 @@ import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
 import { runRequestSweep } from "./sweepRunner";
+import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
 import {
   handleAfterRedirect,
   handleVoiceWebhook,
@@ -839,6 +840,19 @@ export function mountVoiceRuntime(
         const transport = options.createTransport
           ? options.createTransport({ apiKey: lane.voice.apiKey, model: lane.voice.model })
           : new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
+        /**
+         * ONE GREETING, KNOWN TO BOTH SIDES.
+         *
+         * Hoisted out of the bridge options because the SESSION now needs it
+         * too — see withGreetingAlreadyPlayed. The bridge speaks it; the model
+         * has to be told it was spoken.
+         */
+        const spokenGreeting =
+          personaliseGreeting(
+            chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
+            recognisedFirstName(precontext),
+            greetingStyleFor(entry.slug),
+          ) || null;
         bridge = new VoiceCallBridge({
           context,
           startedAtMs,
@@ -861,18 +875,14 @@ export function mountVoiceRuntime(
           // it does on the SIP path — an admin edit must be what the caller
           // hears, not what the code was shipped with. UNLESS it has dropped
           // copy the lane is required to say; see `chooseGreeting`.
-          greeting: personaliseGreeting(
-            chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
-            recognisedFirstName(precontext),
-            greetingStyleFor(entry.slug),
-          ) || null,
+          greeting: spokenGreeting,
           twilio: twilioSocket,
           createSession: (handlers) =>
             new GrokVoiceSession(
               transport,
               buildSessionConfig(
                 lane.voice,
-                lane.agent.instructions,
+                withGreetingAlreadyPlayed(lane.agent.instructions, spokenGreeting),
                 lane.agent.tools,
                 laneKeyterms(entry.slug),
               ),

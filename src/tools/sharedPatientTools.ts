@@ -306,11 +306,25 @@ registerTool({
   name: 'resolve_location',
   layer: 'agent',
   timeoutMs: 4000,
+  /**
+   * "BEFORE YOU FILE A TICKET" WAS READ AS "ALWAYS", AND IT COST 14 CALLS.
+   *
+   * 2026-09-03: this tool was called with NO ARGUMENT 34 times across 16 calls.
+   * `spoken_location` is in `required`, so validateInput refused every one
+   * before the handler ran — and only 5 of those 16 calls went on to file, the
+   * worst recovery rate of any gate that day.
+   *
+   * The old wording named a MOMENT ("before you file") and never named a
+   * PRECONDITION, so a model with nothing to resolve called it anyway, on
+   * schedule, and burnt a turn asking a question standing instruction 10
+   * forbids — "never ask a patient where our offices are".
+   */
   description:
-    'Turn what the caller said about an office into the real office name. Call it ' +
-    'with their words — "the Encinitas one", "Azul Vision Redlands" — before you ' +
-    'file a ticket. A ticket without a location is harder to route, so if this ' +
-    'cannot resolve it, ask the caller which office they visit.',
+    'Turn what the caller said about an office into the real office name — ' +
+    '"the Encinitas one", "Azul Vision Redlands". ONLY call this when the caller ' +
+    'has actually named a place; there is nothing to resolve otherwise, and ' +
+    'calling it empty just wastes a turn. If they have not named one, use the ' +
+    'office already on their record instead.',
   input_schema: {
     type: 'object',
     properties: {

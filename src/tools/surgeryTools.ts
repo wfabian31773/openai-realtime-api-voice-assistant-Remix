@@ -272,9 +272,23 @@ registerTool({
       }
     }
     if (!parts) {
+      /**
+       * THE REFUSAL THAT WAS TERMINAL. 2026-09-03: 23 calls hit this gate and
+       * ZERO of them ever filed, while the optical location gate was hit 11
+       * times and 9 recovered. The difference was diagnosability — see `fix`
+       * on MissingFields. The two branches below need OPPOSITE corrections and
+       * telling the model "ask again" for the first one IS the loop.
+       */
       return missing(
         ['date_of_birth'],
         'I did not catch that — may I please have the date of birth, starting with the month, then the day, then the year?',
+        dob
+          ? 'The date_of_birth you sent could not be read as a date. Say the message to the caller, '
+            + 'then call this tool again with exactly what they say next.'
+          : 'You did not send the date_of_birth argument at all — that, not the caller, is why this '
+            + 'was refused. If they have ALREADY given you a date of birth, call this tool again '
+            + 'right now with date_of_birth set to what they said, and do NOT ask them again. Only '
+            + 'say the message if they have not given it yet.',
       );
     }
 

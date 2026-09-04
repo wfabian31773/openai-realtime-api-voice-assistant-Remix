@@ -33,6 +33,28 @@ export interface MissingFields {
   missingFields: string[];
   /** One sentence the agent can say more or less verbatim. */
   message: string;
+  /**
+   * WHAT THE MODEL MUST DO DIFFERENTLY. Never spoken to the caller.
+   *
+   * `message` answers "what do I say?". This answers "what did I get wrong?",
+   * and the two are not the same question — which is what made the
+   * date-of-birth gate TERMINAL on 2026-09-03: 23 calls hit it and ZERO
+   * recovered, while the optical location gate was hit 11 times and 9 of them
+   * went on to file.
+   *
+   * The difference is that a location refusal is fixable by the caller and a
+   * date-of-birth refusal was not. The model was omitting the `date_of_birth`
+   * argument entirely (dobShape recorded "(none)" on every observed refusal),
+   * heard "I did not catch that date of birth", said that to the caller, the
+   * caller repeated the date, and the model sent the same argument-less
+   * payload again. No answer the caller could give would ever satisfy it.
+   *
+   * So a refusal now carries the model's own mistake back to it. Populate this
+   * only where the tool can tell WHY — an absent argument and an unreadable one
+   * need opposite corrections, and saying "ask again" for the first is the
+   * loop.
+   */
+  fix?: string;
 }
 
 export interface ToolFailure {
@@ -124,9 +146,15 @@ export function manifest(includePrimitives = false): Array<{
     }));
 }
 
-/** Shorthand for the refusal every tool uses. */
-export function missing(fields: string[], message: string): MissingFields {
-  return { success: false, missingFields: fields, message };
+/**
+ * Shorthand for the refusal every tool uses.
+ *
+ * `message` is spoken. `fix` is read by the model and never said out loud —
+ * see MissingFields. A tool that can tell WHY it refused should always pass
+ * it: the refusal the model cannot diagnose is the refusal it repeats.
+ */
+export function missing(fields: string[], message: string, fix?: string): MissingFields {
+  return { success: false, missingFields: fields, message, ...(fix ? { fix } : {}) };
 }
 
 /**

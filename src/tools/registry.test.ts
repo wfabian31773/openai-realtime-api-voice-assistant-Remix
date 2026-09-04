@@ -387,3 +387,82 @@ describe('every tool that asks for a date of birth names the order', () => {
     }
   });
 });
+
+/**
+ * A REFUSAL THE MODEL CANNOT DIAGNOSE IS A REFUSAL IT REPEATS.
+ *
+ * 2026-09-03, measured over every queue call since the cutovers:
+ *
+ *   gate hit              calls   still filed
+ *   date_of_birth           23         0
+ *   optical location        11         9
+ *
+ * Both are refusals. One was survivable and one was terminal, and the whole
+ * difference is that the caller could satisfy the location gate and could not
+ * satisfy the date-of-birth gate — the model was omitting the argument, heard
+ * "I did not catch that date of birth", said that to the caller, and sent the
+ * same argument-less payload again. dobShape recorded "(none)" on every
+ * observed refusal.
+ *
+ * `fix` is the channel that tells the model what IT did wrong, as opposed to
+ * `message`, which tells it what to SAY. These pin that the two branches give
+ * opposite corrections, because "ask the caller again" for an absent argument
+ * is precisely the loop.
+ */
+describe('the date-of-birth refusal tells the model what it got wrong', () => {
+  const filingTools = () =>
+    realTools().filter((t) => /^file_[a-z_]+_ticket$/.test(t.name));
+
+  const refuse = async (tool: { name: string }, dob: string | undefined) => {
+    const res: any = await runTool(tool.name, {
+      first_name: 'Testpatient', last_name: 'Example',
+      callback_number: '5555550100', request_description: 'a refill',
+      // Each lane's OTHER gates, satisfied, so every case below reaches the
+      // date-of-birth check rather than stopping at optical's location gate.
+      requester: 'patient', location: 'Northridge',
+      ...(dob === undefined ? {} : { date_of_birth: dob }),
+    });
+    return res;
+  };
+
+  it('covers all four lanes', () => {
+    expect(filingTools().map((t) => t.name).sort()).toEqual([
+      'file_optical_ticket', 'file_records_ticket', 'file_surgery_ticket', 'file_tech_ticket',
+    ]);
+  });
+
+  it('when the argument is ABSENT it says so, and says not to ask again', async () => {
+    for (const t of filingTools()) {
+      const res = await refuse(t, undefined);
+      expect(res.missingFields, t.name).toContain('date_of_birth');
+      expect(String(res.fix), t.name).toContain('did not send the date_of_birth argument');
+      expect(String(res.fix), t.name).toContain('do NOT ask them again');
+    }
+  });
+
+  it('when the argument is UNREADABLE it asks for it again — the opposite correction', async () => {
+    for (const t of filingTools()) {
+      const res = await refuse(t, 'sometime in the seventies');
+      expect(res.missingFields, t.name).toContain('date_of_birth');
+      expect(String(res.fix), t.name).toContain('could not be read as a date');
+      expect(String(res.fix), t.name).not.toContain('did not send');
+    }
+  });
+
+  it('the two branches are never the same text', async () => {
+    for (const t of filingTools()) {
+      const absent = await refuse(t, undefined);
+      const unreadable = await refuse(t, 'sometime in the seventies');
+      expect(absent.fix, t.name).not.toBe(unreadable.fix);
+    }
+  });
+
+  it('`message` stays the speakable line and carries no instructions to the model', async () => {
+    for (const t of filingTools()) {
+      const res = await refuse(t, undefined);
+      expect(String(res.message), t.name).toContain('starting with the month');
+      expect(String(res.message).toLowerCase(), t.name).not.toContain('argument');
+      expect(String(res.message).toLowerCase(), t.name).not.toContain('call this tool');
+    }
+  });
+});
