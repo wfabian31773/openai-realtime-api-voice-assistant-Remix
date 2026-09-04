@@ -429,13 +429,19 @@ stated by xAI rather than transcribed from a pricing page, and `numUnits` is
 **how many units they counted**, which is the only way to learn whether they
 bill the duration Twilio reports.
 
-**The method, which is Wayne's:** a flat per-minute rate means cost is
-proportional to duration and nothing else, so a day's authoritative total
-splits across that day's calls by their seconds. That is not an estimate —
-it **sums to what xAI actually charged**, and it absorbs any component we are
-not counting. Built in `src/services/grokCostAllocation.ts` (largest
-remainder: no cent invented, none lost, deterministic), `xaiBilling.ts` and
-`grokCostReconciler.ts`.
+**The method, which is Wayne's:** IF a flat per-minute rate is what we are
+charged, cost is proportional to duration and nothing else, so a day's
+authoritative total splits across that day's calls by their seconds. Built in
+`src/services/grokCostAllocation.ts` (largest remainder: no cent invented,
+none lost, deterministic), `xaiBilling.ts` and `grokCostReconciler.ts`.
+
+**READ THAT `IF`.** The DAY'S TOTAL is what xAI reported and the arithmetic
+preserves it exactly — no cent invented, none lost. The PER-CALL SHARES are an
+apportionment, and they are only each call's true cost if the bill really is
+proportional to Twilio seconds. That proportionality is unproven and is the
+open question of this whole section. An earlier version of this paragraph said
+the split "is not an estimate", which was true of the day and false of the
+call, and it sat here contradicting the caveat further down. (Codex, PR #269.)
 
 **It is DORMANT until `XAI_MANAGEMENT_KEY` and `XAI_TEAM_ID` are set.** It
 says so once at boot and does not schedule — a reconciler that writes a wrong
@@ -553,7 +559,8 @@ version of this section divided the day's 3,275 requests and 4.57M tokens by
 239 voice calls to get "13.7 requests per call" and a marginal prompt cost.
 Both denominators are wrong: those totals are the WHOLE account, voice and
 text, and contaminating them that way makes a modelled cost look *closer* to
-the invoice rather than further from it — which is how the original 3.4% "fit"
+the reported spend rather than further from it — which is how the original
+3.4% "fit"
 flattered itself twice over (Codex, PR #269).
 
 What the console actually supports, and nothing beyond it:
@@ -565,7 +572,9 @@ What the console actually supports, and nothing beyond it:
   call count at all.
 - Text is **$5.35 on the day, ~10% of it**, and prompt caching is doing most
   of the work.
-- **Voice is $53.55 for 418.6 minutes, and that is the whole question.**
+- **Voice is $53.55 of reported spend against 418.6 minutes WE recorded, and
+  that is the whole question.** Both nouns, every time: what they reported,
+  what we measured. xAI's own billed duration is not known.
 
 **So trim prompts for latency and for the ceilings — the reasons that were
 always true and never needed a dollar figure.** Anyone wanting the billing
@@ -611,13 +620,15 @@ a short call's cost.
 
 So: **the day's total is authoritative, the per-call figures are an
 apportionment.** That distinction matters more than it looks, because
-`cost_is_estimated = false` on those rows tells every reader they are the
-invoiced truth, and per-call and per-lane cost analytics read them as such.
+`cost_is_estimated = false` on those rows tells every reader they are settled
+truth, and per-call and per-lane cost analytics read them as such.
 Treat a single call's Grok cost as indicative until `numUnits` establishes what
 xAI actually counts. (Codex, PR #269.)
 
 **THE GUARD NOW MATTERS.** It has a live population to defend for the first
-time — 239 rows carry an invoiced cost that an estimate must never overwrite.
+time — 239 rows carry a reconciled allocation of xAI-reported spend, which an
+estimate must never overwrite. Not an invoiced cost: `invoice/preview` has
+never been called.
 Everything below this line was written when that number was zero.
 
 ---
