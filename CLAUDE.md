@@ -469,20 +469,49 @@ our estimate against `duration x published rate`. Both sides of that
 comparison were wrong about the bill. The rounding error was worth $1.18;
 being wrong about the rate is worth $18.89 on one day.
 
-**The cause is NOT established, and nobody should quote one yet.** Two
-candidates, and this file already named the first before the invoice arrived:
+### The cause: THE PROMPT IS BILLED ON EVERY TURN
 
-- **`$0.004 / text input`, billed separately from the audio minute.** We have
-  never counted it. ~$20/day over 239 calls is ~5,000 units, which is the
-  right order of magnitude for a system prompt plus each turn.
-- **xAI bills a duration we do not report.** Session wall-clock including
-  setup, or a minimum increment per call, rather than the seconds Twilio
-  reports.
+Settled the same morning from xAI's own usage export (2026-08-29 → 09-04),
+which carries `tokens` and `requests` columns the daily-spend endpoint does
+not. **The cutover is visible in one line:**
 
-`GET /v1/billing/teams/{team}/postpaid/invoice/preview` settles it — it
-returns `unitType`, `unitPrice` and `numUnits`, and `numUnits` is how many
-units **they** counted. That call is documented in `xaiBilling.ts` but not
-implemented; only the daily-usage endpoint is.
+| day | usd | tokens | requests |
+|---|---|---|---|
+| 2026-09-02 (old core) | 17.73 | 12,542 | 230 |
+| **2026-09-03 (cutover)** | **58.90** | **4,570,953** | **3,275** |
+
+Tokens went up **364x**. That is the whole answer.
+
+| | |
+|---|---|
+| audio, 418.6 min at the published $0.08 | $33.49 |
+| the gap to the invoice | **$20.06** |
+| 4,570,953 tokens at the published $0.004 / 1k | **$18.28** |
+| requests per call | **13.7** |
+| tokens per request | **1,396** — about one prompt |
+
+**Modelled per call: $0.1401 audio + $0.0765 text = $0.2166, against an
+actual $0.2241 — a 3.4% fit.** The residual is the token count including
+non-voice usage; the day's non-voice spend was $5.35 of the $58.90 total,
+which is also the cross-check that the `grok-voice` filter is working.
+
+So the prompt is re-sent on every model request and billed as text input,
+about fourteen times a call. **Text is ~35% of what a call costs.** This is
+strongly consistent rather than proven — `invoice/preview` returns
+`unitType`/`numUnits` and would prove it — but it is enough to act on.
+
+**PROMPT SIZE IS NOW A DOLLAR FIGURE, NOT A STYLE PREFERENCE.** Every 1,000
+tokens carried in a lane's prompt costs about **$0.055 per call** — 13.7
+requests x 1,000 tokens x $0.004/1k. At ~400 queue calls a day that is
+**~$22/day, ~$650/month, per 1,000 prompt tokens.** The operator's standing
+note — *"Grok requires minimal prompting, we should not be near our
+ceilings"* — was a latency judgement and turns out to be a billing one too.
+pcp's untrimmed 2,260-token prompt is the obvious first target.
+
+`GET /v1/billing/teams/{team}/postpaid/invoice/preview` would confirm the
+split directly — it returns `unitType`, `unitPrice` and `numUnits`, and
+`numUnits` is how many units **they** counted. Documented in
+`xaiBilling.ts`, not implemented; only the daily-usage endpoint is.
 
 **What this changes:** every Grok cost-per-call figure quoted before
 2026-09-04 is understated by about a third, including the comparison against
