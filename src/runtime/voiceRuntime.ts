@@ -48,6 +48,7 @@ import {
   GrokVoiceSession,
   WebSocketGrokTransport,
   buildSessionConfig,
+  vadBootMarker,
   type GrokTransport,
 } from "./grokSession";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
@@ -407,6 +408,13 @@ export function mountVoiceRuntime(
   for (const line of formatReadinessLines(computeRuntimeReadiness(env))) {
     console.log(line);
   }
+
+  // Which VAD threshold this build is actually running. 2026-09-04's
+  // re-measurement came back flat and could not be attributed, because a
+  // threshold that never deployed and one that did nothing are identical
+  // from SQL. Absent this line, the build is not live and a call proves
+  // nothing (CLAUDE.md, "How to tell whether a deploy took").
+  console.log(vadBootMarker());
 
   // The warm transfer. Its availability is decided once, here, and logged —
   // so "why is no-ivr still refused?" is answered by the boot log, not a

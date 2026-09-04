@@ -466,6 +466,11 @@ export class VoiceCallBridge {
 
   private assistantAudioPlaying = false;
   /**
+   * The opening has been spoken — the handshake ran. Guards
+   * `handleSessionConfigured` against a second entry; see there for why.
+   */
+  private opened = false;
+  /**
    * The greeting is playing and may not be cut short.
    *
    * `interruptible: false` on the force_message tells the PROVIDER not to
@@ -727,6 +732,18 @@ export class VoiceCallBridge {
 
   private handleSessionConfigured(): void {
     if (this.ended) return;
+    // ONCE PER CALL. The practice picks up the phone one time.
+    //
+    // `GrokVoiceSession` now only reports the handshake here, so this is
+    // defence in depth rather than the fix — but it is the invariant stated
+    // where the opening actually happens, so no future caller of
+    // `onConfigured` can reopen a call that is already underway. The harm is
+    // not only the repeated words: the greeting is spoken LOCKED
+    // (`greetingLocked`), so a replay also takes barge-in away from a caller
+    // mid-conversation. Measured on Spanish callers, 2026-09-04 — see
+    // `handshakeConfirmed` in grokSession.ts.
+    if (this.opened) return;
+    this.opened = true;
     // The handshake landed. Two turns, in this order.
     //
     // First the practice's own greeting, spoken VERBATIM — scripted, not

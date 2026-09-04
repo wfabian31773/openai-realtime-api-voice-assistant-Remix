@@ -162,11 +162,33 @@ export interface GrokVoiceSessionHandlers {
  */
 const VAD_THRESHOLD = Number(process.env.RUNTIME_VAD_THRESHOLD ?? 0.6);
 
+/**
+ * BOOT MARKER. 2026-09-04's VAD re-measurement came back flat and could not
+ * be attributed: a threshold that never deployed and a threshold that did
+ * nothing look identical from SQL. Printing the live value makes the next
+ * measurement decisive — if this line is absent, the build is not live and
+ * the call proves nothing (CLAUDE.md, "How to tell whether a deploy took").
+ */
+const RESOLVED_VAD_THRESHOLD = Number.isFinite(VAD_THRESHOLD)
+  ? Math.min(0.9, Math.max(0.1, VAD_THRESHOLD))
+  : 0.6;
+/**
+ * The boot line naming the live threshold. A FUNCTION, not a module-level
+ * `console.log`: importing this module must not print — the tests import it
+ * hundreds of times, and a marker that fires on import is not evidence a
+ * server booted with it. Called from the runtime's boot block beside the
+ * other markers.
+ */
+export function vadBootMarker(): string {
+  const source = process.env.RUNTIME_VAD_THRESHOLD ? " (from RUNTIME_VAD_THRESHOLD)" : " (default)";
+  return `[VAD] turn-detection threshold ${RESOLVED_VAD_THRESHOLD}${source}; silence 500ms`;
+}
+
 const TURN_DETECTION = {
   type: "server_vad" as const,
   // Clamped to the documented range: a typo in an env var must not silently
   // disable turn detection on every live call.
-  threshold: Number.isFinite(VAD_THRESHOLD) ? Math.min(0.9, Math.max(0.1, VAD_THRESHOLD)) : 0.6,
+  threshold: RESOLVED_VAD_THRESHOLD,
   silence_duration_ms: 500,
   prefix_padding_ms: 333,
 };
@@ -247,6 +269,23 @@ export class GrokVoiceSession {
    * Buffered — not dropped — so the caller's earliest words survive the
    * handshake, then drained in order on session.updated. */
   private readonly preConfigAudio: string[] = [];
+  /**
+   * The handshake's `session.updated` has been seen.
+   *
+   * `session.updated` is Grok acknowledging a config, and it acknowledges
+   * EVERY config — including the fresh one `setSpokenLanguage()` sends
+   * mid-call. `onConfigured` means "the handshake landed" to its consumer,
+   * and those two stopped being the same event the moment anything
+   * reconfigured a live session.
+   *
+   * Measured 2026-09-04: on tech, 20:00-23:00 UTC, greeting replays went
+   * 0 of 70 calls (09-03) to 8 of 43 (09-04) — seven of the eight Spanish
+   * callers, who are exactly the callers `set_spoken_language` fires for.
+   * The bridge speaks the practice's opening on `onConfigured`, LOCKED so it
+   * cannot be barged over, so a caller who had just said they do not speak
+   * English got the whole English opening again and could not talk over it.
+   */
+  private handshakeConfirmed = false;
   /** Scripted lines held because a response was open at the wire when
    * they were requested. THE SIBLING ADAPTER'S SECOND HARD-WON WIRE RULE
    * (its "response gates"): a force_message sent while a wire response
@@ -380,6 +419,27 @@ export class GrokVoiceSession {
         break;
       case "session.updated":
         this.state = "configured";
+        // Only the FIRST one is the handshake. A later acknowledgement is a
+        // reconfiguration of a call already in progress — the caller has
+        // been greeted, the conversation is underway, and re-running the
+        // opening is a regression, not a resume. See `handshakeConfirmed`.
+        if (this.handshakeConfirmed) {
+          // DEPLOY MARKER and live counter in one: it prints only when a
+          // mid-call reconfiguration is acknowledged, which before this fix
+          // was the moment the greeting replayed. No PHI — the language code
+          // is already in the [LANGUAGE] line and nothing else is logged.
+          console.log(
+            "[SESSION RECONFIG] acknowledged mid-call — NOT re-running the " +
+              "handshake; the greeting stays spoken once",
+          );
+          // Still drain: the buffer is normally empty by now, but audio that
+          // arrived inside this update's round trip must not be stranded.
+          for (const audio of this.preConfigAudio.splice(0)) {
+            this.send({ type: "input_audio_buffer.append", audio });
+          }
+          break;
+        }
+        this.handshakeConfirmed = true;
         // The opening scripted line goes on the wire FIRST (onConfigured
         // -> provider.start() -> force_message), THEN the held caller
         // audio: with server VAD live, releasing a buffered speech turn

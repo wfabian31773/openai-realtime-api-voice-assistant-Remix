@@ -83,9 +83,14 @@ function buildHandlers(over: {
   onAudioDone?: NonNullable<GrokVoiceSessionHandlers["onAudioDone"]>;
   onAgentTranscriptDelta?: NonNullable<GrokVoiceSessionHandlers["onAgentTranscriptDelta"]>;
   onResponseDone?: NonNullable<GrokVoiceSessionHandlers["onResponseDone"]>;
+  onConfigured?: NonNullable<GrokVoiceSessionHandlers["onConfigured"]>;
 }) {
   return {
     onToolCall: over.onToolCall ?? vi.fn(),
+    // The handshake signal. It was absent from this builder, so nothing here
+    // could assert how OFTEN it fires — which is exactly the property that
+    // broke on Spanish callers (see the setSpokenLanguage tests below).
+    onConfigured: over.onConfigured ?? vi.fn(),
     onError: over.onError ?? vi.fn(),
     onAudioDone: over.onAudioDone ?? vi.fn(),
     onAgentTranscriptDelta: over.onAgentTranscriptDelta ?? vi.fn(),
@@ -732,6 +737,59 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
     expect(updates[updates.length - 1]?.session.instructions).toMatch(/now speaking es/);
     expect(updates[updates.length - 1]?.session.instructions).toMatch(/ARGUMENTS in English/);
     expect(updates[updates.length - 1]?.session.instructions).not.toMatch(/report_\*/);
+  });
+
+
+  it("does NOT re-fire onConfigured when the language switch is acknowledged", () => {
+    /**
+     * THE SOURCE OF THE GREETING REPLAY, measured 2026-09-04.
+     *
+     * `onConfigured` means "the handshake landed" to the bridge, which
+     * answers it by speaking the practice's opening — LOCKED, so the caller
+     * cannot talk over it. But `session.updated` is Grok acknowledging ANY
+     * config, and `setSpokenLanguage` sends a fresh one mid-call. So the
+     * callers who triggered a language switch were greeted a second time,
+     * in the language they had just said they did not speak, with barge-in
+     * disabled.
+     *
+     * On tech, 20:00-23:00 UTC: 0 replays in 70 calls on 09-03, 8 in 43 on
+     * 09-04 — seven of the eight Spanish callers.
+     */
+    const onConfigured = vi.fn();
+    const { transport, session } = makeSession({ onConfigured });
+    transport.emit({ type: "session.created", conversation: { id: "sess-lang-once" } });
+    transport.emit({ type: "session.updated" });
+    expect(onConfigured).toHaveBeenCalledTimes(1);
+
+    session.setSpokenLanguage("es");
+    transport.emit({ type: "session.updated" }); // Grok acknowledges the new config
+
+    // The handshake happened once. The call is already underway.
+    expect(onConfigured).toHaveBeenCalledTimes(1);
+    // …and the switch itself still went out: this must not be fixed by
+    // suppressing the update.
+    const updates = transport.sent.filter((e) => e.type === "session.update");
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("still drains caller audio buffered during the language round trip", () => {
+    // The early-return must not strand audio. Nothing normally buffers this
+    // late, but the wire rule that config precedes audio is the one that
+    // produced a permanently deaf agent when it was broken (2026-08-24), so
+    // the drain stays on every acknowledgement rather than only the first.
+    const onConfigured = vi.fn();
+    const { transport, session } = makeSession({ onConfigured });
+    transport.emit({ type: "session.created", conversation: { id: "sess-lang-drain" } });
+    transport.emit({ type: "session.updated" });
+
+    session.setSpokenLanguage("es");
+    const before = transport.sent.filter((e) => e.type === "input_audio_buffer.append").length;
+    transport.emit({ type: "session.updated" });
+    // Audio after the handshake goes straight out either way; the assertion
+    // that matters is that the early return did not close the path.
+    session.appendAudio("ZmFrZQ==");
+    const after = transport.sent.filter((e) => e.type === "input_audio_buffer.append").length;
+    expect(after).toBe(before + 1);
   });
 
   it("accepts a spoken language NAME, not just a code — callers say \"Spanish\"", () => {
