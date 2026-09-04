@@ -467,9 +467,12 @@ settled 2026-09-03 and wrote 239 rows. `cost_reconciled_at` went from 0 of
 **THE 3.5% `Math.ceil` OVERSTATEMENT WAS TRUE AND IRRELEVANT.** It compared
 our estimate against `duration x published rate`. Both sides of that
 comparison were wrong about the bill. The rounding error was worth $1.18;
-being wrong about the rate is worth $18.89 on one day.
+our estimate being wrong is worth $18.89 on one day. **Note which noun that
+is** — the estimate, not the rate. Attributing the $18.89 to the rate is the
+claim corrected two sub-sections down, and it crept back into this sentence
+after being removed from that one.
 
-### The cause is INSIDE the voice rate, not the text tokens
+### The cause is inside the VOICE LINE, not the text tokens
 
 **I got this wrong first and the correction is the useful part.** From the
 usage CSV alone — tokens up 364x on the cutover day, 4,570,953 of them — I
@@ -560,16 +563,37 @@ always true and never needed a dollar figure.** Anyone wanting the billing
 argument for a trim has to get per-call units out of the `Voice` breakdown or
 `invoice/preview` first. **The voice minute is where the $20/day is.**
 
-**What this changes:** every Grok cost-per-call figure quoted before
-2026-09-04 is understated by about a third, including the comparison against
-the old core's token-derived cost. The runtime is materially more expensive
-per call than the estimate implied. Whether it is more expensive per
-*resolved request* is a different question and has not been measured.
+**What this changes, scoped to the one day that has been reconciled:** on
+2026-09-03 our estimate understated the invoice by about a third. **That
+percentage is NOT known to hold on any other day.** If the gap is a per-call
+minimum or a setup component rather than a rate, its size moves with the day's
+call-duration mix — a day of many short calls would carry a larger uplift than
+a day of few long ones. One day is one day. The direction (we under-book) is
+the part that generalises; the magnitude is not.
 
-The allocation itself is sound and was checked, not assumed: the voice filter
-matches only `grok-voice` series so non-voice grok spend is excluded; 0 of 239
-reconciled rows are still flagged estimated; 0 have a total disagreeing with
-their parts.
+The runtime is materially more expensive per call than the estimate implied.
+Whether it is more expensive per *resolved request* is a different question and
+has not been measured.
+
+**WHAT THE ALLOCATION IS PROVEN TO DO, AND WHAT IT IS NOT.** Checked, not
+assumed: the voice filter matches only the `grok-voice` series so non-voice
+grok spend is excluded; 0 of 239 reconciled rows are still flagged estimated;
+0 have a total disagreeing with their parts.
+
+Every one of those checks is about the DAY TOTAL and its bookkeeping. **None
+of them establishes that the 239 per-call shares are right.** The split is
+proportional to Twilio seconds, which is correct only if the bill is
+proportional to Twilio seconds — and that is precisely the open question. If
+the gap turns out to be a per-call minimum or a setup component, those pieces
+are NOT proportional to duration, so a long call is currently carrying some of
+a short call's cost.
+
+So: **the day's total is authoritative, the per-call figures are an
+apportionment.** That distinction matters more than it looks, because
+`cost_is_estimated = false` on those rows tells every reader they are the
+invoiced truth, and per-call and per-lane cost analytics read them as such.
+Treat a single call's Grok cost as indicative until `numUnits` establishes what
+xAI actually counts. (Codex, PR #269.)
 
 **THE GUARD NOW MATTERS.** It has a live population to defend for the first
 time — 239 rows carry an invoiced cost that an estimate must never overwrite.
