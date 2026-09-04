@@ -215,6 +215,42 @@ describe('the sweep only ever sees a CERTAIN identity', () => {
   });
 
   /**
+   * A CERTAIN MATCH WITH NO DATE OF BIRTH ON THE RECORD.
+   *
+   * `PatientData.dateOfBirth` is optional, and rememberVerifiedIdentity used
+   * to refuse the whole entry without one — so a certain unique PHONE match
+   * whose schedule row had no date stored nothing, the sweep reported
+   * "no-name", and a recoverable request from a positively identified caller
+   * was dropped (Codex, PR #268 round 7).
+   */
+  it('remembers a verified name even when the record carries no date of birth', () => {
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testpatient',
+      lastName: 'Example',
+      certain: true,
+    });
+    expect(verifiedIdentityFor(SID)).toMatchObject({
+      firstName: 'Testpatient',
+      lastName: 'Example',
+      certain: true,
+    });
+  });
+
+  it('has no date to carry forward for that caller, and says so', () => {
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testpatient',
+      lastName: 'Example',
+      certain: true,
+    });
+    expect(verifiedDobFor(SID, 'Testpatient', 'Example')).toBeUndefined();
+  });
+
+  it('still refuses a nameless entry — a name is the part that is required', () => {
+    rememberVerifiedIdentity(SID, { lastName: 'Example', dateOfBirth: '1973-03-17', certain: true });
+    expect(verifiedIdentityFor(SID)).toBeUndefined();
+  });
+
+  /**
    * verifiedDobFor answers a different question — "is this ticket for that
    * same person?" — and applies its own name guard. Narrowing it is a
    * ticket-path change that needs a before/after number, so it deliberately

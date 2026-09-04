@@ -148,6 +148,8 @@ async function harness(
     fetchPrecontext?: (phone: string) => Promise<unknown>;
     resolveGreeting?: (slug: string) => Promise<string | null>;
     sweepCall?: (record: unknown) => Promise<unknown>;
+    persistCall?: (record: unknown) => Promise<boolean>;
+    persistBeforeSweepMs?: number;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
     callRowDeadlineMs?: number;
     env?: Record<string, string | undefined>;
@@ -183,10 +185,13 @@ async function harness(
         openedRows.push(row as unknown as Record<string, unknown>);
         return undefined;
       }),
-    persistCall: async (record) => {
-      persisted.push(record as unknown as Record<string, unknown>);
-      return true;
-    },
+    persistBeforeSweepMs: over.persistBeforeSweepMs,
+    persistCall:
+      over.persistCall ??
+      (async (record) => {
+        persisted.push(record as unknown as Record<string, unknown>);
+        return true;
+      }),
     sweepCall:
       over.sweepCall ??
       (async (record) => {
@@ -818,6 +823,31 @@ describe("one whole call, end to end, offline", () => {
     await settle(8);
     expect(h.persisted).toHaveLength(1);
     expect(h.persisted[0]).toMatchObject({ callSid: "CA-sweep-boom" });
+  });
+
+  /**
+   * A WEDGED POOL MUST NOT EAT THE REQUEST.
+   *
+   * `persistCall` is a database upsert; if it never settles, an unbounded
+   * await here means the sweep never runs, teardown completes, and a
+   * substantive request is lost even though the ticketing API was healthy
+   * the whole time. The bridge fires teardown without awaiting it, so
+   * nothing upstream would ever notice (Codex, PR #268 round 7).
+   */
+  it("sweeps anyway when the call-record write never settles", async () => {
+    const h = await harness({
+      persistCall: () => new Promise<boolean>(() => {}),
+      persistBeforeSweepMs: 40,
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-wedged", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-wedged", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await new Promise((r) => setTimeout(r, 120));
+    await settle(8);
+    expect(h.persisted).toHaveLength(0);
+    expect(h.swept).toHaveLength(1);
+    expect(h.swept[0]).toMatchObject({ callSid: "CA-wedged" });
   });
 
   it("releases the brokered transfer when the caller hangs up before the bridge exists", async () => {

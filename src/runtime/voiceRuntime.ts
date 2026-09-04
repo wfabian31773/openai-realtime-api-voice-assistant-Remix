@@ -248,6 +248,15 @@ const PRECONTEXT_DEADLINE_MS = 1_500;
  */
 const CALL_ROW_DEADLINE_MS = 2_000;
 
+/**
+ * How long teardown waits for the call_logs write before sweeping anyway.
+ *
+ * Generous — this is teardown, the caller is gone and nothing is holding a
+ * socket for it — but finite, because the sweep is what saves the request
+ * and it must not be hostage to a database that has stopped answering.
+ */
+const PERSIST_BEFORE_SWEEP_MS = 5_000;
+
 /** Resolve within a bound, or null. Never throws. */
 async function withinOrNull<T>(work: Promise<T>, ms: number): Promise<T | null> {
   return Promise.race([
@@ -263,6 +272,8 @@ export interface VoiceRuntimeOptions {
   env?: Record<string, string | undefined>;
   /** Overridable so tests never import the agent tree. */
   laneSource?: LaneSource;
+  /** Overridable so the wedged-pool test does not wait five seconds. */
+  persistBeforeSweepMs?: number;
   registry?: CallSessionRegistry;
   /** How long a media-stream socket may stay open without claiming a call.
    * Defaults to STREAM_CLAIM_DEADLINE_MS. */
@@ -957,7 +968,24 @@ export function mountVoiceRuntime(
            * socket open for a ticket POST.
            */
           persistCallRecord: async (record) => {
-            await persistCall(record);
+            /**
+             * BOUNDED, because an unbounded await here throws the request
+             * away. `persistCall` is a database upsert, and a wedged pool
+             * makes it never settle — at which point the sweep never runs,
+             * teardown completes, and a substantive request is lost even
+             * though the ticketing API was healthy the whole time. The
+             * bridge fires this without awaiting, so nothing upstream would
+             * ever notice (Codex, PR #268 round 7).
+             *
+             * The order still matters and is unchanged: the row first,
+             * because it is the evidence every measurement is built on. But
+             * the sweep reads nothing from it, so a slow or failed write is
+             * no reason to abandon the caller's request.
+             */
+            await withinOrNull(
+              persistCall(record),
+              options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
+            );
             await sweepCall(record).catch(() => undefined);
           },
         });

@@ -40,8 +40,18 @@ import { isTwilioCallSid } from './callSid';
 export interface VerifiedIdentity {
   firstName: string;
   lastName: string;
-  /** As the record holds it. Parsed by the caller, never displayed. */
-  dateOfBirth: string;
+  /**
+   * As the record holds it. Parsed by the caller, never displayed.
+   *
+   * OPTIONAL, because a verified NAME and a carried-forward date of birth are
+   * two different things. A certain unique phone match whose schedule row has
+   * no date of birth used to store nothing at all — so the sweep reported
+   * "no-name" and dropped a recoverable request from a caller we had
+   * positively identified (Codex, PR #268 round 7). `verifiedDobFor` still
+   * refuses to answer without one; only `verifiedIdentityFor` is satisfied by
+   * a name.
+   */
+  dateOfBirth?: string;
   /**
    * The match was UNAMBIGUOUS — not a unique hit on a name or a date of
    * birth alone.
@@ -129,17 +139,30 @@ export function rememberVerifiedIdentity(
   const firstName = (identity.firstName ?? '').trim();
   const lastName = (identity.lastName ?? '').trim();
   const dateOfBirth = (identity.dateOfBirth ?? '').trim();
-  if (!isTwilioCallSid(callSid) || !firstName || !lastName || !dateOfBirth) return;
+  // A NAME IS ENOUGH TO REMEMBER. The date of birth is a bonus that the
+  // filing tools carry forward; its absence is not a reason to forget who
+  // the caller is.
+  if (!isTwilioCallSid(callSid) || !firstName || !lastName) return;
   const now = Date.now();
   sweep(now);
   verified.delete(callSid);
-  verified.set(callSid, { firstName, lastName, dateOfBirth, certain, at: now });
+  verified.set(callSid, {
+    firstName,
+    lastName,
+    ...(dateOfBirth ? { dateOfBirth } : {}),
+    certain,
+    at: now,
+  });
 }
 
 /**
  * The date of birth we verified for this call, IF the ticket is for that same
  * person. Returns undefined otherwise — including for a caller filing on
- * somebody else's behalf, which is the case this must never guess at.
+ * somebody else's behalf, which is the case this must never guess at, and
+ * now also for a caller we identified from a record that simply has no date
+ * of birth on it. That entry still exists so the sweep knows who called; it
+ * just has no date to carry forward, and answering undefined is exactly
+ * right (Codex, PR #268 round 7).
  */
 export function verifiedDobFor(
   callSid: string | undefined,
@@ -196,7 +219,7 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
   return {
     firstName: entry.firstName,
     lastName: entry.lastName,
-    dateOfBirth: entry.dateOfBirth,
+    ...(entry.dateOfBirth ? { dateOfBirth: entry.dateOfBirth } : {}),
     certain: true,
   };
 }

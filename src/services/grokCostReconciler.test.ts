@@ -6,6 +6,7 @@
  * Most of these tests are about declining.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   reconcileGrokCostsForDay,
   reconcileMarker,
@@ -269,6 +270,26 @@ describe("the marker", () => {
     });
     expect(line).not.toMatch(/CA[0-9a-f]{6}/);
     expect(line).not.toMatch(/\+?1?\d{10}/);
+  });
+});
+
+/**
+ * A source pin, and it says so. The day query is a SQL string, so nothing
+ * here proves behaviour — what it proves is that the restriction has not been
+ * quietly dropped. The reason it matters is behavioural: the first run after
+ * UTC midnight can catch a previous-day call still in flight, whose NULL
+ * duration COALESCEd to zero and got that live call stamped reconciled at $0
+ * while the finished calls absorbed its share of the bill (Codex, PR #268
+ * round 7). Later writers then preserve the zero, because the row claims to
+ * be reconciled.
+ */
+describe("the day query takes finalised rows only", () => {
+  const src = readFileSync(new URL("./grokCostReconciler.ts", import.meta.url), "utf8");
+
+  it("filters to completed calls with a real duration", () => {
+    expect(src).toMatch(/AND status = 'completed'/);
+    expect(src).toMatch(/AND duration IS NOT NULL/);
+    expect(src).toMatch(/AND duration > 0/);
   });
 });
 

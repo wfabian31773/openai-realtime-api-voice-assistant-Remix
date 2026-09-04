@@ -201,6 +201,26 @@ export function databasePorts(): ReconcilerPorts {
            FROM call_logs
           WHERE voice_provider = 'grok'
             AND call_sid IS NOT NULL
+            /**
+             * FINALISED ROWS ONLY.
+             *
+             * The reconciler settles the previous UTC day and runs every six
+             * hours, so the first run after midnight can catch a call from
+             * that day still in flight. Its duration is NULL, COALESCE made
+             * it zero, and because other completed calls had seconds the
+             * positive-spend guard did not fire — so the live call was
+             * marked reconciled at $0 (permanently, since later writers then
+             * preserve it) and its share of the bill was absorbed by the
+             * calls that had finished (Codex, PR #268 round 7).
+             *
+             * Excluding it costs nothing: the NEXT run re-allocates the
+             * whole day across every row, that call included, because a
+             * re-run writes all of them. A row briefly missing its share is
+             * self-correcting; a row permanently stamped $0 is not.
+             */
+            AND status = 'completed'
+            AND duration IS NOT NULL
+            AND duration > 0
             AND created_at >= $1::date
             AND created_at <  ($1::date + INTERVAL '1 day')`,
         [day],
