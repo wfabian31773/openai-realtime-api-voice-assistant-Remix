@@ -14,6 +14,9 @@ import {
   sumDailyUsage,
   fetchDailySpend,
   type FetchLike,
+  parseInvoicePreview,
+  compareBilledUnits,
+  fetchInvoicePreview,
 } from "./xaiBilling";
 
 const SETUP = {
@@ -284,5 +287,154 @@ describe("fetching, and every way it can decline", () => {
     });
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.reason).toContain("not JSON");
+  });
+});
+
+// ─── invoice/preview ─────────────────────────────────────────────────────────
+
+describe('parseInvoicePreview', () => {
+  const line = (over: Record<string, unknown> = {}) => ({
+    description: 'grok-voice-think-fast-2.0',
+    unitType: 'minutes',
+    unitPrice: 0.08,
+    numUnits: 418.6,
+    amount: 33.49,
+    ...over,
+  });
+
+  it('reads the fields the endpoint exists for', () => {
+    const r = parseInvoicePreview({ lineItems: [line()] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.lines[0]).toMatchObject({ unitType: 'minutes', numUnits: 418.6, unitPrice: 0.08 });
+  });
+
+  it.each(['lineItems', 'lines', 'items'])('accepts the array under %s', (key) => {
+    expect(parseInvoicePreview({ [key]: [line()] }).ok).toBe(true);
+  });
+
+  it('accepts numeric strings, which billing APIs return for money', () => {
+    const r = parseInvoicePreview({ lineItems: [line({ numUnits: '418.6', unitPrice: '0.08' })] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.lines[0].numUnits).toBe(418.6);
+  });
+
+  /**
+   * The whole point of the endpoint is a number. A line we cannot read has no
+   * answer in it, and defaulting to 0 would look exactly like one — the same
+   * reasoning as "no voice line is not zero" in sumDailyUsage.
+   */
+  it('REFUSES a line whose numUnits cannot be read, rather than defaulting it', () => {
+    const r = parseInvoicePreview({ lineItems: [line({ numUnits: null })] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('cannot read');
+  });
+
+  it('refuses when no line matches the voice needle, and names what came back', () => {
+    const r = parseInvoicePreview({ lineItems: [line({ description: 'grok-4-text' })] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('grok-4-text');
+  });
+
+  it('refuses a body with no line items at all', () => {
+    expect(parseInvoicePreview({}).ok).toBe(false);
+  });
+});
+
+describe('compareBilledUnits — the question five rounds of review could not settle', () => {
+  const OUR_SECONDS = 25_116; // 2026-09-03, the reconciled day: 418.6 minutes
+
+  it('xAI counted OUR minutes -> the duration is not the gap', () => {
+    const c = compareBilledUnits(
+      { unitType: 'minutes', unitPrice: 0.08, numUnits: 418.6, amountUsd: 33.49, description: 'grok-voice' },
+      OUR_SECONDS,
+    );
+    expect(c.ratio).toBeCloseTo(1, 2);
+    expect(c.verdict).toContain('duration is NOT the gap');
+    expect(c.verdict).toContain('Splitting by call seconds is sound');
+  });
+
+  /**
+   * The case that would invalidate the current allocation. 669.4 minutes is
+   * the 418.6 we recorded plus a 63-second per-call minimum over 239 calls —
+   * one concrete way the gap could be duration rather than rate.
+   */
+  it('xAI counted MORE than our minutes -> the per-second split is distributing it wrongly', () => {
+    const c = compareBilledUnits(
+      { unitType: 'minutes', unitPrice: 0.08, numUnits: 669.4, amountUsd: 53.55, description: 'grok-voice' },
+      OUR_SECONDS,
+    );
+    expect(c.ratio).toBeGreaterThan(1.5);
+    expect(c.verdict).toContain('longer duration than Twilio reports');
+    expect(c.verdict).toContain('per-call minimum is NOT proportional to duration');
+  });
+
+  it('a non-duration unit says the allocation denominator itself is wrong', () => {
+    const c = compareBilledUnits(
+      { unitType: 'audio_tokens', unitPrice: 0.000004, numUnits: 13_387_500, amountUsd: 53.55, description: 'grok-voice' },
+      OUR_SECONDS,
+    );
+    expect(c.ourUnits).toBeNull();
+    expect(c.ratio).toBeNull();
+    expect(c.verdict).toContain('not a duration');
+    expect(c.verdict).toContain('do not split');
+  });
+
+  it('handles seconds as the unit', () => {
+    const c = compareBilledUnits(
+      { unitType: 'seconds', unitPrice: 0.00133, numUnits: 25_116, amountUsd: 33.49, description: 'grok-voice' },
+      OUR_SECONDS,
+    );
+    expect(c.ratio).toBeCloseTo(1, 3);
+  });
+
+  it('says so rather than dividing by zero when we recorded nothing', () => {
+    const c = compareBilledUnits(
+      { unitType: 'minutes', unitPrice: 0.08, numUnits: 10, amountUsd: 0.8, description: 'grok-voice' },
+      0,
+    );
+    expect(c.ratio).toBeNull();
+    expect(c.verdict).toContain('nothing to compare');
+  });
+});
+
+describe('fetchInvoicePreview', () => {
+  const setup = { configured: true as const, config: { baseUrl: 'https://management-api.x.ai', managementKey: 'k', teamId: 't' } };
+
+  it('GETs the documented path with the management key', async () => {
+    let seen: { url: string; init?: Record<string, unknown> } | null = null;
+    const fetchImpl = (async (url: string, init?: Record<string, unknown>) => {
+      seen = { url, init };
+      return { ok: true, status: 200, text: async () => JSON.stringify({ lineItems: [
+        { description: 'grok-voice-think-fast-2.0', unitType: 'minutes', unitPrice: 0.08, numUnits: 418.6, amount: 33.49 },
+      ] }) };
+    }) as never;
+    const r = await fetchInvoicePreview({ setup, fetchImpl });
+    expect(r.ok).toBe(true);
+    expect(seen!.url).toBe('https://management-api.x.ai/v1/billing/teams/t/postpaid/invoice/preview');
+    expect(seen!.init!.method).toBe('GET');
+    expect((seen!.init!.headers as Record<string, string>).Authorization).toBe('Bearer k');
+    // A GET must not carry a body — some gateways reject one outright.
+    expect(seen!.init!.body).toBeUndefined();
+  });
+
+  it('names the missing variables when unconfigured, and does not call out', async () => {
+    let called = false;
+    const fetchImpl = (async () => { called = true; throw new Error('should not be reached'); }) as never;
+    const r = await fetchInvoicePreview({ setup: { configured: false, missing: ['XAI_MANAGEMENT_KEY'] }, fetchImpl });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('XAI_MANAGEMENT_KEY');
+    expect(called).toBe(false);
+  });
+
+  /** An error body from a billing endpoint can echo account details. */
+  it('reports the status and never the body on an HTTP error', async () => {
+    const fetchImpl = (async () => ({ ok: false, status: 403, text: async () => 'team_id=SECRET org=SECRET' })) as never;
+    const r = await fetchInvoicePreview({ setup, fetchImpl });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain('403');
+      expect(r.reason).not.toContain('SECRET');
+    }
   });
 });

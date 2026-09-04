@@ -230,16 +230,27 @@ async function post(
   fetchImpl: FetchLike,
   timeoutMs: number,
 ): Promise<BillingResult<unknown>> {
+  return request(config, path, "POST", body, fetchImpl, timeoutMs);
+}
+
+async function request(
+  config: XaiBillingConfig,
+  path: string,
+  method: "GET" | "POST",
+  body: unknown,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<BillingResult<unknown>> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetchImpl(`${config.baseUrl}${path}`, {
-      method: "POST",
+      method,
       headers: {
         Authorization: `Bearer ${config.managementKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: controller.signal,
     });
     const text = await res.text();
@@ -295,4 +306,212 @@ export async function fetchDailySpend(
   );
   if (!res.ok) return res;
   return sumDailyUsage(day, res.value, options.voiceNeedle ?? "grok-voice");
+}
+
+// ─── invoice/preview: what xAI COUNTED ───────────────────────────────────────
+//
+// The daily-usage endpoint above answers "how much". This one answers "how
+// many of what", and that is the question five rounds of review could not
+// settle from spend alone: our estimate was 60% below the invoice on
+// 2026-09-03, and the three live explanations — a stale published rate, audio
+// tokens billed on top of the minute, or a billed duration longer than the one
+// Twilio reports — are indistinguishable while the only numbers available are
+// dollars.
+//
+// `numUnits` distinguishes them, because it is xAI's own count. Compare it
+// against the seconds we recorded:
+//
+//   units ≈ our minutes          -> the rate card is wrong, or something is
+//                                   billed on top of the minute
+//   units >> our minutes         -> they bill a longer duration than we record
+//                                   (setup, wall-clock, or a per-call minimum)
+//   unitType is not a duration   -> the whole per-minute model is wrong and the
+//                                   allocation's denominator must change
+//
+// And `unitPrice` is the rate stated BY xAI, rather than transcribed from a
+// pricing page by someone who may be reading a stale one.
+
+export interface InvoiceLine {
+  /** What xAI is counting: minutes, tokens, requests. Their word, not ours. */
+  unitType: string;
+  /** Their rate, in dollars per unit. */
+  unitPrice: number;
+  /** HOW MANY THEY COUNTED. The number this endpoint exists for. */
+  numUnits: number;
+  amountUsd: number;
+  description: string;
+}
+
+export interface InvoicePreview {
+  lines: InvoiceLine[];
+  /** Lines not matching the voice needle, kept so a rename is visible. */
+  ignored: InvoiceLine[];
+}
+
+function readNumber(raw: Record<string, unknown>, ...names: string[]): number | null {
+  for (const name of names) {
+    const v = raw[name];
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+  }
+  return null;
+}
+
+/**
+ * Pure, so the shape xAI return is pinned by a test rather than discovered in
+ * production — the same reason `buildDailyUsageRequest` is pure.
+ *
+ * A line whose numUnits or unitType cannot be read is REFUSED rather than
+ * defaulted. This endpoint exists to answer a question with a number; a line
+ * we cannot read has no answer in it, and a zero would look like one.
+ */
+export function parseInvoicePreview(
+  raw: unknown,
+  voiceNeedle = "grok-voice",
+): BillingResult<InvoicePreview> {
+  const root = raw as Record<string, unknown> | null;
+  const rawLines =
+    (root?.lineItems as unknown[]) ?? (root?.lines as unknown[]) ?? (root?.items as unknown[]);
+  if (!Array.isArray(rawLines)) {
+    return { ok: false, reason: "xAI invoice preview had no line items array" };
+  }
+
+  const lines: InvoiceLine[] = [];
+  const unreadable: string[] = [];
+  for (const entry of rawLines) {
+    const l = entry as Record<string, unknown>;
+    const description = String(l.description ?? l.name ?? l.model ?? "");
+    const unitType = typeof l.unitType === "string" ? l.unitType : "";
+    const numUnits = readNumber(l, "numUnits", "units", "quantity");
+    const unitPrice = readNumber(l, "unitPrice", "price");
+    const amountUsd = readNumber(l, "amount", "amountUsd", "usd");
+    if (!unitType || numUnits === null || unitPrice === null || amountUsd === null) {
+      unreadable.push(description || "(unnamed line)");
+      continue;
+    }
+    lines.push({ unitType, unitPrice, numUnits, amountUsd, description });
+  }
+
+  if (unreadable.length) {
+    return {
+      ok: false,
+      reason:
+        `xAI invoice preview returned line(s) missing unitType/numUnits/unitPrice/amount ` +
+        `(${unreadable.join(", ")}) — a line we cannot read cannot answer what they counted`,
+    };
+  }
+
+  const voice = lines.filter((l) => isVoiceBillingLine(l.description, voiceNeedle));
+  const ignored = lines.filter((l) => !isVoiceBillingLine(l.description, voiceNeedle));
+  if (voice.length === 0) {
+    return {
+      ok: false,
+      reason:
+        `xAI invoice preview had no line matching "${voiceNeedle}"` +
+        (ignored.length ? ` — lines present: ${ignored.map((l) => l.description).join(", ")}` : ""),
+    };
+  }
+  return { ok: true, value: { lines: voice, ignored } };
+}
+
+export interface UnitComparison {
+  unitType: string;
+  /** What xAI counted. */
+  billedUnits: number;
+  /** The same quantity as WE measure it, converted to xAI's unit where we can. */
+  ourUnits: number | null;
+  /** billedUnits / ourUnits, or null when the unit is not a duration. */
+  ratio: number | null;
+  /** xAI's own stated price per unit. */
+  unitPrice: number;
+  /** What this rules in or out, in one line an operator can act on. */
+  verdict: string;
+}
+
+const MINUTE_UNITS = /minute|min\b/i;
+const SECOND_UNITS = /second|sec\b/i;
+
+/**
+ * THE ANSWER, when it arrives. Everything else in this module is plumbing.
+ *
+ * `ourSeconds` is the summed `call_logs.duration` for the same period — the
+ * denominator the allocation currently splits by, and the one whose
+ * correctness is the open question.
+ */
+export function compareBilledUnits(line: InvoiceLine, ourSeconds: number): UnitComparison {
+  const base = { unitType: line.unitType, billedUnits: line.numUnits, unitPrice: line.unitPrice };
+
+  if (MINUTE_UNITS.test(line.unitType)) {
+    const ourUnits = ourSeconds / 60;
+    return { ...base, ourUnits, ratio: ourUnits > 0 ? line.numUnits / ourUnits : null,
+      verdict: verdictFor(ourUnits > 0 ? line.numUnits / ourUnits : null, "minutes") };
+  }
+  if (SECOND_UNITS.test(line.unitType)) {
+    return { ...base, ourUnits: ourSeconds, ratio: ourSeconds > 0 ? line.numUnits / ourSeconds : null,
+      verdict: verdictFor(ourSeconds > 0 ? line.numUnits / ourSeconds : null, "seconds") };
+  }
+  return {
+    ...base,
+    ourUnits: null,
+    ratio: null,
+    verdict:
+      `xAI bills this line in "${line.unitType}", which is not a duration. ` +
+      `The per-second allocation's denominator is wrong for it — do not split ` +
+      `this line by call seconds.`,
+  };
+}
+
+function verdictFor(ratio: number | null, unit: string): string {
+  if (ratio === null) return `no ${unit} recorded on our side — nothing to compare`;
+  if (ratio >= 0.98 && ratio <= 1.02) {
+    return (
+      `xAI counted the same ${unit} we did (ratio ${ratio.toFixed(3)}). ` +
+      `The duration is NOT the gap — so the rate card is stale or something is ` +
+      `billed on top of the minute. Splitting by call seconds is sound.`
+    );
+  }
+  if (ratio > 1.02) {
+    return (
+      `xAI counted ${ratio.toFixed(2)}x the ${unit} we recorded. They bill a longer ` +
+      `duration than Twilio reports — setup, wall-clock, or a per-call minimum. ` +
+      `A per-call minimum is NOT proportional to duration, so the per-second ` +
+      `allocation is distributing it wrongly across calls.`
+    );
+  }
+  return (
+    `xAI counted FEWER ${unit} than we recorded (ratio ${ratio.toFixed(3)}) — ` +
+    `check the period and timezone of both sides before reading anything into it.`
+  );
+}
+
+/** The live call. Never throws; returns the reason instead. */
+export async function fetchInvoicePreview(
+  options: {
+    setup?: XaiBillingSetup;
+    fetchImpl?: FetchLike;
+    timeoutMs?: number;
+    voiceNeedle?: string;
+  } = {},
+): Promise<BillingResult<InvoicePreview>> {
+  const setup = options.setup ?? readXaiBillingConfig();
+  if (!setup.configured) {
+    return {
+      ok: false,
+      reason:
+        `xAI billing is not configured — set ${setup.missing.join(" and ")}. ` +
+        `The management key is created at xAI Console -> Settings -> Management Keys ` +
+        `and is NOT the same credential as XAI_API_KEY.`,
+    };
+  }
+  const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
+  const res = await request(
+    setup.config,
+    `/v1/billing/teams/${encodeURIComponent(setup.config.teamId)}/postpaid/invoice/preview`,
+    "GET",
+    undefined,
+    fetchImpl,
+    options.timeoutMs ?? 15_000,
+  );
+  if (!res.ok) return res;
+  return parseInvoicePreview(res.value, options.voiceNeedle ?? "grok-voice");
 }
