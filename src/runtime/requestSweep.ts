@@ -48,6 +48,7 @@
  * request survives a gate that was never the server's.
  */
 import { otherReasonFor } from "../tools/otherReason";
+import { monthNumberFromWord } from "../tools/dobParts";
 
 /** The lanes this runs on. Each is a queue whose department is its routing. */
 const DEPARTMENT_BY_SLUG: Record<string, number> = {
@@ -106,6 +107,7 @@ export type SweepSkipReason =
   | "caller-said-nothing"
   | "no-name"
   | "status-check"
+  | "identity-only"
   | "no-department-catch-all";
 
 /**
@@ -148,6 +150,76 @@ function isFiller(line: string): boolean {
 export function callerSaidSomething(transcript: string): boolean {
   return callerLines(transcript).some((l) => !isFiller(l));
 }
+
+/**
+ * A caller who identified themselves and then hung up has not made a request.
+ *
+ * `callerSaidSomething` counts any non-filler line, and "Yes, this is Mary
+ * Smith" and a spoken date of birth are not filler — so a lookup that
+ * succeeded followed by a hang-up produced a high-priority catch-all ticket
+ * containing nothing but the identity interview (Codex, PR #268 round 4).
+ *
+ * DELIBERATELY THE NARROWEST POSSIBLE VERSION. It suppresses a call only when
+ * EVERY caller line is exhausted by that caller's own name and a date — words
+ * they were asked for. Any request contains something else, so this cannot
+ * swallow one; the failure mode it accepts is filing the occasional
+ * identity-only ticket, which is the right direction to err on a path whose
+ * whole purpose is not losing requests.
+ *
+ * It does NOT try to decide what a request is. That is a judgement about
+ * conversation content, it belongs to the operator, and standing instruction
+ * 3 is that meaning is the model's job and not a regex's. This only asks
+ * whether anything was said at all beyond the identifiers.
+ */
+export function saidMoreThanTheirOwnIdentity(
+  transcript: string,
+  identity: { firstName?: string; lastName?: string } | undefined,
+): boolean {
+  const own = new Set(
+    [identity?.firstName, identity?.lastName]
+      .flatMap((n) => (n ?? "").toLowerCase().split(/\s+/))
+      .filter(Boolean),
+  );
+  for (const line of callerLines(transcript)) {
+    if (isFiller(line)) continue;
+    const words = line
+      .toLowerCase()
+      .replace(/[.,!?¿¡'"]/g, " ")
+      .split(/\s+/)
+      .filter(Boolean);
+    const leftover = words.filter(
+      (w) =>
+        !own.has(w) &&
+        !FILLER.has(w) &&
+        !IDENTITY_WORDS.has(w) &&
+        // Bare numbers and ordinals: a spoken date, a year, "the 17th".
+        !/^\d{1,4}(st|nd|rd|th)?$/.test(w) &&
+        monthNumberFromWord(w) === undefined &&
+        !NUMBER_WORDS.has(w),
+    );
+    if (leftover.length > 0) return true;
+  }
+  return false;
+}
+
+/** The scaffolding around an identity answer: "this is", "my name is". */
+const IDENTITY_WORDS = new Set([
+  "this", "is", "it", "i", "am", "my", "name", "the", "of", "birth", "date",
+  "was", "born", "on", "in", "a", "and", "speaking", "here", "that", "s",
+  "im", "its", "mr", "mrs", "ms", "dr", "junior", "senior", "jr", "sr",
+]);
+
+/** Spoken numbers, so "March seventeenth nineteen seventy three" is a date. */
+const NUMBER_WORDS = new Set([
+  "zero", "oh", "one", "two", "three", "four", "five", "six", "seven", "eight",
+  "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+  "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty",
+  "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "thousand",
+  "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
+  "ninth", "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth",
+  "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth",
+  "twentieth", "thirtieth", "twenty-first", "twenty-second",
+]);
 
 /**
  * A filing tool that RAN AND SUCCEEDED.
@@ -211,6 +283,18 @@ export function decideSweep(input: SweepInput): SweepDecision {
   }
   if (!otherReasonFor(departmentId)) {
     return { file: false, reason: "no-department-catch-all" };
+  }
+  /**
+   * IDENTIFIED, THEN HUNG UP. Everything the caller said was their own name
+   * and a date — the two things the agent asked them for. There is no request
+   * in that, and filing one puts an identity interview on the staff queue at
+   * high priority (Codex, PR #268 round 4).
+   *
+   * Placed AFTER the cheap checks and BEFORE the name gate, so its skips are
+   * counted separately from both silence and anonymity.
+   */
+  if (!saidMoreThanTheirOwnIdentity(input.transcript, input.verifiedName)) {
+    return { file: false, reason: "identity-only" };
   }
   /**
    * NO NAME, NO TICKET. Operator ruling, 2026-09-03, answering the question

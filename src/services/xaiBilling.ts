@@ -164,14 +164,38 @@ export function sumDailyUsage(
     return { ok: false, reason: "xAI truncated the usage series (limitReached) — the total would be too low" };
   }
   const lines: DailySpendLine[] = [];
+  /**
+   * A series we RECOGNISED but could not read a number out of.
+   *
+   * Skipping its bad points and calling the result $0 turns a malformed or
+   * truncated response into an authoritative free day — every call on it
+   * written to zero and marked reconciled, permanently (Codex, PR #268
+   * round 4). Silently dropping invalid points is right; silently dropping
+   * ALL of them is not, so the two cases are separated here and the second
+   * one refuses below.
+   */
+  const unreadable: string[] = [];
   for (const series of root.timeSeries) {
     const label = series.groupLabels?.[0] ?? series.group?.[0] ?? "(ungrouped)";
     let usd = 0;
+    let sawNumber = false;
     for (const point of series.dataPoints ?? []) {
       const v = point.values?.[0];
-      if (typeof v === "number" && Number.isFinite(v)) usd += v;
+      if (typeof v === "number" && Number.isFinite(v)) {
+        usd += v;
+        sawNumber = true;
+      }
     }
-    lines.push({ description: label, usd });
+    if (!sawNumber && isVoiceBillingLine(label, voiceNeedle)) unreadable.push(label);
+    else lines.push({ description: label, usd });
+  }
+  if (unreadable.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `xAI returned voice billing line(s) for ${day} with no readable amount ` +
+        `(${unreadable.join(", ")}) — a response we cannot read is not a free day`,
+    };
   }
   const voice = lines.filter((l) => isVoiceBillingLine(l.description, voiceNeedle));
   const ignored = lines.filter((l) => !isVoiceBillingLine(l.description, voiceNeedle));

@@ -10,11 +10,15 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker } from './dobEscape';
 import { resetGateAttempts } from './gateAttempts';
+import { resetDobHistory } from './dobEscape';
 
 const SID = 'CA00000000000000000000000000000077';
 const TOOL = 'file_optical_ticket';
 
-beforeEach(() => resetGateAttempts());
+beforeEach(() => {
+  resetGateAttempts();
+  resetDobHistory();
+});
 
 describe('the date-of-birth escape', () => {
   it('asks the FIRST time — the caller deserves to be asked properly once', () => {
@@ -43,6 +47,29 @@ describe('the date-of-birth escape', () => {
     expect(decideDobEscape(SID, TOOL, 'the seventies sometime')).toMatchObject({
       status: 'unmatched',
     });
+  });
+
+  /**
+   * The caller gave an unreadable date on the first try and the model omitted
+   * the argument on the retry. Deciding from the last payload alone reports
+   * "never given" and sends staff looking for nothing, while the date sits on
+   * the recording (Codex, PR #268 round 4).
+   */
+  it('remembers an EARLIER unreadable date when the retry sends nothing', () => {
+    decideDobEscape(SID, TOOL, 'sometime in the seventies');
+    expect(decideDobEscape(SID, TOOL, '')).toMatchObject({ status: 'unmatched' });
+  });
+
+  it('still says unavailable when no attempt ever carried one', () => {
+    decideDobEscape(SID, TOOL, '');
+    expect(decideDobEscape(SID, TOOL, '')).toMatchObject({ status: 'unavailable' });
+  });
+
+  it('does not let one call\'s spoken date decide another call\'s status', () => {
+    const other = 'CA00000000000000000000000000000079';
+    decideDobEscape(SID, TOOL, 'the seventies');
+    decideDobEscape(other, TOOL, '');
+    expect(decideDobEscape(other, TOOL, '')).toMatchObject({ status: 'unavailable' });
   });
 
   it('counts per call and per tool, so one caller cannot spend another\'s ask', () => {

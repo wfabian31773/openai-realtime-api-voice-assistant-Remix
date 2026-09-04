@@ -11,10 +11,11 @@ import { laneRoster, formatLaneRoster, REPORTED_LANES } from "./laneRoster";
 import type { LaneSource } from "./laneRegistry";
 
 /** Enough of an agent config for laneSupportStatus to judge it. */
-const inbound = (id: string) => ({ id, agentType: "inbound" as const });
+const inbound = (id: string, enabled = true) => ({ id, agentType: "inbound" as const, enabled });
 
-const source = (ids: string[]): LaneSource => ({
-  getAgentConfig: (id: string) => (ids.includes(id) ? (inbound(id) as never) : undefined),
+const source = (ids: string[], disabled: string[] = []): LaneSource => ({
+  getAgentConfig: (id: string) =>
+    ids.includes(id) ? (inbound(id, !disabled.includes(id)) as never) : undefined,
 });
 
 const ALL = source([...REPORTED_LANES]);
@@ -86,6 +87,34 @@ describe("what this deployment can serve", () => {
     const r = bySlug(laneRoster(ALL, FULL_ENV, { transferAvailable: true }));
     expect(r["azul-scheduling"].servable).toBe(false);
     expect(r["azul-scheduling"].blockedBy).toContain("side channel");
+  });
+
+  /**
+   * `resolveLane` returns null for a disabled lane BEFORE it reaches
+   * laneSupportStatus, and laneSupportStatus never checks the flag — so the
+   * roster advertised a deliberately switched-off lane as servable, which
+   * defeats the readiness report at exactly the moment it matters (Codex,
+   * PR #268 round 4).
+   */
+  it("reports a DISABLED lane as unservable, the way resolveLane treats it", () => {
+    const r = bySlug(
+      laneRoster(source([...REPORTED_LANES], ["records"]), FULL_ENV, { transferAvailable: true }),
+    );
+    expect(r.records.registered).toBe(true);
+    expect(r.records.servable).toBe(false);
+    expect(r.records.blockedBy).toContain("disabled");
+    // Its neighbours are unaffected.
+    expect(r.optical.servable).toBe(true);
+  });
+
+  it("does not warn about a transfer for a lane that is disabled anyway", () => {
+    const r = bySlug(
+      laneRoster(source([...REPORTED_LANES], ["pcp"]), { HUMAN_AGENT_NUMBER: "+1555" }, {
+        transferAvailable: true,
+      }),
+    );
+    expect(r.pcp.servable).toBe(false);
+    expect(r.pcp.transferWarning).toBeNull();
   });
 
   it("says so when a lane is not registered, rather than calling it refused", () => {

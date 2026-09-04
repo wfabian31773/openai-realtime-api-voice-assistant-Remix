@@ -133,6 +133,55 @@ describe("reading a day's spend out of the response", () => {
     }
   });
 
+  /**
+   * A response we cannot read is not a free day (Codex, PR #268 round 4).
+   * Skipping invalid points is right; skipping ALL of them and calling the
+   * result $0 writes zero to every call and marks them reconciled — an
+   * unreadable billing response presented, permanently, as authoritative.
+   */
+  it("REFUSES a voice series whose points carry no readable amount", () => {
+    for (const dataPoints of [[], [{ values: [] }], [{ values: [null as any] }]]) {
+      const out = sumDailyUsage("2026-09-03", {
+        timeSeries: [{ groupLabels: ["grok-voice-think-fast-2.0"], dataPoints }],
+      });
+      expect(out.ok, JSON.stringify(dataPoints)).toBe(false);
+      if (!out.ok) expect(out.reason).toContain("no readable amount");
+    }
+  });
+
+  it("still accepts a voice series with SOME bad points and at least one good", () => {
+    const out = sumDailyUsage("2026-09-03", {
+      timeSeries: [
+        {
+          groupLabels: ["grok-voice-think-fast-2.0"],
+          dataPoints: [{ values: [null as any] }, { values: [7.5] }],
+        },
+      ],
+    });
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.value.totalUsd).toBe(7.5);
+  });
+
+  it("does not refuse over an unreadable NON-voice series", () => {
+    // Someone else's broken line is not our problem — it is excluded anyway.
+    const out = sumDailyUsage("2026-09-03", {
+      timeSeries: [
+        { groupLabels: ["grok-voice-2"], dataPoints: [{ values: [3] }] },
+        { groupLabels: ["grok-4"], dataPoints: [] },
+      ],
+    });
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.value.totalUsd).toBe(3);
+  });
+
+  it("accepts a genuine zero — a real number that happens to be 0", () => {
+    const out = sumDailyUsage("2026-09-03", {
+      timeSeries: [{ groupLabels: ["grok-voice-2"], dataPoints: [{ values: [0] }] }],
+    });
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.value.totalUsd).toBe(0);
+  });
+
   it("takes a different needle when the model is renamed", () => {
     const out = sumDailyUsage(
       "2026-09-03",

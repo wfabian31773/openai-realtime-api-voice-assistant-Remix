@@ -46,6 +46,27 @@
  */
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 
+/**
+ * Calls where the caller DID say something we could not read as a date.
+ *
+ * The two statuses mean different things to whoever picks the ticket up, and
+ * the difference is entirely about whether the recording holds an answer. So
+ * the decision cannot be made from the LAST payload alone: if the caller gave
+ * an unreadable date on the first attempt and the model then omitted the
+ * argument on the retry, the escape would report "never given" and send staff
+ * looking for nothing — while the date sits on the recording (Codex, PR #268
+ * round 4).
+ *
+ * Keyed by call, and it only ever grows within a call, so a later empty
+ * payload cannot erase what an earlier one showed.
+ */
+const spokeADate = new Set<string>();
+
+/** Tests only, and the per-call state resets with gateAttempts. */
+export function resetDobHistory(): void {
+  spokeADate.clear();
+}
+
 export type DobStatus = 'unavailable' | 'unmatched';
 
 /**
@@ -65,12 +86,21 @@ export function decideDobEscape(
   /** What the model sent, after trimming. Empty means it sent nothing. */
   spokenDob: string,
 ): DobDecision {
+  // Recorded BEFORE the first-ask branch returns, so an unreadable date on
+  // attempt one is remembered even though that attempt only asks again.
+  if (spokenDob) spokeADate.add(callSid);
+
   const askedAlready = gateRefusalsSoFar(callSid, toolName, 'date_of_birth') > 0;
   if (!askedAlready) {
     noteGateRefusal(callSid, toolName, 'date_of_birth');
     return { askAgain: true };
   }
-  return { askAgain: false, status: spokenDob ? 'unmatched' : 'unavailable' };
+  // ANY attempt on this call having carried a date is what decides it — not
+  // just the payload in hand. "unavailable" sends nobody to the recording.
+  return {
+    askAgain: false,
+    status: spokenDob || spokeADate.has(callSid) ? 'unmatched' : 'unavailable',
+  };
 }
 
 /**

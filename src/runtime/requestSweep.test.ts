@@ -333,3 +333,69 @@ describe("a caller who rang to check on an existing request", () => {
       .toBe(true);
   });
 });
+
+/**
+ * Identified, then hung up (Codex, PR #268 round 4).
+ *
+ * "Yes, this is Mary Smith" and a spoken date of birth are not FILLER, so a
+ * successful lookup followed by a hang-up produced a high-priority catch-all
+ * ticket containing nothing but the identity interview.
+ *
+ * The rule is deliberately the narrowest one that works: it suppresses a call
+ * only when EVERY caller line is used up by their own name and a date. Any
+ * request contains something else — which is what the second half of these
+ * tests is for.
+ */
+describe("a caller who only identified themselves", () => {
+  const withTranscript = (lines: string) =>
+    decideSweep(
+      call({
+        transcript: lines,
+        verifiedName: { firstName: "Mary", lastName: "Smith" },
+        toolEvents: [{ name: "lookup_patient", succeeded: true }],
+      }),
+    );
+
+  it("is not swept — there is no request in a name", () => {
+    const d = withTranscript(
+      "AGENT: May I have your last name?\nCALLER: Smith.\n" +
+        "AGENT: And your date of birth?\nCALLER: March seventeenth, nineteen fifty.",
+    );
+    expect(d).toEqual({ file: false, reason: "identity-only" });
+  });
+
+  it("is not swept when they confirm who they are", () => {
+    expect(withTranscript("AGENT: Am I speaking with Mary Smith?\nCALLER: Yes, this is Mary Smith.").file)
+      .toBe(false);
+  });
+
+  it("is not swept for a numeric date of birth either", () => {
+    expect(withTranscript("AGENT: Date of birth?\nCALLER: 03 17 1950").file).toBe(false);
+  });
+
+  it("gets its OWN reason, so it is countable against the other skips", () => {
+    const d = withTranscript("CALLER: Mary Smith.");
+    if (!d.file) expect(d.reason).toBe("identity-only");
+  });
+
+  /** The half that matters more: a request must still get through. */
+  it.each([
+    "AGENT: How can I help?\nCALLER: Mary Smith. I need a refill on my drops.",
+    "AGENT: Name?\nCALLER: Smith.\nAGENT: And?\nCALLER: My glasses broke.",
+    "CALLER: This is Mary Smith and I want to reschedule.",
+    "CALLER: I'm calling about my surgery date.",
+  ])("STILL sweeps a real request: %j", (transcript) => {
+    expect(withTranscript(transcript).file).toBe(true);
+  });
+
+  it("sweeps when the caller said something we cannot attribute to identity", () => {
+    // No verified name at all — nothing to subtract, so everything counts.
+    const d = decideSweep(
+      call({
+        transcript: "CALLER: My drops ran out.",
+        verifiedName: { firstName: "Mary", lastName: "Smith" },
+      }),
+    );
+    expect(d.file).toBe(true);
+  });
+});

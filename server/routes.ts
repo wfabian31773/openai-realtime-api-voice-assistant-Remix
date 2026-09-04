@@ -3304,6 +3304,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
               await storage.updateCallLog(call.id, {
                 duration: finalDuration,
                 twilioCostCents: twilioCostCents ?? call.twilioCostCents,
+                // The total is rebuilt whether or not the PROVIDER cost moved.
+                // On a reconciled row priceVoiceCall deliberately leaves the
+                // provider cost alone and returns a total that folds in the new
+                // Twilio price — and this update used to discard it, leaving a
+                // total that no longer equalled its own two components
+                // (Codex, PR #268 round 4).
+                totalCostCents: pricing.totalCostCents,
                 ...(pricing.providerCostCents !== undefined
                   ? { openaiCostCents: pricing.providerCostCents, costIsEstimated: true }
                   : {}),

@@ -83,7 +83,18 @@ export function laneRoster(
         transferWarning: null,
       };
     }
-    const blockedBy = laneSupportStatus(config, { transferAvailable: opts.transferAvailable });
+    /**
+     * `resolveLane` returns null for a disabled lane BEFORE it ever calls
+     * laneSupportStatus, and laneSupportStatus does not check the flag — so
+     * the roster would advertise a deliberately switched-off lane as
+     * servable, defeating the report at exactly the moment it matters
+     * (Codex, PR #268 round 4). Checked first, for the same reason
+     * resolveLane checks it first.
+     */
+    const blockedBy =
+      config.enabled === false
+        ? `lane '${slug}' is registered but disabled in the agent registry`
+        : laneSupportStatus(config, { transferAvailable: opts.transferAvailable });
     const which = DESTINATION_ENV[slug];
     const destinationSet = which ? destinations[which] : true;
     return {
