@@ -516,13 +516,29 @@ had not asked for it. *Before quoting a rate, find the control that proves
 the measure* — the same lesson as the `tool_timeline` filing rates, one
 section up.
 
-**Prompt size is a real but SECOND-ORDER cost lever.** 1,000 prompt tokens x
-13.7 requests = 13,700 tokens per call; at the observed ~72/28 cached/uncached
-mix that is about **$0.011 per call**, roughly **$4/day** at fleet volume —
-not the $0.055 and $22/day an earlier version of this section claimed from the
-uncached list price. Trim prompts for latency and for the ceilings, which are
-the reasons that were always true. **The voice minute is where the $20/day
-is.**
+**AND THERE IS NO PER-CALL TOKEN FIGURE HERE, DELIBERATELY.** An earlier
+version of this section divided the day's 3,275 requests and 4.57M tokens by
+239 voice calls to get "13.7 requests per call" and a marginal prompt cost.
+Both denominators are wrong: those totals are the WHOLE account, voice and
+text, and contaminating them that way makes a modelled cost look *closer* to
+the invoice rather than further from it — which is how the original 3.4% "fit"
+flattered itself twice over (Codex, PR #269).
+
+What the console actually supports, and nothing beyond it:
+
+- The week's text tokens (1.2M + 272.5K + 3.1M + 15.7K = 4,588,200) account
+  for essentially all 4,606,021 tokens on the account. **Voice is billed by
+  the minute and contributes no measurable tokens.** So the token column
+  describes the text API, not the phone calls, and cannot be divided by a
+  call count at all.
+- Text is **$5.35 on the day, ~10% of it**, and prompt caching is doing most
+  of the work.
+- **Voice is $53.55 for 418.6 minutes, and that is the whole question.**
+
+**So trim prompts for latency and for the ceilings — the reasons that were
+always true and never needed a dollar figure.** Anyone wanting the billing
+argument for a trim has to get per-call units out of the `Voice` breakdown or
+`invoice/preview` first. **The voice minute is where the $20/day is.**
 
 **What this changes:** every Grok cost-per-call figure quoted before
 2026-09-04 is understated by about a third, including the comparison against
