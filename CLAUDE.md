@@ -369,40 +369,65 @@ Classifying each row and then taking `count(DISTINCT call_sid)` inside each
 group puts a call with both an agent filing and a staff ticket in TWO buckets,
 and the buckets stop being exclusive without saying so (Codex, PR #272).
 
-**And the call-level precedence is the ROW-LEVEL ONE INVERTED.** That looks
-like a contradiction and is not: the row rule answers *who made this ticket*,
-where a named human wins; the call rule answers *did the agent file for this
-call*, and **one agent filing is enough** no matter what staff added
-afterwards. Write both down or the next reader will "fix" one into the other.
+**AND THE TWO PRECEDENCES ARE DIFFERENT ORDERS. THIS IS THE PART TO READ
+TWICE.** They look like a contradiction and are not, because they answer
+different questions:
+
+| | question | order | why |
+|---|---|---|---|
+| **row** | who made THIS ticket? | staff > agent > UNKNOWN | a named human creator is positive evidence; a set `agent_used` is not |
+| **call** | did the AGENT file for this call? | **agent > UNKNOWN > staff** | see below |
+
+The call order is not the row order inverted, which is what an earlier version
+of this paragraph said and what the query below did (Codex, PR #272 round 2).
+Three steps, and each earns its place:
+
+1. **`agent` first** — one proven agent filing settles the call, whatever staff
+   added afterwards.
+2. **`UNKNOWN` SECOND, ABOVE `staff`** — a row with neither field set **may be
+   an agent filing**. `staff` is a *proven negative*, and it only earns that
+   when EVERY row on the call is a proven staff ticket. One unproven row means
+   the call's provenance is not settled, and folding it into `staff`
+   understates the filing rate by exactly the assumption bucket 3 exists to
+   prevent.
+3. **`staff` last** — every row proven human.
 
 ```sql
--- The filing test. Three buckets, real SIDs only, ONE verdict per call, and
--- bucket 3 never vanishes into bucket 2's complement. No prefix filter, ever.
+-- The filing test. Three buckets, canonical SIDs only, ONE verdict per call,
+-- and bucket 3 never vanishes into ANOTHER bucket. No prefix filter, ever.
 WITH per_call AS (
   SELECT call_sid,
          bool_or(created_by_id IS NULL AND agent_used IS NOT NULL) AS any_agent,
+         bool_or(created_by_id IS NULL AND agent_used IS NULL)     AS any_unknown,
          bool_or(created_by_id IS NOT NULL)                        AS any_staff
   FROM tickets
   WHERE call_sid ~* '^CA[0-9a-f]{32}$'  -- NOT `IS NOT NULL`, NOT `LIKE 'CA%'`.
     AND created_at::date = '<day>'
   GROUP BY call_sid
 )
-SELECT CASE WHEN any_agent THEN 'agent'
-            WHEN any_staff THEN 'staff'
-            ELSE 'UNKNOWN' END AS provenance,
-       count(*)                AS calls
+SELECT CASE WHEN any_agent   THEN 'agent'
+            WHEN any_unknown THEN 'UNKNOWN'   -- NEVER below 'staff'. See above.
+            ELSE 'staff' END AS provenance,   -- only when every row is proven
+       count(*)              AS calls
 FROM per_call GROUP BY 1;
+-- `any_staff` is deliberately not read: it is the ELSE. Reintroducing it as a
+-- WHEN above UNKNOWN is the round-2 defect.
 -- All-time totals live in THE CENSUS above; do not copy them here. The
 -- 2026-09-03 day figures are stated ONCE, under "Effect of the change" below.
 ```
 
-**THE OVERLAP IS LATENT, NOT LIVE — measured 2026-09-05 10:41 UTC, all time.**
-Of 40,931 calls carrying a real-SID ticket, the mixed pairs the old query would
-have double-counted number **0** — agent+staff 0, agent+unknown 0,
-staff+unknown 0. So no rate this file has ever published was inflated by it.
-**The mechanism is live even though the defect has not fired:** 16 calls
-already carry more than one ticket, so a single staff ticket landing on a call
-the agent filed is enough to start it. Re-run this beside the census.
+**BOTH MIXED-PROVENANCE DEFECTS ARE LATENT, NOT LIVE — measured 2026-09-05
+10:50 UTC, all time.** Of 40,931 calls carrying a canonical-SID ticket, every
+mixed pair is **0**: agent+staff 0, agent+unknown 0, **staff+unknown 0**. So no
+rate this file has ever published was touched by either the row-level
+double-count or the UNKNOWN-under-staff fold — re-run under both orderings, the
+bucket counts are identical to the call (agent 40,865 · staff 37 · UNKNOWN 29,
+0 calls moved).
+
+**The mechanism is live even though neither defect has fired:** 16 calls
+already carry more than one ticket. One staff ticket on a call the agent filed
+starts the first; one unattributed ticket beside a staff ticket starts the
+second. Re-run this beside the census.
 
 ```sql
 SELECT count(*) FILTER (WHERE any_agent AND any_staff)   AS agent_and_staff,
@@ -422,10 +447,12 @@ FROM (
 file are not exposed to it. That is a measured fact about one day, not a
 property of the rule — check bucket 3 before quoting any other day.
 
-**This section has now been wrong FOUR times.** The first three reached for a
-naming convention; the fourth reached for a single column and called it
-complete. The through-line is not "prefixes are bad" — it is **adopting one
-signal as definitive without enumerating how it fails**, which is what every
+**This section has now been wrong SIX times, on TWO different axes.** Four
+were about WHICH SIGNAL says a call filed — three reached for a naming
+convention, the fourth for a single column called complete. Two more were
+about HOW THE ROWS ARE FOLDED INTO A CALL, and they only became reachable once
+the signal was right. The through-line on both axes is the same: **adopting
+one rule as definitive without enumerating how it fails**, which is what every
 version of this did, including the one that had already published the table
 disproving it. Recorded in full because the pattern matters more than the rule:
 
@@ -498,8 +525,29 @@ would have dropped real filings.
    counts staff tickets as agent filings; and **`SR-` rows plus a `VA-` row
    have NEITHER** (counts: see the census), so NULL means unknown provenance,
    not a proven non-filing.
-   Fixed by the precedence rule at the top — a human creator wins, and unknown
-   is a reported bucket rather than silence. (Codex, PR #272.)
+   Fixed by the ROW-level precedence rule at the top — a human creator wins,
+   and unknown is a reported bucket rather than silence. (Codex, PR #272.)
+
+**Then twice more, on the folding rather than the signal. Both found by Codex
+on PR #272, both LATENT when found (see the mixed-pair control above), and the
+second was created by the fix for the first:**
+
+5. **Classifying the ROW and then counting distinct calls.** `CASE` per row
+   with `count(DISTINCT call_sid)` inside each group puts a call carrying both
+   an agent filing and a staff ticket in TWO buckets, so the buckets stop
+   being exclusive without saying so. Fixed by folding rows to one verdict per
+   `call_sid` first.
+6. **Calling the call-level order "the row order inverted".** It is not. That
+   phrasing produced `agent > staff > UNKNOWN`, which buries a call whose only
+   unproven row might BE an agent filing underneath a proven staff ticket —
+   the exact assumption bucket 3 exists to prevent, reintroduced one line
+   below the rule forbidding it. The order is **`agent > UNKNOWN > staff`**.
+
+   **The lesson is narrower than "be careful".** Fixing failure 4 moved the
+   question from *which column* to *which row wins*, and I answered the new
+   question with a slogan carried over from the old one instead of re-deriving
+   it. A fix that changes the shape of a rule invalidates the sentence that
+   justified the old shape; re-derive it, do not rephrase it.
 
 **What the prefix rule costs: see [the census](#census).** It misses real
 filings and silently scores unknown-provenance calls as non-filings. Two
@@ -525,8 +573,9 @@ prevent.
 **Effect of the change on the published 2026-09-03 numbers, re-measured under
 the precedence rule, per call, with canonical SIDs** (2026-09-05 10:43 UTC).
 This is the ONLY place the 09-03 day figures are stated: **agent 197 · staff 2
-· UNKNOWN 0 · agent-and-staff overlap 0**, against the old `VA-` rule's
-**196** — the new rule adds **1** and loses 0, so it strictly dominates the
+· UNKNOWN 0 · every mixed pair 0** — re-run at 10:50 UTC under the corrected
+`agent > UNKNOWN > staff` ordering and unchanged by it — against the old `VA-`
+rule's **196** — the new rule adds **1** and loses 0, so it strictly dominates the
 old one that day.
 The staff figure read **1** when written on 2026-09-04 and is **2** now; a
 second staff ticket landed on a 09-03 call after the fact, which is the same
