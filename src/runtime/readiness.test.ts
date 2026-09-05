@@ -136,10 +136,7 @@ describe("runtime readiness", () => {
    */
   it("carries the date it was set, so a build's age is readable from the marker", () => {
     expect(VOICE_RUNTIME_DEPLOY_MARKER).toMatch(/-\d{8}$/);
-    const on = markerSetOn();
-    expect(on).not.toBeNull();
-    // A real calendar date, not eight digits that merely look like one.
-    expect(Number.isNaN(Date.parse(`${on}T00:00:00Z`))).toBe(false);
+    expect(markerSetOn()).not.toBeNull();
   });
 
   it("markerSetOn reports null rather than guessing when the suffix is gone", () => {
@@ -148,5 +145,37 @@ describe("runtime readiness", () => {
     expect(markerSetOn("voice-runtime-v3-precontext-diagnosable-20260905")).toBe(
       "2026-09-05",
     );
+  });
+
+  /**
+   * THE FIRST VERSION OF THIS SUITE CLAIMED THIS AND DID NOT TEST IT.
+   *
+   * It asserted "a real calendar date, not eight digits that merely look like
+   * one" via `Date.parse`, which NORMALISES an overflow instead of rejecting
+   * it — `2026-02-30` parses as March 2, so a mistyped marker would have
+   * passed while the comment promised it could not (Codex, PR #272 round 3).
+   * A marker reporting a date the calendar does not have is worse than one
+   * with no date, because it gets believed. Every case below rolls into a
+   * different month under `Date.UTC` and must come back null.
+   */
+  it("rejects eight digits that are not a real date", () => {
+    for (const bad of [
+      "20260230", // 30 February — Date.parse says 2 March
+      "20260931", // 31 September — 30 days hath September
+      "20261301", // month 13
+      "20260001", // month 0
+      "20260900", // day 0 — rolls back into August
+      "20260229", // 29 February in a common year (2026 is not a leap year)
+      "20260932", // day 32
+    ]) {
+      expect(markerSetOn(`voice-runtime-vX-${bad}`), `${bad} was accepted`).toBeNull();
+    }
+  });
+
+  it("accepts the dates that ARE real, including a leap day", () => {
+    expect(markerSetOn("voice-runtime-vX-20240229")).toBe("2024-02-29");
+    expect(markerSetOn("voice-runtime-vX-20260930")).toBe("2026-09-30");
+    expect(markerSetOn("voice-runtime-vX-20261231")).toBe("2026-12-31");
+    expect(markerSetOn("voice-runtime-vX-20260101")).toBe("2026-01-01");
   });
 });
