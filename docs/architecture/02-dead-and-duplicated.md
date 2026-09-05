@@ -779,7 +779,9 @@ are the record.
 - **`.shadow-spool/`** — 696 KB of captured session JSONL committed into the
   working tree.
 - **`src/runtime/readiness.ts:28`** `VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v2-transfer-guardrails-tools"` — a deploy marker for a
+  "voice-runtime-v2-transfer-guardrails-tools"` (superseded 2026-09-05 by
+  `voice-runtime-v3-precontext-diagnosable-20260905`, which carries its date)
+  — a deploy marker for a
   transport that has never served a call, printed at every boot next to the SIP
   path's markers.
 

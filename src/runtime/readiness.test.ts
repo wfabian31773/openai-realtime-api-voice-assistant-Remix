@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   computeRuntimeReadiness,
   formatReadinessLines,
+  markerSetOn,
   VOICE_RUNTIME_DEPLOY_MARKER,
 } from "./readiness";
 
@@ -115,6 +116,37 @@ describe("runtime readiness", () => {
     expect(lines[1]).toContain("XAI_API_KEY");
     expect(formatReadinessLines(computeRuntimeReadiness(FULL))[1]).toBe(
       "[voice-runtime] live-ready",
+    );
+  });
+
+  /**
+   * WHY A TEST GUARDS A STRING'S SUFFIX.
+   *
+   * The marker went 2026-08-29 to 2026-09-05 without a bump, across every
+   * commit in between — including the one adding the `[runtime] pre-context`
+   * diagnostic. When the operator searched a live deployment for that line
+   * and found nothing, the marker could not say whether the build contained
+   * it, because the identical string is served either side of the change.
+   * The rule "bump it on every ship" was already written at the top of
+   * readiness.ts and was not enough on its own.
+   *
+   * The date suffix makes the marker answer "how old is this build?" without
+   * anyone knowing our commits. These tests exist so a future bump cannot
+   * quietly drop it and put us back where we were.
+   */
+  it("carries the date it was set, so a build's age is readable from the marker", () => {
+    expect(VOICE_RUNTIME_DEPLOY_MARKER).toMatch(/-\d{8}$/);
+    const on = markerSetOn();
+    expect(on).not.toBeNull();
+    // A real calendar date, not eight digits that merely look like one.
+    expect(Number.isNaN(Date.parse(`${on}T00:00:00Z`))).toBe(false);
+  });
+
+  it("markerSetOn reports null rather than guessing when the suffix is gone", () => {
+    expect(markerSetOn("voice-runtime-v2-transfer-guardrails-tools")).toBeNull();
+    expect(markerSetOn("voice-runtime-v9-something-2026090")).toBeNull();
+    expect(markerSetOn("voice-runtime-v3-precontext-diagnosable-20260905")).toBe(
+      "2026-09-05",
     );
   });
 });

@@ -19,7 +19,7 @@ GET /voice/health
 ```
 
 ```json
-{"marker":"voice-runtime-v2-transfer-guardrails-tools","knowledgePack":"v1",
+{"marker":"voice-runtime-v3-precontext-diagnosable-20260905","knowledgePack":"v1",
  "liveReady":true,"missing":[],"requiredDbEnvVar":"DATABASE_URL","activeCalls":0}
 ```
 

@@ -20,12 +20,41 @@
  * marker below at boot and serves it from /voice/health. If the marker is
  * absent or old, the code is not live and the call proves nothing. Bump it
  * on every ship whose effect is hard to see.
+ *
+ * THE MARKER CARRIES A DATE BECAUSE THE DISCIPLINE ALONE FAILED.
+ *
+ * It read `voice-runtime-v2-transfer-guardrails-tools` from 2026-08-29 to
+ * 2026-09-05, unchanged across every commit in between — including the one
+ * that added the `[runtime] pre-context` diagnostic on 08-31. On 2026-09-05
+ * the operator searched a live deployment for that line, found nothing, and
+ * the marker could not say whether the build contained it: THE SAME STRING
+ * is served by a build from before the line existed and by one from after.
+ * An instrument that cannot separate those two is not an instrument, and
+ * being one is this file's entire purpose.
+ *
+ * So the marker ENDS IN THE YYYYMMDD IT WAS SET, and `markerSetOn` parses it
+ * back out. "Is the deployed build newer than <date>?" is then answerable
+ * from the marker alone, by anyone, without our commit history — which is
+ * exactly the question that could not be answered above. The boot log and
+ * `/voice/health` both carry it, so either one gives the same answer.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
 import { callEnvironment } from "./callRecord";
 
-export const VOICE_RUNTIME_DEPLOY_MARKER = "voice-runtime-v2-transfer-guardrails-tools";
+export const VOICE_RUNTIME_DEPLOY_MARKER =
+  "voice-runtime-v3-precontext-diagnosable-20260905";
+
+/**
+ * The date the marker was set, parsed out of the marker itself so anyone can
+ * compare a deployment against a date without our commit history. Returns
+ * null if a future bump drops the suffix — `readiness.test.ts` fails on that,
+ * so it cannot happen silently.
+ */
+export function markerSetOn(marker: string = VOICE_RUNTIME_DEPLOY_MARKER): string | null {
+  const m = /-(\d{4})(\d{2})(\d{2})$/.exec(marker);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
 
 export interface RuntimeReadiness {
   liveReady: boolean;

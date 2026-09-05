@@ -1125,6 +1125,33 @@ in the new build. Current marker:
   last visit 2026-07-13; 17 not counted (cancelled, no-show, or cancelled-future)
 ```
 
+**ON THE RUNTIME, ASK `/voice/health` — AND THE MARKER NOW CARRIES ITS DATE.**
+
+```
+voice-runtime-v3-precontext-diagnosable-20260905
+```
+
+Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
+EARLIER date, or with no date at all, is a build older than 2026-09-05 and
+nothing measured on it is evidence about current code.
+
+**This exists because the marker failed at the one job it has, on 2026-09-05.**
+It read `voice-runtime-v2-transfer-guardrails-tools` from 2026-08-29 straight
+through to 2026-09-05, unchanged across every commit between — including
+`91498ff` on 08-31, which added the `[runtime] pre-context` diagnostic. Wayne
+searched a live deployment for that line, found nothing, and **the marker could
+not say whether the build contained it**: the identical string is served either
+side of the change. Neither could the rest of the payload — `transferDestinations`
+landed 08-30, one day too early to discriminate.
+
+The field that CAN date a build older than 09-04 is **`lanes`**, added that day.
+A `/voice/health` response with no `lanes` key predates it.
+
+So: the rule "bump it on every ship whose effect is hard to see" was already
+written at the top of `src/runtime/readiness.ts` and was not enough on its own.
+The date is now in the string, `markerSetOn()` parses it back out, and
+`readiness.test.ts` fails if a future bump drops the suffix.
+
 **If the marker is absent, the code is not live and the call proves nothing.**
 Whenever you ship something whose effect is hard to see, add a marker like this.
 
