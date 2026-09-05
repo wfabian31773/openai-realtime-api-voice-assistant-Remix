@@ -803,6 +803,33 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
     expect(after).toMatch(/only if the caller switches/i);
   });
 
+  it("applies the regional mapping to the INITIAL handshake hint too", () => {
+    /**
+     * Codex, 2026-09-05, and the two halves compound into a whole-call bug.
+     *
+     * `buildSessionConfig` wrote `config.language` straight into the
+     * transcription hint, so a lane configured `es` handshook with the bare
+     * subtag. And the bridge drops a switch to the language already in use
+     * (`next !== this.spokenLanguage`), which for such a lane is every
+     * Spanish switch — so `es-MX` would never reach the wire for the entire
+     * call. Mid-call-only mapping fixed the case that was already working
+     * and missed the one that was not.
+     *
+     * Latent rather than live as things stand: every lane defaults to `en`.
+     * It goes live the moment anyone sets XAI_VOICE_LANGUAGE=es for a lane,
+     * which is exactly the thing someone would do to help Spanish callers.
+     */
+    const config = { ...loadGrokRuntimeVoiceConfig({}), language: "es" };
+    const built = buildSessionConfig(config, "instructions", [...FIXTURE_TOOLS]);
+    expect(built.audio.input.transcription?.language_hint).toBe("es-MX");
+  });
+
+  it("leaves a language with no regional mapping exactly as it is", () => {
+    const config = { ...loadGrokRuntimeVoiceConfig({}), language: "ko" };
+    const built = buildSessionConfig(config, "instructions", [...FIXTURE_TOOLS]);
+    expect(built.audio.input.transcription?.language_hint).toBe("ko");
+  });
+
   it("sends a REGIONAL Spanish hint, not the bare primary subtag", () => {
     // Operator: *"After you hear Spanish, send es-MX or es-ES (not es)."*
     // Southern California practice, so es-MX. Unrecognized codes are

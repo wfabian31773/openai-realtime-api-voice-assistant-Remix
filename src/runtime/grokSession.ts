@@ -221,9 +221,12 @@ export function buildSessionConfig(
       input: {
         format: AUDIO_FORMAT,
         // The lane's configured language seeds the STT hint; a mid-call
-        // switch retargets it via setSpokenLanguage().
+        // switch retargets it via setSpokenLanguage(). REGIONAL here too —
+        // the bridge drops a switch to the language already in use, so a
+        // lane configured `es` would otherwise never send es-MX at all
+        // (Codex, 2026-09-05).
         transcription: {
-          language_hint: config.language,
+          language_hint: sttLanguageHint(config.language),
           ...(keyterms && keyterms.length > 0 ? { keyterms } : {}),
         },
         transport: "json",
