@@ -29,6 +29,7 @@ vi.hoisted(() => {
 
 import { buildSurgeryPrompt } from './surgeryAgent';
 import { buildTechPrompt } from './techAgent';
+import { GREETING_ALREADY_PLAYED } from '../runtime/greetingAlreadyPlayed';
 import { buildOpticalPrompt } from './opticalAgent';
 import { buildRecordsPrompt } from './recordsAgent';
 
@@ -281,6 +282,54 @@ describe('the trim actually happened', () => {
 
   it('tech stays under 1,600 prompt tokens', () => {
     expect(Math.round(tech.length / 4)).toBeLessThan(1600);
+  });
+
+  /**
+   * THESE CEILINGS ARE CLOCK-DEPENDENT, AND TECH'S HAS FOUR CHARACTERS IN IT.
+   *
+   * Every queue prompt embeds `getPacificTimeContext()`, whose weekday, date
+   * and time are variable width — and `timeStr` appears TWICE in that block,
+   * so a minute's difference can move the prompt by two characters. Tech's
+   * ceiling boundary is 6,400 characters and tech renders at 6,332, so 67
+   * characters of slack absorb it today.
+   *
+   * That is not much, and it was nearly none. A sixteen-token language fix
+   * (Codex, 2026-09-05) took tech to 6,395 — FOUR characters of headroom —
+   * at which point "Wednesday" instead of "Saturday" would have failed this
+   * suite on the calendar rather than on the diff. The fix was reverted on
+   * tech and kept on the three lanes with real slack. Whoever buys tech room
+   * should delete this guard's reason for existing, not raise the number.
+   *
+   * This test asserts the SLACK rather than the length, so a future prompt
+   * that eats it fails here with the reason attached.
+   */
+  it('tech keeps enough slack that the clock cannot fail the ceiling', () => {
+    const boundary = 1600 * 4; // Math.round(len / 4) reaches 1600 at 6398.
+    const slack = boundary - tech.length;
+    // The widest weekday, a two-digit date and a two-digit hour rendered
+    // twice come to well under 20 characters of swing.
+    expect(slack, `tech has only ${slack} characters of slack`).toBeGreaterThan(20);
+  });
+
+  /**
+   * WHAT THE CEILING DOES NOT MEASURE, recorded because it is invisible here.
+   *
+   * On the runtime the transport appends `GREETING_ALREADY_PLAYED` — 272
+   * characters, about 68 tokens — to whatever the lane's prompt says. So the
+   * instructions Grok actually receives on tech are ~1,667 tokens, not the
+   * 1,583 this file guards. The ceilings above are BASE-prompt ceilings and
+   * always were; nothing is violated, but nobody reading them would know the
+   * as-sent figure is higher, and it is the as-sent figure that costs
+   * latency.
+   *
+   * Asserted so the gap is a number somebody has to update deliberately
+   * rather than a fact that has to be rediscovered.
+   */
+  it('records what the runtime actually sends, over and above the ceiling', () => {
+    expect(GREETING_ALREADY_PLAYED.length).toBe(272);
+    const asSent = Math.round((tech.length + GREETING_ALREADY_PLAYED.length) / 4);
+    expect(asSent).toBeGreaterThan(1600); // the base ceiling is not the wire
+    expect(asSent).toBeLessThan(1700);
   });
 
   /**
