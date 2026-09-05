@@ -402,7 +402,8 @@ WITH per_call AS (
          bool_or(created_by_id IS NOT NULL)                        AS any_staff
   FROM tickets
   WHERE call_sid ~* '^CA[0-9a-f]{32}$'  -- NOT `IS NOT NULL`, NOT `LIKE 'CA%'`.
-    AND created_at::date = '<day>'
+    -- THE CALL'S DAY, NOT THE TICKET'S. See below; the COALESCE is required.
+    AND coalesce(call_start_time, created_at)::date = '<day>'
   GROUP BY call_sid
 )
 SELECT CASE WHEN any_agent   THEN 'agent'
@@ -415,6 +416,45 @@ FROM per_call GROUP BY 1;
 -- All-time totals live in THE CENSUS above; do not copy them here. The
 -- 2026-09-03 day figures are stated ONCE, under "Effect of the change" below.
 ```
+
+**A FILING RATE IS PER CALL, SO THE DAY MUST COME FROM THE CALL — AND THIS ONE
+IS LIVE.** Filtering on the TICKET's `created_at` puts a filing in a different
+day's cohort than its call whenever the call crosses midnight or the ticket
+outbox retries (up to 12 attempts, backoff 30s → 30m, so a 23:5x call can file
+after midnight). The call is then scored a non-filing in its own cohort and the
+ticket is added to a cohort whose denominator does not contain it. Measured
+2026-09-05 11:11 UTC: **159 of 40,947** canonical-SID tickets land on a
+different calendar day from their call (Codex, PR #272 round 4).
+
+**`tickets.call_start_time` is the anchor, and `coalesce` with `created_at` is
+NOT optional.** The naive fix — filter on `call_start_time::date` alone — is
+WORSE than the bug it fixes, and the 2026-09-03 cohort is the proof:
+
+| 2026-09-03, canonical-SID tickets | |
+|---|---|
+| by the TICKET's day (what was published) | 199 |
+| would correctly LEAVE the cohort (call was another day) | 4 |
+| would correctly JOIN it (ticket filed another day) | 2 |
+| **have NO `call_start_time` at all — silently dropped by a bare filter** | **8** |
+| by the CALL's day, with the coalesce | 189 |
+
+Eight unanchored rows against four correctly moved: dropping them loses twice
+what the fix gains, and it loses them the same way bucket 3 exists to prevent —
+by assumption. 1,013 canonical-SID tickets carry no `call_start_time` at all.
+
+**AND THE ANCHOR ITSELF HAS A BAD TAIL — do not treat it as exact.** 259
+tickets have `created_at` EARLIER than their own `call_start_time`, which
+cannot happen; the mean lag reads **-45s** while the median is a sensible
+**+111s**, so outliers, not the typical row, drive the mean. Against
+`call_end_time` the median is **-35s** — a ticket filed just before hangup,
+which is the expected shape. Good enough to bucket a day, not good enough to
+time a single call.
+
+**`call_logs.created_at` would be the better anchor** — it is our own record of
+the call rather than a value carried on the ticket — but `tickets` lives in the
+Support Center (`vsmcxhxeirkoobmjcrbn`) and `call_logs` in the Hub
+(`pslzngjciiifowemrzza`), so no single statement can join them. That is why the
+ticket's own copy is used here.
 
 **BOTH MIXED-PROVENANCE DEFECTS ARE LATENT, NOT LIVE — measured 2026-09-05
 10:50 UTC, all time.** Of 40,931 calls carrying a canonical-SID ticket, every
@@ -571,16 +611,20 @@ nearly wrote a new trap here of exactly the kind this section exists to
 prevent.
 
 **Effect of the change on the published 2026-09-03 numbers, re-measured under
-the precedence rule, per call, with canonical SIDs** (2026-09-05 10:43 UTC).
-This is the ONLY place the 09-03 day figures are stated: **agent 197 · staff 2
-· UNKNOWN 0 · every mixed pair 0** — re-run at 10:50 UTC under the corrected
-`agent > UNKNOWN > staff` ordering and unchanged by it — against the old `VA-`
-rule's **196** — the new rule adds **1** and loses 0, so it strictly dominates the
-old one that day.
-The staff figure read **1** when written on 2026-09-04 and is **2** now; a
-second staff ticket landed on a 09-03 call after the fact, which is the same
-drift the timestamp warning above describes and does not touch the agent
-count. The earlier version of this line said +2, which came from the
+the precedence rule, per call, canonical SIDs, anchored on the CALL's day**
+(2026-09-05 11:12 UTC). This is the ONLY place the 09-03 day figures are
+stated: **agent 196 · staff 1 · UNKNOWN 0 · every mixed pair 0**, against the
+old `VA-` rule's **195** — the new rule adds **1** and loses 0, so it strictly
+dominates the old one that day.
+
+**Each fix moved these numbers and none moved the conclusion, which is the
+point of stating them once.** Anchored on the TICKET's day they read agent 197
+· staff 2 · VA- 196; the call anchor takes one off each column and leaves the
++1 delta exactly where it was. The corrected `agent > UNKNOWN > staff`
+ordering moved nothing at all. The staff figure also read **1** on 2026-09-04,
+went to **2** as a late staff ticket landed, and is **1** again under the call
+anchor because that ticket belongs to another day's call — three different
+values for one number, all correct for what they measured. The earlier version of this line said +2, which came from the
 superseded `agent_used IS NOT NULL` test counting a STAFF ticket as an agent
 filing (Codex, PR #272). Which lane the added call belongs to is NOT settled
 here, because settling it needs the `call_logs` join rather than the
@@ -605,7 +649,9 @@ SELECT split_part(ticket_number,'-',1) AS prefix, count(*) AS tickets,
        count(*) FILTER (WHERE created_by_id IS NULL
                           AND agent_used IS NOT NULL)                       AS agent,
        count(*) FILTER (WHERE created_by_id IS NULL AND agent_used IS NULL) AS UNKNOWN
-FROM tickets WHERE created_at::date = '<day>' AND call_sid ~* '^CA[0-9a-f]{32}$' 
+FROM tickets
+WHERE call_sid ~* '^CA[0-9a-f]{32}$'
+  AND coalesce(call_start_time, created_at)::date = '<day>'   -- the CALL's day
 GROUP BY 1 ORDER BY 2 DESC;
 -- THIS ONE COUNTS ROWS, NOT CALLS — so it uses the ROW-level precedence (a
 -- human creator wins), not the filing test's per-call one (any agent filing
