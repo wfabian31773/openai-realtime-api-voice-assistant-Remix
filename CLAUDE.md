@@ -115,7 +115,7 @@ Green tests did not prevent any of the regressions listed there.
     | the schedule mirror | `si_appointment_facts` | 908,995 |
     | providers | `si_providers` | 77 |
     | locations | `si_locations` | 105 |
-    | phone → patient; powers `sage_precontext` | `si_persons` | 3,731 |
+    | phone → patient (whether IT or `patients_master` powers `sage_precontext` is UNSETTLED — see below) | `si_persons` | 3,731 |
 
     **What violates this today — do not assume it is already done:**
 
@@ -136,10 +136,14 @@ Green tests did not prevent any of the regressions listed there.
       wrong. Where mirror verification should be wired on the live path is
       an open question for Wayne.
     - Caller-ID pre-context on the runtime goes through
-      `fetchAzulPrecontext` → the `sage_precontext` HTTP tool. That is Console
-      data (`si_persons`) but over the network and bounded at 1.5s, and every
-      failure is normalized to `null`, so the agent asks cold for several
-      different reasons. The RETURN VALUE is indistinguishable; the logs are
+      `fetchAzulPrecontext` → the `sage_precontext` HTTP tool. It is Console
+      data over the network, bounded at 1.5s, and every failure is normalized
+      to `null`, so the agent asks cold for several different reasons.
+      **WHICH Console table it reads is UNSETTLED:** `voiceRuntime.ts:715`
+      says `si_persons`, `voiceAgentRoutes.ts:2481` says `patients_master` and
+      cites the service's `sage-tools.ts`, and the Console's only phone→person
+      RPCs all read `patients_master`. Do not quote either as fact — see the
+      pre-context entry under the 2026-09-03 measurements. The RETURN VALUE is indistinguishable; the logs are
       not — `callEyecareTool` writes `[AZUL-SCHED]` lines naming an unset key,
       an HTTP status, or a fetch/abort, and 401/403 go through
       `noteAuthFailure`. The one genuinely silent mode is a lookup that
@@ -308,7 +312,8 @@ is reading noise.
   - **Patient-Console** `kbbmywvasbsxnbblrhot` — the source of truth
     (standing instruction 14). `patients_master` (915,843 persons),
     `si_appointment_facts` (908,995 — the schedule mirror), `si_providers`,
-    `si_locations`, `si_persons` (phone→patient, powers `sage_precontext`),
+    `si_locations`, `si_persons` (phone→patient; whether it or
+    `patients_master` powers `sage_precontext` is UNSETTLED),
     plus the scheduling-intelligence tables (`si_slot_rules`,
     `si_eligibility_matrix`, `open_slots_snapshot`).
   - The Hub keeps its OWN `Schedule` copy and several services still read it.
@@ -610,12 +615,50 @@ over every queue call since each lane's own cutover. Do not re-derive these.**
   "no name, no ticket", because the calls that get lost are exactly the calls
   where identification failed. The identity rule selects against the population
   it exists to serve. **Open question for Wayne.**
-- **Pre-context produced a usable name on ZERO of 143 substantive queue calls.**
-  Of 132 distinct callers: **2** are in `si_persons` (3,774 rows — the table
-  pre-context reads) and **100** are in `patients_master` (915,843). Of those
-  100, only 25 resolve to exactly ONE person; 75 resolve to several (average
-  2.2). So pointing pre-context at the mirror is worth 2 → 100, but it buys a
-  name to CONFIRM, never an identity.
+- **Pre-context produced a usable name on ZERO substantive queue calls — and
+  the REASON stated here was wrong.** Re-measured 2026-09-05 over the 186 grok
+  queue calls of 2026-09-03 lasting >=30s, 170 distinct caller numbers:
+
+  | where the number was looked for | found (of 170) | resolve to ONE person |
+  |---|---|---|
+  | `si_persons` (3,774 rows) | **3** | 3 |
+  | `patients_master` (915,843), all five phone columns | **135** | **107** |
+
+  The person base HAS these callers. What is withdrawn is the *diagnosis*: the
+  earlier entry asserted pre-context reads `si_persons` and concluded the fix
+  was to point it at the mirror. **That premise is contradicted inside this
+  repo and is NOT settled.** The Console's only phone→person RPCs —
+  `pm_find_by_phone`, `pm_find_by_dob`, `pm_find_by_name_dob` — all read
+  `patients_master` and none touch `si_persons`; `pm_find_by_phone` returns in
+  **13ms** on five index scans, so neither table size nor the 1.5s deadline is
+  explained by the database. `voiceAgentRoutes.ts:2481` says `patients_master`
+  and cites the service's `sage-tools.ts`; `voiceRuntime.ts:715` says
+  `si_persons`. That service is not in this repo, so **which table
+  `sage_precontext` actually reads over HTTP is UNKNOWN from here.** Do not
+  ship a "point it at the mirror" change until that is established — it may
+  already be pointed there.
+
+  **The OUTCOME is not in doubt, and it is not runtime-specific.** On
+  2026-09-03, `"am I speaking with"` appears in **0 of 196** old-core and
+  **0 of 186** runtime substantive queue transcripts. Nobody was greeted by
+  name on either stack, so this is not something the cutover introduced.
+
+  **The one-word diagnostic is already deployed, and it is console-only** —
+  no SQL can reach it. `[runtime] pre-context <slug> <sid>:` prints
+  `unavailable` (failed, or past the 1.5s deadline) / `no_match` (ran, vouched
+  for nobody) / `recognised`. Read that line before theorising; it separates
+  all three causes at once.
+
+  A phone match stays a candidate to CONFIRM, never an identity: 28 of the 135
+  resolve to 2–3 people (avg 2.18).
+- **`call_logs.caller_name` IS NOT A PATIENT MATCH, and the runtime never
+  writes it.** Same day: the old core set it on 133 of 196 substantive calls,
+  the runtime on **0 of 186**. Of the old core's 133, **123** are `[Lookup] …`
+  — Twilio's CNAM, i.e. the name on the phone bill, which
+  `azulSchedulingAgent.ts:1053` already documents as the wrong person ("the
+  console was showing the phone bill"). **0** carry the verified `✓`. So the
+  column measures a telco lookup on one stack and nothing at all on the other.
+  Any "callers identified" rate built on it is measuring neither.
 - **13 calls played the greeting twice or three times**, averaging 175s against
   a fleet average of 89. Six of the seven worst were a caller asking for
   another language during the opening.
