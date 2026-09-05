@@ -127,3 +127,87 @@ describe("no PHI can reach a keyterm", () => {
     for (const term of r) expect(term).not.toMatch(/\d/);
   });
 });
+
+/**
+ * THE HUNDRED SLOTS WERE BEING SPENT ENTIRELY ON THE FIRST SOURCE.
+ *
+ * Measured 2026-09-05 against the real directory sizes (77 providers, 105
+ * locations). `selectKeyterms` drained each source completely before starting
+ * the next, so any lane whose first source is bigger than MAX_KEYTERMS never
+ * reached its second:
+ *
+ *   optical            meds   0  providers   0  locations 100
+ *   records            meds   0  providers   0  locations 100
+ *   answering-service  meds   0  providers   0  locations 100
+ *
+ * Three of five configured lanes sent ZERO provider names, and
+ * answering-service declared `medications` in its order and had never sent
+ * one. Nothing failed and nothing logged — the lane just could not hear a
+ * surgeon's name.
+ *
+ * The marginal value is not flat: the 60th-busiest office is worth far less
+ * to a transcriber than the busiest surgeon, because both lists are ranked by
+ * real volume and both have long tails. So the slots are drawn round-robin
+ * across the lane's sources, in priority order within each round. Priority
+ * still decides who is served first when a round runs out; it no longer
+ * decides who is served at all.
+ */
+describe("every source a lane declares actually gets slots", () => {
+  const providers = Array.from({ length: 77 }, (_, i) => ({
+    canonical: `Provider ${i}, M.D.`,
+    volume90d: 1000 - i,
+  }));
+  const locations = Array.from({ length: 105 }, (_, i) => ({
+    canonical: `Office ${i}`,
+    volume90d: 1000 - i,
+  }));
+  const medications = Array.from({ length: 45 }, (_, i) => `Drug${i}`);
+  const vocab = { providers, locations, medications };
+
+  const shareOf = (terms: string[]) => ({
+    meds: terms.filter((t) => t.startsWith("Drug")).length,
+    providers: terms.filter((t) => t.startsWith("Provider")).length,
+    locations: terms.filter((t) => t.startsWith("Office")).length,
+  });
+
+  it.each([
+    ["optical", ["locations", "providers"]],
+    ["records", ["locations", "providers"]],
+    ["answering-service", ["medications", "locations", "providers"]],
+    ["no-ivr", ["medications", "providers", "locations"]],
+    ["tech", ["medications", "providers", "locations"]],
+    ["surgery", ["providers", "locations"]],
+  ] as const)("%s sends some of every source it declares", (lane, declared) => {
+    const terms = selectKeyterms(vocab, lane) ?? [];
+    expect(terms.length).toBe(MAX_KEYTERMS);
+    const share = shareOf(terms);
+    for (const source of declared) {
+      const got = source === "medications" ? share.meds : share[source];
+      expect(got, `${lane} declares ${source} and must send some`).toBeGreaterThan(0);
+    }
+  });
+
+  it("keeps the highest-volume entries, not an arbitrary slice", () => {
+    // Round-robin must still draw each source in its own ranked order, so the
+    // busiest provider is always in and the 77th never displaces it.
+    const terms = selectKeyterms(vocab, "surgery") ?? [];
+    expect(terms).toContain("Provider 0");
+    expect(terms).not.toContain("Provider 76");
+  });
+
+  it("still honours priority when the rounds run out", () => {
+    // surgery leads with providers, so it must hold more provider slots than
+    // location slots — the order still means something.
+    const share = shareOf(selectKeyterms(vocab, "surgery") ?? []);
+    expect(share.providers).toBeGreaterThan(share.locations);
+  });
+
+  it("a source with nothing in it does not strand the others", () => {
+    const terms = selectKeyterms({ providers, locations, medications: [] }, "tech") ?? [];
+    expect(terms.length).toBe(MAX_KEYTERMS);
+    const share = shareOf(terms);
+    expect(share.meds).toBe(0);
+    expect(share.providers).toBeGreaterThan(0);
+    expect(share.locations).toBeGreaterThan(0);
+  });
+});

@@ -89,7 +89,22 @@ const LANE_ORDER: Record<string, readonly ('providers' | 'locations' | 'medicati
   optical: ['locations', 'providers'],
   tech: ['medications', 'providers', 'locations'],
   records: ['locations', 'providers'],
-  'answering-service': ['locations', 'providers', 'medications'],
+  'answering-service': ['medications', 'locations', 'providers'],
+  /**
+   * The after-hours family takes EVERY department's calls — overnight, at
+   * weekends, and across the holiday weekends when it is the only line
+   * running. Measured over 5,552 substantive calls since 2026-08-01:
+   * appointments 1,622 · medications 1,367 · records 896 · surgery 827 ·
+   * optical 672. So it needs all three vocabularies, not a specialist's.
+   *
+   * Medications lead because they are the words ASR can least afford to
+   * guess: an office is a place name it can approximate ("Long Beach"), a
+   * drug is an invented proper noun it cannot. That ordering is a judgement;
+   * the traffic mix behind it is measured.
+   */
+  'no-ivr': ['medications', 'providers', 'locations'],
+  'no-ivr-v2': ['medications', 'providers', 'locations'],
+  'dev-no-ivr': ['medications', 'providers', 'locations'],
 };
 
 /** The order used for a lane with no entry of its own. */
@@ -105,24 +120,69 @@ const DEFAULT_ORDER = ['locations', 'providers'] as const;
  */
 export function selectKeyterms(vocab: Vocabulary, lane: string): string[] | undefined {
   const order = LANE_ORDER[lane] ?? DEFAULT_ORDER;
-  const out: string[] = [];
   const seen = new Set<string>();
 
-  for (const source of order) {
-    const candidates =
-      source === 'medications' ? [...vocab.medications] : namesOf(vocab[source]);
-    for (const raw of candidates) {
+  /**
+   * DRAWN ROUND-ROBIN, NOT SOURCE BY SOURCE.
+   *
+   * The old loop drained each source completely before starting the next, so
+   * a lane whose FIRST source is bigger than MAX_KEYTERMS never reached its
+   * second. With 105 locations against 100 slots that was not a corner case:
+   * measured 2026-09-05, optical, records and answering-service each sent 100
+   * location names and ZERO provider names, and answering-service had never
+   * sent one of the medications its order declares. Nothing failed and
+   * nothing logged; the lane simply could not hear a surgeon's name.
+   *
+   * Both directory lists are ranked by real volume and both have long tails,
+   * so the marginal value is steeply unequal — the 60th-busiest office is
+   * worth much less to a transcriber than the busiest surgeon. Taking one
+   * from each source per round spends the hundred slots on the head of every
+   * list instead of the whole of one.
+   *
+   * THE ROUNDS ARE WEIGHTED, because an even split throws away the ordering.
+   * Plain round-robin gave surgery 50 providers and 50 locations where it had
+   * held 77 providers — and surgery is assigned BY SURGEON, so that is a real
+   * loss dressed up as fairness. Each source draws `order.length - index`
+   * terms per round: with two sources the leader takes two to the other's one,
+   * with three it is 3:2:1. Priority decides how MUCH, never whether.
+   *
+   * A source that runs dry simply stops contributing and the others take the
+   * remaining slots, so a short medication list does not cap the lane.
+   */
+  const cursors = order.map((source, index) => ({
+    /** Ranked candidates for this source, in the order they should be spent. */
+    terms: source === 'medications' ? [...vocab.medications] : namesOf(vocab[source]),
+    at: 0,
+    /** Draws per round. The lane's first source draws the most. */
+    weight: order.length - index,
+  }));
+
+  const out: string[] = [];
+  let drewSomething = true;
+  while (out.length < MAX_KEYTERMS && drewSomething) {
+    drewSomething = false;
+    for (const cursor of cursors) {
+      for (let drawn = 0; drawn < cursor.weight; drawn += 1) {
+        if (out.length >= MAX_KEYTERMS) break;
+        // Advance past anything unusable rather than spending the draw on it:
+        // a term the API would silently discard is worse than an absent one.
+        let took = false;
+        while (cursor.at < cursor.terms.length) {
+          const term = (cursor.terms[cursor.at] ?? '').trim();
+          cursor.at += 1;
+          if (!term || term.length > MAX_KEYTERM_CHARS) continue;
+          const dedupe = term.toLowerCase();
+          if (seen.has(dedupe)) continue;
+          seen.add(dedupe);
+          out.push(term);
+          drewSomething = true;
+          took = true;
+          break;
+        }
+        if (!took) break; // this source is exhausted
+      }
       if (out.length >= MAX_KEYTERMS) break;
-      const term = raw.trim();
-      // Silently-dropped terms are worse than absent ones: skip anything the
-      // API would discard, rather than spending a slot on it.
-      if (!term || term.length > MAX_KEYTERM_CHARS) continue;
-      const dedupe = term.toLowerCase();
-      if (seen.has(dedupe)) continue;
-      seen.add(dedupe);
-      out.push(term);
     }
-    if (out.length >= MAX_KEYTERMS) break;
   }
 
   return out.length > 0 ? out : undefined;
