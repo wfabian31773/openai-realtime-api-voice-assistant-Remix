@@ -433,14 +433,24 @@ WORSE than the bug it fixes, and the 2026-09-03 cohort is the proof:
 | 2026-09-03, canonical-SID tickets | |
 |---|---|
 | by the TICKET's day (what was published) | 199 |
-| would correctly LEAVE the cohort (call was another day) | 4 |
-| would correctly JOIN it (ticket filed another day) | 2 |
-| **have NO `call_start_time` at all — silently dropped by a bare filter** | **8** |
-| by the CALL's day, with the coalesce | 189 |
+| … correctly LEAVE the cohort (the call was another day) | −4 |
+| … correctly JOIN it (the ticket filed on another day) | +2 |
+| **by the CALL's day, WITH the coalesce — the fix** | **197** |
+| … `call_start_time` NULL: kept by the coalesce, dropped by a bare filter | 8 |
+| by a bare `call_start_time::date` — **the rejected form** | 189 |
 
-Eight unanchored rows against four correctly moved: dropping them loses twice
-what the fix gains, and it loses them the same way bucket 3 exists to prevent —
-by assumption. 1,013 canonical-SID tickets carry no `call_start_time` at all.
+Read the last two rows together: **197 is the fix, 189 is the mistake**, and
+the gap between them is the eight rows a bare filter throws away. Eight
+unanchored against four correctly moved — it loses twice what it gains, and it
+loses them the way bucket 3 exists to prevent, by assumption. 1,013
+canonical-SID tickets carry no `call_start_time` at all.
+
+An earlier version of this table printed **189** on the "with the coalesce"
+row, which is what the REJECTED filter returns — the section's own worked
+example quoting the cohort it warns against, a few lines after warning against
+it, and contradicting the agent 196 + staff 1 total below (Codex, PR #272
+round 5). **When a fix is justified by a table, recompute the table under the
+fix; do not carry a figure over from the run that motivated it.**
 
 **AND THE ANCHOR ITSELF HAS A BAD TAIL — do not treat it as exact.** 259
 tickets have `created_at` EARLIER than their own `call_start_time`, which
