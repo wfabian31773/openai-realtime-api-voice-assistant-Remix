@@ -47,7 +47,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import { normalizeSpokenLanguage, type SpokenLanguage } from "./language";
+import { normalizeSpokenLanguage, sttLanguageHint, type SpokenLanguage } from "./language";
 import type { GrokRuntimeVoiceConfig } from "./config";
 import type { GrokClientEvent, GrokServerEvent, GrokSessionConfig, GrokToolDefinition } from "./wireTypes";
 
@@ -258,6 +258,10 @@ export class GrokVoiceSession {
   /** Mutable copy — mid-call language switches send a fresh session.update
    * with language_hint so Grok's STT follows the caller. */
   private sessionConfig: GrokSessionConfig;
+  /** The lane's own instructions, before any language line. Held separately
+   * so `setSpokenLanguage` can REPLACE its line instead of stacking one on
+   * the last one; see there for what stacking did. */
+  private readonly baseInstructions: string;
   /** Caller audio that arrived before session.updated confirmed the
    * config. THE SIBLING REPO'S HARD-WON WIRE RULE: the session
    * configuration must ALWAYS precede the audio (ticketing 9fb0c83) —
@@ -329,6 +333,7 @@ export class GrokVoiceSession {
     private readonly handlers: GrokVoiceSessionHandlers,
   ) {
     this.sessionConfig = sessionConfig;
+    this.baseInstructions = sessionConfig.instructions;
     this.transport.onMessage((data) => this.handleServerEvent(data));
     this.transport.onError((err) => {
       this.state = "error";
@@ -361,25 +366,51 @@ export class GrokVoiceSession {
    * update carries the patched config.
    */
   setSpokenLanguage(language: SpokenLanguage): void {
-    const hint = normalizeSpokenLanguage(language);
-    // Agent-agnostic on purpose: the runtime serves every lane and cannot
-    // name any particular agent's tools here. Naming them was correct in
-    // the scheduling provider this was ported from and is wrong here.
+    const spoken = normalizeSpokenLanguage(language);
+    const hint = sttLanguageHint(language);
+    /**
+     * THE LOCK CLAUSE IS THE LOAD-BEARING HALF. Operator, 2026-09-05:
+     *
+     *   *"The model is doing what it was trained to do: match the last clear
+     *   language it thinks it heard. After a Spanish turn, a noisy word, an
+     *   English tool result, a number, or a default greeting pulls it back
+     *   to English... the 'switch only if they switch' clause is what stops
+     *   the revert."*
+     *
+     * The old line said "Follow their language from now on", which reads as
+     * a description of the present rather than a rule about the future. It
+     * is on BOTH branches now, English included: a lock that only holds one
+     * way is not a lock, it is a preference for English.
+     */
     const languageLine =
-      hint === "en"
-        ? " The caller is now speaking English. Continue using the same tools."
-        : ` The caller is now speaking ${hint}. Follow their language from now on. ` +
-          "Continue using the same tools, and keep tool ARGUMENTS in English " +
-          "(names, dates, yes/no) regardless of the spoken language.";
+      spoken === "en"
+        ? " The caller is speaking English. Keep every question, confirmation and " +
+          "tool preamble in English. Switch only if the caller switches. " +
+          "Continue using the same tools."
+        : ` The caller is speaking ${spoken}. Keep every question, confirmation and ` +
+          `tool preamble in ${spoken}. Switch only if the caller switches — not for ` +
+          "an English tool result, a medication name, a number, or a word you did " +
+          "not catch. Continue using the same tools, and keep tool ARGUMENTS in " +
+          "English (names, dates, yes/no) regardless of the spoken language.";
     this.sessionConfig = {
       ...this.sessionConfig,
-      instructions: this.sessionConfig.instructions + languageLine,
+      /**
+       * REPLACE, NEVER APPEND. This rebuilt `instructions` from the MUTATED
+       * config, so a second switch stacked a second line and the first
+       * survived: a caller who spoke Spanish and was then mis-heard as
+       * English ended up carrying BOTH standing instructions at once. We
+       * were telling the model two contradictory things and reading its
+       * choice as drift. `baseInstructions` is the lane's own prompt, fixed
+       * at construction, so exactly one language line is ever live.
+       */
+      instructions: this.baseInstructions + languageLine,
       audio: {
         ...this.sessionConfig.audio,
         input: {
           ...this.sessionConfig.audio.input,
           transcription: {
             ...this.sessionConfig.audio.input.transcription,
+            // Regional where we know the region — see sttLanguageHint().
             language_hint: hint,
           },
         },

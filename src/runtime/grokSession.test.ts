@@ -729,16 +729,94 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
       session: { audio: { input: { transcription?: { language_hint?: string } } }; instructions: string };
     }>;
     expect(updates.length).toBe(before + 1);
-    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es");
+    // es-MX, not es: the STT hint is regional now (sttLanguageHint), per the
+    // operator's 2026-09-05 guidance. The MODEL-facing text still says "es".
+    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es-MX");
     // Agent-agnostic copy: the runtime names the language and holds tool
     // arguments to English, but never names a particular agent's tools —
     // the scheduling provider this was ported from did, and that was
     // correct there and wrong here.
-    expect(updates[updates.length - 1]?.session.instructions).toMatch(/now speaking es/);
+    expect(updates[updates.length - 1]?.session.instructions).toMatch(/is speaking es\b/);
     expect(updates[updates.length - 1]?.session.instructions).toMatch(/ARGUMENTS in English/);
     expect(updates[updates.length - 1]?.session.instructions).not.toMatch(/report_\*/);
   });
 
+
+
+  /**
+   * LANGUAGE LOCK, 2026-09-05. Operator guidance, and the diagnosis is his:
+   *
+   *   *"The model is doing what it was trained to do: match the last clear
+   *   language it thinks it heard. After a Spanish turn, a noisy word, an
+   *   English tool result, a number, or a default greeting pulls it back to
+   *   English. Auto-detect alone will not hold the lane... the 'switch only
+   *   if they switch' clause is what stops the revert."*
+   *
+   * Three defects, all in this one method, all fixed together because they
+   * compound:
+   */
+  it("REPLACES the language line rather than stacking a new one on top", () => {
+    // THE COMPOUNDING BUG. `instructions` was rebuilt from the MUTATED
+    // config, so a second switch appended a second line and the first
+    // survived. A caller who spoke Spanish and was then mis-detected as
+    // English ended up with BOTH standing instructions at once — we were
+    // telling the model two contradictory things and blaming it for
+    // picking one.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "s" } });
+    transport.emit({ type: "session.updated" });
+
+    session.setSpokenLanguage("Spanish");
+    session.setSpokenLanguage("English");
+    session.setSpokenLanguage("Spanish");
+
+    const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
+      session: { instructions: string };
+    }>;
+    const final = updates[updates.length - 1]!.session.instructions;
+    // Assert the PROPERTY, not the prose: exactly one language line is live,
+    // and it is the one for the language the caller last actually spoke.
+    const allLines = (final.match(/The caller is speaking/g) ?? []).length;
+    expect(allLines, "one live language line, not a pile").toBe(1);
+    expect(final).toMatch(/The caller is speaking es\b/);
+    expect(final, "the superseded English line must be gone")
+      .not.toMatch(/The caller is speaking English/);
+  });
+
+  it("tells the model to switch only when the CALLER switches", () => {
+    // Without this clause the model reverts on the next English-looking
+    // token — a drug name, a number, a tool result.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "s" } });
+    transport.emit({ type: "session.updated" });
+    session.setSpokenLanguage("Spanish");
+    const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
+      session: { instructions: string };
+    }>;
+    const line = updates[updates.length - 1]!.session.instructions;
+    expect(line).toMatch(/only if the caller switches/i);
+    // And it must survive a return to English, or the lock is one-way.
+    session.setSpokenLanguage("English");
+    const after = (transport.sent.filter((e) => e.type === "session.update") as Array<{
+      session: { instructions: string };
+    }>).pop()!.session.instructions;
+    expect(after).toMatch(/only if the caller switches/i);
+  });
+
+  it("sends a REGIONAL Spanish hint, not the bare primary subtag", () => {
+    // Operator: *"After you hear Spanish, send es-MX or es-ES (not es)."*
+    // Southern California practice, so es-MX. Unrecognized codes are
+    // ignored by the provider, so a regional guess costs nothing and a
+    // bare subtag costs recognition.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "s" } });
+    transport.emit({ type: "session.updated" });
+    session.setSpokenLanguage("Spanish");
+    const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
+      session: { audio: { input: { transcription?: { language_hint?: string } } } };
+    }>;
+    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es-MX");
+  });
 
   it("does NOT re-fire onConfigured when the language switch is acknowledged", () => {
     /**
@@ -800,7 +878,9 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
     const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
       session: { audio: { input: { transcription?: { language_hint?: string } } } };
     }>;
-    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es");
+    // es-MX, not es: the STT hint is regional now (sttLanguageHint), per the
+    // operator's 2026-09-05 guidance. The MODEL-facing text still says "es".
+    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es-MX");
   });
 
   it("an unknown language is passed through rather than forced to English", () => {
