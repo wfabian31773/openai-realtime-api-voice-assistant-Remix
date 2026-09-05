@@ -60,6 +60,27 @@ const SHARED: readonly Ruling[] = [
   },
   {
     /**
+     * Codex, PR #272 round 2. Tech's identity block read "one at a time, in
+     * these words" while its language line said only "continue in their
+     * language" — so a Spanish caller who triggered set_spoken_language could
+     * still be asked for a last name and a date of birth in English, because
+     * the more concrete instruction said to use those words. The other three
+     * lanes had carried the qualifier since the language fix and tech had it
+     * reverted for four characters of ceiling headroom; the restructure gave
+     * the room back.
+     *
+     * Asserted here because this ruling had NO test at all — nothing stopped
+     * a trim from dropping it on all four lanes at once, which is precisely
+     * what this file exists to prevent.
+     */
+    source: 'Codex, 2026-09-05 (PR #272) — a translated call translates the quoted asks too',
+    requires: [
+      ['set_spoken_language'],
+      ['shape, not a script', 'shapes to translate', 'not scripts to read'],
+    ],
+  },
+  {
+    /**
      * Operator ruling, 2026-09-03: when a caller asks for a representative the
      * agent says it cannot transfer AND that it will take a message and raise a
      * request for staff to follow up. Bought with three calls in twelve minutes
@@ -269,6 +290,27 @@ check(tech, [...SHARED, MEDICAL_SAFETY, ...TECH_ONLY], 'tech prompt keeps every 
 check(optical, SHARED, 'optical prompt keeps every ruling');
 check(records, [...SHARED, ...RECORDS_ONLY], 'records prompt keeps every ruling');
 
+/**
+ * THE MUTATION GUARD FOR THE RULING ABOVE, stated as the defect rather than
+ * the fix. "in this shape" is one way to say it and a future rewording is
+ * fine; telling the model to use a quoted English question VERBATIM is not,
+ * on any lane, because it outranks a general "continue in their language".
+ */
+describe('no queue prompt pins a quoted ask to English', () => {
+  for (const [name, prompt] of [
+    ['surgery', surgery],
+    ['tech', tech],
+    ['optical', optical],
+    ['records', records],
+  ] as const) {
+    it(`${name} does not instruct verbatim wording`, () => {
+      expect(prompt, `${name} says "in these words" above a quoted ask`).not.toMatch(
+        /in these (?:exact )?words/i,
+      );
+    });
+  }
+});
+
 describe('the trim actually happened', () => {
   /**
    * A ceiling, not a target. Surgery was ~2,636 prompt tokens on 2026-09-03
@@ -285,26 +327,33 @@ describe('the trim actually happened', () => {
   });
 
   /**
-   * THESE CEILINGS ARE CLOCK-DEPENDENT, AND TECH'S HAS FOUR CHARACTERS IN IT.
+   * THESE CEILINGS ARE CLOCK-DEPENDENT, AND TECH'S ONCE HAD FOUR CHARACTERS
+   * IN IT.
    *
    * Every queue prompt embeds `getPacificTimeContext()`, whose weekday, date
    * and time are variable width — and `timeStr` appears TWICE in that block,
-   * so a minute's difference can move the prompt by two characters. Tech's
-   * ceiling boundary is 6,400 characters and tech renders at 6,332, so 67
-   * characters of slack absorb it today.
+   * so a minute's difference can move the prompt by two characters.
    *
-   * That is not much, and it was nearly none. A sixteen-token language fix
-   * (Codex, 2026-09-05) took tech to 6,395 — FOUR characters of headroom —
-   * at which point "Wednesday" instead of "Saturday" would have failed this
-   * suite on the calendar rather than on the diff. The fix was reverted on
-   * tech and kept on the three lanes with real slack. Whoever buys tech room
-   * should delete this guard's reason for existing, not raise the number.
+   * The history is why this guard exists rather than a bare length check.
+   * Tech rendered at 6,332 with 66 characters of slack, and a sixteen-token
+   * language fix (Codex, 2026-09-05) took it to 6,395 — FOUR characters — at
+   * which point "Wednesday" instead of "Saturday" would have failed this
+   * suite on the calendar rather than on the diff. That fix was reverted on
+   * tech and kept on the three lanes with real slack.
+   *
+   * Restructuring all four prompts to xAI's recommended section order bought
+   * the room back: tech fell to 6,242, so the language fix went in on tech
+   * too (PR #272 round 2) and it still holds 65 characters. Whoever eats that
+   * should buy tech room, not raise the number.
    *
    * This test asserts the SLACK rather than the length, so a future prompt
    * that eats it fails here with the reason attached.
    */
   it('tech keeps enough slack that the clock cannot fail the ceiling', () => {
-    const boundary = 1600 * 4; // Math.round(len / 4) reaches 1600 at 6398.
+    // Math.round(len / 4) reaches 1600 at 6398, so 6398 is the first failing
+    // length — NOT 1600 * 4, which this used and which was two characters
+    // optimistic about the room left.
+    const boundary = 6398;
     const slack = boundary - tech.length;
     // The widest weekday, a two-digit date and a two-digit hour rendered
     // twice come to well under 20 characters of swing.

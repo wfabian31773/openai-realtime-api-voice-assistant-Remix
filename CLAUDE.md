@@ -351,9 +351,9 @@ REPORTED RATHER THAN ASSUMED. Never a ticket prefix.**
 
 **AND THE `call_sid` MUST PASS THE CANONICAL VALIDATOR — `~* '^CA[0-9a-f]{32}$'`,
 the SQL form of `isTwilioCallSid` (`src/tools/callSid.ts`).** `LIKE 'CA%'` is
-NOT enough: `CAunknown` passes it and recreates the very problem. Today that
-loose form admits exactly 1 junk row — which is a fact about today, not about
-the rule (Codex, PR #272). `call_sid IS
+NOT enough: `CAunknown` passes it and recreates the very problem. How many
+junk rows it admits today is a fact about today, not about the rule (count:
+see the census — Codex, PR #272). `call_sid IS
 NOT NULL` is not enough: ticket rows carry sentinels ("unknown", "latest",
 "none", bare uuids) across far fewer distinct values than rows (counts: see
 the census), so `count(DISTINCT call_sid)` both invents calls that never
@@ -362,19 +362,60 @@ once carried no usable CallSid — I wrote a rule on `IS NOT NULL` directly
 beneath that knowledge. (Codex, PR #272; see also
 `docs/BACKEND_HANDOFF.md`.)
 
+**CLASSIFY THE CALL, NOT THE ROW.** The precedence above decides who made ONE
+TICKET. A filing rate is per CALL, and a call can carry several tickets, so the
+rows must be folded to one verdict per `call_sid` BEFORE anything is counted.
+Classifying each row and then taking `count(DISTINCT call_sid)` inside each
+group puts a call with both an agent filing and a staff ticket in TWO buckets,
+and the buckets stop being exclusive without saying so (Codex, PR #272).
+
+**And the call-level precedence is the ROW-LEVEL ONE INVERTED.** That looks
+like a contradiction and is not: the row rule answers *who made this ticket*,
+where a named human wins; the call rule answers *did the agent file for this
+call*, and **one agent filing is enough** no matter what staff added
+afterwards. Write both down or the next reader will "fix" one into the other.
+
 ```sql
--- The filing test. Three buckets, real SIDs only, and bucket 3 never vanishes
--- into bucket 2's complement. No prefix filter, ever.
-SELECT CASE WHEN created_by_id IS NOT NULL THEN 'staff'
-            WHEN agent_used   IS NOT NULL THEN 'agent'
-            ELSE 'UNKNOWN' END                     AS provenance,
-       count(DISTINCT call_sid)
-FROM tickets
-WHERE call_sid ~* '^CA[0-9a-f]{32}$'   -- NOT `IS NOT NULL`, NOT `LIKE 'CA%'`.
-  AND created_at::date = '<day>'
-GROUP BY 1;
+-- The filing test. Three buckets, real SIDs only, ONE verdict per call, and
+-- bucket 3 never vanishes into bucket 2's complement. No prefix filter, ever.
+WITH per_call AS (
+  SELECT call_sid,
+         bool_or(created_by_id IS NULL AND agent_used IS NOT NULL) AS any_agent,
+         bool_or(created_by_id IS NOT NULL)                        AS any_staff
+  FROM tickets
+  WHERE call_sid ~* '^CA[0-9a-f]{32}$'  -- NOT `IS NOT NULL`, NOT `LIKE 'CA%'`.
+    AND created_at::date = '<day>'
+  GROUP BY call_sid
+)
+SELECT CASE WHEN any_agent THEN 'agent'
+            WHEN any_staff THEN 'staff'
+            ELSE 'UNKNOWN' END AS provenance,
+       count(*)                AS calls
+FROM per_call GROUP BY 1;
 -- All-time totals live in THE CENSUS above; do not copy them here. The
 -- 2026-09-03 day figures are stated ONCE, under "Effect of the change" below.
+```
+
+**THE OVERLAP IS LATENT, NOT LIVE — measured 2026-09-05 10:41 UTC, all time.**
+Of 40,931 calls carrying a real-SID ticket, the mixed pairs the old query would
+have double-counted number **0** — agent+staff 0, agent+unknown 0,
+staff+unknown 0. So no rate this file has ever published was inflated by it.
+**The mechanism is live even though the defect has not fired:** 16 calls
+already carry more than one ticket, so a single staff ticket landing on a call
+the agent filed is enough to start it. Re-run this beside the census.
+
+```sql
+SELECT count(*) FILTER (WHERE any_agent AND any_staff)   AS agent_and_staff,
+       count(*) FILTER (WHERE any_agent AND any_unknown) AS agent_and_unknown,
+       count(*) FILTER (WHERE any_staff AND any_unknown) AS staff_and_unknown,
+       count(*) FILTER (WHERE rows_for_call > 1)         AS calls_with_2plus_tickets
+FROM (
+  SELECT call_sid, count(*) AS rows_for_call,
+         bool_or(created_by_id IS NOT NULL)                        AS any_staff,
+         bool_or(created_by_id IS NULL AND agent_used IS NOT NULL) AS any_agent,
+         bool_or(created_by_id IS NULL AND agent_used IS NULL)     AS any_unknown
+  FROM tickets WHERE call_sid ~* '^CA[0-9a-f]{32}$' GROUP BY call_sid
+) c;
 ```
 
 **On 2026-09-03 the unknown bucket is EMPTY**, so the rates published in this
@@ -401,32 +442,45 @@ disproving it. Recorded in full because the pattern matters more than the rule:
 <a id="census"></a>
 ### THE CENSUS — the only place in this file that states these numbers
 
-**Every figure below is as of `2026-09-04 17:23:05 UTC`, real `CA%` SIDs only.**
+**Every figure below is as of `2026-09-05 10:42:04 UTC`, canonical SIDs only,
+and CLASSIFIED PER CALL** (the row-level query these came from before
+2026-09-05 could put one call in two buckets — see the filing test above).
 Nothing else in this section restates them; other paragraphs say "see the
 census" and stop. That rule exists because eight separate stale copies were
-caught in this file today, each one fixed in prose while a near-duplicate
-survived in a query or a bullet. **If you add a number here, do not repeat it
-elsewhere — link to it.**
+caught in this file, each one fixed in prose while a near-duplicate survived in
+a query or a bullet. **If you add a number here, do not repeat it elsewhere —
+link to it.**
 
 | | value |
 |---|---|
-| calls with any ticket | 40,783 |
-| **agent-filed** | **40,717** |
+| calls with any ticket | 40,931 |
+| **agent-filed** | **40,865** |
 | unknown-provenance only | 29 |
 | staff-created | 37 |
-| the `VA-`/`PCP-` prefix rule would match | 40,710 |
+| the `VA-`/`PCP-` prefix rule would match | 40,858 |
 | … **real filings it misses** | **7** |
 | … filings it wrongly counts | **0** |
-| dropped as sentinel `call_sid` | 216 rows across 60 distinct values |
+| dropped as sentinel `call_sid` | 217 rows across 61 distinct values |
+| admitted by `LIKE 'CA%'` but not by the canonical validator | 1 |
 
-Provenance census on the two prefixes that raised the question:
+Provenance census on the two prefixes that raised the question. **These are
+ROWS, not calls** — this table is what proved the row-level precedence rule,
+and per-call folding would hide exactly the both/neither columns it turns on:
 
 | sid-bearing rows | human `created_by_id` | `agent_used` set | both | neither |
 |---|---|---|---|---|
 | `T-` (37) | **37** | 6 | **6** | 0 |
 | `SR-` (36) | **0** | **7** | 0 | **29** |
-| `VA-` control (6,495) | 0 | **6,494** | — | 1 |
+| `VA-` control (40,664) | 0 | **40,664** | — | 0 |
 | `PCP-` control (210) | 0 | **210** | — | 0 |
+
+The `VA-` control read **6,495 rows with 1 neither** when it was written on
+2026-09-04. It is 40,664 with 0 now — the row count could never have been
+right beside an agent-filed total of 40,717 on the same line, since a lane
+cannot file more calls than it has tickets. Whatever narrowed it is not
+recoverable from the number alone. **A census row that contradicts another
+census row is the cheapest bug in this file to catch and the easiest to
+publish; read across the table before quoting down it.**
 
 **THE TIMESTAMP IS NOT DECORATION.** Seven minutes earlier the same query
 returned `T-` = 36 rows with **5** both, and the prefix rule's overcount read
@@ -469,12 +523,16 @@ nearly wrote a new trap here of exactly the kind this section exists to
 prevent.
 
 **Effect of the change on the published 2026-09-03 numbers, re-measured under
-the precedence rule with real SIDs.** This is the ONLY place the 09-03 day
-figures are stated: **agent 197 · staff 1 · UNKNOWN 0**, against the old
-`VA-` rule's **196** — the new rule adds **1** and loses 0, so it strictly
-dominates the old one that day.
-The earlier version of this line said +2, which came from the superseded
-`agent_used IS NOT NULL` test counting that day's one STAFF ticket as an agent
+the precedence rule, per call, with canonical SIDs** (2026-09-05 10:43 UTC).
+This is the ONLY place the 09-03 day figures are stated: **agent 197 · staff 2
+· UNKNOWN 0 · agent-and-staff overlap 0**, against the old `VA-` rule's
+**196** — the new rule adds **1** and loses 0, so it strictly dominates the
+old one that day.
+The staff figure read **1** when written on 2026-09-04 and is **2** now; a
+second staff ticket landed on a 09-03 call after the fact, which is the same
+drift the timestamp warning above describes and does not touch the agent
+count. The earlier version of this line said +2, which came from the
+superseded `agent_used IS NOT NULL` test counting a STAFF ticket as an agent
 filing (Codex, PR #272). Which lane the added call belongs to is NOT settled
 here, because settling it needs the `call_logs` join rather than the
 unreliable ticket column, and that has not been run. One call cannot overturn
@@ -500,9 +558,12 @@ SELECT split_part(ticket_number,'-',1) AS prefix, count(*) AS tickets,
        count(*) FILTER (WHERE created_by_id IS NULL AND agent_used IS NULL) AS UNKNOWN
 FROM tickets WHERE created_at::date = '<day>' AND call_sid ~* '^CA[0-9a-f]{32}$' 
 GROUP BY 1 ORDER BY 2 DESC;
--- Precedence, same as the rule at the top: a human creator wins. Do NOT
--- shorten this to `agent_used IS NOT NULL` — staff rows carry BOTH fields
--- (see the census for how many; the count drifts, the rule does not).
+-- THIS ONE COUNTS ROWS, NOT CALLS — so it uses the ROW-level precedence (a
+-- human creator wins), not the filing test's per-call one (any agent filing
+-- wins). Both are correct for what they answer; see the note above the filing
+-- test. Do NOT shorten this to `agent_used IS NOT NULL` — staff rows carry
+-- BOTH fields (see the census for how many; the count drifts, the rule does
+-- not).
 -- This control is per-DAY and real-SID only, so its output is a day's shape,
 -- NOT the whole-table figures that used to be pasted here (those were produced
 -- by a different, unfiltered query and could not be reproduced from this one —
