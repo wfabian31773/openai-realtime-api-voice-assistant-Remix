@@ -32,6 +32,15 @@
  * An instrument that cannot separate those two is not an instrument, and
  * being one is this file's entire purpose.
  *
+ * THE BUILD TURNED OUT TO BE CURRENT, WHICH IS THE STRONGER VERSION OF THE
+ * POINT. It was established from `call_logs` instead: 405 grok rows carry an
+ * `agent_id` the live process stamped itself (outside the 259-row backfill
+ * snapshot), and that code merged 2026-09-04 — comfortably after 08-31. The
+ * line was absent because the runtime had served NO CALLS that day, not
+ * because it was missing. So the marker was useless in both directions: it
+ * could not confirm the build and it could not exonerate it, and a database
+ * query had to do the job this constant exists to do.
+ *
  * So the marker ENDS IN THE YYYYMMDD IT WAS SET, and `markerSetOn` parses it
  * back out. "Is the deployed build newer than <date>?" is then answerable
  * from the marker alone, by anyone, without our commit history — which is

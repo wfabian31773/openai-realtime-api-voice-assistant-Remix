@@ -1142,15 +1142,45 @@ through to 2026-09-05, unchanged across every commit between — including
 searched a live deployment for that line, found nothing, and **the marker could
 not say whether the build contained it**: the identical string is served either
 side of the change. Neither could the rest of the payload — `transferDestinations`
-landed 08-30, one day too early to discriminate.
-
-The field that CAN date a build older than 09-04 is **`lanes`**, added that day.
-A `/voice/health` response with no `lanes` key predates it.
+landed 08-30, one day too early to discriminate. The only health field that
+dates a build at all is **`lanes`**, added 09-04.
 
 So: the rule "bump it on every ship whose effect is hard to see" was already
 written at the top of `src/runtime/readiness.ts` and was not enough on its own.
 The date is now in the string, `markerSetOn()` parses it back out, and
 `readiness.test.ts` fails if a future bump drops the suffix.
+
+### AN ABSENT RUNTIME LOG LINE USUALLY MEANS NO RUNTIME CALLS
+
+**The build was current all along, and the missing line meant nothing.** Both
+halves came out of `call_logs`, which is where this should have started:
+
+- **The build is ≥ 2026-09-04.** 405 grok rows carry an `agent_id` that the
+  live process stamped itself — they are NOT in the 259-row backfill snapshot
+  `call_logs_agent_id_backfill_20260904` — and `src/runtime/agentIdentity.ts`
+  merged 2026-09-04 03:45 UTC. Earliest such call 2026-09-04 15:01:28 UTC. So
+  the deployed code is newer than the 08-31 log line by a clear margin.
+- **The runtime served ZERO calls that day.** Last grok call
+  2026-09-04 23:55:48 UTC. Every one of 2026-09-05's 49 calls was `no-ivr` on
+  the OLD CORE, 00:01–06:15 UTC. Nothing ran, so nothing printed.
+
+**AND THAT IS THE NORMAL WEEKEND SHAPE, not an outage.** Queue lanes take
+essentially nothing Saturday or Sunday — 08-22: 1 queue call vs 155 no-ivr ·
+08-23: 1 vs 59 · 08-29: 0 vs 120 · 08-30: 0 vs 36 · 09-05: 0 vs 49. Standing
+instruction 13 routes it all to the after-hours agent, which is old core.
+
+```sql
+-- Before concluding a runtime log line is missing, ask whether the runtime
+-- ran at all. Substitute the day.
+SELECT coalesce(voice_provider,'old-core') AS pipeline, agent_used, count(*),
+       min(created_at AT TIME ZONE 'UTC'), max(created_at AT TIME ZONE 'UTC')
+FROM call_logs WHERE created_at::date = '<day>' GROUP BY 1,2 ORDER BY 3 DESC;
+```
+
+**To read the pre-context diagnostic you need a runtime call first.** On a
+weekday the queue lanes open around 15:00 UTC (first grok call was 15:24 on
+09-03, 15:01 on 09-04). On a weekend, one test call to a queue number is the
+only way to produce one.
 
 **If the marker is absent, the code is not live and the call proves nothing.**
 Whenever you ship something whose effect is hard to see, add a marker like this.
