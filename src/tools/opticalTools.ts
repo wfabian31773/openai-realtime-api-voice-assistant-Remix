@@ -212,7 +212,7 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
-    const cleanLocation = sanitizeLocationName(location).value;
+    let cleanLocation = sanitizeLocationName(location).value;
     const cleanProvider = sanitizeProviderName(str(input.provider)).value;
 
     /**
@@ -234,6 +234,45 @@ registerTool({
      * that exists, not a second way to lose the request.
      */
     const askedForOfficeAlready = gateRefusalsSoFar(callSid, OPTICAL_FILE_TOOL, 'location') > 0;
+
+    /**
+     * THE OFFICE THIS CALL ALREADY RESOLVED — but only on the SECOND attempt.
+     *
+     * `location` is a model argument ("The office, as returned by
+     * resolve_location") and the model is not a reliable courier between two of
+     * its own tool calls. On 2026-09-02 an optical request died in the outbox
+     * after resolve_location returned `verified: true` and the very next
+     * file_optical_ticket went out with no office at all.
+     *
+     * WHY IT IS GATED ON HAVING ALREADY ASKED, and not applied on the first
+     * attempt (Cursor, PR #253): a carried office is LAST-WRITE-WINS and has no
+     * "is this still what the caller said" check, unlike verifiedDobFor which
+     * re-matches the name. So resolve_location(Encinitas) -> caller corrects to
+     * Redlands -> model omits location would file Encinitas onto a payload the
+     * caller just contradicted. Optical assigns BY office, so that is a patient
+     * sent to the wrong building.
+     *
+     * Wayne's ruling settles which way to err: "if you gate the location, the
+     * agent will ask and if no answer, unassigned." Unassigned is sanctioned;
+     * a wrong building is not.
+     *
+     * Restricting the carry to after the gate has already asked keeps exactly
+     * the case that died — the model was told the office was missing, called
+     * resolve_location, and still did not pass it — while leaving the first
+     * attempt to the ask, which is where a correction would actually surface.
+     */
+    if (!cleanLocation && askedForOfficeAlready) {
+      const { resolvedOfficeFor } = await import('./resolvedContext');
+      const carried = sanitizeLocationName(resolvedOfficeFor(callSid) ?? '').value;
+      if (carried) {
+        cleanLocation = carried;
+        console.info(
+          `[optical] office "${carried}" taken from resolve_location on this call — ` +
+            `the model did not carry it into the filing arguments`,
+        );
+      }
+    }
+
     if (!cleanLocation && !askedForOfficeAlready) {
       noteGateRefusal(callSid, OPTICAL_FILE_TOOL, 'location');
       return missing(['location'], 'Which of our offices do you usually visit?');

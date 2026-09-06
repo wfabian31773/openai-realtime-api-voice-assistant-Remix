@@ -178,6 +178,56 @@ Contributing causes, in order of confidence:
    `1953-02-22` on file; `Ramon Ronquillo` `1955-08-24` against `1955-08-31`.
 3. **Only 2 of those 30 patients have any physician on record at all.**
 
+### The model does not carry its own tool results forward
+
+Found 2026-09-02, from five requests that dead-lettered in one afternoon.
+
+Optical call `CA747908b5d46b7ed25cffe733fb792738`, tool timeline in order:
+
+```
+lookup_patient (577ms, success)
+check_open_tickets
+classify_optical_request
+file_optical_ticket   -> refused, "Missing required information: office"
+resolve_location (3ms, { success: true, verified: true })
+file_optical_ticket   -> refused AGAIN, same missing office -> dead letter
+```
+
+`resolve_location` verified the office and the very next filing call went out
+without it. The gate was working perfectly; the office was in hand the whole
+time. `location` and `surgeon` are MODEL arguments — `opticalTools.ts` says so
+outright, "The office, as returned by resolve_location" — and the model is not
+a reliable courier between two of its own tool calls.
+
+`src/tools/resolvedContext.ts` holds the resolved office server-side for the
+length of one call, the same way `verifiedIdentity.ts` holds the verified date
+of birth (both exist because of this same failure, found one day apart —
+2026-09-01 and 2026-09-02).
+
+**Three things a future change must not undo:**
+
+1. **`verified` is not `usable`.** `resolve_location` sets `verified: true` on
+   any Console directory hit and computes `usable_for_this_queue` separately.
+   A surgery centre spoken to optical is verified and NOT usable. Only usable
+   offices are stored — storing the other kind lets optical fill in a building
+   the tool had just told the model not to use, and skip its own gate doing it.
+2. **Optical carries only on the SECOND attempt**, after the gate has already
+   asked. The carry is last-write-wins with no "is this still what the caller
+   said" check, so on a first attempt it could file an office the caller had
+   since corrected. Optical assigns BY office: that is a patient sent to the
+   wrong building. Wayne's ruling decides which way to err — *"if you gate the
+   location, the agent will ask and if no answer, unassigned."* Unassigned is
+   sanctioned; a wrong building is not.
+3. **Surgery gets NO office carry.** It does not gate on location at all
+   (`files WITHOUT a location — unlike Optical`), so a missing office was never
+   why its four requests died — a missing surgeon was. And `resolveWith` ANDs
+   `cleanLocation` into every `/lookup`, so a carried office would turn a
+   provider-only search into provider+location and stop matching a surgeon who
+   is not at that building — narrowing the ladder on the queue that most needs
+   it. The surgeon carry is a separate change and needs the four timelines
+   measured first: `matched_by`, whether the ladder ran, and whether the name
+   and date of birth on the filing call agreed with the lookup. See #48.
+
 ### Duplicate filings
 
 Real and unfixed. The four queue tools (`opticalTools`, `surgeryTools`, `techTools`,

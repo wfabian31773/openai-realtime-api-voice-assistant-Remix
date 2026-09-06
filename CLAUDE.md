@@ -274,6 +274,7 @@ is reading noise.
 | Thing | Where | What it does |
 |---|---|---|
 | Mirror verification | `src/services/patientVerification.ts` | Verifies against `patients_master`; refuses to guess between two people. |
+| Per-call carries between tools | `src/tools/verifiedIdentity.ts`, `src/tools/resolvedContext.ts` | The model does NOT reliably pass one of its own tool's results into the next tool's arguments. These hold it server-side for the length of one call: the verified date of birth, and the resolved office. Keyed on a REAL CallSid — a sentinel key would file one caller's request against another's. Both fill a GAP only; what the caller said always wins. The office is OPTICAL ONLY and only on the SECOND filing attempt, after its gate has asked — see BACKEND_HANDOFF §3 before widening either. |
 | Appointment answers | `src/services/appointmentAnswers.ts` | `Schedule.PersonID` join; excludes `Removed`. |
 | Replay tables | Operations Hub | `new_core_replay_summary`, `new_core_replay_index`, `ticket_agent_config` |
 | Date-of-birth parsing | `src/tools/dobParts.ts` | Reads a date out of a whole spoken sentence, English + Spanish months, two-digit centuries. **Turkish is a known, evidenced gap.** Also exports `dobShape` — the PHI-free shape of what arrived, which is the only way to tell "the model sent nothing" from "the parser refused it". |
@@ -738,6 +739,18 @@ them as current.
   `call_logs` row**. The model was overwriting the injected value. Fixed.
 - **With an idempotency key, duplicate filing is 3 calls in 2,086 (0.14%).**
   The key works; the exposure was always the payloads without one.
+- **The model is not a courier between its own tool calls.** 2026-09-02, optical
+  `CA747908b5d46b7ed25cffe733fb792738`: `file_optical_ticket` refused for a
+  missing office → `resolve_location` returned `verified: true` → the very next
+  `file_optical_ticket` went out with no office and the request dead-lettered.
+  `location` and `surgeon` are MODEL arguments. `resolvedContext.ts` carries the
+  office server-side; the surgeon is NOT carried yet (#48).
+  **`verified` is not `usable`:** `resolve_location` sets `verified: true` on any
+  Console directory hit and computes `usable_for_this_queue` separately, so a
+  surgery centre spoken to optical is verified and unusable. Only `usable` ones
+  are stored. **Surgery gets no office carry** — it does not gate on location,
+  and `resolveWith` ANDs a location into every provider lookup, which would
+  narrow the surgeon ladder on the queue that most needs it.
 - **Requests lost to a gate:** 107 calls in 14 days called a filing tool, were
   refused for a missing field, and ended with no ticket. Still missing at the
   hang-up: optical/location **62**, date-of-birth only **23**, callback number

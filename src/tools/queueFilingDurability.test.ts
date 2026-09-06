@@ -120,3 +120,67 @@ describe('the largest queue, end to end', () => {
     expect(writeToOutbox).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * OPTICAL READS WHAT resolve_location ALREADY RESOLVED — AND ONLY IT.
+ *
+ * 2026-09-02: an optical request died in the outbox after this exact sequence
+ * on one call —
+ *
+ *     file_optical_ticket    -> refused, "Missing required information: office"
+ *     resolve_location       -> { success: true, verified: true }
+ *     file_optical_ticket    -> refused AGAIN, same missing office
+ *
+ * Surgery is deliberately NOT given this carry (Cursor, PR #253): it does not
+ * gate on location at all, so a missing office was never why its four requests
+ * died that afternoon — and a carried office would AND itself into every
+ * provider lookup in `resolveWith`, narrowing the surgeon ladder on the one
+ * queue that lost four requests for a missing surgeon.
+ *
+ * Read as source text for the same reason the durability checks above are:
+ * running these tools end to end needs the ticketing client, the lookups and a
+ * database, and this pins the lines that would silently undo the decision.
+ */
+describe('the office carry survives the model forgetting it', () => {
+  it('resolve_location actually WRITES what it resolved', () => {
+    // The read side is worthless if nothing fills the store. Deleting this
+    // one line broke nothing on the first mutation pass.
+    const shared = readFileSync(join(__dirname, 'sharedPatientTools.ts'), 'utf8');
+    expect(shared).toMatch(/rememberResolvedOffice\(str\(input\.call_sid\), fileable, verified && usable\)/);
+  });
+
+  it('stores only an office THIS QUEUE can file to, not merely a verified one', () => {
+    // `verified` is the Console directory hit; `usable_for_this_queue` is
+    // whether optical can action it. A surgery centre is the first and not the
+    // second, and storing it would let optical fill in a building the tool had
+    // just told the model not to use.
+    const shared = readFileSync(join(__dirname, 'sharedPatientTools.ts'), 'utf8');
+    expect(shared).not.toMatch(/rememberResolvedOffice\([^)]*,\s*true\s*\)/);
+  });
+
+  it('opticalTools.ts falls back to resolvedOfficeFor', () => {
+    const src = readFileSync(join(__dirname, 'opticalTools.ts'), 'utf8');
+    expect(src).toMatch(/resolvedOfficeFor\(callSid\)/);
+  });
+
+  it("opticalTools.ts carries only AFTER the gate has already asked", () => {
+    // A carried office is last-write-wins with no "is this still what the
+    // caller said" check. On the FIRST attempt the ask is what surfaces a
+    // correction; the carry belongs to the second, which is the case that
+    // actually died. Unassigned is sanctioned, a wrong building is not.
+    const src = readFileSync(join(__dirname, 'opticalTools.ts'), 'utf8');
+    expect(src).toMatch(/if \(!cleanLocation && askedForOfficeAlready\) \{[\s\S]{0,600}?resolvedOfficeFor/);
+    // ...and actually USES it. Reading the store and dropping the value on the
+    // floor passed the block check: a mutation replacing the assignment with a
+    // no-op survived the first pass.
+    expect(src).toMatch(/const carried = [\s\S]{0,200}?cleanLocation = carried;/);
+  });
+
+  it('surgeryTools.ts does NOT carry an office', () => {
+    // It would narrow the surgeon ladder: resolveWith ANDs cleanLocation into
+    // every /lookup, so a carried office turns a provider-only search into
+    // provider+location and a surgeon not at that building stops matching.
+    const src = readFileSync(join(__dirname, 'surgeryTools.ts'), 'utf8');
+    expect(src).not.toMatch(/resolvedOfficeFor/);
+  });
+});

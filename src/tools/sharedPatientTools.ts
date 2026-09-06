@@ -391,6 +391,9 @@ registerTool({
     }
 
     const usable = acceptsFacility(queue, hit.facilityKind);
+    // Named rather than inlined so the store and the return value cannot
+    // desync: both read this one binding.
+    const verified = true;
 
     // `location` is the form the RECEIVER stores, not the form the mirror does.
     //
@@ -412,10 +415,25 @@ registerTool({
     // heard of, which is how a resolved office still failed to file.
     const fileable = hit.fileAs || sanitizeLocationName(hit.canonical).value || hit.canonical;
 
+    // CARRY IT SERVER-SIDE. The filing tools take `location` as a model
+    // argument — "The office, as returned by resolve_location" — and on
+    // 2026-09-02 an optical request died in the outbox because this returned
+    // `verified: true` and the very next file_optical_ticket went out with no
+    // office at all. The model is not a reliable courier between two of its own
+    // tool calls; see resolvedContext.ts for the timeline. Only the verified,
+    // fileable name is stored, and only for this CallSid.
+    const { rememberResolvedOffice } = await import('./resolvedContext');
+    // `usable`, NOT a hardcoded true — Cursor, PR #253. `verified` means the
+    // Console directory HIT, not "this queue can file here": a surgery centre
+    // spoken to optical is verified:true and usable_for_this_queue:false, and
+    // storing it would let optical fill in a building it was just told not to
+    // use, skipping its own ask-once gate on the way.
+    rememberResolvedOffice(str(input.call_sid), fileable, verified && usable);
+
     return {
       success: true,
       resolved: true,
-      verified: true,
+      verified,
       location: fileable,
       canonical_name: hit.canonical,
       facility_kind: hit.facilityKind,
