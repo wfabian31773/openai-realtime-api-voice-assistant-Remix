@@ -1367,6 +1367,7 @@ Start there before debugging anything in these areas:
 | If you are about to… | Read first |
 |---|---|
 | debug "the agent won't call the tool" | `realtime-tool-schemas.md` |
+| touch the Grok voice transport — barge-in, disclosure, VAD, tools, audio | `grok-speech-to-speech-api.md` |
 | build or change a queue agent | `queue-agents.md` |
 | file, route or classify a ticket | `ticketing-api-contract.md` |
 | touch ticket creation on the after-hours path | `ticket-creation-lock.md` |
