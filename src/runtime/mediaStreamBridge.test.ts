@@ -1504,6 +1504,63 @@ describe("the practice greets the caller before the agent takes a turn", () => {
     expect(h.clears()).toEqual([]);
   });
 
+
+  it("does NOT replay the greeting when a mid-call language switch reconfigures the session", () => {
+    /**
+     * MEASURED, 2026-09-04. On the tech lane, 20:00-23:00 UTC, greeting
+     * replays went 0 of 70 calls (09-03) to 8 of 43 (09-04) — and SEVEN OF
+     * THE EIGHT were Spanish-speaking callers. Every Spanish caller on the
+     * lane that window replayed it; none had the day before.
+     *
+     * The path is a diff, not a theory:
+     *
+     *   set_spoken_language -> GrokVoiceSession.setSpokenLanguage()
+     *     -> send({ type: "session.update", ... })          (grokSession.ts:350)
+     *     -> Grok answers "session.updated"                 (grokSession.ts:381)
+     *     -> handlers.onConfigured()
+     *     -> handleSessionConfigured() speaks deps.greeting VERBATIM
+     *
+     * `onConfigured` means "the handshake landed" to the bridge and "the
+     * session config was accepted" to the wire, and those stopped being the
+     * same event the moment anything reconfigured a live session.
+     *
+     * The caller experience is the reason this is not cosmetic: the greeting
+     * is spoken LOCKED (`greetingLocked`, un-bargeable by design so the
+     * after-hours disclosure cannot be truncated). So a caller who has just
+     * said they do not speak English gets the whole English opening again
+     * and cannot talk over it.
+     */
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    expect(h.session.speak).toHaveBeenCalledTimes(1);
+
+    // The caller asked for Spanish; the tool retargeted the wire, and Grok
+    // acknowledged the new config exactly as it acknowledges the first one.
+    h.handlers().onConfigured();
+
+    // Once per call. The greeting is the practice picking up the phone.
+    expect(h.session.speak).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-lock the caller out of barging in after a language switch", () => {
+    // The replay's second harm, separate from the words: `greetingLocked` is
+    // set again, so barge-in is disabled mid-conversation. The caller loses
+    // the ability to interrupt a turn they never asked for.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onAudioDone(GREETING);
+    const markName = h.marks()[0]!.mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: markName } });
+
+    // Lock released; barge-in is ordinary from here.
+    h.handlers().onConfigured(); // the language switch
+
+    h.handlers().onAudioDelta("ZmFrZQ==");
+    h.handlers().onSpeechStarted();
+    expect(h.session.cancelResponse).toHaveBeenCalled();
+  });
+
   it("takes the lock off once Twilio confirms the greeting played", () => {
     // Released on the MARK ECHO, not on onAudioDone: audio-done means the
     // provider finished sending, with the tail still in Twilio's buffer.

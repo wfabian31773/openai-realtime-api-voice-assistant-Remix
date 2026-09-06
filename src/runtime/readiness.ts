@@ -20,12 +20,73 @@
  * marker below at boot and serves it from /voice/health. If the marker is
  * absent or old, the code is not live and the call proves nothing. Bump it
  * on every ship whose effect is hard to see.
+ *
+ * THE MARKER CARRIES A DATE BECAUSE THE DISCIPLINE ALONE FAILED.
+ *
+ * It read `voice-runtime-v2-transfer-guardrails-tools` from 2026-08-29 to
+ * 2026-09-05, unchanged across every commit in between — including the one
+ * that added the `[runtime] pre-context` diagnostic on 08-31. On 2026-09-05
+ * the operator searched a live deployment for that line, found nothing, and
+ * the marker could not say whether the build contained it: THE SAME STRING
+ * is served by a build from before the line existed and by one from after.
+ * An instrument that cannot separate those two is not an instrument, and
+ * being one is this file's entire purpose.
+ *
+ * THE BUILD TURNED OUT TO BE CURRENT, WHICH IS THE STRONGER VERSION OF THE
+ * POINT. It was established from `call_logs` instead: 405 grok rows carry an
+ * `agent_id` the live process stamped itself (outside the 259-row backfill
+ * snapshot), and that code merged 2026-09-04 — comfortably after 08-31. The
+ * line was absent because the runtime had served NO CALLS that day, not
+ * because it was missing. So the marker was useless in both directions: it
+ * could not confirm the build and it could not exonerate it, and a database
+ * query had to do the job this constant exists to do.
+ *
+ * So the marker ENDS IN THE YYYYMMDD IT WAS SET, and `markerSetOn` parses it
+ * back out. "Is the deployed build newer than <date>?" is then answerable
+ * from the marker alone, by anyone, without our commit history — which is
+ * exactly the question that could not be answered above. The boot log and
+ * `/voice/health` both carry it, so either one gives the same answer.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
 import { callEnvironment } from "./callRecord";
 
-export const VOICE_RUNTIME_DEPLOY_MARKER = "voice-runtime-v2-transfer-guardrails-tools";
+export const VOICE_RUNTIME_DEPLOY_MARKER =
+  "voice-runtime-v3-precontext-diagnosable-20260905";
+
+/**
+ * The date the marker was set, parsed out of the marker itself so anyone can
+ * compare a deployment against a date without our commit history. Returns
+ * null if a future bump drops the suffix — `readiness.test.ts` fails on that,
+ * so it cannot happen silently.
+ *
+ * IT ROUND-TRIPS THE COMPONENTS INSTEAD OF TRUSTING `Date.parse`, because
+ * `Date.parse` NORMALISES an overflow rather than rejecting it: `2026-02-30`
+ * parses happily as March 2. The first version of this validated with
+ * `Date.parse` and the test that claimed to prove "a real calendar date, not
+ * eight digits that merely look like one" would have passed a mistyped
+ * `-20260230` (Codex, PR #272 round 3). A marker that reports a date the
+ * calendar does not have is worse than one with no date, because it will be
+ * believed. Constructing the UTC date and checking all three fields come
+ * back unchanged is the only form that actually rejects.
+ */
+export function markerSetOn(marker: string = VOICE_RUNTIME_DEPLOY_MARKER): string | null {
+  const m = /-(\d{4})(\d{2})(\d{2})$/.exec(marker);
+  if (!m) return null;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const d = new Date(Date.UTC(year, month - 1, day));
+  // Month 0, day 0, month 13, 31 September, 29 February in a common year:
+  // every one of them survives Date.UTC by rolling into another month, and
+  // every one of them fails here.
+  if (
+    d.getUTCFullYear() !== year ||
+    d.getUTCMonth() !== month - 1 ||
+    d.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return `${m[1]}-${m[2]}-${m[3]}`;
+}
 
 export interface RuntimeReadiness {
   liveReady: boolean;

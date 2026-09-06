@@ -52,7 +52,7 @@ judged.
 
 It is mounted at **`server/index.ts:396`** (`mountVoiceRuntime`, imported at `:390`), on
 the **public** server, before `listen`, unconditionally. Its deploy marker is
-`voice-runtime-v2-transfer-guardrails-tools` (`src/runtime/readiness.ts:28`), printed
+`voice-runtime-v3-precontext-diagnosable-20260905` (`src/runtime/readiness.ts:28`), printed
 by `GET /voice/health` — which is how you tell in one request whether a build
 carries it.
 

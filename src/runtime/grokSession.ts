@@ -47,7 +47,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import { normalizeSpokenLanguage, type SpokenLanguage } from "./language";
+import { normalizeSpokenLanguage, sttLanguageHint, type SpokenLanguage } from "./language";
 import type { GrokRuntimeVoiceConfig } from "./config";
 import type { GrokClientEvent, GrokServerEvent, GrokSessionConfig, GrokToolDefinition } from "./wireTypes";
 
@@ -162,11 +162,33 @@ export interface GrokVoiceSessionHandlers {
  */
 const VAD_THRESHOLD = Number(process.env.RUNTIME_VAD_THRESHOLD ?? 0.6);
 
+/**
+ * BOOT MARKER. 2026-09-04's VAD re-measurement came back flat and could not
+ * be attributed: a threshold that never deployed and a threshold that did
+ * nothing look identical from SQL. Printing the live value makes the next
+ * measurement decisive — if this line is absent, the build is not live and
+ * the call proves nothing (CLAUDE.md, "How to tell whether a deploy took").
+ */
+const RESOLVED_VAD_THRESHOLD = Number.isFinite(VAD_THRESHOLD)
+  ? Math.min(0.9, Math.max(0.1, VAD_THRESHOLD))
+  : 0.6;
+/**
+ * The boot line naming the live threshold. A FUNCTION, not a module-level
+ * `console.log`: importing this module must not print — the tests import it
+ * hundreds of times, and a marker that fires on import is not evidence a
+ * server booted with it. Called from the runtime's boot block beside the
+ * other markers.
+ */
+export function vadBootMarker(): string {
+  const source = process.env.RUNTIME_VAD_THRESHOLD ? " (from RUNTIME_VAD_THRESHOLD)" : " (default)";
+  return `[VAD] turn-detection threshold ${RESOLVED_VAD_THRESHOLD}${source}; silence 500ms`;
+}
+
 const TURN_DETECTION = {
   type: "server_vad" as const,
   // Clamped to the documented range: a typo in an env var must not silently
   // disable turn detection on every live call.
-  threshold: Number.isFinite(VAD_THRESHOLD) ? Math.min(0.9, Math.max(0.1, VAD_THRESHOLD)) : 0.6,
+  threshold: RESOLVED_VAD_THRESHOLD,
   silence_duration_ms: 500,
   prefix_padding_ms: 333,
 };
@@ -199,9 +221,12 @@ export function buildSessionConfig(
       input: {
         format: AUDIO_FORMAT,
         // The lane's configured language seeds the STT hint; a mid-call
-        // switch retargets it via setSpokenLanguage().
+        // switch retargets it via setSpokenLanguage(). REGIONAL here too —
+        // the bridge drops a switch to the language already in use, so a
+        // lane configured `es` would otherwise never send es-MX at all
+        // (Codex, 2026-09-05).
         transcription: {
-          language_hint: config.language,
+          language_hint: sttLanguageHint(config.language),
           ...(keyterms && keyterms.length > 0 ? { keyterms } : {}),
         },
         transport: "json",
@@ -236,6 +261,10 @@ export class GrokVoiceSession {
   /** Mutable copy — mid-call language switches send a fresh session.update
    * with language_hint so Grok's STT follows the caller. */
   private sessionConfig: GrokSessionConfig;
+  /** The lane's own instructions, before any language line. Held separately
+   * so `setSpokenLanguage` can REPLACE its line instead of stacking one on
+   * the last one; see there for what stacking did. */
+  private readonly baseInstructions: string;
   /** Caller audio that arrived before session.updated confirmed the
    * config. THE SIBLING REPO'S HARD-WON WIRE RULE: the session
    * configuration must ALWAYS precede the audio (ticketing 9fb0c83) —
@@ -247,6 +276,23 @@ export class GrokVoiceSession {
    * Buffered — not dropped — so the caller's earliest words survive the
    * handshake, then drained in order on session.updated. */
   private readonly preConfigAudio: string[] = [];
+  /**
+   * The handshake's `session.updated` has been seen.
+   *
+   * `session.updated` is Grok acknowledging a config, and it acknowledges
+   * EVERY config — including the fresh one `setSpokenLanguage()` sends
+   * mid-call. `onConfigured` means "the handshake landed" to its consumer,
+   * and those two stopped being the same event the moment anything
+   * reconfigured a live session.
+   *
+   * Measured 2026-09-04: on tech, 20:00-23:00 UTC, greeting replays went
+   * 0 of 70 calls (09-03) to 8 of 43 (09-04) — seven of the eight Spanish
+   * callers, who are exactly the callers `set_spoken_language` fires for.
+   * The bridge speaks the practice's opening on `onConfigured`, LOCKED so it
+   * cannot be barged over, so a caller who had just said they do not speak
+   * English got the whole English opening again and could not talk over it.
+   */
+  private handshakeConfirmed = false;
   /** Scripted lines held because a response was open at the wire when
    * they were requested. THE SIBLING ADAPTER'S SECOND HARD-WON WIRE RULE
    * (its "response gates"): a force_message sent while a wire response
@@ -290,6 +336,7 @@ export class GrokVoiceSession {
     private readonly handlers: GrokVoiceSessionHandlers,
   ) {
     this.sessionConfig = sessionConfig;
+    this.baseInstructions = sessionConfig.instructions;
     this.transport.onMessage((data) => this.handleServerEvent(data));
     this.transport.onError((err) => {
       this.state = "error";
@@ -322,25 +369,51 @@ export class GrokVoiceSession {
    * update carries the patched config.
    */
   setSpokenLanguage(language: SpokenLanguage): void {
-    const hint = normalizeSpokenLanguage(language);
-    // Agent-agnostic on purpose: the runtime serves every lane and cannot
-    // name any particular agent's tools here. Naming them was correct in
-    // the scheduling provider this was ported from and is wrong here.
+    const spoken = normalizeSpokenLanguage(language);
+    const hint = sttLanguageHint(language);
+    /**
+     * THE LOCK CLAUSE IS THE LOAD-BEARING HALF. Operator, 2026-09-05:
+     *
+     *   *"The model is doing what it was trained to do: match the last clear
+     *   language it thinks it heard. After a Spanish turn, a noisy word, an
+     *   English tool result, a number, or a default greeting pulls it back
+     *   to English... the 'switch only if they switch' clause is what stops
+     *   the revert."*
+     *
+     * The old line said "Follow their language from now on", which reads as
+     * a description of the present rather than a rule about the future. It
+     * is on BOTH branches now, English included: a lock that only holds one
+     * way is not a lock, it is a preference for English.
+     */
     const languageLine =
-      hint === "en"
-        ? " The caller is now speaking English. Continue using the same tools."
-        : ` The caller is now speaking ${hint}. Follow their language from now on. ` +
-          "Continue using the same tools, and keep tool ARGUMENTS in English " +
-          "(names, dates, yes/no) regardless of the spoken language.";
+      spoken === "en"
+        ? " The caller is speaking English. Keep every question, confirmation and " +
+          "tool preamble in English. Switch only if the caller switches. " +
+          "Continue using the same tools."
+        : ` The caller is speaking ${spoken}. Keep every question, confirmation and ` +
+          `tool preamble in ${spoken}. Switch only if the caller switches — not for ` +
+          "an English tool result, a medication name, a number, or a word you did " +
+          "not catch. Continue using the same tools, and keep tool ARGUMENTS in " +
+          "English (names, dates, yes/no) regardless of the spoken language.";
     this.sessionConfig = {
       ...this.sessionConfig,
-      instructions: this.sessionConfig.instructions + languageLine,
+      /**
+       * REPLACE, NEVER APPEND. This rebuilt `instructions` from the MUTATED
+       * config, so a second switch stacked a second line and the first
+       * survived: a caller who spoke Spanish and was then mis-heard as
+       * English ended up carrying BOTH standing instructions at once. We
+       * were telling the model two contradictory things and reading its
+       * choice as drift. `baseInstructions` is the lane's own prompt, fixed
+       * at construction, so exactly one language line is ever live.
+       */
+      instructions: this.baseInstructions + languageLine,
       audio: {
         ...this.sessionConfig.audio,
         input: {
           ...this.sessionConfig.audio.input,
           transcription: {
             ...this.sessionConfig.audio.input.transcription,
+            // Regional where we know the region — see sttLanguageHint().
             language_hint: hint,
           },
         },
@@ -380,6 +453,27 @@ export class GrokVoiceSession {
         break;
       case "session.updated":
         this.state = "configured";
+        // Only the FIRST one is the handshake. A later acknowledgement is a
+        // reconfiguration of a call already in progress — the caller has
+        // been greeted, the conversation is underway, and re-running the
+        // opening is a regression, not a resume. See `handshakeConfirmed`.
+        if (this.handshakeConfirmed) {
+          // DEPLOY MARKER and live counter in one: it prints only when a
+          // mid-call reconfiguration is acknowledged, which before this fix
+          // was the moment the greeting replayed. No PHI — the language code
+          // is already in the [LANGUAGE] line and nothing else is logged.
+          console.log(
+            "[SESSION RECONFIG] acknowledged mid-call — NOT re-running the " +
+              "handshake; the greeting stays spoken once",
+          );
+          // Still drain: the buffer is normally empty by now, but audio that
+          // arrived inside this update's round trip must not be stranded.
+          for (const audio of this.preConfigAudio.splice(0)) {
+            this.send({ type: "input_audio_buffer.append", audio });
+          }
+          break;
+        }
+        this.handshakeConfirmed = true;
         // The opening scripted line goes on the wire FIRST (onConfigured
         // -> provider.start() -> force_message), THEN the held caller
         // audio: with server VAD live, releasing a buffered speech turn

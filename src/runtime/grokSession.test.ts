@@ -83,9 +83,14 @@ function buildHandlers(over: {
   onAudioDone?: NonNullable<GrokVoiceSessionHandlers["onAudioDone"]>;
   onAgentTranscriptDelta?: NonNullable<GrokVoiceSessionHandlers["onAgentTranscriptDelta"]>;
   onResponseDone?: NonNullable<GrokVoiceSessionHandlers["onResponseDone"]>;
+  onConfigured?: NonNullable<GrokVoiceSessionHandlers["onConfigured"]>;
 }) {
   return {
     onToolCall: over.onToolCall ?? vi.fn(),
+    // The handshake signal. It was absent from this builder, so nothing here
+    // could assert how OFTEN it fires — which is exactly the property that
+    // broke on Spanish callers (see the setSpokenLanguage tests below).
+    onConfigured: over.onConfigured ?? vi.fn(),
     onError: over.onError ?? vi.fn(),
     onAudioDone: over.onAudioDone ?? vi.fn(),
     onAgentTranscriptDelta: over.onAgentTranscriptDelta ?? vi.fn(),
@@ -724,14 +729,172 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
       session: { audio: { input: { transcription?: { language_hint?: string } } }; instructions: string };
     }>;
     expect(updates.length).toBe(before + 1);
-    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es");
+    // es-MX, not es: the STT hint is regional now (sttLanguageHint), per the
+    // operator's 2026-09-05 guidance. The MODEL-facing text still says "es".
+    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es-MX");
     // Agent-agnostic copy: the runtime names the language and holds tool
     // arguments to English, but never names a particular agent's tools —
     // the scheduling provider this was ported from did, and that was
     // correct there and wrong here.
-    expect(updates[updates.length - 1]?.session.instructions).toMatch(/now speaking es/);
+    expect(updates[updates.length - 1]?.session.instructions).toMatch(/is speaking es\b/);
     expect(updates[updates.length - 1]?.session.instructions).toMatch(/ARGUMENTS in English/);
     expect(updates[updates.length - 1]?.session.instructions).not.toMatch(/report_\*/);
+  });
+
+
+
+  /**
+   * LANGUAGE LOCK, 2026-09-05. Operator guidance, and the diagnosis is his:
+   *
+   *   *"The model is doing what it was trained to do: match the last clear
+   *   language it thinks it heard. After a Spanish turn, a noisy word, an
+   *   English tool result, a number, or a default greeting pulls it back to
+   *   English. Auto-detect alone will not hold the lane... the 'switch only
+   *   if they switch' clause is what stops the revert."*
+   *
+   * Three defects, all in this one method, all fixed together because they
+   * compound:
+   */
+  it("REPLACES the language line rather than stacking a new one on top", () => {
+    // THE COMPOUNDING BUG. `instructions` was rebuilt from the MUTATED
+    // config, so a second switch appended a second line and the first
+    // survived. A caller who spoke Spanish and was then mis-detected as
+    // English ended up with BOTH standing instructions at once — we were
+    // telling the model two contradictory things and blaming it for
+    // picking one.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "s" } });
+    transport.emit({ type: "session.updated" });
+
+    session.setSpokenLanguage("Spanish");
+    session.setSpokenLanguage("English");
+    session.setSpokenLanguage("Spanish");
+
+    const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
+      session: { instructions: string };
+    }>;
+    const final = updates[updates.length - 1]!.session.instructions;
+    // Assert the PROPERTY, not the prose: exactly one language line is live,
+    // and it is the one for the language the caller last actually spoke.
+    const allLines = (final.match(/The caller is speaking/g) ?? []).length;
+    expect(allLines, "one live language line, not a pile").toBe(1);
+    expect(final).toMatch(/The caller is speaking es\b/);
+    expect(final, "the superseded English line must be gone")
+      .not.toMatch(/The caller is speaking English/);
+  });
+
+  it("tells the model to switch only when the CALLER switches", () => {
+    // Without this clause the model reverts on the next English-looking
+    // token — a drug name, a number, a tool result.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "s" } });
+    transport.emit({ type: "session.updated" });
+    session.setSpokenLanguage("Spanish");
+    const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
+      session: { instructions: string };
+    }>;
+    const line = updates[updates.length - 1]!.session.instructions;
+    expect(line).toMatch(/only if the caller switches/i);
+    // And it must survive a return to English, or the lock is one-way.
+    session.setSpokenLanguage("English");
+    const after = (transport.sent.filter((e) => e.type === "session.update") as Array<{
+      session: { instructions: string };
+    }>).pop()!.session.instructions;
+    expect(after).toMatch(/only if the caller switches/i);
+  });
+
+  it("applies the regional mapping to the INITIAL handshake hint too", () => {
+    /**
+     * Codex, 2026-09-05, and the two halves compound into a whole-call bug.
+     *
+     * `buildSessionConfig` wrote `config.language` straight into the
+     * transcription hint, so a lane configured `es` handshook with the bare
+     * subtag. And the bridge drops a switch to the language already in use
+     * (`next !== this.spokenLanguage`), which for such a lane is every
+     * Spanish switch — so `es-MX` would never reach the wire for the entire
+     * call. Mid-call-only mapping fixed the case that was already working
+     * and missed the one that was not.
+     *
+     * Latent rather than live as things stand: every lane defaults to `en`.
+     * It goes live the moment anyone sets XAI_VOICE_LANGUAGE=es for a lane,
+     * which is exactly the thing someone would do to help Spanish callers.
+     */
+    const config = { ...loadGrokRuntimeVoiceConfig({}), language: "es" };
+    const built = buildSessionConfig(config, "instructions", [...FIXTURE_TOOLS]);
+    expect(built.audio.input.transcription?.language_hint).toBe("es-MX");
+  });
+
+  it("leaves a language with no regional mapping exactly as it is", () => {
+    const config = { ...loadGrokRuntimeVoiceConfig({}), language: "ko" };
+    const built = buildSessionConfig(config, "instructions", [...FIXTURE_TOOLS]);
+    expect(built.audio.input.transcription?.language_hint).toBe("ko");
+  });
+
+  it("sends a REGIONAL Spanish hint, not the bare primary subtag", () => {
+    // Operator: *"After you hear Spanish, send es-MX or es-ES (not es)."*
+    // Southern California practice, so es-MX. Unrecognized codes are
+    // ignored by the provider, so a regional guess costs nothing and a
+    // bare subtag costs recognition.
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", conversation: { id: "s" } });
+    transport.emit({ type: "session.updated" });
+    session.setSpokenLanguage("Spanish");
+    const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
+      session: { audio: { input: { transcription?: { language_hint?: string } } } };
+    }>;
+    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es-MX");
+  });
+
+  it("does NOT re-fire onConfigured when the language switch is acknowledged", () => {
+    /**
+     * THE SOURCE OF THE GREETING REPLAY, measured 2026-09-04.
+     *
+     * `onConfigured` means "the handshake landed" to the bridge, which
+     * answers it by speaking the practice's opening — LOCKED, so the caller
+     * cannot talk over it. But `session.updated` is Grok acknowledging ANY
+     * config, and `setSpokenLanguage` sends a fresh one mid-call. So the
+     * callers who triggered a language switch were greeted a second time,
+     * in the language they had just said they did not speak, with barge-in
+     * disabled.
+     *
+     * On tech, 20:00-23:00 UTC: 0 replays in 70 calls on 09-03, 8 in 43 on
+     * 09-04 — seven of the eight Spanish callers.
+     */
+    const onConfigured = vi.fn();
+    const { transport, session } = makeSession({ onConfigured });
+    transport.emit({ type: "session.created", conversation: { id: "sess-lang-once" } });
+    transport.emit({ type: "session.updated" });
+    expect(onConfigured).toHaveBeenCalledTimes(1);
+
+    session.setSpokenLanguage("es");
+    transport.emit({ type: "session.updated" }); // Grok acknowledges the new config
+
+    // The handshake happened once. The call is already underway.
+    expect(onConfigured).toHaveBeenCalledTimes(1);
+    // …and the switch itself still went out: this must not be fixed by
+    // suppressing the update.
+    const updates = transport.sent.filter((e) => e.type === "session.update");
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("still drains caller audio buffered during the language round trip", () => {
+    // The early-return must not strand audio. Nothing normally buffers this
+    // late, but the wire rule that config precedes audio is the one that
+    // produced a permanently deaf agent when it was broken (2026-08-24), so
+    // the drain stays on every acknowledgement rather than only the first.
+    const onConfigured = vi.fn();
+    const { transport, session } = makeSession({ onConfigured });
+    transport.emit({ type: "session.created", conversation: { id: "sess-lang-drain" } });
+    transport.emit({ type: "session.updated" });
+
+    session.setSpokenLanguage("es");
+    const before = transport.sent.filter((e) => e.type === "input_audio_buffer.append").length;
+    transport.emit({ type: "session.updated" });
+    // Audio after the handshake goes straight out either way; the assertion
+    // that matters is that the early return did not close the path.
+    session.appendAudio("ZmFrZQ==");
+    const after = transport.sent.filter((e) => e.type === "input_audio_buffer.append").length;
+    expect(after).toBe(before + 1);
   });
 
   it("accepts a spoken language NAME, not just a code — callers say \"Spanish\"", () => {
@@ -742,7 +905,9 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
     const updates = transport.sent.filter((e) => e.type === "session.update") as Array<{
       session: { audio: { input: { transcription?: { language_hint?: string } } } };
     }>;
-    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es");
+    // es-MX, not es: the STT hint is regional now (sttLanguageHint), per the
+    // operator's 2026-09-05 guidance. The MODEL-facing text still says "es".
+    expect(updates[updates.length - 1]?.session.audio.input.transcription?.language_hint).toBe("es-MX");
   });
 
   it("an unknown language is passed through rather than forced to English", () => {

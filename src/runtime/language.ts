@@ -27,6 +27,35 @@ const LANGUAGE_ALIASES: Record<string, string> = {
   fr: "fr", french: "fr",
 };
 
+/**
+ * REGIONAL HINTS FOR THE STT, keyed by primary subtag.
+ *
+ * Operator guidance, 2026-09-05: *"After you hear Spanish, send es-MX or
+ * es-ES (not es). Unrecognized codes are ignored."* A bare primary subtag
+ * makes the transcriber pick a variant for itself; naming the one this
+ * practice actually hears costs nothing when the provider disagrees,
+ * because it falls back rather than erroring.
+ *
+ * es-MX because this is a Southern California eye-care practice. If the
+ * caller base changes, this is the line to change — not the prompts.
+ *
+ * ONLY the STT hint takes the regional form. `spokenLanguageLabel()` below
+ * keeps the plain subtag for anything a human or the model reads, so a
+ * prompt never says "now speaking es-MX" at a person.
+ */
+const REGIONAL_STT_HINTS: Record<string, string> = {
+  es: "es-MX",
+};
+
+/**
+ * The code to put in `audio.input.transcription.language_hint`. Regional
+ * where we know the region, plain everywhere else.
+ */
+export function sttLanguageHint(raw: string | null | undefined): string {
+  const primary = normalizeSpokenLanguage(raw);
+  return REGIONAL_STT_HINTS[primary] ?? primary;
+}
+
 /** Best-effort BCP-47-ish primary subtag. Unknown input is passed through
  * rather than forced to English — the provider handles more languages than
  * this table lists, and silently answering a Korean caller in English is a

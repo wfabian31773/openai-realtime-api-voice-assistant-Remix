@@ -115,7 +115,7 @@ Green tests did not prevent any of the regressions listed there.
     | the schedule mirror | `si_appointment_facts` | 908,995 |
     | providers | `si_providers` | 77 |
     | locations | `si_locations` | 105 |
-    | phone → patient; powers `sage_precontext` | `si_persons` | 3,731 |
+    | phone → patient (whether IT or `patients_master` powers `sage_precontext` is UNSETTLED — see below) | `si_persons` | 3,731 |
 
     **What violates this today — do not assume it is already done:**
 
@@ -136,10 +136,14 @@ Green tests did not prevent any of the regressions listed there.
       wrong. Where mirror verification should be wired on the live path is
       an open question for Wayne.
     - Caller-ID pre-context on the runtime goes through
-      `fetchAzulPrecontext` → the `sage_precontext` HTTP tool. That is Console
-      data (`si_persons`) but over the network and bounded at 1.5s, and every
-      failure is normalized to `null`, so the agent asks cold for several
-      different reasons. The RETURN VALUE is indistinguishable; the logs are
+      `fetchAzulPrecontext` → the `sage_precontext` HTTP tool. It is Console
+      data over the network, bounded at 1.5s, and every failure is normalized
+      to `null`, so the agent asks cold for several different reasons.
+      **WHICH Console table it reads is UNSETTLED:** `voiceRuntime.ts:715`
+      says `si_persons`, `voiceAgentRoutes.ts:2481` says `patients_master` and
+      cites the service's `sage-tools.ts`, and the Console's only phone→person
+      RPCs all read `patients_master`. Do not quote either as fact — see the
+      pre-context entry under the 2026-09-03 measurements. The RETURN VALUE is indistinguishable; the logs are
       not — `callEyecareTool` writes `[AZUL-SCHED]` lines naming an unset key,
       an HTTP status, or a fetch/abort, and 401/403 go through
       `noteAuthFailure`. The one genuinely silent mode is a lookup that
@@ -167,9 +171,89 @@ discriminator; a NULL there is the old core.
 | **tech** | **Grok runtime** | 19:51:10 | 100 | 46/66 = **69.7%** | Before: 49/73 = 67.1% on the old core, same day. Busiest lane. |
 | **records** | **STILL OLD CORE** | — | 38 | 14/29 = 48.3% | The same-day CONTROL, and the reason the comparison is trustworthy. It also means records is missing every ruling shipped to the runtime lanes — on 2026-09-03 23:54 it said "all of our agents are currently busy… as soon as they become available", which #265 forbids, and asked for first and last name in one breath. |
 | **no-ivr** | old core | — | — | — | After-hours agent. All overnight and weekend volume (standing instruction 13). Queue lanes take nothing after 00:00 UTC / 5pm Pacific. |
-| **pcp** | **OFF** in Twilio | — | — | — | Wayne's decision, Aug 10. Do not ask why. |
+| **pcp** | **Grok runtime — BACK ON 2026-09-04 ~16:00 UTC** | 2026-09-04 ~16:00 | 3 test calls | — | Wayne switched it over himself and made three test calls. It had been OFF since Aug 10 (his decision — do not ask why it *was* off). **TWO-DAY PEAK, not a steady-state rate:** it ran 08-06 and 08-07 at **216 and 203 calls**, then was switched off — so no average exists for it. Like-for-like on BUSIEST DAY: pcp 216 · tech 214 · surgery 161 · optical 119. An earlier version compared that peak against the other lanes' 15-16 day AVERAGES (165/107/79) and concluded pcp beat surgery+optical combined; that mixed two different windows and is withdrawn (Codex, PR #272). Peak-for-peak it is the busiest lane by a nose, on two days of evidence — its typical full-volume traffic is UNMEASURED. **A live defect is open on it: see below.** |
 | **azul-scheduling** (San Diego) | **OFF** | — | — | — | Gate B replay books 8 of 21. Not ready. Do not ask why. |
 | **answering-service** | old core | — | — | — | — |
+
+### PCP LIVE DEFECT — the agent promises a transfer and does not make one
+
+Found in Wayne's own test calls, 2026-09-04 16:11 (`CAa37f1a422d120c200d2038c1314a32aa`).
+A caller from a surgery center asked for a representative. The agent said:
+
+> "Give me one moment while I connect you with our PCP team — I'll stay right
+> here with you."
+
+Then `transferred_to_human = false`, `transfer_outcome` NULL,
+`runtime_outcome = agent_ended`. It filed PCP-57486 ("Service inquiry", noting
+the intake was incomplete) and ended the call. **No transfer was attempted.**
+
+**WHAT THIS DOES AND DOES NOT ESTABLISH.** The defect is the BROKEN PROMISE,
+and that stands whichever way the open question below is settled: the agent
+said it would connect the caller and then did not, and it did not say
+otherwise either. Nothing here establishes that this call was *required* to
+transfer — an earlier version of this section said it "MUST transfer", which
+silently resolved the operator's still-open question (entity + asks + the
+matter is ticketable) in one direction, inside the same section that marks it
+open. It was in fact recorded as a service inquiry and it DID file a ticket,
+which is what the "ticketable → ticket it" half of the rule asks for. The
+wrong part is the sentence spoken to the caller, not necessarily the routing.
+(Codex, PR #272.)
+
+**Scope: one observed call.** It proves the failure mode exists on this lane;
+it does not establish how often it happens. The runtime has three test calls
+in total. An earlier version said "at 200+ calls/day … every entity that asks
+for a person gets a promise and a dial tone" — both halves were unearned: the
+volume was extrapolated from two peak days, and "every" from a single call.
+
+**There IS a measured history for the shape, on the OLD core.** Over PCP's two
+full days (2026-08-06/07), of 67 substantive calls whose `agent_outcome` was
+`escalated`: **8 reached a human, 20 filed a ticket, and 47 produced NEITHER.**
+So "the agent decides it cannot handle the call, then does nothing" is a
+long-standing and concentrated loss on this lane, not something the pipeline
+change introduced. That is evidence the shape recurs; it is NOT evidence that
+those 47 should have been transferred — under the rule below most of them
+should have been TICKETED.
+
+**THESE ARE TWO DIFFERENT DEFECTS. Do not merge them.** An earlier version of
+this paragraph ended "what is wrong in both is ending with neither", which is
+false of the live call: **it DID file PCP-57486.** Its ticket path worked.
+
+| | what failed |
+|---|---|
+| the live 2026-09-04 call | **the spoken promise** — said it would connect, then did not, and did not say otherwise. Filed a ticket. |
+| the 47 historical calls | **neither a transfer NOR a ticket** — the request left no trace at all. |
+
+They may share a cause and they may not. Sending follow-up work toward
+missing-ticket handling on the basis of the live call would be chasing the
+wrong defect, since that call's ticket filed. (Codex, PR #272.)
+
+**The mechanism is present in the tree** — `warmTransfer.ts`,
+`transferTwilioOps.ts`, the accept webhook mounted at `voiceRuntime.ts:448`,
+and `pcp` in `RUNTIME_TRANSFER_READY_LANES`. **Do not read that as ruling out
+"the feature was unreachable on this call":** `laneSupportStatus` refuses a
+transfer-capable lane outright when no handoff is injected for the deployment,
+and whether one was injected here was NOT checked. **Not root-caused, and the
+search is not narrowed.**
+
+**WAYNE'S PCP TRANSFER RULE (2026-09-04), replacing "anyone who asks goes through":**
+
+- Default is to take the request and file the ticket. **Never auto-transfer.**
+- Transfer only when BOTH: the caller **asks** for a representative, AND the
+  caller is an **entity** — doctor's office, medical group, surgery center,
+  insurance — **not a patient**.
+- Ticketable → ticket it. Not ticketable → let it through on request.
+- **OPEN:** an entity asks for a rep about something that IS ticketable — does
+  the ask win or the ticket win? Not yet answered. Do not assume.
+- The entity test is the model's read of what the caller SAYS. There is no
+  verification behind it.
+
+**Also observed on those calls, not yet fixed:** the agent asks "What is your
+role?" and then "What is your professional relationship to this patient?" and
+gets the same answer twice; it asked seven questions before reaching the
+patient even when the caller opened with name and purpose; no callback number
+was captured on either ticket (standing instruction 12); and no recording
+disclosure was spoken. Wayne also wants the voice changed — which voice is his
+call, unanswered.
 
 **THE HEADLINE OF THE CUTOVER: filing rate is FLAT.** tech +2.6 points, surgery
 +6.3 — neither is significant at these n. The runtime matches the old core. It
@@ -228,7 +312,8 @@ is reading noise.
   - **Patient-Console** `kbbmywvasbsxnbblrhot` — the source of truth
     (standing instruction 14). `patients_master` (915,843 persons),
     `si_appointment_facts` (908,995 — the schedule mirror), `si_providers`,
-    `si_locations`, `si_persons` (phone→patient, powers `sage_precontext`),
+    `si_locations`, `si_persons` (phone→patient; whether it or
+    `patients_master` powers `sage_precontext` is UNSETTLED),
     plus the scheduling-intelligence tables (`si_slot_rules`,
     `si_eligibility_matrix`, `open_slots_snapshot`).
   - The Hub keeps its OWN `Schedule` copy and several services still read it.
@@ -244,23 +329,373 @@ is reading noise.
 I got this wrong for a whole afternoon on 2026-09-03 and reported filing rates
 understated by about a third. The instrument, not the fleet, was the problem.
 
-**THE AUTHORITY: a call filed a new ticket iff its `call_sid` appears on a
-`VA-` ticket in the Support Center (`vsmcxhxeirkoobmjcrbn`).**
+**THE AUTHORITY — THREE BUCKETS WITH PRECEDENCE, AND AN UNKNOWN THAT IS
+REPORTED RATHER THAN ASSUMED. Never a ticket prefix.**
+
+1. `created_by_id IS NOT NULL` → **STAFF.** A named human made it. This wins
+   over `agent_used`, and the direction was CHECKED rather than assumed.
+
+   The worry was the reverse case: if staff can re-own a ticket the agent
+   created, a human creator would be stamped on a genuine agent filing and
+   this precedence would silently reclassify real filings as staff. **Read all
+   of the both-fields rows: every one is staff prose** — "Pt ci", "PT C/I",
+   "hello team", "sx", Spanish-speaker notes — and their `agent_used` values
+   are mostly bare UUIDs rather than lane slugs. They are staff tickets
+   carrying a stray value, not agent filings re-owned. **A human creator is
+   positive evidence; a set `agent_used` is not.**
+2. else `agent_used IS NOT NULL` → **AGENT FILING.**
+3. else → **UNKNOWN, and it must be reported as unknown.** NULL is not proof
+   of a non-filing. Calls sit in this bucket (count: see the census); folding
+   them into the denominator as "did not file" understates the rate by
+   assumption.
+
+**AND THE `call_sid` MUST PASS THE CANONICAL VALIDATOR — `~* '^CA[0-9a-f]{32}$'`,
+the SQL form of `isTwilioCallSid` (`src/tools/callSid.ts`).** `LIKE 'CA%'` is
+NOT enough: `CAunknown` passes it and recreates the very problem. How many
+junk rows it admits today is a fact about today, not about the rule (count:
+see the census — Codex, PR #272). `call_sid IS
+NOT NULL` is not enough: ticket rows carry sentinels ("unknown", "latest",
+"none", bare uuids) across far fewer distinct values than rows (counts: see
+the census), so `count(DISTINCT call_sid)` both invents calls that never
+happened and collapses unrelated tickets into them. This file already documented that 14% of POSTs
+once carried no usable CallSid — I wrote a rule on `IS NOT NULL` directly
+beneath that knowledge. (Codex, PR #272; see also
+`docs/BACKEND_HANDOFF.md`.)
+
+**CLASSIFY THE CALL, NOT THE ROW.** The precedence above decides who made ONE
+TICKET. A filing rate is per CALL, and a call can carry several tickets, so the
+rows must be folded to one verdict per `call_sid` BEFORE anything is counted.
+Classifying each row and then taking `count(DISTINCT call_sid)` inside each
+group puts a call with both an agent filing and a staff ticket in TWO buckets,
+and the buckets stop being exclusive without saying so (Codex, PR #272).
+
+**AND THE TWO PRECEDENCES ARE DIFFERENT ORDERS. THIS IS THE PART TO READ
+TWICE.** They look like a contradiction and are not, because they answer
+different questions:
+
+| | question | order | why |
+|---|---|---|---|
+| **row** | who made THIS ticket? | staff > agent > UNKNOWN | a named human creator is positive evidence; a set `agent_used` is not |
+| **call** | did the AGENT file for this call? | **agent > UNKNOWN > staff** | see below |
+
+The call order is not the row order inverted, which is what an earlier version
+of this paragraph said and what the query below did (Codex, PR #272 round 2).
+Three steps, and each earns its place:
+
+1. **`agent` first** — one proven agent filing settles the call, whatever staff
+   added afterwards.
+2. **`UNKNOWN` SECOND, ABOVE `staff`** — a row with neither field set **may be
+   an agent filing**. `staff` is a *proven negative*, and it only earns that
+   when EVERY row on the call is a proven staff ticket. One unproven row means
+   the call's provenance is not settled, and folding it into `staff`
+   understates the filing rate by exactly the assumption bucket 3 exists to
+   prevent.
+3. **`staff` last** — every row proven human.
 
 ```sql
--- the control that makes the join trustworthy. Re-run it before trusting it.
-SELECT count(*), count(call_sid) FROM tickets
-WHERE created_at::date = '<day>' AND ticket_number LIKE 'VA-%';
--- 2026-09-03: 196 of 196 carry a real CA-prefixed sid. T- tickets are staff.
+-- The filing test. Three buckets, canonical SIDs only, ONE verdict per call,
+-- and bucket 3 never vanishes into ANOTHER bucket. No prefix filter, ever.
+WITH per_call AS (
+  SELECT call_sid,
+         bool_or(created_by_id IS NULL AND agent_used IS NOT NULL) AS any_agent,
+         bool_or(created_by_id IS NULL AND agent_used IS NULL)     AS any_unknown,
+         bool_or(created_by_id IS NOT NULL)                        AS any_staff
+  FROM tickets
+  WHERE call_sid ~* '^CA[0-9a-f]{32}$'  -- NOT `IS NOT NULL`, NOT `LIKE 'CA%'`.
+    -- THE CALL'S DAY, NOT THE TICKET'S. See below; the COALESCE is required.
+    AND coalesce(call_start_time, created_at)::date = '<day>'
+  GROUP BY call_sid
+)
+SELECT CASE WHEN any_agent   THEN 'agent'
+            WHEN any_unknown THEN 'UNKNOWN'   -- NEVER below 'staff'. See above.
+            ELSE 'staff' END AS provenance,   -- only when every row is proven
+       count(*)              AS calls
+FROM per_call GROUP BY 1;
+-- `any_staff` is deliberately not read: it is the ELSE. Reintroducing it as a
+-- WHEN above UNKNOWN is the round-2 defect.
+-- All-time totals live in THE CENSUS above; do not copy them here. The
+-- 2026-09-03 day figures are stated ONCE, under "Effect of the change" below.
 ```
 
-**THREE WAYS TO GET THIS WRONG, all of which I did:**
+**A FILING RATE IS PER CALL, SO THE DAY MUST COME FROM THE CALL — AND THIS ONE
+IS LIVE.** Filtering on the TICKET's `created_at` puts a filing in a different
+day's cohort than its call whenever the call crosses midnight or the ticket
+outbox retries (up to 12 attempts, backoff 30s → 30m, so a 23:5x call can file
+after midnight). The call is then scored a non-filing in its own cohort and the
+ticket is added to a cohort whose denominator does not contain it. Measured
+2026-09-05 11:11 UTC: **159 of 40,947** canonical-SID tickets land on a
+different calendar day from their call (Codex, PR #272 round 4).
+
+**`tickets.call_start_time` is the anchor, and `coalesce` with `created_at` is
+NOT optional.** The naive fix — filter on `call_start_time::date` alone — is
+WORSE than the bug it fixes, and the 2026-09-03 cohort is the proof:
+
+| 2026-09-03, canonical-SID tickets | |
+|---|---|
+| by the TICKET's day (what was published) | 199 |
+| … correctly LEAVE the cohort (the call was another day) | −4 |
+| … correctly JOIN it (the ticket filed on another day) | +2 |
+| **by the CALL's day, WITH the coalesce — the fix** | **197** |
+| … `call_start_time` NULL: kept by the coalesce, dropped by a bare filter | 8 |
+| by a bare `call_start_time::date` — **the rejected form** | 189 |
+
+Read the last two rows together: **197 is the fix, 189 is the mistake**, and
+the gap between them is the eight rows a bare filter throws away. Eight
+unanchored against four correctly moved — it loses twice what it gains, and it
+loses them the way bucket 3 exists to prevent, by assumption. 1,013
+canonical-SID tickets carry no `call_start_time` at all.
+
+An earlier version of this table printed **189** on the "with the coalesce"
+row, which is what the REJECTED filter returns — the section's own worked
+example quoting the cohort it warns against, a few lines after warning against
+it, and contradicting the agent 196 + staff 1 total below (Codex, PR #272
+round 5). **When a fix is justified by a table, recompute the table under the
+fix; do not carry a figure over from the run that motivated it.**
+
+**AND THE ANCHOR ITSELF HAS A BAD TAIL — do not treat it as exact.** 259
+tickets have `created_at` EARLIER than their own `call_start_time`, which
+cannot happen; the mean lag reads **-45s** while the median is a sensible
+**+111s**, so outliers, not the typical row, drive the mean. Against
+`call_end_time` the median is **-35s** — a ticket filed just before hangup,
+which is the expected shape. Good enough to bucket a day, not good enough to
+time a single call.
+
+**`call_logs.created_at` would be the better anchor** — it is our own record of
+the call rather than a value carried on the ticket — but `tickets` lives in the
+Support Center (`vsmcxhxeirkoobmjcrbn`) and `call_logs` in the Hub
+(`pslzngjciiifowemrzza`), so no single statement can join them. That is why the
+ticket's own copy is used here.
+
+**BOTH MIXED-PROVENANCE DEFECTS ARE LATENT, NOT LIVE — measured 2026-09-05
+10:50 UTC, all time.** Of 40,931 calls carrying a canonical-SID ticket, every
+mixed pair is **0**: agent+staff 0, agent+unknown 0, **staff+unknown 0**. So no
+rate this file has ever published was touched by either the row-level
+double-count or the UNKNOWN-under-staff fold — re-run under both orderings, the
+bucket counts are identical to the call (agent 40,865 · staff 37 · UNKNOWN 29,
+0 calls moved).
+
+**The mechanism is live even though neither defect has fired:** 16 calls
+already carry more than one ticket. One staff ticket on a call the agent filed
+starts the first; one unattributed ticket beside a staff ticket starts the
+second. Re-run this beside the census.
+
+```sql
+SELECT count(*) FILTER (WHERE any_agent AND any_staff)   AS agent_and_staff,
+       count(*) FILTER (WHERE any_agent AND any_unknown) AS agent_and_unknown,
+       count(*) FILTER (WHERE any_staff AND any_unknown) AS staff_and_unknown,
+       count(*) FILTER (WHERE rows_for_call > 1)         AS calls_with_2plus_tickets
+FROM (
+  SELECT call_sid, count(*) AS rows_for_call,
+         bool_or(created_by_id IS NOT NULL)                        AS any_staff,
+         bool_or(created_by_id IS NULL AND agent_used IS NOT NULL) AS any_agent,
+         bool_or(created_by_id IS NULL AND agent_used IS NULL)     AS any_unknown
+  FROM tickets WHERE call_sid ~* '^CA[0-9a-f]{32}$' GROUP BY call_sid
+) c;
+```
+
+**On 2026-09-03 the unknown bucket is EMPTY**, so the rates published in this
+file are not exposed to it. That is a measured fact about one day, not a
+property of the rule — check bucket 3 before quoting any other day.
+
+**This section has now been wrong SIX times, on TWO different axes.** Four
+were about WHICH SIGNAL says a call filed — three reached for a naming
+convention, the fourth for a single column called complete. Two more were
+about HOW THE ROWS ARE FOLDED INTO A CALL, and they only became reachable once
+the signal was right. The through-line on both axes is the same: **adopting
+one rule as definitive without enumerating how it fails**, which is what every
+version of this did, including the one that had already published the table
+disproving it. Recorded in full because the pattern matters more than the rule:
+
+1. **`VA-` only.** Silently reports ZERO for a lane filing under another
+   prefix. Every PCP ticket went missing this way (count: see the census).
+2. **"any ticket, never filter by prefix".** Over-corrected — counts staff
+   tickets as agent filings.
+3. **"`VA-` + `PCP-`, and the other 72 sid-bearing rows are staff".** I
+   established that by the ABSENCE of agent-output text markers. Codex pointed
+   out those markers appear on only 45% of KNOWN agent filings, so their
+   absence cannot classify anything — and checking the real metadata proved
+   the claim false:
+
+<a id="census"></a>
+### THE CENSUS — the only place in this file that states these numbers
+
+**Every figure below is as of `2026-09-05 10:42:04 UTC`, canonical SIDs only,
+and CLASSIFIED PER CALL** (the row-level query these came from before
+2026-09-05 could put one call in two buckets — see the filing test above).
+Nothing else in this section restates them; other paragraphs say "see the
+census" and stop. That rule exists because eight separate stale copies were
+caught in this file, each one fixed in prose while a near-duplicate survived in
+a query or a bullet. **If you add a number here, do not repeat it elsewhere —
+link to it.**
+
+| | value |
+|---|---|
+| calls with any ticket | 40,931 |
+| **agent-filed** | **40,865** |
+| unknown-provenance only | 29 |
+| staff-created | 37 |
+| the `VA-`/`PCP-` prefix rule would match | 40,858 |
+| … **real filings it misses** | **7** |
+| … filings it wrongly counts | **0** |
+| dropped as sentinel `call_sid` | 217 rows across 61 distinct values |
+| admitted by `LIKE 'CA%'` but not by the canonical validator | 1 |
+
+Provenance census on the two prefixes that raised the question. **These are
+ROWS, not calls** — this table is what proved the row-level precedence rule,
+and per-call folding would hide exactly the both/neither columns it turns on:
+
+| sid-bearing rows | human `created_by_id` | `agent_used` set | both | neither |
+|---|---|---|---|---|
+| `T-` (37) | **37** | 6 | **6** | 0 |
+| `SR-` (36) | **0** | **7** | 0 | **29** |
+| `VA-` control (40,664) | 0 | **40,664** | — | 0 |
+| `PCP-` control (210) | 0 | **210** | — | 0 |
+
+The `VA-` control read **6,495 rows with 1 neither** when it was written on
+2026-09-04. It is 40,664 with 0 now — the row count could never have been
+right beside an agent-filed total of 40,717 on the same line, since a lane
+cannot file more calls than it has tickets. Whatever narrowed it is not
+recoverable from the number alone. **A census row that contradicts another
+census row is the cheapest bug in this file to catch and the easiest to
+publish; read across the table before quoting down it.**
+
+**THE TIMESTAMP IS NOT DECORATION.** Seven minutes earlier the same query
+returned `T-` = 36 rows with **5** both, and the prefix rule's overcount read
+**1** before sentinels were excluded. `tickets` is live and a row landed
+mid-analysis. **Re-run before quoting; a bare number here is already drifting.**
+
+`T-` is genuinely staff — every row has a named human creator. **`SR-` is
+not:** some carry `agent_used`, i.e. they ARE agent filings, and the rest are
+unattributed (counts: see the census). So "all 72 are staff tickets" was wrong, and excluding them all
+would have dropped real filings.
+
+4. **"`agent_used IS NOT NULL`, full stop".** The table directly above already
+   showed why that fails and I published it without reading it that way:
+   **`T-` rows have BOTH** a human creator and `agent_used`, so the predicate
+   counts staff tickets as agent filings; and **`SR-` rows plus a `VA-` row
+   have NEITHER** (counts: see the census), so NULL means unknown provenance,
+   not a proven non-filing.
+   Fixed by the ROW-level precedence rule at the top — a human creator wins,
+   and unknown is a reported bucket rather than silence. (Codex, PR #272.)
+
+**Then twice more, on the folding rather than the signal. Both found by Codex
+on PR #272, both LATENT when found (see the mixed-pair control above), and the
+second was created by the fix for the first:**
+
+5. **Classifying the ROW and then counting distinct calls.** `CASE` per row
+   with `count(DISTINCT call_sid)` inside each group puts a call carrying both
+   an agent filing and a staff ticket in TWO buckets, so the buckets stop
+   being exclusive without saying so. Fixed by folding rows to one verdict per
+   `call_sid` first.
+6. **Calling the call-level order "the row order inverted".** It is not. That
+   phrasing produced `agent > staff > UNKNOWN`, which buries a call whose only
+   unproven row might BE an agent filing underneath a proven staff ticket —
+   the exact assumption bucket 3 exists to prevent, reintroduced one line
+   below the rule forbidding it. The order is **`agent > UNKNOWN > staff`**.
+
+   **The lesson is narrower than "be careful".** Fixing failure 4 moved the
+   question from *which column* to *which row wins*, and I answered the new
+   question with a slogan carried over from the old one instead of re-deriving
+   it. A fix that changes the shape of a rule invalidates the sentence that
+   justified the old shape; re-derive it, do not rephrase it.
+
+**What the prefix rule costs: see [the census](#census).** It misses real
+filings and silently scores unknown-provenance calls as non-filings. Two
+earlier versions of this paragraph restated those totals inline and both went
+stale within the hour — once from the superseded `agent_used IS NOT NULL`
+test, once from counting sentinel `call_sid`s. That is why this paragraph now
+names no numbers.
+
+**`agent_used` is also immune to the failure that started this:** a new lane
+gets a new prefix but still stamps the column, so it cannot silently zero
+itself.
+
+**AND NEVER USE ITS VALUE, even where its presence is used.** Presence alone
+is not sound either — that is failure 4 above, which the precedence rule fixes.
+The value is separately unusable: `agent_used = '<lane>'` is NOT lane attribution — on
+2026-09-03 the ticket-side column read `unknown` on **91** rows and a bare uuid
+on **3**, and grouping the day by it reported **optical = 1** when optical
+actually filed 28. **Attribute a call to a lane with `call_logs.agent_used`,
+which is the call's own record; the ticket's copy is for provenance only.** I
+nearly wrote a new trap here of exactly the kind this section exists to
+prevent.
+
+**Effect of the change on the published 2026-09-03 numbers, re-measured under
+the precedence rule, per call, canonical SIDs, anchored on the CALL's day**
+(2026-09-05 11:12 UTC). This is the ONLY place the 09-03 day figures are
+stated: **agent 196 · staff 1 · UNKNOWN 0 · every mixed pair 0**, against the
+old `VA-` rule's **195** — the new rule adds **1** and loses 0, so it strictly
+dominates the old one that day.
+
+**Each fix moved these numbers and none moved the conclusion, which is the
+point of stating them once.** Anchored on the TICKET's day they read agent 197
+· staff 2 · VA- 196; the call anchor takes one off each column and leaves the
++1 delta exactly where it was. The corrected `agent > UNKNOWN > staff`
+ordering moved nothing at all. The staff figure also read **1** on 2026-09-04,
+went to **2** as a late staff ticket landed, and is **1** again under the call
+anchor because that ticket belongs to another day's call — three different
+values for one number, all correct for what they measured. The earlier version of this line said +2, which came from the
+superseded `agent_used IS NOT NULL` test counting a STAFF ticket as an agent
+filing (Codex, PR #272). Which lane the added call belongs to is NOT settled
+here, because settling it needs the `call_logs` join rather than the
+unreliable ticket column, and that has not been run. One call cannot overturn
+the "filing rate is FLAT" headline (tech +2.6 points at n≈66, surgery +6.3 at
+n≈32), but the per-lane percentages in the table above were derived under the
+old rule and have not been re-derived under this one.
+
+**How the prefix trap was found, kept because the discovery route matters.**
+PCP files under `PCP-`, for the entire life of the line back to 2026-08-04
+(counts: see the census). The old `LIKE 'VA-%'` rule
+missed all of them and concluded the lane files nothing. It surfaced only
+because tickets turned up for calls whose `tool_timeline` claimed no tool had
+run: **two broken instruments disagreeing is what exposed the first one.** Had
+they agreed, the wrong answer would have looked confirmed.
+
+```sql
+-- The control, per day. It uses agent_used (provenance), and reports the
+-- prefix only so a prefix-shaped surprise is visible rather than silent.
+SELECT split_part(ticket_number,'-',1) AS prefix, count(*) AS tickets,
+       count(*) FILTER (WHERE created_by_id IS NOT NULL)                    AS staff,
+       count(*) FILTER (WHERE created_by_id IS NULL
+                          AND agent_used IS NOT NULL)                       AS agent,
+       count(*) FILTER (WHERE created_by_id IS NULL AND agent_used IS NULL) AS UNKNOWN
+FROM tickets
+WHERE call_sid ~* '^CA[0-9a-f]{32}$'
+  AND coalesce(call_start_time, created_at)::date = '<day>'   -- the CALL's day
+GROUP BY 1 ORDER BY 2 DESC;
+-- THIS ONE COUNTS ROWS, NOT CALLS — so it uses the ROW-level precedence (a
+-- human creator wins), not the filing test's per-call one (any agent filing
+-- wins). Both are correct for what they answer; see the note above the filing
+-- test. Do NOT shorten this to `agent_used IS NOT NULL` — staff rows carry
+-- BOTH fields (see the census for how many; the count drifts, the rule does
+-- not).
+-- This control is per-DAY and real-SID only, so its output is a day's shape,
+-- NOT the whole-table figures that used to be pasted here (those were produced
+-- by a different, unfiltered query and could not be reproduced from this one —
+-- Codex, PR #272). For all-time totals see THE CENSUS; do not copy them here.
+-- Do NOT reintroduce a prefix filter here. It was wrong three times.
+```
+
+**FOUR WAYS TO GET THIS WRONG, all of which I did:**
+
+0. **USING THE TICKET PREFIX AT ALL.** Every variant of this failed: too
+   narrow returns a plausible zero (a broken lane, not a broken query); too
+   wide counts staff tickets as agent filings; a hand-validated set still
+   missed real filings (count: see the census) and needed re-validating
+   whenever a lane changed.
+   `agent_used` is the provenance field and was in the table the whole time.
+   If you find yourself reasoning about ticket-number naming to decide what a
+   call did, stop — you are inferring provenance instead of reading it.
 
 1. **`tool_timeline` DROPS ABOUT 35% OF SUCCESSFUL FILINGS.** On 2026-09-03,
    100 substantive queue calls read a real VA number to the caller and the
    timeline recorded 65. Three consecutive calls (VA-57425, VA-57428,
    VA-57429) had a real ticket and NO filing event in the timeline at all.
    That is #77, and it is live on the runtime, not historical.
+   **On PCP the drop is 100%, not 35%.** All three runtime calls on
+   2026-09-04 recorded ZERO timeline events and NULL `tool_call_count`, and
+   two of them filed real tickets (PCP-57486, PCP-57487). Do not read an
+   empty timeline as "no tool ran" on any runtime lane, and never on PCP.
    **The timeline IS reliable for refusals** (`outcome.missingFields`) — use it
    for those and nothing else.
 2. **The transcript `VA-#####` proxy OVER-counts.** It caught 9 extra calls on
@@ -346,12 +781,50 @@ over every queue call since each lane's own cutover. Do not re-derive these.**
   "no name, no ticket", because the calls that get lost are exactly the calls
   where identification failed. The identity rule selects against the population
   it exists to serve. **Open question for Wayne.**
-- **Pre-context produced a usable name on ZERO of 143 substantive queue calls.**
-  Of 132 distinct callers: **2** are in `si_persons` (3,774 rows — the table
-  pre-context reads) and **100** are in `patients_master` (915,843). Of those
-  100, only 25 resolve to exactly ONE person; 75 resolve to several (average
-  2.2). So pointing pre-context at the mirror is worth 2 → 100, but it buys a
-  name to CONFIRM, never an identity.
+- **Pre-context produced a usable name on ZERO substantive queue calls — and
+  the REASON stated here was wrong.** Re-measured 2026-09-05 over the 186 grok
+  queue calls of 2026-09-03 lasting >=30s, 170 distinct caller numbers:
+
+  | where the number was looked for | found (of 170) | resolve to ONE person |
+  |---|---|---|
+  | `si_persons` (3,774 rows) | **3** | 3 |
+  | `patients_master` (915,843), all five phone columns | **135** | **107** |
+
+  The person base HAS these callers. What is withdrawn is the *diagnosis*: the
+  earlier entry asserted pre-context reads `si_persons` and concluded the fix
+  was to point it at the mirror. **That premise is contradicted inside this
+  repo and is NOT settled.** The Console's only phone→person RPCs —
+  `pm_find_by_phone`, `pm_find_by_dob`, `pm_find_by_name_dob` — all read
+  `patients_master` and none touch `si_persons`; `pm_find_by_phone` returns in
+  **13ms** on five index scans, so neither table size nor the 1.5s deadline is
+  explained by the database. `voiceAgentRoutes.ts:2481` says `patients_master`
+  and cites the service's `sage-tools.ts`; `voiceRuntime.ts:715` says
+  `si_persons`. That service is not in this repo, so **which table
+  `sage_precontext` actually reads over HTTP is UNKNOWN from here.** Do not
+  ship a "point it at the mirror" change until that is established — it may
+  already be pointed there.
+
+  **The OUTCOME is not in doubt, and it is not runtime-specific.** On
+  2026-09-03, `"am I speaking with"` appears in **0 of 196** old-core and
+  **0 of 186** runtime substantive queue transcripts. Nobody was greeted by
+  name on either stack, so this is not something the cutover introduced.
+
+  **The one-word diagnostic is already deployed, and it is console-only** —
+  no SQL can reach it. `[runtime] pre-context <slug> <sid>:` prints
+  `unavailable` (failed, or past the 1.5s deadline) / `no_match` (ran, vouched
+  for nobody) / `recognised`. Read that line before theorising; it separates
+  all three causes at once.
+
+  A phone match stays a candidate to CONFIRM, never an identity: 28 of the 135
+  resolve to 2–3 people (avg 2.18).
+- **`call_logs.caller_name` IS NOT A PATIENT MATCH, and the runtime never
+  writes it.** Same day: the old core set it on 133 of 196 substantive calls,
+  the runtime on **0 of 186**. Of the old core's 133, **123** are `[Lookup] …`
+  — Twilio's CNAM, i.e. the name on the phone bill, which
+  `azulSchedulingAgent.ts:1053` already documents as the wrong person ("the
+  console was showing the phone bill"). **0** carry the verified `✓`. So the
+  column measures a telco lookup on one stack and nothing at all on the other.
+  Any "callers identified" rate built on it is measuring neither.
 - **13 calls played the greeting twice or three times**, averaging 175s against
   a fleet average of 89. Six of the seven worst were a caller asking for
   another language during the opening.
@@ -707,6 +1180,63 @@ in the new build. Current marker:
 [ScheduleLookup] 20 row(s) as of 2026-08-10 -> 3 past visit(s), 0 upcoming;
   last visit 2026-07-13; 17 not counted (cancelled, no-show, or cancelled-future)
 ```
+
+**ON THE RUNTIME, ASK `/voice/health` — AND THE MARKER NOW CARRIES ITS DATE.**
+
+```
+voice-runtime-v3-precontext-diagnosable-20260905
+```
+
+Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
+EARLIER date, or with no date at all, is a build older than 2026-09-05 and
+nothing measured on it is evidence about current code.
+
+**This exists because the marker failed at the one job it has, on 2026-09-05.**
+It read `voice-runtime-v2-transfer-guardrails-tools` from 2026-08-29 straight
+through to 2026-09-05, unchanged across every commit between — including
+`91498ff` on 08-31, which added the `[runtime] pre-context` diagnostic. Wayne
+searched a live deployment for that line, found nothing, and **the marker could
+not say whether the build contained it**: the identical string is served either
+side of the change. Neither could the rest of the payload — `transferDestinations`
+landed 08-30, one day too early to discriminate. The only health field that
+dates a build at all is **`lanes`**, added 09-04.
+
+So: the rule "bump it on every ship whose effect is hard to see" was already
+written at the top of `src/runtime/readiness.ts` and was not enough on its own.
+The date is now in the string, `markerSetOn()` parses it back out, and
+`readiness.test.ts` fails if a future bump drops the suffix.
+
+### AN ABSENT RUNTIME LOG LINE USUALLY MEANS NO RUNTIME CALLS
+
+**The build was current all along, and the missing line meant nothing.** Both
+halves came out of `call_logs`, which is where this should have started:
+
+- **The build is ≥ 2026-09-04.** 405 grok rows carry an `agent_id` that the
+  live process stamped itself — they are NOT in the 259-row backfill snapshot
+  `call_logs_agent_id_backfill_20260904` — and `src/runtime/agentIdentity.ts`
+  merged 2026-09-04 03:45 UTC. Earliest such call 2026-09-04 15:01:28 UTC. So
+  the deployed code is newer than the 08-31 log line by a clear margin.
+- **The runtime served ZERO calls that day.** Last grok call
+  2026-09-04 23:55:48 UTC. Every one of 2026-09-05's 49 calls was `no-ivr` on
+  the OLD CORE, 00:01–06:15 UTC. Nothing ran, so nothing printed.
+
+**AND THAT IS THE NORMAL WEEKEND SHAPE, not an outage.** Queue lanes take
+essentially nothing Saturday or Sunday — 08-22: 1 queue call vs 155 no-ivr ·
+08-23: 1 vs 59 · 08-29: 0 vs 120 · 08-30: 0 vs 36 · 09-05: 0 vs 49. Standing
+instruction 13 routes it all to the after-hours agent, which is old core.
+
+```sql
+-- Before concluding a runtime log line is missing, ask whether the runtime
+-- ran at all. Substitute the day.
+SELECT coalesce(voice_provider,'old-core') AS pipeline, agent_used, count(*),
+       min(created_at AT TIME ZONE 'UTC'), max(created_at AT TIME ZONE 'UTC')
+FROM call_logs WHERE created_at::date = '<day>' GROUP BY 1,2 ORDER BY 3 DESC;
+```
+
+**To read the pre-context diagnostic you need a runtime call first.** On a
+weekday the queue lanes open around 15:00 UTC (first grok call was 15:24 on
+09-03, 15:01 on 09-04). On a weekend, one test call to a queue number is the
+only way to produce one.
 
 **If the marker is absent, the code is not live and the call proves nothing.**
 Whenever you ship something whose effect is hard to see, add a marker like this.
