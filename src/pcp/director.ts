@@ -52,6 +52,20 @@ export interface PcpConversationState {
    * change because nothing else writes it; the model may still correct it.
    */
   callerIsThePatient?: boolean;
+  /**
+   * WHERE THE RECORDS GO, and how. Operator, 2026-09-08, after his own test
+   * call took a records request without ever asking:
+   *
+   *   "if you want medical records, how would you like to receive them by
+   *    fax? What's the fax number? By email. What's your email? ... gathering
+   *    the information as we go, sort of filling out a form."
+   *
+   * The callback number does NOT answer this. It is seeded from caller ID
+   * because a clinic's switchboard is the one contact detail we never have to
+   * ask for — but it is not somewhere you send a medical record.
+   */
+  recordsDeliveryMethod?: PcpRecordsDeliveryMethod;
+  recordsDeliveryDestination?: string;
 }
 
 export interface PcpDirectorDecision {
@@ -93,6 +107,25 @@ export interface PcpDirectorDecision {
  * answer it — every transcript reviewed states the purpose in the opening
  * sentence. Asking for it first costs nothing and unblocks everything.
  */
+/**
+ * How a requester can receive records. Fax and email are the operator's own
+ * two; mail is the obvious third and is flagged for his confirmation rather
+ * than assumed silently. Nothing here decides POLICY about who may receive
+ * what — it only records what the caller asked for, for the staffer who
+ * fulfils it.
+ */
+export const PCP_RECORDS_DELIVERY_METHODS = ['fax', 'email', 'mail'] as const;
+export type PcpRecordsDeliveryMethod = (typeof PCP_RECORDS_DELIVERY_METHODS)[number];
+
+/**
+ * Asked ONLY on a records request, and appended to the same `required` list
+ * every other field goes through — so they come out one at a time, in order,
+ * like the rest of the form.
+ */
+export const RECORDS_FIELDS: Array<keyof PcpConversationState> = [
+  'recordsDeliveryMethod', 'recordsDeliveryDestination',
+];
+
 export const PROFESSIONAL_FIELDS: Array<keyof PcpConversationState> = [
   'callPurpose', 'callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber',
 ];
@@ -123,6 +156,18 @@ export const PROMPTS: Partial<Record<keyof PcpConversationState, string>> = {
   patientFirstName: "What is the patient's first name?",
   patientLastName: "What is the patient's last name?",
   patientDob: "What is the patient's date of birth?",
+  recordsDeliveryMethod: 'How would you like to receive the records — by fax, by email, or by mail?',
+  // Replaced at ask-time by DESTINATION_PROMPTS once the method is known. A
+  // generic "what is the destination?" is the thing this change exists to
+  // stop: the question should be the one a person would actually ask.
+  recordsDeliveryDestination: 'Where should we send the records?',
+};
+
+/** The destination question, in the words of the method the caller chose. */
+export const DESTINATION_PROMPTS: Record<PcpRecordsDeliveryMethod, string> = {
+  fax: 'What is the fax number?',
+  email: 'What is the email address?',
+  mail: 'What is the mailing address?',
 };
 
 export class PcpDirector {
@@ -254,6 +299,16 @@ export class PcpDirector {
      * director rather than reading it, 2026-08-17.
      */
     if (!isPatient && purpose?.patientContextRequired && !connectsToHuman) required.push(...PATIENT_FIELDS);
+    /**
+     * A RECORDS REQUEST IS NOT COMPLETE UNTIL WE KNOW WHERE IT GOES.
+     *
+     * Appended here rather than made a fourth entry in ticketRequirements.ts
+     * on purpose. That file's three-field list is deliberate and its history
+     * is that blocking fields destroyed 21 records requests on 2026-08-06 —
+     * so these are asked by the form, and the existing strike budget still
+     * decides whether a missing answer may ever hold the filing.
+     */
+    if (state.callPurpose === 'patient_medical_records_request') required.push(...RECORDS_FIELDS);
     const missing = required.find((field) => !state[field]);
 
     let disposition = purpose?.defaultDisposition;
@@ -340,7 +395,17 @@ export class PcpDirector {
       eligibleByAsk || Boolean(!isPatient && purpose && disposition === 'HAND_OFF' && !missing && !handoffFailed);
 
     return {
-      nextQuestion: missing ? { field: missing, prompt: PROMPTS[missing] ?? `Please provide ${String(missing)}.` } : undefined,
+      nextQuestion: missing
+        ? {
+            field: missing,
+            prompt:
+              (missing === 'recordsDeliveryDestination' && state.recordsDeliveryMethod
+                ? DESTINATION_PROMPTS[state.recordsDeliveryMethod]
+                : undefined)
+              ?? PROMPTS[missing]
+              ?? `Please provide ${String(missing)}.`,
+          }
+        : undefined,
       disposition,
       phiDisclosureAllowed,
       authoritativeToolAllowed,

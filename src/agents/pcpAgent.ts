@@ -12,6 +12,7 @@ import {
   PROFESSIONAL_FIELDS,
   PATIENT_INTAKE_ORDER,
   PROMPTS as DIRECTOR_PROMPTS,
+  PCP_RECORDS_DELIVERY_METHODS,
   pcpDirector,
   type PcpConversationState,
 } from '../pcp/director';
@@ -518,6 +519,14 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       callerOrganization: z.string().min(1).optional(),
       callerFacilityType: z.enum(PCP_FACILITY_TYPES).optional(),
       callbackNumber: z.string().min(7).optional(),
+      /**
+       * WHERE A RECORDS REQUEST GOES. Operator, 2026-09-08 — his own test
+       * call took a records request and never asked. The callback number does
+       * not answer this: it is seeded from caller ID, and a switchboard is not
+       * somewhere you send a medical record.
+       */
+      recordsDeliveryMethod: z.enum(PCP_RECORDS_DELIVERY_METHODS).optional(),
+      recordsDeliveryDestination: z.string().min(3).optional(),
       statedRelationship: z.string().min(1).optional(),
       callPurpose: z.enum(PCP_CALL_PURPOSE_SLUGS).optional(),
       /**
@@ -1069,11 +1078,47 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         if (gapNote) narrative = `${narrative}\n\n${gapNote}`;
       }
       const { state, missing } = ticketState(callId);
+      /**
+       * The delivery instruction goes ON the ticket, in words, because the
+       * staffer who fulfils it cannot send anything without it. Appended to
+       * the narrative rather than added to the API payload: the ticket schema
+       * has no field for it, and inventing one would need the other team.
+       */
+      if (state.recordsDeliveryMethod) {
+        narrative = `${narrative}\n\nDeliver by ${state.recordsDeliveryMethod.toUpperCase()}` +
+          (state.recordsDeliveryDestination ? ` to ${state.recordsDeliveryDestination}.` : ' — destination NOT captured.');
+      } else {
+        narrative = `${narrative}\n\nDelivery method NOT captured — ask the requester before sending anything.`;
+      }
       const response = await submitPcpTicket(
         buildPayload(metadata, state, 'CREATE_TASK', narrative, 'high', undefined, 'patient_medical_records_request_isolated', missing),
       );
       if (response.success) pcpDirector.recordDisposition(callId, 'CREATE_TASK');
-      return { ...response, recordsPathwayUsed: false, isolatedFromPcpPurposes: true };
+      /**
+       * SAY SOMETHING BEFORE THE LINE GOES QUIET.
+       *
+       * On CAdc07bca1b6e2c7daf43c9f3a8f5ee4fa this tool returned bare success.
+       * Nothing told the agent to speak, terminate_call became legal the
+       * instant the disposition was recorded, and the caller got "let me get
+       * this logged for you — one moment" followed by a dead line. The patient
+       * path in create_pcp_task has carried a `message` for exactly this
+       * reason; records never did.
+       */
+      if (!response.success) {
+        return { ...response, recordsPathwayUsed: false, isolatedFromPcpPurposes: true };
+      }
+      const deliveryLine = state.recordsDeliveryMethod
+        ? ` Confirm we will send them by ${state.recordsDeliveryMethod}` +
+          (state.recordsDeliveryDestination ? ` to ${state.recordsDeliveryDestination}.` : '.')
+        : '';
+      return {
+        ...response,
+        recordsPathwayUsed: false,
+        isolatedFromPcpPurposes: true,
+        message:
+          `Filed as ${response.ticketNumber}. Read that number back to the caller and say our medical records ` +
+          `team will follow up.${deliveryLine} Do not promise a date. Ask if there is anything else before ending the call.`,
+      };
     },
   });
 
