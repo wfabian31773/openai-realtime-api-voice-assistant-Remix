@@ -70,7 +70,8 @@ const INTAKE = {
   callerRole: 'referral coordinator',
   callerOrganization: 'Optum',
   callerFacilityType: 'ipa_medical_group',
-  callbackNumber: '6262229400',
+  // Synthetic. The live call's own number never enters the repo.
+  callbackNumber: '9515550100',
   callPurpose: 'service_inquiry',
 };
 const ASKED = 'Caller asked to speak to a representative about a mutual patient.';
@@ -182,8 +183,8 @@ describe('CAbf717457 — the refusal that was retried six times', () => {
     ticketing.createTicket.mockImplementation(async () => response as never);
     const { agent } = freshCall(async () => ({ ok: false, status: 'FAILED' }));
     await call(agent, 'record_pcp_intake', {
-      callerName: 'Joseph Perez',
-      callbackNumber: '6262229400',
+      callerName: 'Test Caller',
+      callbackNumber: '9515550100',
       callPurpose: 'patient_caller',
     });
     return call(agent, 'create_pcp_task', {
