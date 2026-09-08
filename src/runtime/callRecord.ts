@@ -37,11 +37,7 @@
 
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
-import {
-  ackRuntimeTransferOutcome,
-  peekRuntimeTransferOutcome,
-  type RuntimeTransferOutcome,
-} from "./transferOutcomeLog";
+import { type RuntimeTransferOutcome } from "./transferOutcomeLog";
 
 /**
  * Identity the runtime was TOLD, never identity it inferred. Supplied by
@@ -96,18 +92,6 @@ export interface RuntimeCallLogRow {
    * a racing writer that recorded a transfer is not overwritten by this
    * one's omission (Codex, PR #230 round 2). */
   transferredToHuman?: true;
-  /**
-   * WHAT THE DIAL ACTUALLY DID — destination, outcome, how long it rang.
-   *
-   * The old core has written this since 2026-07-30 and the runtime never did:
-   * `recordTransferOutcome` keys on `officeLegDials`, which only the SIP dial
-   * path populates. So every runtime transfer read from `call_logs` as though
-   * no transfer had been attempted — which is how I came to state exactly that
-   * about CAa37f1a42 from a column that could not say it. Written only when an
-   * attempt was actually made; a call that never dialled leaves it NULL, which
-   * reads honestly.
-   */
-  transferOutcome?: RuntimeTransferOutcome;
   /** Present ONLY when the runtime was told — see RuntimeCallIdentity. */
   patientName?: string;
   patientDob?: string;
@@ -140,11 +124,6 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
     voiceProvider: row.voiceProvider,
     runtimeOutcome: row.runtimeOutcome,
     ...(row.transferredToHuman ? { transferredToHuman: row.transferredToHuman } : {}),
-    // Same rule as transferredToHuman: present or absent, never null. A second
-    // teardown pass has already consumed the stored outcome (delete-on-read),
-    // so omitting it here preserves what the first pass wrote instead of
-    // blanking it.
-    ...(row.transferOutcome ? { transferOutcome: row.transferOutcome } : {}),
     ...(row.firstTranscriptDelayMs !== undefined
       ? { firstTranscriptDelayMs: row.firstTranscriptDelayMs }
       : {}),
@@ -200,18 +179,6 @@ export function toCallLogRow(
     0,
     Math.round((record.endedAtMs - record.startedAtMs) / 1000),
   );
-  /**
-   * PEEKED, NOT CONSUMED — and this function stays pure, which it is
-   * documented to be.
-   *
-   * It was delete-on-read, copying the old core. Codex found what that costs
-   * (P2, PR #273): the read happens while BUILDING the row, so an upsert that
-   * REJECTS has already destroyed the only copy, and the retry this module
-   * exists to support then writes the row without the outcome. The failure
-   * mode was a transient database error — exactly when a retry should save
-   * you. `persistRuntimeCall` acks after a successful write instead.
-   */
-  const transferOutcome = peekRuntimeTransferOutcome(record.callSid);
   return {
     callSid: record.callSid,
     direction: "inbound",
@@ -310,16 +277,6 @@ export function toCallLogRow(
     // Omitted (never false) except on a transferred outcome, so this
     // writer cannot erase a transfer someone else recorded.
     ...(record.outcome === "transferred" ? { transferredToHuman: true as const } : {}),
-    /**
-     * Collected here rather than written when the transfer settled, because
-     * this module is the runtime's ONE writer of this row — see the note on
-     * toConflictUpdate. Dropped only once the write lands, so a rejected
-     * upsert leaves it for the retry.
-     *
-     * Note this is independent of `transferredToHuman`: a transfer that RANG
-     * OUT is exactly the case worth recording, and it is not a transfer.
-     */
-    ...(transferOutcome ? { transferOutcome } : {}),
     // Omitted entirely when unknown rather than written as null: the queue
     // agents' own stampVerifiedIdentity may already have set these during
     // the call, and a null would erase what it learned.
@@ -490,28 +447,26 @@ async function defaultUpsert(
 }
 
 /**
- * Write a transfer outcome onto a row that has ALREADY been written.
+ * THE ONLY WRITER OF `transfer_outcome`, called when a transfer settles.
  *
- * The one exception to "this module writes the row once, at teardown", and it
- * exists because teardown can run while a transfer is still in flight. It then
- * persists `redirecting` — true at that instant — and the redirect settles
- * afterwards with the real answer. Without this the database keeps
- * `redirecting` forever: not a false claim, but a permanently unfinished one,
- * which under-counts exactly the completed transfers the column exists to
- * count (Codex, PR #273, round 4 of this race).
+ * Teardown deliberately does not touch this column. It used to, from a
+ * snapshot of an in-memory store, and five rounds of review each found another
+ * consequence of having two writers race over one value — see the long note in
+ * transferOutcomeLog.ts. One writer, at the moment the answer exists, removes
+ * the class rather than the instance.
  *
- * A TARGETED UPDATE, not an upsert. The row exists — `openRuntimeCall` creates
- * it when the call starts — and every other column belongs to a writer that
- * has already finished. Touching one column is the whole point: a second
- * upsert here would re-assert a teardown snapshot over whatever the agents'
- * own telemetry wrote in between.
+ * A TARGETED UPDATE, not an upsert. The row already exists: `openRuntimeCall`
+ * creates it when the call begins, long before any transfer settles. Touching
+ * one column is the whole point — an upsert here would re-assert this caller's
+ * view of every other column over whatever the agents' own telemetry wrote
+ * during the call.
  *
  * Never throws. A lost telemetry update must not surface anywhere near a call.
  */
-export async function persistLateTransferOutcome(
+export async function persistTransferOutcome(
   callSid: string,
   transferOutcome: RuntimeTransferOutcome,
-  update: (callSid: string, outcome: RuntimeTransferOutcome) => Promise<void> = defaultLateUpdate,
+  update: (callSid: string, outcome: RuntimeTransferOutcome) => Promise<void> = defaultTransferOutcomeUpdate,
 ): Promise<boolean> {
   try {
     await update(callSid, transferOutcome);
@@ -525,7 +480,7 @@ export async function persistLateTransferOutcome(
   }
 }
 
-async function defaultLateUpdate(
+async function defaultTransferOutcomeUpdate(
   callSid: string,
   transferOutcome: RuntimeTransferOutcome,
 ): Promise<void> {
@@ -548,12 +503,6 @@ export async function persistRuntimeCall(
   const row = toCallLogRow(record, identity);
   try {
     await upsert(row, toConflictUpdate(row));
-    // Only now, and only the exact value this row carried. Acking before the
-    // write let a transient database error destroy the outcome the retry was
-    // supposed to save; acking unconditionally let a redirect settling during
-    // the upsert have its correction deleted while the older snapshot was the
-    // one persisted (Codex P2 then P1, PR #273).
-    ackRuntimeTransferOutcome(record.callSid, row.transferOutcome);
     return true;
   } catch (error) {
     // Log the failure rather than the record: a transcript in an error log

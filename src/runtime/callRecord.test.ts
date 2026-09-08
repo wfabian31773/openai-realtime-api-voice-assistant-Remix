@@ -3,17 +3,12 @@ import {
   toCallLogRow,
   toConflictUpdate,
   persistRuntimeCall,
-  persistLateTransferOutcome,
+  persistTransferOutcome,
   openRuntimeCall,
 } from "./callRecord";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { resetAgentIdCache } from "./agentIdentity";
-import {
-  recordRuntimeTransferOutcome,
-  clearRuntimeTransferOutcomes,
-  newTransferAttemptId,
-  peekRuntimeTransferOutcome,
-} from "./transferOutcomeLog";
+import { type RuntimeTransferOutcome } from "./transferOutcomeLog";
 
 function record(over: Partial<VoiceCallRecord> = {}): VoiceCallRecord {
   return {
@@ -59,65 +54,8 @@ describe("toCallLogRow", () => {
     expect(toCallLogRow(record({ outcome: "max_duration" })).status).toBe("completed");
   });
 
-  it("carries the transfer outcome onto the row — the column that was NULL on every runtime call", () => {
-    /**
-     * 2026-09-08: all three PCP runtime calls had `transfer_outcome` NULL while
-     * the TICKET carried the whole record — destination +17149564300, NO_ANSWER,
-     * office_no_answer. `recordTransferOutcome` keys on `officeLegDials`, which
-     * only the old core's dial path populates, so the runtime's dial was
-     * measured and then dropped. Operator: "you have the data, but we're not
-     * capturing it properly."
-     */
-    clearRuntimeTransferOutcomes();
-    recordRuntimeTransferOutcome("CA-1", {
-      outcome: "no_answer",
-      status: "NO_ANSWER",
-      reason: "office_no_answer",
-      dialedNumber: "+17149564300",
-      ringSeconds: 30,
-    }, newTransferAttemptId());
 
-    const row = toCallLogRow(record());
 
-    expect(row.transferOutcome?.outcome).toBe("no_answer");
-    expect(row.transferOutcome?.dialedNumber).toBe("+17149564300");
-    // It rides through the conflict update too, or a second teardown pass
-    // would leave the first pass's value unrefreshed on a retried insert.
-    expect(toConflictUpdate(row).transferOutcome?.outcome).toBe("no_answer");
-  });
-
-  it("a call that never dialled leaves it absent, so NULL keeps meaning 'no transfer'", () => {
-    clearRuntimeTransferOutcomes();
-    const row = toCallLogRow(record());
-
-    expect(row.transferOutcome).toBeUndefined();
-    expect(
-      "transferOutcome" in toConflictUpdate(row),
-      "an absent outcome must be OMITTED, never written as null over a real one",
-    ).toBe(false);
-  });
-
-  it("records a dial that RANG OUT even though it is not a transfer", () => {
-    /**
-     * The two columns are independent and this is the case that proves it:
-     * `transferred_to_human` stays false because nobody answered, and that is
-     * exactly the call worth having a record of. Reading the absence of one as
-     * the absence of the other is the mistake that produced "no transfer was
-     * attempted" about CAa37f1a42.
-     */
-    clearRuntimeTransferOutcomes();
-    recordRuntimeTransferOutcome("CA-1", {
-      outcome: "no_answer",
-      status: "NO_ANSWER",
-      reason: "office_no_answer",
-      ringSeconds: 30,
-    }, newTransferAttemptId());
-
-    const row = toCallLogRow(record({ outcome: "caller_hangup" }));
-
-    expect(row.transferredToHuman, "nobody answered").toBeUndefined();
-    expect(row.transferOutcome?.outcome, "but we did dial, and it rang out").toBe("no_answer");
-  });
 
   it("a transferred call sets transferred_to_human — and ONLY a transferred call", () => {
     // The column the SIP path writes and the dashboards read; a runtime
@@ -508,87 +446,65 @@ describe("a greeting-only call keeps its tail", () => {
  * cannot see when `persistRuntimeCall` calls it. That is the same gap, in the
  * same commit, as the one on the transfer side.
  */
-describe("persistRuntimeCall and the transfer outcome", () => {
-  const RANG_OUT = {
-    outcome: "no_answer" as const,
-    status: "NO_ANSWER",
-    reason: "office_no_answer",
-    dialedNumber: "+17149564300",
-    ringSeconds: 30,
-  };
 
-  it("keeps the outcome when the write REJECTS, so the retry still has it", async () => {
-    clearRuntimeTransferOutcomes();
-    recordRuntimeTransferOutcome("CA-1", RANG_OUT, newTransferAttemptId());
-
-    const wrote = await persistRuntimeCall(record(), {}, async () => {
-      throw new Error("connection terminated unexpectedly");
-    });
-
-    expect(wrote).toBe(false);
-    expect(
-      peekRuntimeTransferOutcome("CA-1")?.outcome,
-      "consuming it before the write is what loses it on a transient error",
-    ).toBe("no_answer");
-  });
-
-  it("and the retry writes a row that CARRIES it", async () => {
-    clearRuntimeTransferOutcomes();
-    recordRuntimeTransferOutcome("CA-1", RANG_OUT, newTransferAttemptId());
-    await persistRuntimeCall(record(), {}, async () => {
-      throw new Error("connection terminated unexpectedly");
-    });
-
-    const rows: any[] = [];
-    const wrote = await persistRuntimeCall(record(), {}, async (row) => void rows.push(row));
-
-    expect(wrote).toBe(true);
-    expect(rows[0].transferOutcome?.outcome).toBe("no_answer");
-  });
-
-  it("drops it once the row is durable, so a second teardown cannot rewrite it", async () => {
-    clearRuntimeTransferOutcomes();
-    recordRuntimeTransferOutcome("CA-1", RANG_OUT, newTransferAttemptId());
-
-    await persistRuntimeCall(record(), {}, async () => undefined);
-
-    expect(peekRuntimeTransferOutcome("CA-1"), "acked on success").toBeUndefined();
-  });
-});
-
-describe("persistLateTransferOutcome", () => {
-  const SETTLED = {
-    outcome: "accepted" as const,
+describe("persistTransferOutcome — the ONLY writer of this column", () => {
+  /**
+   * Teardown used to write `transfer_outcome` from a snapshot of an in-memory
+   * store. Five rounds of review each found another consequence of two writers
+   * racing over one column — see the redesign note in transferOutcomeLog.ts —
+   * so the settle writes it and teardown does not touch it at all.
+   */
+  const SETTLED: RuntimeTransferOutcome = {
+    outcome: "accepted",
     status: "CONNECTED",
     officeCallSid: "CAoffice1",
     ringSeconds: 13,
-    pipeline: "grok" as const,
-    attempt: 1,
+    pipeline: "grok",
+    attempt: 2,
     at: "2026-09-08T14:00:00.000Z",
   };
 
   it("updates the one column, on the one row", async () => {
     /**
-     * A TARGETED UPDATE, not an upsert, and that is the point: every other
-     * column belongs to a writer that has already finished, and a second
-     * upsert here would re-assert a teardown snapshot over whatever the
-     * agents' own telemetry wrote in between.
+     * A TARGETED UPDATE, not an upsert. The row already exists —
+     * `openRuntimeCall` creates it when the call begins — and every other
+     * column belongs to a writer that may still be working. An upsert here
+     * would re-assert this caller's view of all of them.
      */
     const calls: Array<{ sid: string; outcome: unknown }> = [];
 
-    const ok = await persistLateTransferOutcome("CA-1", SETTLED, async (sid, outcome) => {
+    const ok = await persistTransferOutcome("CA-1", SETTLED, async (sid: string, outcome: RuntimeTransferOutcome) => {
       calls.push({ sid, outcome });
     });
 
     expect(ok).toBe(true);
     expect(calls).toEqual([{ sid: "CA-1", outcome: SETTLED }]);
+    expect((calls[0].outcome as RuntimeTransferOutcome).attempt, "the real count, not a reconstructed one").toBe(2);
   });
 
   it("never throws — a lost telemetry update must not surface near a call", async () => {
-    const ok = await persistLateTransferOutcome("CA-1", SETTLED, async () => {
+    const ok = await persistTransferOutcome("CA-1", SETTLED, async () => {
       throw new Error("connection terminated unexpectedly");
     });
 
     expect(ok).toBe(false);
+  });
+});
+
+describe("teardown does not touch transfer_outcome", () => {
+  it("is absent from the row and from the conflict update", () => {
+    /**
+     * The property the whole redesign turns on. If teardown carries this
+     * column again, every race it took five rounds to close is reachable
+     * again — a snapshot older than the truth, written over the settle's
+     * answer.
+     */
+    const row = toCallLogRow(record());
+    const asRecord = row as unknown as Record<string, unknown>;
+
+    expect("transferOutcome" in asRecord, "teardown must not carry it").toBe(false);
+    expect(
+      "transferOutcome" in (toConflictUpdate(row) as unknown as Record<string, unknown>),
+    ).toBe(false);
   });
 });

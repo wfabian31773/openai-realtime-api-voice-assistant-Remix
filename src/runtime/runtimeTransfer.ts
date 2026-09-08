@@ -410,102 +410,15 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               fromNumber: env.TWILIO_PHONE_NUMBER ?? "",
               callerId: env.TWILIO_PHONE_NUMBER,
               /**
-               * RECORD SOMETHING HERE, BEFORE THE CALLER IS MOVED — BUT NOT
-               * A COMPLETED TRANSFER. Codex P1, PR #273, rounds 1 and 3.
-               *
-               * Round 1: the redirect ends the media stream, and the resulting
-               * close can beat the redirect's own resolution — which is why
-               * this hook exists at all. Teardown starts on that close and
-               * synchronously builds the call_logs row, so an outcome recorded
-               * only when `attempt()` resolves can arrive AFTER the row is
-               * written, and the successful transfer is missing from the
-               * column. Hence: write before the redirect.
-               *
-               * Round 3, and I got this wrong in between. I wrote `accepted`
-               * here and claimed in a commit message that the corrective
-               * failure "cannot arrive late at all" because
-               * `onCallerRedirectFailed` fires synchronously. THAT CLAIM WAS
-               * FALSE, and Codex found the window: the hook fires in the catch
-               * of `await redirectCallerToConference`, so it runs only once
-               * the redirect REJECTS. A caller who hangs up while that await
-               * is pending gets teardown, a snapshot of `accepted`, a durable
-               * write and an ack — and the correction, when it finally
-               * arrives, has no teardown left to persist it. The database then
-               * says a disconnected caller reached a human. Synchronous with
-               * respect to the settle is not synchronous with respect to
-               * teardown.
-               *
-               * The fix is not more sequencing, it is not claiming what is not
-               * yet true: `redirecting` is accurate at the instant it is
-               * written, cannot be misread as a connection, and still leaves a
-               * record for the success that races teardown. The settle below
-               * replaces it under the SAME attempt id — with `accepted` when
-               * the caller lands, or `failed` when the redirect throws.
+               * NO PROVISIONAL RECORD HERE ANY MORE. It existed so a success
+               * would survive teardown beating the settle — and teardown no
+               * longer writes this column at all, so there is nothing to
+               * survive. See the redesign note in transferOutcomeLog.ts.
                */
-              onCallerRedirectStarting: () => {
-                try {
-                  recordRuntimeTransferOutcome(
-                    metadata.callSid,
-                    {
-                      // NOT "accepted" — the caller has not moved yet, and the
-                      // move can fail. See the note below.
-                      outcome: "redirecting",
-                      status: "ACCEPTED_REDIRECTING",
-                      ...(policy.allowed ? { dialedNumber: policy.destination } : {}),
-                      acceptMethod: "keypress",
-                      ringSeconds: Math.round((Date.now() - dialStartedAt) / 1000),
-                      // The side channel is still alive here — attempt()'s
-                      // finally has not run — so the accept carries the same
-                      // briefing record the settle would.
-                      ...(details?.briefingGaps ? { briefingGaps: details.briefingGaps } : {}),
-                      ...(details?.askedBeforeDial !== undefined
-                        ? { askedBeforeDial: details.askedBeforeDial }
-                        : {}),
-                    },
-                    attemptId,
-                  );
-                } catch (err) {
-                  log(`[runtime-xfer] could not record the accept for ${metadata.callSid}: ${String(err)}`);
-                }
-                hooks?.onCallerRedirectStarting?.();
-              },
-              /**
-               * CORRECT THE IN-FLIGHT RECORD AS EARLY AS THIS PATH CAN.
-               *
-               * This fires in the catch of the redirect's await, before
-               * `endQuietly` and before the attempt settles, so it narrows the
-               * window — but it does NOT close it, and the previous version of
-               * this comment claimed it did. Teardown can run while the
-               * redirect is still pending, which is earlier than any hook here
-               * can fire. That is why the provisional record says
-               * `redirecting` rather than `accepted`: what teardown might
-               * persist has to be true on its own.
-               *
-               * The settle still records under the same attempt id, which is
-               * idempotent here: it writes the same failure again.
-               */
-              onCallerRedirectFailed: () => {
-                try {
-                  recordRuntimeTransferOutcome(
-                    metadata.callSid,
-                    {
-                      outcome: "failed",
-                      status: "FAILED",
-                      reason: "caller_redirect_failed",
-                      ...(policy.allowed ? { dialedNumber: policy.destination } : {}),
-                      ringSeconds: Math.round((Date.now() - dialStartedAt) / 1000),
-                      ...(details?.briefingGaps ? { briefingGaps: details.briefingGaps } : {}),
-                      ...(details?.askedBeforeDial !== undefined
-                        ? { askedBeforeDial: details.askedBeforeDial }
-                        : {}),
-                    },
-                    attemptId,
-                  );
-                } catch (err) {
-                  log(`[runtime-xfer] could not record the failed redirect for ${metadata.callSid}: ${String(err)}`);
-                }
-                hooks?.onCallerRedirectFailed?.();
-              },
+              onCallerRedirectStarting: hooks?.onCallerRedirectStarting,
+              // Nothing to correct: the settle below records the failure the
+              // redirect produces, and it is the only thing that writes.
+              onCallerRedirectFailed: hooks?.onCallerRedirectFailed,
               log,
             },
           );
@@ -564,51 +477,35 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
            * refusals as dials.
            */
           if (!outcome.ok && outcome.status === "UNAVAILABLE") return outcome;
-          const settled = toRecordedOutcome(
-            outcome,
-            Math.round((Date.now() - dialStartedAt) / 1000),
-            briefing,
-          );
-          const { supersededPersisted } = recordRuntimeTransferOutcome(
-            metadata.callSid,
-            settled,
-            attemptId,
-          );
           /**
-           * THE ROW IS ALREADY WRITTEN AND NOW DISAGREES. Codex P1, PR #273,
-           * round 4.
+           * RECORD IT, THEN WRITE IT. One writer, at the moment the answer
+           * exists.
            *
-           * Teardown runs when the redirect closes the media stream, which can
-           * be BEFORE the redirect settles — so it persists the in-flight
-           * `redirecting` and acks it. Recording the real answer here then only
-           * updates memory, and the database keeps `redirecting` forever: not
-           * the false "reached a human" of round 3, but a permanently
-           * unfinished record, which under-counts the completed transfers this
-           * column exists to count.
-           *
-           * Fired only when the store says a persisted value was replaced, so
-           * the ordinary case — teardown after the settle — does no extra
-           * write at all.
+           * `recordRuntimeTransferOutcome` returns the value to persist —
+           * which is NOT always the value just passed in: a later attempt
+           * failing after this call already reached a human keeps the earlier
+           * success, with the attempt count advanced. Writing the RETURN value
+           * means this code never has to know which branch was taken, and the
+           * attempt count is whatever the store actually counted rather than a
+           * number reconstructed here (Codex P2, PR #273 round 5, where it was
+           * hardcoded to 1 and lost every retry).
            *
            * Deliberately NOT awaited: this runs on the path returning to the
            * agent, and a database round trip must not sit between a caller and
-           * the next thing they hear. `persistLateTransferOutcome` never
-           * throws, so nothing escapes.
+           * the next thing they hear. `persistTransferOutcome` never throws.
            */
-          if (supersededPersisted) {
-            void import("./callRecord")
-              .then(({ persistLateTransferOutcome }) =>
-                persistLateTransferOutcome(metadata.callSid, {
-                  ...settled,
-                  pipeline: "grok",
-                  attempt: 1,
-                  at: new Date().toISOString(),
-                }),
-              )
-              .catch((err) =>
-                log(`[runtime-xfer] late outcome update could not start for ${metadata.callSid}: ${String(err)}`),
-              );
-          }
+          const toPersist = recordRuntimeTransferOutcome(
+            metadata.callSid,
+            toRecordedOutcome(outcome, Math.round((Date.now() - dialStartedAt) / 1000), briefing),
+            attemptId,
+          );
+          void import("./callRecord")
+            .then(({ persistTransferOutcome }) =>
+              persistTransferOutcome(metadata.callSid, toPersist),
+            )
+            .catch((err) =>
+              log(`[runtime-xfer] outcome write could not start for ${metadata.callSid}: ${String(err)}`),
+            );
         } catch (err) {
           // Telemetry must never cost a transfer. This is the whole reason the
           // record is taken here and not inside the dial.

@@ -12,16 +12,15 @@ import {
   peekRuntimeTransferOutcome,
   clearRuntimeTransferOutcomes,
 } from "./transferOutcomeLog";
-import { ackRuntimeTransferOutcome } from "./transferOutcomeLog";
 import { escalationDetailsMap } from "../services/escalationStore";
 
 /**
- * The late-settlement writer, intercepted. `runtimeTransfer` reaches it
+ * The transfer-outcome writer, intercepted. `runtimeTransfer` reaches it
  * through a DYNAMIC import so the runtime never pulls a database connection
  * into boot, and `vi.mock` intercepts that just as well as a static one.
  */
-const lateWrites = vi.hoisted(() => ({ persistLateTransferOutcome: vi.fn(async () => true) }));
-vi.mock("./callRecord", () => lateWrites);
+const writes = vi.hoisted(() => ({ persistTransferOutcome: vi.fn(async () => true) }));
+vi.mock("./callRecord", () => writes);
 import type { WebhookRequest } from "./voiceWebhook";
 
 const AUTH_TOKEN = "test-auth-token";
@@ -466,137 +465,6 @@ describe("the briefing", () => {
  * written exercised the store — which cannot see WHEN the store was written.
  * Third time today that testing the sink instead of the source hid a defect.
  */
-describe("the accepted outcome is recorded before the redirect", () => {
-  it("WHAT TEARDOWN WOULD PERSIST MID-REDIRECT is not a claim that anyone connected", async () => {
-    /**
-     * Codex P1 round 3, PR #273 — and the window my previous test missed.
-     *
-     * That test observed `endCall`, which runs in the redirect's CATCH, i.e.
-     * after the await has already rejected. It therefore proved the correction
-     * beats the SETTLE, and said nothing about teardown, which can run while
-     * the redirect promise is still pending. A caller who hangs up in that
-     * window gets teardown, a snapshot, a durable write and an ack — and any
-     * later correction has no teardown left to persist it.
-     *
-     * So the assertion point is INSIDE the redirect, before it settles either
-     * way: whatever is in the store at that instant is what the database can
-     * end up holding forever, and it must be true on its own.
-     */
-    clearRuntimeTransferOutcomes();
-    const seenMidRedirect: Array<string | undefined> = [];
-    const { ops } = fakeOps();
-    const watched: TransferTwilioOps = {
-      ...ops,
-      redirectCallerToConference: async (input) => {
-        // Teardown's snapshot, taken here rather than after the await.
-        seenMidRedirect.push(peekRuntimeTransferOutcome("CAcaller")?.outcome);
-        return ops.redirectCallerToConference(input);
-      },
-    };
-    const transfer = transferWith(watched);
-    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
-
-    const handoff = transfer.handoffFor("no-ivr", META);
-    const outcome = handoff();
-    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
-    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
-    await outcome;
-
-    expect(
-      seenMidRedirect,
-      "a record written before the move completes must not say the move completed",
-    ).toEqual(["redirecting"]);
-    expect(seenMidRedirect[0], "and above all not this").not.toBe("accepted");
-  });
-
-  it("becomes accepted once the caller actually lands", async () => {
-    // The control: `redirecting` must be a transient state, not the end of the
-    // story, or the column would never record a completed transfer at all.
-    clearRuntimeTransferOutcomes();
-    const { ops } = fakeOps();
-    const transfer = transferWith(ops);
-    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
-
-    const handoff = transfer.handoffFor("no-ivr", META);
-    const outcome = handoff();
-    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
-    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
-    await outcome;
-
-    expect(peekRuntimeTransferOutcome("CAcaller")?.outcome).toBe("accepted");
-  });
-
-  it("corrects a failed redirect SYNCHRONOUSLY, not when the attempt settles", async () => {
-    /**
-     * Mutation testing found this gap: removing the synchronous correction
-     * failed NOTHING, because the settle records the same failure a moment
-     * later and the test below only reads the end state. But the window is the
-     * whole point — teardown starts on the stream close, so a correction that
-     * waits for the settle can arrive after the row is written, and the row
-     * then says a caller reached a human who never did.
-     *
-     * `endQuietly` runs AFTER `onCallerRedirectFailed` and BEFORE the attempt
-     * resolves, so a fake `endCall` is the one place the difference is
-     * visible. Fifth time on this PR that asserting the end state hid a
-     * timing requirement.
-     */
-    clearRuntimeTransferOutcomes();
-    const seenAtCleanup: Array<string | undefined> = [];
-    const { ops } = fakeOps();
-    const failing: TransferTwilioOps = {
-      ...ops,
-      redirectCallerToConference: async () => {
-        throw new Error("twilio said no");
-      },
-      endCall: async (sid) => {
-        seenAtCleanup.push(peekRuntimeTransferOutcome("CAcaller")?.outcome);
-        return ops.endCall(sid);
-      },
-    };
-    const transfer = transferWith(failing);
-    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
-
-    const handoff = transfer.handoffFor("no-ivr", META);
-    const outcome = handoff().catch(() => undefined);
-    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
-    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
-    await outcome;
-
-    expect(
-      seenAtCleanup,
-      "the provisional accept must already be corrected before the attempt resolves",
-    ).toEqual(["failed"]);
-  });
-
-  it("and a redirect that then FAILS corrects it — the caller never moved", async () => {
-    /**
-     * The half that makes the early record safe. Without the attempt id, the
-     * "an accepted transfer is never overwritten" rule would pin a transfer
-     * that did not happen: the office pressed a key, the redirect threw, and
-     * the caller stayed with the agent.
-     */
-    clearRuntimeTransferOutcomes();
-    const { ops } = fakeOps();
-    const failing: TransferTwilioOps = {
-      ...ops,
-      redirectCallerToConference: async () => {
-        throw new Error("twilio said no");
-      },
-    };
-    const transfer = transferWith(failing);
-    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
-
-    const handoff = transfer.handoffFor("no-ivr", META);
-    const outcome = handoff().catch(() => undefined);
-    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
-    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
-    await outcome;
-
-    const stored = peekRuntimeTransferOutcome("CAcaller");
-    expect(stored?.outcome, "nobody was transferred").not.toBe("accepted");
-    expect(stored?.attempt, "and it is still one attempt").toBe(1);
-  });
-});
 
 describe("what never dialled is never recorded", () => {
   /**
@@ -644,64 +512,22 @@ describe("what never dialled is never recorded", () => {
   });
 });
 
-describe("a transfer that settles after teardown already wrote the row", () => {
+describe("the settle is the only thing that writes the outcome", () => {
   /**
-   * Codex P1, PR #273, round 4 — and the wiring, not the store.
+   * THE REDESIGN, and the property it exists to hold. Teardown used to write
+   * this column from a snapshot of an in-memory store; five rounds of review
+   * each found another consequence of two writers racing over one value — a
+   * snapshot older than the truth, a rejected upsert destroying the only copy,
+   * a provisional `accepted` before the caller had moved, a stranded
+   * settlement, and three holes in the reconciliation for that.
    *
-   * Mutation testing showed the settle path's call to
-   * `persistLateTransferOutcome` was only grep-checkable: disabling it failed
-   * NOTHING, because every assertion I had written was on the store, which
-   * cannot see whether anything acts on what it reports. That is the same gap,
-   * for the eighth time on this PR, so it is closed the same way — by driving
-   * the real transfer and intercepting the real writer.
-   *
-   * Teardown is simulated where it actually happens: DURING the redirect,
-   * peeking the in-flight value and acking it exactly as a successful upsert
-   * would.
+   * One writer, at the moment the answer exists, removes the class rather than
+   * the instance. These tests drive the real transfer and intercept the real
+   * writer, because the ordering is the point and the store cannot see it.
    */
-  it("writes the settled outcome to the row teardown already persisted", async () => {
+  it("writes once, when the transfer settles, with the settled value", async () => {
     clearRuntimeTransferOutcomes();
-    lateWrites.persistLateTransferOutcome.mockClear();
-    const { ops } = fakeOps();
-    const watched: TransferTwilioOps = {
-      ...ops,
-      redirectCallerToConference: async (input) => {
-        // Teardown runs here: it snapshots `redirecting`, writes it, acks it.
-        ackRuntimeTransferOutcome("CAcaller", peekRuntimeTransferOutcome("CAcaller"));
-        return ops.redirectCallerToConference(input);
-      },
-    };
-    const transfer = transferWith(watched);
-    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
-
-    const handoff = transfer.handoffFor("no-ivr", META);
-    const outcome = handoff();
-    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
-    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
-    await outcome;
-
-    // The update is deliberately not awaited on the agent's path, so wait for it.
-    await vi.waitFor(() => expect(lateWrites.persistLateTransferOutcome).toHaveBeenCalledTimes(1));
-    const [sid, written] = lateWrites.persistLateTransferOutcome.mock.calls[0] as any[];
-    expect(sid).toBe("CAcaller");
-    expect(written.outcome, "the row said redirecting; the caller landed").toBe("accepted");
-  });
-
-  it("does NOT write again when teardown has not run yet", async () => {
-    /**
-     * The ordinary ordering — an extra update here would be pure noise on
-     * every successful transfer.
-     *
-     * IT HAS TO WAIT BEFORE ASSERTING, and the first version did not. The
-     * update is fired with `void import(...).then(...)`, so it lands a few
-     * microtasks after the transfer resolves: asserting immediately passes
-     * whether or not the code fired, and mutation testing proved it — making
-     * the update UNCONDITIONAL failed nothing. A negative assertion about
-     * asynchronous work is worthless unless the work has had its chance to
-     * happen.
-     */
-    clearRuntimeTransferOutcomes();
-    lateWrites.persistLateTransferOutcome.mockClear();
+    writes.persistTransferOutcome.mockClear();
     const { ops } = fakeOps();
     const transfer = transferWith(ops);
     escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
@@ -711,10 +537,49 @@ describe("a transfer that settles after teardown already wrote the row", () => {
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
     await outcome;
-    // Let the dynamic import and its .then settle. Generous enough that a
-    // firing update would be seen, short enough to stay a unit test.
+
+    // Fired without awaiting, so the caller's path is not held behind a
+    // database round trip.
+    await vi.waitFor(() => expect(writes.persistTransferOutcome).toHaveBeenCalledTimes(1));
+    const [sid, written] = writes.persistTransferOutcome.mock.calls[0] as any[];
+    expect(sid).toBe("CAcaller");
+    expect(written.outcome).toBe("accepted");
+    expect(written.attempt, "the count the store kept, not one invented here").toBe(1);
+  });
+
+  it("writes NOTHING for a call that never dialled", async () => {
+    /**
+     * A policy refusal returns UNAVAILABLE before `createOfficeLeg`. NULL has
+     * to keep meaning "no transfer was attempted", or the column is no more
+     * readable than it was when it meant nothing.
+     */
+    clearRuntimeTransferOutcomes();
+    writes.persistTransferOutcome.mockClear();
+    const { ops, dialed } = fakeOps();
+    const transfer = transferWith(ops);
+
+    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow(/handoff_failed:UNAVAILABLE/);
     for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(lateWrites.persistLateTransferOutcome).not.toHaveBeenCalled();
+    expect(dialed).toEqual([]);
+    expect(writes.persistTransferOutcome).not.toHaveBeenCalled();
+  });
+
+  it("writes the FAILURE when the office never answers", async () => {
+    clearRuntimeTransferOutcomes();
+    writes.persistTransferOutcome.mockClear();
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const outcome = handoff().catch(() => undefined);
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "" }));
+    await outcome;
+
+    await vi.waitFor(() => expect(writes.persistTransferOutcome).toHaveBeenCalledTimes(1));
+    const [, written] = writes.persistTransferOutcome.mock.calls[0] as any[];
+    expect(written.outcome, "nobody pressed a key").not.toBe("accepted");
   });
 });
