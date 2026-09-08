@@ -483,6 +483,48 @@ describe("the accepted outcome is recorded before the redirect", () => {
     expect(seenAtRedirect, "recorded only at settle is recorded too late").toEqual(["accepted"]);
   });
 
+  it("corrects a failed redirect SYNCHRONOUSLY, not when the attempt settles", async () => {
+    /**
+     * Mutation testing found this gap: removing the synchronous correction
+     * failed NOTHING, because the settle records the same failure a moment
+     * later and the test below only reads the end state. But the window is the
+     * whole point — teardown starts on the stream close, so a correction that
+     * waits for the settle can arrive after the row is written, and the row
+     * then says a caller reached a human who never did.
+     *
+     * `endQuietly` runs AFTER `onCallerRedirectFailed` and BEFORE the attempt
+     * resolves, so a fake `endCall` is the one place the difference is
+     * visible. Fifth time on this PR that asserting the end state hid a
+     * timing requirement.
+     */
+    clearRuntimeTransferOutcomes();
+    const seenAtCleanup: Array<string | undefined> = [];
+    const { ops } = fakeOps();
+    const failing: TransferTwilioOps = {
+      ...ops,
+      redirectCallerToConference: async () => {
+        throw new Error("twilio said no");
+      },
+      endCall: async (sid) => {
+        seenAtCleanup.push(peekRuntimeTransferOutcome("CAcaller")?.outcome);
+        return ops.endCall(sid);
+      },
+    };
+    const transfer = transferWith(failing);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const outcome = handoff().catch(() => undefined);
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+
+    expect(
+      seenAtCleanup,
+      "the provisional accept must already be corrected before the attempt resolves",
+    ).toEqual(["failed"]);
+  });
+
   it("and a redirect that then FAILS corrects it — the caller never moved", async () => {
     /**
      * The half that makes the early record safe. Without the attempt id, the
@@ -510,5 +552,51 @@ describe("the accepted outcome is recorded before the redirect", () => {
     const stored = peekRuntimeTransferOutcome("CAcaller");
     expect(stored?.outcome, "nobody was transferred").not.toBe("accepted");
     expect(stored?.attempt, "and it is still one attempt").toBe(1);
+  });
+});
+
+describe("what never dialled is never recorded", () => {
+  /**
+   * Codex P2, PR #273. `performWarmTransfer` returns UNAVAILABLE BEFORE
+   * `createOfficeLeg` when no destination is configured or policy withheld
+   * one — its own comment says "nothing was attempted". Recording it writes a
+   * non-null `transfer_outcome` for a call where no number was ever rung,
+   * which breaks the meaning the column was just given and makes reporting
+   * count configuration refusals as dials.
+   *
+   * THROUGH THE REAL TRANSFER, because the test that was supposed to cover
+   * this read an untouched store and passed without exercising any wiring.
+   */
+  it("a policy refusal leaves the column NULL", async () => {
+    clearRuntimeTransferOutcomes();
+    const { ops, dialed } = fakeOps();
+    const transfer = transferWith(ops);
+    // No side-channel entry: the clinical branch withholds the destination.
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    await expect(handoff()).rejects.toThrow(/handoff_failed:UNAVAILABLE/);
+
+    expect(dialed, "nothing was rung").toEqual([]);
+    expect(
+      peekRuntimeTransferOutcome("CAcaller"),
+      "NULL has to keep meaning 'no transfer was attempted'",
+    ).toBeUndefined();
+  });
+
+  it("but a dial that RANG OUT is still recorded", async () => {
+    // The control. Without it, "record nothing" could be satisfied by
+    // recording nothing ever.
+    clearRuntimeTransferOutcomes();
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const outcome = handoff().catch(() => undefined);
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "" }));
+    await outcome;
+
+    expect(peekRuntimeTransferOutcome("CAcaller")?.outcome).toBeTruthy();
   });
 });

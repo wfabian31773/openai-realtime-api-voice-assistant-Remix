@@ -453,7 +453,43 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                 }
                 hooks?.onCallerRedirectStarting?.();
               },
-              onCallerRedirectFailed: hooks?.onCallerRedirectFailed,
+              /**
+               * CORRECT THE PROVISIONAL ACCEPT THE INSTANT THE REDIRECT FAILS.
+               * Codex P1, PR #273.
+               *
+               * The accept is recorded before the redirect, because the
+               * redirect's own close can beat its resolution. If the redirect
+               * then THROWS, the caller never moved — and waiting for the
+               * settle to correct that leaves a window in which teardown
+               * snapshots `accepted` and the row says a caller reached a human
+               * who never did. This hook fires synchronously in the catch,
+               * before any await, so the correction cannot arrive late.
+               *
+               * The settle still records under the same attempt id, which is
+               * idempotent here: it writes the same failure again.
+               */
+              onCallerRedirectFailed: () => {
+                try {
+                  recordRuntimeTransferOutcome(
+                    metadata.callSid,
+                    {
+                      outcome: "failed",
+                      status: "FAILED",
+                      reason: "caller_redirect_failed",
+                      ...(policy.allowed ? { dialedNumber: policy.destination } : {}),
+                      ringSeconds: Math.round((Date.now() - dialStartedAt) / 1000),
+                      ...(details?.briefingGaps ? { briefingGaps: details.briefingGaps } : {}),
+                      ...(details?.askedBeforeDial !== undefined
+                        ? { askedBeforeDial: details.askedBeforeDial }
+                        : {}),
+                    },
+                    attemptId,
+                  );
+                } catch (err) {
+                  log(`[runtime-xfer] could not record the failed redirect for ${metadata.callSid}: ${String(err)}`);
+                }
+                hooks?.onCallerRedirectFailed?.();
+              },
               log,
             },
           );
@@ -500,6 +536,18 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
         const briefing = { gaps: briefed?.briefingGaps, asked: briefed?.askedBeforeDial };
         const outcome = await attempt();
         try {
+          /**
+           * A POLICY REFUSAL IS NOT A DIAL. Codex P2, PR #273.
+           *
+           * `performWarmTransfer` returns UNAVAILABLE before `createOfficeLeg`
+           * when there is no destination or policy withheld one — its own
+           * comment says "nothing was attempted". Recording it would write a
+           * non-null `transfer_outcome` for a call where no number was ever
+           * rung, which breaks the meaning this column was just given: NULL is
+           * "no transfer was attempted". Reporting would count configuration
+           * refusals as dials.
+           */
+          if (!outcome.ok && outcome.status === "UNAVAILABLE") return outcome;
           recordRuntimeTransferOutcome(
             metadata.callSid,
             toRecordedOutcome(outcome, Math.round((Date.now() - dialStartedAt) / 1000), briefing),

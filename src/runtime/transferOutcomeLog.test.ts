@@ -77,13 +77,24 @@ describe('the outcome survives from the dial to teardown', () => {
     expect(peekRuntimeTransferOutcome('CAretry'), 'the row is built from it').toBeTruthy();
     expect(peekRuntimeTransferOutcome('CAretry'), 'and the retry still has it').toBeTruthy();
 
-    ackRuntimeTransferOutcome('CAretry');
+    // The ack now names the exact value that was written — see the version
+    // check below; passing nothing is a deliberate no-op.
+    ackRuntimeTransferOutcome('CAretry', peekRuntimeTransferOutcome('CAretry'));
     expect(peekRuntimeTransferOutcome('CAretry'), 'gone only once it is durable').toBeUndefined();
   });
 
   it('a call that never dialled stores nothing at all', () => {
-    // NULL has to keep meaning "no transfer was attempted", or the column is
-    // no more readable than it was when it meant nothing.
+    /**
+     * VACUOUS AS ORIGINALLY WRITTEN, and Codex said so (P2, PR #273): it read
+     * an untouched store, so it passed without exercising any production
+     * wiring — a policy refusal was in fact being recorded as a dial. The real
+     * assertion is in runtimeTransfer.test.ts, through
+     * `createRuntimeTransfer` with no destination configured. This one is kept
+     * only as the statement of the INVARIANT it names.
+     *
+     * Fourth time on this PR that a test of mine asserted against the store
+     * instead of the wiring. Left labelled rather than deleted.
+     */
     expect(peekRuntimeTransferOutcome('CAnodial')).toBeUndefined();
   });
 });
@@ -352,5 +363,55 @@ describe('the briefing gaps reach the stored outcome', () => {
 
     expect(recorded.briefingGaps).toHaveLength(3);
     expect(recorded.askedBeforeDial).toBe(true);
+  });
+});
+
+describe('the ack only drops what was actually written', () => {
+  /**
+   * Codex P1, PR #273. Teardown starts when the redirect closes the media
+   * stream, and the redirect has not necessarily settled: `toCallLogRow` can
+   * snapshot the provisional `accepted`, the redirect can settle and REPLACE
+   * it, and the upsert can land afterwards carrying the older snapshot. An
+   * unconditional delete then throws away the newer, truer value while the
+   * database keeps the older one.
+   */
+  it('does NOT delete a value that landed after the row was built', () => {
+    const id = newTransferAttemptId();
+    recordRuntimeTransferOutcome('CAlate', {
+      outcome: 'accepted', status: 'CONNECTED', acceptMethod: 'keypress', ringSeconds: 12,
+    }, id);
+    const snapshot = peekRuntimeTransferOutcome('CAlate');
+
+    // The redirect settles while the upsert is in flight, and corrects itself.
+    recordRuntimeTransferOutcome('CAlate', {
+      outcome: 'failed', status: 'FAILED', reason: 'caller_redirect_failed', ringSeconds: 13,
+    }, id);
+
+    ackRuntimeTransferOutcome('CAlate', snapshot);
+
+    const stillThere = peekRuntimeTransferOutcome('CAlate');
+    expect(stillThere?.outcome, 'a failed redirect must not be left recorded as accepted').toBe(
+      'failed',
+    );
+  });
+
+  it('does drop the value when it is still the one that was written', () => {
+    recordRuntimeTransferOutcome('CAsame', RANG_OUT, newTransferAttemptId());
+    const snapshot = peekRuntimeTransferOutcome('CAsame');
+
+    ackRuntimeTransferOutcome('CAsame', snapshot);
+
+    expect(peekRuntimeTransferOutcome('CAsame')).toBeUndefined();
+  });
+
+  it('acking nothing is a no-op — a row with no outcome must not clear one', () => {
+    // `persistRuntimeCall` passes `row.transferOutcome`, which is absent on
+    // every call that never transferred. That must not delete a record another
+    // writer is mid-way through.
+    recordRuntimeTransferOutcome('CAuntouched', RANG_OUT, newTransferAttemptId());
+
+    ackRuntimeTransferOutcome('CAuntouched', undefined);
+
+    expect(peekRuntimeTransferOutcome('CAuntouched')).toBeTruthy();
   });
 });

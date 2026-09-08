@@ -203,14 +203,43 @@ export function peekRuntimeTransferOutcome(
 }
 
 /**
- * Drop the outcome once it is durably written.
+ * Drop the outcome once it is durably written — but ONLY the exact one that
+ * was written.
  *
- * Called only after a successful upsert. A teardown that runs twice finds
- * nothing on the second pass and `toConflictUpdate` omits an absent outcome
- * rather than nulling it, so the first pass's value survives — the property
- * delete-on-read was there to protect, kept without its cost.
+ * Called after a successful upsert. A teardown that runs twice finds nothing
+ * on the second pass and `toConflictUpdate` omits an absent outcome rather
+ * than nulling it, so the first pass's value survives.
+ *
+ * `persisted` IS THE VERSION CHECK, and it needs no version field: `record`
+ * always `set`s a NEW object, and `peek` hands back the stored one, so
+ * reference equality asks exactly the right question — "is what I wrote still
+ * what is here?"
+ *
+ * WHY THAT MATTERS (Codex P1, PR #273). Teardown starts when the redirect
+ * closes the media stream, and the redirect has not necessarily settled:
+ * `toCallLogRow` can snapshot the provisional `accepted` written at the
+ * keypress, the redirect can then settle and REPLACE it — with the complete
+ * success, or with the corrective failure when the redirect threw — and the
+ * upsert can land afterwards carrying the older snapshot. An unconditional
+ * delete then throws away the newer, truer value while the database keeps the
+ * older one. A failed redirect recorded as a completed transfer is the worst
+ * output this module can produce, because it says a caller reached a human
+ * when they did not.
+ *
+ * WHAT THIS DOES NOT FIX, said plainly rather than left to be discovered: when
+ * a late settle only ENRICHES a success (adding `officeCallSid` to a value
+ * already recorded as `accepted`), that enrichment stays in the map and no
+ * teardown will persist it — the row keeps the correct outcome without the
+ * office leg's id. The dangerous case is closed elsewhere: the corrective
+ * failure is recorded synchronously in `onCallerRedirectFailed`, so it cannot
+ * arrive late at all.
  */
-export function ackRuntimeTransferOutcome(callerCallSid: string): void {
+export function ackRuntimeTransferOutcome(
+  callerCallSid: string,
+  persisted?: RuntimeTransferOutcome,
+): void {
+  if (!persisted) return;
+  if (outcomes.get(callerCallSid) !== persisted) return;
   outcomes.delete(callerCallSid);
 }
 

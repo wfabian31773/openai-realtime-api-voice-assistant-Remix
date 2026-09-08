@@ -497,10 +497,12 @@ export async function persistRuntimeCall(
   const row = toCallLogRow(record, identity);
   try {
     await upsert(row, toConflictUpdate(row));
-    // Only now. Acking before the write is what let a transient database
-    // error destroy the outcome the retry was supposed to save (Codex P2,
-    // PR #273).
-    ackRuntimeTransferOutcome(record.callSid);
+    // Only now, and only the exact value this row carried. Acking before the
+    // write let a transient database error destroy the outcome the retry was
+    // supposed to save; acking unconditionally let a redirect settling during
+    // the upsert have its correction deleted while the older snapshot was the
+    // one persisted (Codex P2 then P1, PR #273).
+    ackRuntimeTransferOutcome(record.callSid, row.transferOutcome);
     return true;
   } catch (error) {
     // Log the failure rather than the record: a transcript in an error log
