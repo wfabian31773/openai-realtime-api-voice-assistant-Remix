@@ -19,7 +19,7 @@ GET /voice/health
 ```
 
 ```json
-{"marker":"voice-runtime-v3-precontext-diagnosable-20260905","knowledgePack":"v1",
+{"marker":"voice-runtime-v5-handoff-timeline-20260908","knowledgePack":"v1",
  "liveReady":true,"missing":[],"requiredDbEnvVar":"DATABASE_URL","activeCalls":0}
 ```
 
@@ -385,6 +385,7 @@ files correctly is a pass. After each:
 | check | where |
 |---|---|
 | **`file_optical_ticket` ran, and succeeded** | `tool_timeline` for that callSid |
+| **a successful PCP `handoff_to_pcp` persisted** | `tool_timeline` AND `tool_call_count` on that callSid — a solid `transfer_outcome` with both of those NULL is the 2026-09-08 gap (CA41b1e1 / PCP-57964). Also `human_agent_number` = the `dialedNumber`. |
 | **the ticket's `created_at` is AFTER this call started** | ticketing vs `call_logs.start_time` |
 | a ticket exists, **in the department the request belongs to** | ticketing |
 | patient name, DOB and location are right | the ticket |

@@ -408,6 +408,7 @@ is reading noise.
 | The runtime's agents-table id | `src/runtime/agentIdentity.ts` | slug → `agents.id`, cached per lane. Without it every runtime call is absent from five per-agent reports. |
 | Pipeline label on a card | `client/src/lib/pipelineSplit.ts` | Says which stack served a lane's calls, and warns on a mid-day cutover. |
 | PCP blind transfer | `src/runtime/blindTransfer.ts` + `blindTransferDialResult.ts` | Warns the caller, hands them into the PCP call-centre queue, and reads Twilio's `<Dial action>` back so the outcome is still measurable. PCP only; `RUNTIME_TRANSFER_MODE` overrides. |
+| Runtime timeline flush | `mediaStreamBridge.flushTimeline` wired in `voiceRuntime.ts` | The SIP path flushed per-tool (`realtimeAdapter`) and at teardown (`voiceAgentRoutes`). The runtime recorded in memory and never wrote. A successful blind handoff ends the stream mid-`handoff_to_pcp`, so teardown used to skip the flush (`if (this.ended) return`). Live 2026-09-08: CA41b1e1 / PCP-57964 had a solid `transfer_outcome` and NULL `tool_timeline`. Flush after every settled dispatch, including after the call has ended. |
 | "Greeting already played" | `src/runtime/greetingAlreadyPlayed.ts` | Appended by the RUNTIME, not the prompts — the transport is what plays the greeting, and tech has 16 tokens of ceiling headroom. |
 
 ---
@@ -817,10 +818,17 @@ GROUP BY 1 ORDER BY 2 DESC;
    timeline recorded 65. Three consecutive calls (VA-57425, VA-57428,
    VA-57429) had a real ticket and NO filing event in the timeline at all.
    That is #77, and it is live on the runtime, not historical.
-   **On PCP the drop is 100%, not 35%.** All three runtime calls on
-   2026-09-04 recorded ZERO timeline events and NULL `tool_call_count`, and
-   two of them filed real tickets (PCP-57486, PCP-57487). Do not read an
-   empty timeline as "no tool ran" on any runtime lane, and never on PCP.
+   **On PCP the drop was 100% on 2026-09-04, and a different hole showed up
+   after #273.** All three runtime calls that day recorded ZERO timeline
+   events and NULL `tool_call_count`, and two of them filed real tickets
+   (PCP-57486, PCP-57487). After the blind-transfer ship, a live SUCCESS
+   (CA41b1e1 / PCP-57964, `queue_answered`, 93s) still had both columns
+   NULL, while a morning FAILURE the same day had `handoff_to_pcp` events.
+   Cause: the runtime never called `flushAzulTimeline`, and the success
+   redirect ends the stream before the in-flight tool records. Fixed by
+   flushing after every settled dispatch, including after the call has
+   ended. Do not read an empty timeline as "no tool ran" on a build older
+   than `voice-runtime-v5-handoff-timeline-20260908`.
    **The timeline IS reliable for refusals** (`outcome.missingFields`) — use it
    for those and nothing else.
 2. **The transcript `VA-#####` proxy OVER-counts.** It caught 9 extra calls on
@@ -1309,13 +1317,15 @@ in the new build. Current marker:
 **ON THE RUNTIME, ASK `/voice/health` — AND THE MARKER NOW CARRIES ITS DATE.**
 
 ```
-voice-runtime-v4-pcp-blind-transfer-20260908
+voice-runtime-v5-handoff-timeline-20260908
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
 EARLIER date, or with no date at all, is a build older than 2026-09-08 and
 nothing measured on it is evidence about current code. In particular, a PCP
-call on a build older than this one used the WARM transfer, so its silence
+call on `v4-pcp-blind-transfer-20260908` used the blind Dial but did not
+persist `tool_timeline` on a successful handoff — that is the gap this
+marker names. A build older than v4 used the WARM transfer, so its silence
 while the queue rang is expected rather than a defect.
 
 **This exists because the marker failed at the one job it has, on 2026-09-05.**

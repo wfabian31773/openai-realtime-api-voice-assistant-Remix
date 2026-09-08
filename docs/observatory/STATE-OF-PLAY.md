@@ -2,13 +2,41 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-09-08** (PCP success-path timeline flush). Prior full
+rewrite: **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
 This is the running record. When something is decided, measured, built or
 broken — write it here. The cost of not having this file was three days of
 re-deriving facts and re-asking questions Wayne had already answered.
+
+---
+
+## 2026-09-08 — successful PCP handoff left `tool_timeline` NULL
+
+After #273 (blind Dial into the PCP queue), a live success proved a logging
+gap the failure path did not show:
+
+- CA41b1e1255bc1031612ddc6d47d2502a6 / PCP-57964
+- `transfer_outcome` was complete: `method=blind`, `outcome=queue_answered`,
+  `dialedNumber` set, `talkSeconds=93`
+- `call_logs.tool_timeline` and `tool_call_count` were NULL
+- `human_agent_number` was also NULL
+- A morning FAILURE the same day (`CAa2a3a1…`) had `handoff_to_pcp` events
+
+**Cause, not a hypothesis:** the Grok runtime never called `flushAzulTimeline`.
+Queue tools on SIP flush per-tool; SIP teardown flushes again. PCP on the
+runtime only `recordingExecute`s into memory. A blind success redirects, the
+Media Stream dies mid-`handoff_to_pcp`, teardown runs, and
+`handleToolCall` used to `return` on `this.ended` without flushing. Failures
+stay on the call, so the 2h reaper eventually wrote them.
+
+**Fix (logging only — the Dial is unchanged):** flush after every settled
+dispatch, including after the call has ended, and COALESCE-fill
+`human_agent_number` from `dialedNumber` on a success. Marker:
+`voice-runtime-v5-handoff-timeline-20260908`. Detail:
+`.agents/memory/runtime-handoff-timeline.md`.
 
 ---
 

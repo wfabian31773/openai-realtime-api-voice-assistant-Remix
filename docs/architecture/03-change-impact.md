@@ -1207,7 +1207,11 @@ or drives `observeCall`. Every conference-map write, the SIP header parse
 ### `src/services/toolTimeline.ts`
 `recordingExecute` (:312) and `flushAzulTimeline` (:489) are called for **all
 four queues** from `realtimeAdapter.ts:16`, and separately by azul-scheduling
-and the director (`voiceAgentRoutes.ts:23`). Swallows: `:344-346`, `:591-593`,
+and the director (`voiceAgentRoutes.ts:23`). **The Grok runtime now flushes
+too** (`mediaStreamBridge.flushTimeline` → `flushAzulTimeline`), including
+after the call has ended — a successful PCP blind transfer used to leave
+`tool_timeline` NULL because the redirect killed the stream mid-tool
+(CA41b1e1 / PCP-57964, 2026-09-08). Swallows: `:344-346`, `:591-593`,
 `:533`, `:385`. Its `timelines` Map (:57) is the only record that a tool ran.
 
 ### `src/utils/phone.ts`

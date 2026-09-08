@@ -5,6 +5,7 @@ import {
   persistRuntimeCall,
   persistTransferOutcome,
   openRuntimeCall,
+  humanAgentNumberFromOutcome,
 } from "./callRecord";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { resetAgentIdCache } from "./agentIdentity";
@@ -446,6 +447,69 @@ describe("a greeting-only call keeps its tail", () => {
  * cannot see when `persistRuntimeCall` calls it. That is the same gap, in the
  * same commit, as the one on the transfer side.
  */
+
+describe("humanAgentNumberFromOutcome — fill the column from the number we dialled", () => {
+  /**
+   * Same logging gap as the NULL timeline. CA41b1e1 wrote
+   * transfer_outcome.dialedNumber and left human_agent_number NULL. Only
+   * a success has a number worth recording; a no-answer that never rang
+   * one must not invent one.
+   */
+  const base = {
+    status: "CONNECTED",
+    ringSeconds: 0,
+    pipeline: "grok" as const,
+    attempt: 1,
+    at: "2026-09-08T16:00:00.000Z",
+  };
+
+  it("takes dialedNumber on a blind or warm success", () => {
+    expect(
+      humanAgentNumberFromOutcome({
+        ...base,
+        outcome: "queue_answered",
+        dialedNumber: "+15555550100",
+      }),
+    ).toBe("+15555550100");
+    expect(
+      humanAgentNumberFromOutcome({
+        ...base,
+        outcome: "handed_to_queue",
+        dialedNumber: "+15555550100",
+      }),
+    ).toBe("+15555550100");
+    expect(
+      humanAgentNumberFromOutcome({
+        ...base,
+        outcome: "accepted",
+        dialedNumber: "+15555550100",
+      }),
+    ).toBe("+15555550100");
+  });
+
+  it("stays unset on a failure, and when there is no number", () => {
+    expect(
+      humanAgentNumberFromOutcome({
+        ...base,
+        outcome: "no_answer",
+        dialedNumber: "+15555550100",
+      }),
+    ).toBeUndefined();
+    expect(
+      humanAgentNumberFromOutcome({
+        ...base,
+        outcome: "queue_answered",
+      }),
+    ).toBeUndefined();
+    expect(
+      humanAgentNumberFromOutcome({
+        ...base,
+        outcome: "handed_to_queue",
+        dialedNumber: "   ",
+      }),
+    ).toBeUndefined();
+  });
+});
 
 describe("persistTransferOutcome — the ONLY writer of this column", () => {
   /**

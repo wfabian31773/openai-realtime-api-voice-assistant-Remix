@@ -40,6 +40,29 @@ import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
 import { type RuntimeTransferOutcome } from "./transferOutcomeLog";
 
 /**
+ * The number we actually dialled, for `call_logs.human_agent_number`.
+ *
+ * Same logging gap as the NULL timeline: a successful blind transfer wrote
+ * `transfer_outcome.dialedNumber` and left `human_agent_number` NULL.
+ * Filled only on a success, and only when the writer has a number — a
+ * failure that never rang one must not invent one. COALESCE at the write
+ * keeps a value someone already set.
+ */
+export function humanAgentNumberFromOutcome(
+  outcome: RuntimeTransferOutcome,
+): string | undefined {
+  if (
+    outcome.outcome !== "accepted" &&
+    outcome.outcome !== "handed_to_queue" &&
+    outcome.outcome !== "queue_answered"
+  ) {
+    return undefined;
+  }
+  const n = outcome.dialedNumber?.trim();
+  return n || undefined;
+}
+
+/**
  * Identity the runtime was TOLD, never identity it inferred. Supplied by
  * the lane wiring (caller-ID pre-context, or an agent-specific adapter);
  * absent means the columns stay NULL.
@@ -525,14 +548,23 @@ async function defaultTransferOutcomeUpdate(
   callSid: string,
   transferOutcome: RuntimeTransferOutcome,
 ): Promise<void> {
-  const [{ db }, { callLogs }, { eq }] = await Promise.all([
+  const [{ db }, { callLogs }, { eq, sql }] = await Promise.all([
     import("../../server/db"),
     import("../../shared/schema"),
     import("drizzle-orm"),
   ]);
+  const human = humanAgentNumberFromOutcome(transferOutcome);
   await db
     .update(callLogs)
-    .set({ transferOutcome } as never)
+    .set({
+      transferOutcome,
+      // WHEN NULL ONLY. A later `queue_answered` rewrite of the same call
+      // must not clobber a number the `handed_to_queue` write already set,
+      // and a racing writer that already filled the column wins.
+      ...(human
+        ? { humanAgentNumber: sql`COALESCE(${callLogs.humanAgentNumber}, ${human})` }
+        : {}),
+    } as never)
     .where(eq(callLogs.callSid, callSid));
 }
 

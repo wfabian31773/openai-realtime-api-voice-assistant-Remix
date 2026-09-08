@@ -70,6 +70,7 @@ function makeBridge(
     agent?: BoundAgent;
     greeting?: string | null;
     persistCallRecord?: (r: VoiceCallRecord) => Promise<void>;
+    flushTimeline?: (callSid: string) => Promise<void>;
     endCallToolNames?: string[];
     maxCallMs?: number;
     deadAirMs?: number;
@@ -127,6 +128,7 @@ function makeBridge(
     },
     onOutcome: (o) => outcomes.push(o),
     persistCallRecord: over.persistCallRecord,
+    flushTimeline: over.flushTimeline,
     endCallToolNames: over.endCallToolNames,
     guardrailMode: over.guardrailMode,
     maxCallMs: over.maxCallMs ?? 600_000,
@@ -973,6 +975,69 @@ describe("VoiceCallBridge — dead-air watchdog", () => {
     expect(h.timers.fire(30_000 + TOOL_DISPATCH_GRACE_MS + 120_000)).toBe(false);
     expect(h.timers.fire(30_000 + TOOL_DISPATCH_GRACE_MS)).toBe(true);
     expect(h.outcomes).toEqual(["dead_air"]);
+  });
+});
+
+describe("VoiceCallBridge — a successful handoff persists the tool timeline", () => {
+  /**
+   * Live 2026-09-08: CA41b1e1255bc1031612ddc6d47d2502a6 (PCP-57964) had a
+   * solid transfer_outcome (method=blind, queue_answered, talkSeconds=93)
+   * and NULL tool_timeline / tool_call_count. The morning failure the same
+   * day had handoff_to_pcp events. The difference is the redirect: it ends
+   * the Media Stream WHILE handoff_to_pcp is still awaiting, teardown runs,
+   * and the post-dispatch path used to `return` on `this.ended` without
+   * flushing. Failures stay on the call, so the 2h reaper eventually wrote
+   * them; success never reached a flush at all if you looked the same day.
+   */
+  it("flushes after a handoff that ends the stream during dispatch", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const flushes: string[] = [];
+    const agent = makeAgent({
+      dispatch: vi.fn(async () => {
+        await held;
+        return { ok: true, output: '{"ok":true,"handedToQueue":true}' };
+      }),
+    });
+    const h = makeBridge({
+      agent,
+      flushTimeline: async (sid) => {
+        flushes.push(sid);
+      },
+    });
+
+    h.handlers().onToolCall("c1", "handoff_to_pcp", { narrative: "representative please" });
+    // The redirect mark + stream death, while the tool is still awaiting —
+    // this is the live success path.
+    h.bridge.noteTransferStarting();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    expect(h.outcomes).toEqual(["transferred"]);
+    expect(flushes, "teardown flushes what is already recorded, not the in-flight handoff").toEqual([
+      "CA-test",
+    ]);
+
+    release();
+    await vi.waitFor(() => expect(agent.dispatch).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(
+        flushes,
+        "the handoff event is written AFTER dispatch returns, even though the call has ended",
+      ).toEqual(["CA-test", "CA-test"]),
+    );
+    expect(h.session.sendToolResult, "the stream is gone — do not talk to a dead session").not.toHaveBeenCalled();
+  });
+
+  it("a flush failure never reaches the call", async () => {
+    const h = makeBridge({
+      flushTimeline: async () => {
+        throw new Error("db is down");
+      },
+    });
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    await vi.waitFor(() => expect(h.agent.dispatch).toHaveBeenCalled());
+    expect(h.outcomes).toEqual([]);
   });
 });
 

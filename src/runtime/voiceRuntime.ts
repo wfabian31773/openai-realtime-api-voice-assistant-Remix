@@ -304,6 +304,12 @@ export interface VoiceRuntimeOptions {
   /** Persists the finished call. Injected for tests. */
   persistCall?: (record: VoiceCallRecord) => Promise<boolean>;
   /**
+   * Flush `call_logs.tool_timeline` after a tool settles. Injected so the
+   * runtime's tests never import the timeline writer (it pulls the
+   * database at module load). Production defaults to `flushAzulTimeline`.
+   */
+  flushTimeline?: (callSid: string) => Promise<void>;
+  /**
    * The teardown request sweep. Injected for tests, and settable to a no-op
    * to turn it off without a deploy.
    *
@@ -984,6 +990,27 @@ export function mountVoiceRuntime(
            * The bridge fires this and does not wait: teardown must not hold a
            * socket open for a ticket POST.
            */
+          /**
+           * THE FLUSH THE SIP PATH ALWAYS HAD AND THE RUNTIME NEVER DID.
+           *
+           * PCP's tools go through `recordingExecute` (in-memory only). Queue
+           * tools on SIP flush per-tool; SIP teardown flushes again. This
+           * transport wrote `transfer_outcome` on a successful blind handoff
+           * and left `tool_timeline` / `tool_call_count` NULL — CA41b1e1,
+           * 2026-09-08, ticket PCP-57964. Wired here, not inside the
+           * agents: the agents do not change (standing instruction 2).
+           *
+           * DYNAMIC import on the default: `toolTimeline.ts` pulls the
+           * database at module load, and a logging path must not be the
+           * thing that dies over configuration (the same rule
+           * `callRecord.ts` already follows). Tests inject a no-op.
+           */
+          flushTimeline:
+            options.flushTimeline ??
+            ((callSid) =>
+              import("../services/toolTimeline").then(({ flushAzulTimeline }) =>
+                flushAzulTimeline(callSid),
+              )),
           persistCallRecord: async (record) => {
             /**
              * BOUNDED, because an unbounded await here throws the request
