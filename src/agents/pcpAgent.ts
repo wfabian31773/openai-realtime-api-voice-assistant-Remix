@@ -1346,7 +1346,17 @@ export function markPcpCallEnded(callId: string): void {
 }
 
 /** Is this call still up? False the moment teardown starts. */
-function pcpCallIsLive(callId: string): boolean {
+/**
+ * EXPORTED so the OLD CORE's sequential dial path can consult it too.
+ *
+ * `voiceAgentRoutes.ts` has its own disconnect marker, `abortedPcpHandoffs`,
+ * and CLEARS it immediately before the dial loop — so a teardown that lands
+ * while `addHumanAgent` is awaiting its Twilio client is erased by the very
+ * code the marker exists to stop (Codex P1, PR #273). This registry is the one
+ * the dial path does not own and cannot clear, which is exactly why it is the
+ * one to ask.
+ */
+export function pcpCallIsLive(callId: string): boolean {
   return !endedPcpCalls.has(callId) && pcpCallMetadata.has(callId);
 }
 

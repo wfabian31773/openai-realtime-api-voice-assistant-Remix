@@ -54,7 +54,7 @@ const ticketing = vi.hoisted(() => ({
 }));
 vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient: ticketing }));
 
-const { createPcpAgent } = await import('../agents/pcpAgent');
+const { createPcpAgent, markPcpCallEnded, pcpCallIsLive } = await import('../agents/pcpAgent');
 const { pcpDirector } = await import('./director');
 
 /** The SDK hands tools `(context, argsJson)` and may return an object or a
@@ -323,5 +323,94 @@ describe('a successful ticket write is not a licence to dial', () => {
 
     expect(dialled, 'the caller is gone — a 200 does not change that').not.toHaveBeenCalled();
     expect(r.success).toBe(false);
+  });
+});
+
+/**
+ * THE THIRD ROUND OF THE SAME RACE, and the reason it keeps coming back.
+ *
+ * Codex P1 on PR #273, third finding of this shape. Each window has been
+ * narrower than the last:
+ *
+ *   round 1  the sweep wrote CREATE_TASK onto the live state, so the gate
+ *            passed for a caller who had hung up
+ *   round 2  liveness turned on when the SWEEP ran, not when teardown STARTED,
+ *            leaving a window across `await cancelActiveOfficeLegs`
+ *   round 3  the old core's sequential path awaits `getTwilioClient()` AFTER
+ *            pcpAgent's gate has passed — and then DELETES `abortedPcpHandoffs`
+ *            immediately before the dial loop, wiping a teardown marker set
+ *            during that await
+ *
+ * Every round is an await between the check and the dial. The fix is not a
+ * fourth marker; it is that the dial path must consult a marker IT DOES NOT
+ * OWN. `abortedPcpHandoffs` is cleared by the very function that reads it, so
+ * it cannot distinguish a stale marker from one set two milliseconds ago.
+ * `pcpCallIsLive` can, and nothing on the dial path clears it.
+ *
+ * These tests pin that property rather than reaching into `voiceAgentRoutes`,
+ * because the property is what makes the guard sound: a 7,000-line route
+ * module would need most of Twilio stood up to assert the same thing, and
+ * would still be asserting this underneath.
+ */
+describe('the marker the dial path cannot clear', () => {
+  it('stays dead once teardown starts, no matter what else is reset', () => {
+    const { callId } = freshCall();
+    expect(pcpCallIsLive(callId), 'a live call before teardown').toBe(true);
+
+    markPcpCallEnded(callId);
+
+    // `abortedPcpHandoffs.delete(callId)` is the line that runs next in
+    // production. It cannot reach this registry — that is the whole fix.
+    expect(pcpCallIsLive(callId), 'and it cannot be un-ended by the dial path').toBe(false);
+  });
+
+  it('is false for a call this process never saw', () => {
+    // The sequential path asks about `openAiCallId`. A call with no PCP
+    // metadata must read as not-live rather than as live-by-default, or the
+    // guard passes for exactly the calls it knows least about.
+    expect(pcpCallIsLive('CAnever-seen')).toBe(false);
+  });
+
+  it('is independent of whether a ticket was recorded', () => {
+    // The round-1 defect was reading a DISPOSITION as proof the call was up.
+    // Liveness must not be re-derivable from the director's state.
+    const { callId } = freshCall();
+    pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+    markPcpCallEnded(callId);
+
+    expect(pcpCallIsLive(callId)).toBe(false);
+  });
+});
+
+/**
+ * THE ONE ASSERTION IN THIS FILE THAT READS SOURCE TEXT, and why.
+ *
+ * The guard Codex's round-3 P1 asked for lives inside `addHumanAgent` in
+ * `voiceAgentRoutes.ts` — a 7,000-line route module whose sequential PCP dial
+ * needs most of Twilio, the env config and the dial-sequence resolver stood up
+ * before it can be entered. Everything above pins the PROPERTY that makes the
+ * guard sound; nothing above can notice the guard being deleted.
+ *
+ * So this pins the ORDERING, which is the whole invariant: liveness is checked
+ * BEFORE `abortedPcpHandoffs.delete`, because that delete is what erases the
+ * teardown marker set during `await getTwilioClient()`. Asking the marker you
+ * are about to erase is not a check.
+ *
+ * A source-text assertion is a weak instrument and is used here deliberately
+ * rather than silently: it catches a deletion, and it cannot catch a
+ * refactor that keeps both lines and breaks the meaning. Stated so nobody
+ * reads this file as proving more than it does.
+ */
+describe('the sequential dial path checks liveness before it clears the marker', () => {
+  it('has the guard, and has it in the order that matters', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const source = await readFile(new URL('../voiceAgentRoutes.ts', import.meta.url), 'utf8');
+
+    const guard = source.indexOf('if (!pcpCallIsLive(openAiCallId))');
+    const clear = source.indexOf('abortedPcpHandoffs.delete(openAiCallId)');
+
+    expect(guard, 'the sequential dial path must consult a marker it does not own').toBeGreaterThan(-1);
+    expect(clear, 'and it still clears the stale marker for a legitimate retry').toBeGreaterThan(-1);
+    expect(guard, 'checking AFTER the clear would read a marker just erased').toBeLessThan(clear);
   });
 });

@@ -50,8 +50,18 @@ export interface PcpBriefingDetails {
  * Fixed at the source as well. This exists because the source is four
  * different agents and this function is the last thing between them and a
  * person's ear, so it is the right place for a floor rather than a duplicate.
+ *
+ * `nan` WAS IN THIS LIST AND HAD TO COME OUT. Codex P2, PR #273: **Nan is a
+ * name** — short for Nancy, and a caller who gives it would have been
+ * discarded as though she were JavaScript's NaN, with the office then told she
+ * had not given a name at all. The list is now exactly the two tokens that can
+ * actually arise from interpolating an absent value here, `undefined` and
+ * `null`, plus the punctuation left behind when one is removed. Nothing in
+ * this path interpolates a number, so `NaN` was never reachable — it was
+ * defensiveness against a case that does not exist, bought at the price of a
+ * real person's name.
  */
-const PLACEHOLDER = /^(undefined|null|nan|,|\s|-)*$/i;
+const PLACEHOLDER = /^(undefined|null|,|\s|-)*$/i;
 
 /**
  * The value, or nothing — never a placeholder, and never a fragment that is

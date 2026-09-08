@@ -46,7 +46,7 @@ import {
   urgentTransferFailureLine,
 } from './services/handoffPolicy';
 import { buildPcpTransferBriefing, buildWarmTransferScript } from './services/warmTransferBriefing';
-import { pcpAgentConfig, markPcpCallEnded } from './agents/pcpAgent';
+import { pcpAgentConfig, markPcpCallEnded, pcpCallIsLive } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
 import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
@@ -1498,6 +1498,33 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     
     let sequentialPcpAnswered = false;
     if (policy.policy === 'pcp' && envConfig.twilio.pcpRoutingMode === 'sequential') {
+      /**
+       * THE CALLER CAN LEAVE WHILE THIS FUNCTION IS SETTING UP. Codex P1, PR #273.
+       *
+       * `addHumanAgent` awaits `getTwilioClient()` above — on the first transfer
+       * of a process that is a real await, and pcpAgent's own liveness gate has
+       * already run and passed by then. If the transport closes during it,
+       * teardown adds the abort marker and marks the call ended... and then the
+       * very next line here DELETES that marker, wiping the evidence a moment
+       * before the loop would have checked it. The PCP team is dialled for a
+       * caller who is gone, and a staffer picks up to silence.
+       *
+       * The delete itself is not the bug and stays: a stale marker from an
+       * earlier aborted attempt must not refuse a legitimate retry. What was
+       * missing is that it cannot tell a stale marker from a fresh one.
+       *
+       * `pcpCallIsLive` can, because it is teardown-synchronous and — unlike
+       * `abortedPcpHandoffs` — this path neither owns nor clears it. Asking the
+       * marker you are about to erase is not a check.
+       *
+       * Third round of this same race, each window narrower than the last:
+       * the sweep, then the teardown await, now the client init. Recorded so
+       * the next one is looked for at an await rather than found on a call.
+       */
+      if (!pcpCallIsLive(openAiCallId)) {
+        console.warn(`[HANDOFF] the caller left during setup — NOT dialling (${openAiCallId})`);
+        return { ok: false, status: 'FAILED', reason: 'caller_disconnected', destination: handoffDestination };
+      }
       abortedPcpHandoffs.delete(openAiCallId);
       if (pcpDialSequence.length === 0) return { ok: false, status: 'HANDOFF_UNAVAILABLE', reason: 'pcp_agent_dids_not_configured' };
       // How to accept is the TwiML's PRESS_PROMPT, spoken before and after this

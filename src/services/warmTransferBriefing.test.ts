@@ -81,6 +81,30 @@ describe('the PCP warm-transfer briefing', () => {
     );
   });
 
+  it('keeps a caller actually named Nan', () => {
+    /**
+     * Codex P2, PR #273. The placeholder filter listed `nan` case-insensitively
+     * to catch JavaScript's NaN — and **Nan is a name**, short for Nancy. She
+     * would have been discarded and the office told she gave no name, which is
+     * the exact failure this filter exists to prevent, aimed at a real person
+     * instead of a stringified `undefined`.
+     *
+     * Nothing on this path interpolates a NUMBER, so `NaN` was never reachable
+     * here: it was defensiveness against a case that does not exist, paid for
+     * with somebody's name. The list is now the two tokens that can actually
+     * arise — `undefined` and `null`.
+     */
+    const briefing = buildPcpTransferBriefing({ callerName: 'Nan', providerInfo: 'Referral coordinator, Optum' });
+
+    expect(briefing).toContain('Caller: Nan.');
+    expect(briefing).not.toMatch(/did not give a name/);
+  });
+
+  it('still drops the tokens that a missing value really does produce', () => {
+    expect(buildPcpTransferBriefing({ callerName: 'undefined' })).toMatch(/did not give a name/);
+    expect(buildPcpTransferBriefing({ callerName: 'null' })).toMatch(/did not give a name/);
+  });
+
   it('when it knows nothing, it says so and hands over — it does not go quiet', () => {
     /**
      * REPLACES an assertion that the empty briefing is the bare header.
