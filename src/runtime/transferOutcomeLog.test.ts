@@ -292,3 +292,65 @@ describe('one attempt that records twice', () => {
     expect(stored?.attempt).toBe(2);
   });
 });
+
+describe('the briefing gaps reach the stored outcome', () => {
+  /**
+   * "Build it and the telemetry" — operator, 2026-09-08, approving the
+   * one-round pre-transfer intake.
+   *
+   * `outcome: 'accepted'` cannot tell a transfer that arrived briefed from one
+   * that connected a stranger the staffer has to interview from scratch. These
+   * two fields are what make "does one round actually fill the briefing?" a
+   * query instead of a listening exercise.
+   */
+  it('carries what the office was not told, and whether we asked', () => {
+    const recorded = toRecordedOutcome(
+      { ok: true, destination: '+17149564300', officeCallSid: 'CAoffice1' },
+      12,
+      { gaps: ['callerRole'], asked: true },
+    );
+
+    expect(recorded.briefingGaps).toEqual(['callerRole']);
+    expect(recorded.askedBeforeDial).toBe(true);
+  });
+
+  it('distinguishes "asked and answered" from "never asked"', () => {
+    // Both have empty gaps and they are different events: one is a caller who
+    // replied, the other a caller who arrived complete.
+    const answered = toRecordedOutcome({ ok: true, destination: '+1', officeCallSid: 'CAo' }, 1, {
+      gaps: [],
+      asked: true,
+    });
+    const complete = toRecordedOutcome({ ok: true, destination: '+1', officeCallSid: 'CAo' }, 1, {
+      gaps: [],
+      asked: false,
+    });
+
+    expect(answered.askedBeforeDial).toBe(true);
+    expect(complete.askedBeforeDial).toBe(false);
+  });
+
+  it('a lane that does not report it leaves the columns ABSENT, not empty', () => {
+    /**
+     * Only PCP runs the one-round intake today. An empty array from a lane
+     * that never checked would claim a complete briefing it knows nothing
+     * about — the same class of lie as writing zeros for a provider that
+     * reported no tokens.
+     */
+    const recorded = toRecordedOutcome({ ok: false, status: 'NO_ANSWER', reason: 'x' }, 30);
+
+    expect(recorded.briefingGaps).toBeUndefined();
+    expect(recorded.askedBeforeDial).toBeUndefined();
+  });
+
+  it('records them on a FAILED dial too — a caller who rang out was still briefed or not', () => {
+    const recorded = toRecordedOutcome(
+      { ok: false, status: 'NO_ANSWER', reason: 'office_no_answer', destination: '+17149564300' },
+      30,
+      { gaps: ['callerName', 'callerRole', 'callPurpose'], asked: true },
+    );
+
+    expect(recorded.briefingGaps).toHaveLength(3);
+    expect(recorded.askedBeforeDial).toBe(true);
+  });
+});

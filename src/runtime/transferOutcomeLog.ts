@@ -64,6 +64,24 @@ export interface RuntimeTransferOutcome {
   pipeline: 'grok';
   /** How many times this CALL attempted a transfer, including this one. */
   attempt: number;
+  /**
+   * WHAT THE OFFICE WAS NOT TOLD, at the moment we dialled.
+   *
+   * Operator, 2026-09-08, approving the one-round intake: "build it and the
+   * telemetry." A transfer that connects a stranger the staffer has to
+   * interview from scratch is a different event from one that arrives briefed,
+   * and `outcome: 'accepted'` cannot tell them apart. Empty array means a
+   * complete briefing; absent means a pipeline that does not report it.
+   */
+  briefingGaps?: string[];
+  /**
+   * Whether the one round of intake actually fired on this call.
+   *
+   * The pair is what makes the round measurable: gaps AND asked says the
+   * caller declined; gaps AND not-asked says the round never ran, which would
+   * be a defect in the gate rather than in the caller.
+   */
+  askedBeforeDial?: boolean;
   at: string;
 }
 

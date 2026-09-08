@@ -238,7 +238,18 @@ export function toPcpHandoffOutcome(
 export function toRecordedOutcome(
   outcome: TransferOutcome,
   ringSeconds: number,
+  /**
+   * What the office was not told, from the agent's side channel. Optional
+   * because only PCP runs the one-round intake today; a lane that does not
+   * report it leaves the columns absent rather than claiming a full briefing
+   * it never checked.
+   */
+  briefing: { gaps?: string[]; asked?: boolean } = {},
 ): Parameters<typeof recordRuntimeTransferOutcome>[1] {
+  const briefingFields = {
+    ...(briefing.gaps ? { briefingGaps: briefing.gaps } : {}),
+    ...(briefing.asked !== undefined ? { askedBeforeDial: briefing.asked } : {}),
+  };
   if (outcome.ok) {
     return {
       outcome: "accepted",
@@ -247,9 +258,11 @@ export function toRecordedOutcome(
       officeCallSid: outcome.officeCallSid,
       acceptMethod: "keypress",
       ringSeconds,
+      ...briefingFields,
     };
   }
   return {
+    ...briefingFields,
     outcome:
       outcome.status === "NO_ANSWER"
         ? "no_answer"
@@ -425,6 +438,13 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                       ...(policy.allowed ? { dialedNumber: policy.destination } : {}),
                       acceptMethod: "keypress",
                       ringSeconds: Math.round((Date.now() - dialStartedAt) / 1000),
+                      // The side channel is still alive here — attempt()'s
+                      // finally has not run — so the accept carries the same
+                      // briefing record the settle would.
+                      ...(details?.briefingGaps ? { briefingGaps: details.briefingGaps } : {}),
+                      ...(details?.askedBeforeDial !== undefined
+                        ? { askedBeforeDial: details.askedBeforeDial }
+                        : {}),
                     },
                     attemptId,
                   );
@@ -469,11 +489,20 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
        * least.
        */
       const settle = async (): Promise<TransferOutcome> => {
+        /**
+         * READ THE SIDE CHANNEL BEFORE `attempt()`, because attempt's own
+         * `finally` DELETES it — the entry holds a caller's name, DOB and
+         * callback number, so it is cleared per attempt rather than left in a
+         * process-wide map (Codex, PR #230). Reading after would report every
+         * transfer as fully briefed, which is worse than reporting nothing.
+         */
+        const briefed = escalationDetailsMap.get(metadata.callId);
+        const briefing = { gaps: briefed?.briefingGaps, asked: briefed?.askedBeforeDial };
         const outcome = await attempt();
         try {
           recordRuntimeTransferOutcome(
             metadata.callSid,
-            toRecordedOutcome(outcome, Math.round((Date.now() - dialStartedAt) / 1000)),
+            toRecordedOutcome(outcome, Math.round((Date.now() - dialStartedAt) / 1000), briefing),
             attemptId,
           );
         } catch (err) {

@@ -25,6 +25,7 @@ import {
 } from '../pcp/policy';
 import { refusePcp } from '../pcp/refusals';
 import { asksForAPerson } from '../pcp/explicitAsk';
+import { preTransferGaps, preTransferQuestion } from '../pcp/preTransferIntake';
 import {
   deliveryAskFor,
   isRecordsRequest,
@@ -502,6 +503,17 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
    * Per call, so it cannot leak between callers.
    */
   let ticketBlocksUsed = 0;
+  /**
+   * THE ONE ROUND OF INTAKE A TRANSFER MAY COST, per call.
+   *
+   * Deliberately NOT `ticketBlocksUsed`. That budget is three, shared across
+   * every filing gate, and three questions standing between a caller and the
+   * person they asked for is the interrogation this line keeps being corrected
+   * for. Operator ruling, 2026-09-08: "the ask wins, one round then transfer
+   * anyway." One is the whole budget, and it is spent whether or not the
+   * caller answers.
+   */
+  let preTransferAskUsed = false;
 
   // Tool timeline. The fleet got this on 2026-08-01; the PCP agent was added
   // on 08-03 and never inherited it, so on 08-06 all 167 PCP calls recorded
@@ -986,6 +998,37 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           fallbackRecorded: fallback.success,
         });
       }
+      /**
+       * ONE ROUND OF INTAKE, THEN THE DIAL — WHATEVER THEY SAID.
+       *
+       * Operator ruling, 2026-09-08: "the ask wins, one round then transfer
+       * anyway." Until now `eligibleByAsk` carried NO field requirement at
+       * all, so a caller whose first words were "can I speak to a
+       * representative" reached the dial on an empty intake and the staffer
+       * who picked up started from zero — which is exactly what he asked
+       * about: "if someone just says representative, you don't know, how can
+       * you warm transfer?"
+       *
+       * PLACED AFTER THE ELIGIBILITY CHECK on purpose. A caller the director
+       * will not transfer must not be asked questions and then told no; only
+       * a transfer that is actually going to happen pays for this turn.
+       *
+       * AND BEFORE THE TICKET WRITE, so the answers land ON the ticket rather
+       * than arriving after it. The request is still filed either way — the
+       * second attempt writes it — so a caller who says nothing loses nothing.
+       *
+       * The latch is checked, not the answers: it is spent on being ASKED, not
+       * on being answered. That is what makes it impossible to loop. See
+       * src/pcp/preTransferIntake.ts for why one turn beats three, and why the
+       * patient's name is deliberately not on the list.
+       */
+      if (!preTransferAskUsed) {
+        const question = preTransferQuestion(preTransferGaps(state));
+        if (question) {
+          preTransferAskUsed = true;
+          return refusePcp('pre_transfer_intake', { say: question });
+        }
+      }
       const requestedAt = new Date().toISOString();
       // The ticket contract requires a purpose. When the caller simply asked
       // for a person before saying why, record the generic inquiry so the
@@ -1093,6 +1136,31 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
          * refuses placeholder text as a floor; this is the source.
          */
         providerInfo: [state.callerRole, state.callerOrganization].filter(Boolean).join(', ') || undefined,
+        /**
+         * WHAT THE ONE ROUND DID NOT GET, recorded at the moment of the dial.
+         *
+         * Operator: "build it and the telemetry." Without it, "does one round
+         * actually fill the briefing?" can only be answered by listening to
+         * calls.
+         *
+         * COMPUTED HERE, FROM THIS INVOCATION'S `state`. An earlier version of
+         * this comment claimed it was "recomputed from the live state rather
+         * than reused from the gate above", implying a stale value was being
+         * avoided — there is none. `state` comes from `ticketState(callId)` at
+         * the top of THIS execute, which is the attempt AFTER the question, so
+         * it already carries whatever the caller answered. Mutating it to the
+         * director's own object changed no test, because
+         * `pcpDirector.get()` returns the live reference `state` is derived
+         * from: they are the same object. The claim was decoration on a line
+         * that is correct for a simpler reason.
+         *
+         * What WOULD break it is hoisting the gap list to the top of the tool
+         * and reusing it for both the question and this record — that would
+         * report the gate's input as its output, and every call would read as
+         * unanswered. The test named for it guards that shape.
+         */
+        briefingGaps: preTransferGaps(state),
+        askedBeforeDial: preTransferAskUsed,
         /** The one field the operator named first, and the one never sent. */
         callerName: state.callerName,
       });

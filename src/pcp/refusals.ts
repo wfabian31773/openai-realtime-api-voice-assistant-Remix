@@ -154,6 +154,36 @@ export const PCP_REFUSALS: Record<string, RefusalCopy> = {
    * live on 2026-09-03. PCP differs only in that it CAN transfer; it may
    * report what this attempt did, never speculate about the next one.
    */
+  /**
+   * ONE ROUND BEFORE THE DIAL, and the only refusal on this line that is
+   * guaranteed never to repeat.
+   *
+   * Operator ruling, 2026-09-08: "the ask wins, one round then transfer
+   * anyway." The caller asked for a person and is going to get one; this asks
+   * once for what the staffer will otherwise have to start from zero on, and
+   * then gets out of the way. `preTransferAskUsed` is a per-call latch, so a
+   * second handoff attempt dials whatever the caller said or did not say.
+   *
+   * The `say` is built by `preTransferQuestion` from the gaps that actually
+   * exist, so it is passed in rather than written here — a caller who already
+   * gave their name is never asked for it again.
+   *
+   * WHAT THE GUIDANCE MUST NOT DO is let the model treat this as a reason to
+   * resume the intake script. That is exactly what happened on CAa2a3a1c1
+   * after a failed dial: handed a refusal with no instruction, it went back to
+   * "What is the patient's first name?" while the caller asked whether we had
+   * tried to connect. One question, then the transfer, whatever the answer.
+   */
+  pre_transfer_intake: {
+    guidance:
+      'NOT AN ERROR — say nothing about a system, a problem, or a requirement. The caller IS being transferred; ' +
+      'this is the one question you ask first. Say the line above, record what they give you with record_pcp_intake, ' +
+      'then call handoff_to_pcp again immediately. ' +
+      'Ask it ONCE. If they will not answer, or answer only part of it, call handoff_to_pcp again anyway — the ' +
+      'transfer goes ahead either way and the person who picks up can ask. Do NOT return to the intake questions, ' +
+      'do not ask for the patient, and do not ask a second time in different words.',
+  },
+
   handoff_no_answer: {
     say: "I wasn't able to get someone on the line just now, but I have your request recorded and the team will follow up with you.",
     guidance:

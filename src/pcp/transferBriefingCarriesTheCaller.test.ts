@@ -88,6 +88,35 @@ const ASKED = 'Caller asked to speak to a representative about a mutual patient 
  */
 const BARE_ASK = 'Caller asked to speak to a representative.';
 
+/**
+ * A BARE ASK NOW COSTS ONE TURN BEFORE IT DIALS — and these tests have to pay
+ * it, or they stop testing anything.
+ *
+ * The one-round intake (src/pcp/preTransferIntake.ts, operator ruling
+ * 2026-09-08) refuses the FIRST handoff on a caller with no name, role or
+ * purpose, asks once, and dials on the next attempt whatever they said. So a
+ * single `handoff_to_pcp` call no longer reaches `escalationDetailsMap.set`
+ * at all.
+ *
+ * That silently made two of these tests VACUOUS — again. They read the side
+ * channel, found it empty, and passed against a briefing that was never built
+ * rather than one built correctly, which is precisely the failure recorded at
+ * the top of this file the first time. Only the third test noticed, because it
+ * asserts the entry EXISTS.
+ *
+ * Hence a helper: the caller is asked, says nothing useful, and is transferred
+ * anyway. That is the shape the ruling describes, and it is what these
+ * assertions need to be about.
+ */
+async function askedThenDialled(agent: any, narrative = BARE_ASK) {
+  const first = await call(agent, 'handoff_to_pcp', { narrative });
+  expect(first.error, 'the one round must fire on a caller we know nothing about').toBe(
+    'pre_transfer_intake',
+  );
+  // The caller declines, or says something the model records nothing from.
+  return call(agent, 'handoff_to_pcp', { narrative });
+}
+
 beforeEach(() => {
   ticketing.createPcpTicket.mockClear();
   escalationDetailsMap.clear();
@@ -132,7 +161,7 @@ describe('the office is told who is on the phone', () => {
     const { agent, callId } = freshCall();
     await call(agent, 'record_pcp_intake', { callPurpose: 'service_inquiry' });
 
-    await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
+    await askedThenDialled(agent);
 
     const details = escalationDetailsMap.get(callId);
     expect(details, 'the side channel must exist — the transfer reads it').toBeTruthy();
@@ -148,9 +177,13 @@ describe('the office is told who is on the phone', () => {
     const { agent, callId } = freshCall();
     await call(agent, 'record_pcp_intake', { callPurpose: 'service_inquiry' });
 
-    await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
+    await askedThenDialled(agent);
 
     const briefing = officeHears(callId);
+    expect(
+      escalationDetailsMap.get(callId),
+      'the dial must have happened — an empty side channel would pass vacuously',
+    ).toBeTruthy();
     expect(briefing.toLowerCase(), 'a staffer heard this word out loud').not.toContain('undefined');
     expect(briefing).not.toContain('Caller organization and role:');
   });
@@ -159,9 +192,13 @@ describe('the office is told who is on the phone', () => {
     const { agent, callId } = freshCall();
     await call(agent, 'record_pcp_intake', { callPurpose: 'service_inquiry' });
 
-    await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
+    await askedThenDialled(agent);
 
     const briefing = officeHears(callId);
+    expect(
+      escalationDetailsMap.get(callId),
+      'the dial must have happened — an empty side channel would pass vacuously',
+    ).toBeTruthy();
     expect(briefing).toContain('did not give a name');
     expect(briefing, 'the staffer needs to know to start from the top').toMatch(
       /asking who they are and what they need/,
