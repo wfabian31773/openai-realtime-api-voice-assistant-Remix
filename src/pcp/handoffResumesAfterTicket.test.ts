@@ -243,3 +243,53 @@ describe('a caller who hangs up mid-write is never dialled', () => {
     expect(r.success).toBe(false);
   });
 });
+
+/**
+ * THE TEARDOWN WINDOW. Codex round 2 on PR #273.
+ *
+ * The sweep is not the start of teardown, it is nearly the end of it.
+ * Production order in `voiceAgentRoutes.ts`:
+ *
+ *   abortedPcpHandoffs.add(callId)        <- synchronous, teardown begins
+ *   await cancelActiveOfficeLegs(callId)  <- an await
+ *   ... unregister hooks, timeline work ...
+ *   import('./agents/pcpAgent')           <- a dynamic import
+ *     .then(sweepPcpUnfiledCall)          <- only NOW is the metadata dropped
+ *
+ * Across that entire window `pcpCallMetadata` still holds the call, so a
+ * handoff write that fails inside it reads the call as live. With a genuinely
+ * pre-existing disposition the gate is satisfied and the PCP team is dialled
+ * for a caller who has already gone — and the sequential path then clears the
+ * abort marker, so nothing downstream stops it either.
+ *
+ * The earlier race tests drove the sweep directly and so jumped over this
+ * window entirely. That is what makes this a separate case rather than a
+ * variation: the signal has to be set when teardown STARTS, not when it ends.
+ */
+describe('the window between teardown starting and the sweep running', () => {
+  it('does not dial once teardown has begun, even before the sweep runs', async () => {
+    const { markPcpCallEnded } = await import('../agents/pcpAgent');
+    const { agent, callId, dialled } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE);
+
+    // A genuine, pre-existing record: this is the legitimate retry shape.
+    const filed = await call(agent, 'create_pcp_task', { narrative: ASKED });
+    expect(filed.success).toBe(true);
+
+    // The caller drops mid-write. Teardown starts — but the sweep has NOT run,
+    // so the metadata is deliberately left in place, exactly as in production.
+    ticketing.createPcpTicket.mockImplementation(async (payload: any) => {
+      if (payload.disposition === 'HAND_OFF') {
+        markPcpCallEnded(callId);   // synchronous, first thing in the finally
+        await Promise.resolve();    // cancelActiveOfficeLegs
+        return { success: false, error: 'Validation failed' };
+      }
+      return { success: true, ticketNumber: 'PCP-57486' };
+    });
+
+    const r = await call(agent, 'handoff_to_pcp', { narrative: ASKED });
+
+    expect(dialled, 'teardown has begun — nobody may be dialled').not.toHaveBeenCalled();
+    expect(r.success).toBe(false);
+  });
+});

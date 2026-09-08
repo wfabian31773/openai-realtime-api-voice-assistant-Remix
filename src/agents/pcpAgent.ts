@@ -947,9 +947,12 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * and get the PCP team dialled for nobody: a staffer picking up to
        * silence, which is worse than the bug this gate change fixes.
        *
-       * `pcpCallMetadata` is the liveness signal because the sweep deletes it
-       * as its very first statement, before it can await anything — so it is
-       * already false by the time any disposition it writes becomes visible.
+       * Liveness turns on when teardown STARTS, not when the sweep finishes.
+       * The sweep is nearly the END of teardown — `voiceAgentRoutes.ts` marks
+       * the call ended, awaits `cancelActiveOfficeLegs`, and only reaches the
+       * sweep later behind a dynamic import — so waiting for the metadata to
+       * disappear leaves a window in which a caller who has already gone still
+       * reads as live. `pcpCallIsLive` closes it (Codex, round 2 on PR #273).
        *
        * It has to be checked HERE rather than left to the handoff callback:
        * on the sequential PCP path `voiceAgentRoutes.ts:1501` clears
@@ -964,7 +967,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        */
       const requestIsOnRecord =
         state.dispositionRecorded === 'CREATE_TASK' || state.dispositionRecorded === 'HAND_OFF';
-      const callStillLive = pcpCallMetadata.has(callId);
+      const callStillLive = pcpCallIsLive(callId);
       if (!initial.success && !(requestIsOnRecord && callStillLive)) {
         if (requestIsOnRecord && !callStillLive) {
           console.warn(
@@ -1113,6 +1116,42 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
 const pcpCallMetadata = new Map<string, PcpAgentMetadata>();
 
 /**
+ * TEARDOWN HAS BEGUN — the earliest signal there is, and it has to be.
+ *
+ * Codex, round 2 on PR #273. `pcpCallMetadata` is not early enough on its own:
+ * production teardown (`voiceAgentRoutes.ts`) adds the abort marker, then
+ * `await cancelActiveOfficeLegs(callId)`, and only reaches
+ * `sweepPcpUnfiledCall` much later behind a dynamic import. Across that whole
+ * window the metadata is still present, so a handoff write that fails inside
+ * it would read the call as live and dial a caller who has already gone.
+ *
+ * This is set SYNCHRONOUSLY at the top of that teardown, before any await, so
+ * there is no window between the call ending and the dial being refused.
+ *
+ * Bounded rather than unbounded: the sweep clears its own id, and a size cap
+ * catches any path that ends a call without one.
+ */
+const endedPcpCalls = new Set<string>();
+
+/** Record that this PCP call is over. Call it synchronously, first thing. */
+export function markPcpCallEnded(callId: string): void {
+  if (!callId) return;
+  endedPcpCalls.add(callId);
+  if (endedPcpCalls.size > 500) {
+    // Oldest-first: Set preserves insertion order.
+    for (const id of endedPcpCalls) {
+      endedPcpCalls.delete(id);
+      if (endedPcpCalls.size <= 250) break;
+    }
+  }
+}
+
+/** Is this call still up? False the moment teardown starts. */
+function pcpCallIsLive(callId: string): boolean {
+  return !endedPcpCalls.has(callId) && pcpCallMetadata.has(callId);
+}
+
+/**
  * THE HANGUP FALLBACK — what makes "file later" safe to do at all.
  *
  * Blocking a ticket until we know who is calling, who it is about and how to
@@ -1197,5 +1236,6 @@ export async function sweepPcpUnfiledCall(callId: string): Promise<void> {
     console.error('[PCP] SWEEP failed (call already ended):', e);
   } finally {
     pcpDirector.clear(callId);
+    endedPcpCalls.delete(callId);
   }
 }

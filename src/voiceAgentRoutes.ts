@@ -46,7 +46,7 @@ import {
   urgentTransferFailureLine,
 } from './services/handoffPolicy';
 import { buildPcpTransferBriefing, buildWarmTransferScript } from './services/warmTransferBriefing';
-import { pcpAgentConfig } from './agents/pcpAgent';
+import { pcpAgentConfig, markPcpCallEnded } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
 import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
@@ -4583,6 +4583,12 @@ async function observeCall(
     throw error;
   } finally {
     abortedPcpHandoffs.add(callId);
+    // SYNCHRONOUS, and it must stay above the await below. handoff_to_pcp
+    // refuses to dial once this is set; the sweep that drops the call's
+    // metadata does not run until much later in this same block, and a
+    // handoff write failing in between would otherwise still read the call as
+    // live and ring the PCP team for someone who has hung up (Codex, PR #273).
+    markPcpCallEnded(callId);
     await cancelActiveOfficeLegs(callId);
     setTimeout(() => abortedPcpHandoffs.delete(callId), 10 * 60_000);
     // Azul scheduling: stop the holding heartbeat, drop the transfer hook +
