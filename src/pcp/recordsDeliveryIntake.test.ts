@@ -195,7 +195,17 @@ describe('the delivery gate cannot be walked around', () => {
     const filed = await call(agent, 'handle_patient_medical_records_request', { narrative: 'Records.' });
     expect(filed.success).toBe(true);
     const blob = JSON.stringify((ticketing.createPcpTicket.mock.calls as any[])[0][0]);
-    expect(blob, 'the ticket must say the destination is unknown').toMatch(/NOT captured/i);
+    /**
+     * "NOT CHOSEN", not "not captured" — and the distinction is the staffer's,
+     * not ours. `ticketDeliveryNote` writes three different sentences because
+     * three different things happen: nobody was asked, they were asked and
+     * declined, or a route was named without a destination. A clerk reading
+     * "not captured" cannot tell whether to ring the requester back or whether
+     * they already refused. This assertion originally pinned the literal
+     * "NOT captured", which was the wording for a case this test is not.
+     */
+    expect(blob, 'the ticket must say the requester declined to choose').toMatch(/NOT chosen/i);
+    expect(blob, 'and that they were asked, so nobody re-asks blindly').toMatch(/did not specify/i);
   });
 
   it('never asks for a destination once the method is unspecified', async () => {

@@ -11,10 +11,7 @@ import {
   PCP_FACILITY_TYPES,
   PROFESSIONAL_FIELDS,
   PATIENT_INTAKE_ORDER,
-  PROMPTS as DIRECTOR_PROMPTS,
   PCP_RECORDS_DELIVERY_METHODS,
-  DESTINATION_PROMPTS,
-  deliveryDestinationNeeded,
   pcpDirector,
   type PcpConversationState,
 } from '../pcp/director';
@@ -27,6 +24,13 @@ import {
   type PcpVerificationStatus,
 } from '../pcp/policy';
 import { refusePcp } from '../pcp/refusals';
+import {
+  deliveryAskFor,
+  isRecordsRequest,
+  spokenDeliveryLine,
+  syncDirectorFactsToLedger,
+  ticketDeliveryNote,
+} from '../pcp/recordsDelivery';
 import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
 import { submitPcpTicket, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
@@ -575,6 +579,27 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         }
       }
       pcpDirector.update(callId, facts);
+      /**
+       * THE OTHER DELIVERY SYSTEM HAS TO HEAR ABOUT THIS. Codex P1, PR #273.
+       *
+       * `gateBeforeExecution` has enforced its own records-delivery rule since
+       * 2026-08-07, out of the call-facts ledger, and it runs BEFORE this
+       * agent's tool bodies. Left unsynchronised it defaults the method to fax
+       * and blocks on a fax number, so a caller choosing mail — or taking the
+       * `'unspecified'` escape — is asked for a fax forever and the block
+       * budget never advances, because the handler that owns it never runs.
+       *
+       * It carries the caller's organisation across as well, because the same
+       * gate refuses on a missing `medicalGroup` — fixing one half of a
+       * disagreement between two systems is not fixing it.
+       *
+       * Awaited rather than fired-and-forgotten: the very next tool call can be
+       * the filing, and a sync that lands after it is a sync that did nothing.
+       * It writes only into a ledger that already exists (see that module for
+       * why creating one would be a worse bug) and swallows its own errors, so
+       * this cannot throw into the intake.
+       */
+      await syncDirectorFactsToLedger(callId, pcpDirector.get(callId));
       return pcpDirector.next(callId);
     },
   });
@@ -866,6 +891,39 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         };
       }
 
+      /**
+       * THE THIRD DOOR TO A RECORDS FILING. Codex P1, PR #273.
+       *
+       * A professional call already classified `patient_medical_records_request`
+       * can reach `create_pcp_task` instead of the records tool — the prompt
+       * prefers the records tool, and a prompt preference is not a structural
+       * guard. `ticketReadiness` above deliberately excludes the delivery
+       * fields, so without this the request files with nowhere to send it, and
+       * the whole point of asking was to stop exactly that.
+       *
+       * Placed AFTER the patient branch on purpose. A patient asking for their
+       * own records leaves through `file_records_ticket`, which carries the
+       * CAP-compliant `deliver_to` gate; asking here as well would put the same
+       * question to them twice, which is the complaint this line keeps being
+       * corrected for. This gate is for the path that reaches the PCP endpoint.
+       *
+       * Shares `ticketBlocksUsed` with every other gate on this call, so a
+       * caller who will not answer cannot be held forever — the floor in
+       * ticketRequirements.ts, not a second budget beside it.
+       */
+      const deliveryAsk = deliveryAskFor(state);
+      if (deliveryAsk && ticketBlocksUsed < MAX_BLOCKS) {
+        ticketBlocksUsed += 1;
+        return refusePcp(`missing_required_field:${deliveryAsk.field}`, {
+          say: deliveryAsk.prompt,
+          guidance:
+            'NOT AN ERROR — say nothing about a system or a problem. This is a records request and we cannot send ' +
+            `records without knowing where they go. Ask: "${deliveryAsk.prompt}" then call this tool again. ` +
+            "If the caller does not know or will not say, record recordsDeliveryMethod as 'unspecified' and file — " +
+            'the ticket will say so.',
+        });
+      }
+      if (isRecordsRequest(state)) narrative = `${narrative}${ticketDeliveryNote(state)}`;
       const response = await submitPcpTicket(
         buildPayload(metadata, state, disposition, narrative, urgency, undefined, failureInformation, missing),
       );
@@ -1162,14 +1220,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        */
       {
         const { state: deliveryState } = ticketState(callId);
-        const deliveryAsk = !deliveryState.recordsDeliveryMethod
-          ? { field: 'recordsDeliveryMethod', prompt: DIRECTOR_PROMPTS.recordsDeliveryMethod }
-          : deliveryDestinationNeeded(deliveryState) && !deliveryState.recordsDeliveryDestination
-            ? {
-                field: 'recordsDeliveryDestination',
-                prompt: DESTINATION_PROMPTS[deliveryState.recordsDeliveryMethod!],
-              }
-            : null;
+        const deliveryAsk = deliveryAskFor(deliveryState);
         if (deliveryAsk && ticketBlocksUsed < MAX_BLOCKS) {
           ticketBlocksUsed += 1;
           return refusePcp(`missing_required_field:${deliveryAsk.field}`, {
@@ -1188,12 +1239,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * the narrative rather than added to the API payload: the ticket schema
        * has no field for it, and inventing one would need the other team.
        */
-      if (state.recordsDeliveryMethod) {
-        narrative = `${narrative}\n\nDeliver by ${state.recordsDeliveryMethod.toUpperCase()}` +
-          (state.recordsDeliveryDestination ? ` to ${state.recordsDeliveryDestination}.` : ' — destination NOT captured.');
-      } else {
-        narrative = `${narrative}\n\nDelivery method NOT captured — ask the requester before sending anything.`;
-      }
+      narrative = `${narrative}${ticketDeliveryNote(state)}`;
       const response = await submitPcpTicket(
         buildPayload(metadata, state, 'CREATE_TASK', narrative, 'high', undefined, 'patient_medical_records_request_isolated', missing),
       );
@@ -1211,10 +1257,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       if (!response.success) {
         return { ...response, recordsPathwayUsed: false, isolatedFromPcpPurposes: true };
       }
-      const deliveryLine = state.recordsDeliveryMethod
-        ? ` Confirm we will send them by ${state.recordsDeliveryMethod}` +
-          (state.recordsDeliveryDestination ? ` to ${state.recordsDeliveryDestination}.` : '.')
-        : '';
+      const deliveryLine = spokenDeliveryLine(state);
       return {
         ...response,
         recordsPathwayUsed: false,
