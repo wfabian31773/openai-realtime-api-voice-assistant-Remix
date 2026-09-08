@@ -913,7 +913,38 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const initial = await submitPcpTicket(buildPayload(metadata, handoffState, 'HAND_OFF', narrative, urgency, {
         requested: true, requestedAt, attempted: false, finalStatus: 'REQUESTED',
       }, undefined, missing));
-      if (!initial.success) return refusePcp('durable_ticket_required_before_handoff');
+      /**
+       * THE PRECONDITION IS "THE REQUEST IS ON RECORD" — NOT "THIS WRITE
+       * RETURNED 200". CAa37f1a42, 2026-09-04 16:11.
+       *
+       * A surgery-center coordinator asked for a representative, was told
+       * "give me one moment while I connect you", and was connected to nobody.
+       * The handoff write failed three times; create_pcp_task then filed
+       * PCP-57486; and the gate below still refused, because it was reading
+       * its OWN write rather than the invariant it exists to protect. The
+       * request was durable and the caller was held back anyway.
+       *
+       * The failing write was the ticket API rejecting every HAND_OFF payload
+       * — a strict schema that did not declare `dispositionGrantedByExplicitAsk`,
+       * the field attached ONLY when a caller explicitly asks for a person.
+       * That is fixed on the ticketing app, which makes this path rare rather
+       * than impossible: any future write failure lands here the same way.
+       *
+       * AUTOMATE is deliberately not durable. It records a disposition and
+       * files nothing — the ticket API returns before inserting — so treating
+       * "a disposition was recorded" as "a ticket exists" would dial a caller
+       * whose request is written down nowhere.
+       */
+      const requestIsOnRecord =
+        state.dispositionRecorded === 'CREATE_TASK' || state.dispositionRecorded === 'HAND_OFF';
+      if (!initial.success && !requestIsOnRecord) {
+        return refusePcp('durable_ticket_required_before_handoff');
+      }
+      if (!initial.success) {
+        console.warn(
+          `[PCP] handoff ticket write failed but the request is already durable (${state.dispositionRecorded}) — dialling`,
+        );
+      }
 
       escalationDetailsMap.set(callId, {
         agentSlug: 'pcp',

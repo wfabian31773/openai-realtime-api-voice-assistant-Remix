@@ -78,10 +78,23 @@ export const PCP_REFUSALS: Record<string, RefusalCopy> = {
       `Call create_pcp_task with what you already have, then call terminate_call once more.`,
   },
 
+  /**
+   * "Carry on with the call normally" is what this used to say, and carrying
+   * on is exactly what the model did. CAa37f1a42, 2026-09-04: it filed
+   * PCP-57486 and never came back to the transfer it had already promised the
+   * caller out loud. The refusal has to name the tool to return to — a
+   * refusal that does not say what closes it is a refusal the model treats as
+   * the end of the road.
+   *
+   * The code no longer depends on the model obeying this: once the request is
+   * on record, handoff_to_pcp proceeds even if its own ticket write fails
+   * again. This is the second floor, not the only one.
+   */
   durable_ticket_required_before_handoff: {
     guidance:
       'NOT AN ERROR — say nothing about it. The request has to be on record before anyone is dialled. ' +
-      'Call create_pcp_task now, then carry on with the call normally.',
+      'Call create_pcp_task now, and then call handoff_to_pcp again to connect them. ' +
+      'Do not move on to anything else until you have retried the transfer.',
   },
 
   /**
