@@ -154,3 +154,92 @@ describe('the refusal tells the agent to come back to the transfer', () => {
     expect(guidance, 'the model must be told to resume the transfer').toMatch(/handoff_to_pcp/);
   });
 });
+
+/**
+ * THE RACE THIS FIX OPENED, and why the invariant read is not enough on its own.
+ * Codex P1 on PR #273.
+ *
+ * `sweepPcpUnfiledCall` runs at teardown when the caller hangs up. It reads the
+ * SAME live director state this tool holds — `pcpDirector.get()` returns the
+ * stored object, not a copy — files "CALLER HUNG UP BEFORE THE REQUEST WAS
+ * COMPLETE", records CREATE_TASK on it, and clears the director.
+ *
+ * So a caller who drops while the handoff's ticket write is in flight leaves a
+ * recorded disposition behind. Reading it AFTER the await would see a request
+ * "on record", proceed, and dial the PCP team for someone who is no longer on
+ * the line — a staffer picking up to silence. Worse than the bug being fixed.
+ *
+ * The handoff callback's own disconnect check does not save us: on the
+ * sequential PCP path `voiceAgentRoutes.ts:1501` clears `abortedPcpHandoffs`
+ * before the dial loop, wiping the evidence of the disconnect it is meant to
+ * detect. The dial has to be prevented here, before the callback is reached.
+ *
+ * Two guards, because they fail differently:
+ *   - the disposition is SNAPSHOT before the write, so a record created by
+ *     teardown during the await cannot satisfy the gate;
+ *   - the call must still be live, so a caller who drops during a legitimate
+ *     retry (the record predates the await) is not dialled either.
+ */
+describe('a caller who hangs up mid-write is never dialled', () => {
+  it('does not dial when teardown records the disposition during the ticket write', async () => {
+    const { sweepPcpUnfiledCall } = await import('../agents/pcpAgent');
+    const { agent, callId, dialled } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE);
+
+    // The interleaving, made deterministic: the caller drops while the
+    // HAND_OFF write is in flight, so the sweep runs before it resolves.
+    ticketing.createPcpTicket.mockImplementation(async (payload: any) => {
+      if (payload.disposition === 'HAND_OFF') {
+        await sweepPcpUnfiledCall(callId);
+        return { success: false, error: 'Validation failed' };
+      }
+      return { success: true, ticketNumber: 'PCP-57486' };
+    });
+
+    const r = await call(agent, 'handoff_to_pcp', { narrative: ASKED });
+
+    // The sweep really did record a disposition on the live state object —
+    // otherwise this test would pass for the wrong reason.
+    expect(ticketing.createPcpTicket).toHaveBeenCalledWith(
+      expect.objectContaining({ disposition: 'CREATE_TASK' }),
+    );
+    expect(dialled, 'the caller is gone — nobody may be dialled').not.toHaveBeenCalled();
+    expect(r.success).toBe(false);
+  });
+
+  it('does not dial when the caller drops mid-write on a LEGITIMATE retry', async () => {
+    /**
+     * The interleaving the snapshot alone does not close, and the reason
+     * liveness is a second guard rather than a belt-and-braces flourish.
+     *
+     * Here the record is genuine and predates the write — create_pcp_task
+     * filed on an earlier turn — so the snapshot says "on record" quite
+     * correctly. The caller then drops while the handoff write is in flight.
+     * Without a liveness check the gate is satisfied by a true fact about a
+     * call that is over, and the PCP team is dialled for nobody.
+     */
+    const { sweepPcpUnfiledCall } = await import('../agents/pcpAgent');
+    const { agent, callId, dialled } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE);
+
+    const filed = await call(agent, 'create_pcp_task', { narrative: ASKED });
+    expect(filed.success).toBe(true);
+    expect(pcpDirector.get(callId).dispositionRecorded).toBe('CREATE_TASK');
+
+    // The caller hangs up DURING the handoff's write, after the snapshot was
+    // taken. The sweep files nothing (a disposition is already recorded) but
+    // still drops the call's metadata, which is what marks the call as over.
+    ticketing.createPcpTicket.mockImplementation(async (payload: any) => {
+      if (payload.disposition === 'HAND_OFF') {
+        await sweepPcpUnfiledCall(callId);
+        return { success: false, error: 'Validation failed' };
+      }
+      return { success: true, ticketNumber: 'PCP-57486' };
+    });
+
+    const r = await call(agent, 'handoff_to_pcp', { narrative: ASKED });
+
+    expect(dialled, 'the call has ended — nobody may be dialled').not.toHaveBeenCalled();
+    expect(r.success).toBe(false);
+  });
+});

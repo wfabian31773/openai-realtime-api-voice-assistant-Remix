@@ -935,9 +935,42 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * "a disposition was recorded" as "a ticket exists" would dial a caller
        * whose request is written down nowhere.
        */
+      /**
+       * ON RECORD **AND** STILL ON THE LINE. Codex P1 on PR #273.
+       *
+       * A recorded disposition alone is not enough to dial on, because
+       * teardown writes one. `pcpDirector.get()` hands back the stored object
+       * rather than a copy, and `sweepPcpUnfiledCall` — which runs when the
+       * caller hangs up — files "CALLER HUNG UP BEFORE THE REQUEST WAS
+       * COMPLETE" and records CREATE_TASK on that very object. A caller who
+       * drops while this write is in flight would therefore satisfy the gate
+       * and get the PCP team dialled for nobody: a staffer picking up to
+       * silence, which is worse than the bug this gate change fixes.
+       *
+       * `pcpCallMetadata` is the liveness signal because the sweep deletes it
+       * as its very first statement, before it can await anything — so it is
+       * already false by the time any disposition it writes becomes visible.
+       *
+       * It has to be checked HERE rather than left to the handoff callback:
+       * on the sequential PCP path `voiceAgentRoutes.ts:1501` clears
+       * `abortedPcpHandoffs` before the dial loop, wiping the evidence of the
+       * very disconnect that check exists to detect.
+       *
+       * Reading the live field rather than a snapshot is deliberate. A
+       * snapshot taken before the write was tried first and mutation-tested
+       * out: it distinguished no case liveness does not already cover, and it
+       * would have refused a legitimate concurrent create_pcp_task filing on
+       * a call that is still up.
+       */
       const requestIsOnRecord =
         state.dispositionRecorded === 'CREATE_TASK' || state.dispositionRecorded === 'HAND_OFF';
-      if (!initial.success && !requestIsOnRecord) {
+      const callStillLive = pcpCallMetadata.has(callId);
+      if (!initial.success && !(requestIsOnRecord && callStillLive)) {
+        if (requestIsOnRecord && !callStillLive) {
+          console.warn(
+            `[PCP] handoff ticket write failed and the call has ended — NOT dialling (${callId})`,
+          );
+        }
         return refusePcp('durable_ticket_required_before_handoff');
       }
       if (!initial.success) {
