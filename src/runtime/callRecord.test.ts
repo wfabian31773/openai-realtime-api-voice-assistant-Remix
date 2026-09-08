@@ -489,6 +489,91 @@ describe("persistTransferOutcome — the ONLY writer of this column", () => {
 
     expect(ok).toBe(false);
   });
+
+  it("a SLOW earlier attempt cannot overtake a later one", async () => {
+    /**
+     * Codex found this on the single-writer redesign, and it is real.
+     *
+     * A call can settle twice — attempt one fails, attempt two connects — and
+     * each settlement fires its write WITHOUT awaiting, so the caller's path
+     * is never held behind a database round trip. Two round trips in flight
+     * can COMPLETE in either order, and if the earlier attempt's failure lands
+     * last it overwrites the success: the row would say a caller who reached a
+     * human did not.
+     *
+     * The first write is held open deliberately, then released, so the test
+     * fails if the second is allowed past it.
+     */
+    const landed: string[] = [];
+    let releaseFirst: () => void = () => undefined;
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const failure = { ...SETTLED, outcome: "no_answer" as const, attempt: 1 };
+    const success = { ...SETTLED, outcome: "accepted" as const, attempt: 2 };
+
+    const first = persistTransferOutcome("CAtwo", failure, async (_sid, outcome) => {
+      await firstHeld;
+      landed.push(outcome.outcome);
+    });
+    const second = persistTransferOutcome("CAtwo", success, async (_sid, outcome) => {
+      landed.push(outcome.outcome);
+    });
+
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(landed, "the success must be the last thing the row sees").toEqual([
+      "no_answer",
+      "accepted",
+    ]);
+  });
+
+  it("a failed predecessor does not strand the write behind it", async () => {
+    // One transient database error must not block every later write for that
+    // call — the chain is joined through a swallowed rejection.
+    const landed: string[] = [];
+
+    const first = persistTransferOutcome("CAfails", SETTLED, async () => {
+      throw new Error("connection terminated unexpectedly");
+    });
+    const second = persistTransferOutcome("CAfails", SETTLED, async (_sid, outcome) => {
+      landed.push(outcome.outcome);
+    });
+
+    expect(await first, "its own caller still learns it failed").toBe(false);
+    expect(await second).toBe(true);
+    expect(landed).toEqual(["accepted"]);
+  });
+
+  it("leaves nothing behind once a call's writes are done", async () => {
+    // The map holds only the TAIL. Without the cleanup it grows with call
+    // volume — a leak that no behavioural test would ever notice, which is
+    // why it is asserted directly.
+    const { transferOutcomeWriteDepth } = await import("./callRecord");
+    await persistTransferOutcome("CAdone", SETTLED, async () => undefined);
+
+    expect(transferOutcomeWriteDepth()).toBe(0);
+  });
+
+  it("different calls are not serialised behind each other", async () => {
+    // Per-call chaining, not a global lock: a slow write on one call must not
+    // hold up an unrelated one.
+    let releaseA: () => void = () => undefined;
+    const aHeld = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+
+    const a = persistTransferOutcome("CAslow", SETTLED, async () => {
+      await aHeld;
+    });
+    const b = await persistTransferOutcome("CAfast", SETTLED, async () => undefined);
+
+    expect(b, "CAfast completed while CAslow was still open").toBe(true);
+    releaseA();
+    expect(await a).toBe(true);
+  });
 });
 
 describe("teardown does not touch transfer_outcome", () => {

@@ -463,20 +463,61 @@ async function defaultUpsert(
  *
  * Never throws. A lost telemetry update must not surface anywhere near a call.
  */
+/**
+ * The tail of each call's write chain, so two settlements cannot land out of
+ * order. Keyed per call, so different calls still write in parallel.
+ */
+const transferOutcomeWrites = new Map<string, Promise<unknown>>();
+
+/** Test hook: how many calls still have a write chain open. Must return to 0. */
+export function transferOutcomeWriteDepth(): number {
+  return transferOutcomeWrites.size;
+}
+
 export async function persistTransferOutcome(
   callSid: string,
   transferOutcome: RuntimeTransferOutcome,
   update: (callSid: string, outcome: RuntimeTransferOutcome) => Promise<void> = defaultTransferOutcomeUpdate,
 ): Promise<boolean> {
+  /**
+   * SERIALISED PER CALL. Codex found this race on the single-writer redesign.
+   *
+   * A call can settle a transfer twice — attempt one fails, attempt two
+   * connects — and each settlement fires its write without awaiting, so the
+   * caller's path is never held behind a database round trip. Two round trips
+   * in flight can COMPLETE in either order, and if the earlier attempt's
+   * failure lands last it overwrites the success. The row would then say a
+   * caller who reached a human did not.
+   *
+   * Chaining per call fixes completion order. Enqueue order is already
+   * correct: attempts are strictly sequential — attempt two cannot settle
+   * until attempt one has returned to the agent — so the writes are queued in
+   * the order the outcomes happened, and this only stops them overtaking.
+   *
+   * A FAILED PREDECESSOR MUST NOT BLOCK ITS SUCCESSOR: the chain is joined
+   * through a swallowed rejection, so one transient database error does not
+   * strand every later write for that call. Its own caller still learns it
+   * failed, from the return value.
+   *
+   * The map holds only the TAIL, and drops it when this write is still the
+   * tail — so a finished call leaves nothing behind and the map cannot grow
+   * with call volume.
+   */
+  const prior = transferOutcomeWrites.get(callSid) ?? Promise.resolve();
+  const mine = prior.then(() => update(callSid, transferOutcome));
+  const queued = mine.catch(() => undefined);
+  transferOutcomeWrites.set(callSid, queued);
   try {
-    await update(callSid, transferOutcome);
+    await mine;
     return true;
   } catch (error) {
     console.error(
-      `[voice-runtime] late transfer_outcome update failed for ${callSid}:`,
+      `[voice-runtime] transfer_outcome update failed for ${callSid}:`,
       error instanceof Error ? error.message : String(error),
     );
     return false;
+  } finally {
+    if (transferOutcomeWrites.get(callSid) === queued) transferOutcomeWrites.delete(callSid);
   }
 }
 
