@@ -26,16 +26,13 @@
  * two-second `talkSeconds` is what tells those apart later, and it can only do
  * that if the two are not already collapsed into one word here.
  */
-import {
-  BLIND_TRANSFER_NO_ANSWER,
-  type BlindTransferRequest,
-} from "./blindTransfer";
+import { BLIND_TRANSFER_NO_ANSWER } from "./blindTransfer";
 import {
   blindTransferVoice,
   buildDialCompletedTwiml,
   buildDialFailedTwiml,
 } from "./transferTwilioOps";
-import type { RuntimeTransferOutcome } from "./transferOutcomeLog";
+import type { RuntimeTransferOutcome, TransferAttemptId } from "./transferOutcomeLog";
 import { checkTwilioSignature, type WebhookRequest, type WebhookResponse } from "./voiceWebhook";
 
 const XML = "text/xml";
@@ -47,7 +44,7 @@ function xml(body: string, status = 200): WebhookResponse {
 /** What the runtime remembers about a blind transfer while its dial runs. */
 export interface PendingBlindDial {
   /** So a later attempt on the same call does not overwrite this one's record. */
-  attemptId: number;
+  attemptId: TransferAttemptId;
   destination: string;
   /** When the redirect went out, for the ring calculation. */
   redirectedAtMs: number;
@@ -65,7 +62,7 @@ export interface DialResultDeps {
   record: (
     callerCallSid: string,
     outcome: Omit<RuntimeTransferOutcome, "pipeline" | "attempt" | "at">,
-    attemptId: number,
+    attemptId: TransferAttemptId,
   ) => void;
   now?: () => number;
   log?: (line: string) => void;
@@ -173,6 +170,3 @@ export function handleBlindDialResult(
     connected ? buildDialCompletedTwiml() : buildDialFailedTwiml(BLIND_TRANSFER_NO_ANSWER, voice),
   );
 }
-
-/** Re-exported so the runtime's request shape stays in one place. */
-export type { BlindTransferRequest };
