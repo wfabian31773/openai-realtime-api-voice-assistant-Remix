@@ -24,6 +24,7 @@ import {
   type PcpVerificationStatus,
 } from '../pcp/policy';
 import { refusePcp } from '../pcp/refusals';
+import { asksForAPerson } from '../pcp/explicitAsk';
 import {
   deliveryAskFor,
   isRecordsRequest,
@@ -963,10 +964,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // "caller from the front desk asking about a referral" is not a request
       // to be transferred, and dialing the queue on it would be worse than
       // the bug being fixed (review 2026-08-09).
-      const askedForAPerson =
-        /\b(speak|talk)\b\s+(?:to|with)\b[^.]{0,25}\b(person|human|someone|somebody|rep|representative|agent|front desk|receptionist)\b/i.test(narrative) ||
-        /\b(connect|transfer|put me through|put me|get me)\b[^.]{0,25}\b(person|human|someone|somebody|rep|representative|agent|front desk|office|team)\b/i.test(narrative) ||
-        /\b(live person|real person|actual person|human being)\b/i.test(narrative);
+      const askedForAPerson = asksForAPerson(narrative);
       if (askedForAPerson) pcpDirector.markCallerRequestedHuman(callId);
       // A professional who asked for a person is not blocked by a missing
       // classification (operator 2026-08-09). The purpose is still recorded
