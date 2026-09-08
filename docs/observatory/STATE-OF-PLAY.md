@@ -468,6 +468,173 @@ full detail per commit. In short:
 
 ---
 
+## 11. The runtime regression harness — first run with a corpus (written 09-03)
+
+Wayne, 09-03: *"run the harness for the runtime agents."* The harness is
+`scripts/run-runtime-regression.ts` over `src/runtime/regression/`, fed by
+`scripts/build-replay-corpus.ts` (merged in #258). This is what a run needs,
+what was proven, and what was not.
+
+### What a run needs — all of it, or the numbers measure the environment
+
+| Variable | Why | Missing it looks like |
+|---|---|---|
+| `DATABASE_URL` (Hub, pooler `:6543`) | `lookup_patient` reads `Schedule` in-process; the corpus builder reads `call_logs` | `[ScheduleLookup] Error … Connection terminated` on every call; agent says "I don't have you on file", never files |
+| `DOMAIN` (the published `.replit.app` host) | tools build their base URL from it; the fallback is `localhost:8000` | every tool `ECONNREFUSED 127.0.0.1:443` (lost a whole smoke run to this) |
+| `TICKETING_SYSTEM_URL`, `TICKETING_API_KEY` | `resolve_location` and `check_open_tickets` go through `ticketingApiClient`, which **throws** without them | `tool_failed` on the office lookup; optical cannot resolve an office |
+| `VOICE_TOOL_API_KEY`, `XAI_API_KEY` | tool surface auth; the model | — |
+| `XAI_REGRESSION_MODEL` | a **chat** model with tool calling, not `grok-voice-*` | script exits at launch, by design |
+| `OPENAI_API_KEY` (any value) | `CallGradingService`'s constructor builds an OpenAI client; the deterministic graders never call it | import throws |
+
+Verified 09-03: `grok-4.6` and `grok-4.20-0309-reasoning` both answer the
+harness's request shape with a `tool_calls` entry. The runtime's voice model is
+`grok-voice-think-fast-2.0` with reasoning on; `grok-4.6` is the closest chat
+surface and is the recommendation. **No recorded decision on the model exists;
+that is Wayne's to make.**
+
+### Proven on 09-03 (offline, no patient dialled)
+
+- `src/runtime/regression` unit tests: 38 pass. `realLanes.test.ts` with
+  `RUNTIME_LANE_SMOKE=1`: all five served lanes bind (optical 5 tools /
+  ~1,287 prompt tokens, surgery 5 / ~2,636, tech 5 / ~1,508, records 5 /
+  ~1,764, answering-service 4 tools).
+- The corpus builder's selection, run against the real 2026-09-02
+  `call_logs` rows: **341 conversations from 484 calls** — optical 54 of 81,
+  surgery 84 of 121, tech 149 of 188, records 26 of 31; skipped 3 no-transcript,
+  111 agent-only, 29 caller said ≤ 6 words. Identical to the #258 numbers.
+- The CLI end to end on one optical call: 16 model turns, both sides graded
+  by the production referee, `results.json` + `summary.json` written. That run
+  is a **plumbing proof only** (see below), not a number.
+
+### Not proven, and why: the cloud sandbox cannot reach Postgres
+
+The Claude Code container carries HTTPS only; raw TCP to `:5432`/`:6543`
+times out. So `lookup_patient` failed on every turn of the plumbing run and
+the agent replayed as a cold, never-verifying agent — exactly the confound the
+table above warns about. **No regression numbers were produced. Run it on
+Replit**, where the secrets and the database are:
+
+```
+npx tsx scripts/build-replay-corpus.ts --agents optical --from 2026-09-02 \
+  --to 2026-09-02 --out replay-corpus/2026-09-02-optical
+XAI_REGRESSION_MODEL=grok-4.6 npx tsx scripts/run-runtime-regression.ts \
+  --slug optical --corpus replay-corpus/2026-09-02-optical \
+  --out replay-out/optical-2026-09-02 --limit 54
+```
+
+Repeat per lane with `--limit` set to the manifest's `calls` (surgery 84,
+tech 149, records 26). Baselines for the delta are in the 09-03 handoff:
+optical 32/54 critical, surgery 30/84, tech 79/149, records 14/26.
+
+### Traps found on the way — do not re-learn these
+
+1. **One corpus per lane.** A corpus row has no `agent_used`, and the runner
+   replays every row in the directory under the `--slug` it is given. The
+   builder's own usage example showed a four-lane corpus replayed as optical;
+   corrected in this commit.
+2. **The runner defaults `--limit` to 25.** Optical has 54 conversations;
+   omit the flag and half the lane is silently skipped.
+3. **`[DB] Connected to Supabase (direct)` proves nothing.** `server/db.ts:105`
+   prints it right after constructing the pool, before any socket opens. It
+   printed in a process that could not reach the database at all.
+4. **"Nothing is written to the database" is not quite true.** The tool
+   timeline flush runs an `UPDATE call_logs … WHERE call_sid = 'regression'`
+   at the end of each replayed call. Zero rows match, so it is harmless, but
+   it is a write attempt against production and it will show in the log.
+5. **`call_logs` and `call_turns` are readable — and writable — with the
+   public anon key.** Row-level security is OFF on both, no policies, and the
+   `anon` role holds INSERT/SELECT/UPDATE/DELETE/TRUNCATE. The publishable key
+   ships in any client. Full transcripts, over public REST, to anyone holding
+   it. Found because that is how the corpus was pulled from the sandbox.
+   **Wayne's call; not changed.**
+
+### The first real run — optical, from Replit (later on 09-03)
+
+Run inside the Replit workspace by the Replit Agent on my request (the cloud
+sandbox cannot reach Postgres). **In the workspace, `DATABASE_URL` is the
+development database, not the Hub** — the first build matched zero rows for a
+day the Hub has 81 optical calls on. Every harness command on Replit needs the
+Hub URL substituted in:
+
+```
+DATABASE_URL="$PRODUCTION_DATABASE_URL" npx tsx scripts/build-replay-corpus.ts …
+DATABASE_URL="$PRODUCTION_DATABASE_URL" XAI_REGRESSION_MODEL=grok-4.6 npx tsx scripts/run-runtime-regression.ts …
+```
+
+Corpus: 54 conversations from 81 rows (same as the sandbox count). Model
+`grok-4.6`. 96 minutes wall clock, 598 model turns (median 9 per call, max
+40). **Zero** environment errors in the console: no connection, configuration
+or tool-failure lines. The delta is the agent's, not the environment's.
+
+| | old core (re-graded) | runtime optical agent (replayed) |
+|---|---|---|
+| calls with a critical failure | **32 / 54** | **39 / 54** |
+| per call | | 11 better, 25 same, 18 worse |
+| filed a ticket | **41 / 54** | **1 / 54** |
+
+| grader (critical) | old | new |
+|---|---|---|
+| callback_fields_completeness | 28 | 1 |
+| question_repetition | 4 | **33** |
+| human_request_deflection | 5 | 9 |
+| actionable_request_needs_ticket | 0 | 2 |
+
+**Read the filing row first.** 53 of 54 replays never called
+`file_optical_ticket`. That single fact explains most of the table: the
+callback-fields grader cannot fail on a call that filed nothing (so the 28→1
+"improvement" and most of the 11 "better" verdicts are an artifact of not
+filing), and question_repetition at 33 is the agent re-asking for the same
+missing field until the recorded caller lines ran out.
+
+**Which field.** From the redacted last agent line of each replay: 27 of 54
+ended still asking for an identity field, and the ask that dominates is the
+**ten-digit callback number** — asked 5 to 12 times in a dozen calls, and the
+closing line in roughly 25. The old core rarely asked for it: it confirms the
+caller-ID number ("is the number ending in 4254 the best one?"), so the
+recorded caller never says it, so the replayed agent never gets it, so it
+never files. Standing instruction 12 (confirm the callback number before
+filing) is doing exactly what it should; the harness is starving it.
+
+**Why the harness starves it.** `run-runtime-regression.ts:134` binds the lane
+once with `callerPhone: ""`, and the corpus carries no number — #258 kept it
+out on the stated ground that *"the Operations Hub call_logs table has no phone
+column at all"*. **That is wrong: `call_logs.from` exists and is E.164 on all
+81 optical rows of 09-02.** The runner's own `RegressionCorpusRow` type
+already declares `from?`; the builder never fills it, and its test bans it.
+
+So this run measures "the optical agent with caller ID stripped", which is a
+call that does not exist in production. **The 39/54 is not a number to act
+on.** It is the harness's first calibration result, and it found the
+instrument's largest error on the first day it had input.
+
+**Fix options — Wayne's call, because #258 made the no-phone rule a
+deliberate PHI control:**
+
+- **(A) synthetic number.** Runner binds each call with a fixed dummy phone.
+  No PHI, one-line change; the agent can confirm "the number you're calling
+  from", but caller-ID pre-context will always miss, so identity stays cold.
+- **(B) carry `from` in the corpus.** Faithful, but writes real numbers into
+  the (git-ignored) corpus files beside the transcripts they already hold.
+- **(C) fetch `from` at run time.** Corpus unchanged; the runner, which
+  already needs the Hub, reads `from` by call SID when it binds each call and
+  never writes it to disk. Faithful replay, same PHI footprint on disk as
+  today. **Recommended.**
+
+Any of them also needs the runner to bind the lane **per call** rather than
+once, because the phone is baked into the tool context at bind time.
+
+What the run *does* say, artifact or not: `human_request_deflection` went 5→9
+on identical caller lines, and two calls ended with an actionable request and
+no ticket that the old core had filed. Worth reading those transcripts (in
+`replay-out/optical-2026-09-02/results.json` on Replit) once the phone gap is
+closed and the run is repeated.
+
+Files on Replit (git-ignored): `replay-out/optical-2026-09-02/{results,summary,breakdown,breakdown2}.json`.
+The two `breakdown*.json` files are PHI-free aggregates written by the Replit
+Agent for this write-up.
+
+---
+
 # 2026-09-03 — the runtime cutover, and the first day of real evidence
 
 Three queue lanes moved off the OpenAI SIP core onto the Grok Media Streams
