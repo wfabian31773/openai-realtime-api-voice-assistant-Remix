@@ -38,7 +38,8 @@
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
 import {
-  takeRuntimeTransferOutcome,
+  ackRuntimeTransferOutcome,
+  peekRuntimeTransferOutcome,
   type RuntimeTransferOutcome,
 } from "./transferOutcomeLog";
 
@@ -200,21 +201,17 @@ export function toCallLogRow(
     Math.round((record.endedAtMs - record.startedAtMs) / 1000),
   );
   /**
-   * PURITY NOTE, because this function is documented as a pure mapping and
-   * this line is the one exception.
+   * PEEKED, NOT CONSUMED — and this function stays pure, which it is
+   * documented to be.
    *
-   * `takeRuntimeTransferOutcome` reads AND deletes, so calling `toCallLogRow`
-   * twice on the same record yields the outcome once. That is deliberate and
-   * matches the delete-on-read the old core uses: the second caller is a retry
-   * or a racing teardown, and `toConflictUpdate` omits an absent outcome
-   * rather than nulling it, so the value the first pass wrote survives.
-   *
-   * The alternative — pass the outcome in as an argument — would put the
-   * collection in `persistCallRecord` and leave this function unable to be
-   * asserted against a real transfer without a database, which is the property
-   * this module was built for.
+   * It was delete-on-read, copying the old core. Codex found what that costs
+   * (P2, PR #273): the read happens while BUILDING the row, so an upsert that
+   * REJECTS has already destroyed the only copy, and the retry this module
+   * exists to support then writes the row without the outcome. The failure
+   * mode was a transient database error — exactly when a retry should save
+   * you. `persistRuntimeCall` acks after a successful write instead.
    */
-  const transferOutcome = takeRuntimeTransferOutcome(record.callSid);
+  const transferOutcome = peekRuntimeTransferOutcome(record.callSid);
   return {
     callSid: record.callSid,
     direction: "inbound",
@@ -316,8 +313,8 @@ export function toCallLogRow(
     /**
      * Collected here rather than written when the transfer settled, because
      * this module is the runtime's ONE writer of this row — see the note on
-     * toConflictUpdate. Delete-on-read, so a teardown that runs twice does not
-     * rewrite what the first pass already stored.
+     * toConflictUpdate. Dropped only once the write lands, so a rejected
+     * upsert leaves it for the retry.
      *
      * Note this is independent of `transferredToHuman`: a transfer that RANG
      * OUT is exactly the case worth recording, and it is not a transfer.
@@ -500,6 +497,10 @@ export async function persistRuntimeCall(
   const row = toCallLogRow(record, identity);
   try {
     await upsert(row, toConflictUpdate(row));
+    // Only now. Acking before the write is what let a transient database
+    // error destroy the outcome the retry was supposed to save (Codex P2,
+    // PR #273).
+    ackRuntimeTransferOutcome(record.callSid);
     return true;
   } catch (error) {
     // Log the failure rather than the record: a transcript in an error log

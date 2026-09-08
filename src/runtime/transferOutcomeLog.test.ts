@@ -24,7 +24,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   recordRuntimeTransferOutcome,
-  takeRuntimeTransferOutcome,
+  peekRuntimeTransferOutcome,
+  ackRuntimeTransferOutcome,
+  newTransferAttemptId,
   clearRuntimeTransferOutcomes,
 } from './transferOutcomeLog';
 import { toRecordedOutcome } from './runtimeTransfer';
@@ -42,9 +44,9 @@ const RANG_OUT = {
 
 describe('the outcome survives from the dial to teardown', () => {
   it('records what the ticket recorded and call_logs did not', () => {
-    recordRuntimeTransferOutcome('CAa2a3a1c1', RANG_OUT);
+    recordRuntimeTransferOutcome('CAa2a3a1c1', RANG_OUT, newTransferAttemptId());
 
-    const stored = takeRuntimeTransferOutcome('CAa2a3a1c1');
+    const stored = peekRuntimeTransferOutcome('CAa2a3a1c1');
 
     expect(stored?.outcome).toBe('no_answer');
     expect(stored?.reason, 'why it failed, not just that it did').toBe('office_no_answer');
@@ -56,20 +58,33 @@ describe('the outcome survives from the dial to teardown', () => {
     expect(stored?.at).toBeTruthy();
   });
 
-  it('is collected once — a second teardown pass gets nothing', () => {
-    // Delete-on-read, the discipline the old core uses. Teardown can run twice
-    // (a retry, a racing socket close); the second pass must not rewrite the
-    // row with a value already written.
-    recordRuntimeTransferOutcome('CAtwice', RANG_OUT);
+  it('SURVIVES a failed write, and is dropped only once the row lands', () => {
+    /**
+     * Codex P2, PR #273. This was delete-on-read, copying the old core — and
+     * the read happens while BUILDING the row, so an upsert that REJECTED had
+     * already destroyed the only copy of the outcome. The retry this module
+     * exists to support then wrote the row without it. The failure mode is a
+     * transient database error, which is exactly when a retry should save you.
+     *
+     * Peek-and-ack keeps the property delete-on-read was protecting — a second
+     * teardown pass after a SUCCESSFUL write finds nothing, and
+     * `toConflictUpdate` omits an absent outcome rather than nulling it — and
+     * drops the cost.
+     */
+    recordRuntimeTransferOutcome('CAretry', RANG_OUT, newTransferAttemptId());
 
-    expect(takeRuntimeTransferOutcome('CAtwice')).toBeTruthy();
-    expect(takeRuntimeTransferOutcome('CAtwice')).toBeUndefined();
+    // Teardown builds the row; the write rejects; nothing is acked.
+    expect(peekRuntimeTransferOutcome('CAretry'), 'the row is built from it').toBeTruthy();
+    expect(peekRuntimeTransferOutcome('CAretry'), 'and the retry still has it').toBeTruthy();
+
+    ackRuntimeTransferOutcome('CAretry');
+    expect(peekRuntimeTransferOutcome('CAretry'), 'gone only once it is durable').toBeUndefined();
   });
 
   it('a call that never dialled stores nothing at all', () => {
     // NULL has to keep meaning "no transfer was attempted", or the column is
     // no more readable than it was when it meant nothing.
-    expect(takeRuntimeTransferOutcome('CAnodial')).toBeUndefined();
+    expect(peekRuntimeTransferOutcome('CAnodial')).toBeUndefined();
   });
 });
 
@@ -89,33 +104,33 @@ describe('a call that tried more than once', () => {
       officeCallSid: 'CAoffice1',
       acceptMethod: 'keypress',
       ringSeconds: 12,
-    });
-    recordRuntimeTransferOutcome('CAwon', RANG_OUT);
+    }, newTransferAttemptId());
+    recordRuntimeTransferOutcome('CAwon', RANG_OUT, newTransferAttemptId());
 
-    const stored = takeRuntimeTransferOutcome('CAwon');
+    const stored = peekRuntimeTransferOutcome('CAwon');
     expect(stored?.outcome, 'the caller reached a human on this call').toBe('accepted');
     expect(stored?.officeCallSid).toBe('CAoffice1');
     expect(stored?.attempt, 'and the later attempt is still counted').toBe(2);
   });
 
   it('otherwise keeps the LAST failure — the one the caller was left with', () => {
-    recordRuntimeTransferOutcome('CAtried', RANG_OUT);
+    recordRuntimeTransferOutcome('CAtried', RANG_OUT, newTransferAttemptId());
     recordRuntimeTransferOutcome('CAtried', {
       outcome: 'declined',
       status: 'DECLINED',
       reason: 'office_declined',
       dialedNumber: '+17149564300',
       ringSeconds: 8,
-    });
+    }, newTransferAttemptId());
 
-    const stored = takeRuntimeTransferOutcome('CAtried');
+    const stored = peekRuntimeTransferOutcome('CAtried');
     expect(stored?.outcome).toBe('declined');
     expect(stored?.attempt, 'two attempts is not the same call as one').toBe(2);
   });
 
   it('counts a single attempt as one', () => {
-    recordRuntimeTransferOutcome('CAonce', RANG_OUT);
-    expect(takeRuntimeTransferOutcome('CAonce')?.attempt).toBe(1);
+    recordRuntimeTransferOutcome('CAonce', RANG_OUT, newTransferAttemptId());
+    expect(peekRuntimeTransferOutcome('CAonce')?.attempt).toBe(1);
   });
 });
 
@@ -129,16 +144,16 @@ describe("'declined' is kept distinct on purpose", () => {
      * today, so extending the vocabulary costs nothing and the lie would have
      * cost the distinction.
      */
-    recordRuntimeTransferOutcome('CAno', RANG_OUT);
+    recordRuntimeTransferOutcome('CAno', RANG_OUT, newTransferAttemptId());
     recordRuntimeTransferOutcome('CAdeclined', {
       outcome: 'declined',
       status: 'DECLINED',
       reason: 'office_declined',
       ringSeconds: 5,
-    });
+    }, newTransferAttemptId());
 
-    expect(takeRuntimeTransferOutcome('CAno')?.outcome).toBe('no_answer');
-    expect(takeRuntimeTransferOutcome('CAdeclined')?.outcome).toBe('declined');
+    expect(peekRuntimeTransferOutcome('CAno')?.outcome).toBe('no_answer');
+    expect(peekRuntimeTransferOutcome('CAdeclined')?.outcome).toBe('declined');
   });
 });
 
@@ -146,10 +161,10 @@ describe('it cannot grow without bound', () => {
   it('evicts oldest-first when teardown never came', () => {
     // A call whose teardown never runs — a crashed process, a lost socket —
     // would otherwise hold its entry forever.
-    for (let i = 0; i < 520; i += 1) recordRuntimeTransferOutcome(`CAleak${i}`, RANG_OUT);
+    for (let i = 0; i < 520; i += 1) recordRuntimeTransferOutcome(`CAleak${i}`, RANG_OUT, newTransferAttemptId());
 
-    expect(takeRuntimeTransferOutcome('CAleak0'), 'the oldest is gone').toBeUndefined();
-    expect(takeRuntimeTransferOutcome('CAleak519'), 'the newest is kept').toBeTruthy();
+    expect(peekRuntimeTransferOutcome('CAleak0'), 'the oldest is gone').toBeUndefined();
+    expect(peekRuntimeTransferOutcome('CAleak519'), 'the newest is kept').toBeTruthy();
   });
 });
 
@@ -211,5 +226,69 @@ describe("the transfer's own result maps onto the stored shape", () => {
     );
 
     expect(recorded.dialedNumber).toBe('+17149564300');
+  });
+});
+
+describe('one attempt that records twice', () => {
+  /**
+   * THE SUCCESS PATH RECORDS AT THE KEYPRESS AND AGAIN AT SETTLE, and it has
+   * to. Codex P1, PR #273: the redirect that follows an accept ends the media
+   * stream, and that close can beat the redirect's own resolution — which is
+   * why `onCallerRedirectStarting` exists. Teardown starts on the close and
+   * synchronously builds the row, so an outcome recorded only when `attempt()`
+   * resolves can land AFTER the row is written: the one transfer worth logging,
+   * lost to a race the surrounding code already knew about.
+   *
+   * Two records, one attempt. The attempt id is what keeps that from becoming
+   * two attempts — and, more importantly, what lets the second record CORRECT
+   * the first.
+   */
+  it('counts as one attempt, not two', () => {
+    const id = newTransferAttemptId();
+    recordRuntimeTransferOutcome('CAaccept', {
+      outcome: 'accepted', status: 'CONNECTED', acceptMethod: 'keypress', ringSeconds: 12,
+    }, id);
+    recordRuntimeTransferOutcome('CAaccept', {
+      outcome: 'accepted', status: 'CONNECTED', dialedNumber: '+17149564300',
+      officeCallSid: 'CAoffice1', acceptMethod: 'keypress', ringSeconds: 13,
+    }, id);
+
+    const stored = peekRuntimeTransferOutcome('CAaccept');
+    expect(stored?.attempt, 'recording twice is not attempting twice').toBe(1);
+    expect(stored?.officeCallSid, 'and the fuller record wins').toBe('CAoffice1');
+  });
+
+  it('lets a redirect that FAILED after the accept correct the record', () => {
+    /**
+     * The half that matters more. When the redirect throws, the caller never
+     * moved — so the provisional `accepted` written a moment earlier is now
+     * false. Without the attempt id, the "an accepted transfer is never
+     * overwritten" rule would pin a transfer that did not happen.
+     */
+    const id = newTransferAttemptId();
+    recordRuntimeTransferOutcome('CAredirectfail', {
+      outcome: 'accepted', status: 'CONNECTED', acceptMethod: 'keypress', ringSeconds: 12,
+    }, id);
+    recordRuntimeTransferOutcome('CAredirectfail', {
+      outcome: 'failed', status: 'FAILED', reason: 'caller_redirect_failed', ringSeconds: 13,
+    }, id);
+
+    const stored = peekRuntimeTransferOutcome('CAredirectfail');
+    expect(stored?.outcome, 'the caller never moved').toBe('failed');
+    expect(stored?.reason).toBe('caller_redirect_failed');
+    expect(stored?.attempt).toBe(1);
+  });
+
+  it('but a DIFFERENT attempt still cannot undo a real transfer', () => {
+    // The across-attempts rule is unchanged: a later attempt failing must not
+    // rewrite a call that already reached a human.
+    recordRuntimeTransferOutcome('CAmixed', {
+      outcome: 'accepted', status: 'CONNECTED', acceptMethod: 'keypress', ringSeconds: 12,
+    }, newTransferAttemptId());
+    recordRuntimeTransferOutcome('CAmixed', RANG_OUT, newTransferAttemptId());
+
+    const stored = peekRuntimeTransferOutcome('CAmixed');
+    expect(stored?.outcome).toBe('accepted');
+    expect(stored?.attempt).toBe(2);
   });
 });

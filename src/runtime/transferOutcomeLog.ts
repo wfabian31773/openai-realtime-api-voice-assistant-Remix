@@ -68,6 +68,27 @@ export interface RuntimeTransferOutcome {
 }
 
 /**
+ * Which ATTEMPT a record came from, so an attempt may correct itself without
+ * looking like a second attempt.
+ *
+ * A transfer records TWICE on the success path and it has to: once the moment
+ * the office presses a key (before the redirect closes the media stream and
+ * teardown starts), and again when the whole attempt settles. Without an
+ * identity for the attempt, the second record either double-counts it or —
+ * worse — the "an accepted transfer is never overwritten" rule pins a
+ * provisional `accepted` in place when the redirect afterwards FAILED and the
+ * caller never actually moved.
+ */
+export type TransferAttemptId = number;
+
+let nextAttemptId: TransferAttemptId = 1;
+
+/** A fresh id for one dial-and-wait. Called once per attempt. */
+export function newTransferAttemptId(): TransferAttemptId {
+  return nextAttemptId++;
+}
+
+/**
  * callerCallSid -> the outcome teardown should record.
  *
  * Bounded: a call whose teardown never runs (a crashed process, a lost
@@ -75,7 +96,7 @@ export interface RuntimeTransferOutcome {
  * relative to concurrent calls and the eviction is oldest-first, so the
  * only thing it can drop is a record nobody came back for.
  */
-const outcomes = new Map<string, RuntimeTransferOutcome>();
+const outcomes = new Map<string, RuntimeTransferOutcome & { attemptId: TransferAttemptId }>();
 const MAX_TRACKED = 500;
 
 /**
@@ -100,10 +121,33 @@ const MAX_TRACKED = 500;
 export function recordRuntimeTransferOutcome(
   callerCallSid: string,
   outcome: Omit<RuntimeTransferOutcome, 'attempt' | 'at' | 'pipeline'>,
+  attemptId: TransferAttemptId,
 ): void {
   const prior = outcomes.get(callerCallSid);
+  /**
+   * THE SAME ATTEMPT CORRECTING ITSELF, which is not a second attempt.
+   *
+   * The success path records at the KEYPRESS and again at settle, because the
+   * redirect that follows the keypress closes the media stream and teardown
+   * can consume the record before the attempt resolves (Codex P1, PR #273).
+   * Two records, one attempt — so the count must not move, and the later one
+   * must be able to REPLACE the earlier. That second half matters: when the
+   * redirect fails after an accept, the caller never moved, and pinning the
+   * provisional `accepted` would record a transfer that did not happen.
+   */
+  if (prior && prior.attemptId === attemptId) {
+    outcomes.set(callerCallSid, {
+      ...outcome,
+      pipeline: 'grok',
+      attempt: prior.attempt,
+      at: new Date().toISOString(),
+      attemptId,
+    });
+    return;
+  }
   const attempt = (prior?.attempt ?? 0) + 1;
   if (prior?.outcome === 'accepted') {
+    // A DIFFERENT attempt failing after this call already reached a human.
     // Keep the success; still count the attempt so the record is honest.
     outcomes.set(callerCallSid, { ...prior, attempt });
     return;
@@ -117,22 +161,39 @@ export function recordRuntimeTransferOutcome(
     pipeline: 'grok',
     attempt,
     at: new Date().toISOString(),
+    attemptId,
   });
 }
 
 /**
- * Collect the outcome for a finished call, once.
+ * Read the outcome for a call WITHOUT consuming it.
  *
- * Delete-on-read, the same discipline `recordTransferOutcome` uses on the old
- * core: teardown can run twice (a retry, a racing socket close) and the second
- * pass must not rewrite the row with a value it has already written.
+ * PEEK-AND-ACK, and the ack is deliberately not here. This was delete-on-read,
+ * copying the old core's discipline, and Codex found what that costs (P2,
+ * PR #273): the read happens while BUILDING the row, so a teardown upsert that
+ * REJECTS has already destroyed the only copy of the outcome — and the retry
+ * that the surrounding code exists to support then writes the row without it.
+ * The failure mode was a transient database error, which is exactly when a
+ * retry is supposed to save you.
+ *
+ * It also makes `toCallLogRow` pure again, which it is documented to be.
  */
-export function takeRuntimeTransferOutcome(
+export function peekRuntimeTransferOutcome(
   callerCallSid: string,
 ): RuntimeTransferOutcome | undefined {
-  const found = outcomes.get(callerCallSid);
-  if (found) outcomes.delete(callerCallSid);
-  return found;
+  return outcomes.get(callerCallSid);
+}
+
+/**
+ * Drop the outcome once it is durably written.
+ *
+ * Called only after a successful upsert. A teardown that runs twice finds
+ * nothing on the second pass and `toConflictUpdate` omits an absent outcome
+ * rather than nulling it, so the first pass's value survives — the property
+ * delete-on-read was there to protect, kept without its cost.
+ */
+export function ackRuntimeTransferOutcome(callerCallSid: string): void {
+  outcomes.delete(callerCallSid);
 }
 
 /** Test hook. */

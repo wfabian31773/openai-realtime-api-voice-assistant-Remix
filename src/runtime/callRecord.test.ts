@@ -10,6 +10,8 @@ import { resetAgentIdCache } from "./agentIdentity";
 import {
   recordRuntimeTransferOutcome,
   clearRuntimeTransferOutcomes,
+  newTransferAttemptId,
+  peekRuntimeTransferOutcome,
 } from "./transferOutcomeLog";
 
 function record(over: Partial<VoiceCallRecord> = {}): VoiceCallRecord {
@@ -72,7 +74,7 @@ describe("toCallLogRow", () => {
       reason: "office_no_answer",
       dialedNumber: "+17149564300",
       ringSeconds: 30,
-    });
+    }, newTransferAttemptId());
 
     const row = toCallLogRow(record());
 
@@ -108,7 +110,7 @@ describe("toCallLogRow", () => {
       status: "NO_ANSWER",
       reason: "office_no_answer",
       ringSeconds: 30,
-    });
+    }, newTransferAttemptId());
 
     const row = toCallLogRow(record({ outcome: "caller_hangup" }));
 
@@ -487,5 +489,68 @@ describe("a greeting-only call keeps its tail", () => {
     expect(row.firstTranscriptDelayMs).toBe(4_000);
     expect(row.postTranscriptTailMs).toBe(40_000);
     expect(row.transcriptWindowSeconds).toBe(16);
+  });
+});
+
+/**
+ * THE OUTCOME MUST OUTLIVE A FAILED WRITE. Codex P2, PR #273.
+ *
+ * `toCallLogRow` used to CONSUME the outcome while building the row, so an
+ * upsert that rejected had already destroyed the only copy — and the retry
+ * this module exists to support then wrote the row without it. The failure
+ * mode is a transient database error, which is exactly when a retry should
+ * save you.
+ *
+ * TESTED THROUGH `persistRuntimeCall`, not against the store. Mutation testing
+ * is why: acking before the write, and never acking at all, BOTH failed
+ * nothing, because every assertion I had written exercised the store — which
+ * cannot see when `persistRuntimeCall` calls it. That is the same gap, in the
+ * same commit, as the one on the transfer side.
+ */
+describe("persistRuntimeCall and the transfer outcome", () => {
+  const RANG_OUT = {
+    outcome: "no_answer" as const,
+    status: "NO_ANSWER",
+    reason: "office_no_answer",
+    dialedNumber: "+17149564300",
+    ringSeconds: 30,
+  };
+
+  it("keeps the outcome when the write REJECTS, so the retry still has it", async () => {
+    clearRuntimeTransferOutcomes();
+    recordRuntimeTransferOutcome("CA-1", RANG_OUT, newTransferAttemptId());
+
+    const wrote = await persistRuntimeCall(record(), {}, async () => {
+      throw new Error("connection terminated unexpectedly");
+    });
+
+    expect(wrote).toBe(false);
+    expect(
+      peekRuntimeTransferOutcome("CA-1")?.outcome,
+      "consuming it before the write is what loses it on a transient error",
+    ).toBe("no_answer");
+  });
+
+  it("and the retry writes a row that CARRIES it", async () => {
+    clearRuntimeTransferOutcomes();
+    recordRuntimeTransferOutcome("CA-1", RANG_OUT, newTransferAttemptId());
+    await persistRuntimeCall(record(), {}, async () => {
+      throw new Error("connection terminated unexpectedly");
+    });
+
+    const rows: any[] = [];
+    const wrote = await persistRuntimeCall(record(), {}, async (row) => void rows.push(row));
+
+    expect(wrote).toBe(true);
+    expect(rows[0].transferOutcome?.outcome).toBe("no_answer");
+  });
+
+  it("drops it once the row is durable, so a second teardown cannot rewrite it", async () => {
+    clearRuntimeTransferOutcomes();
+    recordRuntimeTransferOutcome("CA-1", RANG_OUT, newTransferAttemptId());
+
+    await persistRuntimeCall(record(), {}, async () => undefined);
+
+    expect(peekRuntimeTransferOutcome("CA-1"), "acked on success").toBeUndefined();
   });
 });

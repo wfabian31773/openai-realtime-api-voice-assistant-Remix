@@ -8,6 +8,10 @@ import {
   TRANSFER_STATUS_PATH,
 } from "./runtimeTransfer";
 import { ACCEPT_WINDOW_MS, conferenceNameFor, type TransferTwilioOps } from "./warmTransfer";
+import {
+  peekRuntimeTransferOutcome,
+  clearRuntimeTransferOutcomes,
+} from "./transferOutcomeLog";
 import { escalationDetailsMap } from "../services/escalationStore";
 import type { WebhookRequest } from "./voiceWebhook";
 
@@ -434,5 +438,77 @@ describe("the briefing", () => {
   it("still says something usable with no side channel at all", () => {
     const text = briefingFor("no-ivr", { ...META, callerPhone: "" }, undefined);
     expect(text).toContain("Azul Vision");
+  });
+});
+
+/**
+ * THE ACCEPT HAS TO BE ON RECORD BEFORE THE CALLER IS MOVED. Codex P1, PR #273.
+ *
+ * `redirectCallerToConference` ends the media stream, and the resulting close
+ * can beat the redirect's own resolution — that race is why
+ * `onCallerRedirectStarting` exists at all. Teardown starts on the close and
+ * synchronously builds the `call_logs` row, so an outcome recorded only when
+ * `attempt()` resolves can arrive AFTER the row is written: the one transfer
+ * unambiguously worth logging, dropped, with the record left in the map until
+ * eviction.
+ *
+ * TESTED THROUGH THE REAL REDIRECT, not against the store. Mutation testing is
+ * why: reverting the hook wiring failed nothing, because every assertion I had
+ * written exercised the store — which cannot see WHEN the store was written.
+ * Third time today that testing the sink instead of the source hid a defect.
+ */
+describe("the accepted outcome is recorded before the redirect", () => {
+  it("is already stored by the time the caller's leg is moved", async () => {
+    clearRuntimeTransferOutcomes();
+    const seenAtRedirect: Array<string | undefined> = [];
+    const { ops } = fakeOps();
+    const watched: TransferTwilioOps = {
+      ...ops,
+      redirectCallerToConference: async (input) => {
+        // THE ASSERTION POINT. Everything after this line can be beaten by the
+        // stream close, so the outcome has to exist already.
+        seenAtRedirect.push(peekRuntimeTransferOutcome("CAcaller")?.outcome);
+        return ops.redirectCallerToConference(input);
+      },
+    };
+    const transfer = transferWith(watched);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const outcome = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+
+    expect(seenAtRedirect, "recorded only at settle is recorded too late").toEqual(["accepted"]);
+  });
+
+  it("and a redirect that then FAILS corrects it — the caller never moved", async () => {
+    /**
+     * The half that makes the early record safe. Without the attempt id, the
+     * "an accepted transfer is never overwritten" rule would pin a transfer
+     * that did not happen: the office pressed a key, the redirect threw, and
+     * the caller stayed with the agent.
+     */
+    clearRuntimeTransferOutcomes();
+    const { ops } = fakeOps();
+    const failing: TransferTwilioOps = {
+      ...ops,
+      redirectCallerToConference: async () => {
+        throw new Error("twilio said no");
+      },
+    };
+    const transfer = transferWith(failing);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const outcome = handoff().catch(() => undefined);
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+
+    const stored = peekRuntimeTransferOutcome("CAcaller");
+    expect(stored?.outcome, "nobody was transferred").not.toBe("accepted");
+    expect(stored?.attempt, "and it is still one attempt").toBe(1);
   });
 });

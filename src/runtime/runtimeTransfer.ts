@@ -26,7 +26,11 @@
 import { escalationDetailsMap } from "../services/escalationStore";
 import { resolveHandoffDestination } from "../services/handoffPolicy";
 import { buildPcpTransferBriefing } from "../services/warmTransferBriefing";
-import { recordRuntimeTransferOutcome } from "./transferOutcomeLog";
+import {
+  newTransferAttemptId,
+  recordRuntimeTransferOutcome,
+  type TransferAttemptId,
+} from "./transferOutcomeLog";
 import { ACCEPT_WINDOW_MS, conferenceNameFor, performWarmTransfer } from "./warmTransfer";
 import type { TransferOutcome, TransferTwilioOps } from "./warmTransfer";
 import { TransferAcceptRegistry } from "./transferAccepts";
@@ -327,7 +331,9 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
       hooks?: TransferLifecycleHooks,
     ): () => Promise<unknown> {
       let dialStartedAt = Date.now();
+      let attemptId: TransferAttemptId = newTransferAttemptId();
       const attempt = async (): Promise<TransferOutcome> => {
+        attemptId = newTransferAttemptId();
         try {
           // Before anything dials: the whole attempt — dial, briefing,
           // keypress — is bounded by the accept window, and the bridge's
@@ -390,7 +396,43 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               statusUrl,
               fromNumber: env.TWILIO_PHONE_NUMBER ?? "",
               callerId: env.TWILIO_PHONE_NUMBER,
-              onCallerRedirectStarting: hooks?.onCallerRedirectStarting,
+              /**
+               * RECORD THE ACCEPT HERE, BEFORE THE CALLER IS MOVED. Codex P1,
+               * PR #273.
+               *
+               * The redirect ends the media stream, and the resulting close
+               * can beat the redirect's own resolution — which is why this
+               * hook exists at all. Teardown starts on that close and
+               * synchronously builds the call_logs row, so an outcome recorded
+               * only when `attempt()` resolves can arrive AFTER the row is
+               * written: the successful transfer is missing from the column
+               * and the record sits in the map until eviction. The one case
+               * that is unambiguously worth logging, lost to the race that the
+               * surrounding code already knew about.
+               *
+               * The settle below still records, under the SAME attempt id, so
+               * this provisional value is replaced rather than double-counted
+               * — and replaced by a failure if the redirect then throws, which
+               * it must be, because at that point the caller never moved.
+               */
+              onCallerRedirectStarting: () => {
+                try {
+                  recordRuntimeTransferOutcome(
+                    metadata.callSid,
+                    {
+                      outcome: "accepted",
+                      status: "CONNECTED",
+                      ...(policy.allowed ? { dialedNumber: policy.destination } : {}),
+                      acceptMethod: "keypress",
+                      ringSeconds: Math.round((Date.now() - dialStartedAt) / 1000),
+                    },
+                    attemptId,
+                  );
+                } catch (err) {
+                  log(`[runtime-xfer] could not record the accept for ${metadata.callSid}: ${String(err)}`);
+                }
+                hooks?.onCallerRedirectStarting?.();
+              },
               onCallerRedirectFailed: hooks?.onCallerRedirectFailed,
               log,
             },
@@ -432,6 +474,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           recordRuntimeTransferOutcome(
             metadata.callSid,
             toRecordedOutcome(outcome, Math.round((Date.now() - dialStartedAt) / 1000)),
+            attemptId,
           );
         } catch (err) {
           // Telemetry must never cost a transfer. This is the whole reason the
