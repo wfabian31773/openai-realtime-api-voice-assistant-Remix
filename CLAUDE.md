@@ -175,7 +175,7 @@ discriminator; a NULL there is the old core.
 | **azul-scheduling** (San Diego) | **OFF** | — | — | — | Gate B replay books 8 of 21. Not ready. Do not ask why. |
 | **answering-service** | old core | — | — | — | — |
 
-### PCP LIVE DEFECT — the agent promises a transfer and does not make one
+### PCP TRANSFER — the outage that made this a LIVE defect is CLOSED (2026-09-08)
 
 Found in Wayne's own test calls, 2026-09-04 16:11 (`CAa37f1a422d120c200d2038c1314a32aa`).
 A caller from a surgery center asked for a representative. The agent said:
@@ -184,7 +184,19 @@ A caller from a surgery center asked for a representative. The agent said:
 > here with you."
 
 Then `transferred_to_human = false`, `transfer_outcome` NULL,
-`runtime_outcome = agent_ended`. It filed PCP-57486 ("Service inquiry", noting
+`runtime_outcome = agent_ended`.
+
+**DO NOT REPEAT THE READING THAT PRODUCED THOSE TWO FACTS.** I concluded "no
+transfer was attempted" from `transferred_to_human` and `transfer_outcome`, and
+on the RUNTIME those columns cannot say that: `recordTransferOutcome` lives in
+`voiceAgentRoutes.ts` and keys on `officeLegDials`, a map only the OLD CORE's
+dial path populates, so **every runtime transfer read as "none attempted"**.
+The 2026-09-08 calls proved it — the ticket carried destination, timing and
+`NO_ANSWER` while `call_logs` carried nothing. An absent measurement reads as a
+negative finding, which is the `agent_id` blindness of 2026-09-04 in a second
+column. Fixed on `claude/determined-brown-o5qsft`; **until that is deployed,
+measure PCP transfers from `tickets.pcp_handoff_*`, never from `call_logs`.**
+The conclusion about this particular call still held, for other reasons. It filed PCP-57486 ("Service inquiry", noting
 the intake was incomplete) and ended the call. **No transfer was attempted.**
 
 **WHAT THIS DOES AND DOES NOT ESTABLISH.** The defect is the BROKEN PROMISE,
@@ -227,13 +239,35 @@ They may share a cause and they may not. Sending follow-up work toward
 missing-ticket handling on the basis of the live call would be chasing the
 wrong defect, since that call's ticket filed. (Codex, PR #272.)
 
-**The mechanism is present in the tree** — `warmTransfer.ts`,
-`transferTwilioOps.ts`, the accept webhook mounted at `voiceRuntime.ts:448`,
-and `pcp` in `RUNTIME_TRANSFER_READY_LANES`. **Do not read that as ruling out
-"the feature was unreachable on this call":** `laneSupportStatus` refuses a
-transfer-capable lane outright when no handoff is injected for the deployment,
-and whether one was injected here was NOT checked. **Not root-caused, and the
-search is not narrowed.**
+**ROOT-CAUSED AND CLOSED 2026-09-08 — it was neither the mechanism nor the
+lane wiring. The ticket API was rejecting the field that sanctions the
+transfer.**
+
+`handoff_to_pcp` files its HAND_OFF ticket BEFORE it dials, and attaches
+`dispositionGrantedByExplicitAsk` — the flag set only when a caller explicitly
+asks for a person. The ticketing app's schema was `.strict()` and did not
+declare that field, so every payload carrying it was refused, the gate ahead of
+the dial never opened, and the agent filed a CREATE_TASK instead. Measured:
+**19 of 19 POSTs carrying the flag rejected since 2026-08-27; 10 of 10 without
+it accepted.** The field that marks a transfer as sanctioned was the field that
+killed it.
+
+Fixed on the ticketing app (Replit), and **proven in production the same day**:
+on `CAa2a3a1c1e63db974a5063b065b2622a3`, 2026-09-08 12:28, three HAND_OFF POSTs
+returned 200, PCP-57920 recorded `pcp_handoff_attempted = true`, destination
+`+17149564300`, and the dial went out at 12:30:08.
+
+**It rang out — `NO_ANSWER` / `office_no_answer`.** That is a capacity and
+answering question, not a code defect, and it is the open one: see the queue
+sizing note under standing instruction 11.
+
+**WHAT WAS STILL WRONG, and is now fixed on `claude/determined-brown-o5qsft`:**
+the agent said nothing about the failed dial and went back to the intake script
+("What is the patient's first name?") while the caller asked "Did you try to
+connect?" — because the tool answered a failed dial with a bare
+`{success:false}` and no copy. It also took **three** asks to reach the dial;
+his opening line "can I speak to the team please?" did not match
+`askedForAPerson` at all, because two regexes had drifted apart on their nouns.
 
 **WAYNE'S PCP TRANSFER RULE (2026-09-04), replacing "anyone who asks goes through":**
 
@@ -1349,7 +1383,26 @@ it. On 2026-09-03 18:24:56 that ratio was 4 of 12.
    timeline said did not exist. **Before quoting a rate, find the control that
    proves the measure** — see the measurement section above.
 
-9. **Accepting a constraint as immovable.** I treated "the API has no way to
+9. **Building a second system without looking for the first.** 2026-09-08: I
+   built a records-delivery intake in the director and wrote in a commit
+   message that its escape value bounded the refusal loop. `gateBeforeExecution`
+   had enforced its OWN delivery rule since 2026-08-07, out of the call-facts
+   ledger, and it runs BEFORE the tool body — so wherever a ledger exists the
+   escape is unreachable and a MAIL request is asked for a fax number forever.
+   **My tests were green because `getLedger` returns nothing in a unit test**,
+   so the suite exercised a path that does not exist in production. Before
+   adding a rule, grep for the rule.
+
+10. **Testing the sink instead of the source.** Three times in one day
+    (2026-09-08), and only mutation testing found any of them: a briefing test
+    that could not tell the source fix from the downstream floor; a `DECLINED`
+    mapping that lived inside a closure so flattening it failed nothing; and an
+    ack-ordering test that exercised the store, which cannot see WHEN anything
+    calls it. A suite that asserts against the last component in a chain proves
+    the chain has an end, not that it is wired. **Mutate the fix and watch a
+    test fail, or the test is decoration.**
+
+11. **Accepting a constraint as immovable.** I treated "the API has no way to
    express *no category*" as the end of the discussion. Wayne: *"why don't you
    just create one?"* Ask whether the constraint can be changed before designing
    around it.
