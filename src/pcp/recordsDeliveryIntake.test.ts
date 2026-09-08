@@ -155,3 +155,85 @@ describe('the caller is told what happened before the line goes quiet', () => {
     expect(blob).toContain('9095550199');
   });
 });
+
+/**
+ * CODEX ROUND 4 ON PR #273 — four findings, all real, all reproduced here.
+ * The first two are holes in my own change; the third contradicted a claim I
+ * made in the commit message.
+ */
+describe('the delivery gate cannot be walked around', () => {
+  it('holds a PATIENT records request too, though the purpose never says records', async () => {
+    // A patient or family member is stored as `patient_caller`, so the
+    // director's records branch never fires — and the tool sets the records
+    // purpose ITSELF and used to file on the spot. The gate has to live here.
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', {
+      callPurpose: 'patient_caller',
+      callerName: 'A Patient',
+      callerIsThePatient: true,
+    });
+
+    const r = await call(agent, 'handle_patient_medical_records_request', {
+      narrative: 'Patient requesting their own records.',
+    });
+
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/recordsDeliveryMethod/);
+    expect(ticketing.createPcpTicket, 'nothing may file without a destination').not.toHaveBeenCalled();
+  });
+
+  it('lets a caller who will not answer still get their request filed', async () => {
+    // The unbounded loop: nothing incremented MAX_BLOCKS for these fields, so
+    // the director named the same one forever. 'unspecified' is a recordable
+    // answer, which is what ends it.
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+    await call(agent, 'record_pcp_intake', { recordsDeliveryMethod: 'unspecified' });
+
+    expect(pcpDirector.next(callId).nextQuestion, 'a recorded refusal ends the question').toBeUndefined();
+
+    const filed = await call(agent, 'handle_patient_medical_records_request', { narrative: 'Records.' });
+    expect(filed.success).toBe(true);
+    const blob = JSON.stringify((ticketing.createPcpTicket.mock.calls as any[])[0][0]);
+    expect(blob, 'the ticket must say the destination is unknown').toMatch(/NOT captured/i);
+  });
+
+  it('never asks for a destination once the method is unspecified', async () => {
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+    await call(agent, 'record_pcp_intake', { recordsDeliveryMethod: 'unspecified' });
+    expect(pcpDirector.next(callId).nextQuestion?.field).not.toBe('recordsDeliveryDestination');
+  });
+});
+
+describe('a changed delivery method does not keep the old destination', () => {
+  it('forgets the fax number when the caller switches to email', async () => {
+    // "Deliver by EMAIL to <fax number>" — records sent somewhere the caller
+    // never named. `update` merges, so the stale value survived.
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+    await call(agent, 'record_pcp_intake', {
+      recordsDeliveryMethod: 'fax',
+      recordsDeliveryDestination: '9095550199',
+    });
+    await call(agent, 'record_pcp_intake', { recordsDeliveryMethod: 'email' });
+
+    expect(pcpDirector.get(callId).recordsDeliveryDestination).toBeUndefined();
+    expect(pcpDirector.next(callId).nextQuestion?.field).toBe('recordsDeliveryDestination');
+    expect(pcpDirector.next(callId).nextQuestion?.prompt).toMatch(/email/i);
+  });
+
+  it('keeps a replacement supplied in the same breath', async () => {
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+    await call(agent, 'record_pcp_intake', {
+      recordsDeliveryMethod: 'fax',
+      recordsDeliveryDestination: '9095550199',
+    });
+    await call(agent, 'record_pcp_intake', {
+      recordsDeliveryMethod: 'email',
+      recordsDeliveryDestination: 'records@delapena.example',
+    });
+    expect(pcpDirector.get(callId).recordsDeliveryDestination).toBe('records@delapena.example');
+  });
+});

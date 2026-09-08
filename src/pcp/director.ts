@@ -114,7 +114,7 @@ export interface PcpDirectorDecision {
  * what — it only records what the caller asked for, for the staffer who
  * fulfils it.
  */
-export const PCP_RECORDS_DELIVERY_METHODS = ['fax', 'email', 'mail'] as const;
+export const PCP_RECORDS_DELIVERY_METHODS = ['fax', 'email', 'mail', 'unspecified'] as const;
 export type PcpRecordsDeliveryMethod = (typeof PCP_RECORDS_DELIVERY_METHODS)[number];
 
 /**
@@ -168,7 +168,16 @@ export const DESTINATION_PROMPTS: Record<PcpRecordsDeliveryMethod, string> = {
   fax: 'What is the fax number?',
   email: 'What is the email address?',
   mail: 'What is the mailing address?',
+  // 'unspecified' is the caller declining or not knowing. It is an ANSWER,
+  // which is the point: it ends the question instead of leaving a field the
+  // director would name forever. Nothing is asked after it.
+  unspecified: '',
 };
+
+/** A method that names no destination — the recorded form of "they didn't say". */
+export function deliveryDestinationNeeded(state: PcpConversationState): boolean {
+  return Boolean(state.recordsDeliveryMethod) && state.recordsDeliveryMethod !== 'unspecified';
+}
 
 export class PcpDirector {
   private states = new Map<string, PcpConversationState>();
@@ -229,6 +238,15 @@ export class PcpDirector {
     const state = this.get(callId);
     state.handoffStatus = result.status;
     state.handoffFailureReason = result.reason;
+  }
+
+  /**
+   * Forget a destination gathered for a method the caller has since changed.
+   * `update` merges, so without this "actually, email it" keeps the fax number
+   * and the ticket reads "Deliver by EMAIL to <fax number>".
+   */
+  clearRecordsDestination(callId: string): void {
+    this.get(callId).recordsDeliveryDestination = undefined;
   }
 
   /** Record that the caller explicitly asked to speak to a person. */
@@ -308,7 +326,12 @@ export class PcpDirector {
      * so these are asked by the form, and the existing strike budget still
      * decides whether a missing answer may ever hold the filing.
      */
-    if (state.callPurpose === 'patient_medical_records_request') required.push(...RECORDS_FIELDS);
+    if (state.callPurpose === 'patient_medical_records_request') {
+      required.push('recordsDeliveryMethod');
+      // 'unspecified' is a recorded refusal, so it must not lead to a second
+      // question. Without this the escape hatch reopens the loop it closes.
+      if (deliveryDestinationNeeded(state)) required.push('recordsDeliveryDestination');
+    }
     const missing = required.find((field) => !state[field]);
 
     let disposition = purpose?.defaultDisposition;

@@ -13,6 +13,8 @@ import {
   PATIENT_INTAKE_ORDER,
   PROMPTS as DIRECTOR_PROMPTS,
   PCP_RECORDS_DELIVERY_METHODS,
+  DESTINATION_PROMPTS,
+  deliveryDestinationNeeded,
   pcpDirector,
   type PcpConversationState,
 } from '../pcp/director';
@@ -554,6 +556,22 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       patientMrn: z.string().min(1).optional(),
     }).strict(),
     execute: async (facts) => {
+      /**
+       * A CHANGED DELIVERY METHOD INVALIDATES THE OLD DESTINATION.
+       *
+       * `update` merges, so "actually, email it" after a fax number left the
+       * fax number in place and the ticket read "Deliver by EMAIL to
+       * <fax number>" — records sent somewhere the caller never named. Codex
+       * round 4. Cleared unless the same utterance carries a replacement.
+       */
+      {
+        const prior = pcpDirector.get(callId).recordsDeliveryMethod;
+        const changing = facts.recordsDeliveryMethod && facts.recordsDeliveryMethod !== prior;
+        if (changing && !facts.recordsDeliveryDestination) {
+          facts.recordsDeliveryDestination = undefined;
+          pcpDirector.clearRecordsDestination(callId);
+        }
+      }
       pcpDirector.update(callId, facts);
       return pcpDirector.next(callId);
     },
@@ -977,12 +995,21 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const requestIsOnRecord =
         state.dispositionRecorded === 'CREATE_TASK' || state.dispositionRecorded === 'HAND_OFF';
       const callStillLive = pcpCallIsLive(callId);
-      if (!initial.success && !(requestIsOnRecord && callStillLive)) {
-        if (requestIsOnRecord && !callStillLive) {
-          console.warn(
-            `[PCP] handoff ticket write failed and the call has ended — NOT dialling (${callId})`,
-          );
-        }
+      /**
+       * LIVENESS GATES THE DIAL, NOT ONE BRANCH OF IT. Codex round 4.
+       *
+       * The previous shape only consulted `callStillLive` when the ticket
+       * write FAILED, so a caller who hung up while a SUCCESSFUL write was in
+       * flight still reached handoffCallback(). Nothing downstream catches it:
+       * the sequential path clears its abort marker before dialling. The
+       * asymmetry was mine — refusing on failure and not on success has no
+       * justification, and the race tests only ever covered the failure side.
+       */
+      if (!callStillLive) {
+        console.warn(`[PCP] the call has ended — NOT dialling (${callId})`);
+        return refusePcp('durable_ticket_required_before_handoff');
+      }
+      if (!initial.success && !requestIsOnRecord) {
         return refusePcp('durable_ticket_required_before_handoff');
       }
       if (!initial.success) {
@@ -1076,6 +1103,47 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         }
         const gapNote = annotationFor(readiness.annotate);
         if (gapNote) narrative = `${narrative}\n\n${gapNote}`;
+      }
+      /**
+       * DELIVERY IS GATED HERE, NOT ONLY IN THE DIRECTOR. Codex round 4.
+       *
+       * Two holes this closes, and both were real:
+       *
+       *   1. THE PATIENT PATH SKIPPED IT ENTIRELY. A patient or family member
+       *      is stored as `patient_caller`, so the director's records branch —
+       *      which keys on `patient_medical_records_request` — never fired.
+       *      This tool then set that purpose ITSELF and filed immediately, so
+       *      the destination-less request the change exists to prevent still
+       *      went through.
+       *   2. NOTHING FORCED THE PROFESSIONAL PATH BACK THROUGH INTAKE either.
+       *      The director only shapes what `record_pcp_intake` returns; it
+       *      cannot stop this tool being called straight out.
+       *
+       * And it shares `ticketBlocksUsed`, which is what my own commit message
+       * claimed and was not true: MAX_BLOCKS only ever counted fields inside
+       * `ticketReadiness`, so a caller who declined the delivery question was
+       * asked it forever. Bounded here, by the budget that already exists.
+       */
+      {
+        const { state: deliveryState } = ticketState(callId);
+        const deliveryAsk = !deliveryState.recordsDeliveryMethod
+          ? { field: 'recordsDeliveryMethod', prompt: DIRECTOR_PROMPTS.recordsDeliveryMethod }
+          : deliveryDestinationNeeded(deliveryState) && !deliveryState.recordsDeliveryDestination
+            ? {
+                field: 'recordsDeliveryDestination',
+                prompt: DESTINATION_PROMPTS[deliveryState.recordsDeliveryMethod!],
+              }
+            : null;
+        if (deliveryAsk && ticketBlocksUsed < MAX_BLOCKS) {
+          ticketBlocksUsed += 1;
+          return refusePcp(`missing_required_field:${deliveryAsk.field}`, {
+            say: deliveryAsk.prompt,
+            guidance:
+              'NOT AN ERROR — say nothing about a system or a problem. We cannot send records without knowing ' +
+              `where they go. Ask: "${deliveryAsk.prompt}" then call this tool again. If the caller does not know ` +
+              "or will not say, record recordsDeliveryMethod as 'unspecified' and file — the ticket will say so.",
+          });
+        }
       }
       const { state, missing } = ticketState(callId);
       /**

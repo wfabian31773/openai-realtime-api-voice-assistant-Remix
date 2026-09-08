@@ -293,3 +293,35 @@ describe('the window between teardown starting and the sweep running', () => {
     expect(r.success).toBe(false);
   });
 });
+
+/**
+ * CODEX ROUND 4 — the liveness check guarded one branch, not the dial.
+ *
+ * `if (!initial.success && !(requestIsOnRecord && callStillLive))` skips the
+ * whole condition when the write SUCCEEDS, so a caller who hung up during a
+ * successful ticket write still reached handoffCallback(). The asymmetry was
+ * mine: refusing on failure and not on success has no justification, and every
+ * race test I wrote covered only the failure side.
+ */
+describe('a successful ticket write is not a licence to dial', () => {
+  it('does not dial when the call ended during a SUCCESSFUL write', async () => {
+    const { markPcpCallEnded } = await import('../agents/pcpAgent');
+    const { agent, callId, dialled } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE);
+
+    // The write succeeds — and the caller drops while it is in flight.
+    ticketing.createPcpTicket.mockImplementation(async (payload: any) => {
+      if (payload.disposition === 'HAND_OFF') {
+        markPcpCallEnded(callId);
+        await Promise.resolve();
+        return { success: true, ticketNumber: 'PCP-57920' };
+      }
+      return { success: true, ticketNumber: 'PCP-57920' };
+    });
+
+    const r = await call(agent, 'handoff_to_pcp', { narrative: ASKED });
+
+    expect(dialled, 'the caller is gone — a 200 does not change that').not.toHaveBeenCalled();
+    expect(r.success).toBe(false);
+  });
+});
