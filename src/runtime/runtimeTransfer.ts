@@ -564,11 +564,51 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
            * refusals as dials.
            */
           if (!outcome.ok && outcome.status === "UNAVAILABLE") return outcome;
-          recordRuntimeTransferOutcome(
+          const settled = toRecordedOutcome(
+            outcome,
+            Math.round((Date.now() - dialStartedAt) / 1000),
+            briefing,
+          );
+          const { supersededPersisted } = recordRuntimeTransferOutcome(
             metadata.callSid,
-            toRecordedOutcome(outcome, Math.round((Date.now() - dialStartedAt) / 1000), briefing),
+            settled,
             attemptId,
           );
+          /**
+           * THE ROW IS ALREADY WRITTEN AND NOW DISAGREES. Codex P1, PR #273,
+           * round 4.
+           *
+           * Teardown runs when the redirect closes the media stream, which can
+           * be BEFORE the redirect settles — so it persists the in-flight
+           * `redirecting` and acks it. Recording the real answer here then only
+           * updates memory, and the database keeps `redirecting` forever: not
+           * the false "reached a human" of round 3, but a permanently
+           * unfinished record, which under-counts the completed transfers this
+           * column exists to count.
+           *
+           * Fired only when the store says a persisted value was replaced, so
+           * the ordinary case — teardown after the settle — does no extra
+           * write at all.
+           *
+           * Deliberately NOT awaited: this runs on the path returning to the
+           * agent, and a database round trip must not sit between a caller and
+           * the next thing they hear. `persistLateTransferOutcome` never
+           * throws, so nothing escapes.
+           */
+          if (supersededPersisted) {
+            void import("./callRecord")
+              .then(({ persistLateTransferOutcome }) =>
+                persistLateTransferOutcome(metadata.callSid, {
+                  ...settled,
+                  pipeline: "grok",
+                  attempt: 1,
+                  at: new Date().toISOString(),
+                }),
+              )
+              .catch((err) =>
+                log(`[runtime-xfer] late outcome update could not start for ${metadata.callSid}: ${String(err)}`),
+              );
+          }
         } catch (err) {
           // Telemetry must never cost a transfer. This is the whole reason the
           // record is taken here and not inside the dial.

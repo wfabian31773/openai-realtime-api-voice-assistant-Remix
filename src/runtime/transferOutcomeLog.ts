@@ -149,11 +149,20 @@ const MAX_TRACKED = 500;
  * The old core is last-write-wins with no counter, which loses both. This is
  * deliberately not a copy of it.
  */
+/**
+ * Whether a record REPLACED a value the database already holds.
+ *
+ * `true` means teardown has been and gone with an earlier version — almost
+ * always the in-flight `redirecting` — so the row now disagrees with the
+ * truth and needs a targeted update. The caller owns that write; this module
+ * only reports the condition, because it has no business knowing about
+ * `call_logs`.
+ */
 export function recordRuntimeTransferOutcome(
   callerCallSid: string,
   outcome: Omit<RuntimeTransferOutcome, 'attempt' | 'at' | 'pipeline'>,
   attemptId: TransferAttemptId,
-): void {
+): { supersededPersisted: boolean } {
   const prior = outcomes.get(callerCallSid);
   /**
    * THE SAME ATTEMPT CORRECTING ITSELF, which is not a second attempt.
@@ -174,14 +183,19 @@ export function recordRuntimeTransferOutcome(
       at: new Date().toISOString(),
       attemptId,
     });
-    return;
+    /**
+     * THE CASE THIS WHOLE MECHANISM EXISTS FOR. Teardown persisted the
+     * in-flight `redirecting` and acked it; the redirect has now settled with
+     * the real answer, and the row still says the caller was in mid-air.
+     */
+    return { supersededPersisted: consumePersisted(callerCallSid) };
   }
   const attempt = (prior?.attempt ?? 0) + 1;
   if (prior?.outcome === 'accepted') {
     // A DIFFERENT attempt failing after this call already reached a human.
     // Keep the success; still count the attempt so the record is honest.
     outcomes.set(callerCallSid, { ...prior, attempt });
-    return;
+    return { supersededPersisted: false };
   }
   if (outcomes.size >= MAX_TRACKED && !prior) {
     const oldest = outcomes.keys().next();
@@ -194,6 +208,18 @@ export function recordRuntimeTransferOutcome(
     at: new Date().toISOString(),
     attemptId,
   });
+  // A LATER attempt after the row was written — rarer, same consequence.
+  return { supersededPersisted: consumePersisted(callerCallSid) };
+}
+
+/**
+ * Did the database already receive an outcome for this call, and does it now
+ * need replacing? Answering clears the flag: the caller is about to write, and
+ * a second report would produce a second redundant update.
+ */
+function consumePersisted(callerCallSid: string): boolean {
+  if (!persistedCalls.delete(callerCallSid)) return false;
+  return true;
 }
 
 /**
@@ -239,13 +265,17 @@ export function peekRuntimeTransferOutcome(
  * output this module can produce, because it says a caller reached a human
  * when they did not.
  *
- * WHAT THIS DOES NOT FIX, said plainly rather than left to be discovered: when
- * a late settle only ENRICHES a success (adding `officeCallSid` to a value
- * already recorded as `accepted`), that enrichment stays in the map and no
- * teardown will persist it — the row keeps the correct outcome without the
- * office leg's id. The dangerous case is closed elsewhere: the corrective
- * failure is recorded synchronously in `onCallerRedirectFailed`, so it cannot
- * arrive late at all.
+ * A LATE SETTLEMENT IS NO LONGER STRANDED. An earlier version of this comment
+ * said the corrective failure "cannot arrive late at all" because
+ * `onCallerRedirectFailed` fires synchronously. THAT WAS FALSE — it fires in
+ * the catch of the redirect's own await, so teardown can beat it — and the
+ * claim survived here after being corrected in `runtimeTransfer.ts`, which is
+ * exactly the stale-in-one-place failure this repo keeps re-learning (Codex,
+ * PR #273).
+ *
+ * What happens instead: `recordRuntimeTransferOutcome` REPORTS when it has
+ * replaced a value that was already persisted, and the settle path turns that
+ * into a targeted update. See `supersededPersisted` below.
  */
 export function ackRuntimeTransferOutcome(
   callerCallSid: string,
@@ -254,7 +284,34 @@ export function ackRuntimeTransferOutcome(
   if (!persisted) return;
   if (outcomes.get(callerCallSid) !== persisted) return;
   outcomes.delete(callerCallSid);
+  /**
+   * REMEMBER THAT THIS CALL'S ROW HAS BEEN WRITTEN.
+   *
+   * Teardown can persist an IN-FLIGHT value — `redirecting`, written before
+   * the caller's leg has actually moved — and then the redirect settles with
+   * the real answer. Without this, that final `accepted` or `failed` sits in
+   * the map until eviction and the database keeps `redirecting` forever: not a
+   * false claim any more, but a permanently unfinished one, which under-counts
+   * exactly the completed transfers this column exists to count.
+   *
+   * Bounded the same way the outcomes map is: a call whose settlement never
+   * comes leaves one small entry, evicted oldest-first.
+   */
+  if (persistedCalls.size >= MAX_TRACKED) {
+    const oldest = persistedCalls.values().next();
+    if (!oldest.done) persistedCalls.delete(oldest.value);
+  }
+  persistedCalls.add(callerCallSid);
 }
+
+/**
+ * Calls whose `call_logs` row has already been written with an outcome.
+ *
+ * A separate set rather than a flag on the record, because the record is
+ * REPLACED on settlement and the flag would go with it — which is the whole
+ * situation this is here to detect.
+ */
+const persistedCalls = new Set<string>();
 
 /** Test hook. */
 export function clearRuntimeTransferOutcomes(): void {

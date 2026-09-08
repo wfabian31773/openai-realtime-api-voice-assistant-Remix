@@ -3,6 +3,7 @@ import {
   toCallLogRow,
   toConflictUpdate,
   persistRuntimeCall,
+  persistLateTransferOutcome,
   openRuntimeCall,
 } from "./callRecord";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
@@ -552,5 +553,42 @@ describe("persistRuntimeCall and the transfer outcome", () => {
     await persistRuntimeCall(record(), {}, async () => undefined);
 
     expect(peekRuntimeTransferOutcome("CA-1"), "acked on success").toBeUndefined();
+  });
+});
+
+describe("persistLateTransferOutcome", () => {
+  const SETTLED = {
+    outcome: "accepted" as const,
+    status: "CONNECTED",
+    officeCallSid: "CAoffice1",
+    ringSeconds: 13,
+    pipeline: "grok" as const,
+    attempt: 1,
+    at: "2026-09-08T14:00:00.000Z",
+  };
+
+  it("updates the one column, on the one row", async () => {
+    /**
+     * A TARGETED UPDATE, not an upsert, and that is the point: every other
+     * column belongs to a writer that has already finished, and a second
+     * upsert here would re-assert a teardown snapshot over whatever the
+     * agents' own telemetry wrote in between.
+     */
+    const calls: Array<{ sid: string; outcome: unknown }> = [];
+
+    const ok = await persistLateTransferOutcome("CA-1", SETTLED, async (sid, outcome) => {
+      calls.push({ sid, outcome });
+    });
+
+    expect(ok).toBe(true);
+    expect(calls).toEqual([{ sid: "CA-1", outcome: SETTLED }]);
+  });
+
+  it("never throws — a lost telemetry update must not surface near a call", async () => {
+    const ok = await persistLateTransferOutcome("CA-1", SETTLED, async () => {
+      throw new Error("connection terminated unexpectedly");
+    });
+
+    expect(ok).toBe(false);
   });
 });

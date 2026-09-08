@@ -12,7 +12,16 @@ import {
   peekRuntimeTransferOutcome,
   clearRuntimeTransferOutcomes,
 } from "./transferOutcomeLog";
+import { ackRuntimeTransferOutcome } from "./transferOutcomeLog";
 import { escalationDetailsMap } from "../services/escalationStore";
+
+/**
+ * The late-settlement writer, intercepted. `runtimeTransfer` reaches it
+ * through a DYNAMIC import so the runtime never pulls a database connection
+ * into boot, and `vi.mock` intercepts that just as well as a static one.
+ */
+const lateWrites = vi.hoisted(() => ({ persistLateTransferOutcome: vi.fn(async () => true) }));
+vi.mock("./callRecord", () => lateWrites);
 import type { WebhookRequest } from "./voiceWebhook";
 
 const AUTH_TOKEN = "test-auth-token";
@@ -632,5 +641,80 @@ describe("what never dialled is never recorded", () => {
     await outcome;
 
     expect(peekRuntimeTransferOutcome("CAcaller")?.outcome).toBeTruthy();
+  });
+});
+
+describe("a transfer that settles after teardown already wrote the row", () => {
+  /**
+   * Codex P1, PR #273, round 4 — and the wiring, not the store.
+   *
+   * Mutation testing showed the settle path's call to
+   * `persistLateTransferOutcome` was only grep-checkable: disabling it failed
+   * NOTHING, because every assertion I had written was on the store, which
+   * cannot see whether anything acts on what it reports. That is the same gap,
+   * for the eighth time on this PR, so it is closed the same way — by driving
+   * the real transfer and intercepting the real writer.
+   *
+   * Teardown is simulated where it actually happens: DURING the redirect,
+   * peeking the in-flight value and acking it exactly as a successful upsert
+   * would.
+   */
+  it("writes the settled outcome to the row teardown already persisted", async () => {
+    clearRuntimeTransferOutcomes();
+    lateWrites.persistLateTransferOutcome.mockClear();
+    const { ops } = fakeOps();
+    const watched: TransferTwilioOps = {
+      ...ops,
+      redirectCallerToConference: async (input) => {
+        // Teardown runs here: it snapshots `redirecting`, writes it, acks it.
+        ackRuntimeTransferOutcome("CAcaller", peekRuntimeTransferOutcome("CAcaller"));
+        return ops.redirectCallerToConference(input);
+      },
+    };
+    const transfer = transferWith(watched);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const outcome = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+
+    // The update is deliberately not awaited on the agent's path, so wait for it.
+    await vi.waitFor(() => expect(lateWrites.persistLateTransferOutcome).toHaveBeenCalledTimes(1));
+    const [sid, written] = lateWrites.persistLateTransferOutcome.mock.calls[0] as any[];
+    expect(sid).toBe("CAcaller");
+    expect(written.outcome, "the row said redirecting; the caller landed").toBe("accepted");
+  });
+
+  it("does NOT write again when teardown has not run yet", async () => {
+    /**
+     * The ordinary ordering — an extra update here would be pure noise on
+     * every successful transfer.
+     *
+     * IT HAS TO WAIT BEFORE ASSERTING, and the first version did not. The
+     * update is fired with `void import(...).then(...)`, so it lands a few
+     * microtasks after the transfer resolves: asserting immediately passes
+     * whether or not the code fired, and mutation testing proved it — making
+     * the update UNCONDITIONAL failed nothing. A negative assertion about
+     * asynchronous work is worthless unless the work has had its chance to
+     * happen.
+     */
+    clearRuntimeTransferOutcomes();
+    lateWrites.persistLateTransferOutcome.mockClear();
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const outcome = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+    // Let the dynamic import and its .then settle. Generous enough that a
+    // firing update would be seen, short enough to stay a unit test.
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(lateWrites.persistLateTransferOutcome).not.toHaveBeenCalled();
   });
 });

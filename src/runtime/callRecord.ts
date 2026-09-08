@@ -489,6 +489,57 @@ async function defaultUpsert(
   });
 }
 
+/**
+ * Write a transfer outcome onto a row that has ALREADY been written.
+ *
+ * The one exception to "this module writes the row once, at teardown", and it
+ * exists because teardown can run while a transfer is still in flight. It then
+ * persists `redirecting` — true at that instant — and the redirect settles
+ * afterwards with the real answer. Without this the database keeps
+ * `redirecting` forever: not a false claim, but a permanently unfinished one,
+ * which under-counts exactly the completed transfers the column exists to
+ * count (Codex, PR #273, round 4 of this race).
+ *
+ * A TARGETED UPDATE, not an upsert. The row exists — `openRuntimeCall` creates
+ * it when the call starts — and every other column belongs to a writer that
+ * has already finished. Touching one column is the whole point: a second
+ * upsert here would re-assert a teardown snapshot over whatever the agents'
+ * own telemetry wrote in between.
+ *
+ * Never throws. A lost telemetry update must not surface anywhere near a call.
+ */
+export async function persistLateTransferOutcome(
+  callSid: string,
+  transferOutcome: RuntimeTransferOutcome,
+  update: (callSid: string, outcome: RuntimeTransferOutcome) => Promise<void> = defaultLateUpdate,
+): Promise<boolean> {
+  try {
+    await update(callSid, transferOutcome);
+    return true;
+  } catch (error) {
+    console.error(
+      `[voice-runtime] late transfer_outcome update failed for ${callSid}:`,
+      error instanceof Error ? error.message : String(error),
+    );
+    return false;
+  }
+}
+
+async function defaultLateUpdate(
+  callSid: string,
+  transferOutcome: RuntimeTransferOutcome,
+): Promise<void> {
+  const [{ db }, { callLogs }, { eq }] = await Promise.all([
+    import("../../server/db"),
+    import("../../shared/schema"),
+    import("drizzle-orm"),
+  ]);
+  await db
+    .update(callLogs)
+    .set({ transferOutcome } as never)
+    .where(eq(callLogs.callSid, callSid));
+}
+
 export async function persistRuntimeCall(
   record: VoiceCallRecord,
   identity: RuntimeCallIdentity = {},

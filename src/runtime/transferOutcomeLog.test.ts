@@ -415,3 +415,88 @@ describe('the ack only drops what was actually written', () => {
     expect(peekRuntimeTransferOutcome('CAuntouched')).toBeTruthy();
   });
 });
+
+describe('a settlement that arrives after the row was written', () => {
+  /**
+   * Codex P1, PR #273, ROUND 4 of this race. Round 3 stopped the database
+   * claiming a caller reached a human by writing `redirecting` while the move
+   * was in flight — truthful at that instant. But the interleaving continues:
+   *
+   *   1. `onCallerRedirectStarting` stores `redirecting`
+   *   2. teardown snapshots it and persists it
+   *   3. the successful upsert ACKS exactly that snapshot
+   *   4. the redirect settles and stores `accepted`
+   *   5. no teardown remains to persist it
+   *
+   * The row then says `redirecting` forever. Not a false claim any more, but a
+   * permanently unfinished one — which under-counts exactly the completed
+   * transfers this column exists to count.
+   *
+   * The store cannot fix that itself; it reports the condition and the settle
+   * path does the targeted update. These tests pin the REPORT.
+   */
+  it('reports that a persisted value was superseded', () => {
+    const id = newTransferAttemptId();
+    recordRuntimeTransferOutcome('CAlanded', {
+      outcome: 'redirecting', status: 'ACCEPTED_REDIRECTING', acceptMethod: 'keypress', ringSeconds: 12,
+    }, id);
+
+    // Teardown: build the row, write it, ack exactly what was written.
+    ackRuntimeTransferOutcome('CAlanded', peekRuntimeTransferOutcome('CAlanded'));
+
+    // The redirect settles afterwards.
+    const settled = recordRuntimeTransferOutcome('CAlanded', {
+      outcome: 'accepted', status: 'CONNECTED', officeCallSid: 'CAoffice1', ringSeconds: 13,
+    }, id);
+
+    expect(
+      settled.supersededPersisted,
+      'the row says redirecting and the caller actually landed',
+    ).toBe(true);
+  });
+
+  it('does NOT report it when teardown has not run yet — the ordinary case', () => {
+    // The overwhelmingly common ordering: the transfer settles, THEN teardown
+    // writes the final value. An extra update here would be pure noise.
+    const id = newTransferAttemptId();
+    recordRuntimeTransferOutcome('CAnormal', {
+      outcome: 'redirecting', status: 'ACCEPTED_REDIRECTING', ringSeconds: 12,
+    }, id);
+
+    const settled = recordRuntimeTransferOutcome('CAnormal', {
+      outcome: 'accepted', status: 'CONNECTED', ringSeconds: 13,
+    }, id);
+
+    expect(settled.supersededPersisted).toBe(false);
+  });
+
+  it('reports it once, not on every later record', () => {
+    // The flag is consumed by the report: the caller is about to write, and a
+    // second report would produce a second redundant update.
+    const id = newTransferAttemptId();
+    recordRuntimeTransferOutcome('CAonce2', { outcome: 'redirecting', status: 'R', ringSeconds: 1 }, id);
+    ackRuntimeTransferOutcome('CAonce2', peekRuntimeTransferOutcome('CAonce2'));
+
+    expect(
+      recordRuntimeTransferOutcome('CAonce2', { outcome: 'accepted', status: 'CONNECTED', ringSeconds: 2 }, id)
+        .supersededPersisted,
+    ).toBe(true);
+    expect(
+      recordRuntimeTransferOutcome('CAonce2', { outcome: 'accepted', status: 'CONNECTED', ringSeconds: 3 }, id)
+        .supersededPersisted,
+    ).toBe(false);
+  });
+
+  it('a failed write leaves nothing to supersede', () => {
+    // No ack means the row was never written, so the retry will carry the
+    // final value on its own and a targeted update would hit a row that does
+    // not have the earlier value anyway.
+    const id = newTransferAttemptId();
+    recordRuntimeTransferOutcome('CAnowrite', { outcome: 'redirecting', status: 'R', ringSeconds: 1 }, id);
+
+    expect(
+      recordRuntimeTransferOutcome('CAnowrite', { outcome: 'accepted', status: 'CONNECTED', ringSeconds: 2 }, id)
+        .supersededPersisted,
+    ).toBe(false);
+  });
+});
