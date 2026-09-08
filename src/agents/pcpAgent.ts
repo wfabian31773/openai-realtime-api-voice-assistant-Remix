@@ -283,9 +283,11 @@ One line per chain is enough. Never call a tool cold. If you have been quiet for
 more than a few seconds for any reason, say "Still with you — one moment."
 
 # CONNECTING SOMEONE TO A PERSON
-Only the director decides whether a transfer is available. When it is, use
-handoff_to_pcp — it files the request BEFORE dialling, so nothing is lost if
-nobody picks up.
+Only the director decides whether a transfer is available. When it is and they
+ask to be put through — a representative, a person, the team — call
+handoff_to_pcp on that turn, not after one more question. It files before
+dialling, so waiting only makes them ask twice. Never weigh a transfer against
+taking the request.
 
 Never promise HOW they are being reached. One person, several, or a queue is a
 configuration decision, not yours. Say you are connecting them to the PCP team
@@ -1057,7 +1059,41 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         fallbackTicketStatus: ok ? undefined : 'OPEN',
       }, outcome && !outcome.ok ? outcome.reason : undefined, finalMissing));
       if (updated.success) pcpDirector.recordDisposition(callId, finalDisposition);
-      return { success: ok, handoffStatus: finalStatus, ticketNumber: initial.ticketNumber, fallbackRecorded: updated.success };
+      const settled = {
+        handoffStatus: finalStatus,
+        ticketNumber: initial.ticketNumber ?? updated.ticketNumber,
+        fallbackRecorded: updated.success,
+      };
+      if (ok) return { success: true, ...settled };
+      /**
+       * A DIAL THAT FAILED HAS TO COME BACK WITH WORDS. CAa2a3a1c1, 2026-09-08.
+       *
+       * This return used to be `{success:false, ...settled}` and nothing else,
+       * so the model was handed a bare failure and improvised — it resumed the
+       * intake script mid-transfer while the caller asked "did you try to
+       * connect?". See `handoff_no_answer` in refusals.ts for the transcript.
+       *
+       * The three statuses differ in what happened on OUR side and not at all
+       * in what the caller is owed, so two of them share their copy and the
+       * third reuses the eligibility line that was already written for it.
+       * HANDOFF_UNAVAILABLE reaching here is the POLICY refusing at dial time
+       * — the earlier eligibility check catches the director's refusal — and
+       * the caller hears the same thing either way.
+       *
+       * `fallbackRecorded` is deliberately not what selects the copy. The
+       * request is durable before the dial (`requestIsOnRecord`, above) and
+       * `initial` has already written a ticket, so a failed FALLBACK write is
+       * a lost outcome record, not a lost request: telling the caller their
+       * request went nowhere would be the false statement, not the reassuring
+       * one.
+       */
+      const slug =
+        finalStatus === 'NO_ANSWER'
+          ? 'handoff_no_answer'
+          : finalStatus === 'HANDOFF_UNAVAILABLE'
+            ? 'handoff_not_eligible_task_created'
+            : 'handoff_failed';
+      return refusePcp(slug, settled);
     },
   });
 
