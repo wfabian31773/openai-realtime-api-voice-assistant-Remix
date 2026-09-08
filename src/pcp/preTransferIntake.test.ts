@@ -61,6 +61,29 @@ function freshCall() {
 /** His opening line on CAa2a3a1c1, in the shape the model writes it. */
 const BARE_ASK = 'Caller asked: can I speak to the team please?';
 
+/**
+ * WHAT THE MODEL ACTUALLY SENDS ON THE RETRY — and the reason this constant
+ * exists at all.
+ *
+ * Codex P1, PR #273: every test here originally passed `BARE_ASK` again on the
+ * second `handoff_to_pcp`, which is a shape no real call produces. The model
+ * summarises WHAT JUST HAPPENED, so after the one round the narrative
+ * describes the ANSWER — "caller declined to give their name" — and matches
+ * `asksForAPerson` not at all.
+ *
+ * That concealed a defect in the ruling this file is named for: the local
+ * `askedForAPerson` read only the current turn, so the purpose gate refused
+ * with `call_purpose_required` and `escalationDetailsMap` recorded
+ * `callerRequestedHuman: false`, which makes `resolveHandoffDestination`
+ * withhold the number. "One round then transfer anyway" would have been "one
+ * round then nothing" for precisely the caller the round exists to serve.
+ *
+ * Sixth instance on this PR of a test passing because it exercised a shape the
+ * production path does not produce. These constants are the fix.
+ */
+const DECLINED = 'Caller declined to give their name or say what it is regarding.';
+const GAVE_A_PURPOSE = 'Caller is following up on a prior authorisation for a mutual patient.';
+
 beforeEach(() => {
   ticketing.createPcpTicket.mockClear();
   escalationDetailsMap.clear();
@@ -131,28 +154,46 @@ describe('one round, then the dial', () => {
     expect(dialled, 'the office is not rung until we have tried once').not.toHaveBeenCalled();
   });
 
-  it('DIALS ANYWAY on the next attempt when the caller says nothing', async () => {
+  it('DIALS ANYWAY when the caller DECLINES — the narrative no longer mentions an ask', async () => {
     /**
-     * The half that makes it a round and not a gate. On 2026-08-06 blocking on
-     * missing fields destroyed 21 records requests; on this path what the
-     * caller rang for IS the transfer, so trapping them in questions is the
-     * failure, not the protection.
+     * The half that makes it a round and not a gate, tested with the narrative
+     * a real retry carries. On 2026-08-06 blocking on missing fields destroyed
+     * 21 records requests; on this path what the caller rang for IS the
+     * transfer, so trapping them in questions is the failure, not the
+     * protection.
      */
     const { agent, dialled } = freshCall();
     await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
 
-    const second = await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
+    const second = await call(agent, 'handoff_to_pcp', { narrative: DECLINED });
 
-    expect(dialled, 'the ask wins').toHaveBeenCalledTimes(1);
+    expect(dialled, 'the ask wins even when the retry does not repeat it').toHaveBeenCalledTimes(1);
+    expect(second.success, `must dial: ${JSON.stringify(second)}`).toBe(true);
+  });
+
+  it('DIALS ANYWAY when the caller answers with a purpose instead', async () => {
+    // The other realistic retry: they say why they rang but never re-ask for a
+    // person. The latch is what carries the original ask forward.
+    const { agent, callId, dialled } = freshCall();
+    await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
+    await call(agent, 'record_pcp_intake', { callPurpose: 'outside_referral_status' });
+
+    const second = await call(agent, 'handoff_to_pcp', { narrative: GAVE_A_PURPOSE });
+
+    expect(dialled).toHaveBeenCalledTimes(1);
     expect(second.success).toBe(true);
+    expect(
+      escalationDetailsMap.get(callId)?.callerRequestedHuman,
+      'false here makes resolveHandoffDestination withhold the number',
+    ).toBe(true);
   });
 
   it('never asks twice, however many times the handoff is retried', async () => {
     const { agent, dialled } = freshCall();
 
     await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
-    await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
-    const third = await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
+    await call(agent, 'handoff_to_pcp', { narrative: DECLINED });
+    const third = await call(agent, 'handoff_to_pcp', { narrative: DECLINED });
 
     expect(third.error, 'the latch is spent on being asked, not on being answered').not.toBe(
       'pre_transfer_intake',
@@ -201,7 +242,7 @@ describe('the telemetry — "build it and the telemetry"', () => {
   it('records what the office was NOT told, measured after the round', async () => {
     const { agent, callId } = freshCall();
     await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
-    await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
+    await call(agent, 'handoff_to_pcp', { narrative: DECLINED });
 
     const details = escalationDetailsMap.get(callId);
     expect(details?.askedBeforeDial, 'the round fired').toBe(true);
@@ -224,7 +265,7 @@ describe('the telemetry — "build it and the telemetry"', () => {
       callerRole: 'referral coordinator',
       callPurpose: 'outside_referral_status',
     });
-    await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
+    await call(agent, 'handoff_to_pcp', { narrative: GAVE_A_PURPOSE });
 
     const details = escalationDetailsMap.get(callId);
     expect(details?.askedBeforeDial).toBe(true);
@@ -248,7 +289,7 @@ describe('the telemetry — "build it and the telemetry"', () => {
     const { agent, callId } = freshCall();
     await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
     await call(agent, 'record_pcp_intake', { callerName: 'Wayne Fabian' });
-    await call(agent, 'handoff_to_pcp', { narrative: BARE_ASK });
+    await call(agent, 'handoff_to_pcp', { narrative: GAVE_A_PURPOSE });
 
     expect(
       escalationDetailsMap.get(callId)?.briefingGaps,

@@ -414,3 +414,43 @@ describe('the sequential dial path checks liveness before it clears the marker',
     expect(guard, 'checking AFTER the clear would read a marker just erased').toBeLessThan(clear);
   });
 });
+
+/**
+ * BOTH PIPELINES REPORT THE SAME THING, OR THE COLUMN CANNOT BE READ.
+ * Codex P2, PR #273.
+ *
+ * The runtime records `briefingGaps` / `askedBeforeDial` from the escalation
+ * side channel. The old core's `recordTransferOutcome` did not, so a legacy
+ * PCP call that DID run the one-round intake was indistinguishable from a lane
+ * that never checked — the same "absent reads as a negative finding" failure
+ * that made every runtime transfer look like no transfer at all.
+ *
+ * Structural, and labelled as such: `addHumanAgent` sits in a 7,000-line route
+ * module and needs most of Twilio stood up to enter, so what is asserted is
+ * that the snapshot is taken at DIAL time and read at OUTCOME time. That
+ * ordering is the whole fix — a successful handoff clears
+ * `escalationDetailsMap` before the outcome is recorded, so reading it later
+ * would report every connected transfer as fully briefed.
+ */
+describe('the legacy dial path carries the briefing telemetry too', () => {
+  it('snapshots it when it dials, and reads the snapshot when it records', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const source = await readFile(new URL('../voiceAgentRoutes.ts', import.meta.url), 'utf8');
+
+    const snapshot = source.indexOf('const briefedAtDial = escalationDetailsMap.get(openAiCallId)');
+    const read = source.indexOf('...(dial.briefingGaps ? { briefingGaps: dial.briefingGaps }');
+
+    expect(snapshot, 'the dial must capture the briefing before the side channel is cleared').toBeGreaterThan(-1);
+    expect(read, 'and the outcome payload must carry it').toBeGreaterThan(-1);
+  });
+
+  it('reports ABSENT rather than empty on a lane that never ran the round', async () => {
+    // An empty list would claim a complete briefing this path never checked —
+    // the same lie as writing zeros for a provider that reported no tokens.
+    const { readFile } = await import('node:fs/promises');
+    const source = await readFile(new URL('../voiceAgentRoutes.ts', import.meta.url), 'utf8');
+
+    expect(source).not.toContain('briefingGaps: dial.briefingGaps ?? []');
+    expect(source).toContain('...(dial.briefingGaps ? { briefingGaps: dial.briefingGaps } : {})');
+  });
+});

@@ -853,7 +853,28 @@ async function flushLoopTelemetry(key: string, callLogId: string): Promise<LoopG
 
 /** What we dialed for a warm transfer, keyed by the OFFICE leg's CallSid, so
  *  the accept/status webhooks can attribute an outcome to it. */
-const officeLegDials = new Map<string, { openAiCallId: string; dialedNumber: string; queueLabel: string; dialedAt: number; callerCallSid?: string }>();
+const officeLegDials = new Map<string, {
+  openAiCallId: string;
+  dialedNumber: string;
+  queueLabel: string;
+  dialedAt: number;
+  callerCallSid?: string;
+  /**
+   * WHAT THE OFFICE WAS NOT TOLD, SNAPSHOT AT DIAL TIME. Codex P2, PR #273.
+   *
+   * The runtime records these from the escalation side channel; this path did
+   * not, so a legacy PCP call that DID run the one-round intake was
+   * indistinguishable from a lane that never checked the briefing — the exact
+   * "absent reads as a negative finding" failure that made every runtime
+   * transfer look like no transfer at all.
+   *
+   * Snapshotted HERE rather than read at outcome time because a successful
+   * handoff deletes `escalationDetailsMap` before the outcome is recorded, so
+   * reading it later would report every connected transfer as fully briefed.
+   */
+  briefingGaps?: string[];
+  askedBeforeDial?: boolean;
+}>();
 
 /** Persist the office leg's result onto the call log. This is the record that
  *  answers "did the office actually pick up, and which office was it?" — a
@@ -888,6 +909,10 @@ async function recordTransferOutcome(
     amdVerdict: extra.amdVerdict ?? null,
     ...(extra.detail ? { detail: extra.detail } : {}),
     ringSeconds: Math.round((Date.now() - dial.dialedAt) / 1000),
+    // Absent, never empty, on a lane that does not run the round — an empty
+    // list would claim a complete briefing this path never checked.
+    ...(dial.briefingGaps ? { briefingGaps: dial.briefingGaps } : {}),
+    ...(dial.askedBeforeDial !== undefined ? { askedBeforeDial: dial.askedBeforeDial } : {}),
     at: new Date().toISOString(),
   };
   try {
@@ -2203,8 +2228,15 @@ async function transferConferenceToNumber(
     // Office-leg telemetry (2026-07-30): remember what we dialed so the
     // accept/status webhooks can record the OUTCOME against it. Without
     // this pair, nothing in the database says whether the office picked up.
+    const briefedAtDial = escalationDetailsMap.get(openAiCallId);
     officeLegDials.set(dialedSid, {
       openAiCallId, dialedNumber: toNumber, queueLabel: label, dialedAt: Date.now(),
+      // Taken now: a successful handoff clears the side channel before the
+      // outcome is recorded (Codex P2, PR #273).
+      ...(briefedAtDial?.briefingGaps ? { briefingGaps: briefedAtDial.briefingGaps } : {}),
+      ...(briefedAtDial?.askedBeforeDial !== undefined
+        ? { askedBeforeDial: briefedAtDial.askedBeforeDial }
+        : {}),
       // The CALLER's leg, so a late outcome can still find the call_logs row
       // when dbCallLogId has not been written yet. Taken from the conference
       // rather than CallMetadata, whose twilioCallSid is never populated.

@@ -113,8 +113,15 @@ async function askedThenDialled(agent: any, narrative = BARE_ASK) {
   expect(first.error, 'the one round must fire on a caller we know nothing about').toBe(
     'pre_transfer_intake',
   );
-  // The caller declines, or says something the model records nothing from.
-  return call(agent, 'handoff_to_pcp', { narrative });
+  /**
+   * THE RETRY NARRATIVE IS NOT THE ASK. Codex P1, PR #273: the model
+   * summarises what just happened, so after the round it says the caller
+   * declined — a shape that matches `asksForAPerson` not at all. Passing the
+   * bare ask again is what hid a defect in the round itself.
+   */
+  return call(agent, 'handoff_to_pcp', {
+    narrative: 'Caller declined to give their name or say what it is regarding.',
+  });
 }
 
 beforeEach(() => {

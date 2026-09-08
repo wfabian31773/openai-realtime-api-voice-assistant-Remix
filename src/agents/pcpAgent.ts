@@ -976,8 +976,35 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // "caller from the front desk asking about a referral" is not a request
       // to be transferred, and dialing the queue on it would be worse than
       // the bug being fixed (review 2026-08-09).
-      const askedForAPerson = asksForAPerson(narrative);
-      if (askedForAPerson) pcpDirector.markCallerRequestedHuman(callId);
+      const askedThisTurn = asksForAPerson(narrative);
+      if (askedThisTurn) pcpDirector.markCallerRequestedHuman(callId);
+      /**
+       * THE LATCH, NOT THIS TURN'S WORDS. Codex P1, PR #273.
+       *
+       * The one-round intake sends the model away and brings it back, and the
+       * narrative it returns with describes THE ANSWER, not the original ask:
+       * "Caller declined to give their name", or a purpose they finally
+       * stated. Neither matches `asksForAPerson`, so reading only this turn
+       * broke the ruling it was built for —
+       *
+       *   the purpose gate below refused with `call_purpose_required` on a
+       *   caller who declined, and
+       *   `escalationDetailsMap` recorded `callerRequestedHuman: false`, which
+       *   makes `resolveHandoffDestination` withhold the number.
+       *
+       * "One round then transfer anyway" would have become "one round then
+       * nothing" for exactly the caller the round exists to serve.
+       *
+       * `markCallerRequestedHuman` has always latched this on the director, and
+       * the director's own `eligibleByAsk` has always read the latch. This
+       * local copy was the only thing still asking "did they say it THIS
+       * time?".
+       *
+       * MY TESTS HID IT by passing the same bare-ask narrative on every retry —
+       * a shape no real call produces, since the model summarises what just
+       * happened rather than repeating itself.
+       */
+      const askedForAPerson = askedThisTurn || Boolean(state.callerRequestedHuman);
       // A professional who asked for a person is not blocked by a missing
       // classification (operator 2026-08-09). The purpose is still recorded
       // on the ticket; it just no longer decides whether the phone rings.
