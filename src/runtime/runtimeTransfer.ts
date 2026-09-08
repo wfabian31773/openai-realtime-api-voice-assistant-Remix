@@ -26,7 +26,18 @@
 import { escalationDetailsMap } from "../services/escalationStore";
 import { resolveHandoffDestination } from "../services/handoffPolicy";
 import { buildPcpTransferBriefing } from "../services/warmTransferBriefing";
+import {
+  newTransferAttemptId,
+  recordRuntimeTransferOutcome,
+  type RuntimeTransferOutcome,
+  type TransferAttemptId,
+} from "./transferOutcomeLog";
 import { ACCEPT_WINDOW_MS, conferenceNameFor, performWarmTransfer } from "./warmTransfer";
+import { performBlindTransfer } from "./blindTransfer";
+import {
+  handleBlindDialResult,
+  type PendingBlindDial,
+} from "./blindTransferDialResult";
 import type { TransferOutcome, TransferTwilioOps } from "./warmTransfer";
 import { TransferAcceptRegistry } from "./transferAccepts";
 import { createTransferTwilioOps, type MinimalTwilioClient } from "./transferTwilioOps";
@@ -39,6 +50,33 @@ export const TRANSFER_ACCEPT_PATH = "/voice/transfer-accept";
 
 /** The path the office leg's terminal status posts to. Mounted by voiceRuntime. */
 export const TRANSFER_STATUS_PATH = "/voice/transfer-status";
+
+/** The path a BLIND transfer's `<Dial>` posts its finished result to. */
+export const TRANSFER_DIAL_RESULT_PATH = "/voice/transfer-dial-result";
+
+/**
+ * WHICH LANES HAND THE CALLER STRAIGHT TO THE QUEUE.
+ *
+ * PCP only, and by operator decision rather than by capability: its
+ * destination is a call centre (`PCP_HUMAN_AGENT_NUMBER`), asked and answered
+ * 2026-09-08 — *"No, it's a call center."* Every other transfer-capable lane
+ * dials a place where a specific person picks up, and there the warm path's
+ * proof-of-answer is worth the wait it costs.
+ *
+ * Overridable per deployment because this is a live behaviour change on the
+ * busiest lane and reverting it must not need a code change:
+ * `RUNTIME_TRANSFER_MODE=warm` puts every lane back on the warm path;
+ * `blind` puts every lane on the blind one. Anything else, including unset,
+ * is the per-lane default above.
+ */
+export function transferModeFor(
+  slug: string,
+  env: Record<string, string | undefined>,
+): "warm" | "blind" {
+  const override = env.RUNTIME_TRANSFER_MODE?.trim().toLowerCase();
+  if (override === "warm" || override === "blind") return override;
+  return slug === "pcp" ? "blind" : "warm";
+}
 
 /** Per-call hooks the runtime supplies so the CALL's own record survives
  * the transfer — see WarmTransferDeps for why the mark precedes the
@@ -63,6 +101,19 @@ export interface RuntimeTransferOptions {
   ops?: TransferTwilioOps;
   /** Public host the accept URL is built on (no protocol). */
   domain?: string;
+  /**
+   * Where a settled outcome is written. Injected for tests; production leaves
+   * it unset and gets the dynamic `callRecord` import, which is what keeps a
+   * database connection out of the runtime's boot path.
+   *
+   * It is a SEAM rather than a convenience. Two call sites reach the writer —
+   * the transfer settling, and a blind transfer's dial result arriving later
+   * on its own HTTP request — and a test that cannot see both cannot tell a
+   * wired dial-result callback from an unwired one. Mocking the module instead
+   * proved unreliable across the two call paths, which is a fragile thing to
+   * rest the only proof of a write on.
+   */
+  persistOutcome?: (callerCallSid: string, outcome: RuntimeTransferOutcome) => void;
   log?: (line: string) => void;
 }
 
@@ -88,6 +139,10 @@ export interface RuntimeTransfer {
   /** The office leg's terminal-status webhook, for TRANSFER_STATUS_PATH:
    * settles a dial that died without accepting the moment Twilio knows. */
   handleStatus(req: WebhookRequest): WebhookResponse;
+  /** A blind transfer's `<Dial>` finished, for TRANSFER_DIAL_RESULT_PATH:
+   * records whether the queue answered, and speaks to a caller left holding
+   * a line whose agent died with the redirect. */
+  handleDialResult(req: WebhookRequest): WebhookResponse;
   /** The caller's call ended. Abandon any office leg still ringing for it —
    * without this the office rings up to the full window after the caller
    * is gone, and can even accept into a completed leg (Codex, PR #230
@@ -178,6 +233,7 @@ function defaultOps(
     createOfficeLeg: async (input) => (await get()).createOfficeLeg(input),
     redirectCallerToConference: async (input) => (await get()).redirectCallerToConference(input),
     endCall: async (sid) => (await get()).endCall(sid),
+    redirectCallerToQueue: async (input) => (await get()).redirectCallerToQueue(input),
   };
 }
 
@@ -193,14 +249,30 @@ function defaultOps(
 export function toPcpHandoffOutcome(
   outcome: TransferOutcome,
 ):
-  | { ok: true; destination?: string }
+  | { ok: true; destination?: string; handedToQueue?: true }
   | {
       ok: false;
       status: "HANDOFF_UNAVAILABLE" | "NO_ANSWER" | "FAILED";
       reason?: string;
       destination?: string;
     } {
-  if (outcome.ok) return { ok: true, destination: outcome.destination };
+  /**
+   * A BLIND SUCCESS IS NOT A CONNECTION, and the ticket must not say it was.
+   *
+   * `handedToQueue` is what stops `handoff_to_pcp` writing
+   * `finalStatus: 'CONNECTED'` for a caller nobody has been proven to answer.
+   * A staffer reading a CONNECTED ticket reasonably assumes the conversation
+   * happened and deprioritises the callback — which is precisely the ticket
+   * Rosa asked for on 2026-09-08 ("a ticket should be created even when they
+   * are transferred") being made useless by the word on it.
+   */
+  if (outcome.ok) {
+    return {
+      ok: true,
+      destination: outcome.destination,
+      ...(outcome.method === "blind" ? { handedToQueue: true as const } : {}),
+    };
+  }
   return {
     ok: false,
     status:
@@ -214,14 +286,102 @@ export function toPcpHandoffOutcome(
   };
 }
 
+/**
+ * The transfer's own result, in the shape `call_logs.transfer_outcome` stores.
+ *
+ * EXPORTED BECAUSE IT WAS UNTESTABLE INSIDE THE CLOSURE, and mutation testing
+ * is what showed that mattered: flattening DECLINED into `no_answer` — the one
+ * translation this mapping makes a judgement about — failed no test at all,
+ * because the only `declined` assertion was on the STORE, which never sees a
+ * `TransferOutcome`. The same shape as the briefing bug an hour earlier: a
+ * test that exercises the sink and not the source cannot tell a working
+ * mapping from a broken one.
+ *
+ * `declined` deliberately extends the old core's vocabulary rather than
+ * folding into `no_answer`: nobody picking up is a staffing question and
+ * somebody refusing is not, and nothing reads this column today, so the
+ * extension costs nothing while the flattening would cost the distinction.
+ */
+export function toRecordedOutcome(
+  outcome: TransferOutcome,
+  ringSeconds: number,
+  /**
+   * What the office was not told, from the agent's side channel. Optional
+   * because only PCP runs the one-round intake today; a lane that does not
+   * report it leaves the columns absent rather than claiming a full briefing
+   * it never checked.
+   */
+  briefing: { gaps?: string[]; asked?: boolean } = {},
+): Parameters<typeof recordRuntimeTransferOutcome>[1] {
+  const briefingFields = {
+    ...(briefing.gaps ? { briefingGaps: briefing.gaps } : {}),
+    ...(briefing.asked !== undefined ? { askedBeforeDial: briefing.asked } : {}),
+  };
+  if (outcome.ok && outcome.method === "blind") {
+    /**
+     * THE HONEST FLOOR OF A BLIND TRANSFER. Nothing has answered: the caller
+     * was redirected and is no longer ours. `blindTransferDialResult.ts`
+     * upgrades this row to `queue_answered` (or down to `no_answer`) when
+     * Twilio reports what the dial did — and if that callback never arrives,
+     * THIS is what the record says, which is exactly what was known.
+     *
+     * No `acceptMethod`, because nothing was accepted, and no `officeCallSid`,
+     * because there is no office leg. `ringSeconds: 0` is the truth at this
+     * instant rather than a placeholder — the ringing has not started.
+     */
+    return {
+      outcome: "handed_to_queue",
+      status: "HANDED_TO_QUEUE",
+      dialedNumber: outcome.destination,
+      ringSeconds: 0,
+      method: "blind",
+      ...briefingFields,
+    };
+  }
+  if (outcome.ok) {
+    return {
+      outcome: "accepted",
+      status: "CONNECTED",
+      dialedNumber: outcome.destination,
+      officeCallSid: outcome.officeCallSid,
+      acceptMethod: "keypress",
+      ringSeconds,
+      method: "warm",
+      ...briefingFields,
+    };
+  }
+  return {
+    ...briefingFields,
+    ...(outcome.method ? { method: outcome.method } : {}),
+    outcome:
+      outcome.status === "NO_ANSWER"
+        ? "no_answer"
+        : outcome.status === "DECLINED"
+          ? "declined"
+          : outcome.status === "UNAVAILABLE"
+            ? "unavailable"
+            : "failed",
+    status: outcome.status,
+    reason: outcome.reason,
+    // Recorded on FAILURE too. 46 of 46 failed PCP handoffs in the 90 days to
+    // 2026-08-13 recorded no destination, which is why "were we dialling the
+    // retired roster?" is unanswerable from that data.
+    ...(outcome.destination ? { dialedNumber: outcome.destination } : {}),
+    ringSeconds,
+  };
+}
+
 /** Who is calling and why, from the agent's own side-channel write. */
 export function briefingFor(
   slug: string,
   metadata: LaneCallMetadata,
-  details: { reason?: string; providerInfo?: string } | undefined,
+  details: { reason?: string; providerInfo?: string; callerName?: string } | undefined,
 ): string {
   if (slug === "pcp") {
     return buildPcpTransferBriefing({
+      // The staffer is about to talk to this person; their name is the first
+      // thing they need and was not passed here until 2026-09-08.
+      callerName: details?.callerName,
       providerInfo: details?.providerInfo,
       reason: details?.reason,
     });
@@ -262,8 +422,53 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
    * started before the teardown can still be in flight by then. */
   const endedCallers = new Map<string, number>();
 
+  /**
+   * THE ONE PLACE THIS PROCESS WRITES `call_logs.transfer_outcome`.
+   *
+   * Two call sites reach it — the transfer settling, and a blind transfer's
+   * dial result arriving later on its own HTTP request — and they must not
+   * become two writers again. `transferOutcomeLog.ts` documents what two
+   * writers over one column cost: five review rounds, each fix creating the
+   * next finding, until the second writer was deleted rather than sequenced.
+   *
+   * Deliberately NOT awaited. This runs on the path returning to the agent (or
+   * to Twilio), and a database round trip must not sit between a caller and
+   * the next thing they hear. `persistTransferOutcome` never throws; it
+   * serialises per call and reports its own failures.
+   */
+  const writeOutcome =
+    options.persistOutcome ??
+    ((callerCallSid: string, toPersist: RuntimeTransferOutcome): void => {
+      void import("./callRecord")
+        .then(({ persistTransferOutcome }) => persistTransferOutcome(callerCallSid, toPersist))
+        .catch((err) =>
+          log(`[runtime-xfer] outcome write could not start for ${callerCallSid}: ${String(err)}`),
+        );
+    });
+
   const acceptUrl = `https://${options.domain}${TRANSFER_ACCEPT_PATH}`;
   const statusUrl = `https://${options.domain}${TRANSFER_STATUS_PATH}`;
+  const dialResultUrl = `https://${options.domain}${TRANSFER_DIAL_RESULT_PATH}`;
+  /**
+   * callerCallSid -> the blind dial still running for it.
+   *
+   * Bounded the same way the accept registry is: an entry is dropped when the
+   * dial result lands, and a stale one is evicted after the window below. The
+   * whole point of the map is the attempt id — without it the dial result
+   * could be written against a LATER attempt on the same call and overwrite a
+   * transfer that had already settled.
+   */
+  const pendingBlindDials = new Map<string, PendingBlindDial>();
+  /** Long enough for a queue to ring out and a caller to sit in hold music;
+   * short enough that a process serving 200+ calls a day cannot accumulate.
+   * Nothing depends on the exact figure — an evicted entry costs one
+   * unattributed dial result, which the handler logs rather than guesses at. */
+  const BLIND_DIAL_MEMORY_MS = 60 * 60 * 1000;
+  const forgetStaleBlindDials = (nowMs: number): void => {
+    for (const [sid, pending] of pendingBlindDials) {
+      if (nowMs - pending.redirectedAtMs > BLIND_DIAL_MEMORY_MS) pendingBlindDials.delete(sid);
+    }
+  };
 
   return {
     unavailableReason,
@@ -273,13 +478,27 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
       metadata: LaneCallMetadata,
       hooks?: TransferLifecycleHooks,
     ): () => Promise<unknown> {
+      let dialStartedAt = Date.now();
+      let attemptId: TransferAttemptId = newTransferAttemptId();
+      const mode = transferModeFor(slug, env);
       const attempt = async (): Promise<TransferOutcome> => {
+        attemptId = newTransferAttemptId();
         try {
           // Before anything dials: the whole attempt — dial, briefing,
           // keypress — is bounded by the accept window, and the bridge's
           // watchdog needs that budget, not the tool dispatch's 45
           // seconds (Codex, PR #230 round 3).
-          hooks?.onAttemptStarting?.(ACCEPT_WINDOW_MS);
+          //
+          // NOT WIDENED ON THE BLIND PATH, deliberately: it returns the
+          // instant the redirect is accepted by Twilio, so the extra budget
+          // would keep the dead-air watchdog stood down over a stream that is
+          // already being torn down. The whole reason for the blind shape is
+          // that nothing waits.
+          if (mode !== "blind") hooks?.onAttemptStarting?.(ACCEPT_WINDOW_MS);
+          // When the office leg started ringing, so the recorded outcome can
+          // say how long it rang. The old core reports this and the runtime
+          // reported nothing at all.
+          dialStartedAt = Date.now();
           // Read at INVOKE time, not build time: the agent's escalate tool
           // writes the side channel during the call, after the factory ran.
           const details = escalationDetailsMap.get(metadata.callId);
@@ -292,6 +511,45 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           });
           if (!policy.allowed) {
             log(`[runtime-xfer] policy refused ${slug}/${metadata.callId}: ${policy.reason}`);
+          }
+          if (mode === "blind") {
+            /**
+             * THE BRIEFING GAPS ARE SNAPSHOTTED HERE, not read later.
+             *
+             * `attempt`'s own `finally` deletes the side channel — it holds a
+             * caller's name and callback number — so the dial-result callback,
+             * which arrives minutes later on a different HTTP request, cannot
+             * read it. Copying the two telemetry fields into the pending entry
+             * is what keeps `briefingGaps`/`askedBeforeDial` on the row the
+             * webhook writes (the whole point of "build it and the telemetry").
+             */
+            const blindOutcome = await performBlindTransfer(
+              {
+                callerCallSid: metadata.callSid,
+                destination: policy.allowed ? policy.destination : null,
+              },
+              {
+                twilio: ops,
+                dialResultUrl,
+                callerId: env.TWILIO_PHONE_NUMBER,
+                onCallerRedirectStarting: hooks?.onCallerRedirectStarting,
+                onCallerRedirectFailed: hooks?.onCallerRedirectFailed,
+                log,
+              },
+            );
+            if (blindOutcome.ok) {
+              forgetStaleBlindDials(Date.now());
+              pendingBlindDials.set(metadata.callSid, {
+                attemptId,
+                destination: blindOutcome.destination,
+                redirectedAtMs: Date.now(),
+                ...(details?.briefingGaps ? { briefingGaps: details.briefingGaps } : {}),
+                ...(details?.askedBeforeDial !== undefined
+                  ? { askedBeforeDial: details.askedBeforeDial }
+                  : {}),
+              });
+            }
+            return blindOutcome;
           }
           return await performWarmTransfer(
             {
@@ -332,7 +590,15 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               statusUrl,
               fromNumber: env.TWILIO_PHONE_NUMBER ?? "",
               callerId: env.TWILIO_PHONE_NUMBER,
+              /**
+               * NO PROVISIONAL RECORD HERE ANY MORE. It existed so a success
+               * would survive teardown beating the settle — and teardown no
+               * longer writes this column at all, so there is nothing to
+               * survive. See the redesign note in transferOutcomeLog.ts.
+               */
               onCallerRedirectStarting: hooks?.onCallerRedirectStarting,
+              // Nothing to correct: the settle below records the failure the
+              // redirect produces, and it is the only thing that writes.
               onCallerRedirectFailed: hooks?.onCallerRedirectFailed,
               log,
             },
@@ -352,13 +618,83 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           hooks?.onAttemptSettled?.();
         }
       };
+      /**
+       * WRITE THE OUTCOME DOWN BEFORE HANDING IT TO THE AGENT.
+       *
+       * `call_logs.transfer_outcome` was NULL on every runtime call ever made,
+       * because `recordTransferOutcome` keys on `officeLegDials` — a map only
+       * the old core's dial path populates. On 2026-09-08 the PCP line dialled
+       * +17149564300 and rang out; the TICKET recorded destination, timing and
+       * NO_ANSWER, and `call_logs` recorded nothing, so the same call read as
+       * "no transfer attempted" from the table every dashboard uses. Operator:
+       * "you have the data, but we're not capturing it properly."
+       *
+       * Wrapped around BOTH slug paths rather than added to one, because the
+       * non-PCP path THROWS on failure — recording inside it after the throw
+       * would capture successes only, which is the half that needs recording
+       * least.
+       */
+      const settle = async (): Promise<TransferOutcome> => {
+        /**
+         * READ THE SIDE CHANNEL BEFORE `attempt()`, because attempt's own
+         * `finally` DELETES it — the entry holds a caller's name, DOB and
+         * callback number, so it is cleared per attempt rather than left in a
+         * process-wide map (Codex, PR #230). Reading after would report every
+         * transfer as fully briefed, which is worse than reporting nothing.
+         */
+        const briefed = escalationDetailsMap.get(metadata.callId);
+        const briefing = { gaps: briefed?.briefingGaps, asked: briefed?.askedBeforeDial };
+        const outcome = await attempt();
+        try {
+          /**
+           * A POLICY REFUSAL IS NOT A DIAL. Codex P2, PR #273.
+           *
+           * `performWarmTransfer` returns UNAVAILABLE before `createOfficeLeg`
+           * when there is no destination or policy withheld one — its own
+           * comment says "nothing was attempted". Recording it would write a
+           * non-null `transfer_outcome` for a call where no number was ever
+           * rung, which breaks the meaning this column was just given: NULL is
+           * "no transfer was attempted". Reporting would count configuration
+           * refusals as dials.
+           */
+          if (!outcome.ok && outcome.status === "UNAVAILABLE") return outcome;
+          /**
+           * RECORD IT, THEN WRITE IT. One writer, at the moment the answer
+           * exists.
+           *
+           * `recordRuntimeTransferOutcome` returns the value to persist —
+           * which is NOT always the value just passed in: a later attempt
+           * failing after this call already reached a human keeps the earlier
+           * success, with the attempt count advanced. Writing the RETURN value
+           * means this code never has to know which branch was taken, and the
+           * attempt count is whatever the store actually counted rather than a
+           * number reconstructed here (Codex P2, PR #273 round 5, where it was
+           * hardcoded to 1 and lost every retry).
+           *
+           * Deliberately NOT awaited: this runs on the path returning to the
+           * agent, and a database round trip must not sit between a caller and
+           * the next thing they hear. `persistTransferOutcome` never throws.
+           */
+          const toPersist = recordRuntimeTransferOutcome(
+            metadata.callSid,
+            toRecordedOutcome(outcome, Math.round((Date.now() - dialStartedAt) / 1000), briefing),
+            attemptId,
+          );
+          writeOutcome(metadata.callSid, toPersist);
+        } catch (err) {
+          // Telemetry must never cost a transfer. This is the whole reason the
+          // record is taken here and not inside the dial.
+          log(`[runtime-xfer] could not record the outcome for ${metadata.callSid}: ${String(err)}`);
+        }
+        return outcome;
+      };
       if (slug === "pcp") {
         // See handoffFor's interface doc: PCP records the STRUCTURED
         // outcome on its ticket, success or failure — never a throw.
-        return async () => toPcpHandoffOutcome(await attempt());
+        return async () => toPcpHandoffOutcome(await settle());
       }
       return async () => {
-        const outcome = await attempt();
+        const outcome = await settle();
         if (!outcome.ok) {
           // A fixed slug, because the text reaches the model — the
           // detailed reason stays in the server log (warmTransfer.ts).
@@ -378,6 +714,28 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
 
     handleStatus(req: WebhookRequest): WebhookResponse {
       return handleTransferStatus(req, { env, accepts, log });
+    },
+
+    handleDialResult(req: WebhookRequest): WebhookResponse {
+      return handleBlindDialResult(req, {
+        env,
+        pendingFor: (callerCallSid) => pendingBlindDials.get(callerCallSid),
+        forget: (callerCallSid) => {
+          pendingBlindDials.delete(callerCallSid);
+        },
+        /**
+         * SAME WRITER, SAME ORDER as the settle path: record first (which
+         * returns the value to persist, and it is not always the value passed
+         * in), then write. Going through `recordRuntimeTransferOutcome` rather
+         * than straight to the database is what makes the dial result an
+         * UPDATE of this attempt instead of a second, competing row — it keys
+         * on the attempt id the redirect stored.
+         */
+        record: (callerCallSid, outcome, attemptId) => {
+          writeOutcome(callerCallSid, recordRuntimeTransferOutcome(callerCallSid, outcome, attemptId));
+        },
+        log,
+      });
     },
 
     abandonFor(callerCallSid: string): void {

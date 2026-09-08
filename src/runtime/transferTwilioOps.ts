@@ -83,7 +83,120 @@ export function createTransferTwilioOps(
     async endCall(callSid) {
       await client.calls(callSid).update({ status: "completed" });
     },
+
+    async redirectCallerToQueue({
+      callerCallSid,
+      destination,
+      warning,
+      actionUrl,
+      timeoutSeconds,
+      callerId,
+    }) {
+      // Same verb-slot replacement as the conference redirect, and it ends the
+      // media stream the same way. What is different is that nothing has
+      // accepted — see blindTransfer.ts for why that is the operator's
+      // decision rather than a weaker version of the warm path.
+      await client.calls(callerCallSid).update({
+        twiml: buildBlindTransferTwiml({
+          destination,
+          warning,
+          actionUrl,
+          timeoutSeconds,
+          callerId: callerId ?? opts.callerId,
+        }),
+      });
+      log(`[runtime-xfer] caller ${callerCallSid} redirected to the queue on ${destination}`);
+    },
   };
+}
+
+export interface BlindTransferTwimlInput {
+  destination: string;
+  warning: string;
+  actionUrl: string;
+  timeoutSeconds: number;
+  callerId?: string;
+}
+
+/**
+ * The voice the warning is spoken in.
+ *
+ * Polly.Joanna matches every other line this transport speaks on a leg the
+ * agent no longer owns (`buildOfficeAcceptTwiml`, `buildExpiredTransferTwiml`).
+ * The operator has an open question about the agent's voice; this is one env
+ * var wide so answering it does not need a code change.
+ */
+export function blindTransferVoice(env: Record<string, string | undefined> = process.env): string {
+  const configured = env.BLIND_TRANSFER_VOICE?.trim();
+  return configured && configured.length > 0 ? configured : "Polly.Joanna";
+}
+
+/**
+ * WHAT THE CALLER IS REDIRECTED INTO on a blind transfer.
+ *
+ * `<Say>` first and `<Dial>` second, in that order, because the sentence is
+ * the entire consideration the caller is being given: they are about to be put
+ * into a queue of unknown depth and they need to know their request is already
+ * filed before the hold music starts.
+ *
+ * `action` is what keeps this measurable. Twilio posts `DialCallStatus` and
+ * `DialCallDuration` there when the dial ends, which is the only signal we get
+ * that the queue answered at all — the keypress the warm path relies on does
+ * not exist here.
+ *
+ * NO `answerOnBridge`. It governs when an UNANSWERED inbound call is treated
+ * as answered, and this leg was answered the moment the media stream started,
+ * so it would do nothing. The caller hears Twilio's own ringback during the
+ * `<Dial>` either way.
+ *
+ * NOTHING FOLLOWS THE `<Dial>` IN THIS DOCUMENT. Twilio continues to the next
+ * verb when a dial ends without connecting, and the `action` URL's response is
+ * what speaks then — putting a fallback `<Say>` here as well would play it a
+ * second time after the action handler already had its say.
+ */
+export function buildBlindTransferTwiml({
+  destination,
+  warning,
+  actionUrl,
+  timeoutSeconds,
+  callerId,
+  voice,
+}: BlindTransferTwimlInput & { voice?: string }): string {
+  const callerIdAttr = callerId ? ` callerId="${escapeConferenceXml(callerId)}"` : "";
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+    `<Say voice="${escapeConferenceXml(voice ?? blindTransferVoice())}">` +
+    `${escapeConferenceXml(warning)}` +
+    `</Say>` +
+    `<Dial${callerIdAttr} action="${escapeConferenceXml(actionUrl)}" method="POST"` +
+    ` timeout="${Math.max(1, Math.round(timeoutSeconds))}">` +
+    `<Number>${escapeConferenceXml(destination)}</Number>` +
+    `</Dial>` +
+    `</Response>`
+  );
+}
+
+/**
+ * What the caller hears when the `<Dial>` came back without connecting.
+ *
+ * The queue never answered, and the caller is still on the line with nobody —
+ * the agent cannot come back, because its media stream died with the redirect.
+ * So this leg says the one true thing and hangs up. The copy is #265-safe by
+ * construction: it comes from `BLIND_TRANSFER_NO_ANSWER`, which is the same
+ * sentence as the `handoff_no_answer` refusal.
+ */
+export function buildDialFailedTwiml(say: string, voice?: string): string {
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+    `<Say voice="${escapeConferenceXml(voice ?? blindTransferVoice())}">${escapeConferenceXml(say)}</Say>` +
+    `<Hangup/>` +
+    `</Response>`
+  );
+}
+
+/** The dial connected and has now ended on its own. Nothing left to say. */
+export function buildDialCompletedTwiml(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`;
 }
 
 export interface ConferenceTwimlInput {

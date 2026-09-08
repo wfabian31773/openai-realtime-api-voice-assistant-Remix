@@ -3,10 +3,12 @@ import {
   toCallLogRow,
   toConflictUpdate,
   persistRuntimeCall,
+  persistTransferOutcome,
   openRuntimeCall,
 } from "./callRecord";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { resetAgentIdCache } from "./agentIdentity";
+import { type RuntimeTransferOutcome } from "./transferOutcomeLog";
 
 function record(over: Partial<VoiceCallRecord> = {}): VoiceCallRecord {
   return {
@@ -51,6 +53,9 @@ describe("toCallLogRow", () => {
     expect(toCallLogRow(record({ outcome: "agent_ended" })).status).toBe("completed");
     expect(toCallLogRow(record({ outcome: "max_duration" })).status).toBe("completed");
   });
+
+
+
 
   it("a transferred call sets transferred_to_human — and ONLY a transferred call", () => {
     // The column the SIP path writes and the dashboards read; a runtime
@@ -423,5 +428,168 @@ describe("a greeting-only call keeps its tail", () => {
     expect(row.firstTranscriptDelayMs).toBe(4_000);
     expect(row.postTranscriptTailMs).toBe(40_000);
     expect(row.transcriptWindowSeconds).toBe(16);
+  });
+});
+
+/**
+ * THE OUTCOME MUST OUTLIVE A FAILED WRITE. Codex P2, PR #273.
+ *
+ * `toCallLogRow` used to CONSUME the outcome while building the row, so an
+ * upsert that rejected had already destroyed the only copy — and the retry
+ * this module exists to support then wrote the row without it. The failure
+ * mode is a transient database error, which is exactly when a retry should
+ * save you.
+ *
+ * TESTED THROUGH `persistRuntimeCall`, not against the store. Mutation testing
+ * is why: acking before the write, and never acking at all, BOTH failed
+ * nothing, because every assertion I had written exercised the store — which
+ * cannot see when `persistRuntimeCall` calls it. That is the same gap, in the
+ * same commit, as the one on the transfer side.
+ */
+
+describe("persistTransferOutcome — the ONLY writer of this column", () => {
+  /**
+   * Teardown used to write `transfer_outcome` from a snapshot of an in-memory
+   * store. Five rounds of review each found another consequence of two writers
+   * racing over one column — see the redesign note in transferOutcomeLog.ts —
+   * so the settle writes it and teardown does not touch it at all.
+   */
+  const SETTLED: RuntimeTransferOutcome = {
+    outcome: "accepted",
+    status: "CONNECTED",
+    officeCallSid: "CAoffice1",
+    ringSeconds: 13,
+    pipeline: "grok",
+    attempt: 2,
+    at: "2026-09-08T14:00:00.000Z",
+  };
+
+  it("updates the one column, on the one row", async () => {
+    /**
+     * A TARGETED UPDATE, not an upsert. The row already exists —
+     * `openRuntimeCall` creates it when the call begins — and every other
+     * column belongs to a writer that may still be working. An upsert here
+     * would re-assert this caller's view of all of them.
+     */
+    const calls: Array<{ sid: string; outcome: unknown }> = [];
+
+    const ok = await persistTransferOutcome("CA-1", SETTLED, async (sid: string, outcome: RuntimeTransferOutcome) => {
+      calls.push({ sid, outcome });
+    });
+
+    expect(ok).toBe(true);
+    expect(calls).toEqual([{ sid: "CA-1", outcome: SETTLED }]);
+    expect((calls[0].outcome as RuntimeTransferOutcome).attempt, "the real count, not a reconstructed one").toBe(2);
+  });
+
+  it("never throws — a lost telemetry update must not surface near a call", async () => {
+    const ok = await persistTransferOutcome("CA-1", SETTLED, async () => {
+      throw new Error("connection terminated unexpectedly");
+    });
+
+    expect(ok).toBe(false);
+  });
+
+  it("a SLOW earlier attempt cannot overtake a later one", async () => {
+    /**
+     * Codex found this on the single-writer redesign, and it is real.
+     *
+     * A call can settle twice — attempt one fails, attempt two connects — and
+     * each settlement fires its write WITHOUT awaiting, so the caller's path
+     * is never held behind a database round trip. Two round trips in flight
+     * can COMPLETE in either order, and if the earlier attempt's failure lands
+     * last it overwrites the success: the row would say a caller who reached a
+     * human did not.
+     *
+     * The first write is held open deliberately, then released, so the test
+     * fails if the second is allowed past it.
+     */
+    const landed: string[] = [];
+    let releaseFirst: () => void = () => undefined;
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const failure = { ...SETTLED, outcome: "no_answer" as const, attempt: 1 };
+    const success = { ...SETTLED, outcome: "accepted" as const, attempt: 2 };
+
+    const first = persistTransferOutcome("CAtwo", failure, async (_sid, outcome) => {
+      await firstHeld;
+      landed.push(outcome.outcome);
+    });
+    const second = persistTransferOutcome("CAtwo", success, async (_sid, outcome) => {
+      landed.push(outcome.outcome);
+    });
+
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(landed, "the success must be the last thing the row sees").toEqual([
+      "no_answer",
+      "accepted",
+    ]);
+  });
+
+  it("a failed predecessor does not strand the write behind it", async () => {
+    // One transient database error must not block every later write for that
+    // call — the chain is joined through a swallowed rejection.
+    const landed: string[] = [];
+
+    const first = persistTransferOutcome("CAfails", SETTLED, async () => {
+      throw new Error("connection terminated unexpectedly");
+    });
+    const second = persistTransferOutcome("CAfails", SETTLED, async (_sid, outcome) => {
+      landed.push(outcome.outcome);
+    });
+
+    expect(await first, "its own caller still learns it failed").toBe(false);
+    expect(await second).toBe(true);
+    expect(landed).toEqual(["accepted"]);
+  });
+
+  it("leaves nothing behind once a call's writes are done", async () => {
+    // The map holds only the TAIL. Without the cleanup it grows with call
+    // volume — a leak that no behavioural test would ever notice, which is
+    // why it is asserted directly.
+    const { transferOutcomeWriteDepth } = await import("./callRecord");
+    await persistTransferOutcome("CAdone", SETTLED, async () => undefined);
+
+    expect(transferOutcomeWriteDepth()).toBe(0);
+  });
+
+  it("different calls are not serialised behind each other", async () => {
+    // Per-call chaining, not a global lock: a slow write on one call must not
+    // hold up an unrelated one.
+    let releaseA: () => void = () => undefined;
+    const aHeld = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+
+    const a = persistTransferOutcome("CAslow", SETTLED, async () => {
+      await aHeld;
+    });
+    const b = await persistTransferOutcome("CAfast", SETTLED, async () => undefined);
+
+    expect(b, "CAfast completed while CAslow was still open").toBe(true);
+    releaseA();
+    expect(await a).toBe(true);
+  });
+});
+
+describe("teardown does not touch transfer_outcome", () => {
+  it("is absent from the row and from the conflict update", () => {
+    /**
+     * The property the whole redesign turns on. If teardown carries this
+     * column again, every race it took five rounds to close is reachable
+     * again — a snapshot older than the truth, written over the settle's
+     * answer.
+     */
+    const row = toCallLogRow(record());
+    const asRecord = row as unknown as Record<string, unknown>;
+
+    expect("transferOutcome" in asRecord, "teardown must not carry it").toBe(false);
+    expect(
+      "transferOutcome" in (toConflictUpdate(row) as unknown as Record<string, unknown>),
+    ).toBe(false);
   });
 });

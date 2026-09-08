@@ -261,13 +261,78 @@ const pcp = buildPcpPrompt({ callerPhone: '+17605551234' } as never);
 describe('pcp prompt keeps every ruling', () => {
   for (const ruling of PCP_RULINGS) {
     it(`still expresses: ${ruling.source}`, () => {
-      const hay = pcp.toLowerCase();
+      /**
+       * WHITESPACE-COLLAPSED, because this net is about words and was twice
+       * defeated by a line width instead.
+       *
+       * `requires` holds multi-word phrases and `pcp` is hard-wrapped prose,
+       * so any phrase the wrap happens to split becomes invisible to
+       * `includes` — the ruling reports missing when the sentence is right
+       * there. It caught the records trim wrapping "records have been sent"
+       * (queuePromptRulings.test.ts says the same trap once split "currently
+       * busy"), and on 2026-09-08 it failed the "file BEFORE dialling" ruling
+       * because a merge in that section pushed "dialling" onto the next line.
+       *
+       * A net that fires on reflow is a net people learn to reflow around.
+       */
+      const hay = pcp.toLowerCase().replace(/\s+/g, ' ');
       for (const alternatives of ruling.requires) {
         const hit = alternatives.some((a) => hay.includes(a.toLowerCase()));
         expect(hit, `none of ${JSON.stringify(alternatives)} appear in the prompt`).toBe(true);
       }
     });
   }
+});
+
+describe('a caller who asks to be put through', () => {
+  /**
+   * CAa2a3a1c1, 2026-09-08. He asked three times before the phone rang:
+   *
+   *   "can I speak to the team please?"           <- his OPENING line
+   *   "Can I speak to a representative please?"   <- answered with "what is
+   *                                                  your professional
+   *                                                  relationship to this
+   *                                                  patient?"
+   *   "Can I speak to a representative? Hello? Representative?"
+   *
+   * Only the third produced a dial, two intake questions later. Wayne's rule,
+   * settled 2026-09-08: an entity that asks for a representative gets one, and
+   * THE ASK WINS even when the matter is also ticketable.
+   *
+   * This is a prompt assertion and it is weak on its own — `askedForAPerson`
+   * reads the narrative the MODEL passes, so the model's decision to reach for
+   * the tool at all is the only real gate and no offline test can force it. It
+   * is pinned because the instruction is load-bearing and deleting it would
+   * otherwise cost nothing and show up only on a live call.
+   */
+  /**
+   * MATCHED AGAINST WHITESPACE-COLLAPSED TEXT, and that is not tidiness.
+   * The first draft of these three asserted against `pcp` directly and one
+   * failed, because "the request is filed before the phone rings" had wrapped
+   * between "phone" and "rings". This file's own trim notes record the same
+   * trap twice — a line break once split "currently busy" — so a prompt
+   * assertion that reads a sentence must read it flattened or it is asserting
+   * the line width as much as the words.
+   */
+  const flat = pcp.replace(/\s+/g, ' ');
+
+  it('is transferred on that turn, not after one more question', () => {
+    expect(flat).toMatch(/call handoff_to_pcp on that turn/i);
+    expect(flat).toMatch(/Not after one more question/i);
+  });
+
+  it('is not weighed against taking the request instead', () => {
+    // "Ticketable → ticket it" is the DEFAULT, not a veto on an explicit ask.
+    // The model reading the two rules together and choosing the ticket is the
+    // failure mode this line closes.
+    expect(flat).toMatch(/never weigh a transfer against taking the request/i);
+  });
+
+  it('is told the filing already happened, so asking first buys nothing', () => {
+    // The reason has to be in the prompt or the instruction reads as arbitrary
+    // and loses to the intake script, which has a reason on every line.
+    expect(flat).toMatch(/files before dialling/i);
+  });
 });
 
 describe('the caller-ID seeded callback number', () => {

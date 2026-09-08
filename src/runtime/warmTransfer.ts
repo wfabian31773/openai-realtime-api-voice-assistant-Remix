@@ -54,12 +54,32 @@ import { buildWarmTransferScript } from "../services/warmTransferBriefing";
 
 /** How the office leg's outcome came back. */
 export type TransferOutcome =
-  | { ok: true; destination: string; officeCallSid: string }
+  | {
+      ok: true;
+      destination: string;
+      /**
+       * WHICH SHAPE PRODUCED THIS SUCCESS, and it is not cosmetic.
+       *
+       * `warm` means a human picked up and pressed a key — proof of a person.
+       * `blind` means the caller was handed into a queue (blindTransfer.ts);
+       * nobody has been proven to answer anything. Recording both as one
+       * `ok: true` would let a queue hand-off be counted as a reached human,
+       * which is the single measurement this change could destroy.
+       */
+      method: "warm" | "blind";
+      /** Absent on a blind transfer: there is no office leg to name. */
+      officeCallSid?: string;
+    }
   | {
       ok: false;
       status: "NO_ANSWER" | "DECLINED" | "FAILED" | "UNAVAILABLE";
       reason: string;
       destination?: string;
+      /** Which shape failed. Present on the blind path so a failure can be
+       * attributed to a mechanism as readily as a success; the warm path
+       * leaves it absent, which is what `method` defaulting to warm means at
+       * every reader. */
+      method?: "warm" | "blind";
     };
 
 /** The Twilio operations this needs, narrowed to exactly four. */
@@ -84,6 +104,21 @@ export interface TransferTwilioOps {
   }): Promise<void>;
   /** Hang up an office leg we dialled but will not use. */
   endCall(callSid: string): Promise<void>;
+  /**
+   * Speak the warning, then `<Dial>` the caller's live leg straight at the
+   * queue. Ends the media stream, exactly as the conference redirect does —
+   * see blindTransfer.ts for why nothing waits for an accept here.
+   */
+  redirectCallerToQueue(input: {
+    callerCallSid: string;
+    destination: string;
+    /** Spoken to the caller before the dial begins. */
+    warning: string;
+    /** Where Twilio posts the finished dial's result. */
+    actionUrl: string;
+    timeoutSeconds: number;
+    callerId?: string;
+  }): Promise<void>;
 }
 
 /**
@@ -266,7 +301,7 @@ export async function performWarmTransfer(
   }
 
   log(`[runtime-xfer] caller ${request.callerCallSid} joined ${conferenceName} with ${destination}`);
-  return { ok: true, destination, officeCallSid };
+  return { ok: true, destination, method: "warm", officeCallSid };
 }
 
 /**

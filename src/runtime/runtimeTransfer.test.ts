@@ -8,7 +8,19 @@ import {
   TRANSFER_STATUS_PATH,
 } from "./runtimeTransfer";
 import { ACCEPT_WINDOW_MS, conferenceNameFor, type TransferTwilioOps } from "./warmTransfer";
+import {
+  peekRuntimeTransferOutcome,
+  clearRuntimeTransferOutcomes,
+} from "./transferOutcomeLog";
 import { escalationDetailsMap } from "../services/escalationStore";
+
+/**
+ * The transfer-outcome writer, intercepted. `runtimeTransfer` reaches it
+ * through a DYNAMIC import so the runtime never pulls a database connection
+ * into boot, and `vi.mock` intercepts that just as well as a static one.
+ */
+const writes = vi.hoisted(() => ({ persistTransferOutcome: vi.fn(async () => true) }));
+vi.mock("./callRecord", () => writes);
 import type { WebhookRequest } from "./voiceWebhook";
 
 const AUTH_TOKEN = "test-auth-token";
@@ -36,6 +48,7 @@ afterEach(() => {
 function fakeOps() {
   const dialed: Array<{ to: string; twiml: string }> = [];
   const redirected: Array<{ callerCallSid: string; conferenceName: string }> = [];
+  const queued: Array<{ callerCallSid: string; destination: string }> = [];
   const ended: string[] = [];
   const ops: TransferTwilioOps = {
     createOfficeLeg: async ({ to, twiml }) => {
@@ -46,6 +59,9 @@ function fakeOps() {
       redirected.push({ callerCallSid, conferenceName });
     },
     endCall: async (sid) => void ended.push(sid),
+    redirectCallerToQueue: async ({ callerCallSid, destination }) => {
+      queued.push({ callerCallSid, destination });
+    },
   };
   return { ops, dialed, redirected, ended };
 }
@@ -82,9 +98,21 @@ function signedStatus(body: Record<string, string>): WebhookRequest {
   };
 }
 
-function transferWith(ops: TransferTwilioOps) {
-  return createRuntimeTransfer({ env: ENV, ops, domain: DOMAIN, log: () => undefined });
+function transferWith(ops: TransferTwilioOps, env: Record<string, string | undefined> = ENV) {
+  return createRuntimeTransfer({ env, ops, domain: DOMAIN, log: () => undefined });
 }
+
+/**
+ * PCP MOVED TO A BLIND TRANSFER ON 2026-09-08, so a warm-path assertion about
+ * that lane has to say which shape it means.
+ *
+ * The warm contract this file pins — pcp resolves a STRUCTURED outcome rather
+ * than the void the no-ivr family uses — is not what changed and still has to
+ * hold, so the test forces the warm mode rather than being deleted. That also
+ * exercises the revert lever the operator has if the blind shape has to come
+ * back off in a hurry; pcpBlindTransferWiring.test.ts covers the new default.
+ */
+const WARM_ENV = { ...ENV, RUNTIME_TRANSFER_MODE: "warm" };
 
 describe("the whole transfer, side channel to bridge", () => {
   it("dials the destination the agent's escalation earned, and bridges on the keypress", async () => {
@@ -191,7 +219,7 @@ describe("per-lane handoff contracts (Codex, PR #230)", () => {
     vi.useFakeTimers({ now: new Date("2026-08-30T17:00:00Z"), toFake: ["Date"] });
     try {
       const { ops, redirected } = fakeOps();
-      const transfer = transferWith(ops);
+      const transfer = transferWith(ops, WARM_ENV);
       escalationDetailsMap.set("CAcaller", {
         agentSlug: "pcp",
         callerRequestedHuman: true,
@@ -317,6 +345,9 @@ describe("the caller ending abandons the office leg (Codex, PR #230 round 2)", (
         throw new Error("must not redirect");
       },
       endCall: async (sid) => void ended.push(sid),
+      redirectCallerToQueue: async () => {
+        throw new Error("must not redirect");
+      },
     };
     const transfer = transferWith(ops);
     escalationDetailsMap.set("CAcaller", {
@@ -434,5 +465,140 @@ describe("the briefing", () => {
   it("still says something usable with no side channel at all", () => {
     const text = briefingFor("no-ivr", { ...META, callerPhone: "" }, undefined);
     expect(text).toContain("Azul Vision");
+  });
+});
+
+/**
+ * THE ACCEPT HAS TO BE ON RECORD BEFORE THE CALLER IS MOVED. Codex P1, PR #273.
+ *
+ * `redirectCallerToConference` ends the media stream, and the resulting close
+ * can beat the redirect's own resolution — that race is why
+ * `onCallerRedirectStarting` exists at all. Teardown starts on the close and
+ * synchronously builds the `call_logs` row, so an outcome recorded only when
+ * `attempt()` resolves can arrive AFTER the row is written: the one transfer
+ * unambiguously worth logging, dropped, with the record left in the map until
+ * eviction.
+ *
+ * TESTED THROUGH THE REAL REDIRECT, not against the store. Mutation testing is
+ * why: reverting the hook wiring failed nothing, because every assertion I had
+ * written exercised the store — which cannot see WHEN the store was written.
+ * Third time today that testing the sink instead of the source hid a defect.
+ */
+
+describe("what never dialled is never recorded", () => {
+  /**
+   * Codex P2, PR #273. `performWarmTransfer` returns UNAVAILABLE BEFORE
+   * `createOfficeLeg` when no destination is configured or policy withheld
+   * one — its own comment says "nothing was attempted". Recording it writes a
+   * non-null `transfer_outcome` for a call where no number was ever rung,
+   * which breaks the meaning the column was just given and makes reporting
+   * count configuration refusals as dials.
+   *
+   * THROUGH THE REAL TRANSFER, because the test that was supposed to cover
+   * this read an untouched store and passed without exercising any wiring.
+   */
+  it("a policy refusal leaves the column NULL", async () => {
+    clearRuntimeTransferOutcomes();
+    const { ops, dialed } = fakeOps();
+    const transfer = transferWith(ops);
+    // No side-channel entry: the clinical branch withholds the destination.
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    await expect(handoff()).rejects.toThrow(/handoff_failed:UNAVAILABLE/);
+
+    expect(dialed, "nothing was rung").toEqual([]);
+    expect(
+      peekRuntimeTransferOutcome("CAcaller"),
+      "NULL has to keep meaning 'no transfer was attempted'",
+    ).toBeUndefined();
+  });
+
+  it("but a dial that RANG OUT is still recorded", async () => {
+    // The control. Without it, "record nothing" could be satisfied by
+    // recording nothing ever.
+    clearRuntimeTransferOutcomes();
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const outcome = handoff().catch(() => undefined);
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "" }));
+    await outcome;
+
+    expect(peekRuntimeTransferOutcome("CAcaller")?.outcome).toBeTruthy();
+  });
+});
+
+describe("the settle is the only thing that writes the outcome", () => {
+  /**
+   * THE REDESIGN, and the property it exists to hold. Teardown used to write
+   * this column from a snapshot of an in-memory store; five rounds of review
+   * each found another consequence of two writers racing over one value — a
+   * snapshot older than the truth, a rejected upsert destroying the only copy,
+   * a provisional `accepted` before the caller had moved, a stranded
+   * settlement, and three holes in the reconciliation for that.
+   *
+   * One writer, at the moment the answer exists, removes the class rather than
+   * the instance. These tests drive the real transfer and intercept the real
+   * writer, because the ordering is the point and the store cannot see it.
+   */
+  it("writes once, when the transfer settles, with the settled value", async () => {
+    clearRuntimeTransferOutcomes();
+    writes.persistTransferOutcome.mockClear();
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const outcome = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+
+    // Fired without awaiting, so the caller's path is not held behind a
+    // database round trip.
+    await vi.waitFor(() => expect(writes.persistTransferOutcome).toHaveBeenCalledTimes(1));
+    const [sid, written] = writes.persistTransferOutcome.mock.calls[0] as any[];
+    expect(sid).toBe("CAcaller");
+    expect(written.outcome).toBe("accepted");
+    expect(written.attempt, "the count the store kept, not one invented here").toBe(1);
+  });
+
+  it("writes NOTHING for a call that never dialled", async () => {
+    /**
+     * A policy refusal returns UNAVAILABLE before `createOfficeLeg`. NULL has
+     * to keep meaning "no transfer was attempted", or the column is no more
+     * readable than it was when it meant nothing.
+     */
+    clearRuntimeTransferOutcomes();
+    writes.persistTransferOutcome.mockClear();
+    const { ops, dialed } = fakeOps();
+    const transfer = transferWith(ops);
+
+    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow(/handoff_failed:UNAVAILABLE/);
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(dialed).toEqual([]);
+    expect(writes.persistTransferOutcome).not.toHaveBeenCalled();
+  });
+
+  it("writes the FAILURE when the office never answers", async () => {
+    clearRuntimeTransferOutcomes();
+    writes.persistTransferOutcome.mockClear();
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const outcome = handoff().catch(() => undefined);
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "" }));
+    await outcome;
+
+    await vi.waitFor(() => expect(writes.persistTransferOutcome).toHaveBeenCalledTimes(1));
+    const [, written] = writes.persistTransferOutcome.mock.calls[0] as any[];
+    expect(written.outcome, "nobody pressed a key").not.toBe("accepted");
   });
 });

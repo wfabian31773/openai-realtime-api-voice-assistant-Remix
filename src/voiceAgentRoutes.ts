@@ -46,7 +46,7 @@ import {
   urgentTransferFailureLine,
 } from './services/handoffPolicy';
 import { buildPcpTransferBriefing, buildWarmTransferScript } from './services/warmTransferBriefing';
-import { pcpAgentConfig } from './agents/pcpAgent';
+import { pcpAgentConfig, markPcpCallEnded, pcpCallIsLive } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
 import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
@@ -853,7 +853,28 @@ async function flushLoopTelemetry(key: string, callLogId: string): Promise<LoopG
 
 /** What we dialed for a warm transfer, keyed by the OFFICE leg's CallSid, so
  *  the accept/status webhooks can attribute an outcome to it. */
-const officeLegDials = new Map<string, { openAiCallId: string; dialedNumber: string; queueLabel: string; dialedAt: number; callerCallSid?: string }>();
+const officeLegDials = new Map<string, {
+  openAiCallId: string;
+  dialedNumber: string;
+  queueLabel: string;
+  dialedAt: number;
+  callerCallSid?: string;
+  /**
+   * WHAT THE OFFICE WAS NOT TOLD, SNAPSHOT AT DIAL TIME. Codex P2, PR #273.
+   *
+   * The runtime records these from the escalation side channel; this path did
+   * not, so a legacy PCP call that DID run the one-round intake was
+   * indistinguishable from a lane that never checked the briefing — the exact
+   * "absent reads as a negative finding" failure that made every runtime
+   * transfer look like no transfer at all.
+   *
+   * Snapshotted HERE rather than read at outcome time because a successful
+   * handoff deletes `escalationDetailsMap` before the outcome is recorded, so
+   * reading it later would report every connected transfer as fully briefed.
+   */
+  briefingGaps?: string[];
+  askedBeforeDial?: boolean;
+}>();
 
 /** Persist the office leg's result onto the call log. This is the record that
  *  answers "did the office actually pick up, and which office was it?" — a
@@ -888,6 +909,10 @@ async function recordTransferOutcome(
     amdVerdict: extra.amdVerdict ?? null,
     ...(extra.detail ? { detail: extra.detail } : {}),
     ringSeconds: Math.round((Date.now() - dial.dialedAt) / 1000),
+    // Absent, never empty, on a lane that does not run the round — an empty
+    // list would claim a complete briefing this path never checked.
+    ...(dial.briefingGaps ? { briefingGaps: dial.briefingGaps } : {}),
+    ...(dial.askedBeforeDial !== undefined ? { askedBeforeDial: dial.askedBeforeDial } : {}),
     at: new Date().toISOString(),
   };
   try {
@@ -1498,6 +1523,33 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     
     let sequentialPcpAnswered = false;
     if (policy.policy === 'pcp' && envConfig.twilio.pcpRoutingMode === 'sequential') {
+      /**
+       * THE CALLER CAN LEAVE WHILE THIS FUNCTION IS SETTING UP. Codex P1, PR #273.
+       *
+       * `addHumanAgent` awaits `getTwilioClient()` above — on the first transfer
+       * of a process that is a real await, and pcpAgent's own liveness gate has
+       * already run and passed by then. If the transport closes during it,
+       * teardown adds the abort marker and marks the call ended... and then the
+       * very next line here DELETES that marker, wiping the evidence a moment
+       * before the loop would have checked it. The PCP team is dialled for a
+       * caller who is gone, and a staffer picks up to silence.
+       *
+       * The delete itself is not the bug and stays: a stale marker from an
+       * earlier aborted attempt must not refuse a legitimate retry. What was
+       * missing is that it cannot tell a stale marker from a fresh one.
+       *
+       * `pcpCallIsLive` can, because it is teardown-synchronous and — unlike
+       * `abortedPcpHandoffs` — this path neither owns nor clears it. Asking the
+       * marker you are about to erase is not a check.
+       *
+       * Third round of this same race, each window narrower than the last:
+       * the sweep, then the teardown await, now the client init. Recorded so
+       * the next one is looked for at an await rather than found on a call.
+       */
+      if (!pcpCallIsLive(openAiCallId)) {
+        console.warn(`[HANDOFF] the caller left during setup — NOT dialling (${openAiCallId})`);
+        return { ok: false, status: 'FAILED', reason: 'caller_disconnected', destination: handoffDestination };
+      }
       abortedPcpHandoffs.delete(openAiCallId);
       if (pcpDialSequence.length === 0) return { ok: false, status: 'HANDOFF_UNAVAILABLE', reason: 'pcp_agent_dids_not_configured' };
       // How to accept is the TwiML's PRESS_PROMPT, spoken before and after this
@@ -1506,6 +1558,10 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       // anything that is not a digit, so the second half was an instruction we
       // would not honour, given to referring providers.
       const briefing = buildPcpTransferBriefing({
+        // Both pipelines brief the office from the same builder, so both have
+        // to pass the same fields. Adding the name on the runtime only would
+        // have left the old core silently worse (2026-09-08).
+        callerName: escalationDetails?.callerName,
         providerInfo: escalationDetails?.providerInfo,
         reason: escalationDetails?.reason,
       });
@@ -2172,8 +2228,15 @@ async function transferConferenceToNumber(
     // Office-leg telemetry (2026-07-30): remember what we dialed so the
     // accept/status webhooks can record the OUTCOME against it. Without
     // this pair, nothing in the database says whether the office picked up.
+    const briefedAtDial = escalationDetailsMap.get(openAiCallId);
     officeLegDials.set(dialedSid, {
       openAiCallId, dialedNumber: toNumber, queueLabel: label, dialedAt: Date.now(),
+      // Taken now: a successful handoff clears the side channel before the
+      // outcome is recorded (Codex P2, PR #273).
+      ...(briefedAtDial?.briefingGaps ? { briefingGaps: briefedAtDial.briefingGaps } : {}),
+      ...(briefedAtDial?.askedBeforeDial !== undefined
+        ? { askedBeforeDial: briefedAtDial.askedBeforeDial }
+        : {}),
       // The CALLER's leg, so a late outcome can still find the call_logs row
       // when dbCallLogId has not been written yet. Taken from the conference
       // rather than CallMetadata, whose twilioCallSid is never populated.
@@ -4583,6 +4646,12 @@ async function observeCall(
     throw error;
   } finally {
     abortedPcpHandoffs.add(callId);
+    // SYNCHRONOUS, and it must stay above the await below. handoff_to_pcp
+    // refuses to dial once this is set; the sweep that drops the call's
+    // metadata does not run until much later in this same block, and a
+    // handoff write failing in between would otherwise still read the call as
+    // live and ring the PCP team for someone who has hung up (Codex, PR #273).
+    markPcpCallEnded(callId);
     await cancelActiveOfficeLegs(callId);
     setTimeout(() => abortedPcpHandoffs.delete(callId), 10 * 60_000);
     // Azul scheduling: stop the holding heartbeat, drop the transfer hook +
