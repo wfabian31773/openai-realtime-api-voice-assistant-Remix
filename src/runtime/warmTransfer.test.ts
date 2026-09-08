@@ -29,6 +29,9 @@ function fakeTwilio(over: Partial<TransferTwilioOps> = {}) {
     endCall: async () => {
       calls.push("endCall");
     },
+    redirectCallerToQueue: async () => {
+      calls.push("redirectToQueue");
+    },
     ...over,
   };
   return { ops, calls };

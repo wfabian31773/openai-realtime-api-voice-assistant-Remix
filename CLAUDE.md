@@ -269,6 +269,96 @@ connect?" — because the tool answered a failed dial with a bare
 his opening line "can I speak to the team please?" did not match
 `askedForAPerson` at all, because two regexes had drifted apart on their nouns.
 
+### CAbf717457, 2026-09-08 14:47 — LOST TO A SURGEON GATE ON A PCP CALL
+
+The operator rang the PCP line, asked for a representative in his first
+sentence, and hung up 82 seconds later with **no ticket and no transfer**. The
+transfer machinery was not at fault — it had been proven working on the same
+line two hours earlier (PCP-57920, above). The cause is a chain, and every link
+is in `voice_agent_api_logs`:
+
+> CALLER: I am calling from **Loma Linda Surgery Center** and I need to speak to
+> a representative.
+> AGENT: May I have your full name? … **Who is the surgeon for this case?**
+> CALLER: You transfer me to the office?
+> AGENT: I'm not able to put you through from this line…
+
+1. The model classified an ENTITY caller as `patient_caller` — it asked "May I
+   have your full name?", which is the patient branch's question, and never
+   asked for a role or an organisation.
+2. That branch files through the shared cross-queue router, and
+   `detectCrossQueue` matched **`surgery center`** in `SURGERY_CUES`. The
+   caller's EMPLOYER was read as the subject of the request, so the ticket went
+   to **department 2**.
+3. Department 2 demands a surgeon. `create-ticket` answered HTTP 400 *"Missing
+   required information: surgeon"* — **six times, 14:48:06 to 14:48:24** —
+   because `create_pcp_task`'s patient path answered every failure with
+   `retryable: true` and the model obliged. That is the 2026-09-01 storm (602
+   POSTs across 181 surgery calls) in a second place;
+   `CreateTicketResponse.statusCode` was added for exactly this and this call
+   site never read it.
+4. `handoff_to_pcp` was never called at all. `isPatient` makes
+   `handoffEligible` false permanently, and the prompt's patient-only refusal
+   ("I'm not able to put you through from this line") is what the agent spoke
+   to a surgery centre.
+
+**Fixed on `claude/determined-brown-o5qsft`:** link 3, so a 4xx comes back as a
+question with the server's own words instead of a retry flag.
+
+**NOT fixed, and both are open:** link 1 — a `patient_caller` misclassification
+is sticky and silently forfeits the transfer for the rest of the call; and link
+2 — `'surgery center'` as a subject cue fires on a caller's employer. Link 2 is
+a ticket-path routing change affecting every lane that uses `detectCrossQueue`,
+so `docs/BACKEND_HANDOFF.md` applies: measure department-2 misroutes before and
+after, do not just delete the cue.
+
+### THE PCP TRANSFER IS NOW BLIND — Rosa's design, approved 2026-09-08
+
+> *"we should just dump the call into the queue… scrap the warm transfer and
+> provide a verbal warning that they will be transferred to the live queue where
+> there is no guarantee of wait time… a ticket should be created even when they
+> are transferred and it should be searchable by phone number. The auto
+> attendant routes to us and we transfer back to the PCP call center queue, so
+> we grab it early before it actually hits the queue."*
+
+The warm transfer's safety property — never move the caller until a human
+presses a key — is right when the destination is a PERSON. `PCP_HUMAN_AGENT_NUMBER`
+is not: asked directly, *"No, it's a call center."* Measured ring-to-accept on
+that number is 17–41s (avg 32) and **the runtime says nothing while it rings**
+— `HOLD_LADDER` exists only in `azulSchedulingAgent`. So the keypress was being
+bought with the caller's patience against a destination where an ACD answering
+is the normal case.
+
+- **PCP only.** Every other transfer-capable lane keeps the warm path.
+  `RUNTIME_TRANSFER_MODE=warm|blind` overrides per deployment; unset is the
+  per-lane default. That is the revert lever — no code change needed.
+- **The ticket still files BEFORE the redirect.** Unchanged.
+- **The warning is spoken by the TwiML, not the agent** (`blindTransfer.ts`):
+  the redirect ends the media stream, so anything the agent is still saying is
+  cut mid-word. The prompt now says to say NOTHING before `handoff_to_pcp`.
+- **What was traded away: proof that a human answered.** Nothing on this path
+  may record as `accepted` — that word stays reserved for the keypress. The
+  vocabulary is `handed_to_queue` (redirected, nothing known) then, from
+  Twilio's `<Dial action>` callback, `queue_answered` + `talkSeconds` or
+  `no_answer`. **`queue_answered` means the ACD picked up, NOT that a person
+  spoke** — a two-second `talkSeconds` is a caller who gave up in hold music.
+- **The ticket says `DIALING`, never `CONNECTED`,** with
+  `humanAnswerStatus = 'TRANSFERRED_TO_QUEUE'` and no `connectedAt`. A staffer
+  reading CONNECTED assumes the conversation happened and skips the callback,
+  which is the one thing Rosa's ticket exists to prevent. Both values are
+  already in the ticketing app's `PCP_HANDOFF_STATUSES`, so this needs nothing
+  from that team — and that schema is `.strict()`, which is what killed the
+  transfer on 2026-08-27.
+
+**Two of Rosa's three asks were already true, measured 2026-09-08** over all 213
+PCP tickets: 211 carry a callback number, 213 carry `caller_phone`, 68 were
+transferred, and **0 were transferred without a number**.
+
+**Not yet answered:** whether a caller in the ACD's hold queue can still be
+reached if they hang up (they cannot — we let go of the leg), and whether the
+`DIALING` status should become a `TRANSFERRED_TO_QUEUE` enum value on the
+ticketing app rather than free text in `humanAnswerStatus`.
+
 **WAYNE'S PCP TRANSFER RULE (2026-09-04), replacing "anyone who asks goes through":**
 
 - Default is to take the request and file the ticket. **Never auto-transfer.**
@@ -317,6 +407,7 @@ is reading noise.
 | Grok cost from the bill | `src/services/grokCostAllocation.ts` + `xaiBilling.ts` + `grokCostReconciler.ts` | Splits xAI's authoritative daily total across the day's calls by seconds. **Dormant without `XAI_MANAGEMENT_KEY` / `XAI_TEAM_ID`.** |
 | The runtime's agents-table id | `src/runtime/agentIdentity.ts` | slug → `agents.id`, cached per lane. Without it every runtime call is absent from five per-agent reports. |
 | Pipeline label on a card | `client/src/lib/pipelineSplit.ts` | Says which stack served a lane's calls, and warns on a mid-day cutover. |
+| PCP blind transfer | `src/runtime/blindTransfer.ts` + `blindTransferDialResult.ts` | Warns the caller, hands them into the PCP call-centre queue, and reads Twilio's `<Dial action>` back so the outcome is still measurable. PCP only; `RUNTIME_TRANSFER_MODE` overrides. |
 | "Greeting already played" | `src/runtime/greetingAlreadyPlayed.ts` | Appended by the RUNTIME, not the prompts — the transport is what plays the greeting, and tech has 16 tokens of ceiling headroom. |
 
 ---
@@ -1218,12 +1309,14 @@ in the new build. Current marker:
 **ON THE RUNTIME, ASK `/voice/health` — AND THE MARKER NOW CARRIES ITS DATE.**
 
 ```
-voice-runtime-v3-precontext-diagnosable-20260905
+voice-runtime-v4-pcp-blind-transfer-20260908
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
-EARLIER date, or with no date at all, is a build older than 2026-09-05 and
-nothing measured on it is evidence about current code.
+EARLIER date, or with no date at all, is a build older than 2026-09-08 and
+nothing measured on it is evidence about current code. In particular, a PCP
+call on a build older than this one used the WARM transfer, so its silence
+while the queue rang is expected rather than a defect.
 
 **This exists because the marker failed at the one job it has, on 2026-09-05.**
 It read `voice-runtime-v2-transfer-guardrails-tools` from 2026-08-29 straight

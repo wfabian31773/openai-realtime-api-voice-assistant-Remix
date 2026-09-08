@@ -48,6 +48,7 @@ afterEach(() => {
 function fakeOps() {
   const dialed: Array<{ to: string; twiml: string }> = [];
   const redirected: Array<{ callerCallSid: string; conferenceName: string }> = [];
+  const queued: Array<{ callerCallSid: string; destination: string }> = [];
   const ended: string[] = [];
   const ops: TransferTwilioOps = {
     createOfficeLeg: async ({ to, twiml }) => {
@@ -58,6 +59,9 @@ function fakeOps() {
       redirected.push({ callerCallSid, conferenceName });
     },
     endCall: async (sid) => void ended.push(sid),
+    redirectCallerToQueue: async ({ callerCallSid, destination }) => {
+      queued.push({ callerCallSid, destination });
+    },
   };
   return { ops, dialed, redirected, ended };
 }
@@ -94,9 +98,21 @@ function signedStatus(body: Record<string, string>): WebhookRequest {
   };
 }
 
-function transferWith(ops: TransferTwilioOps) {
-  return createRuntimeTransfer({ env: ENV, ops, domain: DOMAIN, log: () => undefined });
+function transferWith(ops: TransferTwilioOps, env: Record<string, string | undefined> = ENV) {
+  return createRuntimeTransfer({ env, ops, domain: DOMAIN, log: () => undefined });
 }
+
+/**
+ * PCP MOVED TO A BLIND TRANSFER ON 2026-09-08, so a warm-path assertion about
+ * that lane has to say which shape it means.
+ *
+ * The warm contract this file pins — pcp resolves a STRUCTURED outcome rather
+ * than the void the no-ivr family uses — is not what changed and still has to
+ * hold, so the test forces the warm mode rather than being deleted. That also
+ * exercises the revert lever the operator has if the blind shape has to come
+ * back off in a hurry; pcpBlindTransferWiring.test.ts covers the new default.
+ */
+const WARM_ENV = { ...ENV, RUNTIME_TRANSFER_MODE: "warm" };
 
 describe("the whole transfer, side channel to bridge", () => {
   it("dials the destination the agent's escalation earned, and bridges on the keypress", async () => {
@@ -203,7 +219,7 @@ describe("per-lane handoff contracts (Codex, PR #230)", () => {
     vi.useFakeTimers({ now: new Date("2026-08-30T17:00:00Z"), toFake: ["Date"] });
     try {
       const { ops, redirected } = fakeOps();
-      const transfer = transferWith(ops);
+      const transfer = transferWith(ops, WARM_ENV);
       escalationDetailsMap.set("CAcaller", {
         agentSlug: "pcp",
         callerRequestedHuman: true,
@@ -329,6 +345,9 @@ describe("the caller ending abandons the office leg (Codex, PR #230 round 2)", (
         throw new Error("must not redirect");
       },
       endCall: async (sid) => void ended.push(sid),
+      redirectCallerToQueue: async () => {
+        throw new Error("must not redirect");
+      },
     };
     const transfer = transferWith(ops);
     escalationDetailsMap.set("CAcaller", {

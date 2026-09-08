@@ -70,7 +70,28 @@ export interface RuntimeTransferOutcome {
    * There is no in-flight value. The record is written when the transfer has
    * settled, so every value here is a final answer.
    */
-  outcome: 'accepted' | 'no_answer' | 'declined' | 'failed' | 'unavailable';
+  outcome:
+    | 'accepted'
+    | 'no_answer'
+    | 'declined'
+    | 'failed'
+    | 'unavailable'
+    /**
+     * BLIND TRANSFER, and the two values exist so it can never be counted as a
+     * warm one.
+     *
+     * `handed_to_queue` — the caller was redirected at the PCP call centre and
+     * is no longer ours. Nothing has answered; this is what is known at the
+     * redirect, and it is the honest floor if the dial result never arrives.
+     *
+     * `queue_answered` — Twilio's `<Dial action>` came back `completed`, so the
+     * ACD picked up and the legs were bridged for `talkSeconds`. That is proof
+     * the QUEUE answered, NOT proof a person spoke: an ACD answers instantly
+     * and then plays hold music. `accepted` stays reserved for the warm path's
+     * keypress, which is the only positive proof of a human this system has.
+     */
+    | 'handed_to_queue'
+    | 'queue_answered';
   /** The runtime's own status, verbatim, so nothing is lost in translation. */
   status: string;
   /** The runtime's own reason slug, verbatim. Absent on success. */
@@ -83,10 +104,36 @@ export interface RuntimeTransferOutcome {
   officeCallSid?: string;
   /** How long the office leg rang before it settled. */
   ringSeconds: number;
-  /** The runtime honours exactly one accept: a keypress. Stated rather than
-   * implied, because the old core's payload carries this field and a reader
-   * comparing pipelines needs it present on both. */
-  acceptMethod?: 'keypress';
+  /**
+   * How long the two legs were actually bridged, when Twilio tells us.
+   *
+   * Only the blind path can report this, and only from `DialCallDuration`.
+   * It is the one number that separates "the ACD answered and the caller gave
+   * up in the hold queue" from "they got through" — a two-second bridge is the
+   * former. Absent on the warm path, which stops observing at the keypress.
+   */
+  talkSeconds?: number;
+  /**
+   * WHICH TRANSFER SHAPE THIS CALL USED.
+   *
+   * PCP moved to a blind transfer on 2026-09-08 and the other lanes did not,
+   * so a single query over `transfer_outcome` now spans two mechanisms with
+   * different meanings for success. Recording the shape is what lets that
+   * query stay honest without knowing which lane ran which week.
+   */
+  method?: 'warm' | 'blind';
+  /**
+   * HOW THE ANSWER WAS PROVEN. Stated rather than implied, because the old
+   * core's payload carries this field and a reader comparing pipelines needs
+   * it present on both.
+   *
+   * `keypress` is a human pressing a digit after hearing a briefing.
+   * `dial_answered` is Twilio reporting that the dialled leg answered — a
+   * weaker fact, and named differently so a query cannot conflate them.
+   * A blind transfer that has only been HANDED OVER carries neither, because
+   * nothing has been proven at all.
+   */
+  acceptMethod?: 'keypress' | 'dial_answered';
   /** Which stack produced this row. The two writers are genuinely different
    * code, and a reader that cannot tell them apart cannot compare them. */
   pipeline: 'grok';

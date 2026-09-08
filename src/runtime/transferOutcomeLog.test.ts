@@ -165,7 +165,7 @@ describe("the transfer's own result maps onto the stored shape", () => {
    */
   it('an accepted transfer records where it went and how it was accepted', () => {
     const recorded = toRecordedOutcome(
-      { ok: true, destination: '+17149564300', officeCallSid: 'CAoffice1' },
+      { ok: true, method: "warm" as const, destination: '+17149564300', officeCallSid: 'CAoffice1' },
       12,
     );
 
@@ -228,7 +228,7 @@ describe('the briefing gaps reach the stored outcome', () => {
    */
   it('carries what the office was not told, and whether we asked', () => {
     const recorded = toRecordedOutcome(
-      { ok: true, destination: '+17149564300', officeCallSid: 'CAoffice1' },
+      { ok: true, method: "warm" as const, destination: '+17149564300', officeCallSid: 'CAoffice1' },
       12,
       { gaps: ['callerRole'], asked: true },
     );
@@ -240,11 +240,11 @@ describe('the briefing gaps reach the stored outcome', () => {
   it('distinguishes "asked and answered" from "never asked"', () => {
     // Both have empty gaps and they are different events: one is a caller who
     // replied, the other a caller who arrived complete.
-    const answered = toRecordedOutcome({ ok: true, destination: '+1', officeCallSid: 'CAo' }, 1, {
+    const answered = toRecordedOutcome({ ok: true, method: "warm" as const, destination: '+1', officeCallSid: 'CAo' }, 1, {
       gaps: [],
       asked: true,
     });
-    const complete = toRecordedOutcome({ ok: true, destination: '+1', officeCallSid: 'CAo' }, 1, {
+    const complete = toRecordedOutcome({ ok: true, method: "warm" as const, destination: '+1', officeCallSid: 'CAo' }, 1, {
       gaps: [],
       asked: false,
     });

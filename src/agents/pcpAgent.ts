@@ -70,7 +70,16 @@ export interface PcpAgentMetadata {
 }
 
 type PcpHandoffStatus = NonNullable<PcpTicketPayload['handoff']>['finalStatus'];
-type HandoffOutcome = { ok: true; destination?: string } | {
+type HandoffOutcome = {
+  ok: true;
+  destination?: string;
+  /**
+   * The caller was put INTO the queue rather than connected to a person who
+   * answered. Set only by the runtime's blind transfer (PCP, from
+   * 2026-09-08); absent means the warm path's keypress proved a human.
+   */
+  handedToQueue?: true;
+} | {
   ok: false;
   status?: 'HANDOFF_UNAVAILABLE' | 'NO_ANSWER' | 'FAILED';
   reason?: string;
@@ -282,8 +291,7 @@ line. Say a short line FIRST, then call the tool, then be quiet while it works:
   appointments      "One moment while I pull up that patient's appointments."
   filing a task     "Let me get this logged for you — one moment."
   a records request "One moment while I log that records request for you."
-  connecting them   "Give me one moment while I connect you with our PCP team —
-                     I'll stay right here with you."
+  connecting them   nothing at all — see CONNECTING SOMEONE TO A PERSON
 
 One line per chain is enough. Never call a tool cold. If you have been quiet for
 more than a few seconds for any reason, say "Still with you — one moment."
@@ -295,14 +303,14 @@ handoff_to_pcp on that turn, not after one more question. It files before
 dialling, so waiting only makes them ask twice. Never weigh a transfer against
 taking the request.
 
-Never promise HOW they are being reached. One person, several, or a queue is a
-configuration decision, not yours. Say you are connecting them to the PCP team
-and stay on the line. Follow the holding updates; do not talk over them or start
-a new question.
+SAY NOTHING BEFORE THIS ONE TOOL. It speaks for itself: the caller is told they
+are being put through, that we cannot promise the wait, and that their details
+are recorded. Anything you say first is cut off when the line moves.
 
-If it connects, say nothing further — the staff member has joined. If it does
-not, say exactly that and confirm their request is already recorded for
-follow-up. Never say somebody answered unless they did.
+Never promise you will stay with them, and never promise HOW they are reached —
+one person, several, or a queue is a configuration decision. If the tool says it
+did not go through, say exactly that and confirm their request is already
+recorded. Never say somebody answered unless they did.
 
 # MEDICAL RECORDS
 Use handle_patient_medical_records_request ONLY when the caller explicitly asks
@@ -887,7 +895,45 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         });
 
         if (!patientResult.success || !patientResult.ticketNumber) {
-          return refusePcp(patientResult.error ?? 'ticket_creation_failed', { retryable: true });
+          /**
+           * A 4xx IS A REFUSAL, AND A REFUSAL RETRIED IS A REFUSAL REPEATED.
+           *
+           * This returned `retryable: true` for EVERY failure, and on
+           * 2026-09-08 that cost a real call. `CAbf717457` reached this line
+           * with department 2 (the caller said "Loma Linda Surgery Center", so
+           * `detectCrossQueue` read a surgery cue), department 2 demands a
+           * surgeon, and create-ticket answered HTTP 400 "Missing required
+           * information: surgeon". The model obliged the retry flag SIX times
+           * in eighteen seconds, asked the caller who the surgeon was on a PCP
+           * call, filed nothing, and the caller hung up.
+           *
+           * That is the same shape as the 602 doomed POSTs across 181 surgery
+           * calls measured on 2026-09-01 — fixed there, never here.
+           * `CreateTicketResponse.statusCode` was added for exactly this
+           * distinction and this call site had not read it.
+           *
+           * So: a status the server chose in the 4xx range will fail
+           * identically forever, and the only useful thing to do with it is
+           * hand the server's own words to the model as something to ASK. No
+           * status at all is a timeout or a socket reset, which may well
+           * succeed next time.
+           */
+          const status = patientResult.statusCode;
+          const refused = typeof status === 'number' && status >= 400 && status < 500;
+          return refusePcp(patientResult.error ?? 'ticket_creation_failed', {
+            ...(refused ? {} : { retryable: true }),
+            ...(refused
+              ? {
+                  guidance:
+                    'The ticketing system refused this payload and will refuse it again unchanged — ' +
+                    'do NOT call this tool again with the same details. Its own words were: ' +
+                    `"${patientResult.error ?? 'no reason given'}". If that names something the ` +
+                    'caller can answer, ask them for it in your own words and try once with it ' +
+                    'added. If it does not, take the rest of their request, tell them it is ' +
+                    'recorded, and move on.',
+                }
+              : {}),
+          });
         }
         pcpDirector.recordDisposition(callId, 'CREATE_TASK');
         console.info(
@@ -1194,7 +1240,29 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const attemptedAt = new Date().toISOString();
       const outcome = await handoffCallback();
       const ok = Boolean(outcome && outcome.ok);
-      const finalStatus: PcpHandoffStatus = ok ? 'CONNECTED' : ((outcome && !outcome.ok && outcome.status) || 'FAILED');
+      /**
+       * A BLIND TRANSFER IS NOT A CONNECTION, and the ticket must not claim
+       * one. Rosa's design, approved 2026-09-08: the PCP caller is put into
+       * the call centre's own queue with a spoken warning, and a ticket is
+       * filed either way "so it's searchable by phone number".
+       *
+       * That ticket's whole value is to the staffer who reads it AFTER the
+       * caller gave up in the hold queue. `CONNECTED` tells them the
+       * conversation already happened; `DIALING` tells them the caller was
+       * put through and we stopped being able to see what happened, which is
+       * exactly true. Both values already exist in the ticketing app's
+       * `PCP_HANDOFF_STATUSES`, so this needs nothing from that team — and
+       * `humanAnswerStatus` is free text there, which is where the
+       * unambiguous word goes.
+       *
+       * `connectedAt` stays UNSET for the same reason: there is no instant a
+       * human answered, and inventing one would put a timestamp on an event
+       * nobody observed.
+       */
+      const handedToQueue = Boolean(outcome && outcome.ok && outcome.handedToQueue);
+      const finalStatus: PcpHandoffStatus = ok
+        ? (handedToQueue ? 'DIALING' : 'CONNECTED')
+        : ((outcome && !outcome.ok && outcome.status) || 'FAILED');
       pcpDirector.recordHandoffResult(callId, { status: finalStatus as PcpConversationState['handoffStatus'], reason: outcome && !outcome.ok ? outcome.reason : undefined });
       const finalDisposition: PcpDisposition = ok ? 'HAND_OFF' : 'CREATE_TASK';
       // Re-read rather than reuse: the caller may have given more during the
@@ -1212,8 +1280,8 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // Recorded whether or not it connected. A failed transfer with no
         // destination is an unanswerable question later; see HandoffOutcome.
         destination: outcome ? outcome.destination : undefined,
-        humanAnswerStatus: finalStatus,
-        connectedAt: ok ? new Date().toISOString() : undefined,
+        humanAnswerStatus: handedToQueue ? 'TRANSFERRED_TO_QUEUE' : finalStatus,
+        connectedAt: ok && !handedToQueue ? new Date().toISOString() : undefined,
         finalStatus,
         failureReason: outcome && !outcome.ok ? outcome.reason : undefined,
         fallbackTicketStatus: ok ? undefined : 'OPEN',

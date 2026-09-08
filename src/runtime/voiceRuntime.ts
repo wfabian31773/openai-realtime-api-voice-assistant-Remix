@@ -57,6 +57,7 @@ import {
   createRuntimeTransfer,
   transferDestinationStatus,
   TRANSFER_ACCEPT_PATH,
+  TRANSFER_DIAL_RESULT_PATH,
   TRANSFER_STATUS_PATH,
 } from "./runtimeTransfer";
 import { releaseCallHandoff } from "../tools/handoffBroker";
@@ -459,6 +460,14 @@ export function mountVoiceRuntime(
 
   app.post(TRANSFER_STATUS_PATH, (req: Request, res: Response) => {
     send(res, transfer.handleStatus(toWebhookRequest(req)));
+  });
+
+  // A blind transfer's `<Dial>` finished. This is the ONLY signal that says
+  // whether the PCP queue answered — there is no keypress on that path — and
+  // its response is the only voice left to a caller whose dial never
+  // connected, because the redirect killed the agent's stream.
+  app.post(TRANSFER_DIAL_RESULT_PATH, (req: Request, res: Response) => {
+    send(res, transfer.handleDialResult(toWebhookRequest(req)));
   });
 
   app.get("/voice/health", async (_req: Request, res: Response) => {
