@@ -142,8 +142,12 @@ export function blindTransferVoice(env: Record<string, string | undefined> = pro
  * `action` is what keeps this measurable. Twilio posts `DialCallStatus` and
  * `DialCallDuration` there when the dial ends, which is the only signal we get
  * that the queue answered at all — the keypress the warm path relies on does
- * not exist here. `answerOnBridge` makes the caller hear real ringback rather
- * than silence while it rings.
+ * not exist here.
+ *
+ * NO `answerOnBridge`. It governs when an UNANSWERED inbound call is treated
+ * as answered, and this leg was answered the moment the media stream started,
+ * so it would do nothing. The caller hears Twilio's own ringback during the
+ * `<Dial>` either way.
  *
  * NOTHING FOLLOWS THE `<Dial>` IN THIS DOCUMENT. Twilio continues to the next
  * verb when a dial ends without connecting, and the `action` URL's response is
@@ -165,7 +169,7 @@ export function buildBlindTransferTwiml({
     `${escapeConferenceXml(warning)}` +
     `</Say>` +
     `<Dial${callerIdAttr} action="${escapeConferenceXml(actionUrl)}" method="POST"` +
-    ` timeout="${Math.max(1, Math.round(timeoutSeconds))}" answerOnBridge="true">` +
+    ` timeout="${Math.max(1, Math.round(timeoutSeconds))}">` +
     `<Number>${escapeConferenceXml(destination)}</Number>` +
     `</Dial>` +
     `</Response>`
