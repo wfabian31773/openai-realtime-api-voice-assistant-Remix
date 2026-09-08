@@ -42,8 +42,21 @@ export interface RuntimeTransferOutcome {
    * distinction between nobody picking up and somebody saying no. Nothing in
    * the tree reads this column today, so the extension costs nothing and the
    * lie would have cost the distinction.
+   *
+   * `redirecting` EXTENDS it for a harder reason — Codex P1, round 3 on
+   * PR #273. The office has pressed a key and the caller's leg is being moved,
+   * and that move can FAIL. Recording `accepted` at that moment claims a
+   * completed transfer before one exists, and teardown can snapshot and
+   * persist it DURING the redirect's own await — after which nothing corrects
+   * it, because teardown has already run. The database would then say a
+   * disconnected caller reached a human.
+   *
+   * So the in-flight state gets its own word. It is true at the instant it is
+   * written, it cannot be misread as a connection, and it still leaves a
+   * record for the success that races teardown — which is the entire reason
+   * anything is written before the redirect at all.
    */
-  outcome: 'accepted' | 'no_answer' | 'declined' | 'failed' | 'unavailable';
+  outcome: 'accepted' | 'redirecting' | 'no_answer' | 'declined' | 'failed' | 'unavailable';
   /** The runtime's own status, verbatim, so nothing is lost in translation. */
   status: string;
   /** The runtime's own reason slug, verbatim. Absent on success. */

@@ -410,31 +410,47 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               fromNumber: env.TWILIO_PHONE_NUMBER ?? "",
               callerId: env.TWILIO_PHONE_NUMBER,
               /**
-               * RECORD THE ACCEPT HERE, BEFORE THE CALLER IS MOVED. Codex P1,
-               * PR #273.
+               * RECORD SOMETHING HERE, BEFORE THE CALLER IS MOVED — BUT NOT
+               * A COMPLETED TRANSFER. Codex P1, PR #273, rounds 1 and 3.
                *
-               * The redirect ends the media stream, and the resulting close
-               * can beat the redirect's own resolution — which is why this
-               * hook exists at all. Teardown starts on that close and
+               * Round 1: the redirect ends the media stream, and the resulting
+               * close can beat the redirect's own resolution — which is why
+               * this hook exists at all. Teardown starts on that close and
                * synchronously builds the call_logs row, so an outcome recorded
                * only when `attempt()` resolves can arrive AFTER the row is
-               * written: the successful transfer is missing from the column
-               * and the record sits in the map until eviction. The one case
-               * that is unambiguously worth logging, lost to the race that the
-               * surrounding code already knew about.
+               * written, and the successful transfer is missing from the
+               * column. Hence: write before the redirect.
                *
-               * The settle below still records, under the SAME attempt id, so
-               * this provisional value is replaced rather than double-counted
-               * — and replaced by a failure if the redirect then throws, which
-               * it must be, because at that point the caller never moved.
+               * Round 3, and I got this wrong in between. I wrote `accepted`
+               * here and claimed in a commit message that the corrective
+               * failure "cannot arrive late at all" because
+               * `onCallerRedirectFailed` fires synchronously. THAT CLAIM WAS
+               * FALSE, and Codex found the window: the hook fires in the catch
+               * of `await redirectCallerToConference`, so it runs only once
+               * the redirect REJECTS. A caller who hangs up while that await
+               * is pending gets teardown, a snapshot of `accepted`, a durable
+               * write and an ack — and the correction, when it finally
+               * arrives, has no teardown left to persist it. The database then
+               * says a disconnected caller reached a human. Synchronous with
+               * respect to the settle is not synchronous with respect to
+               * teardown.
+               *
+               * The fix is not more sequencing, it is not claiming what is not
+               * yet true: `redirecting` is accurate at the instant it is
+               * written, cannot be misread as a connection, and still leaves a
+               * record for the success that races teardown. The settle below
+               * replaces it under the SAME attempt id — with `accepted` when
+               * the caller lands, or `failed` when the redirect throws.
                */
               onCallerRedirectStarting: () => {
                 try {
                   recordRuntimeTransferOutcome(
                     metadata.callSid,
                     {
-                      outcome: "accepted",
-                      status: "CONNECTED",
+                      // NOT "accepted" — the caller has not moved yet, and the
+                      // move can fail. See the note below.
+                      outcome: "redirecting",
+                      status: "ACCEPTED_REDIRECTING",
                       ...(policy.allowed ? { dialedNumber: policy.destination } : {}),
                       acceptMethod: "keypress",
                       ringSeconds: Math.round((Date.now() - dialStartedAt) / 1000),
@@ -454,16 +470,16 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                 hooks?.onCallerRedirectStarting?.();
               },
               /**
-               * CORRECT THE PROVISIONAL ACCEPT THE INSTANT THE REDIRECT FAILS.
-               * Codex P1, PR #273.
+               * CORRECT THE IN-FLIGHT RECORD AS EARLY AS THIS PATH CAN.
                *
-               * The accept is recorded before the redirect, because the
-               * redirect's own close can beat its resolution. If the redirect
-               * then THROWS, the caller never moved — and waiting for the
-               * settle to correct that leaves a window in which teardown
-               * snapshots `accepted` and the row says a caller reached a human
-               * who never did. This hook fires synchronously in the catch,
-               * before any await, so the correction cannot arrive late.
+               * This fires in the catch of the redirect's await, before
+               * `endQuietly` and before the attempt settles, so it narrows the
+               * window — but it does NOT close it, and the previous version of
+               * this comment claimed it did. Teardown can run while the
+               * redirect is still pending, which is earlier than any hook here
+               * can fire. That is why the provisional record says
+               * `redirecting` rather than `accepted`: what teardown might
+               * persist has to be true on its own.
                *
                * The settle still records under the same attempt id, which is
                * idempotent here: it writes the same failure again.

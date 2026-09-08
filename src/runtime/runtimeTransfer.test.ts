@@ -458,16 +458,29 @@ describe("the briefing", () => {
  * Third time today that testing the sink instead of the source hid a defect.
  */
 describe("the accepted outcome is recorded before the redirect", () => {
-  it("is already stored by the time the caller's leg is moved", async () => {
+  it("WHAT TEARDOWN WOULD PERSIST MID-REDIRECT is not a claim that anyone connected", async () => {
+    /**
+     * Codex P1 round 3, PR #273 — and the window my previous test missed.
+     *
+     * That test observed `endCall`, which runs in the redirect's CATCH, i.e.
+     * after the await has already rejected. It therefore proved the correction
+     * beats the SETTLE, and said nothing about teardown, which can run while
+     * the redirect promise is still pending. A caller who hangs up in that
+     * window gets teardown, a snapshot, a durable write and an ack — and any
+     * later correction has no teardown left to persist it.
+     *
+     * So the assertion point is INSIDE the redirect, before it settles either
+     * way: whatever is in the store at that instant is what the database can
+     * end up holding forever, and it must be true on its own.
+     */
     clearRuntimeTransferOutcomes();
-    const seenAtRedirect: Array<string | undefined> = [];
+    const seenMidRedirect: Array<string | undefined> = [];
     const { ops } = fakeOps();
     const watched: TransferTwilioOps = {
       ...ops,
       redirectCallerToConference: async (input) => {
-        // THE ASSERTION POINT. Everything after this line can be beaten by the
-        // stream close, so the outcome has to exist already.
-        seenAtRedirect.push(peekRuntimeTransferOutcome("CAcaller")?.outcome);
+        // Teardown's snapshot, taken here rather than after the await.
+        seenMidRedirect.push(peekRuntimeTransferOutcome("CAcaller")?.outcome);
         return ops.redirectCallerToConference(input);
       },
     };
@@ -480,7 +493,28 @@ describe("the accepted outcome is recorded before the redirect", () => {
     transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
     await outcome;
 
-    expect(seenAtRedirect, "recorded only at settle is recorded too late").toEqual(["accepted"]);
+    expect(
+      seenMidRedirect,
+      "a record written before the move completes must not say the move completed",
+    ).toEqual(["redirecting"]);
+    expect(seenMidRedirect[0], "and above all not this").not.toBe("accepted");
+  });
+
+  it("becomes accepted once the caller actually lands", async () => {
+    // The control: `redirecting` must be a transient state, not the end of the
+    // story, or the column would never record a completed transfer at all.
+    clearRuntimeTransferOutcomes();
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops);
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const outcome = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+
+    expect(peekRuntimeTransferOutcome("CAcaller")?.outcome).toBe("accepted");
   });
 
   it("corrects a failed redirect SYNCHRONOUSLY, not when the attempt settles", async () => {
