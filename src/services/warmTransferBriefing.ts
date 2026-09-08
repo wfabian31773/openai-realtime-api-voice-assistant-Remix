@@ -21,10 +21,55 @@
 
 /** Details the office is told before deciding whether to take the caller. */
 export interface PcpBriefingDetails {
+  /**
+   * Who is on the phone.
+   *
+   * ADDED 2026-09-08, because it was not here at all. The operator, on the
+   * fields he wants captured before a warm transfer: "that would be obviously
+   * the name of the person who's calling, the reason they're calling... and
+   * who they are, basically, what's your role, what's your title." The first
+   * of those three was the one field the office was never told.
+   */
+  callerName?: string | null;
   /** e.g. "Care coordinator at Optum Clinic" — omitted when unknown. */
   providerInfo?: string | null;
   /** Why they are calling — omitted when unknown. */
   reason?: string | null;
+}
+
+/**
+ * Placeholder text that must never be spoken to a human.
+ *
+ * On 2026-09-08 `pcpAgent` built its `providerInfo` as
+ * `` `${state.callerRole}, ${state.callerOrganization}` ``. A template literal
+ * stringifies `undefined`, so a caller who said only "representative" produced
+ * the string "undefined, undefined" — non-empty, therefore truthy, therefore
+ * past every `details.x ? ... : null` guard in this file. The staffer picking
+ * up heard "Caller organization and role: undefined, undefined."
+ *
+ * Fixed at the source as well. This exists because the source is four
+ * different agents and this function is the last thing between them and a
+ * person's ear, so it is the right place for a floor rather than a duplicate.
+ */
+const PLACEHOLDER = /^(undefined|null|nan|,|\s|-)*$/i;
+
+/**
+ * The value, or nothing — never a placeholder, and never a fragment that is
+ * only the punctuation left over from missing parts ("undefined, " and ", "
+ * both reduce to nothing).
+ */
+export function cleanBriefingValue(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const stripped = value
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part && !PLACEHOLDER.test(part))
+    .join(', ')
+    // Every caller of this is about to append a full stop. A narrative that
+    // already ends in one produced "…to speak to a representative.." — spoken
+    // aloud to a staffer as an audible stumble.
+    .replace(/[.\s]+$/, '');
+  return stripped.length ? stripped : null;
 }
 
 /**
@@ -64,10 +109,36 @@ export function describesNonKeypressAccept(text: string): string | null {
  * only creates the opportunity to contradict it.
  */
 export function buildPcpTransferBriefing(details: PcpBriefingDetails): string {
+  const name = cleanBriefingValue(details.callerName);
+  const who = cleanBriefingValue(details.providerInfo);
+  const why = cleanBriefingValue(details.reason);
   return [
     'This is the Azul Vision PCP support assistant with a live professional caller transfer.',
-    details.providerInfo ? `Caller organization and role: ${details.providerInfo}.` : null,
-    details.reason ? `Reason: ${details.reason}.` : null,
+    name ? `Caller: ${name}.` : 'The caller did not give a name.',
+    who ? `Caller organization and role: ${who}.` : null,
+    why ? `Reason: ${why}.` : null,
+    /**
+     * SAY WHEN WE DO NOT KNOW WHO THIS IS, rather than saying nothing.
+     *
+     * The operator's worry, 2026-09-08: "if someone just says, you know,
+     * representative, you don't know, you... how can you warm transfer?" A
+     * briefing that simply omits every unknown is indistinguishable from one
+     * that was never built, and the staffer accepts a caller with no idea they
+     * are starting from zero. One sentence turns that into a handover.
+     *
+     * IT KEYS ON IDENTITY, NOT ON ALL THREE FIELDS. The first version fired
+     * only when name, role/organisation AND reason were all absent, which
+     * never happens on the live path: `reason` is the handoff narrative and
+     * `handoff_to_pcp` requires one, so `why` is always set — the sentence was
+     * unreachable from the agent and only ever fired from a direct builder
+     * call. Worse, the narrative on a bare ask IS the ask ("Caller asked to
+     * speak to a representative"), so the briefing read as though it carried a
+     * reason while telling the staffer nothing about who was on the phone.
+     * That is precisely the case this exists for.
+     */
+    !name && !who
+      ? 'We were not able to take their details before they asked to be put through — please start by asking who they are and what they need.'
+      : null,
   ]
     .filter(Boolean)
     .join(' ');

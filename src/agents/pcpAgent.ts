@@ -1087,7 +1087,16 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         patientLastName: state.patientLastName,
         patientDob: state.patientDob,
         callbackNumber: state.callbackNumber,
-        providerInfo: `${state.callerRole}, ${state.callerOrganization}`,
+        /**
+         * BUILT FROM THE PARTS THAT EXIST. This was a template literal, and a
+         * template literal stringifies `undefined` — a caller who said only
+         * "representative" produced "undefined, undefined", which is truthy,
+         * so the office heard it read out. `buildPcpTransferBriefing` now
+         * refuses placeholder text as a floor; this is the source.
+         */
+        providerInfo: [state.callerRole, state.callerOrganization].filter(Boolean).join(', ') || undefined,
+        /** The one field the operator named first, and the one never sent. */
+        callerName: state.callerName,
       });
       const attemptedAt = new Date().toISOString();
       const outcome = await handoffCallback();

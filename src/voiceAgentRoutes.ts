@@ -1506,6 +1506,10 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       // anything that is not a digit, so the second half was an instruction we
       // would not honour, given to referring providers.
       const briefing = buildPcpTransferBriefing({
+        // Both pipelines brief the office from the same builder, so both have
+        // to pass the same fields. Adding the name on the runtime only would
+        // have left the old core silently worse (2026-09-08).
+        callerName: escalationDetails?.callerName,
         providerInfo: escalationDetails?.providerInfo,
         reason: escalationDetails?.reason,
       });

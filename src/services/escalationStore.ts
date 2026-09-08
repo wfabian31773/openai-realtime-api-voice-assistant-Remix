@@ -11,6 +11,8 @@ export interface EscalationDetails {
   callbackNumber?: string;
   symptomsSummary?: string;
   providerInfo?: string;
+  /** Who is on the phone. Reaches the warm-transfer briefing (2026-09-08). */
+  callerName?: string;
   /** The caller asked, in words, to speak to a person. */
   callerRequestedHuman?: boolean;
 }

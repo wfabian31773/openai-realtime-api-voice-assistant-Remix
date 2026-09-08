@@ -218,10 +218,13 @@ export function toPcpHandoffOutcome(
 export function briefingFor(
   slug: string,
   metadata: LaneCallMetadata,
-  details: { reason?: string; providerInfo?: string } | undefined,
+  details: { reason?: string; providerInfo?: string; callerName?: string } | undefined,
 ): string {
   if (slug === "pcp") {
     return buildPcpTransferBriefing({
+      // The staffer is about to talk to this person; their name is the first
+      // thing they need and was not passed here until 2026-09-08.
+      callerName: details?.callerName,
       providerInfo: details?.providerInfo,
       reason: details?.reason,
     });
