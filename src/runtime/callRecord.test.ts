@@ -7,6 +7,10 @@ import {
 } from "./callRecord";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { resetAgentIdCache } from "./agentIdentity";
+import {
+  recordRuntimeTransferOutcome,
+  clearRuntimeTransferOutcomes,
+} from "./transferOutcomeLog";
 
 function record(over: Partial<VoiceCallRecord> = {}): VoiceCallRecord {
   return {
@@ -50,6 +54,66 @@ describe("toCallLogRow", () => {
     expect(toCallLogRow(record({ outcome: "caller_hangup" })).status).toBe("completed");
     expect(toCallLogRow(record({ outcome: "agent_ended" })).status).toBe("completed");
     expect(toCallLogRow(record({ outcome: "max_duration" })).status).toBe("completed");
+  });
+
+  it("carries the transfer outcome onto the row — the column that was NULL on every runtime call", () => {
+    /**
+     * 2026-09-08: all three PCP runtime calls had `transfer_outcome` NULL while
+     * the TICKET carried the whole record — destination +17149564300, NO_ANSWER,
+     * office_no_answer. `recordTransferOutcome` keys on `officeLegDials`, which
+     * only the old core's dial path populates, so the runtime's dial was
+     * measured and then dropped. Operator: "you have the data, but we're not
+     * capturing it properly."
+     */
+    clearRuntimeTransferOutcomes();
+    recordRuntimeTransferOutcome("CA-1", {
+      outcome: "no_answer",
+      status: "NO_ANSWER",
+      reason: "office_no_answer",
+      dialedNumber: "+17149564300",
+      ringSeconds: 30,
+    });
+
+    const row = toCallLogRow(record());
+
+    expect(row.transferOutcome?.outcome).toBe("no_answer");
+    expect(row.transferOutcome?.dialedNumber).toBe("+17149564300");
+    // It rides through the conflict update too, or a second teardown pass
+    // would leave the first pass's value unrefreshed on a retried insert.
+    expect(toConflictUpdate(row).transferOutcome?.outcome).toBe("no_answer");
+  });
+
+  it("a call that never dialled leaves it absent, so NULL keeps meaning 'no transfer'", () => {
+    clearRuntimeTransferOutcomes();
+    const row = toCallLogRow(record());
+
+    expect(row.transferOutcome).toBeUndefined();
+    expect(
+      "transferOutcome" in toConflictUpdate(row),
+      "an absent outcome must be OMITTED, never written as null over a real one",
+    ).toBe(false);
+  });
+
+  it("records a dial that RANG OUT even though it is not a transfer", () => {
+    /**
+     * The two columns are independent and this is the case that proves it:
+     * `transferred_to_human` stays false because nobody answered, and that is
+     * exactly the call worth having a record of. Reading the absence of one as
+     * the absence of the other is the mistake that produced "no transfer was
+     * attempted" about CAa37f1a42.
+     */
+    clearRuntimeTransferOutcomes();
+    recordRuntimeTransferOutcome("CA-1", {
+      outcome: "no_answer",
+      status: "NO_ANSWER",
+      reason: "office_no_answer",
+      ringSeconds: 30,
+    });
+
+    const row = toCallLogRow(record({ outcome: "caller_hangup" }));
+
+    expect(row.transferredToHuman, "nobody answered").toBeUndefined();
+    expect(row.transferOutcome?.outcome, "but we did dial, and it rang out").toBe("no_answer");
   });
 
   it("a transferred call sets transferred_to_human — and ONLY a transferred call", () => {

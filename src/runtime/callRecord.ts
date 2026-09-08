@@ -37,6 +37,10 @@
 
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
+import {
+  takeRuntimeTransferOutcome,
+  type RuntimeTransferOutcome,
+} from "./transferOutcomeLog";
 
 /**
  * Identity the runtime was TOLD, never identity it inferred. Supplied by
@@ -91,6 +95,18 @@ export interface RuntimeCallLogRow {
    * a racing writer that recorded a transfer is not overwritten by this
    * one's omission (Codex, PR #230 round 2). */
   transferredToHuman?: true;
+  /**
+   * WHAT THE DIAL ACTUALLY DID — destination, outcome, how long it rang.
+   *
+   * The old core has written this since 2026-07-30 and the runtime never did:
+   * `recordTransferOutcome` keys on `officeLegDials`, which only the SIP dial
+   * path populates. So every runtime transfer read from `call_logs` as though
+   * no transfer had been attempted — which is how I came to state exactly that
+   * about CAa37f1a42 from a column that could not say it. Written only when an
+   * attempt was actually made; a call that never dialled leaves it NULL, which
+   * reads honestly.
+   */
+  transferOutcome?: RuntimeTransferOutcome;
   /** Present ONLY when the runtime was told — see RuntimeCallIdentity. */
   patientName?: string;
   patientDob?: string;
@@ -123,6 +139,11 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
     voiceProvider: row.voiceProvider,
     runtimeOutcome: row.runtimeOutcome,
     ...(row.transferredToHuman ? { transferredToHuman: row.transferredToHuman } : {}),
+    // Same rule as transferredToHuman: present or absent, never null. A second
+    // teardown pass has already consumed the stored outcome (delete-on-read),
+    // so omitting it here preserves what the first pass wrote instead of
+    // blanking it.
+    ...(row.transferOutcome ? { transferOutcome: row.transferOutcome } : {}),
     ...(row.firstTranscriptDelayMs !== undefined
       ? { firstTranscriptDelayMs: row.firstTranscriptDelayMs }
       : {}),
@@ -178,6 +199,22 @@ export function toCallLogRow(
     0,
     Math.round((record.endedAtMs - record.startedAtMs) / 1000),
   );
+  /**
+   * PURITY NOTE, because this function is documented as a pure mapping and
+   * this line is the one exception.
+   *
+   * `takeRuntimeTransferOutcome` reads AND deletes, so calling `toCallLogRow`
+   * twice on the same record yields the outcome once. That is deliberate and
+   * matches the delete-on-read the old core uses: the second caller is a retry
+   * or a racing teardown, and `toConflictUpdate` omits an absent outcome
+   * rather than nulling it, so the value the first pass wrote survives.
+   *
+   * The alternative — pass the outcome in as an argument — would put the
+   * collection in `persistCallRecord` and leave this function unable to be
+   * asserted against a real transfer without a database, which is the property
+   * this module was built for.
+   */
+  const transferOutcome = takeRuntimeTransferOutcome(record.callSid);
   return {
     callSid: record.callSid,
     direction: "inbound",
@@ -276,6 +313,16 @@ export function toCallLogRow(
     // Omitted (never false) except on a transferred outcome, so this
     // writer cannot erase a transfer someone else recorded.
     ...(record.outcome === "transferred" ? { transferredToHuman: true as const } : {}),
+    /**
+     * Collected here rather than written when the transfer settled, because
+     * this module is the runtime's ONE writer of this row — see the note on
+     * toConflictUpdate. Delete-on-read, so a teardown that runs twice does not
+     * rewrite what the first pass already stored.
+     *
+     * Note this is independent of `transferredToHuman`: a transfer that RANG
+     * OUT is exactly the case worth recording, and it is not a transfer.
+     */
+    ...(transferOutcome ? { transferOutcome } : {}),
     // Omitted entirely when unknown rather than written as null: the queue
     // agents' own stampVerifiedIdentity may already have set these during
     // the call, and a null would erase what it learned.

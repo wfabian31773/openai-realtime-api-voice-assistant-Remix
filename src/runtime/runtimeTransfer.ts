@@ -26,6 +26,7 @@
 import { escalationDetailsMap } from "../services/escalationStore";
 import { resolveHandoffDestination } from "../services/handoffPolicy";
 import { buildPcpTransferBriefing } from "../services/warmTransferBriefing";
+import { recordRuntimeTransferOutcome } from "./transferOutcomeLog";
 import { ACCEPT_WINDOW_MS, conferenceNameFor, performWarmTransfer } from "./warmTransfer";
 import type { TransferOutcome, TransferTwilioOps } from "./warmTransfer";
 import { TransferAcceptRegistry } from "./transferAccepts";
@@ -214,6 +215,55 @@ export function toPcpHandoffOutcome(
   };
 }
 
+/**
+ * The transfer's own result, in the shape `call_logs.transfer_outcome` stores.
+ *
+ * EXPORTED BECAUSE IT WAS UNTESTABLE INSIDE THE CLOSURE, and mutation testing
+ * is what showed that mattered: flattening DECLINED into `no_answer` — the one
+ * translation this mapping makes a judgement about — failed no test at all,
+ * because the only `declined` assertion was on the STORE, which never sees a
+ * `TransferOutcome`. The same shape as the briefing bug an hour earlier: a
+ * test that exercises the sink and not the source cannot tell a working
+ * mapping from a broken one.
+ *
+ * `declined` deliberately extends the old core's vocabulary rather than
+ * folding into `no_answer`: nobody picking up is a staffing question and
+ * somebody refusing is not, and nothing reads this column today, so the
+ * extension costs nothing while the flattening would cost the distinction.
+ */
+export function toRecordedOutcome(
+  outcome: TransferOutcome,
+  ringSeconds: number,
+): Parameters<typeof recordRuntimeTransferOutcome>[1] {
+  if (outcome.ok) {
+    return {
+      outcome: "accepted",
+      status: "CONNECTED",
+      dialedNumber: outcome.destination,
+      officeCallSid: outcome.officeCallSid,
+      acceptMethod: "keypress",
+      ringSeconds,
+    };
+  }
+  return {
+    outcome:
+      outcome.status === "NO_ANSWER"
+        ? "no_answer"
+        : outcome.status === "DECLINED"
+          ? "declined"
+          : outcome.status === "UNAVAILABLE"
+            ? "unavailable"
+            : "failed",
+    status: outcome.status,
+    reason: outcome.reason,
+    // Recorded on FAILURE too. 46 of 46 failed PCP handoffs in the 90 days to
+    // 2026-08-13 recorded no destination, which is why "were we dialling the
+    // retired roster?" is unanswerable from that data.
+    ...(outcome.destination ? { dialedNumber: outcome.destination } : {}),
+    ringSeconds,
+  };
+}
+
 /** Who is calling and why, from the agent's own side-channel write. */
 export function briefingFor(
   slug: string,
@@ -276,6 +326,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
       metadata: LaneCallMetadata,
       hooks?: TransferLifecycleHooks,
     ): () => Promise<unknown> {
+      let dialStartedAt = Date.now();
       const attempt = async (): Promise<TransferOutcome> => {
         try {
           // Before anything dials: the whole attempt — dial, briefing,
@@ -283,6 +334,10 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           // watchdog needs that budget, not the tool dispatch's 45
           // seconds (Codex, PR #230 round 3).
           hooks?.onAttemptStarting?.(ACCEPT_WINDOW_MS);
+          // When the office leg started ringing, so the recorded outcome can
+          // say how long it rang. The old core reports this and the runtime
+          // reported nothing at all.
+          dialStartedAt = Date.now();
           // Read at INVOKE time, not build time: the agent's escalate tool
           // writes the side channel during the call, after the factory ran.
           const details = escalationDetailsMap.get(metadata.callId);
@@ -355,13 +410,43 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           hooks?.onAttemptSettled?.();
         }
       };
+      /**
+       * WRITE THE OUTCOME DOWN BEFORE HANDING IT TO THE AGENT.
+       *
+       * `call_logs.transfer_outcome` was NULL on every runtime call ever made,
+       * because `recordTransferOutcome` keys on `officeLegDials` — a map only
+       * the old core's dial path populates. On 2026-09-08 the PCP line dialled
+       * +17149564300 and rang out; the TICKET recorded destination, timing and
+       * NO_ANSWER, and `call_logs` recorded nothing, so the same call read as
+       * "no transfer attempted" from the table every dashboard uses. Operator:
+       * "you have the data, but we're not capturing it properly."
+       *
+       * Wrapped around BOTH slug paths rather than added to one, because the
+       * non-PCP path THROWS on failure — recording inside it after the throw
+       * would capture successes only, which is the half that needs recording
+       * least.
+       */
+      const settle = async (): Promise<TransferOutcome> => {
+        const outcome = await attempt();
+        try {
+          recordRuntimeTransferOutcome(
+            metadata.callSid,
+            toRecordedOutcome(outcome, Math.round((Date.now() - dialStartedAt) / 1000)),
+          );
+        } catch (err) {
+          // Telemetry must never cost a transfer. This is the whole reason the
+          // record is taken here and not inside the dial.
+          log(`[runtime-xfer] could not record the outcome for ${metadata.callSid}: ${String(err)}`);
+        }
+        return outcome;
+      };
       if (slug === "pcp") {
         // See handoffFor's interface doc: PCP records the STRUCTURED
         // outcome on its ticket, success or failure — never a throw.
-        return async () => toPcpHandoffOutcome(await attempt());
+        return async () => toPcpHandoffOutcome(await settle());
       }
       return async () => {
-        const outcome = await attempt();
+        const outcome = await settle();
         if (!outcome.ok) {
           // A fixed slug, because the text reaches the model — the
           // detailed reason stays in the server log (warmTransfer.ts).
