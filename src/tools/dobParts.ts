@@ -191,7 +191,67 @@ function normalize(spoken: string): string {
    * rule replaces the leftover rule and does the same work more honestly — a
    * phone number is six numeric groups and assembles into nothing.
    */
-  return readDateFromAnything(raw);
+  const read = readDateFromAnything(raw);
+  if (read) return read;
+  return readDigitStringDate(raw);
+}
+
+/**
+ * A BIRTHDAY READ OUT ONE DIGIT AT A TIME.
+ *
+ * 2026-09-08, CA4475d6f1b265c4c6824ff0f241d159f9: the caller gave
+ * "0 1 0 4 58" and gave it FOUR times. Every one was refused. Probed against
+ * the live parser afterwards, "01 04 58" and "January 4th, 1958" both parse
+ * and the digit-at-a-time form does not — and the reason is arithmetic, not
+ * intent. `readDateFromAnything` assembles a date out of THREE numeric groups
+ * or FOUR; a caller spelling their birthday out produces FIVE, which is
+ * neither, so it fell through to the branch whose actual job is refusing phone
+ * numbers. The same habit in Spanish
+ * (CAdc9f9667694dd95382985ad5f86f57b4, "cero tres veintidos del cincuenta")
+ * cost that caller their request the same day.
+ *
+ * This runs ONLY after the existing reader has already refused, so by
+ * construction it changes no answer the parser gives today. It re-reads the
+ * digits as one continuous string rather than as groups, which is what the
+ * caller was actually saying.
+ *
+ * WHICH GUARD IS LOAD-BEARING, measured by mutation rather than asserted:
+ *
+ *   `tokens.every(isDigits)` — LOAD-BEARING. Remove it and three tests fail.
+ *   Sweeping the digits out of a sentence FABRICATES a birthday: "he was born
+ *   10 years ago in 2016" is 102016, which assembles into 2016-10-20 — real,
+ *   in range, and wrong. A wrong date of birth silently matches the wrong
+ *   patient, which every comment in this file says is worse than no date.
+ *
+ *   The 6-or-8 length check — EARNS NOTHING TODAY. Removing it fails no test,
+ *   and that is stated here rather than dressed up: `valid()` already refuses
+ *   every longer run of digits currently tested, because a phone number's
+ *   first two digits are not a month. It stays as the statement of what this
+ *   function is for — a date is six digits or eight — and not as a guard it
+ *   has earned.
+ */
+function readDigitStringDate(raw: string): string {
+  const tokens = String(raw ?? '')
+    .trim()
+    .split(/[\s\/\-.]+/)
+    .filter(Boolean);
+  if (tokens.length === 0) return '';
+  if (!tokens.every((t) => /^\d+$/.test(t))) return '';
+
+  const digits = tokens.filter((t) => /^\d+$/.test(t)).join('');
+  if (digits.length !== 6 && digits.length !== 8) return '';
+
+  const month = Number(digits.slice(0, 2));
+  const day = Number(digits.slice(2, 4));
+  let year = Number(digits.slice(4));
+  if (digits.length === 6) year = expandTwoDigitYear(year, month, day);
+
+  const mo = String(month).padStart(2, '0');
+  const d = String(day).padStart(2, '0');
+  const y = String(year);
+  if (!valid(y, mo, d)) return '';
+  console.info('[DOB] read a date of birth the caller said one digit at a time');
+  return `${y}-${mo}-${d}`;
 }
 
 /** Ordinals, separators and punctuation gone; month names left in place. */
