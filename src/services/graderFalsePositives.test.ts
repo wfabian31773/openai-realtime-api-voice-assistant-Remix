@@ -55,7 +55,13 @@ function run(input: Partial<typeof base> & { transcript: string }) {
 
 function check(results: Array<{ grader: string }>, name: string) {
   const r = results.find((x) => x.grader === name) as
-    | { grader: string; pass: boolean; reason: string; metadata?: Record<string, unknown> }
+    | {
+        grader: string;
+        pass: boolean;
+        reason: string;
+        severity?: 'info' | 'warning' | 'critical';
+        metadata?: Record<string, unknown>;
+      }
     | undefined;
   expect(r, `grader ${name} did not run`).toBeTruthy();
   return r!;
@@ -325,5 +331,158 @@ describe('question_repetition — the guard’s double-capture rule', () => {
     expect((r.metadata?.askCounts as Record<string, number>)['date of birth']).toBe(3);
     expect(r.pass).toBe(false);
     expect(r.severity).toBe('critical');
+  });
+});
+
+/**
+ * THE THREE REPETITION COUNTERS (2026-09-09).
+ *
+ * Wayne: "can't we make looping just look for any time that the agent repeats
+ * the same thing or something similar, rather than have a count?"
+ *
+ * The shapes below are copied from live calls; names, numbers and ticket ids
+ * are invented.
+ */
+describe('refiled_repeatedly — the filler is a proxy for the tool call', () => {
+  const churn = (times: number, ticket: string | null) => ({
+    transcript: [
+      'AGENT: Thank you for calling Azul Vision clinical support.',
+      'CALLER: I need a refill of my drops.',
+      ...Array.from({ length: times }, (_, i) => [
+        'AGENT: Let me get this logged for you — one moment.',
+        `CALLER: okay${'.'.repeat(i + 1)}`,
+      ]).flat(),
+    ].join('\n'),
+    ticketNumber: ticket,
+  });
+
+  it('one filing attempt is normal', () => {
+    const r = check(run(churn(1, 'VA-50010')), 'refiled_repeatedly');
+    expect(r.pass).toBe(true);
+  });
+
+  it('churn that still filed is a warning, not a critical', () => {
+    const r = check(run(churn(3, 'VA-50011')), 'refiled_repeatedly');
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('warning');
+    expect(r.metadata?.attempts).toBe(3);
+  });
+
+  /** The harm has to have landed. Predicting it is what this audit removed. */
+  it('churn that filed NOTHING is critical', () => {
+    const r = check(run(churn(3, null)), 'refiled_repeatedly');
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('critical');
+  });
+
+  it('collapses the [interrupted] marker onto the same line', () => {
+    const barged = [
+      'AGENT: Thank you for calling Azul Vision surgery coordination.',
+      'CALLER: I need my procedure date.',
+      'AGENT: Let me get this logged for you — one moment. [interrupted]',
+      'CALLER: sorry, go on',
+      'AGENT: Let me get this logged for you — one moment.',
+    ].join('\n');
+    const r = check(run({ transcript: barged, ticketNumber: null }), 'refiled_repeatedly');
+    expect(r.metadata?.attempts).toBe(2);
+  });
+});
+
+describe('greeting_replayed', () => {
+  it('passes a call greeted once', () => {
+    const r = check(run({ transcript: 'AGENT: Thank you for calling Azul Vision optical.\nCALLER: hello' }), 'greeting_replayed');
+    expect(r.pass).toBe(true);
+  });
+
+  it('flags the caller who heard the agent start over', () => {
+    const twice = [
+      'AGENT: Thank you for calling Azul Vision optical.',
+      'CALLER: hola, español por favor',
+      'AGENT: Thank you for calling Azul Vision optical.',
+      'CALLER: hello?',
+    ].join('\n');
+    const r = check(run({ transcript: twice }), 'greeting_replayed');
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('warning');
+    expect(r.metadata?.greetings).toBe(2);
+  });
+});
+
+describe('agent_line_repeated — the wider net under question_repetition', () => {
+  /** The line that motivated not requiring a question mark: it has none, and
+   *  its wording is in none of ASK_TOPICS, so question_repetition is blind
+   *  to it however many times it is said. */
+  it('catches a re-ask that carries no question mark and no known topic', () => {
+    const t = [
+      'AGENT: Thank you for calling Azul Vision surgery coordination.',
+      'CALLER: June ninth.',
+      "AGENT: I didn't catch that date of birth — month, day and year.",
+      'CALLER: June ninth, nineteen forty-nine.',
+      "AGENT: I didn't catch that date of birth — month, day and year.",
+      'CALLER: I said June ninth.',
+    ].join('\n');
+    const r = check(run({ transcript: t }), 'agent_line_repeated');
+    expect(r.pass).toBe(false);
+    expect(r.metadata?.worstRepeatCount).toBe(2);
+  });
+
+  /** Each defect is reported once. Without the exclusions a filing-churn call
+   *  would light up all three counters and read as three problems. */
+  it('does not also count the greeting or the filing filler', () => {
+    const t = [
+      'AGENT: Thank you for calling Azul Vision clinical support.',
+      'CALLER: hello',
+      'AGENT: Thank you for calling Azul Vision clinical support.',
+      'CALLER: my drops',
+      'AGENT: Let me get this logged for you — one moment.',
+      'CALLER: ok',
+      'AGENT: Let me get this logged for you — one moment.',
+      'CALLER: ok',
+    ].join('\n');
+    const r = check(run({ transcript: t, ticketNumber: 'VA-50012' }), 'agent_line_repeated');
+    expect(r.pass).toBe(true);
+    expect(check(run({ transcript: t, ticketNumber: 'VA-50012' }), 'greeting_replayed').pass).toBe(false);
+    expect(check(run({ transcript: t, ticketNumber: 'VA-50012' }), 'refiled_repeatedly').pass).toBe(false);
+  });
+
+  /** normaliseSpokenLine's job: the runtime appends [interrupted] when the
+   *  caller barges in, so the same sentence arrives in two spellings. */
+  it('collapses [interrupted] so a barged line still counts as a repeat', () => {
+    const t = [
+      'AGENT: Thank you for calling Azul Vision.',
+      'CALLER: hello',
+      'AGENT: And may I please have the patient date of birth? [interrupted]',
+      'CALLER: sorry?',
+      'AGENT: And may I please have the patient date of birth?',
+      'CALLER: June ninth.',
+    ].join('\n');
+    const r = check(run({ transcript: t }), 'agent_line_repeated');
+    expect(r.pass).toBe(false);
+    expect(r.metadata?.worstRepeatCount).toBe(2);
+  });
+
+  it('ignores short acknowledgements that repeat harmlessly', () => {
+    const t = [
+      'AGENT: Thank you for calling Azul Vision.',
+      'CALLER: my name is Sample',
+      'AGENT: Got it.',
+      'CALLER: and my drops',
+      'AGENT: Got it.',
+    ].join('\n');
+    const r = check(run({ transcript: t }), 'agent_line_repeated');
+    expect(r.pass).toBe(true);
+  });
+
+  /** The transport artefact, on the wider net too. */
+  it('one response captured twice with no caller between is one line', () => {
+    const t = [
+      'AGENT: Thank you for calling Azul Vision.',
+      'CALLER: hello',
+      'AGENT: May I please have the name and location of your pharmacy?',
+      'AGENT: May I please have the name and location of your pharmacy?',
+      'CALLER: CVS on Main.',
+    ].join('\n');
+    const r = check(run({ transcript: t }), 'agent_line_repeated');
+    expect(r.pass).toBe(true);
   });
 });

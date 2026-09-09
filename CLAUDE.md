@@ -901,6 +901,48 @@ counts long calls as `total_turns > 45`. Over 7 days the grok runtime's
 lane — "no looping" is not a finding there, it is an instrument that cannot
 fire. Same column CLAUDE.md already says not to quote across the cutover.
 
+### THREE REPETITION COUNTERS REPLACE THE BLIND LOOPING PILLAR — 2026-09-09
+
+Wayne: *"can't we make looping just look for any time that the agent repeats
+the same thing or something similar, rather than have a count?"* Yes, and the
+transcript is the right place to ask, because both pipelines write it the same
+way — unlike `total_turns`, which cannot reach its own threshold on the
+runtime. Asking the transcript found **99 runtime calls in 7 days** against
+**2** on the old core.
+
+**They are THREE counters because those 99 calls held three unrelated defects**
+(64 the filing filler · 19 the greeting · ~13 a real re-ask). Collapsed into
+one "looping" number none of them is actionable. Volumes over 30 days /
+10,716 calls: `refiled_repeatedly` 223 (86 critical) · `greeting_replayed`
+268 · `agent_line_repeated` 395.
+
+**Only `refiled_repeatedly` may be critical, and only when no ticket filed.**
+The filler is a proxy for the tool call, and it is monotonic in both columns:
+
+| says "let me get this logged" | calls | avg tool calls | ended with NO ticket |
+|---|---|---|---|
+| 1× | 659 | 4.9 | 15% |
+| 2× | 88 | 6.8 | 28% |
+| 3× | 13 | **17.5** | **46%** |
+| 5× | 2 | 12.0 | **100%** |
+
+At 3× more than half still filed, so churn-with-a-ticket is a WARNING —
+flagging it critical would be predicting harm instead of observing it, which
+is the error this whole audit removed.
+
+**Its critical is 94% precise and the missing 6% is the write-back gap.** All
+85 canonical-SID calls it would have flagged over 30 days were looked up in
+the Support Center: **5 have a ticket `call_logs.ticket_number` never
+received.** **Do not suppress on a spoken `VA-` number** — 12 of the 85 read
+one aloud but only 3 are among those 5, so that suppressor trades 3 correct
+suppressions for up to 9 HIDDEN real losses (`check_open_tickets` reads an
+EXISTING ticket back to a caller chasing one). The fix belongs in the
+write-back, not the counter.
+
+Independent confirmation that it finds real losses: `CAbf717457`, the PCP call
+this file already documents as ending with no ticket and no transfer, is in
+the flagged set.
+
 ## Measured numbers — use these, don't re-derive them
 
 - **Gate B replay** (same corpus, same referee), failure rates:

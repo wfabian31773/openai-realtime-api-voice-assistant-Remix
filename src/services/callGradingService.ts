@@ -154,6 +154,230 @@ function gradeHandoffExpectedVsActual(input: DeterministicGraderInput): GraderRe
   };
 }
 
+/**
+ * THE AGENT'S LINES, WITH THE LIVE GUARD'S DOUBLE-CAPTURE RULE APPLIED.
+ *
+ * The transport emits agent speech on two event types, so one response can
+ * land in the transcript twice verbatim with no caller line between it.
+ * `conversationLoopGuard` has discounted that since it was written — "a REAL
+ * re-ask always has caller audio in between" — and every counter that reads
+ * agent lines needs the same rule, or a transport artefact gets reported to
+ * the operator as the agent repeating itself.
+ */
+function agentSpeech(transcript: string): string[] {
+  const out: string[] = [];
+  let lastAgentLine: string | null = null;
+  let callerSpokeSinceAgent = true;
+  for (const raw of transcript.split('\n')) {
+    const line = raw.trim();
+    if (/^(caller|patient|user):/i.test(line)) {
+      callerSpokeSinceAgent = true;
+      continue;
+    }
+    if (!/^agent:/i.test(line)) continue;
+    const spoken = line.replace(/^agent:\s*/i, '');
+    const isDoubleCapture =
+      !callerSpokeSinceAgent && lastAgentLine !== null &&
+      spoken.toLowerCase() === lastAgentLine.toLowerCase();
+    if (!isDoubleCapture) out.push(spoken);
+    lastAgentLine = spoken;
+    callerSpokeSinceAgent = false;
+  }
+  return out;
+}
+
+/**
+ * One spoken line reduced to what makes it the SAME line said twice.
+ *
+ * `[interrupted]` is stripped deliberately: the runtime appends it when the
+ * caller barges in, so "Let me get this logged for you — one moment" and
+ * "Let me get this logged for you — one moment [interrupted]" are the same
+ * sentence and must collapse. A 2026-09-09 SQL pass that did not strip it
+ * counted them as two different lines and under-reported the repeats.
+ */
+function normaliseSpokenLine(line: string): string {
+  return line
+    .replace(/\[interrupted\]/gi, ' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const GREETING_SHAPE = /^\s*thank you for calling\b/i;
+/** The filler the agent speaks while the filing tool runs. Said twice means
+ *  the tool was called twice. */
+const FILING_FILLER =
+  /\b(let me get this logged|i'?ll get this logged|let me get that logged|one moment while i (?:log|file)|let me file that)\b/i;
+/** Short lines are acknowledgements ("Got it.", "Thank you.") and repeat
+ *  harmlessly all day. Measured on 2026-09-09: at this floor the repeated
+ *  lines are questions and scripts, not pleasantries. */
+const REPEAT_MIN_CHARS = 26;
+
+/**
+ * THREE REPETITION COUNTERS — Wayne, 2026-09-09: "can't we make looping just
+ * look for any time that the agent repeats the same thing or something
+ * similar, rather than have a count?"
+ *
+ * He is right, and the measurement is why. The Observatory's looping pillar
+ * is `total_turns > 45`; over 7 days the Grok runtime's `total_turns` never
+ * exceeds 39, so that counter is structurally ZERO on every runtime lane.
+ * Asking the TRANSCRIPT whether a line was said twice found 99 runtime calls
+ * in the same window (against 2 on the old core) — and the transcript is
+ * written the same way by both pipelines, so unlike `total_turns` it stays
+ * comparable across the cutover.
+ *
+ * THEY ARE THREE COUNTERS AND NOT ONE, because reading what those 99 calls
+ * actually repeated showed three unrelated defects with three unrelated
+ * fixes. Collapsed into a single "looping: 99" the number would name none of
+ * them:
+ *
+ *   64 calls  the filing filler, up to 5x   -> the tool was retried
+ *   19 calls  the greeting                  -> the greeting replayed
+ *   ~13 calls a question                    -> a genuine re-ask
+ *
+ * Only the first is allowed to be CRITICAL, and only when the harm actually
+ * landed on that call — see gradeRefiledRepeatedly.
+ */
+
+/**
+ * THE FILLER IS A PROXY FOR THE TOOL CALL. Measured 2026-09-09 over 7 days:
+ *
+ *   says it | calls | avg tool calls | ended with NO ticket
+ *   1x      |   659 |            4.9 | 15%
+ *   2x      |    88 |            6.8 | 28%
+ *   3x      |    13 |           17.5 | 46%
+ *   5x      |     2 |           12.0 | 100%
+ *
+ * Monotonic in both columns: each extra "let me get this logged for you" is
+ * another filing attempt, and the more attempts, the likelier the call ends
+ * with nothing filed. Neither existing instrument can see it — `total_turns`
+ * cannot reach its threshold on the runtime, and `question_repetition`
+ * ignores the line because it is not an ask.
+ *
+ * CRITICAL ONLY WHEN THE TICKET IS ACTUALLY MISSING. At 3x, 54% of those
+ * calls DID file — flagging those critical would be predicting harm rather
+ * than observing it, which is the exact error this whole audit was cleaning
+ * up. Churn that still filed is a warning: worth seeing, not a failure.
+ *
+ * THE PRECISION OF THE CRITICAL IS 94%, AND THE MISSING 6% IS NOT THIS
+ * CHECK'S FAULT. All 85 canonical-SID calls this would have called critical
+ * over the 30 days to 2026-09-09 were looked up in the Support Center by
+ * `call_sid`: 5 of them DO have a ticket that `call_logs.ticket_number` never
+ * received. That is the known write-back gap (CLAUDE.md measures it at
+ * 97-98%), arriving here as a false red.
+ *
+ * DO NOT "FIX" IT BY SUPPRESSING ON A SPOKEN VA- NUMBER. That was measured
+ * too: 12 of the 85 read a ticket number aloud, but only 3 of them are among
+ * the 5 real write-back misses. Suppressing on the transcript would trade 3
+ * correct suppressions for up to 9 HIDDEN real losses, because
+ * `check_open_tickets` reads an EXISTING ticket back to a caller chasing one
+ * — the documented over-count of that proxy. A counter that hides losses is
+ * worse than one that over-reports by 6%. The real fix is the write-back.
+ */
+function gradeRefiledRepeatedly(input: DeterministicGraderInput): GraderResult {
+  const attempts = agentSpeech(input.transcript).filter(l => FILING_FILLER.test(l)).length;
+
+  if (attempts <= 1) {
+    return {
+      grader: 'refiled_repeatedly',
+      pass: true,
+      score: 1.0,
+      reason: attempts === 0
+        ? 'The agent never announced a filing attempt'
+        : 'One filing attempt',
+      metadata: { attempts, ticketNumber: input.ticketNumber },
+    };
+  }
+
+  if (!input.ticketNumber) {
+    return {
+      grader: 'refiled_repeatedly',
+      pass: false,
+      score: 0.0,
+      severity: 'critical' as const,
+      reason: `The agent announced filing ${attempts}x and the call ended with NO ticket — the caller was told their request was being logged and it was not`,
+      metadata: { attempts, ticketNumber: null, critical: true },
+    };
+  }
+
+  return {
+    grader: 'refiled_repeatedly',
+    pass: false,
+    score: Math.max(0, 1 - (attempts - 1) * 0.25),
+    severity: 'warning' as const,
+    reason: `The agent announced filing ${attempts}x before it succeeded (${input.ticketNumber}) — retry churn the caller can hear`,
+    metadata: { attempts, ticketNumber: input.ticketNumber },
+  };
+}
+
+/**
+ * THE GREETING PLAYED MORE THAN ONCE. Already a known defect and never
+ * counted: 13 calls on 2026-09-03 played it twice or three times, averaging
+ * 175s against a fleet average of 89, and six of the seven worst were a
+ * caller asking for another language during the opening.
+ *
+ * Never critical. The caller hears the agent start over, which is bad and is
+ * not a lost request.
+ */
+function gradeGreetingReplayed(input: DeterministicGraderInput): GraderResult {
+  const greetings = agentSpeech(input.transcript).filter(l => GREETING_SHAPE.test(l)).length;
+  const pass = greetings <= 1;
+  return {
+    grader: 'greeting_replayed',
+    pass,
+    score: pass ? 1.0 : Math.max(0, 1 - (greetings - 1) * 0.4),
+    ...(pass ? {} : { severity: 'warning' as const }),
+    reason: pass
+      ? `Greeting played ${greetings === 0 ? 'never (no greeting line found)' : 'once'}`
+      : `The greeting played ${greetings}x — the caller heard the agent start the call over`,
+    metadata: { greetings },
+  };
+}
+
+/**
+ * ANY OTHER LINE THE AGENT SAID TWICE.
+ *
+ * Named for what it measures rather than what it usually catches. It does NOT
+ * require the line to be question-shaped: the real re-asks found on
+ * 2026-09-09 include "I didn't catch that date of birth — month, day and
+ * year", which carries no question mark and whose wording is in none of
+ * `ASK_TOPICS`. That is the point of this counter — `question_repetition`
+ * can only see a loop it has a topic for, and its own header admits it
+ * "under-reports rather than inventing loops".
+ *
+ * The greeting and the filing filler are excluded because they have their own
+ * counters above; counting them here would report one defect three times.
+ *
+ * Never critical, deliberately. `question_repetition` owns the critical tier
+ * for caller-facing loops, and this check is the wider, noisier net that sits
+ * under it — a second critical on the same call would double-count it.
+ */
+function gradeAgentLineRepeated(input: DeterministicGraderInput): GraderResult {
+  const counts = new Map<string, number>();
+  for (const line of agentSpeech(input.transcript)) {
+    if (GREETING_SHAPE.test(line) || FILING_FILLER.test(line)) continue;
+    const key = normaliseSpokenLine(line);
+    if (key.length < REPEAT_MIN_CHARS) continue;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  let worst = 0;
+  let worstLine = '';
+  for (const [key, n] of counts) if (n > worst) { worst = n; worstLine = key; }
+  const repeatedLines = [...counts.values()].filter(n => n > 1).length;
+  const pass = worst <= 1;
+  return {
+    grader: 'agent_line_repeated',
+    pass,
+    score: pass ? 1.0 : Math.max(0, 1 - (worst - 1) * 0.34),
+    ...(pass ? {} : { severity: 'warning' as const }),
+    reason: pass
+      ? 'The agent did not repeat any line'
+      : `The agent said the same line ${worst}x${repeatedLines > 1 ? ` (${repeatedLines} lines repeated)` : ''} — "${worstLine.slice(0, 60)}"`,
+    metadata: { worstRepeatCount: worst, repeatedLines },
+  };
+}
+
 /** SEV-1 2026-07-30: the loop meter for EVERY agent. The azul rubric had a
  *  repetition dimension; the fleet — answering-service and no-ivr, 90% of
  *  daily traffic and the worst loopers (141 answering-service calls with 3+
@@ -178,24 +402,7 @@ function gradeQuestionRepetition(input: DeterministicGraderInput): GraderResult 
    * retroactively and removes no real loop. It closes the gap before it
    * fires, and restores the parity the guard's header claims.
    */
-  const lines = input.transcript.split('\n').map(l => l.trim());
-  const agentLines: string[] = [];
-  let lastAgentLine: string | null = null;
-  let callerSpokeSinceAgent = true;
-  for (const line of lines) {
-    if (/^(caller|patient|user):/i.test(line)) {
-      callerSpokeSinceAgent = true;
-      continue;
-    }
-    if (!/^agent:/i.test(line)) continue;
-    const spoken = line.replace(/^agent:\s*/i, '');
-    const isDoubleCapture =
-      !callerSpokeSinceAgent && lastAgentLine !== null &&
-      spoken.toLowerCase() === lastAgentLine.toLowerCase();
-    if (!isDoubleCapture) agentLines.push(spoken);
-    lastAgentLine = spoken;
-    callerSpokeSinceAgent = false;
-  }
+  const agentLines = agentSpeech(input.transcript);
   const counts = new Map<string, number>();
   for (const line of agentLines) {
     const topic = classifyAsk(line);
@@ -1190,6 +1397,27 @@ export class CallGradingService {
       results.push(gradeQuestionRepetition(input));
     } catch (e) {
       console.error(`[GRADING] question repetition grader error:`, e);
+    }
+
+    // The three repetition counters (2026-09-09). Each is wrapped on its own
+    // so one throwing cannot take the other two — or the rest of the set —
+    // down with it.
+    try {
+      results.push(gradeRefiledRepeatedly(input));
+    } catch (e) {
+      console.error(`[GRADING] refiled repeatedly grader error:`, e);
+    }
+
+    try {
+      results.push(gradeGreetingReplayed(input));
+    } catch (e) {
+      console.error(`[GRADING] greeting replayed grader error:`, e);
+    }
+
+    try {
+      results.push(gradeAgentLineRepeated(input));
+    } catch (e) {
+      console.error(`[GRADING] agent line repeated grader error:`, e);
     }
 
     try {
