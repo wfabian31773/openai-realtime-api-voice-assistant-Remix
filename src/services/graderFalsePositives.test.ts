@@ -288,6 +288,42 @@ describe('human_request_deflection — a refusal is not a promise', () => {
     expect(r.metadata?.promisedTransfer).not.toBe(true);
   });
 
+  /**
+   * CODEX, PR #278: dropping the whole clause loses an affirmative promise
+   * that shares a sentence with a refusal. This is the FALSE-NEGATIVE
+   * direction — the grader passes a call where the agent really did promise
+   * a transfer it cannot make, which is the defect the check exists to catch.
+   */
+  it('catches a promise that shares a sentence with a refusal', () => {
+    const mixed = [
+      'AGENT: Thank you for calling Azul Vision medical records.',
+      'CALLER: Can I get a representative?',
+      "AGENT: I can't transfer you, but I can connect you with the team.",
+      'CALLER: Thank you.',
+    ].join('\n');
+    const r = check(run({ transcript: mixed, agentSlug: 'records', ticketNumber: null }), 'human_request_deflection');
+    expect(r.pass).toBe(false);
+    expect(r.metadata?.promisedTransfer).toBe(true);
+  });
+
+  /**
+   * CODEX, PR #278: agent lines are concatenated before the split, so a line
+   * with no terminal punctuation merges with the next one and its refusal
+   * suppresses a promise made in a SEPARATE later utterance.
+   */
+  it('does not let an unpunctuated refusal swallow a later line\'s promise', () => {
+    const spanning = [
+      'AGENT: Thank you for calling Azul Vision medical records.',
+      'CALLER: I need a person.',
+      'AGENT: I am not able to transfer calls',
+      'CALLER: please',
+      'AGENT: Give me one moment while I connect you with the team.',
+    ].join('\n');
+    const r = check(run({ transcript: spanning, agentSlug: 'records', ticketNumber: null }), 'human_request_deflection');
+    expect(r.pass).toBe(false);
+    expect(r.metadata?.promisedTransfer).toBe(true);
+  });
+
   it('a real promise on a ticket-only line still fails', () => {
     const broken = [
       'AGENT: Thank you for calling Azul Vision medical records.',

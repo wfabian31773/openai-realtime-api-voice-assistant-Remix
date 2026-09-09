@@ -865,7 +865,13 @@ wrong two independent ways:
 Two smaller false positives, both the agent's own correct words used against
 it: **a refusal read as a promise** — "I'm not able to transfer calls or
 connect you directly" matched `connect you`, so the records agent was reported
-for PROMISING a transfer inside the sentence refusing one — and
+for PROMISING a transfer inside the sentence refusing one (**and the FIRST fix
+for it was wrong the other way** — it dropped the whole sentence, so
+"I can't transfer you, BUT I can connect you with the team" lost its
+affirmative half and a real broken promise would have graded as a pass. Codex,
+PR #278. Latent: 0 such calls in 30 days over 10,606. The scope is now the
+segment, split on sentence ends AND contrast markers, evaluated per agent LINE
+— never across concatenated utterances) — and
 **`can't see` in an eye clinic**, where "I can't use those glasses, I can't
 see out of them" raised an emergency alert. That idiom is rare (1 of 21
 `can't see` mentions in 30 days) and the lexicon is a SAFETY net, so it is

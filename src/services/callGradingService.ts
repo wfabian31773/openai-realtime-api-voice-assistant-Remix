@@ -427,6 +427,52 @@ function gradeQuestionRepetition(input: DeterministicGraderInput): GraderResult 
   };
 }
 
+/**
+ * DID THE AGENT PROMISE A TRANSFER IT CANNOT MAKE?
+ *
+ * The first version of this dropped any SENTENCE containing a negation and
+ * ran the promise test on what was left. Codex caught it on PR #278, and it
+ * was wrong in the direction that matters — it hid real broken promises:
+ *
+ *   "I can't transfer you, BUT I can connect you with the team."
+ *
+ * is one sentence, so the whole thing was discarded and the affirmative
+ * half — an impossible promise, the exact defect this check exists to catch
+ * — was never tested. Worse, every agent line was concatenated before the
+ * split, so a line with no terminal punctuation merged with the next one and
+ * a refusal could swallow a promise made in a SEPARATE later utterance.
+ *
+ * So: evaluate each agent LINE on its own (never across utterances), split
+ * it on sentence ends AND on contrast markers, and ask of each segment
+ * whether it promises a transfer WITHOUT a refusal in that same segment.
+ * "but" is a boundary because that is precisely the word that revokes the
+ * negation preceding it.
+ *
+ * A proximity window was tried instead and rejected: the refusal in
+ * "I'm not able to transfer calls or connect you directly" sits about as far
+ * from its promise phrase as the one in "I can't transfer you, but I can
+ * connect you" sits from its own, so no character distance separates the two
+ * cases. The contrast marker does.
+ */
+const TRANSFER_PROMISE =
+  /(?:transfer|connect) you|one moment while i (?:connect|transfer)|putting you through/;
+const TRANSFER_REFUSAL =
+  /\b(?:not able to|unable to|can'?t|cannot|won'?t|will not|do not|don'?t|never)\b/;
+/** Words that end a refusal's scope: what follows is asserted, not denied. */
+const CONTRAST_BOUNDARY = /\bbut\b|\bhowever\b|\balthough\b|\bthough\b|\binstead\b/;
+
+function promisesATransfer(transcript: string): boolean {
+  for (const line of agentSpeech(transcript)) {
+    const segments = line
+      .toLowerCase()
+      .split(new RegExp(`[.!?]+|${CONTRAST_BOUNDARY.source}`));
+    for (const segment of segments) {
+      if (TRANSFER_PROMISE.test(segment) && !TRANSFER_REFUSAL.test(segment)) return true;
+    }
+  }
+  return false;
+}
+
 /** SEV-1 2026-07-30: ~40 calls/day demanded a human 2+ times and got an
  *  identical scripted deflection each time — some 10 deflections deep —
  *  then ended with no transfer AND no ticket. The caller asked for a
@@ -474,16 +520,12 @@ function gradeHumanRequestDeflection(input: DeterministicGraderInput): GraderRes
      *
      * Observed live on records 2026-09-09 (CAf6d986ca): the agent refused,
      * took the message, filed VA-58344 and read the number back twice, and
-     * graded CRITICAL for it. Clauses carrying a refusal are dropped before
-     * the promise test runs.
+     * graded CRITICAL for it.
+     *
+     * The scoping is in promisesATransfer below, and the FIRST version of it
+     * was wrong in the opposite direction — see the note there.
      */
-    const NEGATED_CLAUSE = /\b(?:not able to|unable to|can'?t|cannot|won'?t be able|do not|don'?t)\b/;
-    const promiseText = agentText
-      .split(/[.!?]+/)
-      .filter(clause => !NEGATED_CLAUSE.test(clause))
-      .join(' . ');
-    const promisedTransfer =
-      /(transfer|connect) you|one moment while i (connect|transfer)|putting you through/.test(promiseText);
+    const promisedTransfer = promisesATransfer(input.transcript);
     const offeredMessage =
       /take (a |your |down )?(message|information|details)|have (the |our )?team (contact|call|reach)|call you (right )?back|(team member|someone) (will )?(call|contact|reach)/.test(agentText);
     if (promisedTransfer) {
