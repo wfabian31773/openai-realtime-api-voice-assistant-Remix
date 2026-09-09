@@ -838,6 +838,69 @@ MORE. Count `CALLER:` lines in the transcript instead.
 
 ---
 
+## THE OBSERVATORY'S "CRITICAL FAILS" NUMBER WAS MOSTLY THE GRADER — 2026-09-09
+
+Audited every critical finding the fleet produced on 2026-09-09, each one
+against the artifact it claims to be about. **93 findings: 67 provably false,
+14 true, 12 whose stated harm is false.** Do not re-derive these; re-measure
+before quoting them.
+
+**One check produced 68 of the first 83.** `callback_fields_completeness` was
+wrong two independent ways:
+
+- **`completeness >= 0.67` can never be true for two of three fields.**
+  2/3 is 0.6666666666666666. Its own "one field short is not a crisis" branch
+  was UNREACHABLE for the life of the check, so every call missing exactly one
+  field fell through into CRITICAL. 58 of the day's findings, and the largest
+  single driver of the red number on all fourteen preceding days.
+- **It reads the TRANSCRIPT for fields that live on the TICKET.** All 65
+  tickets behind that day's criticals carried a name, a phone AND a
+  description in the Support Center. The grader's sentence — "patient may not
+  receive callback" — was false in 65 of 65 measured cases. It also could not
+  see the runtime's recognition-first forms (`I have you as <name>`, `I have
+  your record here`, `I'll use your calling number as the callback`), which is
+  the SAME defect fixed for `am I speaking with` on 08-15, in the same check,
+  against the same better behaviour.
+
+Two smaller false positives, both the agent's own correct words used against
+it: **a refusal read as a promise** — "I'm not able to transfer calls or
+connect you directly" matched `connect you`, so the records agent was reported
+for PROMISING a transfer inside the sentence refusing one — and
+**`can't see` in an eye clinic**, where "I can't use those glasses, I can't
+see out of them" raised an emergency alert. That idiom is rare (1 of 21
+`can't see` mentions in 30 days) and the lexicon is a SAFETY net, so it is
+NOT changed here — it is Wayne's call.
+
+**What was TRUE, and worth reading:** `question_repetition` (11) and
+`actionable_request_needs_ticket` (3). The repetition ones are the
+date-of-birth gate — the agent asks, the caller answers, the lookup misses,
+the agent asks again, three to five times. The three ticket ones are real
+lost requests, including an after-hours caller who gave name, number and
+request in one breath and got nothing.
+
+**A verdict can be graded against a transcript that no longer exists.**
+`toolTimeline` forces a deterministic pass on every flush, and its comment
+assumes "whichever runs LAST folds in complete data" — which holds only if
+the LLM grade pass also runs. When it does not, a MID-CALL verdict stands:
+on 09-09, 9 of 9 "missing reason" verdicts contradicted the stored
+transcript, all 9 had `quality_score` NULL, and one was graded 2.5 minutes
+into a 10-minute call. **Mostly self-healing** — 09-05/06/07 have zero — but
+the residue is real on busy days (47 calls ungraded on 09-08, 2 still
+contradicted). Bumping `CURRENT_GRADER_VERSION` re-scores them against the
+final transcript; the race itself is still open.
+
+**Every tab reads this one payload.** The scorecard's `critical_failure_rate`,
+the agent drill-down's `graderChecks`/`worstCalls`, Guards & Failures and the
+Daily Brief all read `call_logs.grader_results`, so one grader fix moves all
+of them — and one grader bug painted all of them red.
+
+**AND THE LOOPING PILLAR IS BLIND ON THE RUNTIME.** `opsHubAgentScorecards`
+counts long calls as `total_turns > 45`. Over 7 days the grok runtime's
+`total_turns` never exceeds **39** (avg 6.9; old core avg 12.0, max 74,
+20 long calls), so that counter is **structurally zero** on every runtime
+lane — "no looping" is not a finding there, it is an instrument that cannot
+fire. Same column CLAUDE.md already says not to quote across the cutover.
+
 ## Measured numbers — use these, don't re-derive them
 
 - **Gate B replay** (same corpus, same referee), failure rates:

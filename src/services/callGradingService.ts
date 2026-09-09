@@ -161,10 +161,41 @@ function gradeHandoffExpectedVsActual(input: DeterministicGraderInput): GraderRe
  *  loop guard's classifier so live enforcement and post-call measurement
  *  share one definition of "asked again". */
 function gradeQuestionRepetition(input: DeterministicGraderInput): GraderResult {
-  const agentLines = input.transcript
-    .split('\n')
-    .filter(l => /^agent:/i.test(l.trim()))
-    .map(l => l.replace(/^agent:\s*/i, ''));
+  /**
+   * THE SAME EYES AS THE LIVE GUARD, INCLUDING ITS DOUBLE-CAPTURE RULE.
+   *
+   * conversationLoopGuard's header promises that "the post-call graders count
+   * loops with exactly the same eyes the runtime guard uses". They did not:
+   * the guard carries `lastAgentLine` / `callerSpokeSinceAgent` because the
+   * transport emits agent speech on two event types, so one response can land
+   * in the transcript twice verbatim with no caller line between — and it
+   * says outright that "a REAL re-ask always has caller audio in between".
+   * This counter had no such rule, so a transport artefact could be reported
+   * to the operator as the agent badgering a caller.
+   *
+   * Checked on 2026-09-09 before the change: on all 11 of that day's flagged
+   * calls the repeated asks were distinct lines, so this corrects nothing
+   * retroactively and removes no real loop. It closes the gap before it
+   * fires, and restores the parity the guard's header claims.
+   */
+  const lines = input.transcript.split('\n').map(l => l.trim());
+  const agentLines: string[] = [];
+  let lastAgentLine: string | null = null;
+  let callerSpokeSinceAgent = true;
+  for (const line of lines) {
+    if (/^(caller|patient|user):/i.test(line)) {
+      callerSpokeSinceAgent = true;
+      continue;
+    }
+    if (!/^agent:/i.test(line)) continue;
+    const spoken = line.replace(/^agent:\s*/i, '');
+    const isDoubleCapture =
+      !callerSpokeSinceAgent && lastAgentLine !== null &&
+      spoken.toLowerCase() === lastAgentLine.toLowerCase();
+    if (!isDoubleCapture) agentLines.push(spoken);
+    lastAgentLine = spoken;
+    callerSpokeSinceAgent = false;
+  }
   const counts = new Map<string, number>();
   for (const line of agentLines) {
     const topic = classifyAsk(line);
@@ -224,8 +255,28 @@ function gradeHumanRequestDeflection(input: DeterministicGraderInput): GraderRes
       .filter(l => /^agent:/i.test(l.trim()))
       .join(' ')
       .toLowerCase();
+    /**
+     * A REFUSAL IS NOT A PROMISE. 2026-09-09.
+     *
+     * The ticket-only script says, correctly and by the operator's own
+     * ruling: "I'm not able to transfer calls or connect you directly to a
+     * representative." The old test matched "connect you" inside that
+     * sentence and reported the agent for PROMISING a transfer it had just
+     * refused — the same shape as the 08-13 handoff bug, where the agent's
+     * own words were counted against it, in a second check.
+     *
+     * Observed live on records 2026-09-09 (CAf6d986ca): the agent refused,
+     * took the message, filed VA-58344 and read the number back twice, and
+     * graded CRITICAL for it. Clauses carrying a refusal are dropped before
+     * the promise test runs.
+     */
+    const NEGATED_CLAUSE = /\b(?:not able to|unable to|can'?t|cannot|won'?t be able|do not|don'?t)\b/;
+    const promiseText = agentText
+      .split(/[.!?]+/)
+      .filter(clause => !NEGATED_CLAUSE.test(clause))
+      .join(' . ');
     const promisedTransfer =
-      /(transfer|connect) you|one moment while i (connect|transfer)|putting you through/.test(agentText);
+      /(transfer|connect) you|one moment while i (connect|transfer)|putting you through/.test(promiseText);
     const offeredMessage =
       /take (a |your |down )?(message|information|details)|have (the |our )?team (contact|call|reach)|call you (right )?back|(team member|someone) (will )?(call|contact|reach)/.test(agentText);
     if (promisedTransfer) {
@@ -1021,6 +1072,23 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
     /am i (speaking|talking) (with|to) [a-záéíóúñ'-]{2,}[\s\S]{0,160}\n\s*CALLER:[^\n]*\b(yes|yeah|yep|correct|that's right|si|sí|speaking|this is)\b/i,
     /(your last name|last name, please|and your last name)[\s\S]{0,200}\n\s*CALLER:[^\n]*[a-záéíóúñ'-]{2,}/i,
     /\bthank you,?\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ'-]{1,}[.,]/,
+    /**
+     * SILENT RECOGNITION — the runtime's other recognition-first shape,
+     * 2026-09-09. The 08-15 fix above taught this check to read the
+     * CONFIRMING form ("Am I speaking with Charles?" / "Yes."). The runtime
+     * also has a form that states the match outright and never asks:
+     *
+     *     AGENT: I have you as Robert Cheung. I see your usual clinic is …
+     *     AGENT: I have your record here. Which medication is it?
+     *
+     * The agent has the patient's record and the filed ticket carries the
+     * name — verified 2026-09-09 against the ticketing app: 65 of 65 tickets
+     * behind that day's "missing name/phone" criticals carried a name, a
+     * phone and a description. The caller never has to say the name aloud,
+     * so no caller-side pattern can ever match, and the better behaviour
+     * graded worse than the interrogation it replaced.
+     */
+    /\bi have (?:you as|your record)\b/i,
   ];
   const hasName = namePatterns.some(p => p.test(input.transcript));
   if (hasName) collectedFields.push('name');
@@ -1034,6 +1102,11 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
     // The approved confirm-once script: caller-ID confirmed by last four,
     // never read back in full ("number ending in 7471 ... best one to reach you").
     /number ending in \d{4}/i,
+    // 2026-09-09: the runtime's third callback form states the caller-ID
+    // number is being used and asks nothing ("I'll use your calling number as
+    // the callback"). The ticket carries caller_phone either way, so the
+    // callback the patient is promised exists; only the transcript is silent.
+    /\b(?:your|the) calling number\b/i,
   ];
   const hasPhone = phonePatterns.some(p => p.test(input.transcript));
   if (hasPhone) collectedFields.push('phone');
@@ -1046,7 +1119,7 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
 
   const completeness = collectedFields.length / CALLBACK_REQUIRED_FIELDS.length;
 
-  if (completeness >= 1.0) {
+  if (missingFields.length === 0) {
     return {
       grader: 'callback_fields_completeness',
       pass: true,
@@ -1056,7 +1129,22 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
     };
   }
 
-  if (completeness >= 0.67) {
+  /**
+   * COUNT THE FIELDS, DO NOT COMPARE THE FRACTION. 2026-09-09.
+   *
+   * This branch is the "one field short is not a crisis" branch, and for the
+   * whole life of the check it was UNREACHABLE. There are three required
+   * fields, so the only value that can arrive here is 2/3 —
+   * 0.6666666666666666 — and `0.6666666666666666 >= 0.67` is false. Every
+   * call missing exactly one field fell past this branch into CRITICAL.
+   *
+   * Measured on 2026-09-09 before the fix: 53 of the day's 68 critical
+   * findings on this grader, and the single largest driver of the
+   * Observatory's red "critical fails" number on every one of the preceding
+   * fourteen days. The intent was already written here; the arithmetic
+   * silently deleted it.
+   */
+  if (missingFields.length <= 1) {
     return {
       grader: 'callback_fields_completeness',
       pass: true,
@@ -1354,7 +1442,31 @@ Respond with a JSON object only, no other text:
   // NULL on all 2,203 calls and pinned `latency` and `tail_safety` at 0.5 —
   // note those two stay 0.5 for HISTORICAL calls, which have no such data to
   // recover; only calls finalized after that fix carry real values.
-  static readonly CURRENT_GRADER_VERSION = 9;
+  // v10 (2026-09-09): THE RED NUMBER ON THE OBSERVATORY WAS MOSTLY NOT REAL.
+  //
+  // Audited every critical finding the fleet produced on 2026-09-09 against
+  // the artifacts they claim to be about. 68 of the day's 83 were
+  // callback_fields_completeness, and that check was wrong two ways at once:
+  //
+  //   - `completeness >= 0.67` can never be true for 2 of 3 fields
+  //     (0.6666666666666666), so its own "one field short is fine" branch was
+  //     unreachable and 53 calls fell into CRITICAL through it;
+  //   - it reads the TRANSCRIPT for fields that live on the TICKET. All 65
+  //     tickets behind that day's criticals carried a name, a phone and a
+  //     description, so the stated harm — "patient may not receive callback"
+  //     — was false in every measured case.
+  //
+  // Also fixed here: a refusal ("I'm not able to … connect you") counted as a
+  // PROMISE of transfer, and the repetition counter missing the live guard's
+  // double-capture rule.
+  //
+  // The bump is the point. regradeStaleCalls only re-scores rows below
+  // CURRENT_GRADER_VERSION, so without it every false red already written to
+  // call_logs would stand forever — and the sweep re-reads the FINAL
+  // transcript, which also repairs the rows graded against a partial one
+  // (9 of 9 "missing reason" verdicts on 09-09 contradict the transcript now
+  // stored).
+  static readonly CURRENT_GRADER_VERSION = 10;
 
   /** Re-run the deterministic graders on calls graded under an older
    *  grader version. Deterministic-only — the LLM analysis is not re-run,

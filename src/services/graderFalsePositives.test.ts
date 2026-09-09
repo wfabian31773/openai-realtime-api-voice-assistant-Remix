@@ -192,3 +192,138 @@ describe('actionable_request_needs_ticket — same floor', () => {
     expect(r.pass).toBe(true);
   });
 });
+
+/**
+ * THE 2026-09-09 AUDIT — every critical finding the fleet produced that day,
+ * checked against the artifact it claims to be about.
+ *
+ * 83 critical findings. 68 of them came from ONE check, and all 65 tickets
+ * behind those 68 carried a name, a phone and a description in the ticketing
+ * app. The dashboard's red number was mostly measuring its own arithmetic.
+ *
+ * Names, numbers and ticket ids below are invented; the SHAPES are copied
+ * from the live calls that produced the false criticals.
+ */
+describe('callback_fields_completeness — the 2026-09-09 audit', () => {
+  const NAMED_AND_LOGGED = [
+    'AGENT: Thank you for calling Azul Vision clinical support. All of our technicians are currently assisting other patients, but I can take a message and they will follow up with you. How can I help you today?',
+    'CALLER: Refill a prescription.',
+    'AGENT: I have your record here. Which medication is it?',
+    'CALLER: My glaucoma drops.',
+    'AGENT: Your request is filed as ticket VA-50001.',
+  ].join('\n');
+
+  /**
+   * THE UNREACHABLE BRANCH. Three required fields means the only value that
+   * can reach the "most fields collected" branch is 2/3 = 0.6666666666666666,
+   * and `>= 0.67` is false for it. Every call one field short was reported
+   * CRITICAL through a branch written to stop exactly that — 53 of the day's
+   * 68 findings on this grader.
+   */
+  it('one missing field is not a critical failure', () => {
+    const r = check(run({ transcript: NAMED_AND_LOGGED, ticketNumber: 'VA-50001' }), 'callback_fields_completeness');
+    expect(r.pass).toBe(true);
+    expect(r.severity).not.toBe('critical');
+    expect(r.metadata?.missingFields).toEqual(['phone']);
+  });
+
+  it('reads the silent-recognition greeting as a collected name', () => {
+    const recognised = [
+      'AGENT: Thank you for calling Azul Vision optical.',
+      'CALLER: Checking on my contact lens order.',
+      'AGENT: I have you as Robert Sample. I see your usual clinic is Glendora.',
+      'CALLER: Yes.',
+      'AGENT: I have logged your request as ticket VA-50002.',
+    ].join('\n');
+    const r = check(run({ transcript: recognised, ticketNumber: 'VA-50002' }), 'callback_fields_completeness');
+    expect(r.metadata?.collectedFields).toContain('name');
+  });
+
+  it('reads "I will use your calling number" as a collected callback number', () => {
+    const callerId = [
+      'AGENT: Thank you for calling Azul Vision surgery coordination.',
+      'CALLER: I need to ask about my procedure appointment.',
+      'AGENT: I have your record here.',
+      "AGENT: I'll use your calling number as the callback.",
+      'AGENT: Filed as ticket VA-50003.',
+    ].join('\n');
+    const r = check(run({ transcript: callerId, ticketNumber: 'VA-50003' }), 'callback_fields_completeness');
+    expect(r.metadata?.collectedFields).toContain('phone');
+    expect(r.pass).toBe(true);
+  });
+
+  /** The over-correction guard: a ticket filed off a transcript that shows
+   *  nothing at all must still be reported. */
+  it('still critical when the call shows none of the three', () => {
+    const r = check(run({ transcript: 'AGENT: Filed.', ticketNumber: 'VA-50004' }), 'callback_fields_completeness');
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('critical');
+  });
+});
+
+describe('human_request_deflection — a refusal is not a promise', () => {
+  /**
+   * Live on records 2026-09-09: the agent refused the transfer in the exact
+   * words the operator's ruling requires, took the message, filed the ticket
+   * and read the number back — and graded CRITICAL for "PROMISED A TRANSFER",
+   * because "connect you" matched inside "not able to … connect you".
+   */
+  const CORRECT_REFUSAL = [
+    'AGENT: Thank you for calling Azul Vision medical records.',
+    'CALLER: Uh, can I get a representative?',
+    'AGENT: I am not able to transfer calls or connect you directly to a representative. What I can do is take a message and put in a request for the records team to follow up with you.',
+    'CALLER: Okay.',
+    'AGENT: I have filed the request, and the ticket number is VA-50005.',
+  ].join('\n');
+
+  it('does not report the scripted refusal as a promised transfer', () => {
+    const r = check(run({ transcript: CORRECT_REFUSAL, agentSlug: 'records', ticketNumber: 'VA-50005' }), 'human_request_deflection');
+    expect(r.pass).toBe(true);
+    expect(r.metadata?.promisedTransfer).not.toBe(true);
+  });
+
+  it('a real promise on a ticket-only line still fails', () => {
+    const broken = [
+      'AGENT: Thank you for calling Azul Vision medical records.',
+      'CALLER: Can I get a representative?',
+      'AGENT: Give me one moment while I connect you with the team.',
+      'CALLER: Thank you.',
+    ].join('\n');
+    const r = check(run({ transcript: broken, agentSlug: 'records', ticketNumber: null }), 'human_request_deflection');
+    expect(r.pass).toBe(false);
+    expect(r.metadata?.promisedTransfer).toBe(true);
+  });
+});
+
+describe('question_repetition — the guard’s double-capture rule', () => {
+  /** The transport emits agent speech on two event types, so one response can
+   *  land in the transcript twice with no caller line between it. The live
+   *  guard has always discounted that; this counter did not. */
+  it('one response captured twice is one ask', () => {
+    const doubled = [
+      'AGENT: May I please have your date of birth?',
+      'AGENT: May I please have your date of birth?',
+      'CALLER: June 9th, 1949.',
+      'AGENT: And may I please have your date of birth once more?',
+      'CALLER: June 9th, 1949.',
+    ].join('\n');
+    const r = check(run({ transcript: doubled }), 'question_repetition');
+    expect((r.metadata?.askCounts as Record<string, number>)['date of birth']).toBe(2);
+    expect(r.pass).toBe(true);
+  });
+
+  it('three genuine re-asks with the caller answering between them still fail', () => {
+    const looping = [
+      'AGENT: May I please have your date of birth?',
+      'CALLER: June 9th, 1949.',
+      'AGENT: Could you give me your date of birth once more?',
+      'CALLER: June 9th, 1949.',
+      'AGENT: I need your date of birth on the ticket.',
+      'CALLER: No.',
+    ].join('\n');
+    const r = check(run({ transcript: looping }), 'question_repetition');
+    expect((r.metadata?.askCounts as Record<string, number>)['date of birth']).toBe(3);
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('critical');
+  });
+});
