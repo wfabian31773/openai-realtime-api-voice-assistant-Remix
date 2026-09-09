@@ -70,9 +70,13 @@ Both returned the FULL population before this build, so a zero is proof.
 SELECT count(*) FROM call_logs
  WHERE voice_provider = 'grok' AND agent_id IS NULL AND created_at > '<deploy time>';
 
--- one optical call returned 118 before the tool ceiling shipped.
-SELECT call_sid, tool_call_count FROM call_logs
- WHERE voice_provider = 'grok' AND tool_call_count > 40;
+-- `>= 40`, NOT `> 40`. toolCeiling refuses at `dispatches >= perCallDispatches`
+-- with perCallDispatches = 40, so a call can reach 40 and never exceed it — the
+-- `> 40` form only ever matched the one pre-ceiling optical call (118, 09-03).
+-- Measured 2026-09-09: > 40 = 1, = 40 = 5, between 25 and 39 = 0.
+-- A row here is a loop the ceiling STOPPED. Read it; it is not a regression.
+SELECT call_sid, agent_used, tool_call_count FROM call_logs
+ WHERE voice_provider = 'grok' AND tool_call_count >= 40;
 ```
 
 And one that will stay at the full count until the xAI management key exists —

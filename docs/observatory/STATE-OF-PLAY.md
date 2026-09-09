@@ -2,7 +2,7 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-09-09 17:40 UTC** (section 11). Earlier: **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
@@ -796,3 +796,103 @@ pattern was misfiring on no-ivr, after-hours and azul-scheduling the whole
 time. **Turning them on for the queue lanes is still Wayne's call** — #53
 says the clinical language is his, and the generic pair may not be what he
 wants for records in particular.
+
+---
+
+## 11. Why queue calls do not file — the 2026-09-08 taxonomy (written 09-09)
+
+Wayne, 2026-09-09, after reading the overnight report: *"How can eight people
+not get a ticket? … Why are these tickets not being filed, man? I need to
+know why."* And then, on the answer: *"There was a patient on the phone that
+gave their date of birth digit by digit four times, and we fucked that up."*
+
+**Everything in this section is a count with its denominator and window.
+Where a cause is not established, it says so.** The full tables live in
+`/CLAUDE.md` under "WHY QUEUE CALLS DO NOT FILE"; this is the narrative and
+the decisions.
+
+### The shape of the loss
+
+One full business day (2026-09-08), queue lanes, `duration >= 30`:
+**446 substantive calls, 255 filed, 191 produced no ticket.**
+
+The two dominant causes are a filing gate refusing (62) and the caller never
+being properly transcribed (77 with 0 or 1 caller lines). Below those: 26
+calls where tools ran and a filing tool was never called at all, 14 with no
+tool events, and 12 where the filing tool returned a ticket number that no
+ticket carries — **that last group is not established as lost**, it may be the
+known call-attribution defect.
+
+### The date-of-birth gate, root-caused
+
+**75 calls hit it, 53 filed nothing.** The chain, each link measured:
+
+1. **The model sent no `date_of_birth` argument on 75 of 75.** `dobShape` is
+   `(none)` on every refusal event. The parser was never asked a question.
+2. **51 of the 75 callers had already given a date** — a 19xx year or a month
+   name in their own transcribed lines. A lower bound; it counts two signals.
+3. **42 of the 75 end with that refusal as the last tool event.** The model
+   does not try again.
+4. So the "ask once then file anyway" escape (`dobEscape.ts`, built 09-04 to
+   Wayne's ruling) **cannot fire on those 42** — it needs a second attempt
+   that never comes. It was built for a retry loop; this failure is the
+   opposite shape.
+
+**Why the model omits the field is NOT established.** Checked and ruled out:
+the `fix` channel does reach the model (`agentBinding.dispatch` stringifies
+the whole result), and the schema is passed through unchanged with
+`strict: false`. `date_of_birth` is deliberately not in `required`.
+
+### The runtime made this gate worse, and there is a same-day control
+
+Share of substantive calls refused for `date_of_birth`, optical+surgery+tech:
+old core ran **3.2%–8.7%** over 08-28..09-02 and **1.6%** on 09-03 before the
+cutover; the runtime read **12.4%** the same day after it, then **14.8%**
+(09-04) and **18.3%** (09-08). Same lanes, same callers, same tools.
+**This is the before-number for the `docs/BACKEND_HANDOFF.md` rule.**
+
+### A second, independent defect on the same call
+
+`normalizeDobParts` refused `"0 1 0 4 58"` — five numeric groups is neither
+three nor four, so the rule that correctly refuses a phone number refused a
+birthday. That is what the caller on `CA4475d6f1b265c4c6824ff0f241d159f9`
+said, twice, in a 329-second call that filed nothing. A Spanish caller on
+`CAdc9f9667694dd95382985ad5f86f57b4` was lost the same day to
+`"Cero tres veintidos del cincuenta"`.
+
+**Fixed** by `readDigitStringDate`, which runs only after the existing reader
+refuses and therefore cannot change any answer it already gives. Phone numbers
+and digits inside a sentence are still refused. **Spelled-out digits in either
+language are still refused and are not fixed.**
+
+**Both defects were live on that one call.** Even if the model had sent the
+field, the parser would have refused it.
+
+### The runaway-loop check went blind the moment the ceiling shipped
+
+`toolCeiling.ts` refuses at `dispatches >= 40`, so a call can reach 40 and
+never exceed it. The check published as its proof looked for `> 40`. Measured
+09-09 over all grok rows: `> 40` = **1** (the pre-ceiling 118-dispatch optical
+call), `= 40` = **5**, between 25 and 39 = **0**. The zero in the middle is
+what makes it unambiguous — 40 is the ceiling being hit, not a value calls
+drift to. Two of the five were on 09-08. Corrected to `>= 40` in `/CLAUDE.md`
+and `docs/PULL-CHECK.md`. **What each of those five loops actually was has not
+been established.**
+
+### A measurement trap worth keeping
+
+Surgery's hourly barely-heard rate on 2026-09-08 ran from **0% to 42.9%**
+across nine business hours. Any single hour above the 25% watch threshold is
+inside that spread. Do not report an hour of it as a spike.
+
+### Open, and NOT decided here
+
+- The transcript fallback — reading the date from what the caller actually
+  said instead of waiting for the model to relay it — **is not built.** It is
+  where the 53 actually go. `transcriptLog.ts` holds the caller lines in
+  memory and only `mediaStreamBridge.ts` can see them.
+- **Wayne's question, unanswered:** when a ticket files without a date of
+  birth, does it carry `DATE OF BIRTH UNMATCHED` at the top of the description
+  (already built), or route to a named person to verify first?
+- Whether the 77 barely-heard calls are dead air or lost callers.
+- Whether the 12 ticket-number-without-a-ticket calls exist under another SID.
