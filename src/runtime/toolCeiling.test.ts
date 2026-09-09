@@ -6,6 +6,9 @@ import {
   ceilingMessage,
   ceilingRefusal,
   ceilingMarker,
+  ceilingEventError,
+  isCeilingStopError,
+  CEILING_REASONS,
 } from "./toolCeiling";
 
 /** The refusal `missing(['date_of_birth'], …)` actually produces. */
@@ -328,3 +331,47 @@ describe("in-flight dispatches count", () => {
     expect(allowed).toBe(DEFAULT_CEILING_LIMITS.perToolFailures);
   });
 });
+
+describe("a stop is marked so it can be counted", () => {
+  /**
+   * The ceiling never dispatches, so nothing about a stop reaches
+   * `tool_timeline` or `tool_call_count`. The bridge records it as a tool
+   * event carrying this marker and `callRecord` counts those into
+   * `call_logs.ceiling_stops`; both sides go through these helpers so the
+   * producer and the counter cannot drift.
+   */
+  it("round-trips every reason", () => {
+    for (const reason of CEILING_REASONS) {
+      expect(isCeilingStopError(ceilingEventError(reason))).toBe(true);
+    }
+  });
+
+  it("covers every reason the ceiling can actually return", () => {
+    // If a reason is added to CeilingReason and not to CEILING_REASONS, its
+    // stops would be silently uncounted.
+    const ceiling = new ToolCallCeiling({ perCallDispatches: 1 });
+    runUntilRefused(ceiling, "file_optical_ticket", ARGS, 5);
+    const verdict = ceiling.begin("file_optical_ticket", ARGS);
+    expect(verdict.allow).toBe(false);
+    if (verdict.allow) return;
+    expect(CEILING_REASONS).toContain(verdict.reason);
+  });
+
+  it("does not count a tool error that merely looks like one", () => {
+    // A tool is free to return any wording; only the ceiling's own reasons
+    // may be counted as stops.
+    expect(isCeilingStopError("ceiling:something-else")).toBe(false);
+    expect(isCeilingStopError("ceiling:")).toBe(false);
+    expect(isCeilingStopError("the ceiling:call-total was reached")).toBe(false);
+    expect(isCeilingStopError("timed out")).toBe(false);
+    expect(isCeilingStopError(undefined)).toBe(false);
+    expect(isCeilingStopError("")).toBe(false);
+  });
+
+  it("carries no arguments, like every other thing the ceiling emits", () => {
+    for (const reason of CEILING_REASONS) {
+      expect(ceilingEventError(reason)).toBe(`ceiling:${reason}`);
+    }
+  });
+});
+

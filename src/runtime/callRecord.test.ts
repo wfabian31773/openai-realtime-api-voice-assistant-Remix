@@ -593,3 +593,61 @@ describe("teardown does not touch transfer_outcome", () => {
     ).toBe(false);
   });
 });
+
+describe("ceiling stops reach the row", () => {
+  /**
+   * WHY THIS COLUMN EXISTS. The ceiling short-circuits before dispatch, so
+   * the agents' own telemetry — which owns `tool_timeline` and
+   * `tool_call_count` — never runs for a stopped call. Up to 2026-09-08 the
+   * only trace of a stop in SQL was a call sitting exactly on
+   * `perCallDispatches`, an inference that cannot see the identical-args and
+   * same-tool stops at all: they fire at 3 and 6.
+   */
+  const stop = (reason: string, atMs: number) => ({
+    name: "file_optical_ticket",
+    ok: false,
+    succeeded: false,
+    atMs,
+    error: `ceiling:${reason}`,
+  });
+
+  it("counts the dispatches the ceiling refused", () => {
+    const row = toCallLogRow(
+      record({
+        toolEvents: [
+          { name: "file_optical_ticket", ok: true, succeeded: false, atMs: 100 },
+          stop("identical-args", 200),
+          stop("identical-args", 300),
+          stop("call-total", 400),
+        ],
+      }),
+    );
+    expect(row.ceilingStops).toBe(3);
+  });
+
+  it("writes 0 rather than NULL when the ceiling never fired", () => {
+    // The zero is the point: `tool_call_count` was NULL on 422 of 1,174 grok
+    // calls on 2026-09-09, so a check built on it is blind to a third of the
+    // population. A column always written has no such hole.
+    expect(toCallLogRow(record()).ceilingStops).toBe(0);
+    expect(toCallLogRow(record({ toolEvents: [] })).ceilingStops).toBe(0);
+  });
+
+  it("does not count an ordinary tool failure as a stop", () => {
+    const row = toCallLogRow(
+      record({
+        toolEvents: [
+          { name: "lookup_patient", ok: false, succeeded: false, atMs: 100, error: "timed out" },
+          { name: "lookup_patient", ok: false, succeeded: false, atMs: 200, error: "ceiling:nonsense" },
+        ],
+      }),
+    );
+    expect(row.ceilingStops).toBe(0);
+  });
+
+  it("is refreshed by a racing second write, because the runtime owns it", () => {
+    const row = toCallLogRow(record({ toolEvents: [stop("call-total", 100)] }));
+    expect(toConflictUpdate(row).ceilingStops).toBe(1);
+  });
+});
+

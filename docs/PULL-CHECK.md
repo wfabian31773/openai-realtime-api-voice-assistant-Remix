@@ -84,6 +84,15 @@ The second is a reading check, not a pass/fail one:
 -- ceilingDocCheck.test.ts fails if they drift.
 SELECT call_sid, tool_call_count FROM call_logs
  WHERE voice_provider = 'grok' AND tool_call_count >= 40;
+
+-- The ceiling's stops, counted directly rather than inferred from a call
+-- sitting on the backstop. This is the only one that sees an identical-args
+-- or same-tool stop -- those fire at 3 and 6 and never reach 40.
+-- Needs migrations/add_ceiling_stops_to_call_logs.sql applied first.
+SELECT call_sid, agent_used, ceiling_stops
+  FROM call_logs
+ WHERE voice_provider = 'grok' AND ceiling_stops > 0
+ ORDER BY ceiling_stops DESC;
 ```
 
 And one that will stay at the full count until the xAI management key exists —

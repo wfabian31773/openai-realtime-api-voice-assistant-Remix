@@ -115,6 +115,7 @@ import {
   ToolCallCeiling,
   ceilingRefusal,
   ceilingMarker,
+  ceilingEventError,
   type CeilingLimits,
 } from "./toolCeiling";
 
@@ -1434,7 +1435,7 @@ export class VoiceCallBridge {
           ok: false,
           succeeded: false,
           atMs: Date.now() - this.startedAtMs,
-          error: `ceiling:${verdict.reason}`,
+          error: ceilingEventError(verdict.reason),
         });
         if (this.ended) return;
         this.session.sendToolResult(

@@ -1432,6 +1432,30 @@ calls lasted 30 seconds or more, so they are not all instant hangups. Why the
 column is unwritten on a third of calls is not yet established, and until it
 is, this check's floor is unknown rather than zero.
 
+**The ceiling's own stops are countable directly** — `call_logs.ceiling_stops`,
+added 2026-09-09. The check above INFERS a stop from a call sitting on 40, and
+that inference can only ever see the whole-call backstop: `identicalFailures`
+and `perToolFailures` fire at 3 and 6, so the stops they cause never approach
+any threshold on `tool_call_count` and were wholly invisible. A stopped
+dispatch is not a dispatch — it never reaches `tool_timeline` and never counts
+toward `tool_call_count` — so the runtime counts the refusals itself and writes
+them at teardown for every call, zero included. There is no NULL hole here of
+the kind described above.
+
+```sql
+-- Every call where the ceiling did work, whichever limit stopped it.
+SELECT call_sid, agent_used, ceiling_stops, tool_call_count
+  FROM call_logs
+ WHERE voice_provider = 'grok' AND ceiling_stops > 0
+ ORDER BY ceiling_stops DESC;
+```
+
+The two columns answer different questions: a call can carry `ceiling_stops`
+above zero while its dispatch count sits far below the backstop, and that is
+the common case rather than the exception. Migration:
+`migrations/add_ceiling_stops_to_call_logs.sql` — **not yet applied to the
+Hub**, and until it is, every value reads NULL.
+
 **What the corrected check found, measured 2026-09-09.** Six rows at `>= 40`:
 the pre-ceiling optical call of 09-03 at 118, and five sitting at exactly 40.
 Nothing at all between 25 and 39 — the highest count any call reaches without

@@ -12,6 +12,7 @@ import {
 } from "./mediaStreamBridge";
 import type { TwilioOutboundFrame } from "./twilioFrames";
 import type { BoundAgent } from "./agentBinding";
+import { toCallLogRow } from "./callRecord";
 
 /** A timer bank the tests fire by hand — no real clock anywhere. */
 function makeTimers() {
@@ -2443,6 +2444,29 @@ describe("the repeated-failure ceiling", () => {
     const events = records[0]?.toolEvents ?? [];
     expect(events).toHaveLength(6);
     expect(events.filter((e) => e.error === "ceiling:identical-args")).toHaveLength(3);
+  });
+
+  /**
+   * THE CHAIN, NOT THE PIECES. `callRecord.test.ts` proves the count is
+   * derived correctly from tool events and the test above proves the bridge
+   * records the events. Neither proves they are WIRED — which is the failure
+   * CLAUDE.md #10 names, and the reason the ceiling's stops were invisible in
+   * SQL for six days in the first place. So this drives a real loop through
+   * the bridge and reads the column off the row that would be written.
+   */
+  it("puts the stops on the call_logs row, which is where they become countable", async () => {
+    const records: VoiceCallRecord[] = [];
+    const agent = refusingAgent();
+    const h = makeBridge({ agent, persistCallRecord: async (r) => void records.push(r) });
+    await drive(h, 6);
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    const row = toCallLogRow(records[0]!);
+    // Three dispatched and refused by the tool, three stopped by the ceiling.
+    expect(row.ceilingStops).toBe(3);
+    // And the stops are NOT in the count the agents' telemetry would report,
+    // which is exactly why the column is needed.
+    expect(row.ceilingStops).toBeLessThan(records[0]!.toolEvents.length);
   });
 });
 

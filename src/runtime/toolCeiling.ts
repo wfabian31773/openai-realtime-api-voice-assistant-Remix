@@ -113,7 +113,45 @@ export const DEFAULT_CEILING_LIMITS: CeilingLimits = {
 export const CEILING_REACHED_SQL_PREDICATE =
   `tool_call_count >= ${DEFAULT_CEILING_LIMITS.perCallDispatches}` as const;
 
-export type CeilingReason = "identical-args" | "same-tool" | "call-total";
+export const CEILING_REASONS = ["identical-args", "same-tool", "call-total"] as const;
+
+export type CeilingReason = (typeof CEILING_REASONS)[number];
+
+/**
+ * HOW A STOP IS MARKED SO IT CAN BE COUNTED — added 2026-09-09.
+ *
+ * The ceiling short-circuits BEFORE dispatch, so `wrapWithTelemetry` never
+ * runs and a stop reaches neither `tool_timeline` nor `tool_call_count`. The
+ * `[TOOL CEILING]` line is console-only, which left the ceiling's own work
+ * uncountable: the five loops it stopped up to 2026-09-08 could only be
+ * inferred from a call sitting exactly ON `perCallDispatches`, and that
+ * inference cannot see an `identical-args` or `same-tool` stop at all —
+ * those fire at 3 and 6, far below any whole-call threshold.
+ *
+ * So the bridge records a stopped dispatch as a tool event carrying this
+ * marker, and `callRecord` counts those events into `call_logs.ceiling_stops`.
+ * Both sides go through these helpers rather than spelling the string twice:
+ * a wording change that silently stopped the count would be the same class of
+ * defect as the `> 40` check that could never see a stop it was watching for.
+ */
+export const CEILING_EVENT_ERROR_PREFIX = "ceiling:";
+
+/** The `error` a stopped dispatch carries on the call record's tool events. */
+export function ceilingEventError(reason: CeilingReason): string {
+  return `${CEILING_EVENT_ERROR_PREFIX}${reason}`;
+}
+
+/**
+ * True when a tool event records a dispatch the ceiling STOPPED.
+ *
+ * Matched against the known reasons rather than by prefix alone, so a tool
+ * that happens to return an error beginning "ceiling:" cannot inflate the
+ * count.
+ */
+export function isCeilingStopError(error: string | undefined | null): boolean {
+  if (!error) return false;
+  return CEILING_REASONS.some((reason) => error === ceilingEventError(reason));
+}
 
 export type CeilingVerdict =
   | { allow: true }
