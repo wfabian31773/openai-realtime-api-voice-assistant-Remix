@@ -61,18 +61,29 @@ GET https://<domain>/voice/health
   configured. This names it.
 - `transferReady` / `transferBlockedBy` / `transferDestinations`.
 
-## 4. Two SQL checks that must come back empty
+## 4. One SQL check that must come back empty, and one that need not
 
-Both returned the FULL population before this build, so a zero is proof.
+The first returned the FULL population before this build, so a zero is proof.
 
 ```sql
 -- was 239 of 239 on 2026-09-03. Any row here is a lane missing from five reports.
 SELECT count(*) FROM call_logs
  WHERE voice_provider = 'grok' AND agent_id IS NULL AND created_at > '<deploy time>';
+```
 
+The second is a reading check, not a pass/fail one:
+
+```sql
 -- one optical call returned 118 before the tool ceiling shipped.
+-- NOT an empty check, and not part of the two above: `begin` refuses at
+-- `>= perCallDispatches`, so a stopped loop lands on exactly 40 and a `> 40`
+-- threshold can never see one. Each row is a loop the ceiling CONTAINED —
+-- read the call. Only a row ABOVE 40 is a fault, and it means the ceiling is
+-- not in the dispatch path. Keep 40 in step with
+-- DEFAULT_CEILING_LIMITS.perCallDispatches (src/runtime/toolCeiling.ts);
+-- ceilingDocCheck.test.ts fails if they drift.
 SELECT call_sid, tool_call_count FROM call_logs
- WHERE voice_provider = 'grok' AND tool_call_count > 40;
+ WHERE voice_provider = 'grok' AND tool_call_count >= 40;
 ```
 
 And one that will stay at the full count until the xAI management key exists —
