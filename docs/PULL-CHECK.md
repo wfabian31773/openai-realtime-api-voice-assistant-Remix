@@ -104,6 +104,8 @@ worth. None of them carries a name, a date of birth or a phone number.
 [DOB ESCAPE] file_optical_ticket: asked once and still no usable date of birth —
   filing anyway, marked unavailable (CA…)
 [DOB] refused a date of birth in the shape (none)
+[DOB] read a date of birth the caller said one digit at a time
+[surgery] date of birth taken from what the caller said on this call
 [REQUEST SWEEP] tech: recovered request filed as VA-… (CA…)
 [REQUEST SWEEP] surgery: a request was made and nobody was identified —
   not filed, needs a callback (CA…)
@@ -114,3 +116,21 @@ worth. None of them carries a name, a date of birth or a phone number.
 `[DOB ESCAPE]` is the one to watch on day one: every line is a request that
 would have been lost before this build. The gate it removes killed 23 of 23
 calls it touched on 2026-09-03.
+
+The two date-of-birth lines above it are the two halves of the 2026-09-08 gate
+fix, and they measure different things:
+
+- `[DOB] read a date of birth the caller said one digit at a time` — the PARSER
+  half. Prints only for the form that used to be refused, so its rate is how
+  often that shape was costing a ticket.
+- `[<lane>] date of birth taken from what the caller said on this call` — the
+  half that does not depend on the model relaying anything. Every line is a
+  filing that would have been refused: the model sent no `date_of_birth` on 75
+  of 75 refusals that day, so no parser fix could reach those calls.
+
+**The control for both is `[DOB] refused … in the shape (none)`.** That count
+falling is what says this worked; the two lines above it only say the new paths
+are live. If the refusals hold steady while these print, the dates are being
+recovered somewhere that is not the calls that were failing — read the lanes
+before claiming a rate. Neither new line carries a name, a date of birth or a
+phone number.
