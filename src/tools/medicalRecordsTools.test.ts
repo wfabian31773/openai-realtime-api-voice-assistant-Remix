@@ -644,3 +644,64 @@ describe('a lookup that never ran is not an office that does not exist', () => {
     expect(errors.join('\n')).not.toMatch(/LOOKUP UNAVAILABLE/);
   });
 });
+
+/**
+ * THE CALLER'S OWN ANSWER, WHEN THE MODEL DID NOT RELAY IT.
+ *
+ * Each lane carries its own copy of the fallback chain, so each lane proves
+ * its own wiring. See spokenDob.ts for the 2026-09-08 measurement and for the
+ * adjacency rule that keeps a surgery date off a ticket as a birthday.
+ */
+describe('the date of birth the caller said, when the model sent none', () => {
+  const SID = 'CA0000000000000000000000000000c0de';
+
+  beforeEach(async () => {
+    (await import('./spokenDob')).resetSpokenDobs();
+    (await import('./dobEscape')).resetDobHistory();
+  });
+
+  it('files, instead of refusing, when the transcript holds the answer', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    noteSpokenDob(SID, [
+      'AGENT: May I have your date of birth?',
+      'CALLER: March 17th, 1973.',
+    ]);
+
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-RECDOB' } as never);
+
+    const { date_of_birth: _omitted, ...noDob } = BASE;
+    const out = (await runTool('file_records_ticket', {
+      ...noDob,
+      call_sid: SID,
+      request_description: 'I need a release of information',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(true);
+    expect(create.mock.calls[0][0].patientBirthYear).toBe('1973');
+  });
+
+  it('still refuses when the caller never answered', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    noteSpokenDob(SID, [
+      'AGENT: What can I help you with?',
+      'CALLER: The records I need are from March 17th, 1973.',
+    ]);
+
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+
+    const { date_of_birth: _omitted, ...noDob } = BASE;
+    const out = (await runTool('file_records_ticket', {
+      ...noDob,
+      call_sid: SID,
+      request_description: 'I need a release of information',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(false);
+    expect(out.missingFields).toContain('date_of_birth');
+    expect(create).not.toHaveBeenCalled();
+  });
+});

@@ -796,3 +796,129 @@ pattern was misfiring on no-ivr, after-hours and azul-scheduling the whole
 time. **Turning them on for the queue lanes is still Wayne's call** — #53
 says the clinical language is his, and the generic pair may not be what he
 wants for records in particular.
+
+---
+
+# 2026-09-09 — the date-of-birth gate, and the half of it nobody had built
+
+## The measurement this rests on
+
+2026-09-08, one full business day, queue lanes (optical/surgery/tech/records/
+pcp), calls >= 30s: **446 substantive, 255 filed, 191 produced no ticket.** The
+single biggest cause is the date-of-birth gate: **75 calls hit it, 53 filed
+nothing.**
+
+The chain, all measured:
+
+1. In **51 of the 75** the caller's own transcribed words contain a birth year
+   or a month name. They answered.
+2. **The model called the filing tool with no `date_of_birth` argument. 75 of
+   75.** `dobShape` reads `(none)` on every refusal, across surgery, tech and
+   optical.
+3. Nothing to parse, no verified record to fall back on, so `decideDobEscape`
+   returns `askAgain: true` on the FIRST refusal.
+4. **In 42 of the 75 that refusal is the last tool call of the call.** The model
+   never retries, so the "ask once then file anyway" escape (`dobEscape.ts`,
+   the 2026-09-04 ruling) never gets its second attempt. **It is unreachable in
+   the majority of cases.**
+
+Share of substantive queue calls refused for `date_of_birth`, optical + surgery
++ tech — the baseline any "after" number has to beat:
+
+```
+old core 08-28..09-02   3.2% - 8.7%
+old core 09-03          1.6%   (same day, pre-cutover)
+grok     09-03         12.4%   (same day, post-cutover)
+grok     09-04         14.8%
+grok     09-08         18.3%   75 calls, 53 filed nothing
+```
+
+## What shipped
+
+**Two independent defects, and only the second one can move that number.**
+
+### 1. The parser could not read a birthday said one digit at a time
+
+Probed against the real calls:
+
+```
+"0 1 0 4 58"                        REFUSED   CA4475d6f1b265c4c6824ff0f241d159f9, said 4x
+"Cero tres veintidos del cincuenta" REFUSED   CAdc9f9667694dd95382985ad5f86f57b4, Spanish
+"01 04 58" / "January 4th, 1958"    parse fine
+```
+
+`readDateFromAnything` assembles a date out of three numeric groups or four. A
+caller spelling their birthday out produces **five**, which is neither, so it
+fell through to the branch whose job is refusing phone numbers.
+`readDigitStringDate` re-reads the digits as one continuous string, and runs
+only after the existing reader has already refused — so by construction it
+changes no answer the parser gives today.
+
+Mutation-checked rather than asserted: the every-token-is-digits guard is
+load-bearing (removing it fails three tests, two of them pre-existing — a
+sentence's digits joined together fabricate a real, in-range, wrong birthday);
+the 6-or-8 length check **earns nothing today** and the comment says so.
+
+### 2. Nothing carried the caller's answer to the filing tools — this is the half that matters
+
+`src/runtime/transcriptLog.ts` held the caller's lines in memory the whole
+time. Only the bridge could see them. Every fix before this one depended on the
+model relaying what the caller said, and on 75 of 75 refusals the model did not.
+
+`src/tools/spokenDob.ts` bridges that gap: the bridge posts the record as it
+grows (`mediaStreamBridge.ts`, on caller transcript), and the four filing tools
+read the answer back by CallSid as a THIRD source in the `if (!parts)` chain —
+after the model's argument and after `verifiedDobFor`, never replacing either.
+
+**The guard is adjacency, and it is the whole design.** Filing a wrong birthday
+is worse than filing none, and callers on these lines say surgery dates and
+appointment dates constantly — `valid()` cannot tell those from a birthday. So
+a date counts only when the caller said it while ANSWERING a request for one:
+inside the turn following an agent line that asks, ending at the next thing the
+agent says. Same TTL, ceiling, recency eviction and sentinel rule as
+`gateAttempts.ts` and `verifiedIdentity.ts`.
+
+Every guard was mutation-checked against a scratch copy: dropping adjacency
+fails 3, letting the window run past the next agent line fails 1, taking the
+first answer instead of the last fails 1, using the announcing parser instead
+of the quiet one fails 1, severing the bridge post fails 2, and severing the
+third source fails one test in each of the four lanes.
+
+`readDobQuietly` exists because the speculative reader must not touch the
+instruments: `[DOB] refused a date of birth in the shape …` is the documented
+live counter this whole finding rests on, and Grok re-emits a caller turn up to
+five times, so an announcing parser would bury the real refusal count under
+guesses no tool ever made.
+
+## What this does NOT close
+
+- **Spelled-out digits still refuse**, in both languages: `zero one zero four
+  five eight`, `cero tres veintidos del cincuenta`. That cost a Spanish caller
+  their request on 09-08 and it is unchanged.
+- **The DOB question is recognised in English and Spanish only.** The runtime's
+  own language table also carries Tagalog, Korean, Armenian, Farsi,
+  Vietnamese, Russian and Arabic. A caller asked in any of those gets no window
+  opened at all — the same known gap as the month table, needing the same
+  evidence first: which phrasings actually arrive, in real transcripts.
+- **The other no-ticket buckets are untouched**: 77 calls where the caller was
+  transcribed 0 or 1 times (barely-heard is still ~2x the old core after the
+  VAD drop to 0.6, and optical went the wrong way, 8.5% -> 21.5%), and 26 calls
+  where tools ran and a filing tool was never attempted at all.
+- **No production number yet.** BACKEND_HANDOFF §0 is explicit that green tests
+  have never prevented one of these regressions. The control is
+  `[DOB] refused … (none)` falling; the two new markers only prove the paths
+  are live. Nothing here has been measured against a real call.
+
+## Open, and Wayne's to settle
+
+- **Unanswered from 09-08, and still blocking nothing but worth an answer:**
+  when we file without a date of birth, does the ticket say
+  `DATE OF BIRTH UNMATCHED` at the top of the description (already built), or
+  route to a named person to verify first?
+- **A test-fixture question.** The regression tests for both halves carry
+  literal spoken dates, because that is what pins the parser. The standing PHI
+  rule says dates of birth never go into git. The existing suite has done this
+  since it was written (and one commit on the merged branch scrubbed a name and
+  a number from a fixture while leaving dates), so the precedent is dates stay
+  and identifiers go — but it is his rule and it should be his call, not one
+  inherited from a file.

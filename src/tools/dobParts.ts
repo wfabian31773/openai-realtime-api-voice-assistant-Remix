@@ -14,7 +14,46 @@
 export function normalizeDobParts(
   spoken: string,
 ): { month: string; day: string; year: string } | null {
-  const iso = normalize(spoken);
+  return parse(spoken, SAY);
+}
+
+/**
+ * THE SAME PARSE, WITH THE INSTRUMENTS DISCONNECTED.
+ *
+ * For a reader that GUESSES — one that runs the parser over caller lines to
+ * find out whether any of them is a date, rather than over a value the model
+ * actually sent as one. `spokenDob.ts` is the only such reader today.
+ *
+ * The distinction is not tidiness, it is the measurement. Every line below is
+ * a documented live counter (docs/PULL-CHECK.md), and
+ * `[DOB] refused a date of birth in the shape …` is the instrument the whole
+ * 2026-09-08 finding rests on — 75 refusals, `dobShape` reading "(none)" on
+ * every one of them. A speculative reader emits a refusal for every caller
+ * line that is not a date, and Grok re-emits a caller turn up to five times,
+ * so wiring one to the announcing parser would bury the real refusal count
+ * under guesses no tool ever made. The number that says whether any of this
+ * worked would stop meaning anything on the day the fix shipped.
+ *
+ * Deliberately a separate exported function rather than an optional argument
+ * on `normalizeDobParts`: the four filing tools must never be able to silence
+ * their own refusals by passing a flag.
+ */
+export function readDobQuietly(
+  spoken: string,
+): { month: string; day: string; year: string } | null {
+  return parse(spoken, SILENT);
+}
+
+/** Where a parser's log lines go. See readDobQuietly. */
+type Announce = (line: string) => void;
+const SAY: Announce = (line) => console.info(line);
+const SILENT: Announce = () => {};
+
+function parse(
+  spoken: string,
+  announce: Announce,
+): { month: string; day: string; year: string } | null {
+  const iso = normalize(spoken, announce);
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
   if (!m) {
     /**
@@ -23,7 +62,7 @@ export function normalizeDobParts(
      * date; one that names "# # ##" is the parser, and they need opposite
      * fixes.
      */
-    console.info(`[DOB] refused a date of birth in the shape ${dobShape(spoken)}`);
+    announce(`[DOB] refused a date of birth in the shape ${dobShape(spoken)}`);
     return null;
   }
   /**
@@ -33,7 +72,7 @@ export function normalizeDobParts(
    * actually costing a ticket. Never the value: a date of birth is PHI.
    */
   if (/^\d{1,2}\s+\d{1,2}\s+\d{2,4}$/.test(String(spoken ?? '').trim())) {
-    console.info('[DOB] parsed a date of birth the caller said as bare digits — no separator');
+    announce('[DOB] parsed a date of birth the caller said as bare digits — no separator');
   }
   return { year: m[1], month: m[2], day: m[3] };
 }
@@ -86,7 +125,7 @@ export function dobShape(spoken: unknown): string {
  * module is small and gets pulled into tool handlers, and the schedule service
  * opens a database pool at import time.
  */
-function normalize(spoken: string): string {
+function normalize(spoken: string, announce: Announce): string {
   const raw = String(spoken ?? '').trim();
   if (!raw) return '';
 
@@ -191,9 +230,9 @@ function normalize(spoken: string): string {
    * rule replaces the leftover rule and does the same work more honestly — a
    * phone number is six numeric groups and assembles into nothing.
    */
-  const read = readDateFromAnything(raw);
+  const read = readDateFromAnything(raw, announce);
   if (read) return read;
-  return readDigitStringDate(raw);
+  return readDigitStringDate(raw, announce);
 }
 
 /**
@@ -230,7 +269,7 @@ function normalize(spoken: string): string {
  *   function is for — a date is six digits or eight — and not as a guard it
  *   has earned.
  */
-function readDigitStringDate(raw: string): string {
+function readDigitStringDate(raw: string, announce: Announce): string {
   const tokens = String(raw ?? '')
     .trim()
     .split(/[\s\/\-.]+/)
@@ -250,7 +289,7 @@ function readDigitStringDate(raw: string): string {
   const d = String(day).padStart(2, '0');
   const y = String(year);
   if (!valid(y, mo, d)) return '';
-  console.info('[DOB] read a date of birth the caller said one digit at a time');
+  announce('[DOB] read a date of birth the caller said one digit at a time');
   return `${y}-${mo}-${d}`;
 }
 
@@ -329,7 +368,7 @@ function dayTouchesMonth(words: string[], monthAt: number, nums: { at: number }[
   });
 }
 
-function readDateFromAnything(raw: string): string {
+function readDateFromAnything(raw: string, announce: Announce): string {
   const flat = flatten(raw);
   if (!flat) return '';
 
@@ -431,7 +470,7 @@ function readDateFromAnything(raw: string): string {
   const d = String(day).padStart(2, '0');
   const y = String(year);
   if (!valid(y, mo, d)) return '';
-  console.info(
+  announce(
     '[DOB] read a date of birth out of what the caller actually said — the words around it used to lose it',
   );
   return `${y}-${mo}-${d}`;
