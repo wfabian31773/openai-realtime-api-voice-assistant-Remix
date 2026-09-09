@@ -56,7 +56,7 @@ that would mean the ceiling is not in the dispatch path at all.
 day the lane has run. The watcher prints that blind share beside the result
 instead of implying a clean sweep.
 
-### 2. A single hour is never a spike
+### 2. A single hour is never a spike — and neither is a flat threshold
 
 Surgery's hourly barely-heard rate on 2026-09-08 ran
 `16.7 · 14.3 · 42.9 · 31.6 · 36.4 · 5.9 · 31.6 · 7.7 · 0.0` percent across nine
@@ -65,6 +65,31 @@ inside that established spread.
 
 The watcher takes a whole-day (or multi-hour) window and reports `info` rather
 than `watch` below 25 substantive calls.
+
+**AND THE FLAT THRESHOLD ALONE WAS NOT ENOUGH — the first live tick proved it.**
+On 2026-09-09 at 19:07 UTC the watcher's first scheduled run found surgery at
+**26.4% (14/53)** and no-ivr at **30.0% (15/50)**, both over the 25% level. Each
+was checked against its own trailing seven days, computed in the same run:
+
+| lane | today | its own 7-day baseline | z | verdict |
+|---|---|---|---|---|
+| surgery | 26.4% (14/53) | 21.5% (85/395) | 0.81 | inside its own spread |
+| no-ivr | 30.0% (15/50) | 23.6% (98/415) | 0.99 | inside its own spread |
+
+Neither is a move. A rule that fires there fires most days, and a watcher that
+cries wolf every hour is worse than none.
+
+So a reading over the threshold is escalated to `watch` **only when it is also a
+real move against that lane's own trailing days**. The baseline is COMPUTED in
+the same run (`BASELINE_DAYS`, currently 7), never hardcoded — a constant copied
+out of a document goes stale silently, which is what the census rule in
+`/CLAUDE.md` exists to prevent. Where no baseline exists the finding can only be
+`info`, and says the comparison is unmeasured: an unmeasured comparison is not a
+passing one, the same stance rule 4 takes on filing.
+
+The old code's own detail text already told the reader to *"compare against the
+lane's own recent days rather than against another lane"* while comparing
+against neither. It says it and does it now.
 
 ### 3. Quiet queue lanes on a weekend or holiday are the routing working
 

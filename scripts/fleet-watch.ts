@@ -35,6 +35,7 @@ import {
   AFTER_HOURS_LANE,
   QUEUE_LANES,
   type CallRow,
+  type LaneBaseline,
 } from '../server/observatory/fleetWatch.logic';
 
 const day = process.argv[2] ?? new Date().toISOString().slice(0, 10);
@@ -43,6 +44,16 @@ const day = process.argv[2] ?? new Date().toISOString().slice(0, 10);
  * and docs/observatory/STATE-OF-PLAY.md. Changing it makes this report
  * incomparable with all of them. */
 const SUBSTANTIVE_SECONDS = 30;
+
+/**
+ * How many prior days form a lane's own barely-heard baseline.
+ *
+ * The baseline is COMPUTED, never hardcoded. A constant copied out of a
+ * document goes stale silently — the failure the census rule in /CLAUDE.md
+ * exists to prevent. Days with no traffic on a lane contribute nothing, so
+ * weekends and holidays neither dilute nor inflate it.
+ */
+const BASELINE_DAYS = 7;
 
 function readOnlyPool(url: string): pg.Pool {
   return new pg.Pool({
@@ -99,6 +110,46 @@ async function loadFiledSids(support: pg.Pool): Promise<Set<string>> {
   return new Set(rows.map((r: { call_sid: string }) => r.call_sid));
 }
 
+/**
+ * Each lane's own trailing barely-heard record, so a reading over the flat
+ * watch level is only escalated when it is ALSO a move against that lane.
+ *
+ * Why this exists: on the watcher's first live tick (2026-09-09) surgery read
+ * 26.4% and no-ivr 30.0%, both over the 25% level, and NEITHER was a move —
+ * surgery's own runtime record is 37.2 / 27.5 / 21.6. A flat threshold fires
+ * there and would page most days.
+ */
+async function loadBaselines(hub: pg.Pool): Promise<Map<string, LaneBaseline>> {
+  const { rows } = await hub.query(
+    `
+    SELECT agent_used AS lane,
+           count(*) AS n,
+           count(*) FILTER (
+             WHERE (length(coalesce(transcript,'')) -
+                    length(replace(coalesce(transcript,''),'CALLER:','')))/7 <= 1
+           ) AS hits,
+           min(created_at)::date AS from_day,
+           max(created_at)::date AS to_day
+    FROM call_logs
+    WHERE created_at::date <  $1::date
+      AND created_at::date >= $1::date - $2::int
+      AND duration >= $3
+      AND agent_used IS NOT NULL
+    GROUP BY 1
+    `,
+    [day, BASELINE_DAYS, SUBSTANTIVE_SECONDS],
+  );
+  const out = new Map<string, LaneBaseline>();
+  for (const r of rows as Array<{ lane: string; n: string; hits: string; from_day: string; to_day: string }>) {
+    out.set(r.lane, {
+      barelyHeardHits: Number(r.hits),
+      barelyHeardN: Number(r.n),
+      label: `${String(r.from_day).slice(5)}..${String(r.to_day).slice(5)}`,
+    });
+  }
+  return out;
+}
+
 async function main(): Promise<void> {
   const hubUrl = process.env.SUPABASE_POOLER_URL || process.env.DATABASE_URL;
   if (!hubUrl) {
@@ -124,7 +175,8 @@ async function main(): Promise<void> {
     }
 
     const windows = foldCallsIntoWindows(calls, filed);
-    const { findings, closedOffice } = assessFleet(windows);
+    const baselines = await loadBaselines(hub);
+    const { findings, closedOffice } = assessFleet(windows, baselines);
 
     console.log(`\n=== FLEET WATCH — ${day} (UTC), calls of ${SUBSTANTIVE_SECONDS}s or more ===`);
     if (!support) {

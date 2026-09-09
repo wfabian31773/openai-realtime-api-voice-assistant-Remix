@@ -202,19 +202,86 @@ export function assessCeiling(w: LaneWindow): Finding | null {
  * multi-hour window, and the caller is responsible for never handing it a
  * single hour. `assessBarelyHeard` refuses to alarm below `MIN_N_FOR_A_RATE`
  * for the same reason. */
-export function assessBarelyHeard(w: LaneWindow): Finding | null {
+/**
+ * The lane's own trailing barely-heard record, for comparison. Supplied by the
+ * caller from the same query rather than hardcoded here — a constant copied out
+ * of a document goes stale silently, which is the failure the census rule in
+ * `/CLAUDE.md` exists to prevent.
+ */
+export interface LaneBaseline {
+  barelyHeardHits: number;
+  barelyHeardN: number;
+  /** What the baseline covers, e.g. "09-04..09-08". Printed with the finding. */
+  label: string;
+}
+
+/**
+ * Rule 2 AND rule 6 together.
+ *
+ * THE FLAT THRESHOLD ALONE IS NOT ENOUGH, and the first live tick proved it:
+ * on 2026-09-09 surgery read 26.4% (14/53) and no-ivr 30.0% (15/50), both over
+ * the 25% watch level, and NEITHER was a move — surgery's own runtime record is
+ * 37.2 / 27.5 / 21.6 across 09-03, 09-04 and 09-08, so 26.4 sits in the middle
+ * of it (z = 0.70 against 09-08). A rule that fires there fires most days, and
+ * a watcher that cries wolf every hour is worse than none.
+ *
+ * So a reading over the threshold is only a `watch` when it is ALSO a real move
+ * against the lane's OWN trailing days. Without a baseline it can only be
+ * `info` — an unmeasured comparison is not a passing one, the same stance rule
+ * 4 takes on an unmeasurable filing rate.
+ *
+ * The old body's own detail text said "compare against the lane's own recent
+ * days rather than against another lane" while the code compared against
+ * neither. It says it and does it now.
+ */
+export function assessBarelyHeard(w: LaneWindow, baseline?: LaneBaseline): Finding | null {
   const rate = pct(w.barelyHeard, w.substantive);
   if (rate < BARELY_HEARD_WATCH_PCT) return null;
-  const underpowered = w.substantive < MIN_N_FOR_A_RATE;
+
+  const headline = `barely-heard ${formatPct(w.barelyHeard, w.substantive)} (${w.barelyHeard}/${w.substantive})`;
+
+  if (w.substantive < MIN_N_FOR_A_RATE) {
+    return {
+      severity: 'info',
+      lane: w.lane,
+      headline,
+      detail: `Below ${MIN_N_FOR_A_RATE} substantive calls — reported, not alarmed on.`,
+    };
+  }
+
+  if (!baseline) {
+    return {
+      severity: 'info',
+      lane: w.lane,
+      headline,
+      detail:
+        `Over the ${BARELY_HEARD_WATCH_PCT}% watch level, but this lane has no trailing ` +
+        'baseline in this run, so whether it MOVED is unmeasured. Reported, not alarmed on.',
+    };
+  }
+
+  const moved = isRealMove(w.barelyHeard, w.substantive, baseline.barelyHeardHits, baseline.barelyHeardN);
+  if (!moved) {
+    return {
+      severity: 'info',
+      lane: w.lane,
+      headline,
+      detail:
+        `Inside this lane's own established spread (${formatPct(baseline.barelyHeardHits, baseline.barelyHeardN)} ` +
+        `over ${baseline.label}) — over the ${BARELY_HEARD_WATCH_PCT}% level but not a move. ` +
+        'Not a spike; do not report it as one.',
+    };
+  }
+
   return {
-    severity: underpowered ? 'info' : 'watch',
+    severity: 'watch',
     lane: w.lane,
-    headline: `barely-heard ${formatPct(w.barelyHeard, w.substantive)} (${w.barelyHeard}/${w.substantive})`,
-    detail: underpowered
-      ? `Below ${MIN_N_FOR_A_RATE} substantive calls — reported, not alarmed on.`
-      : 'Callers transcribed at most once on a call of 30s or more. Check ' +
-        'RUNTIME_VAD_THRESHOLD before concluding anything, and compare against the ' +
-        "lane's own recent days rather than against another lane.",
+    headline: `${headline} — a real move against ${formatPct(baseline.barelyHeardHits, baseline.barelyHeardN)} over ${baseline.label}`,
+    detail:
+      'Callers transcribed at most once on a call of 30s or more, and this is outside ' +
+      "the lane's own recent range. Check RUNTIME_VAD_THRESHOLD, and re-measure " +
+      'interruptions per call at the same time — the opposite failure is the agent ' +
+      'stopping for a cough.',
   };
 }
 
@@ -330,7 +397,10 @@ export interface FleetAssessment {
   closedOffice: boolean;
 }
 
-export function assessFleet(windows: LaneWindow[]): FleetAssessment {
+export function assessFleet(
+  windows: LaneWindow[],
+  baselines: Map<string, LaneBaseline> = new Map(),
+): FleetAssessment {
   const queue = windows.filter((w) => (QUEUE_LANES as readonly string[]).includes(w.lane));
   const afterHours = windows.filter((w) => w.lane === AFTER_HOURS_LANE);
   const queueSubstantive = queue.reduce((n, w) => n + w.substantive, 0);
@@ -356,7 +426,7 @@ export function assessFleet(windows: LaneWindow[]): FleetAssessment {
     const ceiling = assessCeiling(w);
     if (ceiling) findings.push(ceiling);
 
-    const heard = assessBarelyHeard(w);
+    const heard = assessBarelyHeard(w, baselines.get(w.lane));
     if (heard) findings.push(heard);
 
     const filing = assessFiling(w);

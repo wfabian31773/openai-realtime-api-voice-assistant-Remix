@@ -14,6 +14,7 @@ import {
   longestUnfiledRun,
   type LaneWindow,
   type CallRow,
+  type LaneBaseline,
 } from './fleetWatch.logic';
 
 /**
@@ -149,15 +150,55 @@ describe('rule 7 — a move at small n is not a move', () => {
 });
 
 describe('rule 2 — a rate needs a denominator worth having', () => {
+  // surgery's own trailing record on 2026-09-08.
+  const SURGERY_BASELINE = { barelyHeardHits: 29, barelyHeardN: 134, label: '09-08' };
+
   it('reports but does not alarm below the minimum n', () => {
     const f = assessBarelyHeard(laneWindow({ substantive: 9, barelyHeard: 4 }));
     expect(f?.severity).toBe('info');
   });
 
-  it('watches a sustained rate over a real denominator', () => {
-    // surgery on the runtime, 2026-09-03 at VAD 0.85: 16 of 43 = 37.2%.
-    const f = assessBarelyHeard(laneWindow({ substantive: 43, barelyHeard: 16 }));
+  it('THE FIRST LIVE TICK: over the threshold, inside the lane\'s own spread, is NOT a watch', () => {
+    // 2026-09-09, surgery: 14/53 = 26.4%, over the 25% level, against its own
+    // 21.6% the day before (z = 0.70). Its runtime record is 37.2 / 27.5 / 21.6,
+    // so 26.4 is mid-range. A flat threshold alone fires here and would page
+    // most days.
+    const f = assessBarelyHeard(laneWindow({ lane: 'surgery', substantive: 53, barelyHeard: 14 }), SURGERY_BASELINE);
+    expect(f?.severity).toBe('info');
+    expect(f?.detail).toContain("Inside this lane's own established spread");
+  });
+
+  it('watches only when it is over the level AND a real move against the lane itself', () => {
+    // 40/53 = 75.5% against the same 21.6% baseline — far outside the spread.
+    const f = assessBarelyHeard(laneWindow({ lane: 'surgery', substantive: 53, barelyHeard: 40 }), SURGERY_BASELINE);
     expect(f?.severity).toBe('watch');
+    expect(f?.headline).toContain('a real move');
+  });
+
+  it('assessFleet actually HANDS the baseline to the lane, not just accepts one', () => {
+    // Without this, assessFleet can quietly drop the lookup and every lane
+    // falls back to "no baseline" — which reads as info, so the bug is silent.
+    // The two cases below differ ONLY by whether the map reaches the lane.
+    const window = laneWindow({ lane: 'surgery', substantive: 53, barelyHeard: 40, filed: 30, longestUnfiledRun: 2 });
+    const baselines = new Map<string, LaneBaseline>([['surgery', SURGERY_BASELINE]]);
+
+    const withBaseline = assessFleet([window], baselines).findings
+      .find((f) => f.headline.includes('barely-heard'));
+    expect(withBaseline?.severity).toBe('watch');
+    expect(withBaseline?.headline).toContain('a real move');
+
+    const without = assessFleet([window]).findings
+      .find((f) => f.headline.includes('barely-heard'));
+    expect(without?.severity).toBe('info');
+    expect(without?.detail).toContain('unmeasured');
+  });
+
+  it('without a baseline it can only say "unmeasured", never "watch"', () => {
+    // Same stance rule 4 takes on filing: an unmeasured comparison is not a
+    // passing one, and it is not a failing one either.
+    const f = assessBarelyHeard(laneWindow({ substantive: 43, barelyHeard: 16 }));
+    expect(f?.severity).toBe('info');
+    expect(f?.detail).toContain('unmeasured');
   });
 
   it('stays quiet under the watch level', () => {
