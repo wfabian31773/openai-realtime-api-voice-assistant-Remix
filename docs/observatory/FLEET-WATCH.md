@@ -162,6 +162,48 @@ minutes in, instead of hours later when staff told Wayne.
 The threshold is asserted against the literal `12` in the test, not against the
 constant, so raising the limit fails rather than silently passing.
 
+### It is ONE verdict for the fleet, over FOUR lanes — both corrected 2026-09-09
+
+The first version got the scope and the shape wrong, and Codex caught both on
+PR #277. They are worth stating because each is the same underlying error: **a
+threshold applied to a population it was not measured on.**
+
+**Scope.** It ran on every lane with a non-null `agent_used`. That includes
+`appointment-confirmation`, which is declared `filesTickets: false` in
+`src/config/agentCapabilities.ts` and makes ordinary 60–90 second outbound
+calls — so an empty ticket set is its CORRECT state, and twelve successful
+confirmations were a guaranteed false alarm. It also included `no-ivr`, which
+files through a different path, and `pcp`, whose `tool_timeline` drops 100% of
+filings.
+
+`FILING_ALARMED_LANES` now mirrors `ALARMED_QUEUE_AGENTS` in
+`server/services/ticketFilingHealth.ts` — **optical, surgery, tech, records and
+nothing else.** That is the production alarm, and it had already written down
+the reason:
+
+> *"The four queue lines, and only those. The run-length distribution was
+> measured on these. The answering service and no-IVR file through a different
+> path with a different base rate, so applying a threshold derived here to them
+> would be a number quoted about a population it was not measured on."*
+
+**Shape.** The run was computed inside each `(lane, pipeline)` bucket, but the
+12 was calibrated on consecutive calls across the queue lines **combined**. Per
+lane it means something else: a gateway outage spread over four lanes needs 12
+failures in ONE of them before it speaks, and a filing in another lane cannot
+reset a run that is really fleet-wide. Worked example, now a test — three
+unfiled calls on each of four lanes interleaved is **12 consecutive fleet calls
+and an alarm**, while the per-lane view of the identical outage reads **3** and
+says nothing.
+
+`fleetFilingStopRun` counts one chronological sequence across those four lanes.
+Per-lane windows stay, for reporting only.
+
+**Note which document was wrong.** This one described the threshold correctly —
+"runs of consecutive queue calls" — while the code counted something narrower.
+The prose was right and the implementation did not match it, which is the same
+shape as the barely-heard rule in §2. Read the two together before adding a
+third rule.
+
 ---
 
 ## Testing

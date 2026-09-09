@@ -10,6 +10,9 @@ import {
   CEILING_PER_CALL_DISPATCHES,
   MIN_N_FOR_A_RATE,
   FILING_STOP_RUN,
+  FILING_ALARMED_LANES,
+  assessFilingStop,
+  fleetFilingStopRun,
   foldCallsIntoWindows,
   longestUnfiledRun,
   type LaneWindow,
@@ -119,14 +122,126 @@ describe('rule 4 — an unmeasured filing rate is unknown, never zero', () => {
     // once (the 08-31 outage) and never above 8 otherwise. 12 sits between the
     // worst healthy run and the outage, and would have caught 08-31 at 20:23:06.
     expect(FILING_STOP_RUN).toBe(12);
-    expect(assessFiling(laneWindow({ longestUnfiledRun: 12 }))?.severity).toBe('alarm');
-    expect(assessFiling(laneWindow({ longestUnfiledRun: 11 }))).toBeNull();
+    expect(assessFilingStop(12)?.severity).toBe('alarm');
+    expect(assessFilingStop(11)).toBeNull();
     // 8 is the worst run ever seen on a healthy day — it must stay silent.
-    expect(assessFiling(laneWindow({ longestUnfiledRun: 8 }))).toBeNull();
+    expect(assessFilingStop(8)).toBeNull();
+  });
+
+  it('raises the filing stop ONCE for the fleet, not once per lane', () => {
+    // Codex, PR #277: the alarm used to live on the lane window, so a fleet-wide
+    // outage needed 12 failures inside ONE lane and a filing elsewhere could not
+    // reset the run. It is one verdict now, on lane 'fleet'.
+    const f = assessFilingStop(14);
+    expect(f?.lane).toBe('fleet');
+    expect(f?.headline).toContain('queue calls filed nothing');
+  });
+
+  it('cannot alarm on a run it could not measure', () => {
+    expect(assessFilingStop(null)).toBeNull();
   });
 
   it('never alarms on a run it could not measure', () => {
     expect(assessFiling(laneWindow({ filed: null, longestUnfiledRun: null }))?.severity).not.toBe('alarm');
+  });
+});
+
+describe('the filing-stop alarm speaks only about lanes it was measured on', () => {
+  function call(lane: string, i: number): CallRow {
+    return {
+      call_sid: `CA${String(i).padStart(32, '0')}`,
+      agent_used: lane,
+      pipeline: 'grok',
+      tool_call_count: 3,
+      caller_lines: 5,
+      dob_refused: false,
+    };
+  }
+
+  it('is pinned to the four lanes the production alarm uses', () => {
+    // Mirrors ALARMED_QUEUE_AGENTS in server/services/ticketFilingHealth.ts.
+    // Literal, so widening the set fails here rather than silently quoting the
+    // threshold at a population it was never measured on.
+    expect([...FILING_ALARMED_LANES]).toEqual(['optical', 'surgery', 'tech', 'records']);
+  });
+
+  it('NEVER alarms on appointment-confirmation, which correctly files nothing', () => {
+    // Codex, PR #277: it is declared filesTickets:false and makes ordinary
+    // 60-90s outbound calls, so an empty ticket set is its correct state.
+    // 20 confirmations, none filed, must produce no run at all.
+    const calls = Array.from({ length: 20 }, (_, i) => call('appointment-confirmation', i));
+    expect(fleetFilingStopRun(calls, new Set())).toBe(0);
+  });
+
+  it('excludes no-ivr and pcp — a different filing path and an unmeasured lane', () => {
+    const calls = [
+      ...Array.from({ length: 20 }, (_, i) => call('no-ivr', i)),
+      ...Array.from({ length: 20 }, (_, i) => call('pcp', 100 + i)),
+    ];
+    expect(fleetFilingStopRun(calls, new Set())).toBe(0);
+  });
+
+  it('counts the run ACROSS the four lanes in one sequence, not within each', () => {
+    // A gateway outage hits every lane. Three unfiled on each of four lanes is
+    // 12 consecutive fleet calls — an alarm — but only 3 per lane, which the
+    // old per-lane form scored as healthy and said nothing about.
+    const interleaved: CallRow[] = [];
+    let i = 0;
+    for (let round = 0; round < 3; round++) {
+      for (const lane of ['optical', 'surgery', 'tech', 'records']) {
+        interleaved.push(call(lane, i++));
+      }
+    }
+    expect(fleetFilingStopRun(interleaved, new Set())).toBe(12);
+    expect(assessFilingStop(fleetFilingStopRun(interleaved, new Set()))?.severity).toBe('alarm');
+
+    // The per-lane view of the same outage — what the old code measured.
+    const perLaneWorst = Math.max(
+      ...['optical', 'surgery', 'tech', 'records'].map((lane) =>
+        longestUnfiledRun(interleaved.filter((c) => c.agent_used === lane), new Set()),
+      ),
+    );
+    expect(perLaneWorst).toBe(3);
+    expect(assessFilingStop(perLaneWorst)).toBeNull();
+  });
+
+  it('lets a filing in ANY of the four lanes reset the fleet run', () => {
+    const calls = Array.from({ length: 12 }, (_, i) => call(i === 6 ? 'tech' : 'optical', i));
+    const filed = new Set([calls[6].call_sid]);
+    // 6 before, 5 after — neither reaches 12.
+    expect(fleetFilingStopRun(calls, filed)).toBe(6);
+    expect(assessFilingStop(fleetFilingStopRun(calls, filed))).toBeNull();
+  });
+
+  it('assessFleet actually HANDS the run to the alarm, not just accepts one', () => {
+    // Same class as the baseline lookup: dropping the argument silences the
+    // alarm entirely, and silence is indistinguishable from health. The two
+    // halves differ ONLY in whether the run arrives.
+    const busy = [
+      laneWindow({ lane: 'optical', substantive: 60, filed: 30, longestUnfiledRun: 2 }),
+      laneWindow({ lane: 'no-ivr', pipeline: 'old-core', substantive: 40, filed: 20, longestUnfiledRun: 2 }),
+    ];
+    const withRun = assessFleet(busy, new Map(), 14).findings.find((f) => f.severity === 'alarm');
+    expect(withRun?.lane).toBe('fleet');
+    expect(withRun?.headline).toContain('14 consecutive');
+
+    expect(assessFleet(busy, new Map()).findings.some((f) => f.severity === 'alarm')).toBe(false);
+  });
+
+  it('a closed office is never a filing stop, however long the run reads', () => {
+    // Quiet queues with a busy after-hours agent is the office being shut. The
+    // run is meaningless there and must not speak.
+    const shut = [
+      laneWindow({ lane: 'optical', substantive: 0, filed: 0, longestUnfiledRun: 0 }),
+      laneWindow({ lane: 'no-ivr', pipeline: 'old-core', substantive: 276, filed: 100, longestUnfiledRun: 2 }),
+    ];
+    expect(assessFleet(shut, new Map(), 40).findings.some((f) => f.severity === 'alarm')).toBe(false);
+  });
+
+  it('returns null, never 0, when the ticket half was unreadable', () => {
+    const calls = Array.from({ length: 30 }, (_, i) => call('optical', i));
+    expect(fleetFilingStopRun(calls, null)).toBeNull();
+    expect(assessFilingStop(fleetFilingStopRun(calls, null))).toBeNull();
   });
 });
 

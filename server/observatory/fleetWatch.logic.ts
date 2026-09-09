@@ -88,6 +88,37 @@ export const MIN_N_FOR_A_RATE = 25;
  * otherwise, so 12 separates a real stop from the worst healthy run. */
 export const FILING_STOP_RUN = 12;
 
+/**
+ * THE ONLY LANES THE FILING-STOP ALARM MAY SPEAK ABOUT.
+ *
+ * Mirrors `ALARMED_QUEUE_AGENTS` in `server/services/ticketFilingHealth.ts`,
+ * which is the production alarm and therefore the authority on this
+ * calibration. Its own comment says why, and it is the reason this list is
+ * NARROWER than `QUEUE_LANES`:
+ *
+ *   "The four queue lines, and only those. The run-length distribution was
+ *    measured on these. The answering service and no-IVR file through a
+ *    different path with a different base rate, so applying a threshold
+ *    derived here to them would be a number quoted about a population it was
+ *    not measured on."
+ *
+ * Two lanes this excludes, and neither is an oversight:
+ *
+ *   - `no-ivr` files through `submitSimplifiedTicket`, a different path.
+ *   - `pcp` is in `QUEUE_LANES` for volume reporting but was never in the
+ *     run-length measurement, and its `tool_timeline` drops 100% of filings.
+ *
+ * And one lane that must never be alarmed on at all: `appointment-confirmation`
+ * is declared `filesTickets: false` in `src/config/agentCapabilities.ts` and
+ * makes ordinary 60–90s outbound calls, so an empty ticket set is its CORRECT
+ * state. Alarming there would be a guaranteed false positive after twelve
+ * successful confirmations. (Codex, PR #277.)
+ *
+ * Extend this list by MEASURING the run-length distribution on the new lane,
+ * never by adding a slug.
+ */
+export const FILING_ALARMED_LANES = ['optical', 'surgery', 'tech', 'records'] as const;
+
 /** Barely-heard watch level. Old-core lanes ran 8.5–13.0%; the runtime at VAD
  * 0.85 ran 23.7–37.2% and at 0.6 sits in the high teens to low twenties. */
 export const BARELY_HEARD_WATCH_PCT = 25;
@@ -286,6 +317,19 @@ export function assessBarelyHeard(w: LaneWindow, baseline?: LaneBaseline): Findi
 }
 
 /** Rule 4 and the filing-stop alarm. */
+/**
+ * Rule 4, per lane: report an unmeasurable filing rate as UNKNOWN.
+ *
+ * THE FILING-STOP ALARM IS NOT HERE ANY MORE. It was, and it was wrong twice
+ * over — see `assessFilingStop`, which owns it now:
+ *
+ *   1. It ran on EVERY lane, including ones the threshold was never measured
+ *      on and one (`appointment-confirmation`) that correctly files nothing.
+ *   2. It ran PER LANE, while the 12 was calibrated on consecutive calls
+ *      across the queue fleet — so a gateway outage spread over four lanes
+ *      needed 12 failures in ONE of them, and a filing in another lane could
+ *      not reset a run. (Codex, PR #277.)
+ */
 export function assessFiling(w: LaneWindow): Finding | null {
   if (w.filed === null) {
     return {
@@ -297,17 +341,28 @@ export function assessFiling(w: LaneWindow): Finding | null {
         'An unmeasured rate is reported as unknown; it is never reported as zero.',
     };
   }
-  if (w.longestUnfiledRun !== null && w.longestUnfiledRun >= FILING_STOP_RUN) {
-    return {
-      severity: 'alarm',
-      lane: w.lane,
-      headline: `${w.longestUnfiledRun} consecutive substantive calls filed nothing`,
-      detail:
-        'This is the 2026-08-31 shape (185 consecutive, found hours later because staff ' +
-        'told Wayne). Check the ticketing gateway before anything else.',
-    };
-  }
   return null;
+}
+
+/**
+ * THE FILING-STOP ALARM — one verdict for the fleet, over the four lanes the
+ * threshold was measured on, in one chronological sequence.
+ *
+ * `run` is the longest run of consecutive substantive calls across those lanes
+ * combined that carry no agent filing; `null` when the ticket half could not be
+ * read, which can never alarm (rule 4).
+ */
+export function assessFilingStop(run: number | null): Finding | null {
+  if (run === null || run < FILING_STOP_RUN) return null;
+  return {
+    severity: 'alarm',
+    lane: 'fleet',
+    headline: `${run} consecutive substantive queue calls filed nothing`,
+    detail:
+      'Across ' + FILING_ALARMED_LANES.join(', ') + ' in one chronological sequence — the ' +
+      '2026-08-31 shape (185 consecutive, found hours later because staff told Wayne). ' +
+      'Check the ticketing gateway before anything else.',
+  };
 }
 
 /** One row of `call_logs`, reduced to what the watcher reads. */
@@ -339,6 +394,29 @@ export function longestUnfiledRun(calls: CallRow[], filed: Set<string>): number 
     if (run > worst) worst = run;
   }
   return worst;
+}
+
+/**
+ * The filing-stop run for the FLEET, not for a lane.
+ *
+ * `FILING_STOP_RUN` was calibrated on consecutive calls across the queue lines
+ * combined (2026-08-31: 185 consecutive), so it has to be counted that way. Per
+ * lane it means something else entirely: a gateway outage spread over four
+ * lanes needs 12 failures in ONE of them before it speaks, and a successful
+ * filing in another lane cannot reset a run that is really fleet-wide.
+ *
+ * Restricted to `FILING_ALARMED_LANES` — the four the distribution was measured
+ * on. Everything else is reported and never alarmed on.
+ *
+ * `filed = null` (the Support Center unreachable) returns `null`, not 0: an
+ * unmeasured run cannot alarm.
+ *
+ * Callers must pass the rows already ordered by time.
+ */
+export function fleetFilingStopRun(calls: CallRow[], filed: Set<string> | null): number | null {
+  if (!filed) return null;
+  const alarmed = new Set<string>(FILING_ALARMED_LANES);
+  return longestUnfiledRun(calls.filter((c) => alarmed.has(c.agent_used)), filed);
 }
 
 /**
@@ -400,6 +478,7 @@ export interface FleetAssessment {
 export function assessFleet(
   windows: LaneWindow[],
   baselines: Map<string, LaneBaseline> = new Map(),
+  filingStopRun: number | null = null,
 ): FleetAssessment {
   const queue = windows.filter((w) => (QUEUE_LANES as readonly string[]).includes(w.lane));
   const afterHours = windows.filter((w) => w.lane === AFTER_HOURS_LANE);
@@ -430,10 +509,15 @@ export function assessFleet(
     if (heard) findings.push(heard);
 
     const filing = assessFiling(w);
-    // A closed office explains an empty queue lane; do not also alarm on it.
-    if (filing && !(closedOffice && filing.severity === 'alarm' && w.substantive <= 2)) {
-      findings.push(filing);
-    }
+    if (filing) findings.push(filing);
+  }
+
+  // The filing-stop alarm is ONE verdict for the fleet, over the four lanes the
+  // threshold was measured on — never one per lane. A closed office explains an
+  // empty queue, so it cannot be a filing stop.
+  if (!closedOffice) {
+    const stop = assessFilingStop(filingStopRun);
+    if (stop) findings.push(stop);
   }
 
   const order: Record<Severity, number> = { alarm: 0, watch: 1, info: 2 };

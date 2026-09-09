@@ -30,6 +30,7 @@
 import pg from 'pg';
 import {
   assessFleet,
+  fleetFilingStopRun,
   foldCallsIntoWindows,
   formatPct,
   AFTER_HOURS_LANE,
@@ -176,7 +177,10 @@ async function main(): Promise<void> {
 
     const windows = foldCallsIntoWindows(calls, filed);
     const baselines = await loadBaselines(hub);
-    const { findings, closedOffice } = assessFleet(windows, baselines);
+    // ONE filing-stop run for the fleet, over the four lanes the threshold was
+    // measured on — not one per lane. See fleetFilingStopRun. (Codex, PR #277.)
+    const filingStopRun = fleetFilingStopRun(calls, filed);
+    const { findings, closedOffice } = assessFleet(windows, baselines, filingStopRun);
 
     console.log(`\n=== FLEET WATCH — ${day} (UTC), calls of ${SUBSTANTIVE_SECONDS}s or more ===`);
     if (!support) {
