@@ -395,3 +395,67 @@ describe('the shape a date of birth arrived in', () => {
     expect(long.endsWith('…')).toBe(true);
   });
 });
+
+/**
+ * A DATE OF BIRTH SAID ONE DIGIT AT A TIME.
+ *
+ * Probed against two real calls that were refused on 2026-09-08:
+ *
+ *   "0 1 0 4 58"                         CA4475d6f1b265c4c6824ff0f241d159f9 — said
+ *                                        four times, refused four times
+ *   "Cero tres veintidos del cincuenta"  CAdc9f9667694dd95382985ad5f86f57b4 — the
+ *                                        same habit, in Spanish
+ *
+ * "01 04 58" and "January 4th, 1958" both parse. The digit-at-a-time form does
+ * not, and the reason is arithmetic rather than intent: the reader assembles a
+ * date from THREE numeric groups or FOUR, and a caller reading their birthday
+ * out digit by digit produces FIVE. Five is neither, so it fell through to the
+ * branch whose job is refusing phone numbers.
+ *
+ * The Spanish line above is NOT closed by this — "veintidos" and "cincuenta"
+ * are words, and spelled-out digits in either language still refuse. That gap
+ * is recorded, not fixed.
+ */
+describe('a date of birth said one digit at a time', () => {
+  const cases: Array<[string, string, string]> = [
+    ['the real call, a two-digit year', '0 1 0 4 58', '1958-01-04'],
+    ['the same caller, saying the year in full', '0 1 0 4 1 9 5 8', '1958-01-04'],
+    ['a transcript that punctuated every digit', '0-1-0-4-58', '1958-01-04'],
+    ['five groups, a December birthday', '1 2 2 5 47', '1947-12-25'],
+  ];
+  for (const [why, spoken, iso] of cases) {
+    it(`${why}: "${spoken}"`, () => {
+      const p = normalizeDobParts(spoken);
+      expect(p && `${p.year}-${p.month}-${p.day}`).toBe(iso);
+    });
+  }
+
+  it('the two-digit year is still decided by the calendar, not by the pivot', () => {
+    // Same rule as every other path: "20" is 2020 because 2020 is in the past.
+    // Without expandTwoDigitYear here this reads 1920 and matches nobody.
+    expect(normalizeDobParts('0 1 0 1 2 0')).toEqual({ year: '2020', month: '01', day: '01' });
+  });
+
+  it('still refuses a phone number said the same way', () => {
+    expect(normalizeDobParts('9 0 9 6 0 8 1 8 3 2')).toBeNull();
+    expect(normalizeDobParts('1 9 0 9 6 0 8 1 8 3 2')).toBeNull();
+  });
+
+  it('still refuses digits that are not a real date', () => {
+    expect(normalizeDobParts('9 9 9 9 9 9')).toBeNull();
+    expect(normalizeDobParts('0 0 0 0 0 0')).toBeNull();
+  });
+
+  /**
+   * THE GUARD THIS TEST EXISTS FOR: every token has to be a digit.
+   *
+   * A sentence whose digits happen to total six proves nothing about what the
+   * caller meant, and joining the digits out of one fabricates a birthday —
+   * "he was born 10 years ago in 2016" is 102016, which assembles into a date
+   * that is real, in range, and wrong. Drop the every-token rule and this
+   * assertion is the one that changes colour first.
+   */
+  it('will not sweep the digits out of a sentence', () => {
+    expect(normalizeDobParts('my number is 0 1 0 4 58')).toBeNull();
+  });
+});
