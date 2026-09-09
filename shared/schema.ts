@@ -479,6 +479,7 @@ export const callLogs = pgTable("call_logs", {
   inputCachedTextTokens: integer("input_cached_text_tokens"), // Cached text input tokens
   toolCallCount: integer("tool_call_count"), // Number of tool calls made during session
   toolTimeline: jsonb("tool_timeline"), // Azul scheduling: per-call tool event timeline {events[], purpose, result} (SD pilot evidence)
+  ceilingStops: integer("ceiling_stops"), // Dispatches the tool ceiling REFUSED (never dispatched, so absent from tool_timeline). 0 = ceiling never fired; NULL = not written by the runtime
   telemetrySource: varchar("telemetry_source"), // 'realtime_events' or 'duration_estimate'
   durationMismatchRatio: real("duration_mismatch_ratio"), // Ratio of local vs Twilio duration (>0.35 = flagged)
   durationMismatchFlag: boolean("duration_mismatch_flag").default(false), // True when mismatch exceeds threshold

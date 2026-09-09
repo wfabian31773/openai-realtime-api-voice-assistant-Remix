@@ -38,6 +38,7 @@
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
 import { type RuntimeTransferOutcome } from "./transferOutcomeLog";
+import { isCeilingStopError } from "./toolCeiling";
 
 /**
  * Identity the runtime was TOLD, never identity it inferred. Supplied by
@@ -85,6 +86,22 @@ export interface RuntimeCallLogRow {
   transcriptWindowSeconds?: number;
   totalTurns: number;
   interruptionCount: number;
+  /**
+   * Dispatches the tool ceiling REFUSED on this call.
+   *
+   * The one piece of tool telemetry this module writes, and it is written
+   * here because nothing else can see it: the ceiling short-circuits before
+   * dispatch, so the agents' own `recordedTool` telemetry — which owns
+   * `tool_timeline` and `tool_call_count` — never runs for a stopped call.
+   *
+   * ALWAYS written, 0 included. A zero is the fact "the ceiling did not fire
+   * on this call", and it is what makes the column countable: on 2026-09-09
+   * `tool_call_count` was NULL on 422 of 1,174 grok calls, so a check built
+   * on it is blind to about a third of the population at ANY threshold. A
+   * column the runtime always writes leaves no such hole, and NULL here can
+   * then only mean "this row predates the column".
+   */
+  ceilingStops: number;
   telemetrySource: "realtime_events";
   environment: string;
   /** Set ONLY when the outcome is `transferred`: the caller was moved to
@@ -120,6 +137,9 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
     transcript: row.transcript,
     totalTurns: row.totalTurns,
     interruptionCount: row.interruptionCount,
+    // The runtime owns this at teardown and no other writer produces it, so
+    // refreshing it on a racing upsert can only replace it with itself.
+    ceilingStops: row.ceilingStops,
     telemetrySource: row.telemetrySource,
     voiceProvider: row.voiceProvider,
     runtimeOutcome: row.runtimeOutcome,
@@ -247,6 +267,7 @@ export function toCallLogRow(
     // calls on VoiceCallRecord, for logs and tests, and off the row.
     totalTurns: record.agentTurns,
     interruptionCount: record.interruptions,
+    ceilingStops: record.toolEvents.filter((event) => isCeilingStopError(event.error)).length,
     /**
      * WHAT THE CALL COST — the columns the old core has always written and the
      * runtime never did.
