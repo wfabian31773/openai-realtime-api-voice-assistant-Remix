@@ -123,10 +123,38 @@ const CALLER_PREFIX = 'CALLER: ';
  * The date of birth the caller gave in answer to being asked for one, as
  * `YYYY-MM-DD`, or undefined.
  *
- * THE LAST ONE WINS. An agent that asked twice asked because the first answer
- * did not survive — it was misheard, read back wrong, or the tool refused it —
- * so the later answer is the caller correcting the earlier one. Taking the
- * first would file the value the caller has just told us is wrong.
+ * THE LAST ASK WINS; WITHIN ONE ASK, THE FIRST DATE WINS. The two halves pull
+ * in opposite directions and both are load-bearing.
+ *
+ * ACROSS asks: an agent that asked twice asked because the first answer did not
+ * survive — misheard, read back wrong, or refused by the tool — so the later
+ * answer is the caller correcting the earlier one. Taking the earlier one would
+ * file the value the caller has just told us is wrong.
+ *
+ * WITHIN one ask: the caller's answer is the FIRST date they say. Everything
+ * after it in the same breath is them carrying on talking, and what they carry
+ * on about is very often another date:
+ *
+ *   AGENT:  May I have your date of birth?
+ *   CALLER: January 4th 1958
+ *   CALLER: and my surgery is September 12th, 2025
+ *
+ * This read the surgery date as the birthday, and all four filing tools would
+ * have written it to the patient record. `valid()` cannot tell the two apart —
+ * a surgery date last autumn is a real date in range — so position inside the
+ * answer is the only thing that separates them. Found by Codex on PR #275 in
+ * the readback form; reproduced in the form above, which needs no readback and
+ * is just a patient answering a question and then continuing.
+ *
+ * STILL OPEN, and recorded rather than fixed: `asksForDateOfBirth` is a
+ * substring match, so an agent line that ACKNOWLEDGES the date ("I have your
+ * date of birth, thank you. Anything else?") also opens a window, and a date in
+ * the reply to THAT is the first date in its own window. Narrowing the matcher
+ * collides with the deliberate choice to let a readback open a window so a
+ * correction is captured, which is an operator question and not a parser one.
+ * A scan of 488 agent date-of-birth mentions across three days found the
+ * acknowledgement shape zero times — but the agent's wording is model-generated
+ * and moves when prompts move, so that is "not yet seen", not "cannot happen".
  *
  * Parsed QUIETLY. This runs over caller lines to find out whether any of them
  * is a date, so most of what it parses is not one, and every failure would
@@ -143,12 +171,16 @@ export function dobFromCallerAnswer(lines: readonly string[]): string | undefine
     // The answering turn: every caller line up to the next thing the agent
     // says. More than one is ordinary — "Sure." lands as its own line, then
     // the date.
+    let found: string | undefined;
     for (let j = i + 1; j < lines.length; j += 1) {
       const next = lines[j] ?? '';
       if (!next.startsWith(CALLER_PREFIX)) break;
       const parts = readDobQuietly(next.slice(CALLER_PREFIX.length));
-      if (parts) answer = `${parts.year}-${parts.month}-${parts.day}`;
+      if (parts && found === undefined) {
+        found = `${parts.year}-${parts.month}-${parts.day}`;
+      }
     }
+    if (found !== undefined) answer = found;
   }
   return answer;
 }

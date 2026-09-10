@@ -83,6 +83,55 @@ describe('reading the date out of the answer the caller gave', () => {
     ).toBe('1973-03-17');
   });
 
+  /**
+   * A CALLER WHO KEEPS TALKING AFTER ANSWERING.
+   *
+   * Codex, PR #275, in the readback form. Reproduced in the form below, which
+   * needs no readback at all — the agent asks once, the caller answers, and
+   * then says the other thing on their mind. Very often that other thing is a
+   * date, and until the reader took the FIRST date in an answer rather than the
+   * last, the surgery date won and all four filing tools wrote it to the
+   * patient record as the date of birth.
+   *
+   * `valid()` cannot separate them: a surgery date last autumn is a real date
+   * in range. Position inside the answer is the only discriminator there is.
+   */
+  it('takes the birthday, not the surgery date the caller mentions next', () => {
+    expect(
+      dobFromCallerAnswer([
+        'AGENT: May I have your date of birth?',
+        'CALLER: January 4th 1958',
+        'CALLER: and my surgery is September 12th, 2025',
+      ]),
+    ).toBe('1958-01-04');
+  });
+
+  it('takes the birthday when the caller runs on for several lines', () => {
+    expect(
+      dobFromCallerAnswer([
+        'AGENT: May I have your date of birth, starting with the month?',
+        'CALLER: March 17th, 1973.',
+        'CALLER: I saw the doctor on August 10th, 2024',
+        'CALLER: and my follow up is December 2, 2025',
+      ]),
+    ).toBe('1973-03-17');
+  });
+
+  it('a later ask still supersedes an earlier answer — first-within, last-across', () => {
+    // Both rules at once: the first date inside each window, and the last
+    // window that produced one. Collapsing either direction breaks this.
+    expect(
+      dobFromCallerAnswer([
+        'AGENT: May I have your date of birth?',
+        'CALLER: March 17th, 1983.',
+        'CALLER: my appointment is September 12th, 2025',
+        'AGENT: Sorry, could you give me the date of birth once more?',
+        'CALLER: March 17th, 1973.',
+        'CALLER: and the surgery was August 10th, 2024',
+      ]),
+    ).toBe('1973-03-17');
+  });
+
   it('treats a readback as a request, so the correction to it counts', () => {
     // "I have X, is that right?" is the agent putting the subject on the
     // table. The answer that follows is the caller fixing it.
