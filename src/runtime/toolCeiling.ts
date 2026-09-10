@@ -37,8 +37,9 @@
  *      retries are ordinary here. Only a run of consecutive failures is the
  *      pathology.
  *
- *      MEASURED AGAINST THIS, 2026-09-10: of the eight loops the ceiling has
- *      actually stopped, NONE was a failure loop. Four were a tool returning
+ *      MEASURED AGAINST THIS, 2026-09-10: of the eight loops that REACHED
+ *      the dispatch limit — reached, not provably stopped; the refusal is
+ *      persisted nowhere — NONE was a failure loop. Four were a tool returning
  *      success 30–35 times (`resolve_location`, `lookup_patient`) and one was
  *      `record_pcp_intake` dispatched 40 times with no outcome recorded at
  *      all. `identicalFailures` and `perToolFailures` could not see any of

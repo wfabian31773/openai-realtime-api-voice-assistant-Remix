@@ -51,8 +51,23 @@ function read(doc: string): string {
  * rollups. Exactly one block must match, so that a rename or a second copy
  * fails loudly here rather than silently narrowing what is checked.
  */
+/**
+ * Fenced code blocks, tolerating the CommonMark variations a Markdown-only
+ * edit can legitimately introduce: CRLF checkouts, up to three spaces of
+ * indentation, tilde fences, fences longer than three characters, and an
+ * info string in any case with trailing spaces. A formatting change must
+ * never fail a semantic drift test.
+ */
+function fencedBlocks(text: string, language: string): string[] {
+  const re = new RegExp(
+    String.raw` ^[ ]{0,3}([\`~]{3,})[ \t]*${language}[ \t]*\r?$([\s\S]*?)^[ ]{0,3}\1[ \t]*\r?$`.trim(),
+    "gim",
+  );
+  return [...text.matchAll(re)].map((m) => m[2] ?? "");
+}
+
 function ceilingQueryBlock(doc: string): string {
-  const blocks = [...read(doc).matchAll(/```sql\n([\s\S]*?)```/g)].map((m) => m[1] ?? "");
+  const blocks = fencedBlocks(read(doc), "sql");
   const matching = blocks.filter(
     (b) => b.includes("tool_call_count") && b.includes("call_sid"),
   );

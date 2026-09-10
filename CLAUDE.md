@@ -1565,10 +1565,12 @@ off the row". So the only trace a repeated-failure stop leaves anywhere is the
 console `[TOOL CEILING]` line, and **no SQL can count it.** Raising this
 query's threshold would not help; there is nothing in the row to find.
 
-A row above 40 is the one thing here that IS a regression: nothing can exceed
-the limit while the ceiling is running, so a 41 means the ceiling is not in the
-dispatch path. On 2026-09-10 the only such row was still the pre-ceiling
-optical call of 2026-09-03 that the ceiling was built for.
+A row above 40 is a fault **only if the call is post-deployment**. Nothing can
+exceed the limit while the ceiling is in the dispatch path, so a recent 41
+means it is not. But this query carries no deployment-time predicate, so it
+will ALWAYS return the pre-ceiling call of 2026-09-03 at 118 — check the date
+before concluding anything from a row above 40. As of 2026-09-10 that
+historical row is still the only one.
 
 Note also that `tool_call_count` is NULL on 577 of 1,620 grok calls
 (measured 2026-09-10; the table is live), so this check is blind to about a
@@ -1600,13 +1602,22 @@ NULL on all nine).
 | CAefddb2f48d13678c9df2f27e6750f227 | optical | 09-09 | 160s | `resolve_location` ×33, **all succeeding** | `file_optical_ticket` ×3 `["location"]` |
 | CAa6a32e9c9459a8b4d149383e5e083971 | surgery | 09-09 | 291s | `lookup_patient` ×35, **all succeeding** | `file_surgery_ticket` ×2 `["surgeon"]` |
 
-**The finding that matters: only the 118 was a failure loop.** All eight that
-the ceiling actually stopped were loops of tools reporting SUCCESS (or, on
-pcp, reporting nothing). That means `identicalFailures: 3` and
-`perToolFailures: 6` were structurally blind to every one of them — they
-count failures, and a success clears the counters by design (rule 1 of
-`toolCeiling.ts`). `perCallDispatches` did all of the stopping **on these
-nine calls**.
+**The finding that matters: only the 118 was a failure loop.** All eight
+that reached the limit were loops of tools reporting SUCCESS (or, on pcp,
+reporting nothing). That means `identicalFailures: 3` and `perToolFailures: 6`
+were structurally blind to every one of them — they count failures, and a
+success clears the counters by design (rule 1 of `toolCeiling.ts`).
+
+**Say "reached the limit", not "the ceiling stopped it" — even here.** The
+timelines prove these are loops: one tool repeated 30-odd times is not a call
+that merely got busy. They do NOT prove the ceiling refused anything. The
+refusal lands on the 41st attempt and is written nowhere — not
+`tool_timeline`, not `tool_call_count`, not the call row — so a call that
+looped 40 times and then ended on its own is indistinguishable from one the
+ceiling cut off. Only the console `[TOOL CEILING]` line separates them, and it
+is not retained. Two claims live here and only the first is evidenced:
+**these are loops** (proven), and **the ceiling stopped them** (not provable
+from anything persisted).
 
 Say no more than that. It is tempting to conclude `perCallDispatches` is the
 only rule that ever fires, and the evidence cannot carry it: stops by the

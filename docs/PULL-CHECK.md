@@ -82,8 +82,10 @@ The second is a reading check, not a pass/fail one:
 -- `>= 40` it is the 41st ATTEMPT that is stopped and never counted. A call
 -- that just finished after its 40th tool looks the same here. Confirm by
 -- reading tool_timeline — a real loop repeats one tool ~30 times.
--- Only a row ABOVE 40 is a fault, and it means the ceiling is
--- not in the dispatch path. Keep 40 in step with
+-- A row ABOVE 40 is a fault only if the call is POST-DEPLOYMENT: this query
+-- has no deploy-time predicate, so it always returns the pre-ceiling
+-- 2026-09-03 call at 118. Check the date first. A recent row above 40 does
+-- mean the ceiling is not in the dispatch path. Keep 40 in step with
 -- DEFAULT_CEILING_LIMITS.perCallDispatches (src/runtime/toolCeiling.ts);
 -- ceilingDocCheck.test.ts fails if they drift.
 -- SEES ONE OF THE CEILING'S THREE RULES. identicalFailures (3) and
