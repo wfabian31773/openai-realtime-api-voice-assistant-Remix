@@ -39,10 +39,10 @@
  *
  *      MEASURED AGAINST THIS, 2026-09-10: of the eight loops that REACHED
  *      the dispatch limit — reached, not provably stopped; the refusal is
- *      persisted nowhere — NONE was a failure loop. Four were a tool returning
- *      success 30–35 times (`resolve_location`, `lookup_patient`) and one was
- *      `record_pcp_intake` dispatched 40 times with no outcome recorded at
- *      all. `identicalFailures` and `perToolFailures` could not see any of
+ *      persisted nowhere — NONE was a failure loop. Seven were a tool
+ *      returning success 30–35 times (`resolve_location`, `lookup_patient`)
+ *      and the eighth was `record_pcp_intake` dispatched 40 times with no
+ *      outcome recorded at all. `identicalFailures` and `perToolFailures` could not see any of
  *      them — a success clears the counters, which is this rule working as
  *      written. "A tool that keeps succeeding is not a loop" is not what
  *      those calls show.

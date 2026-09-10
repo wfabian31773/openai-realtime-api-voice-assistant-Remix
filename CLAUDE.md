@@ -1585,8 +1585,8 @@ documents, and nothing currently watches it.
 **What the corrected check found. Re-measured 2026-09-10: NINE rows at
 `>= 40`** — the pre-ceiling optical call of 09-03 at 118, and **eight sitting
 at exactly 40**. Nothing at all between 24 and 39 — the highest count any call
-reaches without striking the ceiling is 23 — so 40 is a ceiling strike, never
-drift. Two are 09-08 and **three are 09-09**, so this is live and recurring,
+reaches without touching the limit is 23 — so a 40 is the limit being
+reached, never drift. Two are 09-08 and **three are 09-09**, so this is live and recurring,
 not a historical batch. **None of the nine filed a ticket** (`ticket_number`
 NULL on all nine).
 

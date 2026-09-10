@@ -9,10 +9,16 @@
  * `tool_call_count > 40` against a ceiling of `>= 40`. It proved the ceiling
  * had shipped, and from that moment it was the only thing watching for
  * runaway loops while being unable, by construction, to see one the ceiling
- * had stopped. Measured on 2026-09-09: one call above 40 (the pre-ceiling
- * call the ceiling was built for), five sitting at exactly 40, and NOTHING
- * between 25 and 39 — the gap is what makes 40 a ceiling strike rather than
- * drift. All five were invisible to the published check.
+ * had contained. Measured 2026-09-10: one call above 40 (the pre-ceiling
+ * call this was built for), eight sitting at exactly 40, and NOTHING between
+ * 24 and 39 — the highest a call reaches without touching the limit is 23,
+ * and that gap is what marks 40 as the limit rather than drift. All eight
+ * were invisible to the published check.
+ *
+ * Those eight are verified LOOPS that reached the limit — one tool repeated
+ * 30-odd times in each. They are not verified ceiling STOPS: the refusal
+ * lands on the 41st attempt and is persisted nowhere, so no column can tell
+ * a stopped call from one that ended on its own at 40.
  *
  * A comment asking the next reader to keep two numbers in step is not a
  * control. This is: if the limit moves and a document does not, these fail.
@@ -59,28 +65,45 @@ function read(doc: string): string {
  * never fail a semantic drift test.
  */
 function fencedBlocks(text: string, language: string): string[] {
-  // CommonMark: the closing fence uses the same character and must be at
-  // least as long as the opening one — not byte-identical to it.
-  const re = new RegExp(
-    String.raw` ^[ ]{0,3}(\`{3,}|~{3,})[ \t]*${language}[ \t]*\r?$([\s\S]*?)^[ ]{0,3}\1+[ \t]*\r?$`.trim(),
-    "gim",
-  );
-  return [...text.matchAll(re)].map((m) => m[2] ?? "");
+  // Scanned line by line rather than matched by one regex. A backreference
+  // cannot express "the same character, at least this many times": `\1+`
+  // repeats the whole captured run, so a three-backtick opener accepted
+  // closers of 3, 6 and 9 but not 4 or 5 — which is a legal fence.
+  const lines = text.split(/\r?\n/);
+  const open = new RegExp(String.raw`^[ ]{0,3}(\`{3,}|~{3,})[ \t]*${language}[ \t]*$`, "i");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = open.exec(lines[i] ?? "");
+    if (!m) continue;
+    const fence = m[1] ?? "";
+    const char = fence[0] ?? "`";
+    const body: string[] = [];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = lines[j] ?? "";
+      const close = /^[ ]{0,3}([`~]+)[ \t]*$/.exec(line);
+      if (close && (close[1] ?? "")[0] === char && (close[1] ?? "").length >= fence.length) {
+        out.push(body.join("\n"));
+        i = j;
+        break;
+      }
+      body.push(line);
+    }
+  }
+  return out;
 }
 
 /**
- * The runaway-loop SQL block plus the prose immediately following it, up to
- * the next heading. Wording guards apply HERE and not to the whole document:
- * a 1,600-line runbook has every right to say "should return nothing" about
- * some other check.
+ * The runaway-loop SQL block itself, and nothing else.
+ *
+ * Wording guards apply HERE. "Up to the next heading" was tried and was far
+ * too wide — in CLAUDE.md the next heading is ~150 lines below the block, so
+ * unrelated marker and telemetry guidance sat inside a ceiling-specific
+ * assertion. The block is the precise home for this guard anyway: the
+ * sentence being guarded against ("this should return nothing") was a SQL
+ * comment inside it, not prose around it.
  */
 function ceilingSection(doc: string): string {
-  const text = read(doc);
-  const block = ceilingQueryBlock(doc);
-  const start = text.indexOf(block);
-  const after = text.slice(start + block.length);
-  const nextHeading = after.search(/^#{1,6} /m);
-  return block + (nextHeading === -1 ? after : after.slice(0, nextHeading));
+  return ceilingQueryBlock(doc);
 }
 
 function ceilingQueryBlock(doc: string): string {
