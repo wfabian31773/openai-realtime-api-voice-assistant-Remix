@@ -168,3 +168,58 @@ describe('the lanes that pass no queue are untouched', () => {
     expect(r.usable_for_this_queue).toBe(true);
   });
 });
+
+describe('the after-control counts CALLS, not tool invocations', () => {
+  /**
+   * MY OWN INSTRUMENT WAS MISCOUNTING — Codex P2 on PR #282.
+   *
+   * The PR names `[RESOLVE LOCATION] the office ask is spent` as the control
+   * that says whether this change worked. But the model may keep calling
+   * `resolve_location` after the limit -- that is the very loop this targets
+   * -- and every one of those invocations takes the passthrough. Logged
+   * unconditionally, a single 30-call loop prints ~28 lines and `grep -c`
+   * reports ~28 exhausted CALLS. The after-number would have been inflated by
+   * the failure it is meant to detect, which is the "check the instrument"
+   * trap this repo has been caught by before.
+   *
+   * Once per call, keyed by CallSid. `unresolvedPassthrough` is only
+   * reachable when `officeAskSpent` is true, and that requires a real Twilio
+   * SID (`gateRefusalsSoFar` returns 0 for a sentinel), so there is always a
+   * key to dedupe on.
+   */
+  it('prints the exhausted marker once however many times the loop runs', async () => {
+    const dir = await directory();
+    vi.spyOn(dir, 'isDirectoryConfigured').mockReturnValue(true);
+    vi.spyOn(dir, 'lookupLocation').mockResolvedValue(null as never);
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+    const args = { spoken_location: 'Downtown LA', queue: 'optical', call_sid: SID };
+    // Two refusals, then six more invocations that all take the exit.
+    for (let i = 0; i < 8; i++) await runTool('resolve_location', args);
+
+    const marks = info.mock.calls.filter((c) =>
+      String(c[0]).includes('[RESOLVE LOCATION]'),
+    );
+    expect(marks).toHaveLength(1);
+    // And it carries the CallSid, so a day's lines can be counted distinctly.
+    expect(String(marks[0][0])).toContain(SID);
+  });
+
+  it('counts a second call separately', async () => {
+    const dir = await directory();
+    vi.spyOn(dir, 'isDirectoryConfigured').mockReturnValue(true);
+    vi.spyOn(dir, 'lookupLocation').mockResolvedValue(null as never);
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const OTHER = 'CA747908b5d46b7ed25cffe733fb792738';
+
+    for (const sid of [SID, OTHER]) {
+      const args = { spoken_location: 'Downtown LA', queue: 'optical', call_sid: sid };
+      for (let i = 0; i < 4; i++) await runTool('resolve_location', args);
+    }
+
+    const marks = info.mock.calls.filter((c) =>
+      String(c[0]).includes('[RESOLVE LOCATION]'),
+    );
+    expect(marks).toHaveLength(2);
+  });
+});

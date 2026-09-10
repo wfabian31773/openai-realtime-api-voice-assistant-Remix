@@ -29,7 +29,7 @@
  * the HTTP surface, where the caller is not a queue.
  */
 import { registerTool, missing, type MissingFields, type ToolResult } from './registry';
-import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
+import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
 
 /** Which queue is asking. Injected as call context, never a model argument. */
 export type ToolQueue = 'optical' | 'surgery';
@@ -332,6 +332,9 @@ const RESOLVE_TOOL = 'resolve_location';
  */
 const RESOLVE_ASK_LIMIT = 2;
 
+/** Per-call fact: this call has already printed the exhausted marker. */
+const RESOLVE_ASK_SPENT = 'resolve_location:ask_spent';
+
 /** The caller has been asked as often as this call is allowed to ask. */
 function officeAskSpent(callSid: string | undefined): boolean {
   return gateRefusalsSoFar(callSid, RESOLVE_TOOL, 'spoken_location') >= RESOLVE_ASK_LIMIT;
@@ -341,16 +344,33 @@ function officeAskSpent(callSid: string | undefined): boolean {
  * The caller's words, carried on unverified. Never invented, never a guess —
  * `resolved: false` is the tool saying plainly that it could not place this.
  */
-function unresolvedPassthrough(spoken: string): ToolResult {
-  // A LIVE COUNTER, not just a marker. It prints only when the exit is taken,
-  // so `grep` over a day's logs says how often the office ask is running out —
-  // which is the number that says whether RESOLVE_ASK_LIMIT is set right.
-  // No caller words are logged: a spoken office name is the caller's own
-  // speech and this line is not the place for it.
-  console.info(
-    '[RESOLVE LOCATION] the office ask is spent on this call — passing the ' +
-      "caller's words through unverified so the filing tool can take the request",
-  );
+function unresolvedPassthrough(callSid: string | undefined, spoken: string): ToolResult {
+  /**
+   * A LIVE COUNTER OF CALLS, AND IT HAS TO BE ONE PER CALL TO BE THAT.
+   *
+   * This is the after-control for the whole change, so it is worth saying why
+   * it is guarded. Printed unconditionally, it fired on every invocation
+   * rather than every call — and the model may keep calling this tool after
+   * the limit, which is the very loop being fixed. One 30-call loop printed
+   * about 28 lines, so `grep -c` would have reported ~28 exhausted CALLS and
+   * the after-number would have been inflated by the failure it exists to
+   * detect. Found by Codex on PR #282; the tests hold it at one.
+   *
+   * `unresolvedPassthrough` is only reachable once `officeAskSpent` is true,
+   * and that needs a real Twilio SID — `gateRefusalsSoFar` returns 0 for a
+   * sentinel — so there is always a key to dedupe on.
+   *
+   * The CallSid is on the line deliberately: it makes the count distinct and
+   * a single call traceable. No caller words are logged — a spoken office
+   * name is the caller's own speech and this line is not the place for it.
+   */
+  if (!callFactNoted(callSid, RESOLVE_ASK_SPENT)) {
+    noteCallFact(callSid, RESOLVE_ASK_SPENT);
+    console.info(
+      `[RESOLVE LOCATION] the office ask is spent on ${callSid} — passing the ` +
+        "caller's words through unverified so the filing tool can take the request",
+    );
+  }
   return { success: true, resolved: false, location: spoken, verified: false, ask_exhausted: true };
 }
 
@@ -431,7 +451,7 @@ registerTool({
        * is not a fault.
        */
       // BOUNDED. Refusing forever is what turned this into a 35-call well.
-      if (officeAskSpent(callSid)) return unresolvedPassthrough(cleaned.value);
+      if (officeAskSpent(callSid)) return unresolvedPassthrough(callSid, cleaned.value);
       noteGateRefusal(callSid, RESOLVE_TOOL, 'spoken_location');
       return missing(
         ['spoken_location'],
@@ -461,7 +481,7 @@ registerTool({
       const wrongKind =
         `${hit.canonical} is a ${hit.facilityKind?.replace('_', ' ')}, not an ` +
         `${facilityWord(queue)}. ` + askWhichOffice(queue);
-      if (officeAskSpent(callSid)) return unresolvedPassthrough(cleaned.value);
+      if (officeAskSpent(callSid)) return unresolvedPassthrough(callSid, cleaned.value);
       noteGateRefusal(callSid, RESOLVE_TOOL, 'spoken_location');
       // The ENVELOPE changes; the diagnostic fields do not. Callers read
       // `usable_for_this_queue` to explain the refusal, and dropping it here
