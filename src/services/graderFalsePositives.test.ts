@@ -324,6 +324,23 @@ describe('human_request_deflection — a refusal is not a promise', () => {
     expect(r.metadata?.promisedTransfer).toBe(true);
   });
 
+  /**
+   * CODEX round 2, PR #278: the contrast-marker split still suppressed a real
+   * promise when the refusal was about something ELSE entirely. "cannot" here
+   * governs "help with billing", not the transfer — and a comma plus "so" is
+   * not a contrast marker.
+   */
+  it('catches a promise when the refusal is about a different subject', () => {
+    const billing = [
+      'AGENT: Thank you for calling Azul Vision medical records.',
+      'CALLER: Can I speak to someone about my bill?',
+      "AGENT: I cannot help with billing directly, so I'll transfer you to the billing team.",
+      'CALLER: Thank you.',
+    ].join('\n');
+    const r = check(run({ transcript: billing, agentSlug: 'records', ticketNumber: 'VA-50020' }), 'human_request_deflection');
+    expect(r.metadata?.promisedTransfer).toBe(true);
+  });
+
   it('a real promise on a ticket-only line still fails', () => {
     const broken = [
       'AGENT: Thank you for calling Azul Vision medical records.',

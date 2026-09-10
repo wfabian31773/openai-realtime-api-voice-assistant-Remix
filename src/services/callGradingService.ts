@@ -430,44 +430,67 @@ function gradeQuestionRepetition(input: DeterministicGraderInput): GraderResult 
 /**
  * DID THE AGENT PROMISE A TRANSFER IT CANNOT MAKE?
  *
- * The first version of this dropped any SENTENCE containing a negation and
- * ran the promise test on what was left. Codex caught it on PR #278, and it
- * was wrong in the direction that matters — it hid real broken promises:
+ * Written three times. Both earlier versions HID real broken promises, which
+ * is the failure that matters — this check exists to catch an agent promising
+ * a transfer on a line the operator ruled can never transfer.
  *
- *   "I can't transfer you, BUT I can connect you with the team."
+ *   v1  dropped any SENTENCE containing a negation, so
+ *       "I can't transfer you, BUT I can connect you with the team"
+ *       lost its affirmative half. (Codex, PR #278.)
+ *   v2  split on contrast markers, which fixed that one and still suppressed
+ *       "I cannot help with billing directly, SO I'll transfer you to the
+ *       billing team" — where the refusal governs BILLING, not the transfer,
+ *       and a comma plus "so" is no contrast marker. (Codex, PR #278 round 2.)
  *
- * is one sentence, so the whole thing was discarded and the affirmative
- * half — an impossible promise, the exact defect this check exists to catch
- * — was never tested. Worse, every agent line was concatenated before the
- * split, so a line with no terminal punctuation merged with the next one and
- * a refusal could swallow a promise made in a SEPARATE later utterance.
+ * The rule both rounds were pointing at: a negation only refuses THIS
+ * transfer phrase when it actually governs it. So for each transfer phrase,
+ * look back to the nearest preceding negation IN THE SAME SENTENCE; if
+ * anything between the two revokes it — a contrast marker, or a fresh
+ * affirmative intent like "I'll" / "let me" / "I can" — the negation was
+ * about something else and the promise stands.
  *
- * So: evaluate each agent LINE on its own (never across utterances), split
- * it on sentence ends AND on contrast markers, and ask of each segment
- * whether it promises a transfer WITHOUT a refusal in that same segment.
- * "but" is a boundary because that is precisely the word that revokes the
- * negation preceding it.
+ * Proximity was tried and rejected: the refusal in "I'm not able to transfer
+ * calls or connect you directly" sits 34 characters from its promise phrase,
+ * the unrelated one in the billing sentence about 36, so no character window
+ * separates them. What separates them is whether an affirmative intervenes.
  *
- * A proximity window was tried instead and rejected: the refusal in
- * "I'm not able to transfer calls or connect you directly" sits about as far
- * from its promise phrase as the one in "I can't transfer you, but I can
- * connect you" sits from its own, so no character distance separates the two
- * cases. The contrast marker does.
+ * Lines are never concatenated. The transport emits agent speech in separate
+ * utterances, and joining them let an unpunctuated refusal swallow a promise
+ * made later in the call.
  */
 const TRANSFER_PROMISE =
-  /(?:transfer|connect) you|one moment while i (?:connect|transfer)|putting you through/;
+  /(?:transfer|connect) you|one moment while i (?:connect|transfer)|putting you through/g;
 const TRANSFER_REFUSAL =
-  /\b(?:not able to|unable to|can'?t|cannot|won'?t|will not|do not|don'?t|never)\b/;
-/** Words that end a refusal's scope: what follows is asserted, not denied. */
-const CONTRAST_BOUNDARY = /\bbut\b|\bhowever\b|\balthough\b|\bthough\b|\binstead\b/;
+  /\b(?:not able to|unable to|can'?t|cannot|won'?t|will not|do not|don'?t|never)\b/g;
+/** Anything that ends a refusal's reach: the contrast that revokes it, or a
+ *  fresh affirmative intent that starts a new promise after it. */
+const REFUSAL_CANCELLED =
+  /\b(?:but|however|although|though|instead|i'?ll|i will|we'?ll|we will|let me|i can|going to)\b/;
+
+/** End index of the LAST match of `re` in `text`, or -1 when there is none. */
+function lastMatchEnd(text: string, re: RegExp): number {
+  const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  let end = -1;
+  let m: RegExpExecArray | null;
+  while ((m = scan.exec(text)) !== null) {
+    end = m.index + m[0].length;
+    if (m.index === scan.lastIndex) scan.lastIndex++;
+  }
+  return end;
+}
 
 function promisesATransfer(transcript: string): boolean {
   for (const line of agentSpeech(transcript)) {
-    const segments = line
-      .toLowerCase()
-      .split(new RegExp(`[.!?]+|${CONTRAST_BOUNDARY.source}`));
-    for (const segment of segments) {
-      if (TRANSFER_PROMISE.test(segment) && !TRANSFER_REFUSAL.test(segment)) return true;
+    for (const sentence of line.toLowerCase().split(/[.!?]+/)) {
+      const promises = new RegExp(TRANSFER_PROMISE.source, 'g');
+      let hit: RegExpExecArray | null;
+      while ((hit = promises.exec(sentence)) !== null) {
+        const before = sentence.slice(0, hit.index);
+        const refusalEnd = lastMatchEnd(before, TRANSFER_REFUSAL);
+        // Nothing denied it, or whatever denied it was revoked before the
+        // phrase was reached.
+        if (refusalEnd === -1 || REFUSAL_CANCELLED.test(before.slice(refusalEnd))) return true;
+      }
     }
   }
   return false;

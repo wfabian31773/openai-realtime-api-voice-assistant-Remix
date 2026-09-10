@@ -869,9 +869,15 @@ for PROMISING a transfer inside the sentence refusing one (**and the FIRST fix
 for it was wrong the other way** — it dropped the whole sentence, so
 "I can't transfer you, BUT I can connect you with the team" lost its
 affirmative half and a real broken promise would have graded as a pass. Codex,
-PR #278. Latent: 0 such calls in 30 days over 10,606. The scope is now the
-segment, split on sentence ends AND contrast markers, evaluated per agent LINE
-— never across concatenated utterances) — and
+PR #278, and the SECOND fix was wrong too — splitting on contrast markers
+still suppressed "I cannot help with billing directly, SO I'll transfer you",
+where the refusal governs BILLING and a comma plus "so" is no contrast marker.
+**Written three times; both earlier versions hid real broken promises.** The
+rule that finally holds: a negation refuses a transfer phrase only when it
+GOVERNS it — look back to the nearest negation in the same sentence, and if
+anything between the two revokes it (a contrast marker, or a fresh "I'll" /
+"let me" / "I can") the promise stands. Latent throughout: 0 such calls in 30
+days over 10,606. Lines are never concatenated) — and
 **`can't see` in an eye clinic**, where "I can't use those glasses, I can't
 see out of them" raised an emergency alert. That idiom is rare (1 of 21
 `can't see` mentions in 30 days) and the lexicon is a SAFETY net, so it is
