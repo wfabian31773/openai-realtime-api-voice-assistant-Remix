@@ -154,6 +154,230 @@ function gradeHandoffExpectedVsActual(input: DeterministicGraderInput): GraderRe
   };
 }
 
+/**
+ * THE AGENT'S LINES, WITH THE LIVE GUARD'S DOUBLE-CAPTURE RULE APPLIED.
+ *
+ * The transport emits agent speech on two event types, so one response can
+ * land in the transcript twice verbatim with no caller line between it.
+ * `conversationLoopGuard` has discounted that since it was written — "a REAL
+ * re-ask always has caller audio in between" — and every counter that reads
+ * agent lines needs the same rule, or a transport artefact gets reported to
+ * the operator as the agent repeating itself.
+ */
+function agentSpeech(transcript: string): string[] {
+  const out: string[] = [];
+  let lastAgentLine: string | null = null;
+  let callerSpokeSinceAgent = true;
+  for (const raw of transcript.split('\n')) {
+    const line = raw.trim();
+    if (/^(caller|patient|user):/i.test(line)) {
+      callerSpokeSinceAgent = true;
+      continue;
+    }
+    if (!/^agent:/i.test(line)) continue;
+    const spoken = line.replace(/^agent:\s*/i, '');
+    const isDoubleCapture =
+      !callerSpokeSinceAgent && lastAgentLine !== null &&
+      spoken.toLowerCase() === lastAgentLine.toLowerCase();
+    if (!isDoubleCapture) out.push(spoken);
+    lastAgentLine = spoken;
+    callerSpokeSinceAgent = false;
+  }
+  return out;
+}
+
+/**
+ * One spoken line reduced to what makes it the SAME line said twice.
+ *
+ * `[interrupted]` is stripped deliberately: the runtime appends it when the
+ * caller barges in, so "Let me get this logged for you — one moment" and
+ * "Let me get this logged for you — one moment [interrupted]" are the same
+ * sentence and must collapse. A 2026-09-09 SQL pass that did not strip it
+ * counted them as two different lines and under-reported the repeats.
+ */
+function normaliseSpokenLine(line: string): string {
+  return line
+    .replace(/\[interrupted\]/gi, ' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const GREETING_SHAPE = /^\s*thank you for calling\b/i;
+/** The filler the agent speaks while the filing tool runs. Said twice means
+ *  the tool was called twice. */
+const FILING_FILLER =
+  /\b(let me get this logged|i'?ll get this logged|let me get that logged|one moment while i (?:log|file)|let me file that)\b/i;
+/** Short lines are acknowledgements ("Got it.", "Thank you.") and repeat
+ *  harmlessly all day. Measured on 2026-09-09: at this floor the repeated
+ *  lines are questions and scripts, not pleasantries. */
+const REPEAT_MIN_CHARS = 26;
+
+/**
+ * THREE REPETITION COUNTERS — Wayne, 2026-09-09: "can't we make looping just
+ * look for any time that the agent repeats the same thing or something
+ * similar, rather than have a count?"
+ *
+ * He is right, and the measurement is why. The Observatory's looping pillar
+ * is `total_turns > 45`; over 7 days the Grok runtime's `total_turns` never
+ * exceeds 39, so that counter is structurally ZERO on every runtime lane.
+ * Asking the TRANSCRIPT whether a line was said twice found 99 runtime calls
+ * in the same window (against 2 on the old core) — and the transcript is
+ * written the same way by both pipelines, so unlike `total_turns` it stays
+ * comparable across the cutover.
+ *
+ * THEY ARE THREE COUNTERS AND NOT ONE, because reading what those 99 calls
+ * actually repeated showed three unrelated defects with three unrelated
+ * fixes. Collapsed into a single "looping: 99" the number would name none of
+ * them:
+ *
+ *   64 calls  the filing filler, up to 5x   -> the tool was retried
+ *   19 calls  the greeting                  -> the greeting replayed
+ *   ~13 calls a question                    -> a genuine re-ask
+ *
+ * Only the first is allowed to be CRITICAL, and only when the harm actually
+ * landed on that call — see gradeRefiledRepeatedly.
+ */
+
+/**
+ * THE FILLER IS A PROXY FOR THE TOOL CALL. Measured 2026-09-09 over 7 days:
+ *
+ *   says it | calls | avg tool calls | ended with NO ticket
+ *   1x      |   659 |            4.9 | 15%
+ *   2x      |    88 |            6.8 | 28%
+ *   3x      |    13 |           17.5 | 46%
+ *   5x      |     2 |           12.0 | 100%
+ *
+ * Monotonic in both columns: each extra "let me get this logged for you" is
+ * another filing attempt, and the more attempts, the likelier the call ends
+ * with nothing filed. Neither existing instrument can see it — `total_turns`
+ * cannot reach its threshold on the runtime, and `question_repetition`
+ * ignores the line because it is not an ask.
+ *
+ * CRITICAL ONLY WHEN THE TICKET IS ACTUALLY MISSING. At 3x, 54% of those
+ * calls DID file — flagging those critical would be predicting harm rather
+ * than observing it, which is the exact error this whole audit was cleaning
+ * up. Churn that still filed is a warning: worth seeing, not a failure.
+ *
+ * THE PRECISION OF THE CRITICAL IS 94%, AND THE MISSING 6% IS NOT THIS
+ * CHECK'S FAULT. All 85 canonical-SID calls this would have called critical
+ * over the 30 days to 2026-09-09 were looked up in the Support Center by
+ * `call_sid`: 5 of them DO have a ticket that `call_logs.ticket_number` never
+ * received. That is the known write-back gap (CLAUDE.md measures it at
+ * 97-98%), arriving here as a false red.
+ *
+ * DO NOT "FIX" IT BY SUPPRESSING ON A SPOKEN VA- NUMBER. That was measured
+ * too: 12 of the 85 read a ticket number aloud, but only 3 of them are among
+ * the 5 real write-back misses. Suppressing on the transcript would trade 3
+ * correct suppressions for up to 9 HIDDEN real losses, because
+ * `check_open_tickets` reads an EXISTING ticket back to a caller chasing one
+ * — the documented over-count of that proxy. A counter that hides losses is
+ * worse than one that over-reports by 6%. The real fix is the write-back.
+ */
+function gradeRefiledRepeatedly(input: DeterministicGraderInput): GraderResult {
+  const attempts = agentSpeech(input.transcript).filter(l => FILING_FILLER.test(l)).length;
+
+  if (attempts <= 1) {
+    return {
+      grader: 'refiled_repeatedly',
+      pass: true,
+      score: 1.0,
+      reason: attempts === 0
+        ? 'The agent never announced a filing attempt'
+        : 'One filing attempt',
+      metadata: { attempts, ticketNumber: input.ticketNumber },
+    };
+  }
+
+  if (!input.ticketNumber) {
+    return {
+      grader: 'refiled_repeatedly',
+      pass: false,
+      score: 0.0,
+      severity: 'critical' as const,
+      reason: `The agent announced filing ${attempts}x and the call ended with NO ticket — the caller was told their request was being logged and it was not`,
+      metadata: { attempts, ticketNumber: null, critical: true },
+    };
+  }
+
+  return {
+    grader: 'refiled_repeatedly',
+    pass: false,
+    score: Math.max(0, 1 - (attempts - 1) * 0.25),
+    severity: 'warning' as const,
+    reason: `The agent announced filing ${attempts}x before it succeeded (${input.ticketNumber}) — retry churn the caller can hear`,
+    metadata: { attempts, ticketNumber: input.ticketNumber },
+  };
+}
+
+/**
+ * THE GREETING PLAYED MORE THAN ONCE. Already a known defect and never
+ * counted: 13 calls on 2026-09-03 played it twice or three times, averaging
+ * 175s against a fleet average of 89, and six of the seven worst were a
+ * caller asking for another language during the opening.
+ *
+ * Never critical. The caller hears the agent start over, which is bad and is
+ * not a lost request.
+ */
+function gradeGreetingReplayed(input: DeterministicGraderInput): GraderResult {
+  const greetings = agentSpeech(input.transcript).filter(l => GREETING_SHAPE.test(l)).length;
+  const pass = greetings <= 1;
+  return {
+    grader: 'greeting_replayed',
+    pass,
+    score: pass ? 1.0 : Math.max(0, 1 - (greetings - 1) * 0.4),
+    ...(pass ? {} : { severity: 'warning' as const }),
+    reason: pass
+      ? `Greeting played ${greetings === 0 ? 'never (no greeting line found)' : 'once'}`
+      : `The greeting played ${greetings}x — the caller heard the agent start the call over`,
+    metadata: { greetings },
+  };
+}
+
+/**
+ * ANY OTHER LINE THE AGENT SAID TWICE.
+ *
+ * Named for what it measures rather than what it usually catches. It does NOT
+ * require the line to be question-shaped: the real re-asks found on
+ * 2026-09-09 include "I didn't catch that date of birth — month, day and
+ * year", which carries no question mark and whose wording is in none of
+ * `ASK_TOPICS`. That is the point of this counter — `question_repetition`
+ * can only see a loop it has a topic for, and its own header admits it
+ * "under-reports rather than inventing loops".
+ *
+ * The greeting and the filing filler are excluded because they have their own
+ * counters above; counting them here would report one defect three times.
+ *
+ * Never critical, deliberately. `question_repetition` owns the critical tier
+ * for caller-facing loops, and this check is the wider, noisier net that sits
+ * under it — a second critical on the same call would double-count it.
+ */
+function gradeAgentLineRepeated(input: DeterministicGraderInput): GraderResult {
+  const counts = new Map<string, number>();
+  for (const line of agentSpeech(input.transcript)) {
+    if (GREETING_SHAPE.test(line) || FILING_FILLER.test(line)) continue;
+    const key = normaliseSpokenLine(line);
+    if (key.length < REPEAT_MIN_CHARS) continue;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  let worst = 0;
+  let worstLine = '';
+  for (const [key, n] of counts) if (n > worst) { worst = n; worstLine = key; }
+  const repeatedLines = [...counts.values()].filter(n => n > 1).length;
+  const pass = worst <= 1;
+  return {
+    grader: 'agent_line_repeated',
+    pass,
+    score: pass ? 1.0 : Math.max(0, 1 - (worst - 1) * 0.34),
+    ...(pass ? {} : { severity: 'warning' as const }),
+    reason: pass
+      ? 'The agent did not repeat any line'
+      : `The agent said the same line ${worst}x${repeatedLines > 1 ? ` (${repeatedLines} lines repeated)` : ''} — "${worstLine.slice(0, 60)}"`,
+    metadata: { worstRepeatCount: worst, repeatedLines },
+  };
+}
+
 /** SEV-1 2026-07-30: the loop meter for EVERY agent. The azul rubric had a
  *  repetition dimension; the fleet — answering-service and no-ivr, 90% of
  *  daily traffic and the worst loopers (141 answering-service calls with 3+
@@ -161,10 +385,24 @@ function gradeHandoffExpectedVsActual(input: DeterministicGraderInput): GraderRe
  *  loop guard's classifier so live enforcement and post-call measurement
  *  share one definition of "asked again". */
 function gradeQuestionRepetition(input: DeterministicGraderInput): GraderResult {
-  const agentLines = input.transcript
-    .split('\n')
-    .filter(l => /^agent:/i.test(l.trim()))
-    .map(l => l.replace(/^agent:\s*/i, ''));
+  /**
+   * THE SAME EYES AS THE LIVE GUARD, INCLUDING ITS DOUBLE-CAPTURE RULE.
+   *
+   * conversationLoopGuard's header promises that "the post-call graders count
+   * loops with exactly the same eyes the runtime guard uses". They did not:
+   * the guard carries `lastAgentLine` / `callerSpokeSinceAgent` because the
+   * transport emits agent speech on two event types, so one response can land
+   * in the transcript twice verbatim with no caller line between — and it
+   * says outright that "a REAL re-ask always has caller audio in between".
+   * This counter had no such rule, so a transport artefact could be reported
+   * to the operator as the agent badgering a caller.
+   *
+   * Checked on 2026-09-09 before the change: on all 11 of that day's flagged
+   * calls the repeated asks were distinct lines, so this corrects nothing
+   * retroactively and removes no real loop. It closes the gap before it
+   * fires, and restores the parity the guard's header claims.
+   */
+  const agentLines = agentSpeech(input.transcript);
   const counts = new Map<string, number>();
   for (const line of agentLines) {
     const topic = classifyAsk(line);
@@ -187,6 +425,75 @@ function gradeQuestionRepetition(input: DeterministicGraderInput): GraderResult 
       : `Asked for "${worstTopic}" ${worst} times — a caller answering the same question over and over is the single fastest trust destroyer`,
     metadata: { askCounts: Object.fromEntries(counts) },
   };
+}
+
+/**
+ * DID THE AGENT PROMISE A TRANSFER IT CANNOT MAKE?
+ *
+ * Written three times. Both earlier versions HID real broken promises, which
+ * is the failure that matters — this check exists to catch an agent promising
+ * a transfer on a line the operator ruled can never transfer.
+ *
+ *   v1  dropped any SENTENCE containing a negation, so
+ *       "I can't transfer you, BUT I can connect you with the team"
+ *       lost its affirmative half. (Codex, PR #278.)
+ *   v2  split on contrast markers, which fixed that one and still suppressed
+ *       "I cannot help with billing directly, SO I'll transfer you to the
+ *       billing team" — where the refusal governs BILLING, not the transfer,
+ *       and a comma plus "so" is no contrast marker. (Codex, PR #278 round 2.)
+ *
+ * The rule both rounds were pointing at: a negation only refuses THIS
+ * transfer phrase when it actually governs it. So for each transfer phrase,
+ * look back to the nearest preceding negation IN THE SAME SENTENCE; if
+ * anything between the two revokes it — a contrast marker, or a fresh
+ * affirmative intent like "I'll" / "let me" / "I can" — the negation was
+ * about something else and the promise stands.
+ *
+ * Proximity was tried and rejected: the refusal in "I'm not able to transfer
+ * calls or connect you directly" sits 34 characters from its promise phrase,
+ * the unrelated one in the billing sentence about 36, so no character window
+ * separates them. What separates them is whether an affirmative intervenes.
+ *
+ * Lines are never concatenated. The transport emits agent speech in separate
+ * utterances, and joining them let an unpunctuated refusal swallow a promise
+ * made later in the call.
+ */
+const TRANSFER_PROMISE =
+  /(?:transfer|connect) you|one moment while i (?:connect|transfer)|putting you through/g;
+const TRANSFER_REFUSAL =
+  /\b(?:not able to|unable to|can'?t|cannot|won'?t|will not|do not|don'?t|never)\b/g;
+/** Anything that ends a refusal's reach: the contrast that revokes it, or a
+ *  fresh affirmative intent that starts a new promise after it. */
+const REFUSAL_CANCELLED =
+  /\b(?:but|however|although|though|instead|i'?ll|i will|we'?ll|we will|let me|i can|going to)\b/;
+
+/** End index of the LAST match of `re` in `text`, or -1 when there is none. */
+function lastMatchEnd(text: string, re: RegExp): number {
+  const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  let end = -1;
+  let m: RegExpExecArray | null;
+  while ((m = scan.exec(text)) !== null) {
+    end = m.index + m[0].length;
+    if (m.index === scan.lastIndex) scan.lastIndex++;
+  }
+  return end;
+}
+
+function promisesATransfer(transcript: string): boolean {
+  for (const line of agentSpeech(transcript)) {
+    for (const sentence of line.toLowerCase().split(/[.!?]+/)) {
+      const promises = new RegExp(TRANSFER_PROMISE.source, 'g');
+      let hit: RegExpExecArray | null;
+      while ((hit = promises.exec(sentence)) !== null) {
+        const before = sentence.slice(0, hit.index);
+        const refusalEnd = lastMatchEnd(before, TRANSFER_REFUSAL);
+        // Nothing denied it, or whatever denied it was revoked before the
+        // phrase was reached.
+        if (refusalEnd === -1 || REFUSAL_CANCELLED.test(before.slice(refusalEnd))) return true;
+      }
+    }
+  }
+  return false;
 }
 
 /** SEV-1 2026-07-30: ~40 calls/day demanded a human 2+ times and got an
@@ -224,8 +531,24 @@ function gradeHumanRequestDeflection(input: DeterministicGraderInput): GraderRes
       .filter(l => /^agent:/i.test(l.trim()))
       .join(' ')
       .toLowerCase();
-    const promisedTransfer =
-      /(transfer|connect) you|one moment while i (connect|transfer)|putting you through/.test(agentText);
+    /**
+     * A REFUSAL IS NOT A PROMISE. 2026-09-09.
+     *
+     * The ticket-only script says, correctly and by the operator's own
+     * ruling: "I'm not able to transfer calls or connect you directly to a
+     * representative." The old test matched "connect you" inside that
+     * sentence and reported the agent for PROMISING a transfer it had just
+     * refused — the same shape as the 08-13 handoff bug, where the agent's
+     * own words were counted against it, in a second check.
+     *
+     * Observed live on records 2026-09-09 (CAf6d986ca): the agent refused,
+     * took the message, filed VA-58344 and read the number back twice, and
+     * graded CRITICAL for it.
+     *
+     * The scoping is in promisesATransfer below, and the FIRST version of it
+     * was wrong in the opposite direction — see the note there.
+     */
+    const promisedTransfer = promisesATransfer(input.transcript);
     const offeredMessage =
       /take (a |your |down )?(message|information|details)|have (the |our )?team (contact|call|reach)|call you (right )?back|(team member|someone) (will )?(call|contact|reach)/.test(agentText);
     if (promisedTransfer) {
@@ -1021,6 +1344,23 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
     /am i (speaking|talking) (with|to) [a-záéíóúñ'-]{2,}[\s\S]{0,160}\n\s*CALLER:[^\n]*\b(yes|yeah|yep|correct|that's right|si|sí|speaking|this is)\b/i,
     /(your last name|last name, please|and your last name)[\s\S]{0,200}\n\s*CALLER:[^\n]*[a-záéíóúñ'-]{2,}/i,
     /\bthank you,?\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ'-]{1,}[.,]/,
+    /**
+     * SILENT RECOGNITION — the runtime's other recognition-first shape,
+     * 2026-09-09. The 08-15 fix above taught this check to read the
+     * CONFIRMING form ("Am I speaking with Charles?" / "Yes."). The runtime
+     * also has a form that states the match outright and never asks:
+     *
+     *     AGENT: I have you as Robert Cheung. I see your usual clinic is …
+     *     AGENT: I have your record here. Which medication is it?
+     *
+     * The agent has the patient's record and the filed ticket carries the
+     * name — verified 2026-09-09 against the ticketing app: 65 of 65 tickets
+     * behind that day's "missing name/phone" criticals carried a name, a
+     * phone and a description. The caller never has to say the name aloud,
+     * so no caller-side pattern can ever match, and the better behaviour
+     * graded worse than the interrogation it replaced.
+     */
+    /\bi have (?:you as|your record)\b/i,
   ];
   const hasName = namePatterns.some(p => p.test(input.transcript));
   if (hasName) collectedFields.push('name');
@@ -1034,6 +1374,11 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
     // The approved confirm-once script: caller-ID confirmed by last four,
     // never read back in full ("number ending in 7471 ... best one to reach you").
     /number ending in \d{4}/i,
+    // 2026-09-09: the runtime's third callback form states the caller-ID
+    // number is being used and asks nothing ("I'll use your calling number as
+    // the callback"). The ticket carries caller_phone either way, so the
+    // callback the patient is promised exists; only the transcript is silent.
+    /\b(?:your|the) calling number\b/i,
   ];
   const hasPhone = phonePatterns.some(p => p.test(input.transcript));
   if (hasPhone) collectedFields.push('phone');
@@ -1046,7 +1391,7 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
 
   const completeness = collectedFields.length / CALLBACK_REQUIRED_FIELDS.length;
 
-  if (completeness >= 1.0) {
+  if (missingFields.length === 0) {
     return {
       grader: 'callback_fields_completeness',
       pass: true,
@@ -1056,7 +1401,22 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
     };
   }
 
-  if (completeness >= 0.67) {
+  /**
+   * COUNT THE FIELDS, DO NOT COMPARE THE FRACTION. 2026-09-09.
+   *
+   * This branch is the "one field short is not a crisis" branch, and for the
+   * whole life of the check it was UNREACHABLE. There are three required
+   * fields, so the only value that can arrive here is 2/3 —
+   * 0.6666666666666666 — and `0.6666666666666666 >= 0.67` is false. Every
+   * call missing exactly one field fell past this branch into CRITICAL.
+   *
+   * Measured on 2026-09-09 before the fix: 53 of the day's 68 critical
+   * findings on this grader, and the single largest driver of the
+   * Observatory's red "critical fails" number on every one of the preceding
+   * fourteen days. The intent was already written here; the arithmetic
+   * silently deleted it.
+   */
+  if (missingFields.length <= 1) {
     return {
       grader: 'callback_fields_completeness',
       pass: true,
@@ -1102,6 +1462,27 @@ export class CallGradingService {
       results.push(gradeQuestionRepetition(input));
     } catch (e) {
       console.error(`[GRADING] question repetition grader error:`, e);
+    }
+
+    // The three repetition counters (2026-09-09). Each is wrapped on its own
+    // so one throwing cannot take the other two — or the rest of the set —
+    // down with it.
+    try {
+      results.push(gradeRefiledRepeatedly(input));
+    } catch (e) {
+      console.error(`[GRADING] refiled repeatedly grader error:`, e);
+    }
+
+    try {
+      results.push(gradeGreetingReplayed(input));
+    } catch (e) {
+      console.error(`[GRADING] greeting replayed grader error:`, e);
+    }
+
+    try {
+      results.push(gradeAgentLineRepeated(input));
+    } catch (e) {
+      console.error(`[GRADING] agent line repeated grader error:`, e);
     }
 
     try {
@@ -1354,7 +1735,31 @@ Respond with a JSON object only, no other text:
   // NULL on all 2,203 calls and pinned `latency` and `tail_safety` at 0.5 —
   // note those two stay 0.5 for HISTORICAL calls, which have no such data to
   // recover; only calls finalized after that fix carry real values.
-  static readonly CURRENT_GRADER_VERSION = 9;
+  // v10 (2026-09-09): THE RED NUMBER ON THE OBSERVATORY WAS MOSTLY NOT REAL.
+  //
+  // Audited every critical finding the fleet produced on 2026-09-09 against
+  // the artifacts they claim to be about. 68 of the day's 83 were
+  // callback_fields_completeness, and that check was wrong two ways at once:
+  //
+  //   - `completeness >= 0.67` can never be true for 2 of 3 fields
+  //     (0.6666666666666666), so its own "one field short is fine" branch was
+  //     unreachable and 53 calls fell into CRITICAL through it;
+  //   - it reads the TRANSCRIPT for fields that live on the TICKET. All 65
+  //     tickets behind that day's criticals carried a name, a phone and a
+  //     description, so the stated harm — "patient may not receive callback"
+  //     — was false in every measured case.
+  //
+  // Also fixed here: a refusal ("I'm not able to … connect you") counted as a
+  // PROMISE of transfer, and the repetition counter missing the live guard's
+  // double-capture rule.
+  //
+  // The bump is the point. regradeStaleCalls only re-scores rows below
+  // CURRENT_GRADER_VERSION, so without it every false red already written to
+  // call_logs would stand forever — and the sweep re-reads the FINAL
+  // transcript, which also repairs the rows graded against a partial one
+  // (9 of 9 "missing reason" verdicts on 09-09 contradict the transcript now
+  // stored).
+  static readonly CURRENT_GRADER_VERSION = 10;
 
   /** Re-run the deterministic graders on calls graded under an older
    *  grader version. Deterministic-only — the LLM analysis is not re-run,

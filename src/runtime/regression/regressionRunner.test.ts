@@ -9,6 +9,7 @@ import {
 } from "./regressionRunner";
 import type { BoundAgent } from "../agentBinding";
 import type { GraderResult } from "../../services/callGradingService";
+import { COMPARABLE, criticalsOf } from "./comparable";
 
 function boundAgent(over: Partial<BoundAgent> = {}): BoundAgent {
   return {
@@ -232,5 +233,34 @@ describe("the summary", () => {
       oldCriticalCalls: 2,
       newCriticalCalls: 2,
     });
+  });
+});
+
+/**
+ * CODEX, PR #278: a new CRITICAL grader that is not in COMPARABLE is invisible
+ * to the replay verdict — `criticalsOf` filters through the whitelist before
+ * counting, so a replay that got worse in that dimension can still report
+ * `same` or `better`.
+ */
+describe('COMPARABLE covers the repetition counters', () => {
+  it('counts refiled_repeatedly as a critical when the replay filed nothing', () => {
+    const criticals = criticalsOf([
+      { grader: 'refiled_repeatedly', pass: false, metadata: { attempts: 3, critical: true } } as any,
+    ]);
+    expect(criticals).toContain('refiled_repeatedly');
+  });
+
+  it('carries agent_line_repeated through the comparison', () => {
+    expect(COMPARABLE.has('agent_line_repeated')).toBe(true);
+  });
+
+  /**
+   * And greeting_replayed stays OUT on purpose: the harness starts its
+   * transcript at the first CALLER turn, so the replayed side never plays a
+   * greeting and would score a free improvement against any stored call that
+   * greeted twice. Excluding it scores the agent, not the harness.
+   */
+  it('leaves greeting_replayed out, because the replay never plays a greeting', () => {
+    expect(COMPARABLE.has('greeting_replayed')).toBe(false);
   });
 });

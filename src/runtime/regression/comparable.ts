@@ -16,6 +16,16 @@
  * Audio-plumbing graders (latency, interruption_rate, transcript_coverage,
  * duration_mismatch) are deliberately absent: a text replay has no audio on
  * either side, so comparing them would score the harness, not the agent.
+ *
+ * `greeting_replayed` is absent for the SAME reason, and it is the one worth
+ * spelling out. The harness builds its transcript starting from the first
+ * CALLER turn, so the replayed side never plays a greeting at all. A stored
+ * call that really did greet twice would fail that check on the old side and
+ * pass on the new one every single time — a free "improvement" that is purely
+ * an artefact of how the replay is constructed. It is never critical, so it
+ * could not have moved a verdict, but it would have made the compared lists
+ * lie. (Codex asked for the new graders here, PR #278; this one earns its
+ * exclusion.)
  */
 export interface ComparableGraderResult {
   grader: string;
@@ -35,6 +45,16 @@ export const COMPARABLE = new Set([
   'actionable_request_needs_ticket',
   'callback_fields_completeness',
   'tail_safety',
+  // The repetition counters, added 2026-09-09 with the graders themselves.
+  // `refiled_repeatedly` is the one that matters: it is the only new grader
+  // that can be CRITICAL, and the harness sets `ticketNumber` from the
+  // replay's own writes ("SIM-1" when a filing tool ran, null when none did),
+  // so a replay that announces filing repeatedly and writes nothing is
+  // exactly the failure it names. Without it here, `criticalsOf` dropped that
+  // result and the run could report `same` or `better` on a replay that got
+  // measurably worse — the harness blind to the very defect just instrumented.
+  'refiled_repeatedly',
+  'agent_line_repeated',
 ]);
 
 export function criticalsOf(graders: ComparableGraderResult[] | undefined | null): string[] {
