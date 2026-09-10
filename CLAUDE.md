@@ -410,6 +410,7 @@ is reading noise.
 | Pipeline label on a card | `client/src/lib/pipelineSplit.ts` | Says which stack served a lane's calls, and warns on a mid-day cutover. |
 | PCP blind transfer | `src/runtime/blindTransfer.ts` + `blindTransferDialResult.ts` | Warns the caller, hands them into the PCP call-centre queue, and reads Twilio's `<Dial action>` back so the outcome is still measurable. PCP only; `RUNTIME_TRANSFER_MODE` overrides. |
 | "Greeting already played" | `src/runtime/greetingAlreadyPlayed.ts` | Appended by the RUNTIME, not the prompts — the transport is what plays the greeting, and tech has 16 tokens of ceiling headroom. |
+| The bounded office ask | `src/tools/sharedPatientTools.ts` (`resolve_location`) | Refuses when the office is the wrong KIND for the queue instead of returning `success: true` with a message, and bounds the ask at two per call (`RESOLVE_ASK_LIMIT`) so a refusal cannot become a 35-call well. Merged as #282; **the after-number has not been taken** — see the ceiling section. |
 
 ---
 
@@ -1697,7 +1698,7 @@ and it is the **41st attempt** that is refused; that refused attempt is never
 counted. A call whose model simply stopped after its 40th tool therefore looks
 identical here to one the ceiling stopped. Confirm by reading `tool_timeline`:
 a loop repeats one tool 30-odd times, and a call that merely finished busy
-does not. All nine below were confirmed that way, not assumed.
+does not. All eleven below were confirmed that way, not assumed.
 
 **This check sees ONE of the ceiling's three rules.** An empty result says
 only that no call reached `perCallDispatches` — it is not proof the build is
@@ -1728,23 +1729,30 @@ will ALWAYS return the pre-ceiling call of 2026-09-03 at 118 — check the date
 before concluding anything from a row above 40. As of 2026-09-10 that
 historical row is still the only one.
 
-Note also that `tool_call_count` is NULL on 577 of 1,620 grok calls
-(measured 2026-09-10; the table is live), so this check is blind to about a
-third of the population whatever the threshold. The control that says this is
-not a legacy gap: the NULL share is steady on every day the lane has run
-(39.3 / 35.6 / 34.5 / 35.1% across 09-03, 09-04, 09-08, 09-09), and it does
-not fall as the runtime matures. Why the column is unwritten on a third of
+Note also that `tool_call_count` is NULL on **714 of 1,952 grok calls —
+36.6%** (measured 2026-09-10 21:51 UTC; the table is live, and this read
+577/1,620 = 35.6% nine hours earlier on the same day). So this check is blind
+to about a third of the population whatever the threshold. The control that
+says this is not a legacy gap: the NULL share is steady on every day the lane
+has run (39.3 / 35.6 / 34.5 / 35.1% across 09-03, 09-04, 09-08, 09-09), it
+does not fall as the runtime matures, and the whole-population share moved
+only 1 point while the denominator grew by 332 calls. Why the column is unwritten on a third of
 calls is not yet established, and until it is, **this check's floor is unknown
 rather than zero.** That gap is larger than the `>`/`>=` bug this section
 documents, and nothing currently watches it.
 
-**What the corrected check found. Re-measured 2026-09-10: NINE rows at
-`>= 40`** — the pre-ceiling optical call of 09-03 at 118, and **eight sitting
-at exactly 40**. Nothing at all between 24 and 39 — the highest count any call
-reaches without touching the limit is 23 — so a 40 is the limit being
-reached, never drift. Two are 09-08 and **three are 09-09**, so this is live and recurring,
-not a historical batch. **None of the nine filed a ticket** (`ticket_number`
-NULL on all nine).
+**What the corrected check found. Re-measured 2026-09-10 21:51 UTC: ELEVEN
+rows at `>= 40`** — the pre-ceiling optical call of 09-03 at 118, and **ten
+sitting at exactly 40**. Nothing at all between 24 and 39 — the highest count
+any call reaches without touching the limit is still 23 — so a 40 is the limit
+being reached, never drift. **None of the eleven filed a ticket**
+(`ticket_number` NULL on all eleven).
+
+**It is not decaying, and the per-day count is the reason to care:** 09-03 ×1
+(the pre-ceiling 118) · 09-04 ×3 · 09-08 ×2 · 09-09 ×3 · **09-10 ×2**. This
+section read NINE earlier the same day and gained two before the day was out.
+Roughly two lost requests a day, each after a caller has spent two minutes on
+the phone.
 
 | call_sid | lane | day | dur | the loop | the gate that was refusing |
 |---|---|---|---|---|---|
@@ -1757,8 +1765,10 @@ NULL on all nine).
 | CA511a3e2dcc4a53d63e2d4cd2a6dcb29d | optical | 09-09 | 168s | `resolve_location` ×30, **all succeeding** | `file_optical_ticket` ×3 `["location"]` |
 | CAefddb2f48d13678c9df2f27e6750f227 | optical | 09-09 | 160s | `resolve_location` ×33, **all succeeding** | `file_optical_ticket` ×3 `["location"]` |
 | CAa6a32e9c9459a8b4d149383e5e083971 | surgery | 09-09 | 291s | `lookup_patient` ×35, **all succeeding** | `file_surgery_ticket` ×2 `["surgeon"]` |
+| CAebcb3ffe096d0bf024139cc416797a89 | optical | 09-10 | 140s | `resolve_location` ×35, **all succeeding** | `file_optical_ticket` ×3 `["location"]` |
+| CA4ffd0c125b59ea0f84f773e4256148ae | optical | 09-10 | 123s | `resolve_location` ×31, **all succeeding** | `file_optical_ticket` ×3 `["location"]` AND `["date_of_birth"]` |
 
-**The finding that matters: only the 118 was a failure loop.** All eight
+**The finding that matters: only the 118 was a failure loop.** All ten
 that reached the limit were loops of tools reporting SUCCESS (or, on pcp,
 reporting nothing). That means `identicalFailures: 3` and `perToolFailures: 6`
 were structurally blind to every one of them — they count failures, and a
@@ -1782,20 +1792,68 @@ other two rules leave no trace on the call row, so a census built from
 repeated-failure rules fire is **unknown, not zero** — which is the same trap
 this whole section documents, one level down.
 
-**And the shape is general, not an optical quirk.** On every one of the seven
+**And the shape is general, not an optical quirk.** On every one of the nine
 strikes that recorded outcomes at all, the same thing happens: a filing tool
 refuses for a missing field, and the model answers by re-running a LOOKUP tool
-that keeps returning success, instead of asking the caller for the field. Six
-of the seven are optical hitting `["location"]`; the seventh is **surgery
+that keeps returning success, instead of asking the caller for the field.
+Eight of the nine are optical hitting `["location"]`; the ninth is **surgery
 hitting `["surgeon"]` and re-running `lookup_patient` 35 times**. The lane and
 the field change; the loop does not — so **a fix scoped to `opticalTools.ts`
 would leave surgery looping.**
 
+### A FIX IS MERGED. DO NOT REBUILD IT — and do not assume it worked either
+
+**PR #282, merged 2026-09-10 as `de89ac2` on `main`.** Two changes, both in
+`src/tools/sharedPatientTools.ts` so surgery gets them too:
+
+1. **`resolve_location` REFUSES when the office is the wrong KIND of facility
+   for the queue** — a surgery centre named on the optical line. That branch
+   returned `success: true` with an advisory `message`, which is precisely
+   the trap the `!hit` branch above it had already been fixed for and whose
+   own comment calls it *"the worst loop we had"*: a success envelope tells
+   the model the call worked, so it retries. The fix stopped one branch short
+   the first time.
+2. **The office ask is bounded at two per call** via `gateAttempts`. Past
+   that the caller's words pass through with `resolved: false, verified:
+   false`, and `file_*_ticket`'s own escape takes the request unassigned at
+   high priority rather than losing it.
+
+**MERGED WITHOUT THE AFTER-NUMBER, on Wayne's explicit instruction**, with the
+Codex P1 saying so left OPEN on #282. `docs/BACKEND_HANDOFF.md` forbids that
+by default; the reason given was that the change cannot produce its own
+after-number while it sits unmerged and the loop was costing ~2 requests a
+day. **So nothing below is proven.** The after-measurement, including the
+guard, is in task #103 and in the #282 body.
+
+**The guard matters more than the primary number.** This change can trade a
+ROUTED optical ticket for an UNASSIGNED one, and optical assigns BY location —
+the department-2 shape that went ~98% → 49% once already. **Optical tickets
+filed with no `location_id` must not rise materially.** If they do,
+`RESOLVE_ASK_LIMIT` (currently 2) is the dial; it is a judgement, not a
+measurement, because nothing tells us how often a caller names a resolvable
+office on the THIRD attempt — the tool never let them get that far.
+
+**The after-control is `[RESOLVE LOCATION] the office ask is spent`**, one
+line per CALL. It printed per INVOCATION when first written, which on a
+30-call loop would have read ~28 exhausted calls — the number meant to prove
+the fix worked, inflated by the failure it detects. Found by Codex, fixed
+before merge.
+
+**STILL OPEN, and #282 did not touch it:** why 11 of 72 optical calls hitting
+the location gate never reached `file_optical_ticket`'s OWN CallSid-keyed
+escape, which demonstrably works on 61 of 72 (those 61 filed 53; the 11 filed
+**0**). A reproduction shows an absent or sentinel CallSid produces exactly
+the observed shape — three refusals, no ticket, `createTicket` never called —
+but what makes the SID go missing on ~4% of runtime calls is NOT established.
+The obvious cross-check does not settle it: the DOB gate does not loop on
+those same calls, but it is barely reached on them either, so that is an
+absent measurement, not evidence the keying worked.
+
 Whether a verified lookup answer is failing to reach the filing tool's view of
-the call is an open question, and it lives in the filing tools, not in the
-ceiling. The two standing suspects are present but are NOT the loop:
-`resolve_location` with no argument appears once or twice per call, and the
-location gate two or three times.
+the call is still open, and it lives in the filing tools, not in the ceiling.
+The two standing suspects are present but are NOT the loop: `resolve_location`
+with no argument appears once or twice per call, and the location gate two or
+three times.
 
 Markers added 2026-09-03 (late), all on `claude/determined-brown-o5qsft`.
 Each prints only when the thing it watches happens, so each is a live counter:
