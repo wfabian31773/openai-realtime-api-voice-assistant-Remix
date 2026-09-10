@@ -59,11 +59,28 @@ function read(doc: string): string {
  * never fail a semantic drift test.
  */
 function fencedBlocks(text: string, language: string): string[] {
+  // CommonMark: the closing fence uses the same character and must be at
+  // least as long as the opening one — not byte-identical to it.
   const re = new RegExp(
-    String.raw` ^[ ]{0,3}([\`~]{3,})[ \t]*${language}[ \t]*\r?$([\s\S]*?)^[ ]{0,3}\1[ \t]*\r?$`.trim(),
+    String.raw` ^[ ]{0,3}(\`{3,}|~{3,})[ \t]*${language}[ \t]*\r?$([\s\S]*?)^[ ]{0,3}\1+[ \t]*\r?$`.trim(),
     "gim",
   );
   return [...text.matchAll(re)].map((m) => m[2] ?? "");
+}
+
+/**
+ * The runaway-loop SQL block plus the prose immediately following it, up to
+ * the next heading. Wording guards apply HERE and not to the whole document:
+ * a 1,600-line runbook has every right to say "should return nothing" about
+ * some other check.
+ */
+function ceilingSection(doc: string): string {
+  const text = read(doc);
+  const block = ceilingQueryBlock(doc);
+  const start = text.indexOf(block);
+  const after = text.slice(start + block.length);
+  const nextHeading = after.search(/^#{1,6} /m);
+  return block + (nextHeading === -1 ? after : after.slice(0, nextHeading));
 }
 
 function ceilingQueryBlock(doc: string): string {
@@ -113,7 +130,8 @@ describe("the published runaway-loop check tracks the ceiling", () => {
         expect(found.length).toBeGreaterThan(0);
 
         for (const { operator, value } of found) {
-          // `> 40` is the exact bug: it can never see a stopped loop.
+          // `> 40` is the exact bug: it can never see a loop that reached
+          // the limit and landed on exactly 40.
           expect({ operator, value }).toEqual({
             operator: ">=",
             value: DEFAULT_CEILING_LIMITS.perCallDispatches,
@@ -125,7 +143,13 @@ describe("the published runaway-loop check tracks the ceiling", () => {
         // The check was published as "this should return nothing". At `>=` it
         // returns rows in normal operation, and a reader acting on the old
         // sentence would treat the ceiling working as a regression.
-        expect(read(doc)).not.toMatch(/should return nothing/i);
+        //
+        // Scoped to the ceiling's own SQL block and the prose immediately
+        // around it. Scanning the whole document would recreate exactly the
+        // coupling that scoping the threshold check removed: an unrelated
+        // future check that legitimately says "should return nothing" would
+        // fail this ceiling-specific suite.
+        expect(ceilingSection(doc)).not.toMatch(/should return nothing/i);
       });
     });
   }

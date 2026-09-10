@@ -1523,7 +1523,7 @@ Its no-log check is the one that matters, and it is SQL. The threshold is
 `dispatches >= perCallDispatches`, so a call can REACH 40 and can never
 exceed it. Written as `> 40` — as it was from 2026-09-03 until it was
 corrected — it proved the ceiling had shipped and then could never again see
-a loop the ceiling stopped. It missed eight of them.
+a loop that reached the limit. It missed eight of them.
 
 ```sql
 -- Each row is a CANDIDATE runaway loop, not a confirmed ceiling stop.

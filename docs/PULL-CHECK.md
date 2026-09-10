@@ -76,7 +76,7 @@ The second is a reading check, not a pass/fail one:
 ```sql
 -- one optical call returned 118 before the tool ceiling shipped.
 -- NOT an empty check, and not part of the two above: `begin` refuses at
--- `>= perCallDispatches`, so a stopped loop lands on exactly 40 and a `> 40`
+-- `>= perCallDispatches`, so a loop that reaches it lands on exactly 40 and a `> 40`
 -- threshold can never see one. Each row is a CANDIDATE loop, not a proven
 -- one: 40 means 40 dispatches were ALLOWED, and since begin refuses at
 -- `>= 40` it is the 41st ATTEMPT that is stopped and never counted. A call
