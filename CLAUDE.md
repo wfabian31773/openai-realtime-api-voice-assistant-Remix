@@ -1516,8 +1516,13 @@ corrected — it proved the ceiling had shipped and then could never again see
 a loop the ceiling stopped. It missed five of them.
 
 ```sql
--- Each row is a runaway loop the ceiling STOPPED. Not a regression: the
--- ceiling did its job. Read the call and find out what looped.
+-- Each row is a CANDIDATE, not a confirmed stop. `begin` guards on
+-- `dispatches >= 40` BEFORE it increments, so the 40th dispatch is ALLOWED
+-- and the refusal lands on the 41st — which returns before `agent.dispatch`
+-- and never reaches tool_call_count. So `= 40` proves forty were allowed,
+-- not that a 41st was refused: a call whose model simply stopped after its
+-- 40th tool looks identical here. VERIFY each row in `tool_timeline` — a
+-- real loop repeats one tool ~30 times; a merely busy call does not.
 -- Keep 40 in step with DEFAULT_CEILING_LIMITS.perCallDispatches
 -- (src/runtime/toolCeiling.ts); ceilingDocCheck.test.ts fails if they drift.
 SELECT call_sid, tool_call_count FROM call_logs
@@ -1527,9 +1532,10 @@ WHERE voice_provider = 'grok' AND tool_call_count >= 40;
 An empty result is NOT proof the build is healthy — it says only that no call
 hit the ceiling in the window. A row above 40 is the one thing here that IS a
 regression: nothing can exceed the limit while the ceiling is running, so a
-41 means the ceiling is not in the path. Re-measured 2026-09-10, the only row
-above 40 is still the pre-ceiling optical call of 2026-09-03 that the ceiling
-was built for.
+41 means the ceiling is not in the path — **but only a row from AFTER the
+ceiling deployed says that.** The query has no deployment predicate, so it
+always returns the pre-ceiling optical call of 2026-09-03 at 118. Re-measured
+2026-09-10, that row is still the only one above 40, and it is not a fault.
 
 Note also that `tool_call_count` is NULL on **577 of 1,620 grok calls**
 (re-measured 2026-09-10; the table is live), so this check is blind to about a
@@ -1562,9 +1568,12 @@ all nine).
 | CAefddb2f48d13678c9df2f27e6750f227 | optical | 09-09 | 160s | `resolve_location` ×33, **all succeeding** | `file_optical_ticket` ×3 `["location"]` |
 | CAa6a32e9c9459a8b4d149383e5e083971 | surgery | 09-09 | 291s | `lookup_patient` ×35, **all succeeding** | `file_surgery_ticket` ×2 `["surgeon"]` |
 
-**The finding that matters: only the 118 was a failure loop.** All eight that
-the ceiling actually stopped were loops of tools reporting SUCCESS (or, on
-pcp, reporting nothing). That means `identicalFailures: 3` and
+**The finding that matters: only the 118 was a failure loop.** The other eight
+were loops of tools reporting SUCCESS (or, on pcp, reporting nothing).
+**They are confirmed LOOPS, not confirmed ceiling STOPS** — each timeline was
+read individually (`resolve_location` ×30–33, `lookup_patient` ×35,
+`record_pcp_intake` ×40), which establishes the loop; nothing in SQL can
+establish that the ceiling fired, for the reason in the query comment above. That means `identicalFailures: 3` and
 `perToolFailures: 6` were structurally blind to every one of them — they
 count failures, and a success clears the counters by design (rule 1 of
 `toolCeiling.ts`). `perCallDispatches` did **all** of the stopping. The
