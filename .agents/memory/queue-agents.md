@@ -641,3 +641,48 @@ phone numbers resolve to more than one person (average 2.2, and Wayne's own
 number resolves to eight). Pointing pre-context at `patients_master` buys a name
 to CONFIRM. It does not buy an identity, and treating it as one is the failure
 standing instruction 6 exists to prevent.
+
+---
+
+## When a gate refuses, the model re-runs a LOOKUP — it does not ask the caller
+
+**Measured 2026-09-10 over every grok call that struck the per-call tool
+ceiling (`tool_call_count >= 40`, nine calls, 2026-09-03 to 2026-09-09).
+None of the nine filed a ticket.**
+
+Eight of the nine are the ceiling doing its job. One (2026-09-03, optical, 118
+dispatches) predates it. What matters is the shape the other eight share, and
+it is not the shape the ceiling was designed for:
+
+| the strike | what looped |
+|---|---|
+| 6 optical, refused `["location"]` | 5 re-run `resolve_location` (30–33×, **every one returning success**), 1 re-runs `lookup_patient` 35× |
+| 1 surgery, refused `["surgeon"]` | `lookup_patient` 35×, **every one succeeding** |
+| 1 pcp | `record_pcp_intake` 40×, no outcome recorded at all |
+
+**Only the pre-ceiling 118 was a failure loop.** Every loop the ceiling
+actually stopped was a loop of tools reporting SUCCESS. So:
+
+1. **`identicalFailures: 3` and `perToolFailures: 6` are structurally blind to
+   this.** They count failures and a success clears the counters (rule 1 of
+   `toolCeiling.ts`). The blunt `perCallDispatches` cap did **all** of the
+   stopping, on every observed case. A backstop that is the only rule firing
+   is not a backstop.
+2. **The lane and the field change; the loop does not.** Do not write this off
+   as a `resolve_location` quirk — surgery reaches it through
+   `["surgeon"]` and `lookup_patient`. A fix scoped to `opticalTools.ts`
+   leaves surgery looping.
+3. **The model's recovery move for a missing field is to re-run a lookup, not
+   to ask the caller.** That is the behaviour to design against. It is the
+   same failure as the date-of-birth gate one level up: a refusal the model
+   cannot diagnose is a refusal it repeats, and here it repeats it against a
+   tool that keeps saying yes.
+
+Open, and it is a ticket-path change so `docs/BACKEND_HANDOFF.md` applies:
+whether a verified `resolve_location` answer or a successful `lookup_patient`
+is failing to reach the filing tool's view of the call. **Before-number: nine
+strikes, zero tickets.**
+
+Two standing suspects are present on these calls but are NOT the loop —
+`resolve_location` with no argument appears once or twice per call, and the
+location gate two or three times.

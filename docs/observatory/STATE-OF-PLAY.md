@@ -804,9 +804,36 @@ wants for records in particular.
 ## The measurement this rests on
 
 2026-09-08, one full business day, queue lanes (optical/surgery/tech/records/
-pcp), calls >= 30s: **446 substantive, 255 filed, 191 produced no ticket.** The
-single biggest cause is the date-of-birth gate: **75 calls hit it, 53 filed
-nothing.**
+pcp), calls >= 30s: **446 substantive**, and **75 calls hit the date-of-birth
+gate**.
+
+> **CORRECTED 2026-09-10 — "the single biggest cause" was wrong, and this
+> document's own numbers said so.** The line here read *"the single biggest
+> cause is the date-of-birth gate"*, while the "What this does NOT close"
+> section below named **77** barely-heard calls against the gate's 53. Nothing
+> reconciled the two. Re-measured over the same 446 calls, scoring every
+> no-ticket call into exactly one bucket:
+>
+> | 2026-09-08, no ticket | | 2026-09-09 | |
+> |---|---|---|---|
+> | caller transcribed 0–1 times | **77** | | **68** |
+> | the date-of-birth gate | 52 | | 37 |
+> | no tool event at all | 14 | | 14 |
+> | other | 36 | | 37 |
+> | **total with no ticket** | **179** | | **156** |
+>
+> **Barely-heard is the larger bucket, on both days.** The date-of-birth gate
+> is the largest cause that a code change can currently reach, and that is the
+> claim this section supports — not the rank. The gate figure also reads **52**
+> under this query, not the 53 recorded above; both use
+> `call_logs.ticket_number IS NULL`, which item #77 says under-reports filings,
+> so all four buckets may be slightly high. The bias is shared, so the ordering
+> stands.
+>
+> The `191 produced no ticket` figure came from a different query than this
+> one, which returns 179 over the same 446 calls. Where the twelve went is not
+> established, and the figure is left as measured rather than reconciled by
+> assumption.
 
 The chain, all measured:
 
@@ -826,11 +853,38 @@ Share of substantive queue calls refused for `date_of_birth`, optical + surgery
 + tech — the baseline any "after" number has to beat:
 
 ```
-old core 08-28..09-02   3.2% - 8.7%
-old core 09-03          1.6%   (same day, pre-cutover)
-grok     09-03         12.4%   (same day, post-cutover)
-grok     09-04         14.8%
-grok     09-08         18.3%   75 calls, 53 filed nothing
+old core 08-27          5.4%   299 substantive, 16 refused
+old core 08-28          6.6%   271, 18
+old core 08-31          5.6%   341, 19
+old core 09-01          8.4%   356, 30
+old core 09-02          3.2%   314, 10
+old core 09-03          1.6%   123,  2   (same day, pre-cutover)
+grok     09-03         12.4%   186, 23   (same day, post-cutover)
+grok     09-04         14.8%   324, 48
+grok     09-08         18.3%   410, 75   -- 53 filed nothing
+grok     09-09         16.7%   360, 60   -- 37 filed nothing
+```
+
+**Re-measured day by day on 2026-09-10.** An earlier version of this block gave
+the old core as a range, `3.2% - 8.7%`. The 3.2% reproduces exactly; **the 8.7%
+does not** — the worst old-core day in 08-25..09-02 is 09-01 at 8.4%, and no
+day in that window returns 8.7% under the query below. The day-by-day figures
+replace the range because they are the ones that reproduce. Nothing about the
+conclusion moves: the old core sat between 3% and 9%, the runtime has not been
+under 12% on any day it has run, and the 09-03 pair is a same-day A/B on the
+same lanes.
+
+```sql
+WITH sub AS (
+  SELECT call_sid, created_at::date AS d, tool_timeline FROM call_logs
+  WHERE created_at::date = '<day>' AND voice_provider = 'grok'   -- IS NULL for old core
+    AND agent_used IN ('optical','surgery','tech') AND duration >= 30
+), gated AS (
+  SELECT s.call_sid, s.d,
+         bool_or(e->'outcome'->>'missingFields' LIKE '%date_of_birth%') AS dob_gate
+  FROM sub s LEFT JOIN LATERAL jsonb_array_elements(s.tool_timeline->'events') e ON true
+  GROUP BY 1,2)
+SELECT count(*) AS substantive, count(*) FILTER (WHERE dob_gate) AS refused FROM gated;
 ```
 
 ## What shipped
@@ -922,3 +976,88 @@ guesses no tool ever made.
   a number from a fixture while leaving dates), so the precedent is dates stay
   and identifiers go — but it is his rule and it should be his call, not one
   inherited from a file.
+
+---
+
+# 2026-09-10 — what a second day of measurement confirmed, and what got worse
+
+Nothing was shipped on this date. This entry is measurement only: every figure
+below was produced on 2026-09-10 against live tables, and each one either
+replicates a finding recorded above or corrects one.
+
+## The date-of-birth finding replicated on a second day
+
+2026-09-09, grok, optical + surgery + tech, calls >= 30s:
+
+| | 2026-09-08 | 2026-09-09 |
+|---|---|---|
+| substantive | 410 | 360 |
+| refused for `date_of_birth` | 75 (**18.3%**) | 60 (**16.7%**) |
+| of those, filed no ticket | **52** | **37** |
+| of those, `dobShape` = `(none)` | **75 of 75** | **60 of 60** |
+
+(The 09-08 no-ticket figure is **52** under the query re-run on 2026-09-10;
+**53** was recorded on 09-09. Both use `call_logs.ticket_number IS NULL`. The
+one-call difference is not reconciled and is not worth reconciling — see the
+correction block above for the buckets that actually matter.)
+
+**135 of 135 across two days: the model sent no `date_of_birth` argument at
+all.** One day could have been an artifact; two cannot. This is the behaviour,
+and it is why no parser change can reach these calls.
+
+Per lane on 09-09: surgery 21/98 = 21.4%, tech 30/178 = 16.9%,
+optical 9/84 = 10.7%.
+
+**Both fixes are still unmerged.** `dc33d6e` (parser reads a birthday spelled
+one digit at a time) and `1f4d842` (the filing tools read the caller's own
+words) are on `claude/determined-brown-o5qsft`; `git merge-base --is-ancestor`
+against `origin/main` says NO as of 2026-09-10. **So 09-09 is a BEFORE number,
+not a result.** Nothing here has yet been measured against a build containing
+either fix.
+
+## The runaway-loop check found three more, and the shape is not optical-only
+
+Re-running the corrected `>= 40` check on 2026-09-10 returns **nine** rows,
+where the same check returned six the day before. Three are new, all
+2026-09-09: two optical (21:25 and 21:53) and one surgery (22:49).
+**None of the nine filed a ticket.**
+
+The generalisation the surgery call forces:
+
+> On all seven strikes that recorded outcomes at all, a filing tool refuses for
+> a missing field and the model answers by re-running a LOOKUP tool that keeps
+> returning **success**, rather than asking the caller for the field.
+
+Six of the seven are optical refused for `["location"]` — five re-resolve the
+location, one re-runs `lookup_patient`. The seventh is **surgery refused for
+`["surgeon"]`, re-running `lookup_patient` 35 times.** The lane and the field
+change; the loop does not. So this is not a quirk of `resolve_location`, and a
+fix scoped to `opticalTools.ts` would leave surgery looping.
+
+`identicalFailures: 3` and `perToolFailures: 6` cannot see any of these — a
+success clears the counters by design. The blunt `perCallDispatches: 40` cap
+is doing all of the stopping, on every observed case.
+
+Ticket-path work, so `docs/BACKEND_HANDOFF.md` applies. The before-number is
+in the table in `CLAUDE.md`: **nine strikes, zero tickets.**
+
+## Two corrections to figures recorded above
+
+- **The old-core date-of-birth range.** Recorded as `3.2% - 8.7%`. The 3.2%
+  reproduces exactly; **8.7% does not appear on any day in 08-25..09-02** —
+  the worst is 09-01 at 8.4%. Replaced above with the day-by-day figures,
+  which do reproduce. The conclusion is unchanged.
+- **`tool_call_count` NULL share.** Recorded as 422 of 1,174 grok calls; now
+  **577 of 1,620**. The point that mattered holds and is now stronger: the
+  share is steady on every day the lane has run (39.3% / 35.6% / 34.5% /
+  35.1%), so it is not a legacy gap, and **255** of those NULL calls lasted
+  30 seconds or more.
+
+## Still open, unchanged by any of this
+
+- Why `tool_call_count` is unwritten on about a third of grok calls. Until
+  that is known, the runaway-loop check's floor is unknown rather than zero.
+- Whether a verified `resolve_location` / a successful `lookup_patient` is
+  failing to reach the filing tool's view of the call.
+- The PHI question on the date-of-birth test fixtures, put to Wayne on 09-09
+  and not yet answered.

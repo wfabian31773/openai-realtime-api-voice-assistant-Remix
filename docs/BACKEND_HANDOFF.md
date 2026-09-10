@@ -178,6 +178,49 @@ Contributing causes, in order of confidence:
    `1953-02-22` on file; `Ramon Ronquillo` `1955-08-24` against `1955-08-31`.
 3. **Only 2 of those 30 patients have any physician on record at all.**
 
+### Two live ticket-path losses, with their before-numbers (measured 2026-09-10)
+
+Both are recorded here because §0's rule applies to them: **neither may be
+changed without the production number, before and after.** Both before-numbers
+are stated so a later change has something to be measured against.
+
+**1. The date-of-birth gate.** A filing tool refuses for a missing
+`date_of_birth`, and the call ends with no ticket.
+
+| grok, optical+surgery+tech, calls >=30s | 2026-09-08 | 2026-09-09 |
+|---|---|---|
+| substantive | 410 | 360 |
+| refused for `date_of_birth` | 75 (18.3%) | 60 (16.7%) |
+| of those, filed nothing | **52** | **37** |
+| of those, the model sent no argument at all (`dobShape` = `(none)`) | **75 of 75** | **60 of 60** |
+
+It is not the largest no-ticket bucket. Over all five queue lanes, calls
+>=30s, every no-ticket call scored into exactly one bucket: **caller
+transcribed 0–1 times 77 (09-08) / 68 (09-09)**, the date-of-birth gate 52 /
+37, no tool event at all 14 / 14, other 36 / 37 — 179 and 156 in total against
+446 and 392 substantive. Barely-heard is larger on both days; the gate is the
+largest bucket a change to OUR code can reach.
+
+The old core on the same measure ran 3.2%–8.4% (08-27..09-02) and **1.6% on
+2026-09-03 before the cutover, against 12.4% on grok the same day** — a
+same-day A/B on the same lanes. Two fixes exist on
+`claude/determined-brown-o5qsft` (`dc33d6e`, `1f4d842`) and are **not in
+`main`**, so every figure above is a BEFORE number. The after-control is the
+`[DOB] refused a date of birth in the shape (none)` count falling.
+
+**2. The success-loop.** A filing tool refuses for a missing field and the
+model answers by re-running a LOOKUP tool that keeps returning success,
+instead of asking the caller. Nine calls have struck the per-call tool ceiling
+(`tool_call_count >= 40`) between 2026-09-03 and 2026-09-09; **none of the
+nine filed a ticket.** Six are optical refused for `["location"]`, one is
+surgery refused for `["surgeon"]` re-running `lookup_patient` 35 times, one is
+pcp, one predates the ceiling. It is recurring, not historical — three of the
+nine are 2026-09-09 alone.
+
+Because the surgery case reaches the same loop through a different tool and a
+different field, **a fix scoped to `opticalTools.ts` will not close it.**
+Before-number: **nine strikes, zero tickets.**
+
 ### Duplicate filings
 
 Real and unfixed. The four queue tools (`opticalTools`, `surgeryTools`, `techTools`,

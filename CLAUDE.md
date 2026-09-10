@@ -404,6 +404,8 @@ is reading noise.
 | The teardown request sweep | `src/runtime/requestSweep.ts` (decides) + `sweepRunner.ts` (files) | If the caller made a request and no filing tool succeeded, files it from the transcript at teardown. Wired in `voiceRuntime.ts` AFTER the call_logs write. Recovers only 6 of 53 today — see the open question about "no name, no ticket". |
 | Mid-call language switching | `src/tools/languageTools.ts` + the bridge's transport step | `set_spoken_language`; result to the model BEFORE the wire changes. Proven live 2026-09-03 on a Turkish caller. |
 | Repeated-failure ceiling | `src/runtime/toolCeiling.ts` | Stops a tool loop. **Keys on IDENTICAL arguments**, so a model that varies them gets more than 3 bites — observed 4–6. Its stops are INVISIBLE in `tool_timeline` (it short-circuits before dispatch, so `wrapWithTelemetry` never runs); console-only, uncountable from SQL. |
+| The date-of-birth escape | `src/tools/dobEscape.ts` | Ask once for a missing date of birth, then file anyway marked unavailable. **It reaches that second attempt on a minority of calls**: on 2026-09-08, 42 of the 75 refusals were the LAST tool event of the call. |
+| The caller's spoken date of birth | `src/tools/spokenDob.ts` + `src/runtime/transcriptLog.ts` | Reads the date out of what the caller actually said, by CallSid — a THIRD source in all four filing tools, after the model's argument and after `verifiedDobFor`, never replacing either. Guarded by ADJACENCY: only a date said while answering a request for one. **On the branch, not in `main` as of 2026-09-10.** |
 | Grok cost from the bill | `src/services/grokCostAllocation.ts` + `xaiBilling.ts` + `grokCostReconciler.ts` | Splits xAI's authoritative daily total across the day's calls by seconds. **Dormant without `XAI_MANAGEMENT_KEY` / `XAI_TEAM_ID`.** |
 | The runtime's agents-table id | `src/runtime/agentIdentity.ts` | slug → `agents.id`, cached per lane. Without it every runtime call is absent from five per-agent reports. |
 | Pipeline label on a card | `client/src/lib/pipelineSplit.ts` | Says which stack served a lane's calls, and warns on a mid-day cutover. |
@@ -902,6 +904,9 @@ over every queue call since each lane's own cutover. Do not re-derive these.**
   were "what time do you close?"). The taxonomy:
   23 the date-of-birth gate · 12 asked for a human then hung up ·
   7 no tool ever ran · 9 other.
+  **This is the 09-03 day only. The date-of-birth gate has been measured twice
+  since and got worse, not better — see the date-of-birth gate section below
+  before quoting 23 as the size of it.**
 - **The teardown sweep as built recovers only 6 of those 53.** 47 skip on
   "no name, no ticket", because the calls that get lost are exactly the calls
   where identification failed. The identity rule selects against the population
@@ -979,6 +984,107 @@ over every queue call since each lane's own cutover. Do not re-derive these.**
   So cost-per-call is not comparable between pipelines today, and
   `total_cost_cents` on a grok row is not built from token counts.
   **The route is the bill, not the wire** — see the cost section below.
+
+---
+
+## THE DATE-OF-BIRTH GATE — measured on two full days, and the model sends nothing
+
+Full write-up in `docs/observatory/STATE-OF-PLAY.md` under 2026-09-09. Every
+number here was re-measured 2026-09-10. The per-day shares reproduce that
+write-up exactly; **three of its figures did not and are corrected below and
+there** — the old-core range, the "single biggest cause" claim, and one call
+in the 09-08 loss count.
+
+**THE MODEL SENDS NO `date_of_birth` ARGUMENT. 135 of 135 refusals over two
+full days** — `dobShape` reads `(none)` on 75 of 75 on 2026-09-08 and on 60 of
+60 on 2026-09-09. It replicated on a second day, so it is the behaviour and not
+an artifact of one day. **No parser fix can reach these calls**; there is
+nothing to parse.
+
+Share of substantive (>=30s) queue calls — optical + surgery + tech — where a
+filing tool refused for `date_of_birth`. The pipeline split is the control:
+
+| day | pipeline | substantive | refused | share |
+|---|---|---|---|---|
+| 2026-08-27 | old core | 299 | 16 | 5.4% |
+| 2026-08-28 | old core | 271 | 18 | 6.6% |
+| 2026-08-31 | old core | 341 | 19 | 5.6% |
+| 2026-09-01 | old core | 356 | 30 | 8.4% |
+| 2026-09-02 | old core | 314 | 10 | 3.2% |
+| 2026-09-03 | old core, **pre-cutover same day** | 123 | 2 | **1.6%** |
+| 2026-09-03 | grok, **post-cutover same day** | 186 | 23 | **12.4%** |
+| 2026-09-04 | grok | 324 | 48 | 14.8% |
+| 2026-09-08 | grok | 410 | 75 | **18.3%** |
+| 2026-09-09 | grok | 360 | 60 | 16.7% |
+
+The 09-03 pair is a same-day A/B on the same lanes, and it is the strongest
+thing here: 1.6% before the cutover, 12.4% after.
+
+**IT COSTS TICKETS, on both measured days** — and here is where it sits among
+the other losses. Every substantive call with no ticket, scored into exactly
+one bucket (all five queue lanes, both pipelines, calls >=30s):
+
+| no ticket, by cause | 2026-09-08 | 2026-09-09 |
+|---|---|---|
+| caller transcribed 0–1 times | **77** | **68** |
+| **the date-of-birth gate** | **52** | **37** |
+| no tool event at all | 14 | 14 |
+| other | 36 | 37 |
+| **total** | **179** | **156** |
+| (substantive calls) | 446 | 392 |
+
+**READ THE FIRST ROW BEFORE THE SECOND.** Barely-heard is the LARGER bucket on
+both days. An earlier version of this heading, and the write-up in
+`STATE-OF-PLAY.md`, called the date-of-birth gate the single biggest cause; it
+is not, and that same document already carried the 77 that disproved it — the
+two numbers sat in one file and nothing reconciled them. Both are now
+corrected. The gate is the second bucket, and it is the one with a diagnosis:
+we know exactly why those 52 and 37 calls failed.
+
+All four buckets use `call_logs.ticket_number IS NULL`, which #77 says
+under-reports filings, so every one of them may be slightly high. The bias is
+shared, so the ORDERING is safe even though the absolute counts are soft.
+
+**In 51 of the 75 on 09-08 the caller's own transcribed words already carried a
+birth year or a month name.** They answered. Nothing carried the answer to the
+filing tool.
+
+**NEITHER FIX IS DEPLOYED.** `dc33d6e` (the parser reads a birthday said one
+digit at a time) and `1f4d842` (the filing tools read the caller's own words)
+are on `claude/determined-brown-o5qsft` and **not in `main` as of 2026-09-10**.
+So every number in the table above, 09-09 included, is a BEFORE number. The
+control that will say whether they worked is `[DOB] refused a date of birth in
+the shape (none)` FALLING; the two new markers only prove the new paths are
+live.
+
+**Known and unchanged:** a birthday spoken as WORDS rather than digits still
+refuses, in English and in Spanish — observed on real calls in both. And the
+DOB question itself is recognised in English and Spanish only, while the
+runtime's language table also carries Tagalog, Korean, Armenian, Farsi,
+Vietnamese, Russian and Arabic. (Literal examples are deliberately not
+reproduced here: they are real callers' dates of birth, and whether they may
+live in git is an open question for Wayne.)
+
+```sql
+-- The gate's share of substantive queue calls, per day. Change the provider
+-- predicate to compare pipelines; `voice_provider IS NULL` is the old core.
+WITH sub AS (
+  SELECT call_sid, created_at::date AS d, tool_timeline FROM call_logs
+  WHERE created_at::date = '<day>' AND voice_provider = 'grok'
+    AND agent_used IN ('optical','surgery','tech') AND duration >= 30
+), gated AS (
+  SELECT s.call_sid, s.d,
+         bool_or(e->'outcome'->>'missingFields' LIKE '%date_of_birth%') AS dob_gate,
+         bool_or(e->'args'->>'dobShape' = '(none)')                     AS shape_none
+  FROM sub s LEFT JOIN LATERAL jsonb_array_elements(s.tool_timeline->'events') e ON true
+  GROUP BY 1,2
+)
+SELECT count(*) AS substantive, count(*) FILTER (WHERE dob_gate) AS refused,
+       count(*) FILTER (WHERE dob_gate AND shape_none) AS model_sent_nothing
+FROM gated;
+-- `tool_timeline` IS reliable for refusals (it drops filings, not gates) —
+-- that is the one thing it may be used for. See the measurement section.
+```
 
 ---
 
@@ -1420,35 +1526,42 @@ WHERE voice_provider = 'grok' AND tool_call_count >= 40;
 An empty result is NOT proof the build is healthy — it says only that no call
 hit the ceiling in the window. A row above 40 is the one thing here that IS a
 regression: nothing can exceed the limit while the ceiling is running, so a
-41 means the ceiling is not in the path. On 2026-09-09 the only such row was
-the pre-ceiling optical call of 2026-09-03 that the ceiling was built for.
+41 means the ceiling is not in the path. Re-measured 2026-09-10, the only row
+above 40 is still the pre-ceiling optical call of 2026-09-03 that the ceiling
+was built for.
 
-Note also that `tool_call_count` is NULL on 422 of 1,174 grok calls
-(measured 2026-09-09; the table is live), so this check is blind to about a
+Note also that `tool_call_count` is NULL on **577 of 1,620 grok calls**
+(re-measured 2026-09-10; the table is live), so this check is blind to about a
 third of the population whatever the threshold. The control that says this is
 not a legacy gap: the NULL share is steady on every day the lane has run —
-94/239 on 09-03, 144/405 on 09-04, 180/521 on 09-08 — and 187 of those NULL
-calls lasted 30 seconds or more, so they are not all instant hangups. Why the
-column is unwritten on a third of calls is not yet established, and until it
-is, this check's floor is unknown rather than zero.
+94/239 on 09-03, 144/405 on 09-04, 180/521 on 09-08, 159/453 on 09-09, i.e.
+39.3% / 35.6% / 34.5% / 35.1% — and **255** of those NULL calls lasted 30
+seconds or more, so they are not all instant hangups. Why the column is
+unwritten on a third of calls is not yet established, and until it is, this
+check's floor is unknown rather than zero.
 
-**What the corrected check found, measured 2026-09-09.** Six rows at `>= 40`:
-the pre-ceiling optical call of 09-03 at 118, and five sitting at exactly 40.
+**What the corrected check found. Re-measured 2026-09-10: NINE rows at
+`>= 40`, three of them new since the check was corrected the day before.** The
+pre-ceiling optical call of 09-03 at 118, and **eight sitting at exactly 40**.
 Nothing at all between 25 and 39 — the highest count any call reaches without
-striking the ceiling is 23 — so 40 is a ceiling strike, never drift. Two of
-the five are 09-08, so this is live. **None of the six filed a ticket**
-(`ticket_number` NULL on all six).
+striking the ceiling is 23 — so 40 is a ceiling strike, never drift. Two are
+09-08 and **three are 09-09**, so this is live and it is recurring, not a
+historical batch. **None of the nine filed a ticket** (`ticket_number` NULL on
+all nine).
 
-| call_sid | lane | day | dur | the loop |
-|---|---|---|---|---|
-| CAc9f38039b80c47cf13cf5c15b79c1c37 | optical | 09-03 | 245s | `file_optical_ticket` ×110, all `missing:["date_of_birth"]` |
-| CA3985d8bcabd63bb29e7861a58cfc682b | optical | 09-04 | 120s | `resolve_location` ×32, **all succeeding** |
-| CAefbdd1832725217d5846f723c259f944 | optical | 09-04 | 161s | `lookup_patient` ×35, **all succeeding** |
-| CA60675f75fcbb9211e68dc01e7416a83f | pcp | 09-04 | 247s | `record_pcp_intake` ×40, **no outcome recorded at all** |
-| CA9f9710a9fe054f387f1d6e4c6f3b6350 | optical | 09-08 | 159s | `resolve_location` ×30, **all succeeding** |
-| CA3ccec8b38c1734b990f7f6c91fec71e6 | optical | 09-08 | 121s | `resolve_location` ×32, **all succeeding** |
+| call_sid | lane | day | dur | the loop | the gate that was refusing |
+|---|---|---|---|---|---|
+| CAc9f38039b80c47cf13cf5c15b79c1c37 | optical | 09-03 | 245s | `file_optical_ticket` ×110, all failing | `["date_of_birth"]` |
+| CA3985d8bcabd63bb29e7861a58cfc682b | optical | 09-04 | 120s | `resolve_location` ×32, **all succeeding** | `file_optical_ticket` ×2 `["location"]` |
+| CAefbdd1832725217d5846f723c259f944 | optical | 09-04 | 161s | `lookup_patient` ×35, **all succeeding** | `file_optical_ticket` ×2 `["location"]` |
+| CA60675f75fcbb9211e68dc01e7416a83f | pcp | 09-04 | 247s | `record_pcp_intake` ×40, **no outcome recorded at all** | — |
+| CA9f9710a9fe054f387f1d6e4c6f3b6350 | optical | 09-08 | 159s | `resolve_location` ×30, **all succeeding** | `file_optical_ticket` ×2 `["location"]` |
+| CA3ccec8b38c1734b990f7f6c91fec71e6 | optical | 09-08 | 121s | `resolve_location` ×32, **all succeeding** | `file_optical_ticket` ×2 `["location"]` |
+| CA511a3e2dcc4a53d63e2d4cd2a6dcb29d | optical | 09-09 | 168s | `resolve_location` ×30, **all succeeding** | `file_optical_ticket` ×3 `["location"]` |
+| CAefddb2f48d13678c9df2f27e6750f227 | optical | 09-09 | 160s | `resolve_location` ×33, **all succeeding** | `file_optical_ticket` ×3 `["location"]` |
+| CAa6a32e9c9459a8b4d149383e5e083971 | surgery | 09-09 | 291s | `lookup_patient` ×35, **all succeeding** | `file_surgery_ticket` ×2 `["surgeon"]` |
 
-**The finding that matters: only the 118 was a failure loop.** All five that
+**The finding that matters: only the 118 was a failure loop.** All eight that
 the ceiling actually stopped were loops of tools reporting SUCCESS (or, on
 pcp, reporting nothing). That means `identicalFailures: 3` and
 `perToolFailures: 6` were structurally blind to every one of them — they
@@ -1457,15 +1570,23 @@ count failures, and a success clears the counters by design (rule 1 of
 backstop is not a backstop in practice; on the observed evidence it is the
 only rule that fires.
 
-The shape on four of five optical calls is the same: `file_optical_ticket`
-refuses with `missing:["location"]`, `resolve_location` then returns
-`success: true, verified: true`, and the filing refuses for the missing
-location again — so the agent re-resolves a location it has already resolved,
-indefinitely. Whether `resolve_location`'s verified answer is failing to
-reach the filing tool's view of the call is an open question, and it is in
-`opticalTools.ts`, not here. The two standing suspects are present but are
-NOT the loop: `resolve_location` with no argument appears once per call, and
-the location gate once or twice.
+**And the shape is now general, not an optical quirk.** On every one of the
+seven strikes that recorded outcomes at all, the SAME thing happens: a filing
+tool refuses for a missing field, and the model answers by re-running a
+LOOKUP tool that keeps returning success, instead of asking the caller for the
+field. Six of the seven are optical hitting `["location"]` — five of those
+re-resolve the location, one re-runs `lookup_patient` — and the seventh is
+**surgery hitting `["surgeon"]` and re-running `lookup_patient` 35 times**. The
+lane and the field change; the loop does not.
+
+Whether a verified `resolve_location` answer is failing to reach the filing
+tool's view of the call is an open question, and it lives in `opticalTools.ts`
+/ `surgeryTools.ts`, not in the ceiling. The two standing suspects are present
+but are NOT the loop: `resolve_location` with no argument appears once or
+twice per call, and the location gate two or three times.
+
+This is a ticket-path question, so `docs/BACKEND_HANDOFF.md` applies. **The
+before-number is on the table above: nine strikes, zero tickets.**
 
 Markers added 2026-09-03 (late), all on `claude/determined-brown-o5qsft`.
 Each prints only when the thing it watches happens, so each is a live counter:

@@ -350,6 +350,18 @@ parser.
 would clear it. If not, the refusal is a loop and the model needs to be told
 what IT did wrong, not what to say.** That is what `MissingFields.fix` is for.
 
+**Replicated on two full days, 2026-09-08 and 2026-09-09** — `dobShape` reads
+`(none)` on **75 of 75** refusals and then on **60 of 60**, across surgery,
+tech and optical. 135 of 135. The reason it is recorded here rather than only
+in the day's write-up: a finding taken from one day is a candidate, and the
+cheapest way to promote it is to run the identical query on the next day the
+lane ran. It cost one query and it turned "the model omitted the argument on
+the calls I looked at" into "the model does not send this argument."
+
+And the corollary that survives the replication: **the gate is not the whole
+loss, but it is the biggest measurable slice of it** — 53 of the day's
+unfiled calls on 09-08, 37 on 09-09.
+
 ---
 
 ## A cost that is a constant times a duration is not a measurement
@@ -415,3 +427,55 @@ SELECT voice_provider, count(*) AS calls, count(agent_id) AS with_agent_id
 
 If `with_agent_id` is not `calls`, every per-agent report is under-counting
 by the difference and none of them will say so.
+
+
+---
+
+## A threshold that the thing it watches can never cross (2026-09-10)
+
+The runaway-loop check read
+
+```sql
+WHERE voice_provider = 'grok' AND tool_call_count > 40
+```
+
+against a ceiling that refuses at `dispatches >= perCallDispatches`. So a
+loop the ceiling STOPS lands on exactly 40 and can never exceed it. The check
+could see only calls from BEFORE the ceiling shipped: it proved the fix had
+landed, and in the same moment became permanently blind to the fix doing its
+job.
+
+Measured 2026-09-10 on the same table: `> 40` returns **1** row, `>= 40`
+returns **9**. The old form missed eight of the nine, including all three that
+happened the previous day.
+
+**Two things generalise.**
+
+1. **A boundary check has to be read against the code that enforces the
+   boundary, not against the number in the code.** `40` matched. `>` did not.
+   The number is the part people diff; the comparator is the part that
+   silently decides whether the query has any reachable population at all.
+2. **An empty result from a check that CANNOT return rows looks exactly like a
+   healthy system**, and it looks healthier the longer it runs. This is the
+   `agent_id` failure again (an absent row and a quiet lane look identical)
+   with the absence manufactured by the query rather than by the writer.
+
+The control is one line and it should be run whenever a check is written
+against a cap: **ask the query for the distribution, not the exceedances.**
+
+```sql
+SELECT count(*) FILTER (WHERE tool_call_count > 40)             AS above,
+       count(*) FILTER (WHERE tool_call_count = 40)             AS at_the_cap,
+       count(*) FILTER (WHERE tool_call_count BETWEEN 25 AND 39) AS just_below,
+       max(tool_call_count) FILTER (WHERE tool_call_count < 40)  AS highest_clean
+FROM call_logs WHERE voice_provider = 'grok';
+```
+
+On 2026-09-10 that returns `above 1 · at_the_cap 8 · just_below 0 ·
+highest_clean 23`. The **empty band between 23 and 40** is what proves 40 is a
+strike and never drift — and it is visible only because the query asked for
+the shape instead of asking whether a threshold was crossed.
+
+`ceilingDocCheck.test.ts` keeps the documented 40 in step with
+`DEFAULT_CEILING_LIMITS.perCallDispatches`. It cannot check the comparator,
+which is the half that was actually wrong.
