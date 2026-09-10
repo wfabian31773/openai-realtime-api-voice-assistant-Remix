@@ -192,6 +192,9 @@ async function harness(
         persisted.push(record as unknown as Record<string, unknown>);
         return true;
       }),
+    // A no-op: the real writer pulls the database at module load, and
+    // these tests must not. The flush itself is proven on the bridge.
+    flushTimeline: async () => undefined,
     sweepCall:
       over.sweepCall ??
       (async (record) => {

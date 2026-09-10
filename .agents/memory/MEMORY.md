@@ -1,5 +1,6 @@
 - [Supabase pooler URL + failover](supabase-pooler-failover.md) — pooler password = direct DB password, port 6543; bad secret trips circuit breaker; db.ts validates + fails over, await `dbReady` before DB work.
 - [Handoff silent failures](handoff-silent-failures.md) — urgent SMS fires only on successful clinical handoff; blocked handoffs must fail the tool, not silently succeed.
+- [Runtime handoff timeline flush](runtime-handoff-timeline.md) — a successful PCP blind transfer must persist `tool_timeline` / `tool_call_count` (and fill `human_agent_number` from `dialedNumber` when null). The runtime used to skip the flush when the redirect ended the stream mid-tool.
 - [VM publish port mappings](vm-publish-port-mappings.md) — stale `[[ports]]` entries make VM publishes hang at "waiting to be ready" then fail; keep only ports prod actually opens.
 - [Deployment health probe](deployment-health-probe.md) — Replit probe path is not configurable; app endpoints must return non-2xx on failed init (Twilio voice paths still need 200 TwiML).
 - [Director enforcement](director-enforcement.md) — `author`/`force_exit` cancel live audio; never wire a rule to them on an inferred signal (two mass regressions in 48h). Authoritative identity comes from `verify_patient_identity` via `markIdentityVerified`, not from a transcript regex. Kill switch: `DIRECTOR_AGENTS`.

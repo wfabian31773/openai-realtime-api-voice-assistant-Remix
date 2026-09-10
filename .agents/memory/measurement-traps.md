@@ -301,6 +301,13 @@ WHERE created_at::date = '<day>' AND ticket_number LIKE 'VA-%';
 written faithfully. It is successes that go missing. So the shape of an honest
 query is: refusals from the timeline, successes from the ticket table.
 
+**A later, narrower hole (2026-09-08):** after the PCP blind-transfer ship, a
+live SUCCESS left `tool_timeline` NULL while a same-day FAILURE had
+`handoff_to_pcp` events. The instrument was not dropping a third of filings
+this time — the runtime never flushed on the path that ends the stream
+mid-tool. See [runtime-handoff-timeline.md](runtime-handoff-timeline.md).
+Absence in the timeline is still not absence in the world.
+
 ### The proxy that looks safe and over-counts
 
 `transcript ~ 'VA-[0-9]{5}'` seems like a clean read of "the agent told the

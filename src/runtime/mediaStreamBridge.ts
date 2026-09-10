@@ -383,6 +383,30 @@ export interface VoiceCallBridgeDeps {
    * failure swallowed: losing the record must never break teardown, and
    * teardown never throws. Absent in offline tests. */
   persistCallRecord?: (record: VoiceCallRecord) => Promise<void>;
+  /**
+   * Write `call_logs.tool_timeline` + `tool_call_count` NOW, keyed by this
+   * call's SID.
+   *
+   * The agents' `recordingExecute` only records in memory. Queue tools on
+   * the SIP path flush per-tool (`realtimeAdapter.flushTimelineSafely`);
+   * SIP teardown flushes again (`voiceAgentRoutes`). The runtime did
+   * neither, so a PCP call whose tools ran left both columns NULL.
+   *
+   * Blind success makes that unrecoverable without this hook: the redirect
+   * ends the Media Stream while `handoff_to_pcp` is still awaiting, teardown
+   * runs, and `if (this.ended) return` used to skip everything after
+   * dispatch — including any chance to persist. Live 2026-09-08:
+   * CA41b1e1255bc1031612ddc6d47d2502a6 had a solid `transfer_outcome`
+   * (`method=blind`, `queue_answered`) and a NULL timeline; the morning
+   * failure the same day had `handoff_to_pcp` events because the call
+   * stayed up long enough for the 2h reaper.
+   *
+   * Called after every settled dispatch — including after the call has
+   * already ended — and once more at teardown. `flushAzulTimeline` is
+   * idempotent by event count and never throws into the caller. Absent in
+   * tests that are not about this.
+   */
+  flushTimeline?: (callSid: string) => Promise<void>;
   /** Hangup tools to intercept. Defaults to DEFAULT_END_CALL_TOOL_NAMES. */
   endCallToolNames?: string[];
   /** Overridable for the same reason endCallToolNames is: tests name their
@@ -1470,6 +1494,15 @@ export class VoiceCallBridge {
         ...(result.error ? { error: result.error } : {}),
       });
       this.ceiling.settle(name, args, toolSucceeded, output);
+      // PERSIST NOW, including after the call has already ended.
+      //
+      // `recordingExecute` has just appended this tool to the in-memory
+      // timeline. A blind-transfer redirect ends the Media Stream during
+      // THIS await, so `this.ended` is already true here on the success
+      // path — and that is exactly when the row used to stay NULL. The
+      // flush is keyed on the Twilio SID the agents already stored on the
+      // entry; the row exists from `openRuntimeCall`.
+      this.flushTimelineSafely();
       if (this.ended) return;
       this.session.sendToolResult(callId, result.ok, output);
       /**
@@ -1520,10 +1553,25 @@ export class VoiceCallBridge {
       // ceiling's reservation is released, or one throw would wedge this
       // tool shut for the rest of the call.
       this.ceiling.settle(name, args, false, undefined);
+      // A throw after the tool recorded still has events to persist —
+      // the same "ended during dispatch" case as the success path.
+      this.flushTimelineSafely();
       if (!this.ended) {
         this.session.sendToolResult(callId, false, { error: "dispatch_failed" });
         this.toolCallSettled(true);
       }
+    });
+  }
+
+  /**
+   * Write the in-memory timeline out, and never let that failure reach the
+   * call. Same contract as `realtimeAdapter.flushTimelineSafely`.
+   */
+  private flushTimelineSafely(): void {
+    const flush = this.deps.flushTimeline;
+    if (!flush) return;
+    void flush(this.deps.context.callSid).catch((e) => {
+      console.warn("[voice-runtime] timeline flush failed (call unaffected):", e);
     });
   }
 
@@ -1669,6 +1717,13 @@ export class VoiceCallBridge {
 
     const usageAtTeardown = this.usage.result();
     if (usageAtTeardown) console.info(usageSummaryMarker(usageAtTeardown));
+
+    // Backstop for tools that settled before teardown and for director-only
+    // entries that never went through dispatch. On a blind success the
+    // in-flight handoff has NOT recorded yet — that event is flushed from
+    // handleToolCall after dispatch returns, which is why that flush must
+    // not be gated on `!this.ended`.
+    this.flushTimelineSafely();
 
     if (this.deps.persistCallRecord) {
       const persist = this.deps.persistCallRecord;

@@ -887,6 +887,14 @@ call ends when the transport closes or the session errors fatally
   deletes the entry** (`:503-520` — deleting it used to gut a third of the
   pilot's QA record), and triggers a forced deterministic-grader pass
   (`:574-590`).
+- **The Grok runtime now flushes too.** Until 2026-09-08 it did not:
+  `persistRuntimeCall` deliberately omits those columns (the agents' recorder
+  owns the richer shape), and nothing else called `flushAzulTimeline`. A
+  successful PCP blind transfer ends the Media Stream mid-`handoff_to_pcp`,
+  so the in-memory events never landed — CA41b1e1 / PCP-57964. The bridge
+  now flushes after every settled dispatch, **including after the call has
+  ended**, and once more at teardown (`mediaStreamBridge.flushTimeline`,
+  wired in `voiceRuntime.ts`).
 
 ### 7b. Transcript write
 
