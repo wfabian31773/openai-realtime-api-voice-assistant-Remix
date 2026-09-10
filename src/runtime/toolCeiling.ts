@@ -37,6 +37,17 @@
  *      retries are ordinary here. Only a run of consecutive failures is the
  *      pathology.
  *
+ *      MEASURED AGAINST THIS, 2026-09-09: of the five loops the ceiling has
+ *      actually stopped, NONE was a failure loop. Four were a tool returning
+ *      success 30–35 times (`resolve_location`, `lookup_patient`) and one was
+ *      `record_pcp_intake` dispatched 40 times with no outcome recorded at
+ *      all. `identicalFailures` and `perToolFailures` could not see any of
+ *      them — a success clears the counters, which is this rule working as
+ *      written — so `perCallDispatches` did all of the stopping. "A tool that
+ *      keeps succeeding is not a loop" is not what the calls show. Whether
+ *      this rule should change is Wayne's call, not this file's; the evidence
+ *      is in CLAUDE.md beside the ceiling's SQL check.
+ *
  *   2. THE REFUSAL BORROWS THE TOOL'S OWN WORDS. When the ceiling stops a
  *      dispatch it replays the message the tool itself last returned, rather
  *      than inventing one. The tool knows what is missing and the prompts
@@ -78,6 +89,29 @@ export const DEFAULT_CEILING_LIMITS: CeilingLimits = {
   perToolFailures: 6,
   perCallDispatches: 40,
 };
+
+/**
+ * The SQL predicate that finds calls this ceiling STOPPED, derived from the
+ * limit itself so the two can never drift apart.
+ *
+ * `begin` refuses at `dispatches >= perCallDispatches`, so a call can REACH
+ * the limit and can never exceed it. The check published in CLAUDE.md and
+ * docs/PULL-CHECK.md was written as `> 40` against a ceiling of `>= 40`, and
+ * for the six days after the deploy it was the only thing watching for
+ * runaway loops while being unable, by construction, to see one the ceiling
+ * had stopped. Five such loops sat at exactly 40 and none of them appeared.
+ *
+ * WHAT A ROW MEANS — this is not the "should return nothing" check it
+ * replaces. A row is the ceiling doing its job: a loop happened, it was
+ * contained, and the call is worth reading. A row is NOT a regression, and an
+ * empty result is NOT proof the build is healthy — it only says no call hit
+ * the ceiling in the window.
+ *
+ * Consumed by `ceilingDocCheck.test.ts`, which fails if either document
+ * publishes a threshold that no longer matches this limit.
+ */
+export const CEILING_REACHED_SQL_PREDICATE =
+  `tool_call_count >= ${DEFAULT_CEILING_LIMITS.perCallDispatches}` as const;
 
 export type CeilingReason = "identical-args" | "same-tool" | "call-total";
 
