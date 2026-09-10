@@ -1813,10 +1813,31 @@ would leave surgery looping.**
    own comment calls it *"the worst loop we had"*: a success envelope tells
    the model the call worked, so it retries. The fix stopped one branch short
    the first time.
-2. **The office ask is bounded at two per call** via `gateAttempts`. Past
-   that the caller's words pass through with `resolved: false, verified:
-   false`, and `file_*_ticket`'s own escape takes the request unassigned at
-   high priority rather than losing it.
+2. **The office ask is bounded at two per call** via `gateAttempts` — **but
+   only on a call carrying a real Twilio CallSid.** Past that bound the
+   caller's words pass through with `resolved: false, verified: false`, and
+   `file_*_ticket`'s own escape takes the request unassigned at high priority
+   rather than losing it.
+
+   **READ THE EXCEPTION, BECAUSE IT LANDS ON THE COHORT THIS WAS AIMED AT.**
+   `gateRefusalsSoFar` opens with `if (!isTwilioCallSid(callSid)) return 0`,
+   so on a call with an absent or sentinel SID `officeAskSpent` can never
+   become true, the passthrough is unreachable, and `resolve_location` goes
+   on refusing exactly as before. That is by design in `gateAttempts` — a
+   sentinel is not a call, and sharing one counter across callers would file
+   somebody's request unassigned without ever asking them — but the
+   consequence here is specific and uncomfortable: **the ~4% invalid-SID
+   population is the standing suspect behind the eleven looping calls, and
+   change 2 is structurally incapable of helping it.**
+
+   So of the two changes, only **change 1** — the wrong-facility refusal —
+   can reach those calls, by removing the `success: true` envelope that
+   invites the retry in the first place. Change 2 protects every call that
+   does carry a real SID. Both are worth having; neither is the whole fix,
+   and the after-measurement should not be read as though change 2 covers
+   the loop cohort. Found by Codex on #283, AFTER #282 merged — the facts
+   were in the #282 description (it says the passthrough needs a real SID)
+   and were not carried through to what the bound therefore does not cover.
 
 **MERGED WITHOUT THE AFTER-NUMBER, on Wayne's explicit instruction**, with the
 Codex P1 saying so left OPEN on #282. `docs/BACKEND_HANDOFF.md` forbids that
@@ -1838,6 +1859,13 @@ line per CALL. It printed per INVOCATION when first written, which on a
 30-call loop would have read ~28 exhausted calls — the number meant to prove
 the fix worked, inflated by the failure it detects. Found by Codex, fixed
 before merge.
+
+**A SILENT MARKER IS NOT A FAILED DEPLOY.** It prints from the passthrough,
+which needs a real CallSid (see the exception above), so it can only ever
+count calls that have one. Read it together with the `[voice-runtime]` build
+marker: an absent line means either that no call exhausted its two asks, or
+that the ones which did had no usable SID. It cannot distinguish those, and
+it says nothing about whether change 1 is live.
 
 **STILL OPEN, and #282 did not touch it:** why 11 of 72 optical calls hitting
 the location gate never reached `file_optical_ticket`'s OWN CallSid-keyed
