@@ -362,3 +362,67 @@ describe('a lookup that never ran is not a prescriber who does not exist', () =>
     expect(errors.join('\n')).not.toMatch(/PROVIDER LOOKUP UNAVAILABLE/);
   });
 });
+
+/**
+ * THE CALLER'S OWN ANSWER, WHEN THE MODEL DID NOT RELAY IT.
+ *
+ * The 2026-09-08 date-of-birth gate refused 75 substantive queue calls across
+ * surgery, tech and optical and 53 filed nothing, with `dobShape` reading
+ * "(none)" on every one — the model sent no argument at all. Each lane carries
+ * its own copy of the fallback chain, so each lane needs its own proof that
+ * the third source is wired: "two paths through the same code, one working" is
+ * how this repo has lost a week before.
+ */
+describe('the date of birth the caller said, when the model sent none', () => {
+  const SID = 'CA0000000000000000000000000000ca11';
+
+  beforeEach(async () => {
+    (await import('./spokenDob')).resetSpokenDobs();
+    (await import('./dobEscape')).resetDobHistory();
+  });
+
+  it('files, instead of refusing, when the transcript holds the answer', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    noteSpokenDob(SID, [
+      'AGENT: May I have your date of birth?',
+      'CALLER: March 17th, 1973.',
+    ]);
+
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-TEST-TECHDOB'));
+
+    const { date_of_birth: _omitted, ...noDob } = BASE;
+    const out = (await runTool('file_tech_ticket', {
+      ...noDob,
+      call_sid: SID,
+      request_description: 'I need my eye drop prescription refilled',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(true);
+    expect(create.mock.calls[0][0].patientBirthYear).toBe('1973');
+    expect(create.mock.calls[0][0].patientBirthMonth).toBe('03');
+    expect(create.mock.calls[0][0].patientBirthDay).toBe('17');
+  });
+
+  it('still refuses when the caller never answered', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    noteSpokenDob(SID, [
+      'AGENT: What can I help you with?',
+      'CALLER: My appointment was March 17th, 1973.',
+    ]);
+
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+
+    const { date_of_birth: _omitted, ...noDob } = BASE;
+    const out = (await runTool('file_tech_ticket', {
+      ...noDob,
+      call_sid: SID,
+      request_description: 'I need my eye drop prescription refilled',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(false);
+    expect(out.missingFields).toContain('date_of_birth');
+    expect(create).not.toHaveBeenCalled();
+  });
+});

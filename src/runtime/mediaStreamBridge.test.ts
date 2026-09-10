@@ -75,6 +75,8 @@ function makeBridge(
     deadAirMs?: number;
     guardrailMode?: "enforce" | "log";
     toolCeiling?: { identicalFailures?: number; perToolFailures?: number; perCallDispatches?: number };
+    /** A REAL Twilio SID, for the stores that refuse anything else. */
+    callSid?: string;
   } = {},
 ) {
   const timers = makeTimers();
@@ -109,7 +111,7 @@ function makeBridge(
   const agent = over.agent ?? makeAgent();
   const bridge = new VoiceCallBridge({
     context: {
-      callSid: "CA-test",
+      callSid: over.callSid ?? "CA-test",
       streamSid: "MZ-test",
       slug: "optical",
       callerPhone: "+15551234567",
@@ -2564,5 +2566,142 @@ describe("set_spoken_language", () => {
     h.handlers().onToolCall("c1", "set_spoken_language", { language: "Spanish" });
     await settle();
     expect(order).toEqual(["result", "wire"]);
+  });
+});
+
+/**
+ * THE BRIDGE IS THE ONLY THING THAT CAN SEE WHAT THE CALLER SAID.
+ *
+ * 2026-09-08: 75 substantive queue calls were refused for a date of birth and
+ * 53 filed nothing. On 75 of 75 the model called the filing tool with no
+ * `date_of_birth` argument at all, while in 51 of them the caller's own
+ * transcribed words carried the answer — sitting in this class's transcript
+ * log, which nothing outside this file could reach.
+ *
+ * These test the WIRE, not the reader. `spokenDob.test.ts` owns the adjacency
+ * rule; what is proved here is that a caller line actually reaches it, on a
+ * real call, with the call's own SID.
+ */
+describe("what the caller said reaches the filing tools", () => {
+  const SID = "CA000000000000000000000000000f00d1";
+  const GREETING = "Thank you for calling Azul Vision optical. How can I help you today?";
+
+  async function store() {
+    return import("../tools/spokenDob");
+  }
+
+  it("posts the answer the caller gave when the agent asked for it", async () => {
+    const { spokenDobFor, resetSpokenDobs } = await store();
+    resetSpokenDobs();
+
+    const h = makeBridge({ greeting: GREETING, callSid: SID });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAudioDone(GREETING);
+    h.bridge.handleTwilioFrame({
+      event: "mark",
+      streamSid: "MZ-test",
+      mark: { name: lastMarkName(h) },
+    });
+
+    speakUtterance(h, "May I have your date of birth?");
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("March 17th, 1973.", "item-1");
+
+    expect(spokenDobFor(SID)).toBe("1973-03-17");
+  });
+
+  it("tracks the caller's FINAL words, not their first partial ones", async () => {
+    const { spokenDobFor, resetSpokenDobs } = await store();
+    resetSpokenDobs();
+
+    const h = makeBridge({ greeting: GREETING, callSid: SID });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAudioDone(GREETING);
+    h.bridge.handleTwilioFrame({
+      event: "mark",
+      streamSid: "MZ-test",
+      mark: { name: lastMarkName(h) },
+    });
+
+    speakUtterance(h, "May I have your date of birth?");
+    h.handlers().onSpeechStarted();
+    // The cumulative re-emission REPLACES the open line. Posting one line
+    // rather than the record would have stored the truncated year.
+    h.handlers().onCallerTranscript("March 17th, 19", "item-1");
+    h.handlers().onCallerTranscript("March 17th, 1973.", "item-1");
+
+    expect(spokenDobFor(SID)).toBe("1973-03-17");
+  });
+
+  it("still finds the ask when the answer is two caller lines later", async () => {
+    // "Sure." lands as its own line and the date follows it, so the agent's
+    // question is no longer the previous line. Posting a window off the tail
+    // of the record instead of the record itself loses this call — and it is
+    // an ordinary shape, not an edge case.
+    const { spokenDobFor, resetSpokenDobs } = await store();
+    resetSpokenDobs();
+
+    const h = makeBridge({ greeting: GREETING, callSid: SID });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAudioDone(GREETING);
+    h.bridge.handleTwilioFrame({
+      event: "mark",
+      streamSid: "MZ-test",
+      mark: { name: lastMarkName(h) },
+    });
+
+    speakUtterance(h, "May I have your date of birth?");
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("Sure.", "item-1");
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("March 17th, 1973.", "item-2");
+
+    expect(spokenDobFor(SID)).toBe("1973-03-17");
+  });
+
+  it("posts nothing when the agent never asked", async () => {
+    const { spokenDobFor, resetSpokenDobs } = await store();
+    resetSpokenDobs();
+
+    const h = makeBridge({ greeting: GREETING, callSid: SID });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAudioDone(GREETING);
+    h.bridge.handleTwilioFrame({
+      event: "mark",
+      streamSid: "MZ-test",
+      mark: { name: lastMarkName(h) },
+    });
+
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("My appointment was March 17th, 1973.", "item-1");
+
+    expect(spokenDobFor(SID)).toBeUndefined();
+  });
+
+  it("posts nothing for a call with no real SID", async () => {
+    const { spokenDobFor, resetSpokenDobs } = await store();
+    resetSpokenDobs();
+
+    // The harness default, "CA-test", is exactly the shape isTwilioCallSid
+    // refuses — and the shape a model invents when nothing was injected.
+    const h = makeBridge({ greeting: GREETING });
+    h.handlers().onConfigured();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAudioDone(GREETING);
+    h.bridge.handleTwilioFrame({
+      event: "mark",
+      streamSid: "MZ-test",
+      mark: { name: lastMarkName(h) },
+    });
+
+    speakUtterance(h, "May I have your date of birth?");
+    h.handlers().onSpeechStarted();
+    h.handlers().onCallerTranscript("March 17th, 1973.", "item-1");
+
+    expect(spokenDobFor("CA-test")).toBeUndefined();
   });
 });

@@ -777,3 +777,121 @@ describe('a lookup that never ran is not a surgeon who does not exist', () => {
     expect(errors.join('\n')).not.toMatch(/SURGEON LOOKUP UNAVAILABLE/);
   }, 30000);
 });
+
+/**
+ * THE CALLER'S OWN ANSWER, WHEN THE MODEL DID NOT RELAY IT.
+ *
+ * 2026-09-08: 75 substantive queue calls hit the date-of-birth gate and 53
+ * filed nothing. On 75 of 75 the model called the filing tool with NO
+ * `date_of_birth` argument — `dobShape` reads "(none)" on every refusal — while
+ * in 51 of them the caller's transcribed words contain the answer.
+ *
+ * These prove the THIRD source is actually reached and actually used, rather
+ * than that the store can hold a string. The store has its own suite in
+ * spokenDob.test.ts; what is under test here is the chain.
+ */
+describe('the date of birth the caller said, when the model sent none', () => {
+  const SID = 'CA0000000000000000000000000000dead';
+  const ASKED_AND_ANSWERED = [
+    'AGENT: May I have your date of birth?',
+    'CALLER: March 17th, 1973.',
+  ];
+
+  beforeEach(async () => {
+    (await import('./spokenDob')).resetSpokenDobs();
+    /**
+     * The escape counts refusals per CallSid, so without this a test that
+     * refuses hands the NEXT test its second refusal — and the second refusal
+     * files anyway. That is the escape working as designed, but it makes these
+     * tests depend on the order they run in, which is how a mutation gets to
+     * hide behind a green suite.
+     */
+    (await import('./dobEscape')).resetDobHistory();
+  });
+
+  it('files, instead of refusing, when the transcript holds the answer', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    noteSpokenDob(SID, ASKED_AND_ANSWERED);
+
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-DOB' } as never);
+
+    const { date_of_birth: _omitted, ...noDob } = BASE;
+    const out = (await runTool('file_surgery_ticket', {
+      ...noDob,
+      call_sid: SID,
+      request_description: 'I need to move my cataract surgery',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(true);
+    const sent = create.mock.calls[0][0];
+    expect(sent.patientBirthYear).toBe('1973');
+    expect(sent.patientBirthMonth).toBe('03');
+    expect(sent.patientBirthDay).toBe('17');
+  });
+
+  it('still refuses when the caller never answered — this is not a way to skip the gate', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    // The caller talked about a date, but not in answer to being asked for one.
+    noteSpokenDob(SID, [
+      'AGENT: What can I help you with?',
+      'CALLER: My surgery was on March 17th, 1973.',
+    ]);
+
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+
+    const { date_of_birth: _omitted, ...noDob } = BASE;
+    const out = (await runTool('file_surgery_ticket', {
+      ...noDob,
+      call_sid: SID,
+      request_description: 'I need to move my cataract surgery',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(false);
+    expect(out.missingFields).toContain('date_of_birth');
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('never reads one call\'s answer on another call', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    noteSpokenDob(SID, ASKED_AND_ANSWERED);
+
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+
+    const { date_of_birth: _omitted, ...noDob } = BASE;
+    const out = (await runTool('file_surgery_ticket', {
+      ...noDob,
+      call_sid: 'CA0000000000000000000000000000beef',
+      request_description: 'I need to move my cataract surgery',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(false);
+    expect(out.missingFields).toContain('date_of_birth');
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('the date the model DID send still wins — this only fills a gap', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    // A stale or misheard line in the record must never overwrite the
+    // argument the model actually sent.
+    noteSpokenDob(SID, ['AGENT: May I have your date of birth?', 'CALLER: May 8th, 1939.']);
+
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-DOB2' } as never);
+
+    const out = (await runTool('file_surgery_ticket', {
+      ...BASE,
+      call_sid: SID,
+      request_description: 'I need to move my cataract surgery',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(true);
+    expect(create.mock.calls[0][0].patientBirthYear).toBe('1973');
+  });
+});
