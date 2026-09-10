@@ -43,10 +43,19 @@
  *      `record_pcp_intake` dispatched 40 times with no outcome recorded at
  *      all. `identicalFailures` and `perToolFailures` could not see any of
  *      them — a success clears the counters, which is this rule working as
- *      written — so `perCallDispatches` did all of the stopping. "A tool that
- *      keeps succeeding is not a loop" is not what the calls show. Whether
- *      this rule should change is Wayne's call, not this file's; the evidence
- *      is in CLAUDE.md beside the ceiling's SQL check.
+ *      written — so `perCallDispatches` did all of the stopping ON THOSE
+ *      NINE. "A tool that keeps succeeding is not a loop" is not what those
+ *      calls show.
+ *
+ *      That census cannot say more, and must not be read as saying the other
+ *      two rules never fire. A stop by `identicalFailures` or
+ *      `perToolFailures` returns before `agent.dispatch`, so the agents'
+ *      `recordingExecute` never runs, nothing reaches `tool_timeline`, and
+ *      `tool_call_count` never counts it; the bridge's own `ceiling:<reason>`
+ *      event is kept off the call row on purpose. Their rate is UNKNOWN, not
+ *      zero. Whether this rule should change, and whether a stop should be
+ *      recorded somewhere countable, are Wayne's calls, not this file's; the
+ *      evidence is in CLAUDE.md beside the ceiling's SQL check.
  *
  *   2. THE REFUSAL BORROWS THE TOOL'S OWN WORDS. When the ceiling stops a
  *      dispatch it replays the message the tool itself last returned, rather

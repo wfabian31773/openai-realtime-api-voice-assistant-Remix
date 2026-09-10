@@ -1534,12 +1534,26 @@ SELECT call_sid, tool_call_count FROM call_logs
 WHERE voice_provider = 'grok' AND tool_call_count >= 40;
 ```
 
-An empty result is NOT proof the build is healthy — it says only that no call
-hit the ceiling in the window. A row above 40 is the one thing here that IS a
-regression: nothing can exceed the limit while the ceiling is running, so a
-41 means the ceiling is not in the path. On 2026-09-10 the only such row was
-still the pre-ceiling optical call of 2026-09-03 that the ceiling was built
-for.
+**This check sees ONE of the ceiling's three rules.** An empty result says
+only that no call reached `perCallDispatches` — it is not proof the build is
+healthy, and it is not proof the ceiling did not fire. A stop by
+`identicalFailures` (3) or `perToolFailures` (6) happens at three or six
+dispatches, so the call sits far below 40 and never appears here at all.
+
+Those two rules' stops are not merely below the threshold, they are
+**unrecorded everywhere**. `begin` returns before `agent.dispatch`, so the
+agents' `recordingExecute` never runs and the attempt is absent from
+`tool_timeline` and from `tool_call_count` (which is that timeline's length).
+The bridge does push a `ceiling:<reason>` entry onto its own `toolEvents`, but
+`callRecord.ts` deliberately keeps that off the row — "for logs and tests, and
+off the row". So the only trace a repeated-failure stop leaves anywhere is the
+console `[TOOL CEILING]` line, and **no SQL can count it.** Raising this
+query's threshold would not help; there is nothing in the row to find.
+
+A row above 40 is the one thing here that IS a regression: nothing can exceed
+the limit while the ceiling is running, so a 41 means the ceiling is not in the
+dispatch path. On 2026-09-10 the only such row was still the pre-ceiling
+optical call of 2026-09-03 that the ceiling was built for.
 
 Note also that `tool_call_count` is NULL on 577 of 1,620 grok calls
 (measured 2026-09-10; the table is live), so this check is blind to about a
@@ -1576,9 +1590,15 @@ the ceiling actually stopped were loops of tools reporting SUCCESS (or, on
 pcp, reporting nothing). That means `identicalFailures: 3` and
 `perToolFailures: 6` were structurally blind to every one of them — they
 count failures, and a success clears the counters by design (rule 1 of
-`toolCeiling.ts`). `perCallDispatches` did **all** of the stopping. The
-backstop is not a backstop in practice; on the observed evidence it is the
-only rule that fires.
+`toolCeiling.ts`). `perCallDispatches` did all of the stopping **on these
+nine calls**.
+
+Say no more than that. It is tempting to conclude `perCallDispatches` is the
+only rule that ever fires, and the evidence cannot carry it: stops by the
+other two rules leave no trace on the call row, so a census built from
+`tool_call_count` is structurally incapable of finding one. How often the
+repeated-failure rules fire is **unknown, not zero** — which is the same trap
+this whole section documents, one level down.
 
 **And the shape is general, not an optical quirk.** On every one of the seven
 strikes that recorded outcomes at all, the same thing happens: a filing tool
