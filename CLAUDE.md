@@ -1537,8 +1537,14 @@ WHERE voice_provider = 'grok' AND tool_call_count >= 40;
 **This check sees ONE of the ceiling's three rules.** An empty result says
 only that no call reached `perCallDispatches` — it is not proof the build is
 healthy, and it is not proof the ceiling did not fire. A stop by
-`identicalFailures` (3) or `perToolFailures` (6) happens at three or six
-dispatches, so the call sits far below 40 and never appears here at all.
+`identicalFailures` (3) or `perToolFailures` (6) can happen at any call
+total below 40, so it never appears here at all. Do not expect such a call to
+read 3 or 6: those two limits are **per-tool** counters, not call totals —
+`begin` reads them off that tool's own `byArgs` / `toolFailures` state, while
+`tool_call_count` counts every tool that ran. Twenty good calls to one tool
+followed by three identical failures of another is a stop at a total of 23.
+What IS guaranteed is only that the total is under 40, because the call-total
+check runs first and would have fired instead.
 
 Those two rules' stops are not merely below the threshold, they are
 **unrecorded everywhere**. `begin` returns before `agent.dispatch`, so the

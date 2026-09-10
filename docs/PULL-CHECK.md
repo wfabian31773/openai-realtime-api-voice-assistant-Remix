@@ -82,12 +82,15 @@ The second is a reading check, not a pass/fail one:
 -- not in the dispatch path. Keep 40 in step with
 -- DEFAULT_CEILING_LIMITS.perCallDispatches (src/runtime/toolCeiling.ts);
 -- ceilingDocCheck.test.ts fails if they drift.
--- SEES ONE OF THE CEILING'S THREE RULES. An identicalFailures (3) or
--- perToolFailures (6) stop leaves the call at three or six dispatches, and
--- leaves no trace on the row at all: `begin` returns before agent.dispatch,
--- so recordingExecute never runs and nothing reaches tool_timeline or
--- tool_call_count. Empty here means "nothing reached the dispatch limit",
--- NOT "the ceiling never fired".
+-- SEES ONE OF THE CEILING'S THREE RULES. identicalFailures (3) and
+-- perToolFailures (6) are PER-TOOL counters, not call totals — 20 good calls
+-- to one tool then three identical failures of another is a stop at a total
+-- of 23. So do not expect a stopped call to read 3 or 6; expect any total
+-- BELOW 40, because the call-total check runs first and would have fired
+-- otherwise. Such a stop also leaves no trace on the row: `begin` returns
+-- before agent.dispatch, so recordingExecute never runs and nothing reaches
+-- tool_timeline or tool_call_count. Empty here means "nothing reached the
+-- dispatch limit", NOT "the ceiling never fired".
 SELECT call_sid, tool_call_count FROM call_logs
  WHERE voice_provider = 'grok' AND tool_call_count >= 40;
 ```
