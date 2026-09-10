@@ -214,6 +214,62 @@ describe('which agent lines open a window — Codex P1b / P1a', () => {
       ]),
     ).toBe('1958-01-04');
   });
+
+  it('P1c — a same-turn self-correction replaces the first date', () => {
+    expect(
+      dobFromCallerAnswer([
+        ASK,
+        C('January 4th 1958'),
+        C('Sorry, I meant January 5th 1958'),
+      ]),
+    ).toBe('1958-01-05');
+  });
+
+  it('P1c — a same-line self-correction replaces the first date', () => {
+    expect(
+      dobFromCallerAnswer([
+        ASK,
+        C('January 4th 1958, sorry I meant January 5th 1958'),
+      ]),
+    ).toBe('1958-01-05');
+  });
+});
+
+/**
+ * THREE LIVE RE-ASKS THAT #280 STOPPED OPENING.
+ *
+ * Operator measurement after d0021e3: 3 of 13 real re-ask windows refused
+ * where they previously parsed. The agent requested the date without
+ * "may I" / a question mark, or put "once more" in the next sentence.
+ * Widening those cues must not reopen P1b.
+ */
+describe('genuine re-asks still open a window', () => {
+  it('CAe3de7ada — need your date of birth, no question mark', () => {
+    expect(
+      dobFromCallerAnswer([
+        'AGENT: I just need your date of birth to get this logged.',
+        'CALLER: October 23, 1995.',
+      ]),
+    ).toBe('1995-10-23');
+  });
+
+  it('CA74811ee4 — everything except your date of birth', () => {
+    expect(
+      dobFromCallerAnswer([
+        'AGENT: I have everything except your date of birth.',
+        'CALLER: April 11th, 1959.',
+      ]),
+    ).toBe('1959-04-11');
+  });
+
+  it('CAa6a32e9c — mis-heard, once more in the next sentence', () => {
+    expect(
+      dobFromCallerAnswer([
+        'AGENT: the date of birth may have been mis-heard. Could you give it to me once more?',
+        'CALLER: January 29th, 1963',
+      ]),
+    ).toBe('1963-01-29');
+  });
 });
 
 /**

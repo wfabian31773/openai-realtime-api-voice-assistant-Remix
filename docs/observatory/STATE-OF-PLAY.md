@@ -879,15 +879,29 @@ next thing the agent says. Same TTL, ceiling, recency eviction and sentinel
 rule as `gateAttempts.ts` and `verifiedIdentity.ts`.
 
 **Which agent lines open a window is the discriminator** (Codex P1b on #275,
-fixed here rather than by first-vs-last date inside a window). A line opens
-one only when it REQUESTS the date or REQUESTS confirmation of it — a
-born-when phrase, a request/confirm cue (`may I`, `is that`, `starting with
-the month`), or a question mark whose question itself is about the date of
-birth. "I have your date of birth, thank you. Anything else?" mentions the
-subject and then changes topic; it does not open a window, so a later
-surgery date in the reply cannot become the birthday. "I have January 4th
-1958 — is that your date of birth?" still opens one, so a real correction
-is captured.
+fixed in #280 rather than by first-vs-last date inside a window). A line
+opens one only when it REQUESTS the date or REQUESTS confirmation of it — a
+born-when phrase, a request/confirm cue (`may I have`, `is that`, `starting
+with the month`, `need your date of birth`, `except your date of birth`), a
+question mark whose question itself is about the date of birth, or a re-ask
+follow-through (`mis-heard` / `once more`) on the same agent line even when
+that cue sits in the next sentence. "I have your date of birth, thank you.
+Anything else?" mentions the subject and then changes topic; it does not
+open a window, so a later surgery date in the reply cannot become the
+birthday. "I have January 4th 1958 — is that your date of birth?" still
+opens one, so a real correction is captured.
+
+**#280 over-narrowed the ask.** After republish, 3 of 13 live re-asks
+stopped opening a window: "I just need your date of birth to get this
+logged." (CAe3de7ada), "I have everything except your date of birth."
+(CA74811ee4), and "the date of birth may have been mis-heard. Could you
+give it to me once more?" (CAa6a32e9c). Those are asks. The P1b
+acknowledgement is not. The extra cues are the ones that separate them.
+
+**Same-turn "sorry I meant" replaces the first date** (P1c). First-date-
+within still blocks "and my surgery is September 12th". It does not block
+"January 4th 1958" / "Sorry, I meant January 5th 1958" — that later date
+is the one the caller is standing on.
 
 **A later empty window does not clear the date; a refused attempt does**
 (Codex P1a). "Yes that is correct" yields no date and leaves the earlier
