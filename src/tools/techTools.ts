@@ -245,6 +245,42 @@ registerTool({
         console.info('[tech] date of birth taken from the verified record for this call');
       }
     }
+    if (!parts) {
+      /**
+       * THE CALLER ALREADY ANSWERED — STOP DEPENDING ON THE MODEL TO RELAY IT.
+       *
+       * 2026-09-08, the queue lanes, one full business day: 75 substantive
+       * calls hit this gate and 53 of them filed nothing. It is the single
+       * biggest cause of a call producing no ticket, and the measurement says
+       * the gate is not where it fails:
+       *
+       *  - On 75 of 75, the model called this tool with NO `date_of_birth`
+       *    argument at all. `dobShape` reads "(none)" on every refusal, across
+       *    surgery, tech and optical.
+       *  - In 51 of the 75, the caller's own transcribed words contain a birth
+       *    year or a month name. They answered the question that was asked.
+       *  - In 42 of the 75 the refusal is the LAST TOOL CALL OF THE CALL, so
+       *    the ask-once-then-file escape below never gets its second attempt.
+       *    It is unreachable in the majority of cases.
+       *
+       * The two sources above both go through the model or the record. This
+       * one does not: it is what the caller said on this call, taken from the
+       * transcript the bridge was already keeping and nothing else could see.
+       *
+       * ONLY FROM THE TURN THAT ANSWERED THE QUESTION. A caller says surgery
+       * dates and appointment dates too, and filing a wrong birthday is worse
+       * than filing none — see spokenDob.ts for the adjacency rule and what it
+       * still cannot catch.
+       */
+      const { spokenDobFor } = await import('./spokenDob');
+      const heard = spokenDobFor(callSid);
+      parts = heard ? normalizeDobParts(heard) : null;
+      if (parts) {
+        // The line names neither the value nor the patient, for the same
+        // reason as the one above it.
+        console.info('[tech] date of birth taken from what the caller said on this call');
+      }
+    }
     /**
      * ASK ONCE, THEN FILE IT ANYWAY. Operator ruling 2026-09-04, and the same
      * ruling he gave for optical's office on 2026-09-01. The measurement that

@@ -796,3 +796,83 @@ describe('optical: ask once for the office, then file it unassigned', () => {
     expect(create).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * THE CALLER'S OWN ANSWER, WHEN THE MODEL DID NOT RELAY IT.
+ *
+ * Optical is one of the three lanes the 2026-09-08 measurement covers: 75
+ * substantive queue calls hit the date-of-birth gate, 53 filed nothing, and
+ * `dobShape` read "(none)" on every refusal — the model sent no argument at
+ * all while the caller's own words carried the answer in 51 of them.
+ *
+ * Each lane holds its own copy of the fallback chain, so each lane proves its
+ * own wiring rather than trusting that four identical blocks are identical.
+ * The adjacency rule itself is tested in spokenDob.test.ts.
+ */
+describe('the date of birth the caller said, when the model sent none', () => {
+  const SID = 'CA00000000000000000000000000000fed';
+
+  beforeEach(async () => {
+    (await import('./spokenDob')).resetSpokenDobs();
+    (await import('./dobEscape')).resetDobHistory();
+  });
+
+  it('files, instead of refusing, when the transcript holds the answer', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    noteSpokenDob(SID, [
+      'AGENT: May I have your date of birth?',
+      'CALLER: March 17th, 1973.',
+    ]);
+
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation').mockResolvedValueOnce({
+      success: true,
+      locationId: 12,
+    } as never);
+    const create = vi
+      .spyOn(ticketingApiClient, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-OPTDOB' } as never);
+
+    const out = (await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      callback_number: '845-531-7471',
+      call_sid: SID,
+      location: 'Eastvale',
+      request_description: 'when will my glasses be ready',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(true);
+    expect(create.mock.calls[0][0].patientBirthYear).toBe('1973');
+    expect(create.mock.calls[0][0].patientBirthMonth).toBe('03');
+    expect(create.mock.calls[0][0].patientBirthDay).toBe('17');
+  });
+
+  it('still refuses when the caller never answered', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    noteSpokenDob(SID, [
+      'AGENT: What can I help you with?',
+      'CALLER: I ordered them on March 17th, 1973.',
+    ]);
+
+    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    vi.spyOn(ticketingApiClient, 'lookupProviderAndLocation').mockResolvedValue({
+      success: true,
+      locationId: 12,
+    } as never);
+    const create = vi.spyOn(ticketingApiClient, 'createTicket');
+
+    const out = (await runTool('file_optical_ticket', {
+      first_name: 'Wayne',
+      last_name: 'Fabian',
+      callback_number: '845-531-7471',
+      call_sid: SID,
+      location: 'Eastvale',
+      request_description: 'when will my glasses be ready',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(false);
+    expect(out.missingFields).toContain('date_of_birth');
+    expect(create).not.toHaveBeenCalled();
+  });
+});

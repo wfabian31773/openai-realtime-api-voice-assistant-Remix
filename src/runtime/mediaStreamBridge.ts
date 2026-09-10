@@ -108,6 +108,7 @@
 
 import type { BoundAgent } from "./agentBinding";
 import { CallTranscriptLog } from "./transcriptLog";
+import { noteSpokenDob } from "../tools/spokenDob";
 import { CallUsage, usageSummaryMarker, type UsageTotals } from "./tokenUsage";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
 import {
@@ -636,6 +637,23 @@ export class VoiceCallBridge {
         // "before or after it" left to decide here — which is the point:
         // deciding it here, and at four other points, was PR #241.
         this.transcriptLog.callerCompleted(text, itemId);
+        /**
+         * THE ONE PLACE THE CALLER'S OWN WORDS CAN REACH THE FILING TOOLS.
+         *
+         * On 2026-09-08 the date-of-birth gate refused 75 substantive queue
+         * calls and 53 of them filed nothing — and on 75 of 75 the model sent
+         * no `date_of_birth` argument at all (`dobShape` reads "(none)"), while
+         * in 51 the caller's transcribed words contain the answer. The record
+         * had it and only this class could see it. See spokenDob.ts.
+         *
+         * The whole record, every time, because a caller turn is REPLACED in
+         * place as its cumulative transcript is re-emitted — posting one line
+         * would store their first partial words instead of their final ones.
+         * A post that finds no date leaves the cache alone. A post whose
+         * latest ask window is an attempted date the parser refused deletes
+         * the entry — a wrong birthday filed is worse than a missing one.
+         */
+        noteSpokenDob(this.deps.context.callSid, this.transcriptLog.lines);
       },
       onError: (err) => this.handleSessionFailure(err),
       onClosed: () => this.handleSessionClosed(),
