@@ -28,7 +28,8 @@
  * acceptable and the wording names no speciality. That is the right default for
  * the HTTP surface, where the caller is not a queue.
  */
-import { registerTool, missing, type ToolResult } from './registry';
+import { registerTool, missing, type MissingFields, type ToolResult } from './registry';
+import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 
 /** Which queue is asking. Injected as call context, never a model argument. */
 export type ToolQueue = 'optical' | 'surgery';
@@ -307,6 +308,52 @@ registerTool({
 
 // ---------------------------------------------------------------- where
 
+const RESOLVE_TOOL = 'resolve_location';
+
+/**
+ * HOW MANY TIMES ONE CALL MAY BE ASKED WHICH OFFICE, BEFORE THE ASK IS A LOOP.
+ *
+ * Two, matching optical's filing gate: the first refusal is a question, the
+ * second is the caller having another go, and a third has stopped being either.
+ *
+ * Measured on the grok runtime, 2026-09-03 to 2026-09-10: `resolve_location`
+ * refused `spoken_location` 144 times across 66 calls, and ten calls reached
+ * the 40-dispatch tool ceiling with this tool running 30-35 times. On the
+ * eleven optical calls carrying two or more `location` refusals it averaged
+ * 19-25 SUCCESSES and filed nothing at all — 0 of 11 — while the 61 calls that
+ * took the filing gate's escape after a single refusal filed 53.
+ *
+ * The exit is deliberately NOT a refusal and NOT a guess. It hands the
+ * caller's own words back with `resolved: false, verified: false`, which is
+ * the same shape this tool already returns when the Console directory is not
+ * configured. `file_*_ticket` then applies its OWN escape (`gateAttempts`,
+ * the 2026-09-01 operator ruling) and takes the request unassigned at high
+ * priority rather than losing it.
+ */
+const RESOLVE_ASK_LIMIT = 2;
+
+/** The caller has been asked as often as this call is allowed to ask. */
+function officeAskSpent(callSid: string | undefined): boolean {
+  return gateRefusalsSoFar(callSid, RESOLVE_TOOL, 'spoken_location') >= RESOLVE_ASK_LIMIT;
+}
+
+/**
+ * The caller's words, carried on unverified. Never invented, never a guess —
+ * `resolved: false` is the tool saying plainly that it could not place this.
+ */
+function unresolvedPassthrough(spoken: string): ToolResult {
+  // A LIVE COUNTER, not just a marker. It prints only when the exit is taken,
+  // so `grep` over a day's logs says how often the office ask is running out —
+  // which is the number that says whether RESOLVE_ASK_LIMIT is set right.
+  // No caller words are logged: a spoken office name is the caller's own
+  // speech and this line is not the place for it.
+  console.info(
+    '[RESOLVE LOCATION] the office ask is spent on this call — passing the ' +
+      "caller's words through unverified so the filing tool can take the request",
+  );
+  return { success: true, resolved: false, location: spoken, verified: false, ask_exhausted: true };
+}
+
 registerTool({
   name: 'resolve_location',
   layer: 'agent',
@@ -340,6 +387,7 @@ registerTool({
   handler: async (input): Promise<ToolResult> => {
     const queue = input.queue as ToolQueue | undefined;
     const spoken = str(input.spoken_location);
+    const callSid = str(input.call_sid);
     const { sanitizeLocationName } = await import('../services/ticketFieldSanitizers');
     const cleaned = sanitizeLocationName(spoken);
     if (!cleaned.value) {
@@ -382,6 +430,9 @@ registerTool({
        * and the queue prompts already tell it that a tool asking for something
        * is not a fault.
        */
+      // BOUNDED. Refusing forever is what turned this into a 35-call well.
+      if (officeAskSpent(callSid)) return unresolvedPassthrough(cleaned.value);
+      noteGateRefusal(callSid, RESOLVE_TOOL, 'spoken_location');
       return missing(
         ['spoken_location'],
         // See opticalTools' matching refusal: every queue prompt that uses
@@ -391,6 +442,44 @@ registerTool({
     }
 
     const usable = acceptsFacility(queue, hit.facilityKind);
+
+    /**
+     * THE WRONG KIND OF PLACE IS A REFUSAL, NOT A SUCCESS.
+     *
+     * The `!hit` branch above already learned this and says so at length: an
+     * advisory `message` inside a `success: true` envelope tells the model the
+     * call WORKED, so it has no reason to change anything and every reason to
+     * try again. That fix stopped at the branch above. This one — an office
+     * found, but a surgery centre named on the optical line — kept returning
+     * success with a message, and it is the branch the 2026-09-10 ceiling
+     * calls ran through: `resolve_location` x35, every one reporting success,
+     * while `file_optical_ticket` refused for `location` beside it.
+     *
+     * Bounded like its sibling, so the refusal cannot become the same well.
+     */
+    if (!usable) {
+      const wrongKind =
+        `${hit.canonical} is a ${hit.facilityKind?.replace('_', ' ')}, not an ` +
+        `${facilityWord(queue)}. ` + askWhichOffice(queue);
+      if (officeAskSpent(callSid)) return unresolvedPassthrough(cleaned.value);
+      noteGateRefusal(callSid, RESOLVE_TOOL, 'spoken_location');
+      // The ENVELOPE changes; the diagnostic fields do not. Callers read
+      // `usable_for_this_queue` to explain the refusal, and dropping it here
+      // would trade one loop for a silent one.
+      // Typed as the refusal PLUS diagnostics: `MissingFields` is closed, and
+      // widening it would stop catching a misspelt `missingFields` everywhere
+      // else. The intersection keeps that check where it matters and admits
+      // the extra fields only here.
+      const refusal: MissingFields & Record<string, unknown> = {
+        ...missing(['spoken_location'], wrongKind),
+        resolved: false,
+        canonical_name: hit.canonical,
+        facility_kind: hit.facilityKind,
+        usable_for_this_queue: false,
+        is_optical_office: false,
+      };
+      return refusal;
+    }
 
     // `location` is the form the RECEIVER stores, not the form the mirror does.
     //
@@ -419,16 +508,11 @@ registerTool({
       location: fileable,
       canonical_name: hit.canonical,
       facility_kind: hit.facilityKind,
-      usable_for_this_queue: usable,
+      // Always true by the time we reach here: an unusable facility refused
+      // above. Kept in the payload because callers read it.
+      usable_for_this_queue: true,
       // Kept for existing Optical callers, which read this name.
       is_optical_office: hit.facilityKind === 'clinic' || hit.facilityKind == null,
-      ...(usable
-        ? {}
-        : {
-            message:
-              `${hit.canonical} is a ${hit.facilityKind?.replace('_', ' ')}, not an ` +
-              `${facilityWord(queue)}. ` + askWhichOffice(queue),
-          }),
     };
   },
 });
