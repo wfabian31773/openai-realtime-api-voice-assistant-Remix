@@ -41,8 +41,33 @@
  *
  * So the signal is not the date, it is WHERE THE CALLER SAID IT. A date counts
  * only when it was said while ANSWERING a request for a date of birth — inside
- * the turn that follows an agent line asking for one, ending at the next thing
- * the agent says. Nothing else in the call is looked at.
+ * the turn that follows an agent line that OPENS A WINDOW, ending at the next
+ * thing the agent says. Nothing else in the call is looked at.
+ *
+ * WHICH AGENT LINES OPEN A WINDOW — this is the discriminator, not first-vs-
+ * last date inside one window. Codex P1b on PR #275: after a date is already
+ * established, "I have your date of birth, thank you. Anything else?" used to
+ * open a window because it merely MENTIONS the subject, and the caller's
+ * "Yes, my surgery is September 12th, 2025" became the birthday. A mention
+ * is not an ask. A window opens only when the line REQUESTS the date or
+ * REQUESTS confirmation of it:
+ *
+ *   - a born-when phrase, or
+ *   - a request/confirm cue ("may I", "is that", "starting with the month"), or
+ *   - a question mark whose question itself is about the date of birth
+ *
+ * A readback that asks ("I have January 4th 1958 — is that your date of
+ * birth?") still opens a window, so a real correction is captured. A
+ * readback that only acknowledges and changes topic does not.
+ *
+ * A LATER WINDOW THAT YIELDS NO DATE does not, by itself, throw the earlier
+ * one away — "Yes that is correct" is an empty window and must leave the
+ * date standing (Codex P1a). What DOES clear it is an attempted date the
+ * parser refused: `dobShape` shows digits, a month word, or two-plus spoken
+ * number words, and `readDobQuietly` returned nothing. "No, zero three
+ * twenty two of fifty" is that case — a wrong birthday filed is worse than
+ * a missing one, and `noteSpokenDob` deletes the cache entry rather than
+ * returning early and leaving the stale value.
  *
  * WHAT THIS STILL CANNOT CATCH, stated rather than papered over:
  *
@@ -57,7 +82,8 @@
  *    `dobParts.ts`, and it needs the same evidence before it is filled: which
  *    phrasings actually arrive, in real transcripts.
  *  - Digits spelled out as WORDS still refuse, in both languages — the parser
- *    cannot read "zero one zero four five eight", so neither can this.
+ *    cannot read "zero one zero four five eight", so neither can this. That
+ *    refusal now CLEARS a previously cached date instead of filing it.
  *
  * ── STORAGE ────────────────────────────────────────────────────────────────
  *
@@ -68,7 +94,7 @@
  */
 
 import { isTwilioCallSid } from './callSid';
-import { readDobQuietly } from './dobParts';
+import { dobShape, monthNumberFromWord, readDobQuietly } from './dobParts';
 
 // ── Reading the answer out of the record ────────────────────────────────────
 
@@ -83,20 +109,16 @@ function fold(text: string): string {
 }
 
 /**
- * The ways an agent asks for a date of birth.
+ * The ways an agent puts a date of birth on the table.
  *
- * Deliberately phrases and not a question mark: a READBACK is a request too
- * ("I have March 17th 1983, is that right?" — no, and here is the right one),
- * and the correction that follows it is exactly the answer worth having. What
- * matters is that the agent put the subject on the table, not the grammar it
- * used.
- *
- * The scripted refusal line the four filing tools speak — "may I please have
- * the date of birth, starting with the month, then the day, then the year" —
- * matches the first entry, which is the case that has to work: it is the line
- * the caller is answering on all 75 of 2026-09-08's refusals.
+ * A mention is not enough to open a window — see `opensDobWindow`. These
+ * phrases identify the SUBJECT. The scripted refusal line the four filing
+ * tools speak — "may I please have the date of birth, starting with the
+ * month, then the day, then the year" — matches the first entry, which is
+ * the case that has to work: it is the line the caller is answering on all
+ * 75 of 2026-09-08's refusals.
  */
-const DOB_QUESTIONS = [
+const DOB_TOPICS = [
   'date of birth',
   'birth date',
   'birthdate',
@@ -111,13 +133,174 @@ const DOB_QUESTIONS = [
   'cuando naciste',
 ];
 
-function asksForDateOfBirth(agentLine: string): boolean {
-  const folded = fold(agentLine);
-  return DOB_QUESTIONS.some((q) => folded.includes(q));
+/** Born-when phrases are themselves the ask, question mark or not. */
+const INHERENT_ASKS = [
+  'when were you born',
+  'when was she born',
+  'when was he born',
+  'when were they born',
+  'cuando nacio',
+  'cuando naciste',
+];
+
+/**
+ * Request or confirmation cues. A READBACK that asks ("is that right?") is
+ * a request; an acknowledgement that does not use these is not.
+ *
+ * Folded text, so "what's" and "Cuál" become `what s` and `cual`.
+ * Scored PER SENTENCE so "I have your date of birth. May I help with
+ * anything else?" cannot smuggle a later `may i` onto the mention.
+ */
+const ASK_CUES = [
+  'may i have',
+  'may i please have',
+  'please have',
+  'can i have',
+  'could i have',
+  'could you give',
+  'could you repeat',
+  'what is',
+  'what s',
+  'is that',
+  'is this',
+  'once more',
+  'cual es',
+  'cual',
+  'me puede',
+  'me das',
+  'digame',
+  'dime',
+  'empezando',
+  'starting with',
+];
+
+/**
+ * Questions that change the subject after the date has already been taken.
+ * A `?` on a sentence that also mentions DOB still does not open a window
+ * when the question is one of these.
+ */
+const TOPIC_CHANGE_ASKS = [
+  'anything else',
+  'what else',
+  'something else',
+  'can i help',
+  'may i help',
+  'could i help',
+  'is there anything',
+  'algo mas',
+];
+
+function mentionsDobTopic(folded: string): boolean {
+  return DOB_TOPICS.some((q) => folded.includes(q));
+}
+
+/**
+ * Whether this agent line opens an answering window.
+ *
+ * THE DISCRIMINATOR IS THE LINE, NOT THE DATE INSIDE THE REPLY. Codex P1b:
+ * first-vs-last date inside a window cannot save a readback that should never
+ * have opened one. Each sentence is judged on its own: it must mention the
+ * date of birth AND request or confirm it. "I have your date of birth, thank
+ * you. Anything else?" mentions the subject in one sentence and asks a
+ * different question in the next — neither sentence does both. "I have
+ * January 4th 1958 — is that your date of birth?" asks about the date, so
+ * it opens — that is how a correction is captured.
+ */
+function sentenceOpensDobWindow(sentence: string): boolean {
+  const folded = fold(sentence);
+  if (!mentionsDobTopic(folded)) return false;
+  if (INHERENT_ASKS.some((q) => folded.includes(q))) return true;
+  if (ASK_CUES.some((c) => folded.includes(c))) return true;
+  if (!/[?]/.test(sentence)) return false;
+  return !TOPIC_CHANGE_ASKS.some((p) => folded.includes(p));
+}
+
+function opensDobWindow(agentLine: string): boolean {
+  return agentLine.split(/(?<=[.!?])\s+/).some(sentenceOpensDobWindow);
+}
+
+/**
+ * A caller utterance that tried to be a date and that the parser refused.
+ *
+ * `dobShape` already separates "nothing arrived" from "something arrived".
+ * Confirmations ("yes that is correct") produce a letter-only shape with no
+ * month and no number words — that is not an attempt. Digits (`#`), a month
+ * word, or two-plus spoken number words (the known refused form, English and
+ * Spanish) are. One isolated "one" ("yes that is the one") is not enough.
+ */
+const NUMBER_WORDS = new Set([
+  'zero', 'oh',
+  'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+  'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
+  'seventeen', 'eighteen', 'nineteen',
+  'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',
+  'cero', 'uno', 'una', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete',
+  'ocho', 'nueve', 'diez', 'once', 'doce', 'trece', 'catorce', 'quince',
+  'dieciseis', 'diecisiete', 'dieciocho', 'diecinueve',
+  'veinte', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta',
+  'ochenta', 'noventa',
+  'veintiuno', 'veintidos', 'veintitres', 'veinticuatro', 'veinticinco',
+  'veintiseis', 'veintisiete', 'veintiocho', 'veintinueve',
+]);
+
+function looksLikeDobAttempt(uttered: string): boolean {
+  if (dobShape(uttered).includes('#')) return true;
+  const words = fold(uttered).split(' ').filter(Boolean);
+  if (words.some((w) => monthNumberFromWord(w))) return true;
+  let numberWords = 0;
+  for (const w of words) {
+    if (NUMBER_WORDS.has(w) || /^veinti/.test(w)) numberWords += 1;
+  }
+  return numberWords >= 2;
 }
 
 const AGENT_PREFIX = 'AGENT: ';
 const CALLER_PREFIX = 'CALLER: ';
+
+type WindowRead =
+  | { kind: 'date'; iso: string }
+  | { kind: 'refused' }
+  | { kind: 'empty' };
+
+type TranscriptRead =
+  | { kind: 'date'; iso: string }
+  | { kind: 'cleared' }
+  | { kind: 'none' };
+
+function readWindow(lines: readonly string[], from: number): WindowRead {
+  let found: string | undefined;
+  let refused = false;
+  for (let j = from; j < lines.length; j += 1) {
+    const next = lines[j] ?? '';
+    if (!next.startsWith(CALLER_PREFIX)) break;
+    const uttered = next.slice(CALLER_PREFIX.length);
+    const parts = readDobQuietly(uttered);
+    if (parts) {
+      if (found === undefined) {
+        found = `${parts.year}-${parts.month}-${parts.day}`;
+      }
+      continue;
+    }
+    if (found === undefined && looksLikeDobAttempt(uttered)) refused = true;
+  }
+  if (found !== undefined) return { kind: 'date', iso: found };
+  if (refused) return { kind: 'refused' };
+  return { kind: 'empty' };
+}
+
+function readCallerAnswer(lines: readonly string[]): TranscriptRead {
+  let latest: TranscriptRead = { kind: 'none' };
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    if (!line.startsWith(AGENT_PREFIX)) continue;
+    if (!opensDobWindow(line.slice(AGENT_PREFIX.length))) continue;
+    const window = readWindow(lines, i + 1);
+    if (window.kind === 'date') latest = { kind: 'date', iso: window.iso };
+    else if (window.kind === 'refused') latest = { kind: 'cleared' };
+    // empty: confirmation / "sure." — leave the earlier answer standing.
+  }
+  return latest;
+}
 
 /**
  * The date of birth the caller gave in answer to being asked for one, as
@@ -146,15 +329,17 @@ const CALLER_PREFIX = 'CALLER: ';
  * the readback form; reproduced in the form above, which needs no readback and
  * is just a patient answering a question and then continuing.
  *
- * STILL OPEN, and recorded rather than fixed: `asksForDateOfBirth` is a
- * substring match, so an agent line that ACKNOWLEDGES the date ("I have your
- * date of birth, thank you. Anything else?") also opens a window, and a date in
- * the reply to THAT is the first date in its own window. Narrowing the matcher
- * collides with the deliberate choice to let a readback open a window so a
- * correction is captured, which is an operator question and not a parser one.
- * A scan of 488 agent date-of-birth mentions across three days found the
- * acknowledgement shape zero times — but the agent's wording is model-generated
- * and moves when prompts move, so that is "not yet seen", not "cannot happen".
+ * A LINE THAT ONLY ACKNOWLEDGES THE DATE DOES NOT OPEN A WINDOW. That is the
+ * P1b discriminator: "I have your date of birth, thank you. Anything else?"
+ * is not an ask, so a later surgery date in the reply cannot replace the
+ * birthday already given. A readback that asks for confirmation still opens
+ * one, so a real correction still wins.
+ *
+ * AN ATTEMPTED DATE THE PARSER REFUSED CLEARS THE ANSWER. That is P1a.
+ * "Yes that is correct" is not an attempt and leaves the earlier date
+ * standing. "No, zero three twenty two of fifty" is an attempt, the parser
+ * refuses it by design, and the function returns undefined rather than the
+ * value the caller has just rejected.
  *
  * Parsed QUIETLY. This runs over caller lines to find out whether any of them
  * is a date, so most of what it parses is not one, and every failure would
@@ -163,26 +348,8 @@ const CALLER_PREFIX = 'CALLER: ';
  * See `readDobQuietly`.
  */
 export function dobFromCallerAnswer(lines: readonly string[]): string | undefined {
-  let answer: string | undefined;
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i] ?? '';
-    if (!line.startsWith(AGENT_PREFIX)) continue;
-    if (!asksForDateOfBirth(line.slice(AGENT_PREFIX.length))) continue;
-    // The answering turn: every caller line up to the next thing the agent
-    // says. More than one is ordinary — "Sure." lands as its own line, then
-    // the date.
-    let found: string | undefined;
-    for (let j = i + 1; j < lines.length; j += 1) {
-      const next = lines[j] ?? '';
-      if (!next.startsWith(CALLER_PREFIX)) break;
-      const parts = readDobQuietly(next.slice(CALLER_PREFIX.length));
-      if (parts && found === undefined) {
-        found = `${parts.year}-${parts.month}-${parts.day}`;
-      }
-    }
-    if (found !== undefined) answer = found;
-  }
-  return answer;
+  const read = readCallerAnswer(lines);
+  return read.kind === 'date' ? read.iso : undefined;
 }
 
 // ── The per-call store ──────────────────────────────────────────────────────
@@ -224,7 +391,10 @@ function sweep(now: number): void {
  *
  * NOTHING IS WRITTEN WHEN NO ANSWER IS FOUND, so a caller who gives their date
  * of birth and then talks about something else for two minutes does not lose
- * it.
+ * it. The exception is a later ASK window whose reply is an attempted date
+ * the parser refused: that DELETES the entry. `if (!iso) return` used to
+ * leave the rejected value in the cache, and the four filing tools would
+ * then file it when the model omitted `date_of_birth`.
  *
  * A SENTINEL IS NOT A CALL. `call_sid` is a declared property on the filing
  * tools, so a model with no injected value supplies "unknown" or "latest", and
@@ -235,12 +405,17 @@ function sweep(now: number): void {
  */
 export function noteSpokenDob(callSid: string | undefined, lines: readonly string[]): void {
   if (!isTwilioCallSid(callSid)) return;
-  const iso = dobFromCallerAnswer(lines);
-  if (!iso) return;
+  const read = readCallerAnswer(lines);
   const now = Date.now();
   sweep(now);
-  heard.delete(callSid); // re-insert so insertion order tracks recency
-  heard.set(callSid, { iso, at: now });
+  if (read.kind === 'date') {
+    heard.delete(callSid); // re-insert so insertion order tracks recency
+    heard.set(callSid, { iso: read.iso, at: now });
+    return;
+  }
+  if (read.kind === 'cleared') {
+    heard.delete(callSid);
+  }
 }
 
 /**

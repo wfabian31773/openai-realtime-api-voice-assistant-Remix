@@ -649,8 +649,9 @@ export class VoiceCallBridge {
          * The whole record, every time, because a caller turn is REPLACED in
          * place as its cumulative transcript is re-emitted — posting one line
          * would store their first partial words instead of their final ones.
-         * The reader is bounded by the record and writes nothing unless it
-         * finds an answer, so a re-emission is cheap and cannot erase one.
+         * A post that finds no date leaves the cache alone. A post whose
+         * latest ask window is an attempted date the parser refused deletes
+         * the entry — a wrong birthday filed is worse than a missing one.
          */
         noteSpokenDob(this.deps.context.callSid, this.transcriptLog.lines);
       },

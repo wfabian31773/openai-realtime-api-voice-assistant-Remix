@@ -145,6 +145,78 @@ describe('reading the date out of the answer the caller gave', () => {
 });
 
 /**
+ * CODEX P1b / P1a ON PR #275 — the four probes that blocked the merge.
+ *
+ * The discriminator is WHICH AGENT LINE OPENS A WINDOW, not first-vs-last
+ * date inside one. An acknowledgement that mentions the date and then
+ * changes topic must not treat a later surgery date as a birthday. A
+ * confirmation ask still opens a window, so a real correction wins, a
+ * refused attempt clears, and "yes that is correct" leaves the date.
+ */
+describe('which agent lines open a window — Codex P1b / P1a', () => {
+  const A = (s: string) => `AGENT: ${s}`;
+  const C = (s: string) => `CALLER: ${s}`;
+  const ASK = A(
+    'May I have your date of birth, starting with the month, then the day, then the year?',
+  );
+
+  it('P1b — an acknowledgement does not take a later surgery date as the birthday', () => {
+    expect(
+      dobFromCallerAnswer([
+        ASK,
+        C('January 4th 1958'),
+        A('I have your date of birth, thank you. Anything else?'),
+        C('Yes, my surgery is September 12th, 2025'),
+      ]),
+    ).toBe('1958-01-04');
+  });
+
+  it('P1a — a later unparseable correction clears the earlier date', () => {
+    expect(
+      dobFromCallerAnswer([
+        ASK,
+        C('01 04 58'),
+        A('I have January 4th 1958 - is that your date of birth?'),
+        C('No, zero three twenty two of fifty'),
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('a real correction still wins', () => {
+    expect(
+      dobFromCallerAnswer([
+        ASK,
+        C('January 4th 1958'),
+        A('I have January 4th 1958 - is that your date of birth?'),
+        C('No, it is March 22nd 1950'),
+      ]),
+    ).toBe('1950-03-22');
+  });
+
+  it('a plain confirmation keeps the date', () => {
+    expect(
+      dobFromCallerAnswer([
+        ASK,
+        C('January 4th 1958'),
+        A('I have January 4th 1958 - is that your date of birth?'),
+        C('Yes that is correct'),
+      ]),
+    ).toBe('1958-01-04');
+  });
+
+  it('a same-sentence topic change after acknowledging still does not open a window', () => {
+    expect(
+      dobFromCallerAnswer([
+        ASK,
+        C('January 4th 1958'),
+        A('I have your date of birth, can I help with anything else?'),
+        C('Yes, my surgery is September 12th, 2025'),
+      ]),
+    ).toBe('1958-01-04');
+  });
+});
+
+/**
  * THE GUARD, STATED AS THE FAILURES IT PREVENTS.
  *
  * Every case below carries a real, parseable date somewhere in the caller's
@@ -280,6 +352,37 @@ describe('the per-call store', () => {
       'CALLER: No, that is everything.',
     ]);
     expect(spokenDobFor(SID)).toBe('1973-03-17');
+  });
+
+  it('deletes the cached date when the latest ask window is a refused attempt', () => {
+    // P1a reaches the store, not only the reader. `if (!iso) return` used to
+    // leave 1958-01-04 standing, and the four filing tools would file it.
+    noteSpokenDob(SID, [
+      'AGENT: May I have your date of birth, starting with the month, then the day, then the year?',
+      'CALLER: 01 04 58',
+    ]);
+    expect(spokenDobFor(SID)).toBe('1958-01-04');
+    noteSpokenDob(SID, [
+      'AGENT: May I have your date of birth, starting with the month, then the day, then the year?',
+      'CALLER: 01 04 58',
+      'AGENT: I have January 4th 1958 - is that your date of birth?',
+      'CALLER: No, zero three twenty two of fifty',
+    ]);
+    expect(spokenDobFor(SID)).toBeUndefined();
+  });
+
+  it('keeps the cache on a confirmation that yields no date', () => {
+    noteSpokenDob(SID, [
+      'AGENT: May I have your date of birth?',
+      'CALLER: January 4th 1958',
+    ]);
+    noteSpokenDob(SID, [
+      'AGENT: May I have your date of birth?',
+      'CALLER: January 4th 1958',
+      'AGENT: I have January 4th 1958 - is that your date of birth?',
+      'CALLER: Yes that is correct',
+    ]);
+    expect(spokenDobFor(SID)).toBe('1958-01-04');
   });
 
   it('forgets everything on reset', () => {

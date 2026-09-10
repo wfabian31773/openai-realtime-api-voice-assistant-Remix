@@ -874,9 +874,28 @@ after the model's argument and after `verifiedDobFor`, never replacing either.
 is worse than filing none, and callers on these lines say surgery dates and
 appointment dates constantly — `valid()` cannot tell those from a birthday. So
 a date counts only when the caller said it while ANSWERING a request for one:
-inside the turn following an agent line that asks, ending at the next thing the
-agent says. Same TTL, ceiling, recency eviction and sentinel rule as
-`gateAttempts.ts` and `verifiedIdentity.ts`.
+inside the turn following an agent line that *opens a window*, ending at the
+next thing the agent says. Same TTL, ceiling, recency eviction and sentinel
+rule as `gateAttempts.ts` and `verifiedIdentity.ts`.
+
+**Which agent lines open a window is the discriminator** (Codex P1b on #275,
+fixed here rather than by first-vs-last date inside a window). A line opens
+one only when it REQUESTS the date or REQUESTS confirmation of it — a
+born-when phrase, a request/confirm cue (`may I`, `is that`, `starting with
+the month`), or a question mark whose question itself is about the date of
+birth. "I have your date of birth, thank you. Anything else?" mentions the
+subject and then changes topic; it does not open a window, so a later
+surgery date in the reply cannot become the birthday. "I have January 4th
+1958 — is that your date of birth?" still opens one, so a real correction
+is captured.
+
+**A later empty window does not clear the date; a refused attempt does**
+(Codex P1a). "Yes that is correct" yields no date and leaves the earlier
+value standing. "No, zero three twenty two of fifty" is an attempted date
+the parser refuses (`dobShape` / month word / two-plus spoken number words,
+and `readDobQuietly` returned nothing). That clears the answer, and
+`noteSpokenDob` deletes the cache entry — `if (!iso) return` used to leave
+the rejected value for the four filing tools to write.
 
 Every guard was mutation-checked against a scratch copy: dropping adjacency
 fails 3, letting the window run past the next agent line fails 1, taking the
