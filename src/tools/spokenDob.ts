@@ -53,12 +53,19 @@
  * REQUESTS confirmation of it:
  *
  *   - a born-when phrase, or
- *   - a request/confirm cue ("may I", "is that", "starting with the month"), or
- *   - a question mark whose question itself is about the date of birth
+ *   - a request/confirm cue ("may I have", "is that", "starting with the
+ *     month", "need your date of birth", "except your date of birth"), or
+ *   - a question mark whose question itself is about the date of birth, or
+ *   - a re-ask follow-through on the same agent line ("mis-heard" /
+ *     "once more") even when that cue sits in the next sentence
  *
  * A readback that asks ("I have January 4th 1958 — is that your date of
  * birth?") still opens a window, so a real correction is captured. A
- * readback that only acknowledges and changes topic does not.
+ * readback that only acknowledges and changes topic does not. Measured
+ * 2026-09-10 after #280: 3 of 13 live re-asks stopped opening a window
+ * because the request was stated without "may I" / "?" ("I just need your
+ * date of birth to get this logged."). Those cues are now asks. The P1b
+ * acknowledgement is not.
  *
  * A LATER WINDOW THAT YIELDS NO DATE does not, by itself, throw the earlier
  * one away — "Yes that is correct" is an empty window and must leave the
@@ -164,6 +171,17 @@ const ASK_CUES = [
   'is that',
   'is this',
   'once more',
+  // Genuine re-asks that do not use "may I" or a question mark.
+  // CAe3de7ada / CA74811ee4, 2026-09-10: #280 closed these windows.
+  'need your date of birth',
+  'need the date of birth',
+  'except your date of birth',
+  'except the date of birth',
+  'mis heard',
+  'necesito su fecha de nacimiento',
+  'necesito la fecha de nacimiento',
+  'excepto su fecha de nacimiento',
+  'excepto la fecha de nacimiento',
   'cual es',
   'cual',
   'me puede',
@@ -172,6 +190,19 @@ const ASK_CUES = [
   'dime',
   'empezando',
   'starting with',
+];
+
+/**
+ * Cues that reopen a window when they share an agent LINE with a DOB
+ * mention, even if they sit in the next sentence. CAa6a32e9c:
+ * "the date of birth may have been mis-heard. Could you give it to me
+ * once more?" — "once more" is the ask, "date of birth" is the previous
+ * sentence. "I have your date of birth, thank you. Anything else?" has
+ * neither of these, so P1b stays closed.
+ */
+const LINE_REASK_CUES = [
+  'once more',
+  'mis heard',
 ];
 
 /**
@@ -216,7 +247,53 @@ function sentenceOpensDobWindow(sentence: string): boolean {
 }
 
 function opensDobWindow(agentLine: string): boolean {
-  return agentLine.split(/(?<=[.!?])\s+/).some(sentenceOpensDobWindow);
+  if (agentLine.split(/(?<=[.!?])\s+/).some(sentenceOpensDobWindow)) return true;
+  const folded = fold(agentLine);
+  if (!mentionsDobTopic(folded)) return false;
+  return LINE_REASK_CUES.some((c) => folded.includes(c));
+}
+
+/**
+ * A same-turn self-correction. First date in a window still wins when the
+ * caller just keeps talking ("and my surgery is September 12th") — that is
+ * P1b's sibling, and it stays. A later date wins only when the utterance
+ * that carries it is "sorry, I meant …" (P1c).
+ */
+const CORRECTION_CUES = [
+  'sorry i meant',
+  'no i meant',
+  'i meant',
+  'queria decir',
+];
+
+function textAfterLastCorrection(uttered: string): string | undefined {
+  const folded = fold(uttered);
+  let best = -1;
+  let cueLen = 0;
+  for (const cue of CORRECTION_CUES) {
+    const idx = folded.lastIndexOf(cue);
+    if (idx > best) {
+      best = idx;
+      cueLen = cue.length;
+    }
+  }
+  if (best < 0) return undefined;
+  const after = folded.slice(best + cueLen).trim();
+  return after || undefined;
+}
+
+function isoFromParts(parts: { year: string; month: string; day: string }): string {
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function isoFromUtterance(uttered: string): string | undefined {
+  const after = textAfterLastCorrection(uttered);
+  if (after) {
+    const corrected = readDobQuietly(after);
+    if (corrected) return isoFromParts(corrected);
+  }
+  const parts = readDobQuietly(uttered);
+  return parts ? isoFromParts(parts) : undefined;
 }
 
 /**
@@ -274,10 +351,10 @@ function readWindow(lines: readonly string[], from: number): WindowRead {
     const next = lines[j] ?? '';
     if (!next.startsWith(CALLER_PREFIX)) break;
     const uttered = next.slice(CALLER_PREFIX.length);
-    const parts = readDobQuietly(uttered);
-    if (parts) {
-      if (found === undefined) {
-        found = `${parts.year}-${parts.month}-${parts.day}`;
+    const iso = isoFromUtterance(uttered);
+    if (iso) {
+      if (found === undefined || textAfterLastCorrection(uttered)) {
+        found = iso;
       }
       continue;
     }
@@ -306,8 +383,9 @@ function readCallerAnswer(lines: readonly string[]): TranscriptRead {
  * The date of birth the caller gave in answer to being asked for one, as
  * `YYYY-MM-DD`, or undefined.
  *
- * THE LAST ASK WINS; WITHIN ONE ASK, THE FIRST DATE WINS. The two halves pull
- * in opposite directions and both are load-bearing.
+ * THE LAST ASK WINS; WITHIN ONE ASK, THE FIRST DATE WINS unless the caller
+ * corrects themselves in that same turn. The two halves pull in opposite
+ * directions and both are load-bearing.
  *
  * ACROSS asks: an agent that asked twice asked because the first answer did not
  * survive — misheard, read back wrong, or refused by the tool — so the later
@@ -325,9 +403,9 @@ function readCallerAnswer(lines: readonly string[]): TranscriptRead {
  * This read the surgery date as the birthday, and all four filing tools would
  * have written it to the patient record. `valid()` cannot tell the two apart —
  * a surgery date last autumn is a real date in range — so position inside the
- * answer is the only thing that separates them. Found by Codex on PR #275 in
- * the readback form; reproduced in the form above, which needs no readback and
- * is just a patient answering a question and then continuing.
+ * answer is the only thing that separates them, UNLESS the later date is a
+ * self-correction ("Sorry, I meant January 5th 1958"). That later date wins
+ * (P1c). "and my surgery is…" is not a correction and still loses.
  *
  * A LINE THAT ONLY ACKNOWLEDGES THE DATE DOES NOT OPEN A WINDOW. That is the
  * P1b discriminator: "I have your date of birth, thank you. Anything else?"
