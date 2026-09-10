@@ -77,8 +77,12 @@ The second is a reading check, not a pass/fail one:
 -- one optical call returned 118 before the tool ceiling shipped.
 -- NOT an empty check, and not part of the two above: `begin` refuses at
 -- `>= perCallDispatches`, so a stopped loop lands on exactly 40 and a `> 40`
--- threshold can never see one. Each row is a loop the ceiling CONTAINED —
--- read the call. Only a row ABOVE 40 is a fault, and it means the ceiling is
+-- threshold can never see one. Each row is a CANDIDATE loop, not a proven
+-- one: 40 means 40 dispatches were ALLOWED, and since begin refuses at
+-- `>= 40` it is the 41st ATTEMPT that is stopped and never counted. A call
+-- that just finished after its 40th tool looks the same here. Confirm by
+-- reading tool_timeline — a real loop repeats one tool ~30 times.
+-- Only a row ABOVE 40 is a fault, and it means the ceiling is
 -- not in the dispatch path. Keep 40 in step with
 -- DEFAULT_CEILING_LIMITS.perCallDispatches (src/runtime/toolCeiling.ts);
 -- ceilingDocCheck.test.ts fails if they drift.

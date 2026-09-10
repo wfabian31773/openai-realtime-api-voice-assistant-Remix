@@ -1526,13 +1526,22 @@ corrected — it proved the ceiling had shipped and then could never again see
 a loop the ceiling stopped. It missed eight of them.
 
 ```sql
--- Each row is a runaway loop the ceiling STOPPED. Not a regression: the
--- ceiling did its job. Read the call and find out what looped.
+-- Each row is a CANDIDATE runaway loop, not a confirmed ceiling stop.
+-- Read the call's tool_timeline before calling it a loop; see below for why.
 -- Keep 40 in step with DEFAULT_CEILING_LIMITS.perCallDispatches
 -- (src/runtime/toolCeiling.ts); ceilingDocCheck.test.ts fails if they drift.
 SELECT call_sid, tool_call_count FROM call_logs
 WHERE voice_provider = 'grok' AND tool_call_count >= 40;
 ```
+
+**A row is a candidate, and the verification is one column away.** A count of
+40 says 40 dispatches were ALLOWED — nothing more. `begin` refuses when
+`this.dispatches >= 40`, so the 40th dispatch still runs (39 >= 40 is false)
+and it is the **41st attempt** that is refused; that refused attempt is never
+counted. A call whose model simply stopped after its 40th tool therefore looks
+identical here to one the ceiling stopped. Confirm by reading `tool_timeline`:
+a loop repeats one tool 30-odd times, and a call that merely finished busy
+does not. All nine below were confirmed that way, not assumed.
 
 **This check sees ONE of the ceiling's three rules.** An empty result says
 only that no call reached `perCallDispatches` — it is not proof the build is

@@ -37,7 +37,7 @@
  *      retries are ordinary here. Only a run of consecutive failures is the
  *      pathology.
  *
- *      MEASURED AGAINST THIS, 2026-09-09: of the five loops the ceiling has
+ *      MEASURED AGAINST THIS, 2026-09-10: of the eight loops the ceiling has
  *      actually stopped, NONE was a failure loop. Four were a tool returning
  *      success 30–35 times (`resolve_location`, `lookup_patient`) and one was
  *      `record_pcp_intake` dispatched 40 times with no outcome recorded at
@@ -108,13 +108,17 @@ export const DEFAULT_CEILING_LIMITS: CeilingLimits = {
  * docs/PULL-CHECK.md was written as `> 40` against a ceiling of `>= 40`, and
  * for the six days after the deploy it was the only thing watching for
  * runaway loops while being unable, by construction, to see one the ceiling
- * had stopped. Five such loops sat at exactly 40 and none of them appeared.
+ * had stopped. Eight such loops sat at exactly 40 and none of them appeared.
  *
  * WHAT A ROW MEANS — this is not the "should return nothing" check it
- * replaces. A row is the ceiling doing its job: a loop happened, it was
- * contained, and the call is worth reading. A row is NOT a regression, and an
- * empty result is NOT proof the build is healthy — it only says no call hit
- * the ceiling in the window.
+ * replaces, and it is not proof of a stop either. A row is a CANDIDATE: 40
+ * means 40 dispatches were allowed, and because `begin` refuses at
+ * `>= perCallDispatches` the 40th still runs and the 41st ATTEMPT is the one
+ * refused — and never counted. A call that simply ended after its 40th tool
+ * is indistinguishable here from one the ceiling stopped, so confirm against
+ * `tool_timeline` before calling a row a loop. A row is NOT a regression, and
+ * an empty result is NOT proof of health — it only says nothing reached the
+ * dispatch limit.
  *
  * Consumed by `ceilingDocCheck.test.ts`, which fails if either document
  * publishes a threshold that no longer matches this limit.

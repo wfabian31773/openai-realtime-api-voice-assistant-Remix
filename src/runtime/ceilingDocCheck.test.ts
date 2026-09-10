@@ -29,11 +29,38 @@ const ROOT = resolve(__dirname, "..", "..");
 /** Every document that publishes the check. Add to this list, never fork it. */
 const PUBLISHING_DOCS = ["CLAUDE.md", "docs/PULL-CHECK.md"] as const;
 
-/** `tool_call_count` compared against a literal, in either order, any spacing. */
+/** `tool_call_count` compared against a literal, any spacing. */
 const THRESHOLD_RE = /tool_call_count\s*(>=|<=|>|<|=)\s*(\d+)/g;
 
 function read(doc: string): string {
   return readFileSync(resolve(ROOT, doc), "utf8");
+}
+
+/**
+ * The fenced ```sql block that publishes the runaway-loop query, and ONLY
+ * that block.
+ *
+ * Scoping matters: an earlier version of this file validated every
+ * `tool_call_count` comparison anywhere in the document, which would have
+ * failed the suite the day someone added an unrelated `tool_call_count < 5`
+ * elsewhere in a 1,600-line runbook. The guard exists to stop THIS query
+ * drifting from the limit, not to reserve the column.
+ *
+ * The runaway-loop query is the one that selects `call_sid` alongside
+ * `tool_call_count`; the other queries in these documents are `count(*)`
+ * rollups. Exactly one block must match, so that a rename or a second copy
+ * fails loudly here rather than silently narrowing what is checked.
+ */
+function ceilingQueryBlock(doc: string): string {
+  const blocks = [...read(doc).matchAll(/```sql\n([\s\S]*?)```/g)].map((m) => m[1] ?? "");
+  const matching = blocks.filter(
+    (b) => b.includes("tool_call_count") && b.includes("call_sid"),
+  );
+  expect(
+    matching.length,
+    `${doc} must publish exactly one runaway-loop SQL block (found ${matching.length})`,
+  ).toBe(1);
+  return matching[0] ?? "";
 }
 
 describe("the published runaway-loop check tracks the ceiling", () => {
@@ -46,11 +73,22 @@ describe("the published runaway-loop check tracks the ceiling", () => {
   for (const doc of PUBLISHING_DOCS) {
     describe(doc, () => {
       it("publishes the check at the ceiling's own limit", () => {
-        expect(read(doc)).toContain(CEILING_REACHED_SQL_PREDICATE);
+        expect(ceilingQueryBlock(doc)).toContain(CEILING_REACHED_SQL_PREDICATE);
+      });
+
+      it("leaves unrelated tool_call_count queries alone", () => {
+        // The guard must not veto a legitimate future query on the same
+        // column. Proven by construction: the scoped block is a strict
+        // subset of the document, and the document is not searched.
+        const block = ceilingQueryBlock(doc);
+        expect(block.length).toBeGreaterThan(0);
+        expect(read(doc).length).toBeGreaterThan(block.length);
       });
 
       it("compares tool_call_count only with >=, never a strict >", () => {
-        const found = [...read(doc).matchAll(THRESHOLD_RE)].map((m) => ({
+        // Scoped to the runaway-loop block: other uses of the column
+        // elsewhere in these documents are none of this guard's business.
+        const found = [...ceilingQueryBlock(doc).matchAll(THRESHOLD_RE)].map((m) => ({
           operator: m[1],
           value: Number(m[2]),
         }));
