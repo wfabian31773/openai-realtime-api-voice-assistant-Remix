@@ -37,6 +37,32 @@
  *      retries are ordinary here. Only a run of consecutive failures is the
  *      pathology.
  *
+ *      MEASURED AGAINST THIS, 2026-09-10: of the eight loops that REACHED
+ *      the dispatch limit — reached, not provably stopped; the refusal is
+ *      persisted nowhere — NONE was a failure loop. Seven were a tool
+ *      returning success 30–35 times (`resolve_location`, `lookup_patient`)
+ *      and the eighth was `record_pcp_intake` dispatched 40 times with no
+ *      outcome recorded at all. `identicalFailures` and `perToolFailures` could not see any of
+ *      them — a success clears the counters, which is this rule working as
+ *      written. "A tool that keeps succeeding is not a loop" is not what
+ *      those calls show.
+ *
+ *      Note what this does NOT say. It does not say `perCallDispatches` did
+ *      the stopping: nothing persisted can establish that a 41st attempt was
+ *      refused, and one of the nine (the 118 of 09-03) PREDATES this file
+ *      entirely, so no rule of it stopped that one. What the nine show is
+ *      that every call which reached the limit was a success loop.
+ *
+ *      That census cannot say more, and must not be read as saying the other
+ *      two rules never fire. A stop by `identicalFailures` or
+ *      `perToolFailures` returns before `agent.dispatch`, so the agents'
+ *      `recordingExecute` never runs, nothing reaches `tool_timeline`, and
+ *      `tool_call_count` never counts it; the bridge's own `ceiling:<reason>`
+ *      event is kept off the call row on purpose. Their rate is UNKNOWN, not
+ *      zero. Whether this rule should change, and whether a stop should be
+ *      recorded somewhere countable, are Wayne's calls, not this file's; the
+ *      evidence is in CLAUDE.md beside the ceiling's SQL check.
+ *
  *   2. THE REFUSAL BORROWS THE TOOL'S OWN WORDS. When the ceiling stops a
  *      dispatch it replays the message the tool itself last returned, rather
  *      than inventing one. The tool knows what is missing and the prompts
@@ -78,6 +104,36 @@ export const DEFAULT_CEILING_LIMITS: CeilingLimits = {
   perToolFailures: 6,
   perCallDispatches: 40,
 };
+
+/**
+ * The SQL predicate that finds calls which REACHED this ceiling's dispatch
+ * limit, derived from the limit itself so the two can never drift apart.
+ *
+ * Reached, not stopped: see WHAT A ROW MEANS below. No persisted column can
+ * tell the two apart.
+ *
+ * `begin` refuses at `dispatches >= perCallDispatches`, so a call can REACH
+ * the limit and can never exceed it. The check published in CLAUDE.md and
+ * docs/PULL-CHECK.md was written as `> 40` against a ceiling of `>= 40`, and
+ * for the six days after the deploy it was the only thing watching for
+ * runaway loops while being unable, by construction, to see one the ceiling
+ * had contained. Eight such loops sat at exactly 40 and none appeared.
+ *
+ * WHAT A ROW MEANS — this is not the "should return nothing" check it
+ * replaces, and it is not proof of a stop either. A row is a CANDIDATE: 40
+ * means 40 dispatches were allowed, and because `begin` refuses at
+ * `>= perCallDispatches` the 40th still runs and the 41st ATTEMPT is the one
+ * refused — and never counted. A call that simply ended after its 40th tool
+ * is indistinguishable here from one the ceiling stopped, so confirm against
+ * `tool_timeline` before calling a row a loop. A row is NOT a regression, and
+ * an empty result is NOT proof of health — it only says nothing reached the
+ * dispatch limit.
+ *
+ * Consumed by `ceilingDocCheck.test.ts`, which fails if either document
+ * publishes a threshold that no longer matches this limit.
+ */
+export const CEILING_REACHED_SQL_PREDICATE =
+  `tool_call_count >= ${DEFAULT_CEILING_LIMITS.perCallDispatches}` as const;
 
 export type CeilingReason = "identical-args" | "same-tool" | "call-total";
 

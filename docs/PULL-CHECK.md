@@ -61,18 +61,44 @@ GET https://<domain>/voice/health
   configured. This names it.
 - `transferReady` / `transferBlockedBy` / `transferDestinations`.
 
-## 4. Two SQL checks that must come back empty
+## 4. One SQL check that must come back empty, and one that need not
 
-Both returned the FULL population before this build, so a zero is proof.
+The first returned the FULL population before this build, so a zero is proof.
 
 ```sql
 -- was 239 of 239 on 2026-09-03. Any row here is a lane missing from five reports.
 SELECT count(*) FROM call_logs
  WHERE voice_provider = 'grok' AND agent_id IS NULL AND created_at > '<deploy time>';
+```
 
+The second is a reading check, not a pass/fail one:
+
+```sql
 -- one optical call returned 118 before the tool ceiling shipped.
+-- NOT an empty check, and not part of the two above: `begin` refuses at
+-- `>= perCallDispatches`, so a loop that reaches it lands on exactly 40 and a `> 40`
+-- threshold can never see one. Each row is a CANDIDATE loop, not a proven
+-- one: 40 means 40 dispatches were ALLOWED, and since begin refuses at
+-- `>= 40` it is the 41st ATTEMPT that is stopped and never counted. A call
+-- that just finished after its 40th tool looks the same here. Confirm by
+-- reading tool_timeline — a real loop repeats one tool ~30 times.
+-- A row ABOVE 40 is a fault only if the call is POST-DEPLOYMENT: this query
+-- has no deploy-time predicate, so it always returns the pre-ceiling
+-- 2026-09-03 call at 118. Check the date first. A recent row above 40 does
+-- mean the ceiling is not in the dispatch path. Keep 40 in step with
+-- DEFAULT_CEILING_LIMITS.perCallDispatches (src/runtime/toolCeiling.ts);
+-- ceilingDocCheck.test.ts fails if they drift.
+-- SEES ONE OF THE CEILING'S THREE RULES. identicalFailures (3) and
+-- perToolFailures (6) are PER-TOOL counters, not call totals — 20 good calls
+-- to one tool then three identical failures of another is a stop at a total
+-- of 23. So do not expect a stopped call to read 3 or 6; expect any total
+-- BELOW 40, because the call-total check runs first and would have fired
+-- otherwise. Such a stop also leaves no trace on the row: `begin` returns
+-- before agent.dispatch, so recordingExecute never runs and nothing reaches
+-- tool_timeline or tool_call_count. Empty here means "nothing reached the
+-- dispatch limit", NOT "the ceiling never fired".
 SELECT call_sid, tool_call_count FROM call_logs
- WHERE voice_provider = 'grok' AND tool_call_count > 40;
+ WHERE voice_provider = 'grok' AND tool_call_count >= 40;
 ```
 
 And one that will stay at the full count until the xAI management key exists —

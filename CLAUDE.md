@@ -1518,14 +1518,128 @@ too — and it never carries arguments, because they hold PHI:
   the agent to speak to the caller
 ```
 
-Its no-log check is the one that matters, and it is SQL:
+Its no-log check is the one that matters, and it is SQL. The threshold is
+`>=`, not `>`, and that is the whole point of the check: `begin` refuses at
+`dispatches >= perCallDispatches`, so a call can REACH 40 and can never
+exceed it. Written as `> 40` — as it was from 2026-09-03 until it was
+corrected — it proved the ceiling had shipped and then could never again see
+a loop that reached the limit. It missed eight of them.
 
 ```sql
--- After the deploy this should return nothing. Before it, one optical call
--- on 2026-09-03 returned 118.
+-- Each row is a CANDIDATE runaway loop, not a confirmed ceiling stop.
+-- Read the call's tool_timeline before calling it a loop; see below for why.
+-- Keep 40 in step with DEFAULT_CEILING_LIMITS.perCallDispatches
+-- (src/runtime/toolCeiling.ts); ceilingDocCheck.test.ts fails if they drift.
 SELECT call_sid, tool_call_count FROM call_logs
-WHERE voice_provider = 'grok' AND tool_call_count > 40;
+WHERE voice_provider = 'grok' AND tool_call_count >= 40;
 ```
+
+**A row is a candidate, and the verification is one column away.** A count of
+40 says 40 dispatches were ALLOWED — nothing more. `begin` refuses when
+`this.dispatches >= 40`, so the 40th dispatch still runs (39 >= 40 is false)
+and it is the **41st attempt** that is refused; that refused attempt is never
+counted. A call whose model simply stopped after its 40th tool therefore looks
+identical here to one the ceiling stopped. Confirm by reading `tool_timeline`:
+a loop repeats one tool 30-odd times, and a call that merely finished busy
+does not. All nine below were confirmed that way, not assumed.
+
+**This check sees ONE of the ceiling's three rules.** An empty result says
+only that no call reached `perCallDispatches` — it is not proof the build is
+healthy, and it is not proof the ceiling did not fire. A stop by
+`identicalFailures` (3) or `perToolFailures` (6) can happen at any call
+total below 40, so it never appears here at all. Do not expect such a call to
+read 3 or 6: those two limits are **per-tool** counters, not call totals —
+`begin` reads them off that tool's own `byArgs` / `toolFailures` state, while
+`tool_call_count` counts every tool that ran. Twenty good calls to one tool
+followed by three identical failures of another is a stop at a total of 23.
+What IS guaranteed is only that the total is under 40, because the call-total
+check runs first and would have fired instead.
+
+Those two rules' stops are not merely below the threshold, they are
+**unrecorded everywhere**. `begin` returns before `agent.dispatch`, so the
+agents' `recordingExecute` never runs and the attempt is absent from
+`tool_timeline` and from `tool_call_count` (which is that timeline's length).
+The bridge does push a `ceiling:<reason>` entry onto its own `toolEvents`, but
+`callRecord.ts` deliberately keeps that off the row — "for logs and tests, and
+off the row". So the only trace a repeated-failure stop leaves anywhere is the
+console `[TOOL CEILING]` line, and **no SQL can count it.** Raising this
+query's threshold would not help; there is nothing in the row to find.
+
+A row above 40 is a fault **only if the call is post-deployment**. Nothing can
+exceed the limit while the ceiling is in the dispatch path, so a recent 41
+means it is not. But this query carries no deployment-time predicate, so it
+will ALWAYS return the pre-ceiling call of 2026-09-03 at 118 — check the date
+before concluding anything from a row above 40. As of 2026-09-10 that
+historical row is still the only one.
+
+Note also that `tool_call_count` is NULL on 577 of 1,620 grok calls
+(measured 2026-09-10; the table is live), so this check is blind to about a
+third of the population whatever the threshold. The control that says this is
+not a legacy gap: the NULL share is steady on every day the lane has run
+(39.3 / 35.6 / 34.5 / 35.1% across 09-03, 09-04, 09-08, 09-09), and it does
+not fall as the runtime matures. Why the column is unwritten on a third of
+calls is not yet established, and until it is, **this check's floor is unknown
+rather than zero.** That gap is larger than the `>`/`>=` bug this section
+documents, and nothing currently watches it.
+
+**What the corrected check found. Re-measured 2026-09-10: NINE rows at
+`>= 40`** — the pre-ceiling optical call of 09-03 at 118, and **eight sitting
+at exactly 40**. Nothing at all between 24 and 39 — the highest count any call
+reaches without touching the limit is 23 — so a 40 is the limit being
+reached, never drift. Two are 09-08 and **three are 09-09**, so this is live and recurring,
+not a historical batch. **None of the nine filed a ticket** (`ticket_number`
+NULL on all nine).
+
+| call_sid | lane | day | dur | the loop | the gate that was refusing |
+|---|---|---|---|---|---|
+| CAc9f38039b80c47cf13cf5c15b79c1c37 | optical | 09-03 | 245s | `file_optical_ticket` ×110, all failing | `["date_of_birth"]` |
+| CA3985d8bcabd63bb29e7861a58cfc682b | optical | 09-04 | 120s | `resolve_location` ×32, **all succeeding** | `file_optical_ticket` ×2 `["location"]` |
+| CAefbdd1832725217d5846f723c259f944 | optical | 09-04 | 161s | `lookup_patient` ×35, **all succeeding** | `file_optical_ticket` ×2 `["location"]` |
+| CA60675f75fcbb9211e68dc01e7416a83f | pcp | 09-04 | 247s | `record_pcp_intake` ×40, **no outcome recorded at all** | — |
+| CA9f9710a9fe054f387f1d6e4c6f3b6350 | optical | 09-08 | 159s | `resolve_location` ×30, **all succeeding** | `file_optical_ticket` ×2 `["location"]` |
+| CA3ccec8b38c1734b990f7f6c91fec71e6 | optical | 09-08 | 121s | `resolve_location` ×32, **all succeeding** | `file_optical_ticket` ×2 `["location"]` |
+| CA511a3e2dcc4a53d63e2d4cd2a6dcb29d | optical | 09-09 | 168s | `resolve_location` ×30, **all succeeding** | `file_optical_ticket` ×3 `["location"]` |
+| CAefddb2f48d13678c9df2f27e6750f227 | optical | 09-09 | 160s | `resolve_location` ×33, **all succeeding** | `file_optical_ticket` ×3 `["location"]` |
+| CAa6a32e9c9459a8b4d149383e5e083971 | surgery | 09-09 | 291s | `lookup_patient` ×35, **all succeeding** | `file_surgery_ticket` ×2 `["surgeon"]` |
+
+**The finding that matters: only the 118 was a failure loop.** All eight
+that reached the limit were loops of tools reporting SUCCESS (or, on pcp,
+reporting nothing). That means `identicalFailures: 3` and `perToolFailures: 6`
+were structurally blind to every one of them — they count failures, and a
+success clears the counters by design (rule 1 of `toolCeiling.ts`).
+
+**Say "reached the limit", not "the ceiling stopped it" — even here.** The
+timelines prove these are loops: one tool repeated 30-odd times is not a call
+that merely got busy. They do NOT prove the ceiling refused anything. The
+refusal lands on the 41st attempt and is written nowhere — not
+`tool_timeline`, not `tool_call_count`, not the call row — so a call that
+looped 40 times and then ended on its own is indistinguishable from one the
+ceiling cut off. Only the console `[TOOL CEILING]` line separates them, and it
+is not retained. Two claims live here and only the first is evidenced:
+**these are loops** (proven), and **the ceiling stopped them** (not provable
+from anything persisted).
+
+Say no more than that. It is tempting to conclude `perCallDispatches` is the
+only rule that ever fires, and the evidence cannot carry it: stops by the
+other two rules leave no trace on the call row, so a census built from
+`tool_call_count` is structurally incapable of finding one. How often the
+repeated-failure rules fire is **unknown, not zero** — which is the same trap
+this whole section documents, one level down.
+
+**And the shape is general, not an optical quirk.** On every one of the seven
+strikes that recorded outcomes at all, the same thing happens: a filing tool
+refuses for a missing field, and the model answers by re-running a LOOKUP tool
+that keeps returning success, instead of asking the caller for the field. Six
+of the seven are optical hitting `["location"]`; the seventh is **surgery
+hitting `["surgeon"]` and re-running `lookup_patient` 35 times**. The lane and
+the field change; the loop does not — so **a fix scoped to `opticalTools.ts`
+would leave surgery looping.**
+
+Whether a verified lookup answer is failing to reach the filing tool's view of
+the call is an open question, and it lives in the filing tools, not in the
+ceiling. The two standing suspects are present but are NOT the loop:
+`resolve_location` with no argument appears once or twice per call, and the
+location gate two or three times.
 
 Markers added 2026-09-03 (late), all on `claude/determined-brown-o5qsft`.
 Each prints only when the thing it watches happens, so each is a live counter:
