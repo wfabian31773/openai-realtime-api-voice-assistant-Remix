@@ -140,3 +140,31 @@ describe('the ask is bounded, so a refusal cannot become a well', () => {
     expect(other.success).toBe(false);
   });
 });
+
+describe('the lanes that pass no queue are untouched', () => {
+  /**
+   * THE REGRESSION THIS CHANGE COULD HAVE CAUSED, PINNED.
+   *
+   * `resolve_location` is in records' and tech's tool arrays too, and neither
+   * agent injects a `queue` context -- only opticalAgent and surgeryAgent do
+   * (`ToolQueue` is `'optical' | 'surgery'`). `acceptsFacility` returns true
+   * for an undefined queue, so the new refusal branch is unreachable for them
+   * and a surgery centre still resolves. If someone later gives records or
+   * tech a queue value, this test is what tells them they have changed the
+   * behaviour of two lanes that were not in scope.
+   */
+  it('a surgery centre still resolves when no queue is injected', async () => {
+    const dir = await directory();
+    vi.spyOn(dir, 'isDirectoryConfigured').mockReturnValue(true);
+    vi.spyOn(dir, 'lookupLocation').mockResolvedValue(SURGERY_CENTRE as never);
+
+    const r = (await runTool('resolve_location', {
+      spoken_location: 'Loma Linda Surgery Center',
+      call_sid: SID,
+    })) as Record<string, unknown>;
+
+    expect(r.success).toBe(true);
+    expect(r.location).toBe('Loma Linda Surgery Center LLC');
+    expect(r.usable_for_this_queue).toBe(true);
+  });
+});
