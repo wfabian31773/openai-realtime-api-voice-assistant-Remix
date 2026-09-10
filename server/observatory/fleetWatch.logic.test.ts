@@ -1,0 +1,419 @@
+import { describe, it, expect } from 'vitest';
+import {
+  assessBarelyHeard,
+  assessCeiling,
+  assessFiling,
+  assessFleet,
+  isClosedOfficeShape,
+  isRealMove,
+  formatPct,
+  CEILING_PER_CALL_DISPATCHES,
+  MIN_N_FOR_A_RATE,
+  FILING_STOP_RUN,
+  FILING_ALARMED_LANES,
+  assessFilingStop,
+  fleetFilingStopRun,
+  foldCallsIntoWindows,
+  longestUnfiledRun,
+  type LaneWindow,
+  type CallRow,
+  type LaneBaseline,
+} from './fleetWatch.logic';
+
+/**
+ * Each block below names the misreading it prevents, and is written so that
+ * REVERTING the rule makes it red — not so that it merely describes what the
+ * code does today. See failure mode 10 in /CLAUDE.md.
+ */
+
+function laneWindow(over: Partial<LaneWindow> = {}): LaneWindow {
+  return {
+    lane: 'optical',
+    pipeline: 'grok',
+    substantive: 100,
+    barelyHeard: 0,
+    ceilingReached: 0,
+    maxToolCalls: 12,
+    toolCountNull: 0,
+    dobRefused: 0,
+    filed: 60,
+    longestUnfiledRun: 3,
+    ...over,
+  };
+}
+
+describe('rule 1 — the ceiling', () => {
+  it('is pinned to the real limit in toolCeiling.ts', () => {
+    // Literal, not the constant — same reason as the filing-stop threshold.
+    // `DEFAULT_CEILING_LIMITS.perCallDispatches` is 40; if that ever changes,
+    // this test is the thing that says so out loud.
+    expect(CEILING_PER_CALL_DISPATCHES).toBe(40);
+  });
+
+  it('treats a call AT the ceiling as the ceiling working, not a regression', () => {
+    const f = assessCeiling(laneWindow({ ceilingReached: 2, maxToolCalls: 40 }));
+    expect(f?.severity).toBe('watch');
+    expect(f?.headline).toContain('reached the tool ceiling');
+    // The old `> 40` reading would have produced nothing at all here.
+    expect(f).not.toBeNull();
+  });
+
+  it('alarms only ABOVE the ceiling, because that means the ceiling is not in the path', () => {
+    const f = assessCeiling(laneWindow({ ceilingReached: 1, maxToolCalls: 118 }));
+    expect(f?.severity).toBe('alarm');
+    expect(f?.headline).toContain('ABOVE the ceiling');
+  });
+
+  it('says how many rows the check is blind to, rather than implying a clean sweep', () => {
+    const f = assessCeiling(laneWindow({ ceilingReached: 1, maxToolCalls: 40, toolCountNull: 18, substantive: 50 }));
+    expect(f?.detail).toContain('18 of 50');
+    expect(f?.detail).toContain('NULL tool_call_count');
+  });
+
+  it('is silent when nothing reached the ceiling', () => {
+    expect(assessCeiling(laneWindow({ maxToolCalls: 23 }))).toBeNull();
+  });
+});
+
+describe('rule 3 — a closed office is not an outage', () => {
+  it('reads quiet queues WITH a busy after-hours agent as the office being shut', () => {
+    // 2026-09-07, Labor Day: 276 no-ivr, 2 records, zero on the three big lanes.
+    expect(isClosedOfficeShape(2, 276)).toBe(true);
+  });
+
+  it('does NOT excuse quiet queues when the after-hours agent is quiet too', () => {
+    // Both silent in business hours is the shape of a real outage.
+    expect(isClosedOfficeShape(0, 0)).toBe(false);
+    expect(isClosedOfficeShape(2, 9)).toBe(false);
+  });
+
+  it('does not fire on a normal business day', () => {
+    expect(isClosedOfficeShape(181, 50)).toBe(false);
+  });
+
+  it('reports the closed-office shape once, for the fleet, not per lane', () => {
+    const { findings, closedOffice } = assessFleet([
+      laneWindow({ lane: 'optical', substantive: 0, filed: 0, longestUnfiledRun: 0 }),
+      laneWindow({ lane: 'tech', substantive: 0, filed: 0, longestUnfiledRun: 0 }),
+      laneWindow({ lane: 'no-ivr', pipeline: 'old-core', substantive: 276, filed: 100, longestUnfiledRun: 2 }),
+    ]);
+    expect(closedOffice).toBe(true);
+    expect(findings.filter((f) => f.headline.includes('closed')).length + findings.filter((f) => f.lane === 'fleet').length)
+      .toBeGreaterThan(0);
+    // and it must not also raise a filing alarm against the empty lanes
+    expect(findings.some((f) => f.severity === 'alarm')).toBe(false);
+  });
+});
+
+describe('rule 4 — an unmeasured filing rate is unknown, never zero', () => {
+  it('says UNKNOWN when the Support Center was unreachable', () => {
+    const f = assessFiling(laneWindow({ filed: null, longestUnfiledRun: null }));
+    expect(f?.severity).toBe('info');
+    expect(f?.headline).toContain('UNKNOWN');
+    // The failure this prevents: rendering it as 0% and calling the lane broken.
+    expect(f?.headline).not.toContain('0.0%');
+  });
+
+  it('alarms on a filing-stop run at the measured threshold', () => {
+    // The threshold is pinned to the LITERAL 12, not to the constant. Asserting
+    // against FILING_STOP_RUN moves with the constant, so raising the limit
+    // would pass — the sink-not-source failure this suite exists to avoid.
+    // Derivation (2026-09-01): runs of consecutive unfiled queue calls were 185
+    // once (the 08-31 outage) and never above 8 otherwise. 12 sits between the
+    // worst healthy run and the outage, and would have caught 08-31 at 20:23:06.
+    expect(FILING_STOP_RUN).toBe(12);
+    expect(assessFilingStop(12)?.severity).toBe('alarm');
+    expect(assessFilingStop(11)).toBeNull();
+    // 8 is the worst run ever seen on a healthy day — it must stay silent.
+    expect(assessFilingStop(8)).toBeNull();
+  });
+
+  it('raises the filing stop ONCE for the fleet, not once per lane', () => {
+    // Codex, PR #277: the alarm used to live on the lane window, so a fleet-wide
+    // outage needed 12 failures inside ONE lane and a filing elsewhere could not
+    // reset the run. It is one verdict now, on lane 'fleet'.
+    const f = assessFilingStop(14);
+    expect(f?.lane).toBe('fleet');
+    expect(f?.headline).toContain('queue calls filed nothing');
+  });
+
+  it('cannot alarm on a run it could not measure', () => {
+    expect(assessFilingStop(null)).toBeNull();
+  });
+
+  it('never alarms on a run it could not measure', () => {
+    expect(assessFiling(laneWindow({ filed: null, longestUnfiledRun: null }))?.severity).not.toBe('alarm');
+  });
+});
+
+describe('the filing-stop alarm speaks only about lanes it was measured on', () => {
+  function call(lane: string, i: number): CallRow {
+    return {
+      call_sid: `CA${String(i).padStart(32, '0')}`,
+      agent_used: lane,
+      pipeline: 'grok',
+      tool_call_count: 3,
+      caller_lines: 5,
+      dob_refused: false,
+    };
+  }
+
+  it('is pinned to the four lanes the production alarm uses', () => {
+    // Mirrors ALARMED_QUEUE_AGENTS in server/services/ticketFilingHealth.ts.
+    // Literal, so widening the set fails here rather than silently quoting the
+    // threshold at a population it was never measured on.
+    expect([...FILING_ALARMED_LANES]).toEqual(['optical', 'surgery', 'tech', 'records']);
+  });
+
+  it('NEVER alarms on appointment-confirmation, which correctly files nothing', () => {
+    // Codex, PR #277: it is declared filesTickets:false and makes ordinary
+    // 60-90s outbound calls, so an empty ticket set is its correct state.
+    // 20 confirmations, none filed, must produce no run at all.
+    const calls = Array.from({ length: 20 }, (_, i) => call('appointment-confirmation', i));
+    expect(fleetFilingStopRun(calls, new Set())).toBe(0);
+  });
+
+  it('excludes no-ivr and pcp — a different filing path and an unmeasured lane', () => {
+    const calls = [
+      ...Array.from({ length: 20 }, (_, i) => call('no-ivr', i)),
+      ...Array.from({ length: 20 }, (_, i) => call('pcp', 100 + i)),
+    ];
+    expect(fleetFilingStopRun(calls, new Set())).toBe(0);
+  });
+
+  it('counts the run ACROSS the four lanes in one sequence, not within each', () => {
+    // A gateway outage hits every lane. Three unfiled on each of four lanes is
+    // 12 consecutive fleet calls — an alarm — but only 3 per lane, which the
+    // old per-lane form scored as healthy and said nothing about.
+    const interleaved: CallRow[] = [];
+    let i = 0;
+    for (let round = 0; round < 3; round++) {
+      for (const lane of ['optical', 'surgery', 'tech', 'records']) {
+        interleaved.push(call(lane, i++));
+      }
+    }
+    expect(fleetFilingStopRun(interleaved, new Set())).toBe(12);
+    expect(assessFilingStop(fleetFilingStopRun(interleaved, new Set()))?.severity).toBe('alarm');
+
+    // The per-lane view of the same outage — what the old code measured.
+    const perLaneWorst = Math.max(
+      ...['optical', 'surgery', 'tech', 'records'].map((lane) =>
+        longestUnfiledRun(interleaved.filter((c) => c.agent_used === lane), new Set()),
+      ),
+    );
+    expect(perLaneWorst).toBe(3);
+    expect(assessFilingStop(perLaneWorst)).toBeNull();
+  });
+
+  it('lets a filing in ANY of the four lanes reset the fleet run', () => {
+    const calls = Array.from({ length: 12 }, (_, i) => call(i === 6 ? 'tech' : 'optical', i));
+    const filed = new Set([calls[6].call_sid]);
+    // 6 before, 5 after — neither reaches 12.
+    expect(fleetFilingStopRun(calls, filed)).toBe(6);
+    expect(assessFilingStop(fleetFilingStopRun(calls, filed))).toBeNull();
+  });
+
+  it('assessFleet actually HANDS the run to the alarm, not just accepts one', () => {
+    // Same class as the baseline lookup: dropping the argument silences the
+    // alarm entirely, and silence is indistinguishable from health. The two
+    // halves differ ONLY in whether the run arrives.
+    const busy = [
+      laneWindow({ lane: 'optical', substantive: 60, filed: 30, longestUnfiledRun: 2 }),
+      laneWindow({ lane: 'no-ivr', pipeline: 'old-core', substantive: 40, filed: 20, longestUnfiledRun: 2 }),
+    ];
+    const withRun = assessFleet(busy, new Map(), 14).findings.find((f) => f.severity === 'alarm');
+    expect(withRun?.lane).toBe('fleet');
+    expect(withRun?.headline).toContain('14 consecutive');
+
+    expect(assessFleet(busy, new Map()).findings.some((f) => f.severity === 'alarm')).toBe(false);
+  });
+
+  it('a closed office is never a filing stop, however long the run reads', () => {
+    // Quiet queues with a busy after-hours agent is the office being shut. The
+    // run is meaningless there and must not speak.
+    const shut = [
+      laneWindow({ lane: 'optical', substantive: 0, filed: 0, longestUnfiledRun: 0 }),
+      laneWindow({ lane: 'no-ivr', pipeline: 'old-core', substantive: 276, filed: 100, longestUnfiledRun: 2 }),
+    ];
+    expect(assessFleet(shut, new Map(), 40).findings.some((f) => f.severity === 'alarm')).toBe(false);
+  });
+
+  it('returns null, never 0, when the ticket half was unreadable', () => {
+    const calls = Array.from({ length: 30 }, (_, i) => call('optical', i));
+    expect(fleetFilingStopRun(calls, null)).toBeNull();
+    expect(assessFilingStop(fleetFilingStopRun(calls, null))).toBeNull();
+  });
+});
+
+describe('rule 7 — a move at small n is not a move', () => {
+  it('refuses to call the cutover deltas real, because they were not', () => {
+    // tech 49/73 -> 46/66 (+2.6 points) and surgery 22/44 -> 18/32 (+6.3).
+    expect(isRealMove(49, 73, 46, 66)).toBe(false);
+    expect(isRealMove(22, 44, 18, 32)).toBe(false);
+  });
+
+  it('refuses any comparison below the minimum n, whatever the gap looks like', () => {
+    // 0% vs 100% on 10 calls a side is still not a finding.
+    expect(isRealMove(0, 10, 10, 10)).toBe(false);
+    expect(MIN_N_FOR_A_RATE).toBeGreaterThan(10);
+  });
+
+  it('does report a move that is genuinely outside noise', () => {
+    // The date-of-birth gate across the runtime cutover: 2/123 -> 23/186.
+    expect(isRealMove(2, 123, 23, 186)).toBe(true);
+  });
+});
+
+describe('rule 2 — a rate needs a denominator worth having', () => {
+  // surgery's own trailing record on 2026-09-08.
+  const SURGERY_BASELINE = { barelyHeardHits: 29, barelyHeardN: 134, label: '09-08' };
+
+  it('reports but does not alarm below the minimum n', () => {
+    const f = assessBarelyHeard(laneWindow({ substantive: 9, barelyHeard: 4 }));
+    expect(f?.severity).toBe('info');
+  });
+
+  it('THE FIRST LIVE TICK: over the threshold, inside the lane\'s own spread, is NOT a watch', () => {
+    // 2026-09-09, surgery: 14/53 = 26.4%, over the 25% level, against its own
+    // 21.6% the day before (z = 0.70). Its runtime record is 37.2 / 27.5 / 21.6,
+    // so 26.4 is mid-range. A flat threshold alone fires here and would page
+    // most days.
+    const f = assessBarelyHeard(laneWindow({ lane: 'surgery', substantive: 53, barelyHeard: 14 }), SURGERY_BASELINE);
+    expect(f?.severity).toBe('info');
+    expect(f?.detail).toContain("Inside this lane's own established spread");
+  });
+
+  it('watches only when it is over the level AND a real move against the lane itself', () => {
+    // 40/53 = 75.5% against the same 21.6% baseline — far outside the spread.
+    const f = assessBarelyHeard(laneWindow({ lane: 'surgery', substantive: 53, barelyHeard: 40 }), SURGERY_BASELINE);
+    expect(f?.severity).toBe('watch');
+    expect(f?.headline).toContain('a real move');
+  });
+
+  it('assessFleet actually HANDS the baseline to the lane, not just accepts one', () => {
+    // Without this, assessFleet can quietly drop the lookup and every lane
+    // falls back to "no baseline" — which reads as info, so the bug is silent.
+    // The two cases below differ ONLY by whether the map reaches the lane.
+    const window = laneWindow({ lane: 'surgery', substantive: 53, barelyHeard: 40, filed: 30, longestUnfiledRun: 2 });
+    const baselines = new Map<string, LaneBaseline>([['surgery', SURGERY_BASELINE]]);
+
+    const withBaseline = assessFleet([window], baselines).findings
+      .find((f) => f.headline.includes('barely-heard'));
+    expect(withBaseline?.severity).toBe('watch');
+    expect(withBaseline?.headline).toContain('a real move');
+
+    const without = assessFleet([window]).findings
+      .find((f) => f.headline.includes('barely-heard'));
+    expect(without?.severity).toBe('info');
+    expect(without?.detail).toContain('unmeasured');
+  });
+
+  it('without a baseline it can only say "unmeasured", never "watch"', () => {
+    // Same stance rule 4 takes on filing: an unmeasured comparison is not a
+    // passing one, and it is not a failing one either.
+    const f = assessBarelyHeard(laneWindow({ substantive: 43, barelyHeard: 16 }));
+    expect(f?.severity).toBe('info');
+    expect(f?.detail).toContain('unmeasured');
+  });
+
+  it('stays quiet under the watch level', () => {
+    // surgery on 2026-09-08 after the VAD drop to 0.6: 29 of 134 = 21.6%.
+    // Elevated against its old-core history and still not a thing to page on.
+    expect(assessBarelyHeard(laneWindow({ substantive: 134, barelyHeard: 29 }))).toBeNull();
+    expect(assessBarelyHeard(laneWindow({ substantive: 100, barelyHeard: 11 }))).toBeNull();
+  });
+});
+
+describe('folding calls into lane windows', () => {
+  function call(over: Partial<CallRow> = {}): CallRow {
+    return {
+      call_sid: `CA${Math.random().toString(16).slice(2).padEnd(32, '0').slice(0, 32)}`,
+      agent_used: 'optical',
+      pipeline: 'grok',
+      tool_call_count: 5,
+      caller_lines: 6,
+      dob_refused: false,
+      ...over,
+    };
+  }
+
+  it('propagates an unmeasurable filing half as null, never as zero', () => {
+    const [w] = foldCallsIntoWindows([call(), call()], null);
+    expect(w.filed).toBeNull();
+    expect(w.longestUnfiledRun).toBeNull();
+    // The failure this prevents: `filed: 0` on a lane that filed everything,
+    // purely because a credential was missing.
+    expect(w.filed).not.toBe(0);
+  });
+
+  it('splits one lane across pipelines, because a mid-day cutover is two populations', () => {
+    const windows = foldCallsIntoWindows(
+      [call({ pipeline: 'old-core' }), call({ pipeline: 'grok' }), call({ pipeline: 'grok' })],
+      null,
+    );
+    expect(windows).toHaveLength(2);
+    expect(windows.map((w) => w.pipeline).sort()).toEqual(['grok', 'old-core']);
+  });
+
+  it('counts a call at the ceiling but leaves NULL tool counts out of the max', () => {
+    const [w] = foldCallsIntoWindows(
+      [call({ tool_call_count: 40 }), call({ tool_call_count: null }), call({ tool_call_count: 7 })],
+      null,
+    );
+    expect(w.ceilingReached).toBe(1);
+    expect(w.maxToolCalls).toBe(40);
+    expect(w.toolCountNull).toBe(1);
+  });
+
+  it('reports maxToolCalls as null when every row is NULL, rather than 0', () => {
+    // 0 would read as "no tool ever ran"; null reads as "we cannot see".
+    const [w] = foldCallsIntoWindows([call({ tool_call_count: null })], null);
+    expect(w.maxToolCalls).toBeNull();
+  });
+});
+
+describe('longestUnfiledRun — the 2026-08-31 detector', () => {
+  function seq(pattern: string): { calls: CallRow[]; filed: Set<string> } {
+    // 'f' filed, '.' not filed, in time order.
+    const calls = [...pattern].map((ch, i) => ({
+      call_sid: `CA${String(i).padStart(32, '0')}`,
+      agent_used: 'tech',
+      pipeline: 'grok' as const,
+      tool_call_count: 3,
+      caller_lines: 4,
+      dob_refused: false,
+      _filed: ch === 'f',
+    }));
+    const filed = new Set(calls.filter((c) => c._filed).map((c) => c.call_sid));
+    return { calls: calls as unknown as CallRow[], filed };
+  }
+
+  it('finds the longest gap, not the last one', () => {
+    const { calls, filed } = seq('f...f.f.....f');
+    expect(longestUnfiledRun(calls, filed)).toBe(5);
+  });
+
+  it('counts a run that reaches the end of the day', () => {
+    const { calls, filed } = seq('f.......');
+    expect(longestUnfiledRun(calls, filed)).toBe(7);
+  });
+
+  it('is zero when everything filed', () => {
+    const { calls, filed } = seq('ffff');
+    expect(longestUnfiledRun(calls, filed)).toBe(0);
+  });
+
+  it('counts the whole day when nothing filed — the outage shape', () => {
+    const { calls, filed } = seq('.'.repeat(185));
+    expect(longestUnfiledRun(calls, filed)).toBe(185);
+  });
+});
+
+describe('formatPct', () => {
+  it('never divides by zero', () => {
+    expect(formatPct(0, 0)).toBe('n/a');
+  });
+  it('matches the published form', () => {
+    expect(formatPct(75, 410)).toBe('18.3%');
+  });
+});

@@ -1,13 +1,41 @@
 import { describe, it, expect } from 'vitest';
-import { CallGradingService, DeterministicGraderInput } from './callGradingService';
-import { redactPHI, redactGraderResults } from './phiSanitizer';
-import { HANDOFF_VALID_TRANSITIONS } from '../../shared/schema';
-import { getMaxDurationMs } from './callLifecycleCoordinator';
-import {
+
+/**
+ * THE TWO LINES THAT MAKE THIS FILE RUNNABLE (added 2026-09-09).
+ *
+ * This suite has been recorded as "1 pre-existing failure" in
+ * docs/observatory/STATE-OF-PLAY.md and in several PR descriptions for weeks.
+ * It was never a failing test — the file could not be COLLECTED, because two
+ * modules validate or construct at import time:
+ *
+ *   DATABASE_URL    src/config/environment.ts requires a non-empty string, and
+ *                   server/db.ts builds a pool at module load.
+ *   OPENAI_API_KEY  callGradingService.ts constructs an OpenAI client in its
+ *                   constructor and instantiates one at module scope.
+ *
+ * Neither is used: this file tests deterministic graders, PHI redaction,
+ * handoff transitions and lifecycle durations. No test opens a socket. The
+ * values below are deliberately unreachable, and `||=` means a real local
+ * environment still wins.
+ *
+ * 36 other test files already carry exactly these two lines. This one did not,
+ * which is the entire reason it "failed". Because ES imports hoist above
+ * statements, the imports below have to be dynamic — the same shape every one
+ * of those 36 files uses.
+ */
+process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+process.env.OPENAI_API_KEY ||= 'test-unused';
+
+const { CallGradingService } = await import('./callGradingService');
+type DeterministicGraderInput = import('./callGradingService').DeterministicGraderInput;
+const { redactPHI, redactGraderResults } = await import('./phiSanitizer');
+const { HANDOFF_VALID_TRANSITIONS } = await import('../../shared/schema');
+const { getMaxDurationMs } = await import('./callLifecycleCoordinator');
+const {
   markAzulTransferAccepted,
   hasAzulTransferAccepted,
   unregisterAzulOfficeTransferCallback,
-} from '../agents/azulSchedulingAgent';
+} = await import('../agents/azulSchedulingAgent');
 
 function makeInput(overrides: Partial<DeterministicGraderInput> = {}): DeterministicGraderInput {
   return {
@@ -240,20 +268,36 @@ describe('Deterministic Graders', () => {
   });
 
   describe('actionable_request_needs_ticket grader', () => {
+    // The grader carries a CONVERSATION FLOOR added 2026-08-13: fewer than two
+    // caller turns is "not applicable", because a hangup is not a lost request.
+    // The two transcripts below therefore need TWO caller turns to reach the
+    // actionable-request logic at all. Before this was fixed they had one each,
+    // so the "gets a ticket" case passed on the floor rather than on the ticket
+    // and the "no ticket" case failed outright — invisible, because the whole
+    // suite failed to collect on a missing DATABASE_URL.
+    const TWO_TURN_REQUEST =
+      'Agent: Hello, how can I help?\n' +
+      'Caller: I need a callback about my prescription refill and appointment\n' +
+      'Agent: Let me take some details.\n' +
+      'Caller: My appointment needs to be rescheduled as well, and I have a question about the refill.\n';
+
     it('should pass when actionable request gets a ticket', () => {
       const input = makeInput({
-        transcript: 'Agent: Hello, how can I help?\nCaller: I need a callback about my prescription refill and appointment\nAgent: I will create a ticket for you.',
+        transcript: `${TWO_TURN_REQUEST}Agent: I will create a ticket for you.`,
         ticketNumber: 'T-123',
       });
       const results = service.runDeterministicGraders(input);
       const grader = results.find(r => r.grader === 'actionable_request_needs_ticket');
       expect(grader).toBeDefined();
       expect(grader!.pass).toBe(true);
+      // It must pass because a ticket exists, NOT because the floor excused it.
+      expect(grader!.metadata?.notApplicable).toBeUndefined();
+      expect(grader!.metadata?.ticketNumber).toBe('T-123');
     });
 
     it('should FAIL with severity=critical when actionable request has no ticket', () => {
       const input = makeInput({
-        transcript: 'Agent: Hello, how can I help?\nCaller: I need a callback about my prescription refill and appointment\nAgent: I will look into that.',
+        transcript: `${TWO_TURN_REQUEST}Agent: I will look into that.`,
         ticketNumber: null,
       });
       const results = service.runDeterministicGraders(input);
@@ -261,6 +305,23 @@ describe('Deterministic Graders', () => {
       expect(grader).toBeDefined();
       expect(grader!.pass).toBe(false);
       expect(grader!.severity).toBe('critical');
+    });
+
+    it('holds the conversation floor: one caller turn is not a lost request', () => {
+      // The operator's 2026-08-13 ruling, pinned. Removing the floor makes this
+      // red instead of silently re-classifying every hangup as a lost request.
+      const input = makeInput({
+        transcript:
+          'Agent: Hello, how can I help?\n' +
+          'Caller: I need a callback about my prescription refill and appointment\n' +
+          'Agent: I will look into that.',
+        ticketNumber: null,
+      });
+      const results = service.runDeterministicGraders(input);
+      const grader = results.find(r => r.grader === 'actionable_request_needs_ticket');
+      expect(grader!.pass).toBe(true);
+      expect(grader!.metadata?.notApplicable).toBe(true);
+      expect(grader!.metadata?.callerTurnCount).toBe(1);
     });
 
     it('should pass when call is transferred (ticket deferred)', () => {

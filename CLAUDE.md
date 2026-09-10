@@ -1100,6 +1100,161 @@ over every queue call since each lane's own cutover. Do not re-derive these.**
 
 ---
 
+## WHY QUEUE CALLS DO NOT FILE — the 2026-09-08 taxonomy
+
+**One full business day, queue lanes only (optical, surgery, tech, records,
+pcp), `duration >= 30`. Measured 2026-09-09.** Everything in this section is a
+count, not a judgement; where a cause is not established it says so.
+
+**446 substantive calls · 255 filed · 191 produced no ticket.**
+
+**MIND THE TWO BASES — they are not the same test and the counts below use
+both.** The 255/191 split asks *does any canonical-SID ticket exist for this
+call*, over tickets anchored to 09-07..09-09 by the call's own day. The
+date-of-birth figures further down use the STRICTER agent-provenance test
+(`created_by_id IS NULL AND agent_used IS NOT NULL`) over all time. The
+stricter test cannot inflate a filing rate, so 53-of-75 is a floor. Do not
+add a number from one basis to a number from the other — an earlier draft of
+this section put a staff figure from a third, all-lane query into this
+446-call breakdown and the column stopped summing.
+
+| what happened | calls | avg secs | avg CALLER: lines |
+|---|---|---|---|
+| **a filing tool refused it** (`outcome.missingFields`) | **62** | 158 | 7.1 |
+| caller transcribed exactly once | 44 | 58 | 1.0 |
+| caller never transcribed | 33 | 78 | 0.0 |
+| tools ran, a filing tool was never called | 26 | 120 | 5.8 |
+| no tool events at all | 14 | 84 | 3.2 |
+| filing tool returned a `ticket_number`, no ticket carries the SID | 12 | 169 | 6.5 |
+
+The last row is **not established as a lost request** — it may be the known
+call-attribution defect (#77, and the 2.6% of tickets carrying a later call's
+SID). Whether those 12 tickets exist under another SID has NOT been checked.
+
+**The refusals are dominated by ONE field.** Refusal events by lane and field,
+same day:
+
+| lane | field | calls |
+|---|---|---|
+| surgery | `date_of_birth` | 34 |
+| tech | `date_of_birth` | 29 |
+| optical | `location` | 21 |
+| surgery | `surgeon` | 14 |
+| optical | `date_of_birth` | 12 |
+
+### The date-of-birth chain — every link measured, none inferred
+
+**75 calls hit a `date_of_birth` refusal. 53 of them ended with no agent
+ticket; 22 filed anyway** (the `verifiedDobFor` fallback, which needs a certain
+`lookup_patient` match).
+
+1. **The model sent no `date_of_birth` argument. 75 of 75.** `dobShape` reads
+   `(none)` on every refusal event across all three lanes — no other shape
+   appears. The parser was never given anything to read.
+2. **In 51 of the 75 the caller had already given a date** — their own
+   `CALLER:` lines contain a 19xx year or an English/Spanish month name
+   (surgery 25, tech 16, optical 10). This is a lower bound: it counts only
+   those two signals.
+3. **In 42 of the 75 the refusal is the LAST tool event of the call**
+   (surgery 18, tech 19, optical 5). The model does not call the filing tool
+   again.
+4. Therefore **`decideDobEscape`'s "ask once, then file anyway" cannot fire on
+   those 42** — it returns `askAgain: true` on the first refusal and only
+   escapes on a second attempt that never comes. The escape was built
+   2026-09-04 for a retry loop; the runtime's failure is the opposite shape.
+
+**WHY the model omits the field is NOT established.** What IS established:
+`date_of_birth` is declared in the tool schema with a description telling the
+model to send it, is deliberately absent from `required`, and
+`realtimeAdapter` passes the registry schema through unchanged with
+`strict: false`. **The `fix` channel DOES reach the model** —
+`agentBinding.dispatch` JSON-stringifies the whole tool result — so a theory
+that the coaching text is being dropped is wrong; that was checked.
+
+### The gate is worse on the runtime than on the old core
+
+Share of substantive calls (optical + surgery + tech) hitting a
+`date_of_birth` refusal:
+
+| day | pipeline | rate |
+|---|---|---|
+| 2026-08-28 | old core | 19/271 = 7.0% |
+| 2026-08-31 | old core | 21/341 = 6.2% |
+| 2026-09-01 | old core | 31/356 = 8.7% |
+| 2026-09-02 | old core | 10/314 = 3.2% |
+| **2026-09-03** | **old core** | **2/123 = 1.6%** |
+| **2026-09-03** | **grok** | **23/186 = 12.4%** |
+| 2026-09-04 | grok | 48/324 = 14.8% |
+| 2026-09-08 | grok | 75/410 = 18.3% |
+
+The two 09-03 rows are the same lanes on the same day either side of the
+cutover. **This is the before-number for `docs/BACKEND_HANDOFF.md`.** The
+`dobShape` instrument only went live 2026-09-03 23:18, so no comparable
+`(none)`-vs-parser split exists for the old core.
+
+### A SECOND, INDEPENDENT DEFECT: the parser refused shapes real callers used
+
+Probed directly against `normalizeDobParts` on the deployed logic:
+
+```
+"0 1 0 4 58"                        REFUSED   CA4475d6f1b265c4c6824ff0f241d159f9,
+                                              surgery 2026-09-08, said twice, 329s,
+                                              no ticket
+"Cero tres veintidos del cincuenta" REFUSED   CAdc9f9667694dd95382985ad5f86f57b4,
+                                              surgery 2026-09-08, Spanish caller
+"01 04 58" · "January 4th, 1958"    parse
+"Marzo 22 de 1950"                  parses
+```
+
+Five numeric groups is neither three nor four, so the shape rule refused a
+birthday with the rule that refuses phone numbers. **Fixed** by
+`readDigitStringDate`, which runs only after the existing reader has refused
+and so cannot change any answer it gives; `0 1 0 4 58` now reads, while
+`9 0 9 6 0 8 1 8 3 2` and `my number is 0 1 0 4 58` are still refused.
+**Spelled-out digits in either language are STILL refused** and are not fixed.
+
+**Both defects were live on the same call.** Even had the model sent the
+field, that patient's answer would have been refused.
+
+### The other large bucket: the caller is never heard
+
+77 of the 191 (0 or 1 `CALLER:` lines). Some are hangups and wrong numbers;
+**the split has not been established.** Barely-heard rate (`duration >= 30`,
+<= 1 caller line), by lane:
+
+| lane | 09-02 old core | 09-03 old core | 09-03 grok | 09-04 grok | 09-08 grok |
+|---|---|---|---|---|---|
+| optical | 8.5% (59) | 0% (n=2) | 11.7% (60) | 16.4% (61) | **21.5% (93)** |
+| surgery | 13.0% (92) | 13.0% (46) | 37.2% (43) | 27.5% (80) | 21.6% (134) |
+| tech | 10.4% (163) | 9.3% (75) | 30.1% (83) | 19.7% (183) | 16.4% (183) |
+
+Dropping `RUNTIME_VAD_THRESHOLD` to 0.6 moved surgery and tech a long way.
+Neither is back to its old-core rate, and **optical has gone the other way.**
+
+**DO NOT ALARM ON ONE HOUR OF THIS.** Surgery's hourly barely-heard rate on
+2026-09-08 ran 16.7 · 14.3 · 42.9 · 31.6 · 36.4 · 5.9 · 31.6 · 7.7 · 0.0
+percent across the nine business hours (n = 9–19 each). A single hour above
+40% is inside the established spread, not a spike.
+
+**AND IT IS NOT A RUNTIME-ONLY POPULATION.** `no-ivr` — the after-hours agent
+on the OLD CORE, which takes all overnight and weekend volume — has its own
+share of substantive calls with ZERO caller lines, every day:
+
+| day | 09-02 | 09-03 | 09-04 | 09-05 | 09-06 | 09-07 | 09-08 | 09-09 |
+|---|---|---|---|---|---|---|---|---|
+| substantive | 40 | 38 | 39 | 74 | 15 | 175 | 34 | 32 |
+| zero caller lines | 9 | 14 | 5 | 8 | 0 | 28 | 4 | 10 |
+| | 22.5% | 36.8% | 12.8% | 10.8% | 0% | 16.0% | 11.8% | 31.3% |
+
+On 2026-09-09 those 10 calls averaged 95s (33–246s) with 1.4 `AGENT:` lines
+and `agent_outcome = 'inconclusive'` on all 10. **Whether these are dead air
+(robocalls, wrong numbers, abandoned legs) or real callers we never heard is
+NOT established** — the shape is consistent with both, and `RUNTIME_VAD_THRESHOLD`
+does not apply to this pipeline. The control that would settle it: whether the
+same number rings back within 24h and IS heard on the later call.
+
+---
+
 ## WHAT A CALL COSTS — and why the Grok number was never a measurement
 
 **Measured 2026-09-04, all 241 Grok rows on disk.** Every one carries

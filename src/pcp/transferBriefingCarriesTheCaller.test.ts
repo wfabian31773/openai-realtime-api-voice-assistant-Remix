@@ -30,7 +30,37 @@
  * WIRING between the agent and the builder. A builder-only test cannot see it —
  * `warmTransferBriefing.test.ts` was green throughout.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
+
+/**
+ * PIN THE CLOCK — this file was red for exactly one hour every weekday.
+ *
+ * `PcpDirector` reads the Pacific wall clock: `isLunchClosure()` is true when
+ * the local hour is 12 on a weekday, and `eligibleByAsk` is
+ * `askedForAPerson && !handoffFailed && !lunchClosure`. So between 12:00 and
+ * 12:59 Pacific an explicit ask stops being eligible, the agent files a
+ * CREATE_TASK instead of dialling, and every test here that expects a transfer
+ * fails. Measured 2026-09-09: green at 11:54 PDT, all 33 tests across these
+ * six files red from 12:01 PDT, green again with `isLunchClosure` forced off.
+ *
+ * The director is a module singleton, so its `lunchClosure` injection seam is
+ * not reachable from here. Pinning the clock to a weekday MORNING keeps the
+ * real closure logic in the path — it is exercised, and it correctly returns
+ * false — rather than mocking it away. Lunch closure itself is covered by
+ * `lunchClosure.test.ts`.
+ *
+ * Only `Date` is faked; timers stay real, so anything awaiting a timeout still
+ * resolves. Same trap as `.agents/memory/measurement-traps.md`: "a test that
+ * reads the wall clock is wrong at a predictable time."
+ */
+const NOT_LUNCH = new Date('2026-09-09T17:00:00Z'); // Wed 10:00 PDT
+beforeAll(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOT_LUNCH);
+});
+afterAll(() => {
+  vi.useRealTimers();
+});
 
 process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';

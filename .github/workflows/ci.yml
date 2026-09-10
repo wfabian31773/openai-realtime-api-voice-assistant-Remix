@@ -1,0 +1,62 @@
+# Typecheck and test on every pull request.
+#
+# WHY THIS EXISTS (2026-09-09): this repository had no CI at all — no
+# workflows, no check runs, no commit statuses. Every "N tests passing" figure
+# in a PR description was a number a session typed after running vitest in its
+# own container, unverifiable by anyone else. A PR that broke the suite would
+# have looked identical on GitHub to one that did not.
+#
+# WHAT IT DOES NOT DO. It will not catch the class of regression
+# `docs/BACKEND_HANDOFF.md` is about: surgery provider fill went 98% -> 49%
+# across three PRs that all passed their tests. Green here means "the suite
+# still runs", not "the change is safe". That document's rule stands unchanged:
+# do not merge a change to the ticket path without measuring the production
+# number before and after.
+#
+# NO CREDENTIALS, REAL OR FAKE, ARE SET HERE — AND NONE SHOULD BE ADDED.
+# The suite reaches no network and no database. Test files that import a module
+# validating env at load time supply their own unreachable placeholders with
+# `||=` (36 of them do, and `src/services/p0Hardening.test.ts` was fixed to
+# match on 2026-09-09 — that omission, not a failing assertion, was the
+# long-recorded "1 pre-existing failure").
+#
+# If a future test genuinely needs a database, give it a service container.
+# Never point CI at the Operations Hub: it holds live patient data, and a
+# public runner is the wrong place for it.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc -p . --noEmit
+
+      # NOTE: deliberately NOT `npm run build`. Building in-tree emits dist/
+      # containing compiled COPIES of every test file, which vitest then also
+      # collects — the phantom-failure trap recorded in
+      # docs/observatory/STATE-OF-PLAY.md section 7.
+      - name: Test
+        run: npx vitest run --reporter=default
