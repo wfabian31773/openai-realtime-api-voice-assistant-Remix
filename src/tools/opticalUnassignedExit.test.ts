@@ -38,7 +38,17 @@ import './sharedPatientTools';
 import './opticalTools';
 import { resetGateAttempts } from './gateAttempts';
 
-const SID = 'CA45263e1b3b7890aa6f640f5dc3ff8aac';
+/**
+ * INVENTED, like every other value in this file's fixtures. The tests only
+ * need a syntactically valid SID that `isTwilioCallSid` accepts and that is
+ * distinct from the one below; a production SID here would be a stable
+ * identifier anyone with telemetry access could use to pull the recording
+ * and re-link the sanitized fixture to the caller (Codex P1 on #288). The
+ * two real SIDs stay in the PROSE above, as call SIDs do throughout this
+ * repo and CLAUDE.md — that is the provenance of the bug report, and it is
+ * not attached to a fixture pretending to be a patient.
+ */
+const SID = 'CA00000000000000000000000000000001';
 
 /**
  * A complete optical request with no office — the shape that gets lost.
@@ -174,7 +184,7 @@ describe('the narrowness — every guard, because the flag turns the app gate of
     create.mockClear();
     await runTool('file_optical_ticket', {
       ...NO_OFFICE,
-      call_sid: 'CA0ccc14d869f53c4c091fc16847dfe9e5',
+      call_sid: 'CA00000000000000000000000000000002', // a different call: invented, see SID above
       location: 'Anaheim',
     });
 
