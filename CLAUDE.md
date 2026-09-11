@@ -1583,14 +1583,30 @@ in the new build. Current marker:
 **ON THE RUNTIME, ASK `/voice/health` — AND THE MARKER NOW CARRIES ITS DATE.**
 
 ```
-voice-runtime-v4-pcp-blind-transfer-20260908
+voice-runtime-v6-west-covina-20260911
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
-EARLIER date, or with no date at all, is a build older than 2026-09-08 and
-nothing measured on it is evidence about current code. In particular, a PCP
-call on a build older than this one used the WARM transfer, so its silence
-while the queue rang is expected rather than a defect.
+EARLIER date, or with no date at all, is an older build and nothing measured
+on it is evidence about current code.
+
+**WHAT EACH DATE TELLS YOU, because "older" is not one thing:**
+
+| the marker reads | what the build does NOT contain |
+|---|---|
+| earlier than **20260908** | the PCP blind transfer — a PCP call used the WARM path, so its silence while the queue rang is expected rather than a defect |
+| earlier than **20260911** | the date-of-birth transcript backstop (#280, #281, merged 2026-09-10) |
+| **v5**-…-20260911 | the West Covina fix. Two builds share 2026-09-11, so on this one day read the NAME, not the date: v5 routes a "West Covina" caller to our Covina office, v6 refuses and asks again (#287) |
+
+**THIS TABLE IS THE POINT AND IT WAS ADDED LATE.** Until 2026-09-11 this
+section named the v4/20260908 marker as current and rejected only dates
+*before* 09-08 — so a pull that silently failed would serve v4, an operator
+following these very instructions would accept it as current, and the
+date-of-birth backstop would be diagnosed as deployed-but-not-firing when it
+was simply not deployed. That is the 2026-09-05 failure recurring inside the
+documentation written to prevent it (Codex, PR #285). **Bumping
+`VOICE_RUNTIME_DEPLOY_MARKER` and not bumping this line leaves the trap
+armed: change both in the same commit.**
 
 **This exists because the marker failed at the one job it has, on 2026-09-05.**
 It read `voice-runtime-v2-transfer-guardrails-tools` from 2026-08-29 straight
