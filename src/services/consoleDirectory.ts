@@ -405,11 +405,75 @@ export async function lookupProvider(raw: string): Promise<DirectoryProvider | n
  */
 const NEVER_MATCH_INSIDE = new Set(['downtown']);
 
+/**
+ * Places that CONTAIN one of our office names and are not that office.
+ *
+ * Codex P1 on PR #286, landing after it had merged. Containment matches on
+ * whole-token boundaries, which stops `Uplander` and `Pasadenas` and does
+ * nothing whatever about a separate word in front: "the office in West
+ * Covina" matched `covina` and routed the caller to our Covina office. West
+ * Covina is a different city of ~106,000 people, next door to ours.
+ *
+ * THIS IS A REGRESSION #286 INTRODUCED. Before it the exact lookup missed and
+ * the caller was asked again; after it they were sent somewhere wrong.
+ * Optical self-assigns by location, so the cost is the request, not a
+ * question. The old header comment even named the hazard — "covina sits
+ * inside west covina, which is a different city" — and then tested only
+ * plural suffixes, so it read as coverage while covering nothing.
+ *
+ * THE FIRST FIX FOR THIS WAS WRONG AND THE MEASUREMENT IS WHY IT IS NOT HERE.
+ * The obvious rule is "a cardinal direction in front voids the match". Over
+ * 30 days / 10,715 transcripts to 2026-09-11, every direction-plus-office
+ * phrase callers actually said:
+ *
+ *   west covina      13   A DIFFERENT CITY          voiding helps
+ *   south pasadena    4   A DIFFERENT CITY          voiding helps
+ *   south anaheim     5   part of Anaheim           voiding LOSES the office
+ *   west redlands     4   part of Redlands          voiding LOSES the office
+ *   east willow       2   our own office's street   voiding LOSES the office
+ *   south riverside   2   part of Riverside         voiding LOSES the office
+ *   north glendale / north long beach / north indio / south glendora
+ *                     4   all parts of those cities voiding LOSES the office
+ *
+ * Seventeen misroutes prevented, seventeen fresh refusals created, and the
+ * refusals fall on callers who named a real office correctly. That is a wash
+ * paid for by the wrong people, so the generic rule is refused and the two
+ * real cities are named. Small and explicit, like the alias table above it —
+ * a caller does not say "West Covina" because they are being vague.
+ *
+ * Suffixes are not here for the same reason: "san gabriel valley" and
+ * "anaheim hills" appear on ZERO calls in that window. Add an entry when a
+ * transcript produces one, not when a map suggests one.
+ */
+const NOT_OUR_CITY = ['west covina', 'south pasadena'];
+
+/**
+ * Blank out any foreign city before the office keys get a vote, so the office
+ * name buried inside it is never seen.
+ *
+ * Masking rather than rejecting, because a caller who says both — "not West
+ * Covina, Covina" — has named our office cleanly once and must still be
+ * understood. Only the qualified mention disappears; a bare one beside it
+ * still resolves.
+ */
+function maskForeignCities(hay: string): string {
+  let out = hay;
+  for (const city of NOT_OUR_CITY) {
+    const needle = ` ${city} `;
+    // A loop, not a single replace: two mentions share the space between
+    // them, so one pass leaves the second standing.
+    while (out.includes(needle)) out = out.replace(needle, ' \u0000 ');
+  }
+  return out;
+}
+
 function locationNamedInside(
   dir: Snapshot,
   spoken: string,
 ): DirectoryLocation | null {
-  const hay = ` ${directoryKey(spoken).replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()} `;
+  const hay = maskForeignCities(
+    ` ${directoryKey(spoken).replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()} `,
+  );
   if (hay.length <= 2) return null;
 
   const matches: Array<{ needle: string; entry: DirectoryLocation }> = [];

@@ -37,6 +37,14 @@ const ROWS: Array<[string, string, number]> = [
   ['Azul Vision Mission Viejo', 'clinic', 1321],
   ['Azul Vision Covina', 'clinic', 2864],
   ['Azul Vision Upland', 'clinic', 6694],
+  // These five are here as CONTROLS on the rule that was rejected. A
+  // cardinal-direction rule would have broken every one of them, and
+  // callers said each of these phrases in the measured window.
+  ['Azul Vision West Hills', 'clinic', 3135],
+  ['Atlantis Eyecare Anaheim', 'clinic', 3712],
+  ['Azul Vision Redlands', 'clinic', 6564],
+  ['Azul Vision Glendale', 'clinic', 6309],
+  ['Azul Vision Glendora', 'clinic', 4829],
   // Hazards. See the header.
   ['Long Beach Memorial', 'hospital', 0],
   ['H Jones Surgery Center', 'surgery_center', 280],
@@ -185,5 +193,78 @@ describe('what it must NOT start matching', () => {
   it('returns null when the directory is unavailable', async () => {
     __resetDirectory(null);
     expect(await lookupLocation('downtown Riverside')).toBeNull();
+  });
+});
+
+describe('a city whose name CONTAINS one of ours is not one of ours', () => {
+  /**
+   * Codex P1 on PR #286, and it was already merged when the review landed.
+   *
+   * MEASURED over 30 days / 10,715 transcripts, 2026-09-11: "west covina" on
+   * 13 calls against 42 mentioning Covina at all — **roughly a third of every
+   * Covina mention** — and "south pasadena" on 4 of 157. Both are real,
+   * separate, adjacent cities.
+   */
+  it.each([
+    ['the office in West Covina'],
+    ['West Covina'],
+    ['I go to the one in West Covina'],
+    ["I'm in South Pasadena"],
+  ])('refuses %j rather than routing to the city inside it', async (spoken) => {
+    expect(await lookupLocation(spoken)).toBeNull();
+  });
+
+  it('still resolves the bare city when nothing qualifies it', async () => {
+    expect((await lookupLocation('the office in Covina'))?.canonical)
+      .toBe('Azul Vision Covina');
+    expect((await lookupLocation('Pasadena over on Foothill'))?.canonical)
+      .toBe('Azul Vision Pasadena');
+  });
+
+  it('understands a caller who says both — the mask is per mention', async () => {
+    // "not West Covina, Covina". One clean mention is enough, because a
+    // caller correcting themselves must not be punished with a refusal.
+    expect((await lookupLocation('not West Covina, Covina'))?.canonical)
+      .toBe('Azul Vision Covina');
+  });
+
+  it('masks a repeated foreign city, not just its first mention', async () => {
+    // Two mentions share the space between them, so a single replace leaves
+    // the second standing and the office inside it still votes.
+    expect(await lookupLocation('West Covina, I said West Covina')).toBeNull();
+  });
+});
+
+describe('the generic direction rule that was REJECTED, pinned by its casualties', () => {
+  /**
+   * A cardinal-direction rule — "north/south/east/west in front voids the
+   * match" — was written first and thrown away, because the transcripts say
+   * it prevents 17 misroutes and creates 17 refusals. Every phrase below was
+   * said by a real caller in the measured window and names a real office of
+   * ours. If one of these ever starts returning null, that rule has been
+   * reintroduced and it is costing more than it saves.
+   */
+  it.each([
+    ['south Anaheim', 'Atlantis Eyecare Anaheim'],
+    ['west Redlands', 'Azul Vision Redlands'],
+    ['north Glendale', 'Azul Vision Glendale'],
+    ['south Glendora', 'Azul Vision Glendora'],
+    ['east Willow', 'Azul Vision Willow'],
+    ['north Long Beach', 'Atlantis Eyecare Long Beach'],
+  ])('%j still resolves', async (spoken, canonical) => {
+    expect((await lookupLocation(spoken))?.canonical).toBe(canonical);
+  });
+
+  it('does not touch an office whose OWN name starts with a direction', async () => {
+    expect((await lookupLocation('West Hills'))?.canonical)
+      .toBe('Azul Vision West Hills');
+    expect((await lookupLocation('the West Hills office'))?.canonical)
+      .toBe('Azul Vision West Hills');
+  });
+
+  it('leaves "downtown Riverside" alone', async () => {
+    // The one call this whole feature exists for.
+    expect((await lookupLocation('downtown Riverside'))?.canonical)
+      .toBe('Azul Vision Riverside Latham');
   });
 });
