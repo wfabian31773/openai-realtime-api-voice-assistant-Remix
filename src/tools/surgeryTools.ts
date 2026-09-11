@@ -243,6 +243,27 @@ registerTool({
     const cleanLocation = sanitizeLocationName(str(input.location)).value;
     const cleanSurgeon = sanitizeProviderName(str(input.surgeon)).value;
 
+    /**
+     * NO OFFICE CARRY ON SURGERY — Cursor, PR #253, and it was right.
+     *
+     * I added one here on the theory that the four surgery requests lost on
+     * 2026-09-02 were the same shape as the optical one. They are not.
+     *
+     *  - Surgery does not gate on location at all. `files WITHOUT a location —
+     *    unlike Optical` is an explicit test, and the ruling behind it is that
+     *    copying optical's refusal "would cost real calls to prevent a failure
+     *    this queue does not have". So a missing office was never why those
+     *    four died; a missing SURGEON was.
+     *  - Worse, it would have made the surgeon ladder narrower. `resolveWith`
+     *    ANDs `cleanLocation` into every `/lookup`, so a carried office turns a
+     *    provider-only search into provider+location, and a surgeon who would
+     *    have matched unbound fails because they are not at that building —
+     *    on the one queue that lost four requests for a missing surgeon.
+     *
+     * The surgeon carry is a separate change and needs the four timelines
+     * measured first: matched_by, whether the ladder ran, and whether the name
+     * and date of birth on the filing call agreed with the lookup. See #48.
+     */
     const { ticketingApiClient, lookupWasUnavailable } = await import(
       '../../server/services/ticketingApiClient'
     );
