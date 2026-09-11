@@ -84,9 +84,26 @@ import { callEnvironment } from "./callRecord";
  * what makes a bump non-optional when behaviour changes; a test cannot know
  * that a change was behavioural. That is open, and it is the reason this
  * comment names the two PRs that skipped it.
+ *
+ * v7, 2026-09-11: THE THIRD BUILD TO SHARE THIS DATE, AND THE REASON THE NAME
+ * CARRIES THE MEANING RATHER THAN THE DATE.
+ *
+ * #288 made `file_optical_ticket` send `routingAskExhausted`, which is what
+ * lets the ticketing app take an optical request whose office never resolved
+ * instead of refusing it with HTTP 400. Its effect is invisible from outside:
+ * it shows up only on a call where the office does not resolve, and the
+ * before-state is 48 such calls in 30 days filing nothing at all. So "did the
+ * publish take?" is exactly the question the operator will have, and exactly
+ * the one a stale marker cannot answer — the failure this constant's own
+ * history records twice.
+ *
+ * It was ALMOST skipped a third time. #288 merged without touching this file;
+ * the bump is a follow-up, which is the weakness the comment above already
+ * names — nothing makes it non-optional. Bumping this and not the table in
+ * CLAUDE.md leaves the trap armed the other way round, so they move together.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v6-west-covina-20260911";
+  "voice-runtime-v7-optical-exit-20260911";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
