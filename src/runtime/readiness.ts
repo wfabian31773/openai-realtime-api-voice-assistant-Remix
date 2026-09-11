@@ -46,6 +46,15 @@
  * from the marker alone, by anyone, without our commit history — which is
  * exactly the question that could not be answered above. The boot log and
  * `/voice/health` both carry it, so either one gives the same answer.
+ *
+ * THE DATE IS A DAY, NOT A BUILD, SO THE NAME STILL HAS TO MOVE. v5 and v6
+ * are both 20260911: v5 bumped for the date-of-birth backstop and v6, hours
+ * later, for the West Covina misroute that PR #286 introduced and Codex
+ * caught after it merged. Anyone republishing between the two would serve a
+ * marker whose DATE says current and whose build routes a West Covina caller
+ * to our Covina office. Bump the name on every ship whose effect is hard to
+ * see, even the second one in a day; the date answers "how old", the name
+ * answers "which".
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -77,7 +86,7 @@ import { callEnvironment } from "./callRecord";
  * comment names the two PRs that skipped it.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v5-dob-from-transcript-20260911";
+  "voice-runtime-v6-west-covina-20260911";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
