@@ -24,6 +24,34 @@ import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from 
 /** This tool's own name, for the per-call gate counter. */
 const OPTICAL_FILE_TOOL = 'file_optical_ticket';
 
+/**
+ * THE SERVER'S OFFICE REFUSALS ARE COUNTED SEPARATELY FROM OUR OWN GATE'S,
+ * AND THE THRESHOLD IS THE REASON WHY.
+ *
+ * Our local gate refuses with `missing(['location'], …)`, which is the
+ * envelope the prompts teach the agent to answer by SPEAKING to the caller,
+ * and one of those is enough to count the office as asked. The ticketing
+ * app's HTTP 400 is not the same event: it arrives without anyone having
+ * been asked anything, and the model is documented to repeat the tool call
+ * within seconds, unchanged, before it says a word — traced on
+ * CA101be0fe842e77fd83a6024ae06df244 (2026-09-02), where
+ * `file_surgery_ticket` was refused at 15:25:24.064 and called again at
+ * 15:25:25.270 with an identical payload; the question comes afterwards.
+ *
+ * Folding the server's 400 into the local counter would therefore let that
+ * 1.2-second retry spend an ask nobody made, and the attempt after it would
+ * file UNASSIGNED — which is the failure this whole exemption is guarded
+ * against, since optical assigns BY office. `file_surgery_ticket` met this
+ * exact problem first and answered it with `>= 2` (see the long note at its
+ * `surgeonAskExhausted`): over 14 days, 38 of 196 surgeon refusals were
+ * rescued on attempt 2 by an ask that did land, so firing at one refusal
+ * pre-empts the ask rather than replacing it.
+ *
+ * Same shape here, so the same threshold, on its own key. (Codex P1 on
+ * PR #288, round 2.)
+ */
+const OPTICAL_SERVER_OFFICE_FIELD = 'location:server';
+
 // ---------------------------------------------------------------- what kind
 
 registerTool({
@@ -234,6 +262,19 @@ registerTool({
      * that exists, not a second way to lose the request.
      */
     const askedForOfficeAlready = gateRefusalsSoFar(callSid, OPTICAL_FILE_TOOL, 'location') > 0;
+    /**
+     * The SERVER's refusals, on their own key and at their own threshold —
+     * see `OPTICAL_SERVER_OFFICE_FIELD`. Read here, before this attempt can
+     * record anything, so the first pass always reads 0.
+     *
+     * It is deliberately NOT part of `askedForOfficeAlready`: that value also
+     * decides whether the LOCAL gate asks, and a server 400 must not silence
+     * our own question. It only joins in `officeAskSpent`, which is read by
+     * nothing but the exemption.
+     */
+    const serverRefusedOfficeTwice =
+      gateRefusalsSoFar(callSid, OPTICAL_FILE_TOOL, OPTICAL_SERVER_OFFICE_FIELD) >= 2;
+    const officeAskSpent = askedForOfficeAlready || serverRefusedOfficeTwice;
     if (!cleanLocation && !askedForOfficeAlready) {
       noteGateRefusal(callSid, OPTICAL_FILE_TOOL, 'location');
       return missing(['location'], 'Which of our offices do you usually visit?');
@@ -603,6 +644,53 @@ registerTool({
             patientBirthYear: parts.year,
           }
         : {}),
+      /**
+       * THE FLAG THAT SANCTIONS AN UNASSIGNED OPTICAL TICKET — surgery has
+       * sent this since 2026-09-02 and optical never has.
+       *
+       * MEASURED 2026-09-11 in `voice_agent_api_logs`: over 30 days, every
+       * POST carrying `routingAskExhausted` is department 2, 56 of 56, all
+       * answered 200. Department 1 sent it ZERO times, and 48 distinct
+       * optical calls in the same window were answered HTTP 400 "Missing
+       * required information: office".
+       *
+       * That 400 is what the loop actually is. The escape above fires
+       * correctly and POSTs the unassigned ticket; the app refuses it; the
+       * tool surfaces the refusal as `missingFields: ["location"]`, which
+       * reads in the timeline exactly like our own gate refusing a third
+       * time; the model asks again and re-runs `resolve_location` thirty-odd
+       * times into the 40-tool ceiling. Two requests were lost that way on
+       * 2026-09-11 alone, 42 minutes apart, and on the second the office was
+       * never in doubt — recognised by phone, read back off the record,
+       * confirmed, and said again out loud.
+       *
+       * NEITHER SIDE LOOKS WRONG ALONE, which is why this survived. Our
+       * escape is correct and proven offline. The app's gate is correct and
+       * deliberately staged — `DEPARTMENTS_WITH_UNASSIGNED_EXIT` is
+       * `new Set([2])` and its own comment says "Optical's 62 lost requests
+       * are the next measurement, not this one". The defect is the seam: we
+       * never sent the flag that would have asked.
+       *
+       * THREE GUARDS, copied from `file_surgery_ticket` because each earns
+       * its place there and the same reasoning holds here:
+       *  - `officeAskSpent` comes from the per-call refusal counters, which
+       *    are keyed on a REAL CallSid and never on a model argument. Sent
+       *    unconditionally this switches the app's gate off, and optical
+       *    assigns BY location — the department-2 shape that went ~98% to 49%
+       *    once already. One LOCAL refusal spends it; the SERVER's 400 takes
+       *    two, because a 400 is not proof anyone was asked — see
+       *    `OPTICAL_SERVER_OFFICE_FIELD`.
+       *  - `!lookup.locationId`, so a ticket that DID resolve an office never
+       *    claims to need manual routing.
+       *  - the ticket is still on the OPTICAL queue: a request `detectCrossQueue`
+       *    sent to the HVA Hub or another department is not gated on an office
+       *    at all, and must not spend this exemption.
+       */
+      ...(filedDepartmentId === OPTICAL_DEPARTMENT_ID
+        && officeAskSpent
+        && !lookup.locationId
+        ? { routingAskExhausted: true }
+        : {}),
       // The id is what sets the foreign key; the name is what staff read.
       // Omitted rather than sent null when the lookup could not run — the name
       // still travels, and the raised priority surfaces it for assignment.
@@ -626,6 +714,46 @@ registerTool({
     if (!res.success || !res.ticketNumber) {
       // The POST failed. createTicketDurable has already put the payload in the
       // outbox if it could; this only decides what the agent says about it.
+      /**
+       * THE SERVER'S REFUSAL IS ALSO AN ASK, AND OPTICAL WAS NOT COUNTING IT.
+       *
+       * `file_surgery_ticket` has done this since 2026-09-02 and this tool
+       * never has. Codex P1 on PR #288 found the hole it leaves: our own
+       * office gate is skipped whenever the caller DID name something, and
+       * skipped entirely when the lookup is unavailable (`lookupRan` false,
+       * the "take the request rather than lose it" path). On those calls
+       * nothing local ever spends the ask, so `askedForOfficeAlready` stays
+       * false, the exemption above is never attached, and the app answers the
+       * same missing-office 400 on every retry — indefinitely.
+       *
+       * Counting the server's refusal closes that without weakening the
+       * guard. The refusal becomes the question: `postFailureToolResult`
+       * turns it into a sentence the agent says to the caller, and a later
+       * attempt carries the exemption and files unassigned rather than
+       * taking the same 400 forever.
+       *
+       * NOT the alternative Codex proposed, which was to add the
+       * lookup-unavailable path straight into the exemption. That files
+       * unassigned on the FIRST attempt during an outage, without ever asking
+       * — it fixes the 400 by skipping the question, and optical assigns BY
+       * location, so the office is worth an ask before giving up on it.
+       *
+       * ON ITS OWN KEY, AND IT TAKES TWO. Round 2 of the same review: folded
+       * into the local counter, the model's documented 1.2-second identical
+       * retry would spend an ask nobody made and the attempt after it would
+       * file unassigned. `OPTICAL_SERVER_OFFICE_FIELD` carries the whole
+       * argument and surgery's measured threshold.
+       *
+       * Counted ONLY for the office: `REMOTE_FIELD_CANDIDATES` maps the
+       * server's `office` and `location` onto this tool's `location`, and a
+       * refusal for any other field has not put this question to anyone.
+       */
+      if (
+        res.terminal &&
+        (res.missingField === 'office' || res.missingField === 'location')
+      ) {
+        noteGateRefusal(callSid, OPTICAL_FILE_TOOL, OPTICAL_SERVER_OFFICE_FIELD);
+      }
       return postFailureToolResult(res, 'file_optical_ticket');
     }
 
