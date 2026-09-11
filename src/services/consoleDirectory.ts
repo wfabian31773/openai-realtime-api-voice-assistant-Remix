@@ -330,10 +330,124 @@ export async function lookupProvider(raw: string): Promise<DirectoryProvider | n
   return dir.providers.get(directoryKey(raw)) ?? null;
 }
 
+/**
+ * THE OFFICE NAMED INSIDE A SENTENCE, when the whole sentence is not a key.
+ *
+ * Measured 2026-09-11 against the real mirror: every BARE office name
+ * resolves — "Riverside", "Long Beach", "Pasadena", "Mission Viejo" — and
+ * every one with a word around it misses, because the lookup above is a map
+ * get on the whole utterance.
+ *
+ *   "Riverside"                        -> Azul Vision Riverside Latham
+ *   "downtown Riverside"               -> nothing
+ *   "Mission Viejo"                    -> Azul Vision Mission Viejo
+ *   "Mission Viejo, by the Crown Valley" -> nothing
+ *
+ * The second of those is a real 2026-09-09 call (CAa28557a1…): the agent asked
+ * which office five times, twice said "I'm not finding an office by that
+ * name", and the caller had said "downtown Riverside" — a string containing
+ * the exact key that resolves on its own.
+ *
+ * THIS IS NOT A FUZZY MATCHER, and the file header's objection to one still
+ * stands. Nothing new becomes matchable: a candidate must already BE a key,
+ * exact, on whole-token boundaries. All this removes is the requirement that
+ * the caller say the key and NOTHING ELSE.
+ *
+ * One rule keeps it from routing anyone wrong, and it is SUBSUMPTION, not
+ * length. The first draft used longest-by-characters and its own test caught
+ * it sending "the willow office in long beach" to the Long Beach CLINIC,
+ * because "long beach" (10 chars) is longer than "willow" (6) — and the
+ * SHORTER key was the specific one. Length is not specificity.
+ *
+ *   A MATCH SUBSUMED BY ANOTHER DROPS OUT. "long beach willow" contains
+ *   "long beach", so the city match is a fragment of the office match and
+ *   only Willow survives. Same for "long beach memorial", a hospital that is
+ *   also a key: a caller naming it is not sent to our clinic.
+ *
+ *   TWO SURVIVORS REFUSE. Disjoint matches — "the willow office in long
+ *   beach", or "is it Upland or Covina" — mean the phrase names more than
+ *   one office and nothing here can tell which they want. Returning null
+ *   costs the caller one more question; the wrong office costs them their
+ *   request, because optical and surgery both self-assign by it.
+ *
+ * It runs ONLY after the exact lookup has already missed, so by construction
+ * it cannot change any answer the directory gives today — the same shape as
+ * `readDigitStringDate` in dobParts.ts, and for the same reason.
+ *
+ * THERE IS NO MINIMUM KEY LENGTH, deliberately. The first draft carried one
+ * and mutation testing showed it earns nothing: removing it failed no test,
+ * because the whole-token boundaries below already do the work it was
+ * imagined to do — a short key can only match a whole word, and a real office
+ * with a short name SHOULD match it. Same finding, same reasoning, as the
+ * 6-or-8 length check recorded in `readDigitStringDate`.
+ *
+ * STREET NAMES ARE NOT COVERED and deliberately so. "the office down on
+ * Redondo" is Azul Vision Willow, and "Redondo" appears only in
+ * `address_line1`, which `load()` does not read. Adding it is a separate
+ * change with a real hazard: Foothill Blvd is MONROVIA, so a caller saying
+ * "Pasadena over on Foothill" names two offices and a street match scored
+ * outside its city would route them to the wrong one.
+ */
+/**
+ * Keys that may be matched EXACTLY but never INSIDE a longer phrase.
+ *
+ * "downtown" is an alias for DTLA, and it is a word people attach to other
+ * cities. The real call this whole change exists for said "downtown
+ * Riverside" — which contains BOTH the DTLA alias and the Riverside key, so
+ * containment saw two offices and refused, turning the one caller we know
+ * the right answer for into a refusal. Said alone, "downtown" still resolves
+ * to DTLA through the exact lookup above; it simply stops voting when it is
+ * one word inside a sentence.
+ *
+ * Keep this list to words that are GENERIC LOCATIONAL ENGLISH. A distinctive
+ * name that happens to be short — "willow", "latham", "magan" — belongs in
+ * containment: those collide with nothing.
+ */
+const NEVER_MATCH_INSIDE = new Set(['downtown']);
+
+function locationNamedInside(
+  dir: Snapshot,
+  spoken: string,
+): DirectoryLocation | null {
+  const hay = ` ${directoryKey(spoken).replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()} `;
+  if (hay.length <= 2) return null;
+
+  const matches: Array<{ needle: string; entry: DirectoryLocation }> = [];
+  for (const [key, entry] of dir.locations) {
+    if (NEVER_MATCH_INSIDE.has(key)) continue;
+    const needle = ` ${key.replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()} `;
+    if (needle.length <= 2 || !hay.includes(needle)) continue;
+    matches.push({ needle, entry });
+  }
+  if (matches.length === 0) return null;
+
+  // Drop every match that is a fragment of a longer one. Two keys can point
+  // at the SAME office (a bare name and an alias), so compare entries, not
+  // just strings, before calling anything ambiguous.
+  const survivors = matches.filter(
+    (m) => !matches.some(
+      (o) => o !== m
+        && o.needle.length > m.needle.length
+        && o.needle.includes(m.needle.trim()),
+    ),
+  );
+
+  const distinct = new Set(survivors.map((s) => s.entry));
+  if (distinct.size === 1) return survivors[0].entry;
+
+  console.info(
+    `[DIRECTORY] ${distinct.size} different offices are named in that phrase — ` +
+      'refusing rather than guessing; the caller gets asked once more',
+  );
+  return null;
+}
+
 export async function lookupLocation(raw: string): Promise<DirectoryLocation | null> {
   const dir = await getDirectory();
   if (!dir) return null;
-  return dir.locations.get(directoryKey(raw)) ?? null;
+  const exact = dir.locations.get(directoryKey(raw));
+  if (exact) return exact;
+  return locationNamedInside(dir, raw);
 }
 
 /** Test seam. Also lets a deploy force a refresh without a restart. */
