@@ -51,8 +51,33 @@
 
 import { callEnvironment } from "./callRecord";
 
+/**
+ * 2026-09-11: BUMPED BECAUSE THE MARKER FAILED AT ITS ONE JOB AGAIN, AND THIS
+ * TIME IT COST A MORNING.
+ *
+ * #280 and #281 landed the date-of-birth backstop on 2026-09-10 — `spokenDob`
+ * reads the caller's answer off the transcript when the model omits the field,
+ * which it does on every single refusal. Neither PR bumped this constant, and
+ * nothing else in the health payload has changed since 09-08 (`readiness.ts`
+ * had not been touched since `5efa94f`). So every build from 09-08 onward
+ * serves a BYTE-IDENTICAL `/voice/health`, and the operator asking "did my
+ * publish take?" got the same answer whether it had or not.
+ *
+ * The cost was concrete. Measured against the 63 calls that hit the
+ * date-of-birth gate on 2026-09-10, the shipped parser resolves a date on 51
+ * of them; production filed 24. Whether the gap is "not deployed" or
+ * "deployed and not firing" decides which of two entirely different jobs comes
+ * next, and the marker — the instrument that exists to answer exactly that —
+ * could not.
+ *
+ * `markerSetOn()` reads the suffix, so from here a deployment can be dated
+ * without our commit history. The structural question this does NOT answer is
+ * what makes a bump non-optional when behaviour changes; a test cannot know
+ * that a change was behavioural. That is open, and it is the reason this
+ * comment names the two PRs that skipped it.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v4-pcp-blind-transfer-20260908";
+  "voice-runtime-v5-dob-from-transcript-20260911";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
