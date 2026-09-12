@@ -739,16 +739,31 @@ export async function mostRecentAcceptable(
    * matters has to be able to interrupt it. Same shape as the PersonID join —
    * a race, because the catch below only ever covered rejections.
    */
-  return Promise.race([
-    refine(),
-    new Promise<string | null>((resolve) =>
-      setTimeout(() => {
-        console.warn(
-          '[TOOLS] lookup_patient: the office refinement ran out of tool budget — ' +
-            'using the most recent office unrefined',
-        );
-        resolve(locations[0]);
-      }, remaining),
-    ),
-  ]);
+  /**
+   * THE LOSING TIMER MUST BE CLEARED. Codex P2 on `ec45286`, and it is the kind
+   * of bug this repo has been burned by twice: an instrument that fires when
+   * nothing is wrong. Left dangling, the timer runs seconds AFTER the tool has
+   * already answered — on every ordinary call, including the cached-directory
+   * and unconfigured-directory paths — and logs "ran out of tool budget" for a
+   * lookup that did not. That line is meant to be a live counter of a real
+   * failure; firing it on success makes it count nothing. It also holds the
+   * closure alive until the deadline.
+   */
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      refine(),
+      new Promise<string | null>((resolve) => {
+        timer = setTimeout(() => {
+          console.warn(
+            '[TOOLS] lookup_patient: the office refinement ran out of tool budget — ' +
+              'using the most recent office unrefined',
+          );
+          resolve(locations[0]);
+        }, remaining);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

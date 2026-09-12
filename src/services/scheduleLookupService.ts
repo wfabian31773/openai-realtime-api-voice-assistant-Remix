@@ -706,6 +706,12 @@ export class ScheduleLookupService {
        * The deadline is ~20x the measured p95 of this query (15-79 ms over five
        * people) and leaves the rest of the tool budget to the rungs above.
        */
+      // The timer is cleared in the `finally` below for the same reason the
+      // office refinement clears its own (Codex P2 on ec45286): a dangling
+      // deadline outlives the work it was bounding. This one rejects rather
+      // than logs, so it corrupts no counter — but it still holds its closure
+      // for up to `allowed` ms after a query that already came back.
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       const appointments = await Promise.race([
         db
           .select()
@@ -713,10 +719,12 @@ export class ScheduleLookupService {
           .where(byPerson(personId))
           .orderBy(desc(schedule.appointmentDate))
           .limit(LOOKUP_ROW_LIMIT),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('PersonID join deadline')), allowed),
-        ),
-      ]);
+        new Promise<never>((_, reject) => {
+          deadlineTimer = setTimeout(() => reject(new Error('PersonID join deadline')), allowed);
+        }),
+      ]).finally(() => {
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+      });
 
       if (appointments.length === 0) {
         // Not a failure. This is the caller who really is on file and really

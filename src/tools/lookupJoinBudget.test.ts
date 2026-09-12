@@ -180,6 +180,30 @@ describe('1b — so does the office refinement that runs AFTER the service', () 
     expect(out).toBe('Testoffice One');
     expect(dir.calls).toBeGreaterThan(0);
   });
+
+  it('does NOT warn about a budget it did not run out of', async () => {
+    /**
+     * Codex P2 on ec45286. The losing timer was never cleared, so on every
+     * ordinary call it fired seconds after the tool had already answered and
+     * logged "ran out of tool budget" for a lookup that did not. This repo
+     * reads that line as a LIVE COUNTER of a real failure — firing it on
+     * success makes it count nothing, which is the instrument-lies trap
+     * CLAUDE.md documents twice over.
+     */
+    dir.hangs = false;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { mostRecentAcceptable } = await import('./sharedPatientTools');
+
+    // A SHORT budget, so a dangling timer would fire well inside this test.
+    await mostRecentAcceptable(['Testoffice One'], 'optical', Date.now() + 40);
+    await new Promise((r) => setTimeout(r, 120));
+
+    const budgetWarnings = warn.mock.calls
+      .map((c) => String(c[0]))
+      .filter((line) => line.includes('ran out of tool budget'));
+    expect(budgetWarnings, 'the refinement succeeded; nothing timed out').toEqual([]);
+    warn.mockRestore();
+  });
 });
 
 describe('2 — the tool hands an ABSOLUTE deadline down', () => {
