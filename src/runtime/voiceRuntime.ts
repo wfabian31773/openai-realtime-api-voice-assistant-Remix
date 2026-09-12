@@ -212,8 +212,33 @@ function matchedRecord(
     lastNameOnFile?: unknown;
     dobOnFile?: unknown;
   };
-  // `matched` is the service's own unique-hit flag. Ambiguous resolves to
-  // false there, so this never sees a family of three.
+  /**
+   * `matched` is the service's flag, and WHAT IT PROMISES IS NOT ESTABLISHED.
+   *
+   * An earlier version of this comment said it is a unique-hit flag, so this
+   * "never sees a family of three". That was written from the service's own
+   * docstring and the measurement contradicts it: of the 38 caller numbers on
+   * 2026-09-11 whose greeting DID name someone, **17 resolve to two or three
+   * people** in `patients_master`. So either `sage_precontext` reads a table
+   * where those numbers are unique, or it picks a winner among several —
+   * which table it reads is the UNSETTLED question CLAUDE.md already flags,
+   * and this cannot settle it from inside the runtime.
+   *
+   * WHY THAT IS TOLERABLE HERE, stated so nobody has to re-derive it:
+   *
+   *  - **The greeting already asserts this identity out loud.** Storing it
+   *    adds a consequence to a claim the caller is already hearing; it does
+   *    not create the exposure. A wrong name is wrong on the call first.
+   *  - **`verifiedDobFor`'s name guard is the real protection**, and it is
+   *    load-bearing rather than theoretical: 3 of 61 callers that day said
+   *    "no, that's not me", and on those the stored record cannot be read
+   *    back, because the ticket is not filed under the stored name.
+   *  - **`certain: false`** keeps it away from the teardown sweep, which is
+   *    the one reader that acts with nobody listening.
+   *
+   * What would settle it: the service confirming its uniqueness rule, or our
+   * own count against the mirror before trusting the flag. Neither is done.
+   */
   if (pc.matched !== true) return null;
   const firstName = typeof pc.firstName === "string" ? pc.firstName.trim() : "";
   const lastName = typeof pc.lastNameOnFile === "string" ? pc.lastNameOnFile.trim() : "";
