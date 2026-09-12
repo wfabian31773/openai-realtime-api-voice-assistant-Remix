@@ -172,6 +172,65 @@ function recognisedFirstName(precontext: unknown): string {
   if (pc.matched !== true) return "";
   return typeof pc.firstName === "string" ? pc.firstName.trim() : "";
 }
+
+/**
+ * THE RECORD A CALLER-ID MATCH RESOLVED TO — name and date of birth.
+ *
+ * `AzulPrecontext` has carried `dobOnFile` since the eyecare service added it,
+ * and until now the only thing that read it was the PROMPT. That is the whole
+ * defect this helper exists to close, and it cost more than any other single
+ * thing in this codebase:
+ *
+ *  - 2026-09-11, one business day, the three queue lanes: **61 calls were
+ *    refused for a missing date of birth, and on 44 of them the greeting had
+ *    already addressed the caller by name** — so the match had landed, the
+ *    record was in hand, and the filing tool asked for a field the process was
+ *    holding.
+ *  - `dobShape` reads "(none)" on 61 of 61: the model never relayed it. It
+ *    never will reliably, and it should not have to. The prompt is not a
+ *    transport.
+ *  - Of the 93 distinct numbers behind that day's ticketless calls, 46 resolve
+ *    to exactly one person in `patients_master`, and 43 of those have visit
+ *    history naming their office AND their provider — the other two fields the
+ *    gates refuse for.
+ *
+ * The fix is not new machinery. `verifiedIdentity` already exists, already has
+ * the right guards, and is already read by all four filing tools; it simply
+ * had one writer (`lookup_patient`) when it should have had two. This is the
+ * second writer.
+ *
+ * Shape checked rather than asserted, for the same reason as the two helpers
+ * above: `precontext` arrives untyped from an injected fetcher.
+ */
+function matchedRecord(
+  precontext: unknown,
+): { firstName: string; lastName: string; dateOfBirth: string } | null {
+  if (!precontext || typeof precontext !== "object") return null;
+  const pc = precontext as {
+    matched?: unknown;
+    firstName?: unknown;
+    lastNameOnFile?: unknown;
+    dobOnFile?: unknown;
+  };
+  // `matched` is the service's own unique-hit flag. Ambiguous resolves to
+  // false there, so this never sees a family of three.
+  if (pc.matched !== true) return null;
+  const firstName = typeof pc.firstName === "string" ? pc.firstName.trim() : "";
+  const lastName = typeof pc.lastNameOnFile === "string" ? pc.lastNameOnFile.trim() : "";
+  const dateOfBirth = typeof pc.dobOnFile === "string" ? pc.dobOnFile.trim() : "";
+  /**
+   * NO SECOND COPY OF THE NAME RULE. `rememberVerifiedIdentity` already
+   * refuses an entry without both names, because the read guard IS the name
+   * comparison and a half-named entry can never be read back safely.
+   *
+   * A duplicate check here was written first and then deleted: mutation
+   * testing showed removing it failed nothing, because the store caught the
+   * case either way. That is failure mode 9 in CLAUDE.md — adding a rule
+   * without grepping for the rule — and an untestable guard is worse than no
+   * guard, because it reads as protection while proving nothing.
+   */
+  return { firstName, lastName, dateOfBirth };
+}
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
@@ -735,6 +794,39 @@ export function mountVoiceRuntime(
                   : "matched, no usable first name — the greeting stays generic"
                 : "no_match (ran, vouched for nobody — a cold open is correct)"),
         );
+
+        /**
+         * CARRY THE MATCH INTO THE ONE PLACE THE TOOLS CAN READ IT.
+         *
+         * Wayne, repeatedly and for months: *"once you validate that, lock
+         * that, that's it — that carries you everywhere you go."* Until this
+         * line the match went into the greeting and the prompt and nowhere
+         * else, so every tool that needed it depended on the model relaying
+         * it back, and the model does not. See `matchedRecord` above for what
+         * that cost on a single measured day.
+         *
+         * `certain: false` IS THE VALIDATION RULE, not a hedge. A phone match
+         * is a candidate to confirm — his instruction 6, and the reason the
+         * greeting asks "Am I speaking with…?" rather than asserting. The flag
+         * gates `verifiedIdentityFor`, which the teardown sweep uses to file a
+         * ticket under a name with nobody watching, and a caller-ID hit has
+         * not earned that. It deliberately does NOT gate `verifiedDobFor`,
+         * whose own guard is stricter in the way that matters here: it answers
+         * only when the ticket is being filed under the SAME name the record
+         * gave. A caller who says "no, that's my father" is not filed under
+         * that name, so the date of birth never carries — the confirmation
+         * enforces itself through the name rather than through a flag we would
+         * have to guess at.
+         *
+         * Everything else the store already guarantees and this does not
+         * restate: a real Twilio CallSid or nothing is written, both names or
+         * nothing, one entry per call, thirty-minute TTL, in memory only.
+         */
+        const record = matchedRecord(precontext);
+        if (record) {
+          const { rememberVerifiedIdentity } = await import("../tools/verifiedIdentity");
+          rememberVerifiedIdentity(entry.callSid, { ...record, certain: false });
+        }
         const lane = await resolveLane(
           entry.slug,
           {

@@ -1583,7 +1583,7 @@ in the new build. Current marker:
 **ON THE RUNTIME, ASK `/voice/health` — AND THE MARKER NOW CARRIES ITS DATE.**
 
 ```
-voice-runtime-v7-optical-exit-20260911
+voice-runtime-v8-locked-record-20260912
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -1598,11 +1598,12 @@ on it is evidence about current code.
 | earlier than **20260911** | the date-of-birth transcript backstop (#280, #281, merged 2026-09-10) |
 | **v5**-…-20260911 | the West Covina fix: v5 routes a "West Covina" caller to our Covina office, v6 refuses and asks again (#287) |
 | **v5** or **v6**-…-20260911 | the optical unassigned exit (#288, merged 2026-09-11). Without it `file_optical_ticket` never sends `routingAskExhausted`, so an optical request whose office did not resolve is answered HTTP 400 "Missing required information: office" and files NOTHING — 48 calls in the 30 days to 09-11. A build on v5/v6 is the BEFORE arm; do not read a filing rate from it as an after-number |
+| earlier than **20260912** | the locked record. Pre-context's caller-ID match reached the greeting and the prompt and nothing else, so a filing tool could refuse for a date of birth the process was already holding — 61 refusals on 2026-09-11, **44 of them on calls the greeting had already addressed by name**. A build before this is the BEFORE arm for that number |
 
-**THREE builds now share 2026-09-11, so on this date the DATE TELLS YOU
-NOTHING — read the version.** v5 → v6 → v7, each strictly containing the
-one before it. That is the case this table's own warning was written for,
-and it has already happened twice in one day.
+**THREE builds share 2026-09-11, so on THAT date the DATE TELLS YOU NOTHING
+— read the version.** v5 → v6 → v7, each strictly containing the one before
+it. That is the case this table's own warning was written for, and it
+happened twice in one day. v8 is 2026-09-12 and is so far alone on its date.
 
 **THIS TABLE IS THE POINT AND IT WAS ADDED LATE.** Until 2026-09-11 this
 section named the v4/20260908 marker as current and rejected only dates
