@@ -188,6 +188,43 @@ describe('identity in the mirror pulls the whole record from the schedule', () =
     expect(out.identity).toMatchObject({ unique: true, candidateCount: 1 });
   });
 
+  it('marks a CALLER-ID match as unconfirmed — unique is not the same as validated', async () => {
+    /**
+     * Codex P1 on PR #292. The tool decides `identity_is_certain` from this
+     * flag, and a tool-level test that hands itself a fixture with the flag
+     * already set proves only that the tool reads it. This proves the SERVICE
+     * sets it — without this, deleting the flag from the service fails nothing
+     * (caught by mutation, which is the only reason it exists).
+     *
+     * Rule Zero: MATCH, then VALIDATE. Caller ID establishes who owns the
+     * number, never who is speaking.
+     */
+    state.answer = { rows: [row()] };
+
+    const out = await bookFoundNobody().lookupPatient({ phone: '5555550147' });
+
+    expect(out.patientFound).toBe(true);
+    expect(out.matchedBy).toBe('phone');
+    expect(out.identityUnconfirmed, 'a phone hit is a candidate to confirm').toBe(true);
+  });
+
+  it('does NOT mark a spoken name+DOB match as unconfirmed', async () => {
+    // The caller said both out loud; that IS the validation. Flagging it would
+    // make the agent re-interrogate somebody who has already identified
+    // themselves, which is the interrogation loop the funnel exists to end.
+    verifyPatient.mockResolvedValue({
+      verified: true, reason: 'match', candidates: 1, patient: PERSON, source: 'mirror',
+    } as never);
+    state.answer = { rows: [row()] };
+
+    const out = await bookFoundNobody().lookupPatient({
+      phone: '5555550147', firstName: 'Testcaller', lastName: 'Mirror', dateOfBirth: '01/01/1950',
+    });
+
+    expect(out.matchedBy).toBe('name_and_dob');
+    expect(out.identityUnconfirmed).toBeFalsy();
+  });
+
   it('carries the name the MIRROR verified, not the one the row happens to spell', async () => {
     // Standing instruction 14: the Console is the source of truth for who
     // somebody is, and it is the name on the chart the staffer will open.

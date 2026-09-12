@@ -293,10 +293,41 @@ registerTool({
      * out of, and the prompt lines it replaces are deleted (task #25 — the
      * queue prompts carry workarounds written for a model that needed them).
      *
-     * `phone` stays certain: it is the one field nobody mis-transcribed, and
-     * the service only reaches the phone fallback with a unique hit.
+     * `phone` from the SCHEDULE stays certain: it is the one field nobody
+     * mis-transcribed, and that rung only matches a number written on this
+     * person's own appointment record.
+     *
+     * `phone` FROM THE PERSON BASE DOES NOT, and that distinction is new.
+     * Codex P1 on PR #292. This PR made `matchedBy: 'phone'` mean two
+     * different claims: the schedule rung above, and a caller-ID hit in a
+     * 915,843-row person base. The second one establishes only who OWNS the
+     * number — a family member on the household phone, a reassigned number
+     * and a spoofed caller ID all look identical to it — and the PersonID
+     * join now hands that answer a full visit history, office and provider.
+     * The queue prompts ask for name and date of birth only when this flag is
+     * false, so leaving it true is a PHI disclosure gated on nothing.
+     *
+     * It also contradicts Rule Zero, written the same day: MATCH, then
+     * VALIDATE — "a phone number is a candidate to CONFIRM, never an
+     * identity". The service says which kind it is via `identityUnconfirmed`.
+     *
+     * THE LESSON, since it is one CLAUDE.md already names: a change that
+     * widens what a value MEANS invalidates the sentence that justified how
+     * it was treated. I widened `matchedBy: 'phone'` and left the comment
+     * above it standing.
+     *
+     * COST OF BEING WRONG THE OTHER WAY: an unconfirmed match no longer
+     * auto-fills a date of birth through `rememberVerifiedIdentity`. That
+     * removes nothing that existed before this PR — the mirror phone rung is
+     * itself new, so these calls previously reached `emptyContext()` and
+     * filled nothing. It declines to add an unsafe shortcut; it does not take
+     * a working one away.
      */
-    const certain = uniqueMatch && resolved.matchedBy !== 'name' && resolved.matchedBy !== 'dob';
+    const certain =
+      uniqueMatch &&
+      resolved.matchedBy !== 'name' &&
+      resolved.matchedBy !== 'dob' &&
+      !resolved.identityUnconfirmed;
 
     /**
      * PASS THE RECORD ALONG — operator instruction, 2026-09-01.
@@ -358,12 +389,17 @@ registerTool({
       ...(certain
         ? {}
         : {
-            identity_warning:
-              `This ${phone && !first ? 'phone number' : 'name'} matches ` +
-              `${resolved.identity?.candidateCount} different people on file, and what follows ` +
-              `is only the most recently seen of them. Ask for their full name and date of ` +
-              `birth before using any of it, and do not read their history back until they ` +
-              `confirm who they are.`,
+            identity_warning: resolved.identityUnconfirmed
+              ? 'This is the person our records show for the number they are calling from, but ' +
+                'nobody has confirmed the CALLER is that person — a family member, a reassigned ' +
+                'number or a withheld caller ID all look like this. Ask for their full name and ' +
+                'date of birth before using any of it, and do not read their history back until ' +
+                'they confirm who they are.'
+              : `This ${phone && !first ? 'phone number' : 'name'} matches ` +
+                `${resolved.identity?.candidateCount} different people on file, and what follows ` +
+                `is only the most recently seen of them. Ask for their full name and date of ` +
+                `birth before using any of it, and do not read their history back until they ` +
+                `confirm who they are.`,
           }),
       // The field this queue routes on.
       usual_clinic: usualOffice,

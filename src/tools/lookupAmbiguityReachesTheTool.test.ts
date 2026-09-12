@@ -150,3 +150,88 @@ describe('the phone retry may NOT overwrite an explicit ambiguity', () => {
     expect(out.identity_is_certain).toBe(true);
   });
 });
+
+describe('caller ID says who OWNS the number, not who is calling', () => {
+  const RECORD = {
+    patientFound: true,
+    patientName: 'Testcaller Mirror',
+    upcomingAppointments: [],
+    // `usual_office` is derived from the visit LOCATIONS, not from
+    // `lastLocationSeen` — an empty history here would make the office null
+    // and the assertion below would pass for the wrong reason.
+    pastAppointments: [
+      {
+        date: 'July 13', isoDate: '2026-07-13', dayOfWeek: 'Monday', timeOfDay: '3:30 PM',
+        location: 'Covina', provider: 'Testprovider One, MD', status: 'Active',
+      },
+    ],
+    totalAppointmentsFound: 4,
+    lastLocationSeen: 'Covina',
+    lastProviderSeen: 'Testprovider One, MD',
+    identity: { unique: true, candidateCount: 1, candidates: [] },
+    patientData: { firstName: 'Testcaller', lastName: 'Mirror', dateOfBirth: '1950-01-01' },
+  };
+
+  it('a PERSON BASE phone hit is NOT certain, and still returns the record', async () => {
+    /**
+     * Codex P1 on PR #292, and the most serious finding of the review. This PR
+     * made `matchedBy: 'phone'` mean two different claims — the schedule's own
+     * phone column, and a caller-ID hit in a 915,843-row person base. Only the
+     * first says anything about the person on the line. A family member on the
+     * household phone, a reassigned number and a withheld caller ID all look
+     * identical to the second, and the PersonID join now attaches a full
+     * history to it. The queue prompts ask for name and date of birth only
+     * when this flag is false.
+     *
+     * Rule Zero: MATCH, then VALIDATE. A phone match is a candidate to
+     * CONFIRM, never an identity.
+     */
+    lookupSpy.mockResolvedValue({
+      ...RECORD, matchedBy: 'phone', identityUnconfirmed: true,
+    } as never);
+
+    const out = (await runTool('lookup_patient', {
+      queue: 'optical', call_sid: SID, caller_phone: '555-555-0147',
+    })) as Record<string, unknown>;
+
+    expect(out.found).toBe(true);
+    expect(out.identity_is_certain, 'caller ID alone never confirms who is speaking').toBe(false);
+    expect(String(out.identity_warning)).toMatch(/nobody has confirmed the CALLER is that person/);
+    // NOT a withholding: the record is the point of the join. What changes is
+    // that the agent must confirm before using it.
+    expect(out.usual_office).toBe('Covina');
+    expect(out.total_appointments).toBe(4);
+    // And the ambiguity wording must not leak in — this hit is unique.
+    expect(String(out.identity_warning)).not.toMatch(/different people on file/);
+  });
+
+  it('a PERSON BASE name+DOB hit IS certain — the caller said both out loud', async () => {
+    // The funnel's whole purpose. Validation is what turns a candidate into a
+    // match, and spoken name plus date of birth is that validation.
+    lookupSpy.mockResolvedValue({
+      ...RECORD, matchedBy: 'name_and_dob', identityUnconfirmed: false,
+    } as never);
+
+    const out = (await runTool('lookup_patient', {
+      queue: 'optical', call_sid: SID, caller_phone: '555-555-0147',
+      first_name: 'Testcaller', last_name: 'Mirror', date_of_birth: '01/01/1950',
+    })) as Record<string, unknown>;
+
+    expect(out.identity_is_certain).toBe(true);
+    expect(out.identity_warning).toBeUndefined();
+  });
+
+  it('the SCHEDULE phone rung is untouched and stays certain', async () => {
+    // Pre-existing behaviour on every lane, deliberately NOT changed here: that
+    // rung matches a number written on this person's own appointment record,
+    // and altering it is a ticket-path change needing its own before/after
+    // measurement under docs/BACKEND_HANDOFF.md.
+    lookupSpy.mockResolvedValue({ ...RECORD, matchedBy: 'phone' } as never);
+
+    const out = (await runTool('lookup_patient', {
+      queue: 'optical', call_sid: SID, caller_phone: '555-555-0147',
+    })) as Record<string, unknown>;
+
+    expect(out.identity_is_certain).toBe(true);
+  });
+});

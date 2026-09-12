@@ -39,6 +39,23 @@ export interface PatientScheduleContext {
   patientFound: boolean;
   patientName?: string;
   matchedBy?: 'phone' | 'name' | 'dob' | 'name_and_dob';
+  /**
+   * UNIQUE IS NOT CONFIRMED, AND THE DIFFERENCE IS THE WHOLE OF INSTRUCTION 6.
+   *
+   * Set when the PERSON BASE matched on caller ID alone. Exactly one person
+   * carries that number, so `identity.unique` is true and it is not a guess
+   * between candidates — but nobody has established that the CALLER is that
+   * person. A family member on the household phone, a reassigned number and a
+   * spoofed caller ID all produce this shape, and with the PersonID join the
+   * reward for guessing wrong is somebody else's visit history, office and
+   * provider read down the line.
+   *
+   * Rule Zero, `.agents/memory/the-record-and-the-funnel.md`: MATCH, then
+   * VALIDATE. A phone match is a candidate to CONFIRM, never an identity.
+   * This flag is what carries "not yet validated" out of the service, so the
+   * tool can keep the record and still refuse to call it certain.
+   */
+  identityUnconfirmed?: boolean;
   upcomingAppointments: AppointmentSummary[];
   pastAppointments: AppointmentSummary[];
   lastProviderSeen?: string;
@@ -892,6 +909,8 @@ export class ScheduleLookupService {
       );
       return {
         ...joined,
+        // Caller ID alone established WHO is on file, not who is calling.
+        identityUnconfirmed: matchedBy === 'phone',
         /**
          * The mirror wins on WHO, the schedule supplies everything else.
          *
@@ -925,6 +944,7 @@ export class ScheduleLookupService {
       patientFound: true,
       patientName: `${p.firstName} ${p.lastName}`.trim(),
       matchedBy,
+      identityUnconfirmed: matchedBy === 'phone',
       upcomingAppointments: [],
       pastAppointments: [],
       totalAppointmentsFound: 0,
