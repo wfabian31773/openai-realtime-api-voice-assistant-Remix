@@ -399,12 +399,54 @@ registerTool({
          * consumers read, and dropping the entry would break them.
          */
         ...(resolved.identityUnconfirmed ? {} : { dateOfBirth: resolved.patientData?.dateOfBirth }),
+        /**
+         * The office this queue routes on, carried rather than only spoken.
+         *
+         * It is computed twenty lines up and returned below as `usual_office`,
+         * and until now that return value was the ONLY copy — so the filing
+         * tool depended on the model relaying it back, which is the same
+         * dependency that made `date_of_birth` arrive as "(none)" on 61 of 61
+         * refusals. `null` when the history holds no office this queue can
+         * use, which the store drops rather than writes.
+         */
+        ...(usualOffice ? { usualOffice } : {}),
         // The same `certain` reported to the model as `identity_is_certain`.
         // It was computed twenty lines up and then dropped here, so a
         // name-only hit was stored as though it were a verified identity
         // (Codex, PR #268 round 3).
         certain,
       });
+    } else {
+      /**
+       * AN AMBIGUOUS ANSWER MUST NOT LEAVE A CONFIDENT ONE STANDING.
+       *
+       * Codex P1 on PR #291. There was no `else` here at all, so a call that
+       * matched uniquely early and then came back ambiguous kept the FIRST
+       * entry with its `certain: true` intact — and every reader answered
+       * from a result this tool had just stopped believing. The office made
+       * it reachable: `usualOfficeFor` leans on `certain` precisely because
+       * an office string cannot be checked against the ticket, and `certain`
+       * was stale.
+       *
+       * Scoped to the SAME NAME on purpose — see `forgetIfSameName`. Clearing
+       * on every ambiguous lookup would discard a good identification the
+       * moment the model ran a vaguer second search, and that entry is what
+       * carries the date of birth past the gate that cost 53 of 75 calls.
+       */
+      const { forgetIfSameName } = await import('./verifiedIdentity');
+      const dropped = forgetIfSameName(
+        str(input.call_sid),
+        resolved.patientData?.firstName,
+        resolved.patientData?.lastName,
+      );
+      if (dropped) {
+        // No name and no office: the fact that a call went ambiguous is not
+        // PHI, and the count is what this line is for.
+        console.info(
+          '[TOOLS] lookup_patient: this call went ambiguous on a name we had ' +
+            'already verified — forgetting the earlier match',
+        );
+      }
     }
 
     return {

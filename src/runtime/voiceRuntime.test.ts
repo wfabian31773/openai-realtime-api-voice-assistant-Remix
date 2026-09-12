@@ -1281,6 +1281,127 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     ws.close();
   });
 
+  /**
+   * THE MATCH HAS TO LEAVE THE PROMPT.
+   *
+   * Measured 2026-09-11, one business day, the three queue lanes: 61 calls
+   * were refused for a missing date of birth, and on 44 of them the greeting
+   * had already addressed the caller by name. The record was in hand and the
+   * filing tool asked for a field it contained, because pre-context reached
+   * the greeting and the prompt and nothing else.
+   *
+   * These assert against the reader the FILING TOOLS call, never against the
+   * store's writer. A test that checked the write would have passed for the
+   * whole six months the wire was missing, which is the entire lesson here.
+   *
+   * Names and dates below are invented. No production caller is in this file.
+   */
+  const LOCKED_SID = "CA" + "b".repeat(31) + "7";
+
+  it("carries a caller-ID match to the filing tools, not just the greeting", async () => {
+    const { verifiedDobFor, verifiedIdentityFor, resetVerifiedIdentities } =
+      await import("../tools/verifiedIdentity");
+    void verifiedIdentityFor;
+    resetVerifiedIdentities();
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Testcaller", lastNameOnFile: "Optical", dobOnFile: "01/01/1950" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: LOCKED_SID, From: "+1", To: "+2",
+    });
+    const { ws } = await openStream(h, LOCKED_SID, tokenFrom(answered.text));
+    await settle(6);
+
+    // The question file_optical_ticket asks, in the words it asks it.
+    expect(verifiedDobFor(LOCKED_SID, "Testcaller", "Optical")).toBe("01/01/1950");
+    ws.close();
+  });
+
+  it("refuses the record to a ticket filed under a different name", async () => {
+    // The confirmation rule enforced by the name rather than by a flag: a
+    // caller who answers "no, that is my father" is not filed under the
+    // matched name, so nothing carries. This guard is what lets a phone
+    // match be used at all.
+    const { verifiedDobFor, verifiedIdentityFor, resetVerifiedIdentities } =
+      await import("../tools/verifiedIdentity");
+    void verifiedIdentityFor;
+    resetVerifiedIdentities();
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Testcaller", lastNameOnFile: "Optical", dobOnFile: "01/01/1950" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: LOCKED_SID, From: "+1", To: "+2",
+    });
+    const { ws } = await openStream(h, LOCKED_SID, tokenFrom(answered.text));
+    await settle(6);
+
+    expect(verifiedDobFor(LOCKED_SID, "Someone", "Else")).toBeUndefined();
+    ws.close();
+  });
+
+  it("never lets the teardown sweep file under a caller-ID match alone", async () => {
+    // Standing instruction 6: a phone match is a candidate to confirm, never
+    // an identity. The sweep files under this name with nobody watching, so
+    // it reads verifiedIdentityFor, which refuses anything not marked
+    // certain. lookup_patient earns certain; caller ID does not.
+    const { verifiedDobFor, verifiedIdentityFor, resetVerifiedIdentities } =
+      await import("../tools/verifiedIdentity");
+    void verifiedIdentityFor;
+    resetVerifiedIdentities();
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Testcaller", lastNameOnFile: "Optical", dobOnFile: "01/01/1950" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: LOCKED_SID, From: "+1", To: "+2",
+    });
+    const { ws } = await openStream(h, LOCKED_SID, tokenFrom(answered.text));
+    await settle(6);
+
+    expect(verifiedIdentityFor(LOCKED_SID)).toBeUndefined();
+    ws.close();
+  });
+
+  it("stores nothing when the service will not vouch for the number", async () => {
+    const { verifiedDobFor, verifiedIdentityFor, resetVerifiedIdentities } =
+      await import("../tools/verifiedIdentity");
+    void verifiedIdentityFor;
+    resetVerifiedIdentities();
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: false, firstName: "Testcaller", lastNameOnFile: "Optical", dobOnFile: "01/01/1950" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: LOCKED_SID, From: "+1", To: "+2",
+    });
+    const { ws } = await openStream(h, LOCKED_SID, tokenFrom(answered.text));
+    await settle(6);
+
+    expect(verifiedDobFor(LOCKED_SID, "Testcaller", "Optical")).toBeUndefined();
+    ws.close();
+  });
+
+  it("stores nothing from a half-named match, because the name is the read guard", async () => {
+    const { verifiedDobFor, verifiedIdentityFor, resetVerifiedIdentities } =
+      await import("../tools/verifiedIdentity");
+    void verifiedIdentityFor;
+    resetVerifiedIdentities();
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Testcaller", dobOnFile: "01/01/1950" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: LOCKED_SID, From: "+1", To: "+2",
+    });
+    const { ws } = await openStream(h, LOCKED_SID, tokenFrom(answered.text));
+    await settle(6);
+
+    expect(verifiedDobFor(LOCKED_SID, "Testcaller", "")).toBeUndefined();
+    ws.close();
+  });
+
   it("says which pre-context outcome happened, so a cold open can be diagnosed", async () => {
     // Every failure reaches the runtime as the same `null`, and an ordinary
     // "no match" is indistinguishable from it in the return value. The
