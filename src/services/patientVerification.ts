@@ -380,6 +380,21 @@ export function describeForLog(callId: string, r: VerificationResult): string {
 export function __resetPoolForTests(): void {
   void pool?.end().catch(() => undefined);
   pool = null;
+  /**
+   * AND THE BREAKER WITH IT. Codex P2 on PR #292.
+   *
+   * The latch is module state that outlives the pool, and every `beforeEach`
+   * in `patientVerification.test.ts` calls this helper and nothing else. So a
+   * test that provokes ECONNREFUSED left the latch ON, and the next test —
+   * the one that installs a deliberately non-settling query to prove the
+   * TIMEOUT RACE works — returned early through `mirrorIsDown()` without ever
+   * reaching it. That test would have stayed green with the race removed,
+   * which makes it decoration.
+   *
+   * Resetting here rather than in each suite means a file that already knows
+   * to drop the pool cannot forget the latch.
+   */
+  __resetMirrorBreakerForTests();
 }
 
 /**
