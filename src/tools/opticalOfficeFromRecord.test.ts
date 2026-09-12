@@ -291,3 +291,39 @@ describe('a date of birth that contradicts the verified record', () => {
       .toBe(RECORD_LOCATION_ID);
   });
 });
+
+/**
+ * CODEX P2 ON d417ec0 — the comparison guard must not move an instrument.
+ *
+ * `normalizeDobParts` emits the `[DOB] refused a date of birth in the shape …`
+ * line and the parser-shape telemetry, and both are LIVE COUNTERS: `dobShape`
+ * in `tool_timeline` is what settled "did the model omit the field, or did the
+ * parser refuse it?". `file_optical_ticket` parses the same value again a few
+ * lines further on, so announcing inside `usualOfficeFor` double-counts one
+ * tool attempt — and when the office gate returns first it emits a DOB refusal
+ * against an attempt whose recorded outcome is missing only the LOCATION.
+ *
+ * This is the assertion that separates the two parsers. Swapping
+ * `readDobQuietly` back to `normalizeDobParts` passes every other test here.
+ */
+describe('the office comparison is silent', () => {
+  it('emits no [DOB] line of its own for an unreadable stored date', async () => {
+    const api = await client();
+    directoryKnowsOnly(api, ON_RECORD);
+    vi.spyOn(api, 'createTicket')
+      .mockResolvedValue({ success: true, ticketNumber: 'VA-99008' } as never);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    // Stored as something the parser cannot read, so the ANNOUNCING parser
+    // would log a refusal for it. The caller's own date is fine.
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Optical',
+      dateOfBirth: 'not a date at all', usualOffice: ON_RECORD, certain: true,
+    });
+
+    await runTool('file_optical_ticket', { ...NO_OFFICE, date_of_birth: '01/01/1950' });
+
+    const said = [...warn.mock.calls, ...info.mock.calls].map((c) => String(c[0])).join(' | ');
+    expect(said).not.toContain('[DOB]');
+  });
+});

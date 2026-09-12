@@ -36,7 +36,7 @@
  */
 
 import { isTwilioCallSid } from './callSid';
-import { normalizeDobParts } from './dobParts';
+import { readDobQuietly } from './dobParts';
 
 export interface VerifiedIdentity {
   firstName: string;
@@ -256,8 +256,22 @@ export function usualOfficeFor(
    * leaves the previous behaviour exactly as it was.
    */
   if (dateOfBirth && entry.dateOfBirth) {
-    const asked = normalizeDobParts(dateOfBirth);
-    const held = normalizeDobParts(entry.dateOfBirth);
+    /**
+     * THE QUIET PARSER, NOT THE ANNOUNCING ONE. Codex P2 on PR #291.
+     *
+     * `normalizeDobParts` emits the `[DOB]` refusal line and the parser-shape
+     * telemetry, and both are LIVE COUNTERS — `dobShape` in `tool_timeline` is
+     * what settled the "did the model send it, or did the parser refuse it?"
+     * question. `file_optical_ticket` parses the same value again a few lines
+     * later, so announcing here double-counts one tool attempt; worse, when
+     * the office gate returns first it emits a DOB refusal for an attempt
+     * whose recorded outcome is missing only the LOCATION.
+     *
+     * This reader is a comparison, not a filing decision. It has no business
+     * moving an instrument.
+     */
+    const asked = readDobQuietly(dateOfBirth);
+    const held = readDobQuietly(entry.dateOfBirth);
     if (asked && held) {
       const differs =
         asked.year !== held.year || asked.month !== held.month || asked.day !== held.day;
