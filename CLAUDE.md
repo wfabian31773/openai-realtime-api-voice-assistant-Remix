@@ -1,3 +1,145 @@
+# RULE ZERO — THE RECORD AND THE FUNNEL
+
+**Wayne, 2026-09-12. These two rules are BINDING. They SUPERSEDE everything
+else in this file, every other document in this repo, and every prompt.
+They are not guidance and they are not defaults. Do not design around them,
+do not "improve" them, do not weigh them against something else. If anything
+below contradicts them, the thing below is wrong and must be changed.**
+
+> *"This has to be binding. Like, this is my fucking rule. You don't go
+> against this rule. This must be done, like, ironclad. Like, do not break.
+> Forbidden."*
+
+---
+
+## RULE 1 — IF WE HAVE A MATCH, THE JOINED RECORD IS THE RECORD
+
+> *"We always always use — we always match on patient pre-context if we get a
+> match, right, on patient master. We validate. We go to join. That's our
+> record. That's the entire record. That solves every fucking problem that
+> we've had, every single one that we've been having. Wrong date of birth,
+> wrong this, wrong that. No location, no surgeon, no this, no that. That
+> solves every single thing. You have a complete record of the patient."*
+
+The order is fixed and there is no branch in it:
+
+1. **MATCH** on caller-ID pre-context against **`patients_master`**. Always.
+   Every call, every lane, before anything else.
+2. **VALIDATE** the match. A phone number is a candidate to CONFIRM, never an
+   identity (standing instruction 6) — several people share a number, and we
+   never pick between them. Validation is what turns a candidate into a match;
+   an unvalidated candidate is not a match and Rule 1 does not fire on it.
+3. **JOIN** to the schedule on **`PersonID`** the instant a match is
+   established.
+4. **THAT JOINED RECORD IS THE RECORD.** The whole thing. Date of birth,
+   office, provider, surgeon, visit history, contact details.
+5. **CARRY IT FORWARD AUTOMATICALLY**, for the rest of the call, into every
+   tool and onto the ticket. Nothing re-asks for a field the record already
+   holds, and nothing overwrites a field the record already holds.
+
+**It is the SOURCE OF TRUTH for that call.** When the record and anything else
+disagree — a model argument, a transcript guess, a CNAM lookup, a parser — the
+record wins.
+
+**WHAT THIS FORBIDS.** Once the record is in hand:
+
+- Asking the caller for their date of birth. **We have it.**
+- Refusing to file for a missing `date_of_birth`, `location`, `surgeon` or
+  office. **We have them.** A gate that refuses on a field the record holds is
+  a bug in the gate, not a missing answer from the caller.
+- Looking a caller up by name or phone STRINGS when we already hold their
+  `person_id`.
+- Treating the appointment book as the person base. `patients_master` says who
+  somebody is; `Schedule` says what happened to them. Two tables, one key.
+
+Every named gate loss in this file — the 75 date-of-birth refusals, the 21
+optical `location` refusals, the 14 surgery `surgeon` refusals — is a call
+where this rule was not applied. Wayne's claim is that the rule dissolves them
+rather than fixing them one at a time, and the evidence so far agrees: of 64
+callers the appointment book reported no record of, **52 (81%) have a full
+record on the join**, 51 of them with an office and 19 with an appointment
+already booked.
+
+---
+
+## RULE 2 — WHEN WE CANNOT FIND THEM, FUNNEL THE CALLER INTO THE ANSWER
+
+> *"To solve the edge cases is not so much about the coding. You can't solve
+> for every single edge case, because you can't anticipate what the caller is
+> gonna say — unless you guide the caller into what to say."*
+
+**Stop trying to parse whatever arrives. Ask the question that produces the
+shape you need.** This is the standing answer to every "the model sent nothing
+/ the parser refused it" defect, and it is cheaper and more reliable than any
+amount of extraction logic.
+
+### 2a. Ask new-or-existing FIRST, and let the answer close the branch
+
+> *"Are you a new patient or an existing patient? I'm a new patient — now I
+> know I don't need to look for you anymore. Now I know you're not gonna be
+> there. I'm not gonna need to find appointments. I'm an existing patient —
+> now I know I need to find you."*
+
+| answer | what it settles |
+|---|---|
+| **new** | **Stop looking.** No lookup, no appointment search, no "we have no record of you". A miss is now EXPECTED and is not a failure to report, retry or gate on. |
+| **existing** | **Find them, and keep going until you do.** A miss here is a real problem and Rule 2b is how you solve it. |
+
+**Do NOT ask it when Rule 1 already answered it.** A caller recognised from
+their phone number is an existing patient by definition — asking anyway tells
+them we do not know who they are while we are looking at their chart.
+`callFactsLedger.ts:138` already states this and it stays true.
+
+### 2b. One field per question, in the format we need it
+
+> *"If I need date of birth, I'm not gonna say 'name, date of birth'. No. I'm
+> gonna say: what's your first and last name? … Now your date of birth,
+> starting with the month, the day, and then the year."*
+
+Never bundle two fields into one breath. Ask for one thing, in the order that
+produces a clean answer, and **name the format inside the question**:
+
+```
+"What's your first and last name?"
+        <- one field, their own words
+"And your date of birth, starting with the month, then the day,
+ then the year."
+        <- the format is IN the question, so the answer arrives in it
+```
+
+### 2c. The general form, which is the whole point
+
+> *"Everything else that we need, we create a funnel towards — in the
+> questioning — towards that answer in the way that we need it. And then we
+> carry that forward. That's it. That's everything in a nutshell."*
+
+**For every field we need: shape the QUESTION so the answer arrives in the
+format the field requires, then carry the answer forward so it is never asked
+again.** Not a regex over whatever came back. Not a fallback chain. The
+question.
+
+---
+
+## COMPLIANCE — measured 2026-09-12, do not assume any of it
+
+**A rule written here is not a rule the code follows.** This table is the
+honest state; update it when it changes, and never quote the rule as if it
+were the behaviour.
+
+| | state |
+|---|---|
+| Rule 1 · match `patients_master` by phone | **PARTIAL.** `findByPhone` exists and is wired into `lookupPatient`'s LAST rung only (PR #292). Runtime caller-ID pre-context goes through `sage_precontext` over HTTP and **which table it reads is still UNSETTLED** — see instruction 14. Nobody was greeted by name on either pipeline on 2026-09-03. |
+| Rule 1 · validate before trusting | **YES.** `verifyPatient` / `findByPhone` refuse to choose between two people and report a candidate count. |
+| Rule 1 · join on `PersonID` | **BUILT, NOT DEPLOYED.** `ScheduleLookupService.lookupByPersonId`, PR #292. Index `idx_schedule_personid_apptdate` is live. |
+| Rule 1 · carry it forward into every tool and ticket | **NO — this is the largest open gap.** The gates still refuse on `date_of_birth`, `location` and `surgeon` for callers whose record holds all three. |
+| Rule 2a · ask new-or-existing | **MISSING FROM EVERY QUEUE LANE.** Zero hits in `opticalAgent`, `surgeryAgent`, `techAgent`, `recordsAgent`. It exists as `rampEngine.ts:60` (`classify`), and `rampEngine` is imported by **one** file — `voiceAgentRoutes.ts`, the OLD CORE. So the runtime lanes, which take the volume, do not ask it. Wayne asked whether we still had it; we do not, on the lanes that matter. |
+| Rule 2b · DOB asked in month/day/year parts | **YES, all four lanes** — `opticalAgent.ts:193`, `surgeryAgent.ts:203`, `techAgent.ts:189`, `recordsAgent.ts:192`, plus no-ivr and answering-service. |
+| Rule 2b · never two fields in one breath | **NO.** Records was observed asking for first and last name in one breath on 2026-09-03. |
+
+Full working notes: **`.agents/memory/the-record-and-the-funnel.md`**.
+
+---
+
 # READ THIS BEFORE YOU DO ANYTHING
 
 You are working with **Wayne** on the Azul Vision voice agents. Southern
@@ -398,7 +540,8 @@ is reading noise.
 | Thing | Where | What it does |
 |---|---|---|
 | Mirror verification | `src/services/patientVerification.ts` | Verifies against `patients_master`; refuses to guess between two people. |
-| Appointment answers | `src/services/appointmentAnswers.ts` | `Schedule.PersonID` join; excludes `Removed`. |
+| Appointment answers | `src/services/appointmentAnswers.ts` | `Schedule.PersonID` join; excludes `Removed`. Also **exports `byPerson()`** — the one `::uuid` comparison in the repo. |
+| Mirror → schedule join | `ScheduleLookupService.lookupByPersonId` | Identity from `patients_master`, then the WHOLE record on `PersonID` through the same `buildContext` as every other rung. Bypasses `splitByPerson` (a primary key cannot mean two people); a failed join leaves the identity standing. |
 | Replay tables | Operations Hub | `new_core_replay_summary`, `new_core_replay_index`, `ticket_agent_config` |
 | Date-of-birth parsing | `src/tools/dobParts.ts` | Reads a date out of a whole spoken sentence, English + Spanish months, two-digit centuries. **Turkish is a known, evidenced gap.** Also exports `dobShape` — the PHI-free shape of what arrived, which is the only way to tell "the model sent nothing" from "the parser refused it". |
 | Spoken DOB from the transcript | `src/tools/spokenDob.ts` | Third filing source after the model's argument and `verifiedDobFor`. A date counts only in the turn that answered a DOB *ask* — not a mere mention. Acknowledgements ("I have your date of birth, thank you. Anything else?") do not open a window. Re-asks that do not use "may I" ("need your date of birth", "except your date of birth", "mis-heard" / "once more") still do. A later attempted-but-refused date clears the cache; a confirmation does not. Same-turn "sorry I meant" replaces the first date in the window. |
@@ -448,6 +591,111 @@ is reading noise.
     verification has been the hardest part of every line — see instruction 14.
   - `Schedule.PersonID` (uuid) ↔ `patients_master.person_id`; `uuid = text`
     needs an explicit `::uuid` cast.
+
+### THE JOIN IS THE WHOLE THING, AND IT HAD NO INDEX — 2026-09-12
+
+**The operator has said this from the start and it took him saying it again to
+land: there is a MASTER TABLE and a SCHEDULE TABLE, they are two different
+things, and you have to JOIN them.** Identity lives in `patients_master`;
+visits live in `Schedule`; `Schedule.PersonID` ↔ `patients_master.person_id`
+is the only link. Everything below was measured after he insisted.
+
+**`Schedule` had SIXTEEN indexes and none on `PersonID`.** Last name, first
+name, cell phone, home phone, date of birth, appointment date,
+`PatientPartialKey`, physician, roster — every one of them a way to guess at a
+person from a string, and no way to look one up by WHO THEY ARE. So a lookup
+by person was a sequential scan of **1,024,785 rows / 1,494 MB**: three
+attempts timed out at 60s, including one asking for a SINGLE person. That is
+why every rung of `lookupPatient` searches by phone and name, and why
+identifying a caller could not carry their history with it.
+
+**FIXED.** Migration `schedule_personid_index_for_mirror_join`:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_schedule_personid_apptdate
+  ON public."Schedule" ("PersonID", "AppointmentDate" DESC);
+```
+
+`PersonID` is `uuid` and **100% populated** (10,467 of 10,467 in a 1%
+TABLESAMPLE, 9,975 distinct people). Composite with the date because the read
+is always "this person's visits, newest first". **This is a live database
+object, not code — it is in no branch and no PR.** Reversal is
+`DROP INDEX idx_schedule_personid_apptdate`.
+
+**Proof:** `Index Only Scan using idx_schedule_personid_apptdate`,
+`Heap Fetches: 0`, **Execution Time 1.305 ms** — from a 60,000 ms timeout.
+
+**THAT 1.305 ms IS A NARROW COVERING QUERY AND IS NOT WHAT THE JOIN RUNS.**
+Re-measured 2026-09-12 on the statement `lookupByPersonId` actually emits —
+`SELECT * … WHERE "PersonID" = $1::uuid ORDER BY "AppointmentDate" DESC LIMIT
+60` — across five different people: **Index Scan, 15 · 25 · 57 · 63 · 79 ms**
+for 3–21 rows. Not index-ONLY: `db.select()` takes every column and
+`buildContext` reads a dozen of them, so each matched row is fetched from the
+heap. Still four orders of magnitude off the 60s timeout and comfortably
+inside `lookup_patient`'s 6s budget — but it is a fiftyfold difference from
+the number published one line above, and the two describe different queries.
+Quote the one that matches the statement you mean. A covering index over a
+dozen wide columns would buy the difference and is not worth its size.
+
+**AND IT DISPROVED THE CLAIM IN THE v10 MARKER ROW ABOVE.** I wrote that the
+person-base rung brings no history and that this "is correct: having no
+appointments is WHY the book missed them." **False.** Joined the 64
+uniquely-resolved person_ids behind the found-nobody callers:
+
+| of 64 callers told "no record found" | |
+|---|---|
+| **have schedule history** | **52 (81%)** |
+| have Active visits | 51 |
+| **have an UPCOMING appointment** | **19** |
+| have past visits | 49 |
+| **have an office on file** | **51** |
+| distinct offices recoverable | 27 |
+
+**Nineteen people with a future appointment already booked were told we had no
+record of them.** The book missed them because it searches by PHONE and NAME
+STRINGS — not because they have no appointments. A separate, smaller group
+genuinely has a record and no appointments; that is fine and we still know who
+they are. Do not conflate the two.
+
+So the shape instruction 14 has always described is now cheap to build:
+**`patients_master` by phone for identity (63% of found-nobody numbers are
+there) → lock the `person_id` → join `Schedule` ON `"PersonID"` in 1.3ms for
+history, office and provider.** The 51 offices are the exact field
+`file_optical_ticket` needs to route without asking.
+
+**BUILT ON #292, and this is what "lock it in" means in code.**
+`ScheduleLookupService.lookupByPersonId(personId, matchedBy)` is the join:
+`byPerson()` — the ONE `::uuid` comparison in the repo, exported from
+`appointmentAnswers.ts` so a second hand-written one cannot drop the cast —
+then the SAME `buildContext` every other rung uses, so office, provider,
+upcoming/past split, the equipment filter and the surgeon rule all behave
+identically to a name match. It runs only after `verifyPatient`/`findByPhone`
+has returned a person, and a throw or an empty result **leaves the identity
+standing**: an unreachable schedule must never unidentify a caller the person
+base has already vouched for.
+
+**ONE THING THE JOIN MUST NOT REUSE: the grouping.** `splitByPerson` keys on
+`first|last|dob` because a phone number and a surname are not identities.
+`PersonID` is, so that grouping is bypassed here and only here — measured over
+1,500 person_ids seen in the last 21 days, 1,372 of them multi-row, **33
+(2.4%) disagree with themselves across their own rows** (15 last name, 13
+first name, 8 date of birth: maiden names, nicknames, a corrected birthday).
+Grouped by spelling, those 33 report a primary-key join as AMBIGUOUS and drop
+the smaller group's visits out of that patient's own history. The mirror's
+name wins on the way out for the same reason — it is what the staffer's chart
+will say.
+
+**Proven offline, four mutations, each caught:** removing the grouping bypass,
+never calling the join, swapping `byPerson` for a bare `eq`, and letting a
+failed join erase the identity. `src/services/lookupJoinsOnPersonId.test.ts`.
+
+**NOT YET MEASURED IN PRODUCTION**, and `docs/BACKEND_HANDOFF.md` applies —
+this widens what `lookup_patient` returns on the ticket path. The before-arm
+is in task #109. The number it must move: of the 627 substantive queue calls
+in ten days that ran `lookup_patient` and found NOBODY, 235 ended with no
+ticket. The guard beside it: optical routes BY location, so tickets filed with
+no `location_id` must not rise — the join can only ADD an office, but that is
+the assumption to check rather than assert.
 
 ---
 
@@ -1583,7 +1831,7 @@ in the new build. Current marker:
 **ON THE RUNTIME, ASK `/voice/health` — AND THE MARKER NOW CARRIES ITS DATE.**
 
 ```
-voice-runtime-v7-optical-exit-20260911
+voice-runtime-v10-person-base-20260912
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -1599,7 +1847,15 @@ on it is evidence about current code.
 | **v5**-…-20260911 | the West Covina fix: v5 routes a "West Covina" caller to our Covina office, v6 refuses and asks again (#287) |
 | **v5** or **v6**-…-20260911 | the optical unassigned exit (#288, merged 2026-09-11). Without it `file_optical_ticket` never sends `routingAskExhausted`, so an optical request whose office did not resolve is answered HTTP 400 "Missing required information: office" and files NOTHING — 48 calls in the 30 days to 09-11. A build on v5/v6 is the BEFORE arm; do not read a filing rate from it as an after-number |
 
-**THREE builds now share 2026-09-11, so on this date the DATE TELLS YOU
+| earlier than **v10**-…-20260912 | the PERSON BASE rung on `lookup_patient`. Every rung before it reads the Operations Hub APPOINTMENT BOOK, so a real patient with no appointment inside its window cannot be found and the failure looks random from outside — standing instruction 14. Measured 2026-09-12 over ten days, `duration >= 30`: **627 of 2,511 substantive queue calls (25.0%) ran `lookup_patient` and found NOBODY** (tech 277/1173 · surgery 158/638 · optical 122/501 · records 70/199), **235 of those ended with no ticket**, and of the 330 distinct caller numbers behind them **208 (63%) ARE in `patients_master`**. Optical alone reads 76/100 and tech 132/230 — **63% is the fleet figure and 76% overstates it**; tech's sample visibly contains toll-free numbers, so some residue is genuinely not-a-patient. The rung runs ONLY where the method already returned `emptyContext()`, so it can ADD a match and can never change one the schedule made. **v10 also carries THE JOIN**: once the mirror identifies somebody, `lookupByPersonId` pulls their `Schedule` rows on `PersonID` and they come back through the same `buildContext` as every other rung, so history, office and provider arrive with the identity. An earlier draft of this row said v10 brought no history and called that correct; it was wrong, and the join section below has the 81% that disproved it |
+
+**THREE VERSIONS ARE IN FLIGHT ON 2026-09-12 AND THEY DO NOT CONTAIN EACH
+OTHER.** #290 claims v8, #291 claims v9, and the person-base rung claims v10 —
+all three branched off v7, so only the LAST to merge describes the deployed
+build. Whichever merges after the first must re-bump and move its table row in
+the same commit. This is no longer the tidy v5 → v6 → v7 chain below.
+
+**THREE builds also share 2026-09-11, so on that date the DATE TELLS YOU
 NOTHING — read the version.** v5 → v6 → v7, each strictly containing the
 one before it. That is the case this table's own warning was written for,
 and it has already happened twice in one day.
@@ -1979,6 +2235,7 @@ Start there before debugging anything in these areas:
 
 | If you are about to… | Read first |
 |---|---|
+| **anything that touches identity, a gate, or an intake question** | **`the-record-and-the-funnel.md` — RULE ZERO, binding** |
 | debug "the agent won't call the tool" | `realtime-tool-schemas.md` |
 | build or change a queue agent | `queue-agents.md` |
 | file, route or classify a ticket | `ticketing-api-contract.md` |

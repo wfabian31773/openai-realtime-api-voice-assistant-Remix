@@ -62,10 +62,27 @@ function askWhichOffice(queue: ToolQueue | undefined): string {
 
 // ---------------------------------------------------------------- who
 
+/**
+ * `lookup_patient`'s whole budget, and the ONE place it is written.
+ *
+ * `runTool` races the handler against this and the race RESOLVES rather than
+ * cancelling, so anything inside that wants to answer first has to know the
+ * ABSOLUTE moment the race fires — not its own relative timeout. Declared here
+ * so the deadline handed to the service cannot drift from the budget the
+ * registry enforces; `lookupBudgetDrift.test.ts` fails if the two separate.
+ */
+export const LOOKUP_PATIENT_BUDGET_MS = 6000;
+
+/**
+ * Answer this far before the race does. Enough to build the result object and
+ * return it, and nothing more.
+ */
+const LOOKUP_BUDGET_MARGIN_MS = 250;
+
 registerTool({
   name: 'lookup_patient',
   layer: 'agent',
-  timeoutMs: 6000,
+  timeoutMs: LOOKUP_PATIENT_BUDGET_MS,
   description:
     'Find a patient and their recent visit history. Call this as soon as you have ' +
     'either their phone number, or their first name, last name and date of birth. ' +
@@ -103,6 +120,14 @@ registerTool({
     },
   },
   handler: async (input): Promise<ToolResult> => {
+    /**
+     * WHEN THE RACE FIRES, in absolute terms. Codex P1 (round 2) on PR #292:
+     * a RELATIVE deadline inside the join is worthless if the rungs above it
+     * have already spent the budget, because `runTool`'s race is absolute from
+     * the moment the handler was entered. Captured here, at that moment, and
+     * threaded down so the join can bound itself by what is actually LEFT.
+     */
+    const deadlineAt = Date.now() + LOOKUP_PATIENT_BUDGET_MS - LOOKUP_BUDGET_MARGIN_MS;
     const queue = input.queue as ToolQueue | undefined;
     // The number the call ARRIVED on, when the model did not pass one.
     //
@@ -139,6 +164,7 @@ registerTool({
       firstName: first || undefined,
       lastName: last || undefined,
       dateOfBirth: dob || undefined,
+      deadlineAt,
     });
 
     // A name+DOB miss is very often ONE mis-transcribed field, not a stranger.
@@ -150,8 +176,34 @@ registerTool({
     // version did `Object.assign(ctx, byPhone)` and a test caught it corrupting
     // a shared fixture — which is the same hazard in miniature.
     let resolved = ctx;
-    if (!ctx.patientFound && phone && (first || last || dob)) {
-      const byPhone = await scheduleLookupService.lookupPatient({ phone });
+
+    /**
+     * AN EXPLICIT AMBIGUITY IS TERMINAL. THE PHONE RETRY MAY NOT OVERWRITE IT.
+     *
+     * Codex P1 on PR #292. A name+DOB that resolves to SEVERAL people is not a
+     * miss — it is a specific, stronger claim that came back unsettled. The
+     * retry below then looked the CALLER'S NUMBER up on its own, and a unique
+     * hit there replaced the ambiguous result wholesale. Nothing checks that
+     * the phone's owner is one of the people the name matched, so the tool
+     * could answer `found: true, identity_is_certain: true` with an unrelated
+     * person's PersonID-joined record — a daughter's chart read back to a
+     * caller who spoke her mother's name and birthday. Standing instruction 6
+     * forbids exactly that, and the join makes it worse by attaching a full
+     * history, office and provider to the wrong person.
+     *
+     * SMALL, AND FIXED ANYWAY. Measured 2026-09-12 on 400 sampled persons:
+     * last name + date of birth collides for 8 (2.0%), and the full
+     * first+last+DOB triple for 0 (<0.75% at 95%). The scenario needs that
+     * collision AND a unique phone hit on someone else AND the schedule's own
+     * phone rung to miss first — far below the 1% bar where a finding is worth
+     * chasing. It is fixed because reading the wrong patient's record aloud is
+     * a different class of harm from a lost request, and because the fix is
+     * one condition in the direction instruction 6 already mandates.
+     */
+    const explicitlyAmbiguous = Boolean(ctx.identity && !ctx.identity.unique);
+
+    if (!ctx.patientFound && !explicitlyAmbiguous && phone && (first || last || dob)) {
+      const byPhone = await scheduleLookupService.lookupPatient({ phone, deadlineAt });
       if (byPhone.patientFound) {
         console.info('[TOOLS] lookup_patient: name+DOB missed, matched on the caller phone instead');
         resolved = byPhone;
@@ -159,6 +211,32 @@ registerTool({
     }
 
     if (!resolved.patientFound) {
+      /**
+       * "SEVERAL PEOPLE" IS NOT "NOBODY", and the agent needs the difference.
+       *
+       * Codex P2 on PR #292. The person-base rung reports an ambiguous hit by
+       * returning `identity` on an otherwise empty context — several people
+       * share this number, and instruction 6 forbids picking one. This branch
+       * read only `patientFound` and told the agent "no record found", which
+       * is false and points it the wrong way: it would treat a known family as
+       * a new patient instead of asking the one question that separates them.
+       *
+       * The finding also caught that the service-level test could not see
+       * this, because the tool's own not-found branch is where the signal died.
+       */
+      const several = resolved.identity && !resolved.identity.unique;
+      if (several) {
+        return {
+          success: true,
+          found: false,
+          identity_is_certain: false,
+          candidate_count: resolved.identity!.candidateCount,
+          message:
+            `This number is on file for ${resolved.identity!.candidateCount} different people, so ` +
+            'I cannot tell which one is calling. Ask for their full name and date of birth — do ' +
+            'not read any history back until they have given both.',
+        };
+      }
       return {
         success: true,
         found: false,
@@ -185,7 +263,7 @@ registerTool({
     //
     // So the office is resolved against what the QUEUE accepts, and the raw
     // most-recent stays available but is clearly labelled.
-    const usualOffice = await mostRecentAcceptable(seen, queue);
+    const usualOffice = await mostRecentAcceptable(seen, queue, deadlineAt);
 
     // A phone number can carry more than one person, and a surname carries
     // whole families. The service reports which case this was, and the agent
@@ -215,10 +293,41 @@ registerTool({
      * out of, and the prompt lines it replaces are deleted (task #25 — the
      * queue prompts carry workarounds written for a model that needed them).
      *
-     * `phone` stays certain: it is the one field nobody mis-transcribed, and
-     * the service only reaches the phone fallback with a unique hit.
+     * `phone` from the SCHEDULE stays certain: it is the one field nobody
+     * mis-transcribed, and that rung only matches a number written on this
+     * person's own appointment record.
+     *
+     * `phone` FROM THE PERSON BASE DOES NOT, and that distinction is new.
+     * Codex P1 on PR #292. This PR made `matchedBy: 'phone'` mean two
+     * different claims: the schedule rung above, and a caller-ID hit in a
+     * 915,843-row person base. The second one establishes only who OWNS the
+     * number — a family member on the household phone, a reassigned number
+     * and a spoofed caller ID all look identical to it — and the PersonID
+     * join now hands that answer a full visit history, office and provider.
+     * The queue prompts ask for name and date of birth only when this flag is
+     * false, so leaving it true is a PHI disclosure gated on nothing.
+     *
+     * It also contradicts Rule Zero, written the same day: MATCH, then
+     * VALIDATE — "a phone number is a candidate to CONFIRM, never an
+     * identity". The service says which kind it is via `identityUnconfirmed`.
+     *
+     * THE LESSON, since it is one CLAUDE.md already names: a change that
+     * widens what a value MEANS invalidates the sentence that justified how
+     * it was treated. I widened `matchedBy: 'phone'` and left the comment
+     * above it standing.
+     *
+     * COST OF BEING WRONG THE OTHER WAY: an unconfirmed match no longer
+     * auto-fills a date of birth through `rememberVerifiedIdentity`. That
+     * removes nothing that existed before this PR — the mirror phone rung is
+     * itself new, so these calls previously reached `emptyContext()` and
+     * filled nothing. It declines to add an unsafe shortcut; it does not take
+     * a working one away.
      */
-    const certain = uniqueMatch && resolved.matchedBy !== 'name' && resolved.matchedBy !== 'dob';
+    const certain =
+      uniqueMatch &&
+      resolved.matchedBy !== 'name' &&
+      resolved.matchedBy !== 'dob' &&
+      !resolved.identityUnconfirmed;
 
     /**
      * PASS THE RECORD ALONG — operator instruction, 2026-09-01.
@@ -262,7 +371,34 @@ registerTool({
       rememberVerifiedIdentity(str(input.call_sid), {
         firstName: resolved.patientData?.firstName,
         lastName: resolved.patientData?.lastName,
-        dateOfBirth: resolved.patientData?.dateOfBirth,
+        // What makes the downgrade guard provable rather than name-based.
+        personId: resolved.patientData?.personId,
+        /**
+         * NO DATE OF BIRTH FROM A CALLER-ID-ONLY MATCH. Codex P1 on 1d775a4,
+         * answering a challenge I put to it — and my claim was FALSE. I said
+         * an unconfirmed match "no longer auto-fills a date of birth". It
+         * did: `certain` went false, but the DOB was still cached, and
+         * `verifiedDobFor` returns `entry.dateOfBirth` WITHOUT reading
+         * `entry.certain`. So a caller who then gives the matched name and
+         * withholds their birthday gets the mirror's one auto-filled onto the
+         * ticket, which is exactly the confirmation this change exists to
+         * require.
+         *
+         * WHY THE WRITE AND NOT THE READ. `verifiedIdentity.ts` records a
+         * deliberate decision to leave `verifiedDobFor` unnarrowed: it answers
+         * a different question, has its own name guard, and narrowing it is a
+         * ticket-path change that BACKEND_HANDOFF says needs a before/after
+         * number. That reasoning was made when uncertain entries could only
+         * come from a name-only hit. This PR adds a far larger uncertain
+         * population — every caller-ID match — so the hole is mine to close,
+         * and closing it at MY write leaves every pre-existing caller of that
+         * reader behaving exactly as it does today. No measurement is owed for
+         * behaviour that has not changed.
+         *
+         * The entry is still stored: `certain: false` is what the ambiguity
+         * consumers read, and dropping the entry would break them.
+         */
+        ...(resolved.identityUnconfirmed ? {} : { dateOfBirth: resolved.patientData?.dateOfBirth }),
         // The same `certain` reported to the model as `identity_is_certain`.
         // It was computed twenty lines up and then dropped here, so a
         // name-only hit was stored as though it were a verified identity
@@ -280,12 +416,17 @@ registerTool({
       ...(certain
         ? {}
         : {
-            identity_warning:
-              `This ${phone && !first ? 'phone number' : 'name'} matches ` +
-              `${resolved.identity?.candidateCount} different people on file, and what follows ` +
-              `is only the most recently seen of them. Ask for their full name and date of ` +
-              `birth before using any of it, and do not read their history back until they ` +
-              `confirm who they are.`,
+            identity_warning: resolved.identityUnconfirmed
+              ? 'This is the person our records show for the number they are calling from, but ' +
+                'nobody has confirmed the CALLER is that person — a family member, a reassigned ' +
+                'number or a withheld caller ID all look like this. Ask for their full name and ' +
+                'date of birth before using any of it, and do not read their history back until ' +
+                'they confirm who they are.'
+              : `This ${phone && !first ? 'phone number' : 'name'} matches ` +
+                `${resolved.identity?.candidateCount} different people on file, and what follows ` +
+                `is only the most recently seen of them. Ask for their full name and date of ` +
+                `birth before using any of it, and do not read their history back until they ` +
+                `confirm who they are.`,
           }),
       // The field this queue routes on.
       usual_clinic: usualOffice,
@@ -604,24 +745,88 @@ export { normalizePhone } from '../utils/phone';
  * guess beats blocking the call, and `resolve_location` will catch it before a
  * ticket is filed.
  */
-async function mostRecentAcceptable(
+export async function mostRecentAcceptable(
   locations: string[],
   queue: ToolQueue | undefined,
+  deadlineAt?: number,
 ): Promise<string | null> {
   if (locations.length === 0) return null;
-  const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
-  if (!isDirectoryConfigured()) return locations[0];
 
-  for (const name of locations) {
-    try {
-      const hit = await lookupLocation(name);
-      // An unknown location is more likely an office we have not mirrored than
-      // a wrong one, so it is not disqualified here — resolve_location is the
-      // gate that matters.
-      if (!hit || acceptsFacility(queue, hit.facilityKind)) return name;
-    } catch {
-      return locations[0];
+  /**
+   * THE LAST UNBOUNDED AWAIT BEFORE THE TOOL ANSWERS.
+   *
+   * Codex P1 round 3 on PR #292. `lookupLocation` reads a cached snapshot, but
+   * a COLD OR STALE one triggers a refresh with a 5s connection timeout — and
+   * this is a LOOP, one lookup per past location. The 250ms margin covers
+   * building the result, not a database round trip, so `runTool`'s race can
+   * still fire here and discard an identity the join went to some trouble to
+   * preserve.
+   *
+   * MY CHANGE MADE THIS REACHABLE, which is why it belongs in this PR rather
+   * than in #68. Before the PersonID join a mirror-identified caller had NO
+   * past locations, so this returned `null` immediately; now they have several
+   * and the loop runs. The join created the population that pays this cost.
+   *
+   * Out of time falls back to `locations[0]` — the raw most-recent office —
+   * which is exactly what this function already does when the directory is
+   * unconfigured or a lookup throws. A known fallback, not a new behaviour:
+   * the office is unrefined, `resolve_location` is still the gate that
+   * matters, and the caller keeps their identity.
+   */
+  const remaining = deadlineAt === undefined ? Infinity : deadlineAt - Date.now();
+  if (remaining <= 0) return locations[0];
+
+  const refine = async (): Promise<string | null> => {
+    const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
+    if (!isDirectoryConfigured()) return locations[0];
+
+    for (const name of locations) {
+      try {
+        const hit = await lookupLocation(name);
+        // An unknown location is more likely an office we have not mirrored
+        // than a wrong one, so it is not disqualified here — resolve_location
+        // is the gate that matters.
+        if (!hit || acceptsFacility(queue, hit.facilityKind)) return name;
+      } catch {
+        return locations[0];
+      }
     }
+    return null;
+  };
+
+  if (remaining === Infinity) return refine();
+
+  /**
+   * CAPPED, not merely pre-checked. Checking the clock BEFORE each lookup
+   * bounds nothing: the stall happens INSIDE one call, so the check that
+   * matters has to be able to interrupt it. Same shape as the PersonID join —
+   * a race, because the catch below only ever covered rejections.
+   */
+  /**
+   * THE LOSING TIMER MUST BE CLEARED. Codex P2 on `ec45286`, and it is the kind
+   * of bug this repo has been burned by twice: an instrument that fires when
+   * nothing is wrong. Left dangling, the timer runs seconds AFTER the tool has
+   * already answered — on every ordinary call, including the cached-directory
+   * and unconfigured-directory paths — and logs "ran out of tool budget" for a
+   * lookup that did not. That line is meant to be a live counter of a real
+   * failure; firing it on success makes it count nothing. It also holds the
+   * closure alive until the deadline.
+   */
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      refine(),
+      new Promise<string | null>((resolve) => {
+        timer = setTimeout(() => {
+          console.warn(
+            '[TOOLS] lookup_patient: the office refinement ran out of tool budget — ' +
+              'using the most recent office unrefined',
+          );
+          resolve(locations[0]);
+        }, remaining);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  return null;
 }

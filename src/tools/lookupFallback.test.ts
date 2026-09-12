@@ -87,7 +87,18 @@ describe('a mis-transcribed date of birth does not lose a known patient', () => 
     })) as Record<string, unknown>;
 
     expect(spy).toHaveBeenCalledTimes(2);
-    expect(spy.mock.calls[1][0]).toEqual({ phone: '+18455317471' });
+    /**
+     * The retry must be PHONE-ONLY — carrying the mis-transcribed name or date
+     * of birth forward would just re-run the query that already missed. It now
+     * also carries `deadlineAt`, the absolute tool deadline (Codex P1 round 2:
+     * the PersonID join has to bound itself by the time actually LEFT, and the
+     * retry's own join needs it too). So this asserts the intent the strict
+     * deep-equal was protecting, rather than the exact object shape.
+     */
+    const retry = spy.mock.calls[1][0] as Record<string, unknown>;
+    expect(retry.phone).toBe('+18455317471');
+    expect(typeof retry.deadlineAt).toBe('number');
+    expect(Object.keys(retry).sort()).toEqual(['deadlineAt', 'phone']);
     expect(out.found, 'a known patient was reported as unknown').toBe(true);
     expect(out.patient_name).toBe('Wayne Fabian');
   });
