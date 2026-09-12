@@ -20,7 +20,7 @@
  * "asked again", live and post-mortem.
  */
 
-import { canTransfer } from '../config/agentCapabilities';
+import { canTransfer, filesTickets } from '../config/agentCapabilities';
 
 /** Topics an agent asks callers about. A line is bucketed by the FIRST
  *  topic it matches; unmatched lines are not counted, so the guard
@@ -150,13 +150,138 @@ const AGENT_EXIT: Record<string, string> = {
     'Create the ticket NOW with whatever you have — the caller’s phone number is attached automatically from caller ID, and missing fields may stay blank. A partial ticket the team can call back on beats a complete interview the caller never finishes.',
 };
 
-/** What to say to a caller asking for a human on an agent that cannot
- *  transfer: name the limitation, offer the real alternative, then act. */
-const NO_TRANSFER_HUMAN_DIRECTIVE =
-  'SERVER STATE CHECK: The caller asked to reach a person, and this line CANNOT transfer calls. Say this, word-for-word, without adding or rephrasing: "All of our agents are currently busy at the moment — I can take a message and have the team contact you as soon as they become available." Then take the message. If they ask again, repeat the SAME sentence — never improvise around it, never say you are "not a person", never promise anyone will pick up.';
+/**
+ * What to do — NOT what to say — when a caller asks for a human on a line that
+ * cannot transfer: name the limitation, offer the real alternative, then act.
+ *
+ * THIS DIRECTIVE MUST NEVER DICTATE A SENTENCE, and that is the whole point of
+ * its current shape. Between 2026-08-17 and today it did, word-for-word:
+ *
+ *   "All of our agents are currently busy at the moment — I can take a message
+ *    and have the team contact you as soon as they become available."
+ *
+ * Every no-transfer prompt rules its own wording for this moment, and this
+ * directive outranked all of them — `answeringServiceAgent` says explicitly
+ * "If a SERVER STATE CHECK system message appears mid-call... follow it
+ * exactly". So it contradicted two live prompts at once:
+ *
+ *   - RECORDS (and optical, surgery, tech) forbid that exact sentence, on the
+ *     operator's 2026-09-03 ruling: never imply a human is about to come free,
+ *     no "currently busy", no "as soon as someone's available". The server was
+ *     ordering the violation the prompt was written to prevent.
+ *   - ANSWERING SERVICE's approved script opens "I'm not able to transfer you
+ *     to someone — I'm not a person and I can't connect calls", while this
+ *     directive said never to say you are "not a person".
+ *
+ * A ruling lives in the lane's prompt, where the operator can read and change
+ * it. The guard's job is to force the honest answer to be given NOW and to
+ * stop the loop — not to supply the words.
+ */
+/**
+ * Derived per lane, because two facts differ between lanes and getting either
+ * wrong is a promise the line cannot keep:
+ *
+ *   - WORDING. Most no-transfer lanes rule their own sentence for this moment.
+ *     Some have none: `appointment-confirmation` has no human-request script,
+ *     and an unregistered slug falls back to the conservative cannot-transfer
+ *     default with no prompt behind it at all. Pointing those at "your own
+ *     instructions" and stopping would leave the model improvising at exactly
+ *     the guarded moment, so the directive names the SHAPE of the answer as a
+ *     fallback — still not a sentence, so it cannot contradict a lane that
+ *     does have a ruling.
+ *   - WHETHER A MESSAGE CAN BE TAKEN AT ALL. `filesTickets` is false for
+ *     `appointment-confirmation` — outbound confirmation calls, 60-90s, no
+ *     ticket path. Telling it to take a message promises a callback nothing
+ *     will create. An UNREGISTERED slug is a different case and deliberately
+ *     not this one: `UNKNOWN_AGENT` sets `filesTickets: true`, because
+ *     wrongly assuming a lane cannot take a message is the more harmful
+ *     error of the two.
+ */
+/**
+ * A CLOSED SET. Not strings — strings are prose, and prose is where a sentence
+ * hides. `mustDo: ['Reply: I cannot connect calls']` typechecks against
+ * `string[]` and passes every shape and phrase check ever written; against
+ * this union it does not compile (Codex, PR #270).
+ */
+export type DirectiveAction =
+  | "STATE_THE_LIMITATION_FIRST"
+  | "USE_YOUR_OWN_WORDING"
+  | "TAKE_THE_MESSAGE"
+  | "REPEAT_THE_SAME_ANSWER_IF_ASKED_AGAIN";
+
+export type DirectiveProhibition = "NEVER_PROMISE_A_PICKUP";
+
+export type DirectiveSituation = "CALLER_ASKED_FOR_A_PERSON_ON_A_NO_TRANSFER_LINE";
+
+export interface NoTransferDirectiveSpec {
+  /** The server-side fact the agent must act on. A token, never a line. */
+  readonly situation: DirectiveSituation;
+  /** Behaviours, in order. Each is something to DO. */
+  readonly mustDo: readonly DirectiveAction[];
+  /** Prohibited ACTIONS. Never prohibited wording — that is the prompt's. */
+  readonly mustNot: readonly DirectiveProhibition[];
+}
+
+/**
+ * The ONLY place any of this becomes English. A new action means adding a
+ * token above and its sentence here, which is a visible, reviewable edit in
+ * one file — not a string typed at a call site.
+ */
+const SITUATION_TEXT: Record<DirectiveSituation, string> = {
+  CALLER_ASKED_FOR_A_PERSON_ON_A_NO_TRANSFER_LINE:
+    "The caller asked to reach a person, and this line CANNOT transfer calls.",
+};
+
+const ACTION_TEXT: Record<DirectiveAction, string> = {
+  STATE_THE_LIMITATION_FIRST: "Tell them so NOW, before collecting anything else.",
+  USE_YOUR_OWN_WORDING:
+    "If your own instructions give you wording for this moment, use it; otherwise state plainly, in your own words, that you cannot connect calls.",
+  TAKE_THE_MESSAGE: "Then take the message.",
+  REPEAT_THE_SAME_ANSWER_IF_ASKED_AGAIN:
+    "If they ask again, give that SAME answer rather than improvising a new one.",
+};
+
+const PROHIBITION_TEXT: Record<DirectiveProhibition, string> = {
+  NEVER_PROMISE_A_PICKUP: "Never promise that anyone will pick up.",
+};
+
+/**
+ * THE STRUCTURE IS THE GUARANTEE. There is no field here in which a sentence
+ * for the agent to speak can be placed, so the server cannot dictate wording
+ * without visibly abusing a field named for something else. A phrase blocklist
+ * detects dictation after the fact and can always be worded around; this
+ * removes the channel (Codex, PR #270).
+ */
+export function noTransferDirectiveSpec(agentSlug: string): NoTransferDirectiveSpec {
+  return {
+    situation: "CALLER_ASKED_FOR_A_PERSON_ON_A_NO_TRANSFER_LINE",
+    mustDo: [
+      "STATE_THE_LIMITATION_FIRST",
+      "USE_YOUR_OWN_WORDING",
+      ...(filesTickets(agentSlug) ? (["TAKE_THE_MESSAGE"] as const) : []),
+      "REPEAT_THE_SAME_ANSWER_IF_ASKED_AGAIN",
+    ],
+    mustNot: ["NEVER_PROMISE_A_PICKUP"],
+  };
+}
+
+/** Tokens in, English out. No caller supplies a word of it. */
+export function renderDirective(spec: NoTransferDirectiveSpec): string {
+  return [
+    `SERVER STATE CHECK: ${SITUATION_TEXT[spec.situation]}`,
+    ...spec.mustDo.map((a) => ACTION_TEXT[a]),
+    ...spec.mustNot.map((p) => PROHIBITION_TEXT[p]),
+  ].join(" ");
+}
 
 function exitFor(agentSlug: string): string {
-  return AGENT_EXIT[agentSlug] ?? AGENT_EXIT.default;
+  const explicit = AGENT_EXIT[agentSlug];
+  if (explicit) return explicit;
+  // The default exit ends in "Create the ticket NOW". On a lane that files no
+  // tickets that is an instruction it cannot carry out, and it contradicts the
+  // directive above, which for the same reason does not offer to take a
+  // message. Say nothing rather than something false.
+  return filesTickets(agentSlug) ? AGENT_EXIT.default : '';
 }
 
 class ConversationLoopGuard {
@@ -255,7 +380,10 @@ class ConversationLoopGuard {
       // ask; agents that can actually transfer get the escalation directive
       // on the second.
       if (cap === HUMAN_REQUEST_CAP_NO_TRANSFER) {
-        return { kind: 'human_request', text: `${NO_TRANSFER_HUMAN_DIRECTIVE} ${exitFor(agentSlug)}` };
+        return {
+          kind: 'human_request',
+          text: `${renderDirective(noTransferDirectiveSpec(agentSlug))} ${exitFor(agentSlug)}`.trim(),
+        };
       }
       return {
         kind: 'human_request',
