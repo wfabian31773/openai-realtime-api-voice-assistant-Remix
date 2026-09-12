@@ -132,7 +132,7 @@ were the behaviour.
 | Rule 1 · validate before trusting | **YES.** `verifyPatient` / `findByPhone` refuse to choose between two people and report a candidate count. |
 | Rule 1 · join on `PersonID` | **BUILT, NOT DEPLOYED.** `ScheduleLookupService.lookupByPersonId`, PR #292. Index `idx_schedule_personid_apptdate` is live. |
 | Rule 1 · carry it forward into every tool and ticket | **NO — this is the largest open gap.** The gates still refuse on `date_of_birth`, `location` and `surgeon` for callers whose record holds all three. |
-| Rule 2a · ask new-or-existing | **MISSING FROM EVERY QUEUE LANE.** Zero hits in `opticalAgent`, `surgeryAgent`, `techAgent`, `recordsAgent`. It exists as `rampEngine.ts:60` (`classify`), and `rampEngine` is imported by **one** file — `voiceAgentRoutes.ts`, the OLD CORE. So the runtime lanes, which take the volume, do not ask it. Wayne asked whether we still had it; we do not, on the lanes that matter. |
+| Rule 2a · ask new-or-existing | **BUILT, NOT DEPLOYED** — `src/runtime/newOrExistingAsk.ts`, appended at the session seam on optical/surgery/tech/records and suppressed when pre-context recognised the caller. It was MISSING FROM EVERY QUEUE LANE until then: zero hits in `opticalAgent`, `surgeryAgent`, `techAgent`, `recordsAgent`; it existed only as `rampEngine.ts:60` (`classify`), and `rampEngine` is imported by ONE file — `voiceAgentRoutes.ts`, the OLD CORE — so the runtime lanes, which take the volume, did not ask it. **The answer changes no code path yet**: a spoken "new" does not suppress `lookup_patient`, and whether it should is an OPEN question for Wayne. |
 | Rule 2b · DOB asked in month/day/year parts | **YES, all four lanes** — `opticalAgent.ts:193`, `surgeryAgent.ts:203`, `techAgent.ts:189`, `recordsAgent.ts:192`, plus no-ivr and answering-service. |
 | Rule 2b · never two fields in one breath | **NO.** Records was observed asking for first and last name in one breath on 2026-09-03. |
 
@@ -552,6 +552,7 @@ is reading noise.
 | The runtime's agents-table id | `src/runtime/agentIdentity.ts` | slug → `agents.id`, cached per lane. Without it every runtime call is absent from five per-agent reports. |
 | Pipeline label on a card | `client/src/lib/pipelineSplit.ts` | Says which stack served a lane's calls, and warns on a mid-day cutover. |
 | PCP blind transfer | `src/runtime/blindTransfer.ts` + `blindTransferDialResult.ts` | Warns the caller, hands them into the PCP call-centre queue, and reads Twilio's `<Dial action>` back so the outcome is still measurable. PCP only; `RUNTIME_TRANSFER_MODE` overrides. |
+| The new-or-existing ask | `src/runtime/newOrExistingAsk.ts` | RULE ZERO 2a. Appended by the RUNTIME on the four patient queue lanes, and NOT when pre-context already recognised the caller. PCP is excluded on purpose — its callers are entities, and asking a surgery centre whether it is a new or existing PATIENT is the `CAbf717457` error spoken aloud. Gates nothing. |
 | "Greeting already played" | `src/runtime/greetingAlreadyPlayed.ts` | Appended by the RUNTIME, not the prompts — the transport is what plays the greeting, and tech has 16 tokens of ceiling headroom. |
 | The bounded office ask | `src/tools/sharedPatientTools.ts` (`resolve_location`) | Refuses when the office is the wrong KIND for the queue instead of returning `success: true` with a message, and bounds the ask at two per call (`RESOLVE_ASK_LIMIT`) so a refusal cannot become a 35-call well. Merged as #282; **the after-number has not been taken** — see the ceiling section. |
 
@@ -1831,7 +1832,7 @@ in the new build. Current marker:
 **ON THE RUNTIME, ASK `/voice/health` — AND THE MARKER NOW CARRIES ITS DATE.**
 
 ```
-voice-runtime-v10-person-base-20260912
+voice-runtime-v13-new-or-existing-20260912
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -1846,14 +1847,23 @@ on it is evidence about current code.
 | earlier than **20260911** | the date-of-birth transcript backstop (#280, #281, merged 2026-09-10) |
 | **v5**-…-20260911 | the West Covina fix: v5 routes a "West Covina" caller to our Covina office, v6 refuses and asks again (#287) |
 | **v5** or **v6**-…-20260911 | the optical unassigned exit (#288, merged 2026-09-11). Without it `file_optical_ticket` never sends `routingAskExhausted`, so an optical request whose office did not resolve is answered HTTP 400 "Missing required information: office" and files NOTHING — 48 calls in the 30 days to 09-11. A build on v5/v6 is the BEFORE arm; do not read a filing rate from it as an after-number |
-
 | earlier than **v10**-…-20260912 | the PERSON BASE rung on `lookup_patient`. Every rung before it reads the Operations Hub APPOINTMENT BOOK, so a real patient with no appointment inside its window cannot be found and the failure looks random from outside — standing instruction 14. Measured 2026-09-12 over ten days, `duration >= 30`: **627 of 2,511 substantive queue calls (25.0%) ran `lookup_patient` and found NOBODY** (tech 277/1173 · surgery 158/638 · optical 122/501 · records 70/199), **235 of those ended with no ticket**, and of the 330 distinct caller numbers behind them **208 (63%) ARE in `patients_master`**. Optical alone reads 76/100 and tech 132/230 — **63% is the fleet figure and 76% overstates it**; tech's sample visibly contains toll-free numbers, so some residue is genuinely not-a-patient. The rung runs ONLY where the method already returned `emptyContext()`, so it can ADD a match and can never change one the schedule made. **v10 also carries THE JOIN**: once the mirror identifies somebody, `lookupByPersonId` pulls their `Schedule` rows on `PersonID` and they come back through the same `buildContext` as every other rung, so history, office and provider arrive with the identity. An earlier draft of this row said v10 brought no history and called that correct; it was wrong, and the join section below has the 81% that disproved it |
+| **v12** or earlier — NOT the date | RULE ZERO 2a, the new-or-existing ask. The runtime lanes never asked "Are you a new patient or an existing patient?" — zero hits in `opticalAgent`, `surgeryAgent`, `techAgent`, `recordsAgent`. It survived only as `rampEngine.ts:60`, imported by ONE file — `voiceAgentRoutes.ts`, the OLD CORE — so the lanes taking the volume did not ask it. Now appended by the runtime (`newOrExistingAsk.ts`) on the four PATIENT queue lanes only, and SUPPRESSED for a caller pre-context already recognised, because asking then tells them we do not know who they are while we are looking at their chart. **It GATES nothing**: a spoken "new" does not stop `lookup_patient` in code. That is an open question for the operator, not a decision this build made |
 
-**THREE VERSIONS ARE IN FLIGHT ON 2026-09-12 AND THEY DO NOT CONTAIN EACH
-OTHER.** #290 claims v8, #291 claims v9, and the person-base rung claims v10 —
-all three branched off v7, so only the LAST to merge describes the deployed
-build. Whichever merges after the first must re-bump and move its table row in
-the same commit. This is no longer the tidy v5 → v6 → v7 chain below.
+**FOUR VERSIONS SHARE 2026-09-12 AND THEY DO NOT NEST.** v10 (the person base
+and the join) is MERGED and is what `main` describes. Three sit off it as
+SIBLINGS: v11 (#290, the locked record), v12 (#291, optical's office ladder)
+and v13 (this, the new-or-existing ask). **None of the three contains either
+of the others** — so a deployment reporting v13 is NOT running the locked
+record or optical's office ladder, and one reporting v11 is not running this.
+
+Whichever merges next must re-bump above whatever `main` then carries AND move
+its table row in the SAME commit. A marker that goes BACKWARDS is worse than a
+stale one: it describes less code than the deployment is running, which reads
+as a failed pull and will be believed. #290 and #291 each already re-bumped
+once for exactly that reason, from v8 and v9.
+
+This is no longer the tidy v5 → v6 → v7 chain below.
 
 **THREE builds also share 2026-09-11, so on that date the DATE TELLS YOU
 NOTHING — read the version.** v5 → v6 → v7, each strictly containing the
