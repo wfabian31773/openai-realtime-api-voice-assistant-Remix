@@ -2237,6 +2237,7 @@ Start there before debugging anything in these areas:
 |---|---|
 | **anything that touches identity, a gate, or an intake question** | **`the-record-and-the-funnel.md` — RULE ZERO, binding** |
 | debug "the agent won't call the tool" | `realtime-tool-schemas.md` |
+| touch the Grok voice transport — barge-in, disclosure, VAD, tools, audio | `grok-speech-to-speech-api.md` |
 | build or change a queue agent | `queue-agents.md` |
 | file, route or classify a ticket | `ticketing-api-contract.md` |
 | touch ticket creation on the after-hours path | `ticket-creation-lock.md` |
