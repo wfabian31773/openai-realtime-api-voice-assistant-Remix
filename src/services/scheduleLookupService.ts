@@ -378,10 +378,6 @@ const LOOKUP_ROW_LIMIT = 60;
  * history. Must stay COMFORTABLY UNDER `lookup_patient`'s 6s tool budget — the
  * point is to answer before that race does, so the fallback still runs.
  */
-export function joinDeadlineForTests(): number {
-  return joinDeadlineMs();
-}
-
 function joinDeadlineMs(): number {
   const n = Number(process.env.PERSON_JOIN_TIMEOUT_MS);
   return Number.isFinite(n) && n > 0 ? n : 1_500;
@@ -653,8 +649,40 @@ export class ScheduleLookupService {
   async lookupByPersonId(
     personId: string,
     matchedBy: 'phone' | 'name' | 'dob' | 'name_and_dob',
+    deadlineAt?: number,
   ): Promise<PatientScheduleContext> {
     if (!personId) return this.emptyContext();
+
+    /**
+     * BUDGET AGAINST WHAT IS LEFT, NOT AGAINST A FIXED 1.5 SECONDS.
+     *
+     * Codex P1 round 2 on PR #292, and the first fix was only half of it. A
+     * RELATIVE deadline starts when the join starts — after three schedule
+     * rungs and the mirror have already run serially, none of them locally
+     * bounded, against a pool that permits a 15s connection wait. Spend 4.6s
+     * up there and a 1.5s join deadline expires at 6.1s, AFTER `runTool`'s
+     * absolute 6s race has already answered "timed out" — so the preserved
+     * identity never reaches the model and the fix does nothing in exactly the
+     * case it was written for.
+     *
+     * So the deadline is the SMALLER of our own limit and the time actually
+     * remaining, and when nothing is left the join is SKIPPED outright: the
+     * identity in hand is worth more than a history we cannot deliver in time.
+     *
+     * SCOPE, stated honestly: this stops the join being the CAUSE of a lost
+     * identity. It cannot rescue a call whose earlier rungs already spent the
+     * whole budget — that is task #68 (`lookup_patient` exceeds 6s on 13-17%
+     * of queue calls) and it needs those rungs bounded too.
+     */
+    const remaining = deadlineAt === undefined ? Infinity : deadlineAt - Date.now();
+    const allowed = Math.min(joinDeadlineMs(), remaining);
+    if (allowed <= 0) {
+      console.warn(
+        '[ScheduleLookup] PersonID join SKIPPED — no tool budget left; keeping the identity ' +
+          'without history rather than racing a deadline we would lose',
+      );
+      return this.emptyContext();
+    }
 
     try {
       /**
@@ -686,7 +714,7 @@ export class ScheduleLookupService {
           .orderBy(desc(schedule.appointmentDate))
           .limit(LOOKUP_ROW_LIMIT),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('PersonID join deadline')), joinDeadlineMs()),
+          setTimeout(() => reject(new Error('PersonID join deadline')), allowed),
         ),
       ]);
 
@@ -717,8 +745,14 @@ export class ScheduleLookupService {
     firstName?: string;
     lastName?: string;
     dateOfBirth?: string;
+    /**
+     * Epoch ms by which this must have ANSWERED — the moment `runTool`'s race
+     * fires, less a margin. Optional: callers without a tool budget omit it and
+     * the join falls back to its own relative deadline.
+     */
+    deadlineAt?: number;
   }): Promise<PatientScheduleContext> {
-    const { phone, firstName, lastName, dateOfBirth } = params;
+    const { phone, firstName, lastName, dateOfBirth, deadlineAt } = params;
 
     if (firstName && lastName && dateOfBirth) {
       const result = await this.lookupByNameAndDOB(firstName, lastName, dateOfBirth);
@@ -771,7 +805,7 @@ export class ScheduleLookupService {
      * `verifyPatient` both refuse to choose between two people and report a
      * candidate count instead — instruction 6, unchanged.
      */
-    const fromMirror = await this.lookupInPersonBase({ phone, firstName, lastName, dateOfBirth });
+    const fromMirror = await this.lookupInPersonBase({ phone, firstName, lastName, dateOfBirth, deadlineAt });
     // `identity` alone is a real answer: it is the AMBIGUOUS case, where the
     // person base holds several people for this lookup. Returning only on
     // `patientFound` discarded it and reported a plain "not found", which is
@@ -795,8 +829,9 @@ export class ScheduleLookupService {
     firstName?: string;
     lastName?: string;
     dateOfBirth?: string;
+    deadlineAt?: number;
   }): Promise<PatientScheduleContext> {
-    const { phone, firstName, lastName, dateOfBirth } = params;
+    const { phone, firstName, lastName, dateOfBirth, deadlineAt } = params;
     const { verifyPatient, findByPhone } = await import('./patientVerification');
 
     // Name + date of birth first: it is the stronger claim, and it is the one
@@ -839,7 +874,7 @@ export class ScheduleLookupService {
      * of verifying against the person base at all: the mirror answers WHO on
      * its own key, and `Schedule.PersonID` is that same key.
      */
-    const joined = await this.lookupByPersonId(p.personId, matchedBy);
+    const joined = await this.lookupByPersonId(p.personId, matchedBy, deadlineAt);
 
     if (joined.patientFound) {
       console.info(

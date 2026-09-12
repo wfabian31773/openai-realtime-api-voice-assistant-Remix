@@ -62,10 +62,27 @@ function askWhichOffice(queue: ToolQueue | undefined): string {
 
 // ---------------------------------------------------------------- who
 
+/**
+ * `lookup_patient`'s whole budget, and the ONE place it is written.
+ *
+ * `runTool` races the handler against this and the race RESOLVES rather than
+ * cancelling, so anything inside that wants to answer first has to know the
+ * ABSOLUTE moment the race fires — not its own relative timeout. Declared here
+ * so the deadline handed to the service cannot drift from the budget the
+ * registry enforces; `lookupBudgetDrift.test.ts` fails if the two separate.
+ */
+export const LOOKUP_PATIENT_BUDGET_MS = 6000;
+
+/**
+ * Answer this far before the race does. Enough to build the result object and
+ * return it, and nothing more.
+ */
+const LOOKUP_BUDGET_MARGIN_MS = 250;
+
 registerTool({
   name: 'lookup_patient',
   layer: 'agent',
-  timeoutMs: 6000,
+  timeoutMs: LOOKUP_PATIENT_BUDGET_MS,
   description:
     'Find a patient and their recent visit history. Call this as soon as you have ' +
     'either their phone number, or their first name, last name and date of birth. ' +
@@ -103,6 +120,14 @@ registerTool({
     },
   },
   handler: async (input): Promise<ToolResult> => {
+    /**
+     * WHEN THE RACE FIRES, in absolute terms. Codex P1 (round 2) on PR #292:
+     * a RELATIVE deadline inside the join is worthless if the rungs above it
+     * have already spent the budget, because `runTool`'s race is absolute from
+     * the moment the handler was entered. Captured here, at that moment, and
+     * threaded down so the join can bound itself by what is actually LEFT.
+     */
+    const deadlineAt = Date.now() + LOOKUP_PATIENT_BUDGET_MS - LOOKUP_BUDGET_MARGIN_MS;
     const queue = input.queue as ToolQueue | undefined;
     // The number the call ARRIVED on, when the model did not pass one.
     //
@@ -139,6 +164,7 @@ registerTool({
       firstName: first || undefined,
       lastName: last || undefined,
       dateOfBirth: dob || undefined,
+      deadlineAt,
     });
 
     // A name+DOB miss is very often ONE mis-transcribed field, not a stranger.
@@ -177,7 +203,7 @@ registerTool({
     const explicitlyAmbiguous = Boolean(ctx.identity && !ctx.identity.unique);
 
     if (!ctx.patientFound && !explicitlyAmbiguous && phone && (first || last || dob)) {
-      const byPhone = await scheduleLookupService.lookupPatient({ phone });
+      const byPhone = await scheduleLookupService.lookupPatient({ phone, deadlineAt });
       if (byPhone.patientFound) {
         console.info('[TOOLS] lookup_patient: name+DOB missed, matched on the caller phone instead');
         resolved = byPhone;

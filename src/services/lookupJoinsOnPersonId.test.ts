@@ -238,11 +238,10 @@ describe('a schedule that cannot answer must not unidentify the caller', () => {
     }
   });
 
-  it('answers well inside lookup_patient\'s 6s tool budget', async () => {
-    // The deadline is worthless if it lands after the race it exists to beat.
-    const { joinDeadlineForTests } = await import('./scheduleLookupService');
-    expect(joinDeadlineForTests()).toBeLessThan(6_000);
-  });
+  // A "1500 < 6000" assertion used to live here. Codex was right that it
+  // proved nothing: the deadline is RELATIVE and the race is ABSOLUTE, so two
+  // constants can satisfy that inequality while the deadline still fires after
+  // the race. The real coverage is `src/tools/lookupJoinBudget.test.ts`.
 
   it('keeps the identity when the patient genuinely has no appointments', async () => {
     // The operator's own distinction, 2026-09-12: separate from the 63% whose
