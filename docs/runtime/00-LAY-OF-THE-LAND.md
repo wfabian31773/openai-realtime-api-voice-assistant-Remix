@@ -309,3 +309,59 @@ by the runtime, and only by the runtime. I had read it as a dead column because
 it is null on every old-core call, which is the same
 absence-is-not-evidence-of-absence trap recorded in
 `.agents/memory/measurement-traps.md`.
+
+---
+
+## The baseline the runtime will be measured against
+
+**Recorded 2026-09-03.** `BACKEND_HANDOFF.md` requires a before-number for any
+change to the ticket path. This is it for the runtime cutover.
+
+Corpus: the conversations of 2026-09-02 (caller said more than six words),
+graded by `runDeterministicGraders` — the same referee the regression harness
+re-grades the old side with, so these numbers and a future run are directly
+comparable.
+
+| lane | conversations | any failure | **critical** | | dominant criticals |
+|---|---|---|---|---|---|
+| optical | 54 | 39 | **32** | 59% | callback_fields 28 · human_request 5 · repetition 4 |
+| surgery | 84 | 38 | **30** | 36% | callback_fields 16 · human_request 7 · repetition 6 · needs_ticket 3 |
+| tech | 149 | 91 | **79** | 53% | callback_fields 50 · repetition 19 · human_request 17 · needs_ticket 4 |
+| records | 26 | 14 | **14** | 54% | callback_fields 9 · repetition 6 · human_request 5 |
+
+**The same three graders dominate every lane.** `callback_fields_completeness`
+is the top critical on all four — **103 of 313 conversations, a third of
+everything**, and roughly three times worse than the 22% recorded against task
+#52. Behind it, on every lane, `question_repetition` (#56) and
+`human_request_deflection` (#51). The graders and the 2026-09-02 forensic point
+at the same three defects independently.
+
+**Read the levels with suspicion, the delta without.** Task #49 records two
+grader bugs inflating critical errors by roughly 28%, so the absolute rates
+above are probably high. The harness re-grades BOTH sides with the same
+referee, so a grader bug shifts old and new identically and cancels out of the
+comparison. That is the number to trust.
+
+**Surgery — the lane that has had the most attention — has the LOWEST critical
+rate of the four. Optical, the lane described as working like a charm, has the
+highest.** Almost entirely on the callback field.
+
+### Reproducing this
+
+```
+tsx scripts/build-replay-corpus.ts --agents optical --from 2026-09-02 \
+  --to 2026-09-02 --out replay-corpus/optical
+```
+
+Then grade the old side (no model, no xAI key — the deterministic graders are
+pure functions over the transcript), or run the full comparison:
+
+```
+XAI_API_KEY=... XAI_REGRESSION_MODEL=<an xAI chat model with tool calling> \
+tsx scripts/run-runtime-regression.ts --slug optical \
+  --corpus replay-corpus/optical --out replay-out/optical --limit 54
+```
+
+`--limit` defaults to **25**, so pass it or you silently measure half the
+corpus. The model id must be a chat-completions model —
+`https://api.x.ai/v1/chat/completions` — not a `grok-voice-*` realtime model.
