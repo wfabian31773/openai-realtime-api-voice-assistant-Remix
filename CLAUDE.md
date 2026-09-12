@@ -449,6 +449,69 @@ is reading noise.
   - `Schedule.PersonID` (uuid) ↔ `patients_master.person_id`; `uuid = text`
     needs an explicit `::uuid` cast.
 
+### THE JOIN IS THE WHOLE THING, AND IT HAD NO INDEX — 2026-09-12
+
+**The operator has said this from the start and it took him saying it again to
+land: there is a MASTER TABLE and a SCHEDULE TABLE, they are two different
+things, and you have to JOIN them.** Identity lives in `patients_master`;
+visits live in `Schedule`; `Schedule.PersonID` ↔ `patients_master.person_id`
+is the only link. Everything below was measured after he insisted.
+
+**`Schedule` had SIXTEEN indexes and none on `PersonID`.** Last name, first
+name, cell phone, home phone, date of birth, appointment date,
+`PatientPartialKey`, physician, roster — every one of them a way to guess at a
+person from a string, and no way to look one up by WHO THEY ARE. So a lookup
+by person was a sequential scan of **1,024,785 rows / 1,494 MB**: three
+attempts timed out at 60s, including one asking for a SINGLE person. That is
+why every rung of `lookupPatient` searches by phone and name, and why
+identifying a caller could not carry their history with it.
+
+**FIXED.** Migration `schedule_personid_index_for_mirror_join`:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_schedule_personid_apptdate
+  ON public."Schedule" ("PersonID", "AppointmentDate" DESC);
+```
+
+`PersonID` is `uuid` and **100% populated** (10,467 of 10,467 in a 1%
+TABLESAMPLE, 9,975 distinct people). Composite with the date because the read
+is always "this person's visits, newest first". **This is a live database
+object, not code — it is in no branch and no PR.** Reversal is
+`DROP INDEX idx_schedule_personid_apptdate`.
+
+**Proof:** `Index Only Scan using idx_schedule_personid_apptdate`,
+`Heap Fetches: 0`, **Execution Time 1.305 ms** — from a 60,000 ms timeout.
+
+**AND IT DISPROVED THE CLAIM IN THE v10 MARKER ROW ABOVE.** I wrote that the
+person-base rung brings no history and that this "is correct: having no
+appointments is WHY the book missed them." **False.** Joined the 64
+uniquely-resolved person_ids behind the found-nobody callers:
+
+| of 64 callers told "no record found" | |
+|---|---|
+| **have schedule history** | **52 (81%)** |
+| have Active visits | 51 |
+| **have an UPCOMING appointment** | **19** |
+| have past visits | 49 |
+| **have an office on file** | **51** |
+| distinct offices recoverable | 27 |
+
+**Nineteen people with a future appointment already booked were told we had no
+record of them.** The book missed them because it searches by PHONE and NAME
+STRINGS — not because they have no appointments. A separate, smaller group
+genuinely has a record and no appointments; that is fine and we still know who
+they are. Do not conflate the two.
+
+So the shape instruction 14 has always described is now cheap to build:
+**`patients_master` by phone for identity (63% of found-nobody numbers are
+there) → lock the `person_id` → join `Schedule` ON `"PersonID"` in 1.3ms for
+history, office and provider.** The 51 offices are the exact field
+`file_optical_ticket` needs to route without asking.
+
+**PR #292 as it stands stops at identity and returns no history, which is now
+known to leave 81% on the table.** It is green and reviewed; it is not the
+finished shape.
+
 ---
 
 ## HOW TO MEASURE WHETHER A CALL FILED — read this before quoting any rate
@@ -1599,7 +1662,7 @@ on it is evidence about current code.
 | **v5**-…-20260911 | the West Covina fix: v5 routes a "West Covina" caller to our Covina office, v6 refuses and asks again (#287) |
 | **v5** or **v6**-…-20260911 | the optical unassigned exit (#288, merged 2026-09-11). Without it `file_optical_ticket` never sends `routingAskExhausted`, so an optical request whose office did not resolve is answered HTTP 400 "Missing required information: office" and files NOTHING — 48 calls in the 30 days to 09-11. A build on v5/v6 is the BEFORE arm; do not read a filing rate from it as an after-number |
 
-| earlier than **v10**-…-20260912 | the PERSON BASE rung on `lookup_patient`. Every rung before it reads the Operations Hub APPOINTMENT BOOK, so a real patient with no appointment inside its window cannot be found and the failure looks random from outside — standing instruction 14. Measured 2026-09-12 over ten days, `duration >= 30`: **627 of 2,511 substantive queue calls (25.0%) ran `lookup_patient` and found NOBODY** (tech 277/1173 · surgery 158/638 · optical 122/501 · records 70/199), **235 of those ended with no ticket**, and of the 330 distinct caller numbers behind them **208 (63%) ARE in `patients_master`**. Optical alone reads 76/100 and tech 132/230 — **63% is the fleet figure and 76% overstates it**; tech's sample visibly contains toll-free numbers, so some residue is genuinely not-a-patient. The rung runs ONLY where the method already returned `emptyContext()`, so it can ADD a match and can never change one the schedule made. It brings NO visit history, which is correct: having no appointments is WHY the book missed them, so `usual_office` stays empty and optical still asks |
+| earlier than **v10**-…-20260912 | the PERSON BASE rung on `lookup_patient`. Every rung before it reads the Operations Hub APPOINTMENT BOOK, so a real patient with no appointment inside its window cannot be found and the failure looks random from outside — standing instruction 14. Measured 2026-09-12 over ten days, `duration >= 30`: **627 of 2,511 substantive queue calls (25.0%) ran `lookup_patient` and found NOBODY** (tech 277/1173 · surgery 158/638 · optical 122/501 · records 70/199), **235 of those ended with no ticket**, and of the 330 distinct caller numbers behind them **208 (63%) ARE in `patients_master`**. Optical alone reads 76/100 and tech 132/230 — **63% is the fleet figure and 76% overstates it**; tech's sample visibly contains toll-free numbers, so some residue is genuinely not-a-patient. The rung runs ONLY where the method already returned `emptyContext()`, so it can ADD a match and can never change one the schedule made. **v10 brings NO visit history, and the reason given for that WAS WRONG — see the join section below** |
 
 **THREE VERSIONS ARE IN FLIGHT ON 2026-09-12 AND THEY DO NOT CONTAIN EACH
 OTHER.** #290 claims v8, #291 claims v9, and the person-base rung claims v10 —
