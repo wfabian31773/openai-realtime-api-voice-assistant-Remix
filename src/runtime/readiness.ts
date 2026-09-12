@@ -103,7 +103,7 @@ import { callEnvironment } from "./callRecord";
  * CLAUDE.md leaves the trap armed the other way round, so they move together.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v8-locked-record-20260912";
+  "voice-runtime-v11-locked-record-20260912";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

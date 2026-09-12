@@ -1,3 +1,11 @@
+> **RULE ZERO (Wayne, 2026-09-12) is binding and supersedes everything in this
+> document.** (1) A validated `patients_master` match, JOINED to `Schedule` on
+> `PersonID`, IS the record — carried forward into every tool and onto the
+> ticket; nothing may ask for or gate on a field it already holds. (2) When we
+> cannot find them, FUNNEL the caller: new-or-existing first, then one field per
+> question with the format named inside the question. Full text: `CLAUDE.md`
+> (top) and `.agents/memory/the-record-and-the-funnel.md`.
+
 # State of Play — Azul Vision voice agents
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
