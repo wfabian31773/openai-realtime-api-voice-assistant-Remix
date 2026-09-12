@@ -53,6 +53,22 @@ export interface VerifiedIdentity {
    */
   dateOfBirth?: string;
   /**
+   * The office this patient actually attends, as `lookup_patient` already
+   * picked it for this queue — the value it returns as `usual_office` and
+   * the comment beside it calls "the field this queue routes on".
+   *
+   * It was computed, handed to the model, and then dropped on the floor,
+   * exactly as the date of birth above it was. `file_optical_ticket` never
+   * saw it and had only the caller's own words to work from, so an office it
+   * could not match became an UNASSIGNED ticket on the one queue whose
+   * assignment IS the location.
+   *
+   * OPTIONAL, and read back under a stricter guard than the date of birth:
+   * see `usualOfficeFor`. A name can be checked against the ticket; an office
+   * string cannot, so the certainty flag has to carry that weight instead.
+   */
+  usualOffice?: string;
+  /**
    * The match was UNAMBIGUOUS — not a unique hit on a name or a date of
    * birth alone.
    *
@@ -139,6 +155,7 @@ export function rememberVerifiedIdentity(
   const firstName = (identity.firstName ?? '').trim();
   const lastName = (identity.lastName ?? '').trim();
   const dateOfBirth = (identity.dateOfBirth ?? '').trim();
+  const usualOffice = (identity.usualOffice ?? '').trim();
   // A NAME IS ENOUGH TO REMEMBER. The date of birth is a bonus that the
   // filing tools carry forward; its absence is not a reason to forget who
   // the caller is.
@@ -150,6 +167,7 @@ export function rememberVerifiedIdentity(
     firstName,
     lastName,
     ...(dateOfBirth ? { dateOfBirth } : {}),
+    ...(usualOffice ? { usualOffice } : {}),
     certain,
     at: now,
   });
@@ -180,6 +198,36 @@ export function verifiedDobFor(
     return undefined;
   }
   return entry.dateOfBirth;
+}
+
+/**
+ * The office this patient attends, IF the ticket is for that same person AND
+ * the match was unambiguous.
+ *
+ * TWO GUARDS, WHERE THE DATE OF BIRTH HAS ONE, AND THE ASYMMETRY IS THE POINT.
+ * `verifiedDobFor` can be satisfied by the name alone because a wrong date
+ * under the RIGHT name is caught by the name comparison — the ticket says who
+ * it is about. An office is a bare string with nothing to compare it against,
+ * so a family sharing a phone would hand one member's office to another's
+ * ticket and nothing downstream would notice. `certain` is what stands in for
+ * the missing comparison, and it is required here.
+ *
+ * Same TTL and same call-sid validation as the other two readers.
+ */
+export function usualOfficeFor(
+  callSid: string | undefined,
+  firstName: string,
+  lastName: string,
+): string | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = verified.get(callSid);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > TTL_MS) return undefined;
+  if (!entry.certain) return undefined;
+  if (norm(firstName) !== norm(entry.firstName) || norm(lastName) !== norm(entry.lastName)) {
+    return undefined;
+  }
+  return entry.usualOffice;
 }
 
 /**

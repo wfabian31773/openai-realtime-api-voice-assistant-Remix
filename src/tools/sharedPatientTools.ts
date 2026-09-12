@@ -263,6 +263,17 @@ registerTool({
         firstName: resolved.patientData?.firstName,
         lastName: resolved.patientData?.lastName,
         dateOfBirth: resolved.patientData?.dateOfBirth,
+        /**
+         * The office this queue routes on, carried rather than only spoken.
+         *
+         * It is computed twenty lines up and returned below as `usual_office`,
+         * and until now that return value was the ONLY copy — so the filing
+         * tool depended on the model relaying it back, which is the same
+         * dependency that made `date_of_birth` arrive as "(none)" on 61 of 61
+         * refusals. `null` when the history holds no office this queue can
+         * use, which the store drops rather than writes.
+         */
+        ...(usualOffice ? { usualOffice } : {}),
         // The same `certain` reported to the model as `identity_is_certain`.
         // It was computed twenty lines up and then dropped here, so a
         // name-only hit was stored as though it were a verified identity

@@ -388,7 +388,7 @@ registerTool({
     // Nothing to resolve if the caller never named an office and never named a
     // provider — and calling /lookup with an empty name is how a queue asks a
     // question it already knows the answer to.
-    const lookup =
+    let lookup =
       cleanLocation || cleanProvider
         ? await ticketingApiClient.lookupProviderAndLocation({
             ...(cleanLocation ? { locationName: cleanLocation } : {}),
@@ -425,6 +425,55 @@ registerTool({
     // now states it outright as `outcome: 'unavailable'`; the predicate keeps
     // the old boolean working for fixtures that predate the field.
     const lookupRan = !lookupWasUnavailable(lookup);
+
+    /**
+     * THE OFFICE THE PATIENT ACTUALLY ATTENDS, when the caller gave us nothing.
+     *
+     * Surgery has walked the patient's record for its routing field since
+     * 2026-08-18 and optical never has — the asymmetry, not the idea, is what
+     * is new here. `lookup_patient` already picks this office for this queue
+     * and returns it as `usual_office`; `verifiedIdentity` now carries it, so
+     * this costs no second lookup of the patient, only the id resolution.
+     *
+     * WHY IT IS DELIBERATELY NARROW: it runs ONLY when the caller named no
+     * office at all. If they named one and it did not resolve, the record is a
+     * CONFLICTING signal, not a missing one, and quietly overriding a caller
+     * who said "Riverside" with the Covina on their chart produces a ticket
+     * that looks correct and is wrong — which nobody re-reads, where an
+     * unassigned one gets triaged by a human who can see both. That case is a
+     * routing ruling for the operator and is NOT decided here.
+     *
+     *   1. the office the CALLER named            (unchanged, always wins)
+     *   2. the office the RECORD shows            (this, only when 1 is empty)
+     *   3. unassigned at high priority            (unchanged)
+     *
+     * The certainty guard lives in `usualOfficeFor`, which refuses an
+     * ambiguous match outright: an office string cannot be checked against the
+     * ticket the way a name can, so a family sharing a phone must not trade
+     * offices. See the comment there.
+     */
+    let officeFromRecord: string | undefined;
+    if (lookupRan && !lookup.locationId && !cleanLocation) {
+      const { usualOfficeFor } = await import('./verifiedIdentity');
+      officeFromRecord = usualOfficeFor(callSid, first, last);
+      if (officeFromRecord) {
+        const byRecord = await ticketingApiClient.lookupProviderAndLocation({
+          locationName: officeFromRecord,
+          ...(cleanProvider ? { providerName: cleanProvider } : {}),
+        });
+        if (byRecord.locationId) {
+          lookup = byRecord;
+          // Names no office and no patient: the office is not PHI on its own,
+          // but pairing it with a call identifier in a log line is a step
+          // toward one, and the count is what this line is for.
+          console.info(
+            '[optical] the caller named no office — routed to the one on their record',
+          );
+        } else {
+          officeFromRecord = undefined;
+        }
+      }
+    }
 
     if (lookupRan && !lookup.locationId) {
       /**
