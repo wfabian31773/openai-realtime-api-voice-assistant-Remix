@@ -621,10 +621,20 @@ export class ScheduleLookupService {
    * IT NEEDED AN INDEX AND HAD NONE. `Schedule` is 1,024,785 rows / 1,494 MB
    * and carried sixteen indexes, not one of them on `PersonID`, so this query
    * was a sequential scan and timed out at 60s — for a SINGLE person.
-   * `idx_schedule_personid_apptdate` makes it an index-only scan, 0 heap
-   * fetches, **1.305 ms**. That index is a live database object created by
-   * migration, not a file in this repo; if this method ever goes slow again,
-   * check that it still exists before changing any code here.
+   * `idx_schedule_personid_apptdate` makes it an **Index Scan, 15–79 ms**
+   * (five different people, 2026-09-12, 3–21 rows each).
+   *
+   * NOT an index-only scan, and the difference is this method's own doing:
+   * `db.select()` is `SELECT *`, `buildContext` reads a dozen columns, so
+   * every matched row is fetched from the heap. A 1.305 ms figure was measured
+   * on a NARROW covering query and does not describe this one — quoting it
+   * here would be the instrument error this repo keeps making. It is well
+   * inside `lookup_patient`'s 6s budget either way, and a covering index over
+   * a dozen wide columns is not worth its size.
+   *
+   * That index is a live database object created by migration, not a file in
+   * this repo; if this method ever goes slow again, check that it still
+   * exists before changing any code here.
    */
   async lookupByPersonId(
     personId: string,

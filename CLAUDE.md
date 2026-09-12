@@ -483,6 +483,18 @@ object, not code — it is in no branch and no PR.** Reversal is
 **Proof:** `Index Only Scan using idx_schedule_personid_apptdate`,
 `Heap Fetches: 0`, **Execution Time 1.305 ms** — from a 60,000 ms timeout.
 
+**THAT 1.305 ms IS A NARROW COVERING QUERY AND IS NOT WHAT THE JOIN RUNS.**
+Re-measured 2026-09-12 on the statement `lookupByPersonId` actually emits —
+`SELECT * … WHERE "PersonID" = $1::uuid ORDER BY "AppointmentDate" DESC LIMIT
+60` — across five different people: **Index Scan, 15 · 25 · 57 · 63 · 79 ms**
+for 3–21 rows. Not index-ONLY: `db.select()` takes every column and
+`buildContext` reads a dozen of them, so each matched row is fetched from the
+heap. Still four orders of magnitude off the 60s timeout and comfortably
+inside `lookup_patient`'s 6s budget — but it is a fiftyfold difference from
+the number published one line above, and the two describe different queries.
+Quote the one that matches the statement you mean. A covering index over a
+dozen wide columns would buy the difference and is not worth its size.
+
 **AND IT DISPROVED THE CLAIM IN THE v10 MARKER ROW ABOVE.** I wrote that the
 person-base rung brings no history and that this "is correct: having no
 appointments is WHY the book missed them." **False.** Joined the 64
