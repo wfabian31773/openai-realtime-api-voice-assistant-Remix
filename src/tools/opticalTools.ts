@@ -424,7 +424,7 @@ registerTool({
     // queue and the other three answer the question the same way. The client
     // now states it outright as `outcome: 'unavailable'`; the predicate keeps
     // the old boolean working for fixtures that predate the field.
-    const lookupRan = !lookupWasUnavailable(lookup);
+    let lookupRan = !lookupWasUnavailable(lookup);
 
     /**
      * THE OFFICE THE PATIENT ACTUALLY ATTENDS, when the caller gave us nothing.
@@ -470,10 +470,29 @@ registerTool({
             '[optical] the caller named no office — routed to the one on their record',
           );
         } else {
+          /**
+           * A DIRECTORY OUTAGE ON THIS RUNG IS STILL A DIRECTORY OUTAGE.
+           *
+           * Codex P2 on PR #291. Only `locationId` was read, so an
+           * `outcome: 'unavailable'` here was discarded and the synthetic
+           * `no_match` from above survived — which is the exact collapse the
+           * long comment on `lookupRan` was written about, reintroduced one
+           * rung further down. The caller would be told we have no office by
+           * that name while the directory was simply down, and the
+           * LOCATION LOOKUP UNAVAILABLE branch could never fire.
+           *
+           * So an unavailable answer is ADOPTED rather than dropped, and
+           * `lookupRan` is recomputed below — it was read before this block
+           * and cannot describe a request made inside it.
+           */
+          if (lookupWasUnavailable(byRecord)) lookup = byRecord;
           officeFromRecord = undefined;
         }
       }
     }
+    // AFTER the fallback, never before: the value above was computed against
+    // the caller's own lookup and says nothing about the request just made.
+    lookupRan = !lookupWasUnavailable(lookup);
 
     if (lookupRan && !lookup.locationId) {
       /**

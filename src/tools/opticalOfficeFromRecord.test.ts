@@ -175,3 +175,53 @@ describe('the narrowness — each guard forced to a POST so the payload can be r
     expect(payload.routingAskExhausted).toBe(true);
   });
 });
+
+/**
+ * CODEX P2 ON PR #291 — a directory outage on the RECORD rung is still an
+ * outage.
+ *
+ * The rung read only `locationId`, so an `outcome: 'unavailable'` answer was
+ * discarded and the synthetic `no_match` survived. That is the collapse the
+ * long comment on `lookupRan` warns about — "a lookup that never ran is not a
+ * name that did not match" — reintroduced one rung further down, and it is
+ * the shape that took optical to zero on 2026-08-31.
+ *
+ * SCOPE, MEASURED RATHER THAN ASSUMED, because the finding's wording is wider
+ * than its effect: the filed payload is BYTE-IDENTICAL either way (both take
+ * the unassigned exit at high priority), and the caller is never told the
+ * false sentence, because reaching this rung requires `!cleanLocation`, which
+ * means the early gate has already asked and set `askedForOfficeAlready`.
+ * What the defect actually costs is the DIAGNOSIS: an operator reading the
+ * logs during a directory outage is told we do not hold the office. So the
+ * assertions here are about the log, deliberately — it is the only thing that
+ * differs, and it is the thing being fixed.
+ */
+describe('the directory is down while we look up the record office', () => {
+  it('reports an outage, not an office we do not have', async () => {
+    const api = await client();
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue(
+      { success: false, outcome: 'unavailable', locationId: undefined } as never,
+    );
+    const create = vi.spyOn(api, 'createTicket')
+      .mockResolvedValue({ success: true, ticketNumber: 'VA-99006' } as never);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Optical',
+      dateOfBirth: '01/01/1950', usualOffice: ON_RECORD, certain: true,
+    });
+
+    await runTool('file_optical_ticket', NO_OFFICE); // the early gate asks
+    await runTool('file_optical_ticket', NO_OFFICE); // reaches the record rung
+
+    const said = (spy: typeof err) => spy.mock.calls.map((c) => String(c[0])).join(' | ');
+    expect(said(err)).toContain('LOCATION LOOKUP UNAVAILABLE');
+    expect(said(warn)).not.toContain('still does not resolve');
+
+    // The request is still taken either way — stated so a future reader does
+    // not mistake this for a lost-ticket fix.
+    expect(create).toHaveBeenCalledTimes(1);
+    expect((create.mock.calls[0][0] as unknown as Record<string, unknown>).routingAskExhausted)
+      .toBe(true);
+  });
+});

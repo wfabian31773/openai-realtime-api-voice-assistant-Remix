@@ -40,9 +40,14 @@ vi.mock('../services/syncAgentService', () => ({
   SyncAgentService: { checkOpenTickets: (...a: unknown[]) => checkOpenTickets(...a) },
 }));
 const rememberVerifiedIdentity = vi.fn();
+// The ambiguous branch reaches for this (Codex P1 on PR #291). A partial mock
+// that omits it fails the dynamic import inside the handler, not an assertion,
+// so the suite reports four unrelated tests broken and names none of them.
+const forgetIfSameName = vi.fn(() => false);
 vi.mock('./verifiedIdentity', () => ({
   rememberVerifiedIdentity: (...a: unknown[]) => rememberVerifiedIdentity(...a),
   verifiedDobFor: () => null,
+  forgetIfSameName: (...a: unknown[]) => forgetIfSameName(...a),
 }));
 vi.mock('../services/consoleDirectory', () => ({
   lookupLocation: (...a: unknown[]) => lookupLocation(...a),
@@ -281,6 +286,12 @@ describe('lookup_patient', () => {
     const r = await run('lookup_patient', { caller_phone: '+17605551234', call_sid: 'CA3' });
     expect(r.identity_is_certain).toBe(false);
     expect(rememberVerifiedIdentity).not.toHaveBeenCalled();
+    // And it does not merely decline to WRITE — it actively unsets anything
+    // this call had already established under the same name. Codex P1 on
+    // PR #291: without that, an early certain match kept its `certain: true`
+    // and the office reader answered from a result the tool had just stopped
+    // believing.
+    expect(forgetIfSameName).toHaveBeenCalledWith('CA3', 'Wayne', 'Fabian');
   });
 
   it('reports "not found" as a success, not a failure', async () => {

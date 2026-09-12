@@ -276,3 +276,47 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
 export function resetVerifiedIdentities(): void {
   verified.clear();
 }
+
+/**
+ * FORGET WHAT THIS CALL ESTABLISHED, when a later lookup comes back AMBIGUOUS
+ * about the same name.
+ *
+ * Codex P1 on PR #291. `rememberVerifiedIdentity` is only ever called under
+ * `if (uniqueMatch)`, and there was no `else` — so a call that identified
+ * somebody early and then hit an ambiguous lookup kept the FIRST entry, with
+ * its `certain: true` intact. Every reader here then answered from a result
+ * the tool itself had just stopped believing.
+ *
+ * The office is what made that reachable: a name can be checked against the
+ * ticket, an office string cannot, so `usualOfficeFor` leans on `certain` —
+ * and `certain` was stale. A parent and child sharing a name and a chart
+ * would trade offices on the one queue that assigns BY office.
+ *
+ * DELIBERATELY NARROW, and the narrowness is the point. Clearing on ANY
+ * ambiguous lookup would throw away a good identification whenever the model
+ * ran a second, vaguer search — and that entry is what closed the
+ * date-of-birth gate that cost 53 of 75 calls. So it clears only when the
+ * ambiguity is about the SAME NAME we are holding, which is exactly the
+ * collision the readers' name guard cannot see. An ambiguous lookup about
+ * somebody else leaves the entry alone; the name guard already covers that.
+ *
+ * No name to compare means no collision can be established, so nothing is
+ * cleared — the same "do not guess" posture as everything else in this file.
+ *
+ * Returns whether an entry was actually dropped, so a caller can count it.
+ */
+export function forgetIfSameName(
+  callSid: string | undefined,
+  firstName: string | undefined,
+  lastName: string | undefined,
+): boolean {
+  if (!isTwilioCallSid(callSid)) return false;
+  if (!norm(firstName) || !norm(lastName)) return false;
+  const entry = verified.get(callSid);
+  if (!entry) return false;
+  if (norm(firstName) !== norm(entry.firstName) || norm(lastName) !== norm(entry.lastName)) {
+    return false;
+  }
+  verified.delete(callSid);
+  return true;
+}
