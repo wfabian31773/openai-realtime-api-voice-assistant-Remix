@@ -82,6 +82,45 @@ function lookupTimeoutMs(): number {
   return Number.isFinite(n) && n > 0 ? n : 2500;
 }
 
+/**
+ * A MIRROR THAT JUST TIMED OUT IS STILL DOWN A SECOND LATER, and a live caller
+ * must not pay the timeout again for the same answer.
+ *
+ * Codex P1 on PR #292. One `lookup_patient` can reach the mirror THREE times
+ * when the Console is slow: `verifyPatient` waits the full budget and falls
+ * back, `lookupInPersonBase` then tries `findByPhone`, and `sharedPatientTools`
+ * re-enters with `lookupPatient({ phone })` for a third. At the default 2,500ms
+ * that is about 7.5 seconds of silence for a caller, ending in exactly the
+ * not-found they would have had at 2.5.
+ *
+ * So the first failure latches for a short window and the rest of that call
+ * answers instantly. Deliberately SHORT — this suppresses a recovered mirror
+ * for as long as it lasts, and being wrong here costs identifications, which
+ * is the whole point of the change it guards. Long enough to cover one call,
+ * not a shift.
+ *
+ * Only TRANSPORT failures latch. A clean `no_match` is the mirror working.
+ */
+let mirrorDownUntil = 0;
+
+function mirrorCooldownMs(): number {
+  const n = Number(process.env.PATIENT_VERIFY_COOLDOWN_MS);
+  return Number.isFinite(n) && n >= 0 ? n : 15_000;
+}
+
+function mirrorIsDown(): boolean {
+  return Date.now() < mirrorDownUntil;
+}
+
+function noteMirrorDown(): void {
+  mirrorDownUntil = Date.now() + mirrorCooldownMs();
+}
+
+/** Tests only. */
+export function __resetMirrorBreakerForTests(): void {
+  mirrorDownUntil = 0;
+}
+
 let pool: pg.Pool | null = null;
 
 export function isVerificationConfigured(): boolean {
@@ -191,6 +230,10 @@ export async function verifyPatient(input: VerifyInput): Promise<VerificationRes
     return verifyAgainstSchedule(last, first, dob, input.callerPhone);
   }
 
+  // Already established as unreachable on this call. Go straight to the book
+  // rather than spend the caller's patience proving it twice.
+  if (mirrorIsDown()) return verifyAgainstSchedule(last, first, dob, input.callerPhone);
+
   let rows: Row[];
   try {
     const q = getPool().query<Row>(
@@ -216,8 +259,11 @@ export async function verifyPatient(input: VerifyInput): Promise<VerificationRes
       ])
     ).rows;
   } catch (e) {
+    noteMirrorDown();
     console.error(
-      `[VERIFY] mirror lookup FAILED (${(e as Error).message}) — falling back to the appointment book`,
+      `[VERIFY] mirror lookup FAILED (${(e as Error).message}) — falling back to the appointment ` +
+        `book, and skipping the mirror for ${mirrorCooldownMs()}ms so this caller does not pay ` +
+        'the timeout again',
     );
     return verifyAgainstSchedule(last, first, dob, input.callerPhone);
   }
@@ -370,6 +416,9 @@ export async function findByPhone(rawPhone: string | undefined | null): Promise<
     // as it was, and `verifyPatient` already shouts about the missing secret.
     return { verified: false, reason: 'unavailable', candidates: 0 };
   }
+  // The same latch `verifyPatient` sets. On a call that already waited out the
+  // budget there, this answers in microseconds instead of spending it again.
+  if (mirrorIsDown()) return { verified: false, reason: 'unavailable', candidates: 0 };
 
   let rows: Row[];
   try {
@@ -398,6 +447,7 @@ export async function findByPhone(rawPhone: string | undefined | null): Promise<
       ])
     ).rows;
   } catch (e) {
+    noteMirrorDown();
     // A caller is waiting and the ladder already has an answer for them.
     console.error(`[VERIFY] mirror phone lookup FAILED (${(e as Error).message}) — leaving the ladder's answer alone`);
     return { verified: false, reason: 'unavailable', candidates: 0 };

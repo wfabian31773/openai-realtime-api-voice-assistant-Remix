@@ -159,6 +159,32 @@ registerTool({
     }
 
     if (!resolved.patientFound) {
+      /**
+       * "SEVERAL PEOPLE" IS NOT "NOBODY", and the agent needs the difference.
+       *
+       * Codex P2 on PR #292. The person-base rung reports an ambiguous hit by
+       * returning `identity` on an otherwise empty context — several people
+       * share this number, and instruction 6 forbids picking one. This branch
+       * read only `patientFound` and told the agent "no record found", which
+       * is false and points it the wrong way: it would treat a known family as
+       * a new patient instead of asking the one question that separates them.
+       *
+       * The finding also caught that the service-level test could not see
+       * this, because the tool's own not-found branch is where the signal died.
+       */
+      const several = resolved.identity && !resolved.identity.unique;
+      if (several) {
+        return {
+          success: true,
+          found: false,
+          identity_is_certain: false,
+          candidate_count: resolved.identity!.candidateCount,
+          message:
+            `This number is on file for ${resolved.identity!.candidateCount} different people, so ` +
+            'I cannot tell which one is calling. Ask for their full name and date of birth — do ' +
+            'not read any history back until they have given both.',
+        };
+      }
       return {
         success: true,
         found: false,
