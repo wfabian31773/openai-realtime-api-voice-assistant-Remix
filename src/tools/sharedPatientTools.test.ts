@@ -43,7 +43,9 @@ const rememberVerifiedIdentity = vi.fn();
 // The ambiguous branch reaches for this (Codex P1 on PR #291). A partial mock
 // that omits it fails the dynamic import inside the handler, not an assertion,
 // so the suite reports four unrelated tests broken and names none of them.
-const forgetIfSameName = vi.fn(() => false);
+// Rest params, not `vi.fn(() => false)`: a zero-arg spy cannot be spread into
+// (TS2556), and `vi.fn()` bare would lose the boolean return the handler reads.
+const forgetIfSameName = vi.fn((..._args: unknown[]) => false);
 vi.mock('./verifiedIdentity', () => ({
   rememberVerifiedIdentity: (...a: unknown[]) => rememberVerifiedIdentity(...a),
   verifiedDobFor: () => null,
