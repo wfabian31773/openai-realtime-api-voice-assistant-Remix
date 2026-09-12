@@ -75,7 +75,20 @@ beforeEach(() => {
 });
 
 describe('the office on the record is used when the caller named none', () => {
-  it('files ROUTED to it instead of unassigned', async () => {
+  /**
+   * ON THE FIRST CALL, AND THAT IS THE WHOLE POINT (Codex P1, PR #291).
+   *
+   * The first version of this feature sat BELOW the early location gate, so
+   * the gate returned `missing(['location'])` and the record was reached only
+   * if the model called the tool AGAIN. It frequently does not: in 42 of 75
+   * date-of-birth refusals the refusal is the last tool event of the call. So
+   * the feature was inert for the 8-of-25 ticketless calls it was built for,
+   * while a two-call test showed it green.
+   *
+   * Any test here that files on the second call would pass against the broken
+   * arrangement too. One call, or it proves nothing.
+   */
+  it('files ROUTED to it on the FIRST call, without asking', async () => {
     const api = await client();
     directoryKnowsOnly(api, ON_RECORD);
     const create = vi.spyOn(api, 'createTicket')
@@ -85,7 +98,7 @@ describe('the office on the record is used when the caller named none', () => {
       dateOfBirth: '01/01/1950', usualOffice: ON_RECORD, certain: true,
     });
 
-    await runTool('file_optical_ticket', NO_OFFICE); // spends the ask
+    // ONE call. That is the assertion, not a shortcut — see the describe above.
     await runTool('file_optical_ticket', NO_OFFICE);
 
     expect(create).toHaveBeenCalledTimes(1);
@@ -211,8 +224,9 @@ describe('the directory is down while we look up the record office', () => {
       dateOfBirth: '01/01/1950', usualOffice: ON_RECORD, certain: true,
     });
 
-    await runTool('file_optical_ticket', NO_OFFICE); // the early gate asks
-    await runTool('file_optical_ticket', NO_OFFICE); // reaches the record rung
+    // One call: an outage is not something the caller can answer, so the ask
+    // is skipped here too and the request is taken immediately.
+    await runTool('file_optical_ticket', NO_OFFICE);
 
     const said = (spy: typeof err) => spy.mock.calls.map((c) => String(c[0])).join(' | ');
     expect(said(err)).toContain('LOCATION LOOKUP UNAVAILABLE');

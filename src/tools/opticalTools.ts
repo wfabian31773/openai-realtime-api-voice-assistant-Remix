@@ -274,15 +274,97 @@ registerTool({
      */
     const serverRefusedOfficeTwice =
       gateRefusalsSoFar(callSid, OPTICAL_FILE_TOOL, OPTICAL_SERVER_OFFICE_FIELD) >= 2;
-    const officeAskSpent = askedForOfficeAlready || serverRefusedOfficeTwice;
-    if (!cleanLocation && !askedForOfficeAlready) {
+    const { ticketingApiClient, lookupWasUnavailable } = await import(
+      '../../server/services/ticketingApiClient'
+    );
+
+    /**
+     * THE OFFICE ON THE PATIENT'S OWN RECORD, CONSULTED BEFORE WE ASK.
+     *
+     * Operator ruling, 2026-09-12: when we already hold the office this
+     * patient attends, route to it and do NOT ask them which office they use.
+     *
+     * THIS BLOCK SITS ABOVE THE GATE ON PURPOSE, and that placement IS the
+     * fix. Codex P1 on PR #291 found the first version of this feature sitting
+     * BELOW the gate, where it was inert for the population it was written
+     * for: the gate returns `missing(['location'])` on the first call, so the
+     * record was consulted only if the model invoked the tool a SECOND time —
+     * and this repo's own measurement says it frequently does not (in 42 of 75
+     * date-of-birth refusals the refusal is the LAST tool event of the call).
+     * Reproduced before fixing: with a certain record and the directory fully
+     * up, call one filed nothing and call two filed routed.
+     *
+     * WHAT IS TRADED, stated plainly because it is a real cost. A patient
+     * ringing about an office OTHER than their usual one, who names none, now
+     * gets routed to their usual one instead of landing unassigned for a human
+     * to triage. The operator weighed that against 8 of 25 such calls ending
+     * with NO ticket at all on 2026-09-11 and chose routing. The narrowness
+     * that remains is unchanged and load-bearing: an office the caller NAMES
+     * always wins (`!cleanLocation` guards this whole block), and
+     * `usualOfficeFor` refuses an ambiguous match outright.
+     *
+     * An UNAVAILABLE answer also skips the ask. If the directory is down, an
+     * office the caller names cannot resolve either, so asking is friction
+     * with no upside; the request is taken by the unassigned exit below, which
+     * is what standing instruction 10 asks for.
+     */
+    let recordLookup:
+      | Awaited<ReturnType<typeof ticketingApiClient.lookupProviderAndLocation>>
+      | undefined;
+    let officeFromRecord: string | undefined;
+    if (!cleanLocation) {
+      const { usualOfficeFor } = await import('./verifiedIdentity');
+      const onRecord = usualOfficeFor(callSid, first, last);
+      if (onRecord) {
+        const byRecord = await ticketingApiClient.lookupProviderAndLocation({
+          locationName: onRecord,
+          ...(cleanProvider ? { providerName: cleanProvider } : {}),
+        });
+        if (byRecord.locationId) {
+          recordLookup = byRecord;
+          officeFromRecord = onRecord;
+          // Names no office and no patient: the office is not PHI on its own,
+          // but pairing it with a call identifier is a step toward one, and
+          // the count is what this line is for.
+          console.info(
+            '[optical] the caller named no office — routed to the one on their record',
+          );
+        } else if (lookupWasUnavailable(byRecord)) {
+          // Adopted rather than dropped, so the outage is reported as an
+          // outage instead of as an office we do not hold (Codex P2, #291).
+          recordLookup = byRecord;
+        }
+      }
+    }
+
+    if (!cleanLocation && !recordLookup && !askedForOfficeAlready) {
       noteGateRefusal(callSid, OPTICAL_FILE_TOOL, 'location');
       return missing(['location'], 'Which of our offices do you usually visit?');
     }
 
-    const { ticketingApiClient, lookupWasUnavailable } = await import(
-      '../../server/services/ticketingApiClient'
-    );
+    /**
+     * DECLINING TO ASK SPENDS THE ASK. This line is not bookkeeping — without
+     * it the change above silently reintroduces the #105 loop.
+     *
+     * `routingAskExhausted` is the flag the ticketing app requires before it
+     * will accept an optical ticket with no office; without it the POST is
+     * answered HTTP 400 "Missing required information: office" and NOTHING
+     * files. It is gated on `officeAskSpent`, which until now could only be
+     * set by a refusal counter — i.e. by having actually asked.
+     *
+     * The block above introduces the first path that files with no office
+     * having never asked: the record named an office and the DIRECTORY was
+     * down, so there was nothing to ask for. Caught by the outage test, which
+     * failed on `routingAskExhausted` being undefined.
+     *
+     * It does not weaken the guard the flag exists for. The comment at the
+     * POST says the danger is sending it unconditionally, on a value a MODEL
+     * could supply; this is our own code recording that it decided not to ask,
+     * and it still cannot fire while `lookup.locationId` is set.
+     */
+    const officeAskWaived = recordLookup !== undefined && !recordLookup.locationId;
+    const officeAskSpent =
+      askedForOfficeAlready || serverRefusedOfficeTwice || officeAskWaived;
     const { normalizeDobParts } = await import('./dobParts');
     let parts = normalizeDobParts(dob);
     if (!parts) {
@@ -388,8 +470,12 @@ registerTool({
     // Nothing to resolve if the caller never named an office and never named a
     // provider — and calling /lookup with an empty name is how a queue asks a
     // question it already knows the answer to.
+    // The record's answer, when there is one, IS this call's lookup — resolved
+    // above so the gate could see it. Falls through to the caller's own words,
+    // then to the synthetic no-match, exactly as before.
     let lookup =
-      cleanLocation || cleanProvider
+      recordLookup ??
+      (cleanLocation || cleanProvider
         ? await ticketingApiClient.lookupProviderAndLocation({
             ...(cleanLocation ? { locationName: cleanLocation } : {}),
             ...(cleanProvider ? { providerName: cleanProvider } : {}),
@@ -401,7 +487,7 @@ registerTool({
             providerId: undefined,
             locationMatches: [],
             error: undefined,
-          };
+          });
     /**
      * A LOOKUP THAT NEVER RAN IS NOT A NAME THAT DID NOT MATCH.
      *
@@ -424,75 +510,8 @@ registerTool({
     // queue and the other three answer the question the same way. The client
     // now states it outright as `outcome: 'unavailable'`; the predicate keeps
     // the old boolean working for fixtures that predate the field.
-    let lookupRan = !lookupWasUnavailable(lookup);
+    const lookupRan = !lookupWasUnavailable(lookup);
 
-    /**
-     * THE OFFICE THE PATIENT ACTUALLY ATTENDS, when the caller gave us nothing.
-     *
-     * Surgery has walked the patient's record for its routing field since
-     * 2026-08-18 and optical never has — the asymmetry, not the idea, is what
-     * is new here. `lookup_patient` already picks this office for this queue
-     * and returns it as `usual_office`; `verifiedIdentity` now carries it, so
-     * this costs no second lookup of the patient, only the id resolution.
-     *
-     * WHY IT IS DELIBERATELY NARROW: it runs ONLY when the caller named no
-     * office at all. If they named one and it did not resolve, the record is a
-     * CONFLICTING signal, not a missing one, and quietly overriding a caller
-     * who said "Riverside" with the Covina on their chart produces a ticket
-     * that looks correct and is wrong — which nobody re-reads, where an
-     * unassigned one gets triaged by a human who can see both. That case is a
-     * routing ruling for the operator and is NOT decided here.
-     *
-     *   1. the office the CALLER named            (unchanged, always wins)
-     *   2. the office the RECORD shows            (this, only when 1 is empty)
-     *   3. unassigned at high priority            (unchanged)
-     *
-     * The certainty guard lives in `usualOfficeFor`, which refuses an
-     * ambiguous match outright: an office string cannot be checked against the
-     * ticket the way a name can, so a family sharing a phone must not trade
-     * offices. See the comment there.
-     */
-    let officeFromRecord: string | undefined;
-    if (lookupRan && !lookup.locationId && !cleanLocation) {
-      const { usualOfficeFor } = await import('./verifiedIdentity');
-      officeFromRecord = usualOfficeFor(callSid, first, last);
-      if (officeFromRecord) {
-        const byRecord = await ticketingApiClient.lookupProviderAndLocation({
-          locationName: officeFromRecord,
-          ...(cleanProvider ? { providerName: cleanProvider } : {}),
-        });
-        if (byRecord.locationId) {
-          lookup = byRecord;
-          // Names no office and no patient: the office is not PHI on its own,
-          // but pairing it with a call identifier in a log line is a step
-          // toward one, and the count is what this line is for.
-          console.info(
-            '[optical] the caller named no office — routed to the one on their record',
-          );
-        } else {
-          /**
-           * A DIRECTORY OUTAGE ON THIS RUNG IS STILL A DIRECTORY OUTAGE.
-           *
-           * Codex P2 on PR #291. Only `locationId` was read, so an
-           * `outcome: 'unavailable'` here was discarded and the synthetic
-           * `no_match` from above survived — which is the exact collapse the
-           * long comment on `lookupRan` was written about, reintroduced one
-           * rung further down. The caller would be told we have no office by
-           * that name while the directory was simply down, and the
-           * LOCATION LOOKUP UNAVAILABLE branch could never fire.
-           *
-           * So an unavailable answer is ADOPTED rather than dropped, and
-           * `lookupRan` is recomputed below — it was read before this block
-           * and cannot describe a request made inside it.
-           */
-          if (lookupWasUnavailable(byRecord)) lookup = byRecord;
-          officeFromRecord = undefined;
-        }
-      }
-    }
-    // AFTER the fallback, never before: the value above was computed against
-    // the caller's own lookup and says nothing about the request just made.
-    lookupRan = !lookupWasUnavailable(lookup);
 
     if (lookupRan && !lookup.locationId) {
       /**
