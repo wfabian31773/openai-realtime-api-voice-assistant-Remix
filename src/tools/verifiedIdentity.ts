@@ -87,6 +87,13 @@ export interface VerifiedIdentity {
    * constantly.
    */
   certain: boolean;
+  /**
+   * The person base's primary key, when the lookup that wrote this knew it.
+   * The only thing that can prove a later lookup on the same call is about the
+   * same human — see the downgrade guard, and the father-and-son case that
+   * makes a name insufficient.
+   */
+  personId?: string;
 }
 
 interface Entry extends VerifiedIdentity {
@@ -163,12 +170,66 @@ export function rememberVerifiedIdentity(
   if (!isTwilioCallSid(callSid) || !firstName || !lastName) return;
   const now = Date.now();
   sweep(now);
+
+  /**
+   * A LESS CERTAIN ANSWER NEVER REPLACES A MORE CERTAIN ONE ON THE SAME CALL.
+   *
+   * Codex P2 on PR #292 (`1b99eb2`), and the regression was mine. `lookup_patient`
+   * can run several times in one call, and the person base now answers a
+   * caller-ID-only retry with a match. That write is `certain: false` and — since
+   * the commit before this one — carries no date of birth. Landing it on top of an
+   * earlier CONFIRMED name+DOB entry erased both: the filing tools went back to
+   * refusing for a date of birth the caller had already given, and the teardown
+   * sweep lost the name it needs to file at all ("no name, no ticket" costs 47
+   * recoveries a day).
+   *
+   * So the downgrade is refused. A CERTAIN write still wins — including over
+   * another certain one, so a call that legitimately moves to a second patient
+   * still updates once that patient is confirmed.
+   *
+   * KNOWN AND ACCEPTED: a call that switches to a second patient and only ever
+   * gets an UNCERTAIN read of them keeps the first patient's confirmed identity.
+   * `verifiedDobFor` still cannot leak across, because its name guard fails; the
+   * exposure is the sweep filing under the earlier name. That is the same class of
+   * risk as filing under no name at all, and strictly rarer than the regression
+   * above — but it is a judgement, not a measurement, and worth revisiting if the
+   * sweep ever files for the wrong person.
+   */
+  const existing = verified.get(callSid);
+  /**
+   * PROOF OF THE SAME PERSON, NOT A MATCHING NAME. Codex P1 on `bfa28ae`,
+   * answering a judgement I had flagged as unmeasured — and it found the case
+   * that breaks it.
+   *
+   * The first version of this guard preserved a certain entry against ANY
+   * uncertain write on the call, and I argued the leak was contained because
+   * `verifiedDobFor` also checks the name. A FATHER AND SON SHARE A NAME. On a
+   * call that confirms one and then gets an uncertain read of the other, the
+   * name guard succeeds and the wrong date of birth goes onto the ticket — a
+   * worse outcome than the regression the guard was written to stop.
+   *
+   * So the entry is preserved only where both sides carry a `personId` and
+   * they agree. That is provable; a name is not.
+   *
+   * WHEN IT CANNOT BE PROVED, THE WRITE WINS. Wrong data on a ticket beats a
+   * refused gate, and a caller-ID retry for the same person does carry the id,
+   * so the case the guard exists for is still covered. Where neither side has
+   * an id — a name-only schedule hit — this leaves the behaviour exactly as it
+   * was before this PR, which is a replace.
+   */
+  const provablySamePerson =
+    !!existing?.personId && !!identity.personId && existing.personId === identity.personId;
+  if (existing && existing.certain && !certain && provablySamePerson && now - existing.at <= TTL_MS) {
+    return;
+  }
+
   verified.delete(callSid);
   verified.set(callSid, {
     firstName,
     lastName,
     ...(dateOfBirth ? { dateOfBirth } : {}),
     ...(usualOffice ? { usualOffice } : {}),
+    ...(identity.personId ? { personId: identity.personId } : {}),
     certain,
     at: now,
   });

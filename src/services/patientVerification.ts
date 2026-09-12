@@ -82,6 +82,45 @@ function lookupTimeoutMs(): number {
   return Number.isFinite(n) && n > 0 ? n : 2500;
 }
 
+/**
+ * A MIRROR THAT JUST TIMED OUT IS STILL DOWN A SECOND LATER, and a live caller
+ * must not pay the timeout again for the same answer.
+ *
+ * Codex P1 on PR #292. One `lookup_patient` can reach the mirror THREE times
+ * when the Console is slow: `verifyPatient` waits the full budget and falls
+ * back, `lookupInPersonBase` then tries `findByPhone`, and `sharedPatientTools`
+ * re-enters with `lookupPatient({ phone })` for a third. At the default 2,500ms
+ * that is about 7.5 seconds of silence for a caller, ending in exactly the
+ * not-found they would have had at 2.5.
+ *
+ * So the first failure latches for a short window and the rest of that call
+ * answers instantly. Deliberately SHORT — this suppresses a recovered mirror
+ * for as long as it lasts, and being wrong here costs identifications, which
+ * is the whole point of the change it guards. Long enough to cover one call,
+ * not a shift.
+ *
+ * Only TRANSPORT failures latch. A clean `no_match` is the mirror working.
+ */
+let mirrorDownUntil = 0;
+
+function mirrorCooldownMs(): number {
+  const n = Number(process.env.PATIENT_VERIFY_COOLDOWN_MS);
+  return Number.isFinite(n) && n >= 0 ? n : 15_000;
+}
+
+function mirrorIsDown(): boolean {
+  return Date.now() < mirrorDownUntil;
+}
+
+function noteMirrorDown(): void {
+  mirrorDownUntil = Date.now() + mirrorCooldownMs();
+}
+
+/** Tests only. */
+export function __resetMirrorBreakerForTests(): void {
+  mirrorDownUntil = 0;
+}
+
 let pool: pg.Pool | null = null;
 
 export function isVerificationConfigured(): boolean {
@@ -191,6 +230,10 @@ export async function verifyPatient(input: VerifyInput): Promise<VerificationRes
     return verifyAgainstSchedule(last, first, dob, input.callerPhone);
   }
 
+  // Already established as unreachable on this call. Go straight to the book
+  // rather than spend the caller's patience proving it twice.
+  if (mirrorIsDown()) return verifyAgainstSchedule(last, first, dob, input.callerPhone);
+
   let rows: Row[];
   try {
     const q = getPool().query<Row>(
@@ -216,8 +259,11 @@ export async function verifyPatient(input: VerifyInput): Promise<VerificationRes
       ])
     ).rows;
   } catch (e) {
+    noteMirrorDown();
     console.error(
-      `[VERIFY] mirror lookup FAILED (${(e as Error).message}) — falling back to the appointment book`,
+      `[VERIFY] mirror lookup FAILED (${(e as Error).message}) — falling back to the appointment ` +
+        `book, and skipping the mirror for ${mirrorCooldownMs()}ms so this caller does not pay ` +
+        'the timeout again',
     );
     return verifyAgainstSchedule(last, first, dob, input.callerPhone);
   }
@@ -334,4 +380,103 @@ export function describeForLog(callId: string, r: VerificationResult): string {
 export function __resetPoolForTests(): void {
   void pool?.end().catch(() => undefined);
   pool = null;
+  /**
+   * AND THE BREAKER WITH IT. Codex P2 on PR #292.
+   *
+   * The latch is module state that outlives the pool, and every `beforeEach`
+   * in `patientVerification.test.ts` calls this helper and nothing else. So a
+   * test that provokes ECONNREFUSED left the latch ON, and the next test —
+   * the one that installs a deliberately non-settling query to prove the
+   * TIMEOUT RACE works — returned early through `mirrorIsDown()` without ever
+   * reaching it. That test would have stayed green with the race removed,
+   * which makes it decoration.
+   *
+   * Resetting here rather than in each suite means a file that already knows
+   * to drop the pool cannot forget the latch.
+   */
+  __resetMirrorBreakerForTests();
+}
+
+/**
+ * WHO IS ON THIS NUMBER, asked of the PERSON BASE rather than the appointment
+ * book.
+ *
+ * `verifyPatient` above cannot answer this: it requires a surname AND a date
+ * of birth and returns `bad_input` without them, because a first-name-led
+ * search over 915k persons is neither fast nor selective. A phone number is
+ * different — `patients_master` indexes all five phone columns, and the
+ * Console's own `pm_find_by_phone` returns in about 13ms on five index scans.
+ *
+ * WHY IT EXISTS. Measured 2026-09-12 over ten days of queue calls: 627 of
+ * 2,511 substantive calls (25.0%) ran `lookup_patient` and found NOBODY, and
+ * 235 of those ended with no ticket. Of 330 distinct caller numbers behind
+ * them, 208 (63%) are in `patients_master`. The appointment book only knows
+ * people with appointments in its window; the person base knows everyone.
+ * That is standing instruction 14, and this is the read it asks for.
+ *
+ * A UNIQUE HIT IS AN IDENTITY; ANYTHING ELSE IS NOT. Wayne's number resolves
+ * to eight records, and 157,001 of 1,095,736 numbers in the mirror are shared.
+ * Two or more people means `ambiguous` and a candidate count — never a guess,
+ * which is instruction 6 and the rule the rest of this file already keeps.
+ */
+export async function findByPhone(rawPhone: string | undefined | null): Promise<VerificationResult> {
+  const digits = phoneDigits(rawPhone);
+  // Ten is the shortest thing that can identify a US line. Anything shorter is
+  // a fragment, and a LIKE on a fragment matches strangers.
+  if (digits.length < 10) return { verified: false, reason: 'bad_input', candidates: 0 };
+  const last10 = digits.slice(-10);
+  if (!isVerificationConfigured()) {
+    // Deliberately not an error: this reader is an ADDITION to a ladder that
+    // already answered. Saying nothing leaves the previous behaviour exactly
+    // as it was, and `verifyPatient` already shouts about the missing secret.
+    return { verified: false, reason: 'unavailable', candidates: 0 };
+  }
+  // The same latch `verifyPatient` sets. On a call that already waited out the
+  // budget there, this answers in microseconds instead of spending it again.
+  if (mirrorIsDown()) return { verified: false, reason: 'unavailable', candidates: 0 };
+
+  let rows: Row[];
+  try {
+    const q = getPool().query<Row>(
+      `SELECT person_id::text            AS person_id,
+              person_nbr,
+              first_name,
+              last_name,
+              to_char(date_of_birth, 'YYYY-MM-DD') AS date_of_birth,
+              has_medical_record,
+              language,
+              ARRAY[cell_phone, home_phone, day_phone, alt_phone, sec_home_phone] AS phones
+         FROM public.patients_master
+        WHERE right(regexp_replace(coalesce(cell_phone,''),     '\\D', '', 'g'), 10) = $1
+           OR right(regexp_replace(coalesce(home_phone,''),     '\\D', '', 'g'), 10) = $1
+           OR right(regexp_replace(coalesce(sec_home_phone,''), '\\D', '', 'g'), 10) = $1
+           OR right(regexp_replace(coalesce(day_phone,''),      '\\D', '', 'g'), 10) = $1
+           OR right(regexp_replace(coalesce(alt_phone,''),      '\\D', '', 'g'), 10) = $1
+        LIMIT 50`,
+      [last10],
+    );
+    rows = (
+      await Promise.race([
+        q,
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), lookupTimeoutMs())),
+      ])
+    ).rows;
+  } catch (e) {
+    noteMirrorDown();
+    // A caller is waiting and the ladder already has an answer for them.
+    console.error(`[VERIFY] mirror phone lookup FAILED (${(e as Error).message}) — leaving the ladder's answer alone`);
+    return { verified: false, reason: 'unavailable', candidates: 0 };
+  }
+
+  // One PERSON, not one row: the same human can carry the number in two
+  // columns, and counting rows would call that an ambiguous pair.
+  const byPerson = new Map<string, Row>();
+  for (const r of rows) if (!byPerson.has(r.person_id)) byPerson.set(r.person_id, r);
+  const people = [...byPerson.values()];
+
+  if (people.length === 0) return { verified: false, reason: 'no_match', candidates: 0 };
+  if (people.length === 1) {
+    return { verified: true, reason: 'match', candidates: 1, patient: toPatient(people[0]), source: 'mirror' };
+  }
+  return { verified: false, reason: 'ambiguous', candidates: people.length };
 }
