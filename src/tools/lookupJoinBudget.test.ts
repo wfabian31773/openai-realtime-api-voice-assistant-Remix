@@ -25,6 +25,7 @@ vi.hoisted(() => {
   process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
 });
 
+const { dir } = vi.hoisted(() => ({ dir: { hangs: true, calls: 0 } }));
 const { chain, state, verifyPatient, findByPhone } = vi.hoisted(() => {
   // `queries` is the assertion that has teeth. Returning the right VALUE is not
   // enough: a join that waits out a 1.5s deadline it cannot afford and then
@@ -43,6 +44,15 @@ const { chain, state, verifyPatient, findByPhone } = vi.hoisted(() => {
 });
 vi.mock('../../server/db', () => ({ db: chain }));
 vi.mock('../services/patientVerification', () => ({ verifyPatient, findByPhone }));
+vi.mock('../services/consoleDirectory', () => ({
+  isDirectoryConfigured: () => true,
+  // A cold/stale snapshot refresh that never returns. If the budget check is
+  // missing, the handler waits here forever and the tool race answers instead.
+  lookupLocation: async () => {
+    dir.calls += 1;
+    return dir.hangs ? new Promise(() => {}) : null;
+  },
+}));
 
 const PERSON = {
   personId: '11111111-2222-3333-4444-555555555555',
@@ -57,6 +67,8 @@ const PERSON = {
 beforeEach(() => {
   state.joinHangs = true;
   state.queries = 0;
+  dir.hangs = true;
+  dir.calls = 0;
   verifyPatient.mockReset();
   findByPhone.mockReset();
   findByPhone.mockResolvedValue({
@@ -120,6 +132,53 @@ describe('1 — the join honours a budget the rungs above have already spent', (
 
     expect(out.patientFound).toBe(true);
     expect(state.queries, 'with no deadline the join still runs').toBeGreaterThan(0);
+  });
+});
+
+describe('1b — so does the office refinement that runs AFTER the service', () => {
+  it('CAPS the refinement at the remaining budget instead of waiting on it', async () => {
+    /**
+     * A cold or stale snapshot refreshes with a 5s connection timeout, in a
+     * LOOP — once per past location. Checking the clock BETWEEN lookups bounds
+     * nothing, because the stall happens INSIDE one; only a race can interrupt
+     * it. Tested directly rather than through `runTool`, because the cap IS
+     * the tool budget and a test that waits it out measures vitest's own 5s
+     * timeout instead of the code.
+     */
+    dir.hangs = true;
+    const { mostRecentAcceptable } = await import('./sharedPatientTools');
+
+    const started = performance.now();
+    const out = await mostRecentAcceptable(['Testoffice One', 'Testoffice Two'], 'optical',
+      Date.now() + 60);
+    const elapsed = performance.now() - started;
+
+    // The raw most-recent office, unrefined — the same fallback this function
+    // already uses when the directory is unconfigured or a lookup throws.
+    expect(out).toBe('Testoffice One');
+    expect(dir.calls, 'it did attempt the refinement').toBeGreaterThan(0);
+    expect(elapsed, 'must not wait out a hanging directory refresh').toBeLessThan(1_000);
+  });
+
+  it('skips the directory entirely when the budget is already gone', async () => {
+    dir.hangs = true;
+    const { mostRecentAcceptable } = await import('./sharedPatientTools');
+
+    const out = await mostRecentAcceptable(['Testoffice One'], 'optical', Date.now() - 1);
+
+    expect(out).toBe('Testoffice One');
+    expect(dir.calls, 'nothing should be attempted on a spent budget').toBe(0);
+  });
+
+  it('still refines when there is budget and the directory answers', async () => {
+    // The cap must not cost the refinement in the normal case.
+    dir.hangs = false;
+    const { mostRecentAcceptable } = await import('./sharedPatientTools');
+
+    const out = await mostRecentAcceptable(['Testoffice One'], 'optical', Date.now() + 5_000);
+
+    expect(out).toBe('Testoffice One');
+    expect(dir.calls).toBeGreaterThan(0);
   });
 });
 

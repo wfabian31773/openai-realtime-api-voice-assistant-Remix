@@ -263,7 +263,7 @@ registerTool({
     //
     // So the office is resolved against what the QUEUE accepts, and the raw
     // most-recent stays available but is clearly labelled.
-    const usualOffice = await mostRecentAcceptable(seen, queue);
+    const usualOffice = await mostRecentAcceptable(seen, queue, deadlineAt);
 
     // A phone number can carry more than one person, and a surname carries
     // whole families. The service reports which case this was, and the agent
@@ -682,24 +682,73 @@ export { normalizePhone } from '../utils/phone';
  * guess beats blocking the call, and `resolve_location` will catch it before a
  * ticket is filed.
  */
-async function mostRecentAcceptable(
+export async function mostRecentAcceptable(
   locations: string[],
   queue: ToolQueue | undefined,
+  deadlineAt?: number,
 ): Promise<string | null> {
   if (locations.length === 0) return null;
-  const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
-  if (!isDirectoryConfigured()) return locations[0];
 
-  for (const name of locations) {
-    try {
-      const hit = await lookupLocation(name);
-      // An unknown location is more likely an office we have not mirrored than
-      // a wrong one, so it is not disqualified here — resolve_location is the
-      // gate that matters.
-      if (!hit || acceptsFacility(queue, hit.facilityKind)) return name;
-    } catch {
-      return locations[0];
+  /**
+   * THE LAST UNBOUNDED AWAIT BEFORE THE TOOL ANSWERS.
+   *
+   * Codex P1 round 3 on PR #292. `lookupLocation` reads a cached snapshot, but
+   * a COLD OR STALE one triggers a refresh with a 5s connection timeout — and
+   * this is a LOOP, one lookup per past location. The 250ms margin covers
+   * building the result, not a database round trip, so `runTool`'s race can
+   * still fire here and discard an identity the join went to some trouble to
+   * preserve.
+   *
+   * MY CHANGE MADE THIS REACHABLE, which is why it belongs in this PR rather
+   * than in #68. Before the PersonID join a mirror-identified caller had NO
+   * past locations, so this returned `null` immediately; now they have several
+   * and the loop runs. The join created the population that pays this cost.
+   *
+   * Out of time falls back to `locations[0]` — the raw most-recent office —
+   * which is exactly what this function already does when the directory is
+   * unconfigured or a lookup throws. A known fallback, not a new behaviour:
+   * the office is unrefined, `resolve_location` is still the gate that
+   * matters, and the caller keeps their identity.
+   */
+  const remaining = deadlineAt === undefined ? Infinity : deadlineAt - Date.now();
+  if (remaining <= 0) return locations[0];
+
+  const refine = async (): Promise<string | null> => {
+    const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
+    if (!isDirectoryConfigured()) return locations[0];
+
+    for (const name of locations) {
+      try {
+        const hit = await lookupLocation(name);
+        // An unknown location is more likely an office we have not mirrored
+        // than a wrong one, so it is not disqualified here — resolve_location
+        // is the gate that matters.
+        if (!hit || acceptsFacility(queue, hit.facilityKind)) return name;
+      } catch {
+        return locations[0];
+      }
     }
-  }
-  return null;
+    return null;
+  };
+
+  if (remaining === Infinity) return refine();
+
+  /**
+   * CAPPED, not merely pre-checked. Checking the clock BEFORE each lookup
+   * bounds nothing: the stall happens INSIDE one call, so the check that
+   * matters has to be able to interrupt it. Same shape as the PersonID join —
+   * a race, because the catch below only ever covered rejections.
+   */
+  return Promise.race([
+    refine(),
+    new Promise<string | null>((resolve) =>
+      setTimeout(() => {
+        console.warn(
+          '[TOOLS] lookup_patient: the office refinement ran out of tool budget — ' +
+            'using the most recent office unrefined',
+        );
+        resolve(locations[0]);
+      }, remaining),
+    ),
+  ]);
 }
