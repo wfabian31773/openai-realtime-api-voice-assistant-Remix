@@ -38,7 +38,9 @@ vi.mock('./patientVerification', () => ({ verifyPatient, findByPhone }));
  */
 const { captured, chain, state } = vi.hoisted(() => {
   const captured: { where: unknown; queries: number } = { where: undefined, queries: 0 };
-  const state: { answer: { rows: any[] } | { throws: Error } } = { answer: { rows: [] } };
+  const state: { answer: { rows: any[] } | { throws: Error } | { hangs: true } } = {
+    answer: { rows: [] },
+  };
   const chain: Record<string, unknown> = {};
   for (const step of ['select', 'from', 'orderBy']) chain[step] = () => chain;
   chain.where = (w: unknown) => {
@@ -46,8 +48,11 @@ const { captured, chain, state } = vi.hoisted(() => {
     captured.queries += 1;
     return chain;
   };
-  chain.limit = () =>
-    'throws' in state.answer ? Promise.reject(state.answer.throws) : Promise.resolve(state.answer.rows);
+  chain.limit = () => {
+    if ('hangs' in state.answer) return new Promise(() => {}); // never settles
+    if ('throws' in state.answer) return Promise.reject(state.answer.throws);
+    return Promise.resolve(state.answer.rows);
+  };
   return { captured, chain, state };
 });
 vi.mock('../../server/db', () => ({ db: chain }));
@@ -207,6 +212,36 @@ describe('a schedule that cannot answer must not unidentify the caller', () => {
     expect(out.patientFound).toBe(true);
     expect(out.patientName).toBe('Testcaller Mirror');
     expect(out.totalAppointmentsFound).toBe(0);
+  });
+
+  it('keeps the identity when the join HANGS — a stall is not a throw', async () => {
+    /**
+     * Codex P1 on PR #292. `runTool` races `lookup_patient` against a 6s budget
+     * and that race RESOLVES rather than cancelling: a query stalled on the
+     * pool leaves this await pending forever, so the catch never runs and a
+     * caller the mirror had already identified comes back unidentified. Not a
+     * hypothetical population — the tool already exceeds its budget on 13-17%
+     * of queue calls. The deadline must answer before the tool's race does.
+     */
+    vi.useFakeTimers();
+    state.answer = { hangs: true };
+    try {
+      const pending = bookFoundNobody().lookupPatient({ phone: '5555550147' });
+      await vi.advanceTimersByTimeAsync(1_600); // past the 1.5s join deadline
+      const out = await pending;
+
+      expect(out.patientFound).toBe(true);
+      expect(out.patientName).toBe('Testcaller Mirror');
+      expect(out.totalAppointmentsFound).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('answers well inside lookup_patient\'s 6s tool budget', async () => {
+    // The deadline is worthless if it lands after the race it exists to beat.
+    const { joinDeadlineForTests } = await import('./scheduleLookupService');
+    expect(joinDeadlineForTests()).toBeLessThan(6_000);
   });
 
   it('keeps the identity when the patient genuinely has no appointments', async () => {

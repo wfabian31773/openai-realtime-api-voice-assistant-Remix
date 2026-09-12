@@ -374,6 +374,20 @@ function isValidDate(year: number, month: number, day: number): boolean {
 const LOOKUP_ROW_LIMIT = 60;
 
 /**
+ * How long the PersonID join may take before we keep the identity and drop the
+ * history. Must stay COMFORTABLY UNDER `lookup_patient`'s 6s tool budget — the
+ * point is to answer before that race does, so the fallback still runs.
+ */
+export function joinDeadlineForTests(): number {
+  return joinDeadlineMs();
+}
+
+function joinDeadlineMs(): number {
+  const n = Number(process.env.PERSON_JOIN_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 1_500;
+}
+
+/**
  * A case-insensitive prefix match that Postgres can actually answer from an
  * index.
  *
@@ -643,12 +657,38 @@ export class ScheduleLookupService {
     if (!personId) return this.emptyContext();
 
     try {
-      const appointments = await db
-        .select()
-        .from(schedule)
-        .where(byPerson(personId))
-        .orderBy(desc(schedule.appointmentDate))
-        .limit(LOOKUP_ROW_LIMIT);
+      /**
+       * A DEADLINE, BECAUSE A HANG IS NOT A THROW.
+       *
+       * Codex P1 on PR #292. `lookup_patient` is raced against a 6s budget in
+       * `runTool` (`src/tools/registry.ts`), and that race RESOLVES rather than
+       * cancelling anything: if this query stalls — waiting on the pool, not on
+       * Postgres — the outer race answers `timed out, retryable` while this
+       * await is still pending. The catch below never runs, the
+       * identity-without-history fallback never runs, and a caller the mirror
+       * had ALREADY identified comes back unidentified. That is Rule Zero's
+       * carry-forward lost to a stall, which is the one thing this method must
+       * not do.
+       *
+       * The catch only ever protected failures that reject promptly. This
+       * bounds the ones that do not.
+       *
+       * NOT a hypothetical population: `lookup_patient` already exceeds its 6s
+       * budget on 13-17% of queue calls (475 events / 314 calls, task #68).
+       * The deadline is ~20x the measured p95 of this query (15-79 ms over five
+       * people) and leaves the rest of the tool budget to the rungs above.
+       */
+      const appointments = await Promise.race([
+        db
+          .select()
+          .from(schedule)
+          .where(byPerson(personId))
+          .orderBy(desc(schedule.appointmentDate))
+          .limit(LOOKUP_ROW_LIMIT),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('PersonID join deadline')), joinDeadlineMs()),
+        ),
+      ]);
 
       if (appointments.length === 0) {
         // Not a failure. This is the caller who really is on file and really
@@ -662,6 +702,8 @@ export class ScheduleLookupService {
     } catch (error) {
       // A failed join is NOT an empty history, and the caller above must not
       // let it erase the identity the mirror just established.
+      // Reached by a rejection OR by the deadline above. Either way the
+      // identity survives: the caller returns identity-without-history.
       console.error(
         '[ScheduleLookup] PersonID join FAILED — this is not the same as having no appointments:',
         error instanceof Error ? error.message : 'unknown',

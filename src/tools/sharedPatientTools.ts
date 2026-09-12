@@ -150,7 +150,33 @@ registerTool({
     // version did `Object.assign(ctx, byPhone)` and a test caught it corrupting
     // a shared fixture — which is the same hazard in miniature.
     let resolved = ctx;
-    if (!ctx.patientFound && phone && (first || last || dob)) {
+
+    /**
+     * AN EXPLICIT AMBIGUITY IS TERMINAL. THE PHONE RETRY MAY NOT OVERWRITE IT.
+     *
+     * Codex P1 on PR #292. A name+DOB that resolves to SEVERAL people is not a
+     * miss — it is a specific, stronger claim that came back unsettled. The
+     * retry below then looked the CALLER'S NUMBER up on its own, and a unique
+     * hit there replaced the ambiguous result wholesale. Nothing checks that
+     * the phone's owner is one of the people the name matched, so the tool
+     * could answer `found: true, identity_is_certain: true` with an unrelated
+     * person's PersonID-joined record — a daughter's chart read back to a
+     * caller who spoke her mother's name and birthday. Standing instruction 6
+     * forbids exactly that, and the join makes it worse by attaching a full
+     * history, office and provider to the wrong person.
+     *
+     * SMALL, AND FIXED ANYWAY. Measured 2026-09-12 on 400 sampled persons:
+     * last name + date of birth collides for 8 (2.0%), and the full
+     * first+last+DOB triple for 0 (<0.75% at 95%). The scenario needs that
+     * collision AND a unique phone hit on someone else AND the schedule's own
+     * phone rung to miss first — far below the 1% bar where a finding is worth
+     * chasing. It is fixed because reading the wrong patient's record aloud is
+     * a different class of harm from a lost request, and because the fix is
+     * one condition in the direction instruction 6 already mandates.
+     */
+    const explicitlyAmbiguous = Boolean(ctx.identity && !ctx.identity.unique);
+
+    if (!ctx.patientFound && !explicitlyAmbiguous && phone && (first || last || dob)) {
       const byPhone = await scheduleLookupService.lookupPatient({ phone });
       if (byPhone.patientFound) {
         console.info('[TOOLS] lookup_patient: name+DOB missed, matched on the caller phone instead');
