@@ -205,6 +205,53 @@ describe('caller ID says who OWNS the number, not who is calling', () => {
     expect(String(out.identity_warning)).not.toMatch(/different people on file/);
   });
 
+  it('caches NO date of birth from a caller-ID-only hit, so nothing can auto-fill it', async () => {
+    /**
+     * Codex P1 on 1d775a4, and it refuted a claim I had just made on the PR:
+     * that an unconfirmed match no longer auto-fills a date of birth. It did.
+     * `certain` went false, but the DOB was still cached, and `verifiedDobFor`
+     * returns `entry.dateOfBirth` WITHOUT reading `entry.certain` — so a caller
+     * who supplies the matched name and withholds their birthday gets the
+     * mirror's one written onto the ticket.
+     *
+     * This drives the REAL store rather than a spy on it: the whole defect was
+     * that the value survived one hop further than I thought, and a spy on the
+     * writer would have agreed with me.
+     */
+    const { resetVerifiedIdentities, verifiedDobFor } = await import('./verifiedIdentity');
+    resetVerifiedIdentities();
+
+    lookupSpy.mockResolvedValue({
+      ...RECORD, matchedBy: 'phone', identityUnconfirmed: true,
+    } as never);
+
+    await runTool('lookup_patient', {
+      queue: 'optical', call_sid: SID, caller_phone: '555-555-0147',
+    });
+
+    expect(
+      verifiedDobFor(SID, 'Testcaller', 'Mirror'),
+      'an unconfirmed caller-ID hit must leave nothing for a filing tool to auto-fill',
+    ).toBeUndefined();
+  });
+
+  it('DOES cache the date of birth when the caller confirmed who they are', async () => {
+    // The carry is the point of the store; only the unconfirmed case loses it.
+    const { resetVerifiedIdentities, verifiedDobFor } = await import('./verifiedIdentity');
+    resetVerifiedIdentities();
+
+    lookupSpy.mockResolvedValue({
+      ...RECORD, matchedBy: 'name_and_dob', identityUnconfirmed: false,
+    } as never);
+
+    await runTool('lookup_patient', {
+      queue: 'optical', call_sid: SID, caller_phone: '555-555-0147',
+      first_name: 'Testcaller', last_name: 'Mirror', date_of_birth: '01/01/1950',
+    });
+
+    expect(verifiedDobFor(SID, 'Testcaller', 'Mirror')).toBe('1950-01-01');
+  });
+
   it('a PERSON BASE name+DOB hit IS certain — the caller said both out loud', async () => {
     // The funnel's whole purpose. Validation is what turns a candidate into a
     // match, and spoken name plus date of birth is that validation.
