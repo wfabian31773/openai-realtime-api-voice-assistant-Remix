@@ -145,6 +145,36 @@ export function rememberVerifiedIdentity(
   if (!isTwilioCallSid(callSid) || !firstName || !lastName) return;
   const now = Date.now();
   sweep(now);
+
+  /**
+   * A LESS CERTAIN ANSWER NEVER REPLACES A MORE CERTAIN ONE ON THE SAME CALL.
+   *
+   * Codex P2 on PR #292 (`1b99eb2`), and the regression was mine. `lookup_patient`
+   * can run several times in one call, and the person base now answers a
+   * caller-ID-only retry with a match. That write is `certain: false` and — since
+   * the commit before this one — carries no date of birth. Landing it on top of an
+   * earlier CONFIRMED name+DOB entry erased both: the filing tools went back to
+   * refusing for a date of birth the caller had already given, and the teardown
+   * sweep lost the name it needs to file at all ("no name, no ticket" costs 47
+   * recoveries a day).
+   *
+   * So the downgrade is refused. A CERTAIN write still wins — including over
+   * another certain one, so a call that legitimately moves to a second patient
+   * still updates once that patient is confirmed.
+   *
+   * KNOWN AND ACCEPTED: a call that switches to a second patient and only ever
+   * gets an UNCERTAIN read of them keeps the first patient's confirmed identity.
+   * `verifiedDobFor` still cannot leak across, because its name guard fails; the
+   * exposure is the sweep filing under the earlier name. That is the same class of
+   * risk as filing under no name at all, and strictly rarer than the regression
+   * above — but it is a judgement, not a measurement, and worth revisiting if the
+   * sweep ever files for the wrong person.
+   */
+  const existing = verified.get(callSid);
+  if (existing && existing.certain && !certain && now - existing.at <= TTL_MS) {
+    return;
+  }
+
   verified.delete(callSid);
   verified.set(callSid, {
     firstName,

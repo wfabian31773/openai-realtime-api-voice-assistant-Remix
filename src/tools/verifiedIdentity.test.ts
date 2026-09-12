@@ -262,3 +262,56 @@ describe('the sweep only ever sees a CERTAIN identity', () => {
     expect(verifiedDobFor(SID, 'Testpatient', 'Example')).toBe('1973-03-17');
   });
 });
+
+describe('a caller-ID retry must not erase an identity the caller already confirmed', () => {
+  const SID = 'CA000000000000000000000000000000aa';
+
+  it('an UNCERTAIN write does not downgrade a CERTAIN entry', () => {
+    /**
+     * Codex P2 on PR #292 (1b99eb2), and the regression was mine. lookup_patient
+     * runs several times in one call, and the person base now answers a
+     * caller-ID-only retry with a match — an uncertain write carrying no date of
+     * birth. Landing it on an earlier confirmed name+DOB entry erased both: the
+     * filing tools went back to refusing for a birthday the caller had already
+     * given, and the teardown sweep lost the name it needs to file at all.
+     */
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Mirror', dateOfBirth: '1950-01-01', certain: true,
+    });
+    // The caller-ID retry: same person, but nothing confirmed it this time.
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Mirror', certain: false,
+    });
+
+    expect(verifiedDobFor(SID, 'Testcaller', 'Mirror'), 'the confirmed DOB survives')
+      .toBe('1950-01-01');
+    expect(verifiedIdentityFor(SID), 'and so does the identity the sweep needs')
+      .toMatchObject({ firstName: 'Testcaller', lastName: 'Mirror', certain: true });
+  });
+
+  it('a CERTAIN write still replaces an earlier certain one', () => {
+    // The guard must only block DOWNGRADES. A call that legitimately moves to a
+    // second patient still updates once that patient is confirmed.
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Mirror', dateOfBirth: '1950-01-01', certain: true,
+    });
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testsecond', lastName: 'Patient', dateOfBirth: '1962-05-05', certain: true,
+    });
+
+    expect(verifiedIdentityFor(SID)).toMatchObject({ firstName: 'Testsecond' });
+    expect(verifiedDobFor(SID, 'Testsecond', 'Patient')).toBe('1962-05-05');
+  });
+
+  it('an uncertain write is still stored when there is nothing to downgrade', () => {
+    // The guard must not stop the store working at all — an uncertain entry is
+    // what the ambiguity consumers read.
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Mirror', certain: false,
+    });
+
+    // Uncertain, so the sweep declines it — but it IS there.
+    expect(verifiedIdentityFor(SID)).toBeUndefined();
+    expect(verifiedDobFor(SID, 'Testcaller', 'Mirror')).toBeUndefined();
+  });
+});
