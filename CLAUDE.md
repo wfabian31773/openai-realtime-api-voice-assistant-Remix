@@ -1831,7 +1831,7 @@ in the new build. Current marker:
 **ON THE RUNTIME, ASK `/voice/health` — AND THE MARKER NOW CARRIES ITS DATE.**
 
 ```
-voice-runtime-v11-locked-record-20260912
+voice-runtime-v12-optical-office-20260912
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -1848,22 +1848,24 @@ on it is evidence about current code.
 | **v5** or **v6**-…-20260911 | the optical unassigned exit (#288, merged 2026-09-11). Without it `file_optical_ticket` never sends `routingAskExhausted`, so an optical request whose office did not resolve is answered HTTP 400 "Missing required information: office" and files NOTHING — 48 calls in the 30 days to 09-11. A build on v5/v6 is the BEFORE arm; do not read a filing rate from it as an after-number |
 | earlier than **v10**-…-20260912 | the PERSON BASE rung on `lookup_patient`. Every rung before it reads the Operations Hub APPOINTMENT BOOK, so a real patient with no appointment inside its window cannot be found and the failure looks random from outside — standing instruction 14. Measured 2026-09-12 over ten days, `duration >= 30`: **627 of 2,511 substantive queue calls (25.0%) ran `lookup_patient` and found NOBODY** (tech 277/1173 · surgery 158/638 · optical 122/501 · records 70/199), **235 of those ended with no ticket**, and of the 330 distinct caller numbers behind them **208 (63%) ARE in `patients_master`**. Optical alone reads 76/100 and tech 132/230 — **63% is the fleet figure and 76% overstates it**; tech's sample visibly contains toll-free numbers, so some residue is genuinely not-a-patient. The rung runs ONLY where the method already returned `emptyContext()`, so it can ADD a match and can never change one the schedule made. **v10 also carries THE JOIN**: once the mirror identifies somebody, `lookupByPersonId` pulls their `Schedule` rows on `PersonID` and they come back through the same `buildContext` as every other rung, so history, office and provider arrive with the identity. An earlier draft of this row said v10 brought no history and called that correct; it was wrong, and the join section below has the 81% that disproved it |
 | **v10** or earlier — NOT the date | the locked record. Pre-context's caller-ID match reached the greeting and the prompt and nothing else, so a filing tool could refuse for a date of birth the process was already holding — 61 refusals on 2026-09-11, **44 of them on calls the greeting had already addressed by name**. A build before this is the BEFORE arm for that number. **This row was keyed on `earlier than 20260912` until v10 merged on the same date and did not contain it** — which is this table's own warning firing against the table |
+| **v11** or earlier — NOT the date | optical's office ladder. `file_optical_ticket` resolved ONLY the office the CALLER named, so a caller who named none filed UNASSIGNED on the one queue that assigns BY location. Surgery has walked the patient's record for its routing field since 2026-08-18; optical never had. 2026-09-11: 25 optical calls hit the location gate, 8 ended with no ticket at all. **This marker is v12.** It claimed v9 until #292 merged as v10 and #290 re-bumped to v11; a v9 here would have sent `/voice/health` BACKWARDS past two markers that are already live, which reads as a failed pull rather than as a new build. This row was keyed on `earlier than 20260912` for the same reason and had to be re-keyed onto the version: three builds now share that date. v12 also carries two Codex fixes from #291's review: an ambiguous `lookup_patient` now UNSETS an earlier certain match on the same name (it could not before — there was no `else`, so `usualOfficeFor` answered from a result the tool had stopped believing), and a directory outage on the record rung is reported as an outage rather than as an office we do not hold. **AND OPTICAL NO LONGER ASKS WHEN IT ALREADY KNOWS** — operator ruling 2026-09-12. The record is consulted BEFORE the location gate, so a caller who names no office is routed on the FIRST `file_optical_ticket` call instead of being asked. The first version of this sat below the gate and was inert for the calls it was for: the gate returns `missing(['location'])` first and the record was reached only on a SECOND invocation, which in 42 of 75 refusals never comes (Codex P1, #291). What it trades: a patient ringing about an office other than their usual one, who names none, is now routed to their usual one rather than landing unassigned for triage — weighed against 8 of 25 such calls ending with no ticket at all on 09-11. An office the CALLER names still always wins |
 
-**TWO OF THE THREE 2026-09-12 VERSIONS ARE STILL IN FLIGHT, AND THEY DO NOT
-CONTAIN EACH OTHER.** v10 (the person base and the join) merged first, so it
-is what `main` describes. This branch re-bumped from v8 to **v11** on the
-merge, because v8 would have sent `/voice/health` BACKWARDS past a marker that
-is already live — a build serving v8 after v10 shipped reports a string that
-describes less code than it is running, which is worse than a stale marker
-because it will be believed. **#291 still claims v9 and is in exactly that
-state: it must re-bump above whatever is on `main` when it lands, and move its
-table row in the same commit.** All three branched off v7.
+**READ THE VERSION, NEVER THE DATE — FOUR BUILDS SHARE 2026-09-12.**
+v10 (the person base and the join), v11 (the locked record, #290) and v12
+(optical's office ladder, this) are now a CHAIN on `main`: each merged after
+the one before and brought it in, so v12 contains both.
+
+**v13 IS NOT IN THAT CHAIN.** #293 (RULE ZERO 2a, the new-or-existing ask)
+branched off v10 and contains NEITHER v11 NOR v12. Before it lands it must
+merge `main` and re-bump above whatever `main` then carries. A marker that
+goes BACKWARDS is worse than a stale one: it describes less code than the
+deployment is running, and it will be believed. #290 and #291 each re-bumped
+once for exactly that reason, from v8 and v9.
 
 **THREE builds also share 2026-09-11, so on that date the DATE TELLS YOU
-NOTHING — read the version.** v5 → v6 → v7, each strictly containing the
-one before it. That is the case this table's own warning was written for,
-and it has already happened twice in one day. **2026-09-12 is now the same
-situation with three more** — v10 and v11 share it, and #291 will make three.
+NOTHING either — read the version.** v5 → v6 → v7, each strictly containing
+the one before it. That is the case this table's own warning was written for,
+and it has now happened on two separate days.
 
 **THIS TABLE IS THE POINT AND IT WAS ADDED LATE.** Until 2026-09-11 this
 section named the v4/20260908 marker as current and rejected only dates
