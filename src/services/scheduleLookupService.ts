@@ -3,6 +3,10 @@ import { schedule } from '../../shared/schema';
 import { eq, or, desc, gte, and, sql } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { normalizePhone } from '../utils/phone';
+// The ONE PersonID comparison in the repo, cast to uuid. See its own comment:
+// a bare `uuid = text` fails at runtime, inside a catch, on a live call, and
+// reads as "this patient has no history" rather than as a bug.
+import { byPerson } from './appointmentAnswers';
 
 /**
  * Who this lookup could have meant.
@@ -445,6 +449,46 @@ function splitByPerson(rows: any[]): { primary: any[]; identity: PatientIdentity
   };
 }
 
+/**
+ * Rows that came back on the PERSON KEY are one person by construction.
+ *
+ * `splitByPerson` exists because a phone number and a surname are not
+ * identities, so it groups on `first|last|dob` and keeps the newest group.
+ * PersonID is a different kind of answer: it is the primary key of the person
+ * base, and every row carrying it belongs to that person whatever the row
+ * SPELLS their name as.
+ *
+ * MEASURED 2026-09-12 over 1,500 person_ids seen in the last 21 days (1,372 of
+ * them carrying more than one row): **33 — 2.4% — disagree with themselves**
+ * across their own rows. 15 vary by last name, 13 by first name, 8 by date of
+ * birth: married and maiden names, a nickname against a legal name, a
+ * corrected birthday. Every one is the same human being under one key.
+ *
+ * Put those rows through `splitByPerson` and the 2.4% are reported
+ * `unique: false` — AMBIGUOUS, on a primary-key join — and the smaller group's
+ * visits are dropped from their own history. So the grouping is bypassed here,
+ * and ONLY here: it still guards every lookup that matched on a name or a
+ * number, which is every lookup that can genuinely have meant two people.
+ */
+function onePerson(rows: any[]): { primary: any[]; identity: PatientIdentity } {
+  const newest = rows[0] ?? {};
+  return {
+    primary: rows,
+    identity: {
+      unique: true,
+      candidateCount: 1,
+      candidates: [
+        {
+          firstName: newest.patientFirstName || undefined,
+          lastName: newest.patientLastName || undefined,
+          dateOfBirth: newest.patientDateOfBirth || undefined,
+          appointmentCount: rows.length,
+        },
+      ],
+    },
+  };
+}
+
 export class ScheduleLookupService {
 
   async lookupByPhone(phone: string): Promise<PatientScheduleContext> {
@@ -554,6 +598,68 @@ export class ScheduleLookupService {
     }
   }
 
+  /**
+   * THE WHOLE RECORD, ON THE KEY THAT CANNOT BE MISSPELLED.
+   *
+   * Operator, 2026-09-12: *"When you find the patient in the patient master,
+   * you automatically join the UID or UUID, whatever, to the schedule to pull
+   * up the entire record. Right? Simple. Basic."*
+   *
+   * Every other rung in this class searches the appointment book by STRING —
+   * a phone number as it was typed into the chart, a surname, a date of birth.
+   * That is why they miss: the strings drift, and the book is not the person
+   * base. `patients_master` answers WHO on its own key, and `Schedule` carries
+   * that same key in `PersonID`, so once the mirror has identified somebody
+   * their appointments come back with no matching of any kind.
+   *
+   * MEASURED 2026-09-12 on the 64 callers the book had just told us it had no
+   * record of: **52 (81%) have schedule history on this join** — 51 with
+   * Active visits, 49 with past visits, 19 with an UPCOMING appointment, 51
+   * with an office on file across 27 distinct offices, averaging 4.8 rows.
+   * The book did not lack their appointments. It could not find them by name.
+   *
+   * IT NEEDED AN INDEX AND HAD NONE. `Schedule` is 1,024,785 rows / 1,494 MB
+   * and carried sixteen indexes, not one of them on `PersonID`, so this query
+   * was a sequential scan and timed out at 60s — for a SINGLE person.
+   * `idx_schedule_personid_apptdate` makes it an index-only scan, 0 heap
+   * fetches, **1.305 ms**. That index is a live database object created by
+   * migration, not a file in this repo; if this method ever goes slow again,
+   * check that it still exists before changing any code here.
+   */
+  async lookupByPersonId(
+    personId: string,
+    matchedBy: 'phone' | 'name' | 'dob' | 'name_and_dob',
+  ): Promise<PatientScheduleContext> {
+    if (!personId) return this.emptyContext();
+
+    try {
+      const appointments = await db
+        .select()
+        .from(schedule)
+        .where(byPerson(personId))
+        .orderBy(desc(schedule.appointmentDate))
+        .limit(LOOKUP_ROW_LIMIT);
+
+      if (appointments.length === 0) {
+        // Not a failure. This is the caller who really is on file and really
+        // has never had an appointment — we still know exactly who they are.
+        console.log('[ScheduleLookup] PersonID join: identified, and genuinely no appointments on file');
+        return this.emptyContext();
+      }
+
+      console.log(`[ScheduleLookup] PersonID join returned ${appointments.length} row(s) — no name matching`);
+      return this.buildContext(appointments, matchedBy, { keyedByPerson: true });
+    } catch (error) {
+      // A failed join is NOT an empty history, and the caller above must not
+      // let it erase the identity the mirror just established.
+      console.error(
+        '[ScheduleLookup] PersonID join FAILED — this is not the same as having no appointments:',
+        error instanceof Error ? error.message : 'unknown',
+      );
+      return this.emptyContext();
+    }
+  }
+
   async lookupPatient(params: {
     phone?: string;
     firstName?: string;
@@ -598,11 +704,15 @@ export class ScheduleLookupService {
      * and the 1,214 calls that currently reach a certain match take exactly
      * the path they take today.
      *
-     * IT BRINGS NO HISTORY, and that is correct rather than a shortfall. These
-     * people have no appointments in the window — that is why the book missed
-     * them. `usual_office` stays empty, so optical still asks rather than
-     * routing on a guess. What this establishes is WHO, which is what the date
-     * of birth carry and the teardown sweep need.
+     * IT BRINGS THE HISTORY TOO, ON THE PERSON KEY. An earlier version of this
+     * comment said it brought none, and called that correct on the reasoning
+     * that these people must have no appointments — which is why the book
+     * missed them. THAT WAS WRONG, and measuring it is what settled it: of 64
+     * such callers, **52 (81%) have schedule history** reachable on
+     * `PersonID`, 19 of them with an appointment still upcoming. The book was
+     * not missing their appointments, it was missing THEM — it searches by
+     * name and phone STRINGS, and those drift. So identity comes from the
+     * mirror and then `lookupByPersonId` pulls the record on the key.
      *
      * The risk here runs OPPOSITE to most of this file: the danger is
      * verification becoming permissive, not strict. `findByPhone` and
@@ -671,9 +781,50 @@ export class ScheduleLookupService {
     }
 
     const p = result.patient!;
+
+    /**
+     * IDENTIFIED — SO PULL THE RECORD. This is the join, and it is the point
+     * of verifying against the person base at all: the mirror answers WHO on
+     * its own key, and `Schedule.PersonID` is that same key.
+     */
+    const joined = await this.lookupByPersonId(p.personId, matchedBy);
+
+    if (joined.patientFound) {
+      console.info(
+        `[ScheduleLookup] the appointment book had nobody by name or number; the PERSON BASE ` +
+          `identified this caller by ${matchedBy}, and the PersonID join returned ` +
+          `${joined.totalAppointmentsFound} row(s)`,
+      );
+      return {
+        ...joined,
+        /**
+         * The mirror wins on WHO, the schedule supplies everything else.
+         *
+         * Standing instruction 14 puts identity in the Console, and this is
+         * exactly where the two disagree: 2.4% of person_ids are spelled more
+         * than one way across their own appointment rows (maiden names,
+         * nicknames, a corrected birthday). The name we just verified against
+         * `patients_master` is the one staff will see on the chart, so it is
+         * the one to carry. Office, provider, history and contact details have
+         * no counterpart in the mirror and come from the rows untouched.
+         */
+        patientName: `${p.firstName} ${p.lastName}`.trim() || joined.patientName,
+        patientData: {
+          ...joined.patientData,
+          firstName: p.firstName || joined.patientData?.firstName,
+          lastName: p.lastName || joined.patientData?.lastName,
+          dateOfBirth: p.dob || joined.patientData?.dateOfBirth,
+        },
+      };
+    }
+
+    // Identified, but the join brought nothing back — either they genuinely
+    // have no appointments, or it failed (the two log differently, one line
+    // up). WHO still stands: an unavailable schedule must never unidentify a
+    // caller the person base already vouched for.
     console.info(
       `[ScheduleLookup] the appointment book had nobody; the PERSON BASE identified this caller ` +
-        `by ${matchedBy} (no visit history in the window)`,
+        `by ${matchedBy}, and the PersonID join returned no rows`,
     );
     return {
       patientFound: true,
@@ -687,7 +838,11 @@ export class ScheduleLookupService {
     };
   }
 
-  private buildContext(rows: any[], matchedBy: 'phone' | 'name' | 'dob' | 'name_and_dob'): PatientScheduleContext {
+  private buildContext(
+    rows: any[],
+    matchedBy: 'phone' | 'name' | 'dob' | 'name_and_dob',
+    options: { keyedByPerson?: boolean } = {},
+  ): PatientScheduleContext {
     const todayStr = getPacificDateString();
 
     // ONE PERSON PER CONTEXT.
@@ -703,7 +858,10 @@ export class ScheduleLookupService {
     // reported rather than discarded, because a caller that intends to say a
     // name out loud needs to know whether it is the only one this lookup could
     // have meant.
-    const { primary, identity } = splitByPerson(rows);
+    // ...unless the rows came back on the person key, which cannot mean two
+    // people. See `onePerson`: grouping them by spelling would report 2.4% of
+    // real patients as ambiguous and discard part of their own history.
+    const { primary, identity } = options.keyedByPerson ? onePerson(rows) : splitByPerson(rows);
     const appointments = primary;
 
     const upcoming: AppointmentSummary[] = [];

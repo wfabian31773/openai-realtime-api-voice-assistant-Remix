@@ -29,8 +29,15 @@ import { schedule } from '../../shared/schema';
  * "operator does not exist", and the failure lands inside the catch below —
  * meaning a caller would verify perfectly and then be told they have no
  * appointments at all. Cast, and it returns their 43.
+ *
+ * EXPORTED so there is exactly ONE of these in the repo. `scheduleLookupService`
+ * joins on the same key for the same reason, and a second hand-written
+ * comparison is a second chance to drop the cast — which fails at RUNTIME, in
+ * a catch block, on a call, and looks like a patient with no history rather
+ * than like a bug. `drizzle` types the column as text, so nothing above
+ * Postgres will object.
  */
-const byPerson = (personId: string) => sql`${schedule.personId} = ${personId}::uuid`;
+export const byPerson = (personId: string) => sql`${schedule.personId} = ${personId}::uuid`;
 
 // server/db is imported LAZILY, inside the lookup. At module scope it runs
 // environment validation on import, which would make every file that merely

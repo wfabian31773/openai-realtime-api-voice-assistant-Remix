@@ -51,6 +51,15 @@ function svc(scheduleAnswers: unknown) {
   for (const rung of ['lookupByNameAndDOB', 'lookupByPhone', 'lookupByName']) {
     s[rung] = vi.fn().mockResolvedValue(scheduleAnswers);
   }
+  /**
+   * The PersonID join is stubbed EXPLICITLY, and that matters: this file does
+   * not mock `server/db`, so an unstubbed join would hit a database that is
+   * not there, land in its own catch, and every assertion below would pass
+   * because of an error rather than because of the ladder. The join has its
+   * own suite — `lookupJoinsOnPersonId.test.ts`. These tests are about WHICH
+   * RUNG ANSWERS, and nothing else.
+   */
+  s.lookupByPersonId = vi.fn().mockResolvedValue(EMPTY);
   return s as unknown as ScheduleLookupService;
 }
 
@@ -79,8 +88,15 @@ describe('the person base is asked only after the appointment book gives up', ()
     expect(out.matchedBy).toBe('phone');
     expect(out.patientData?.dateOfBirth).toBe('1950-01-01');
     expect(out.identity).toMatchObject({ unique: true, candidateCount: 1 });
-    // No history, and that is correct: no appointments is WHY the book missed
-    // them. An empty list here is honest; a fabricated one would route on air.
+    /**
+     * No history HERE because the join is stubbed empty above — not because
+     * these callers have none. An earlier version of this comment said the
+     * opposite ("no appointments is WHY the book missed them") and reasoned
+     * from it that bringing no history was correct. Measured 2026-09-12 on 64
+     * such callers: **52 (81%) DO have schedule history** on the PersonID
+     * join, 19 with an appointment still upcoming. The book was missing THEM,
+     * not their appointments — it searches by name and phone strings.
+     */
     expect(out.totalAppointmentsFound).toBe(0);
     expect(out.pastAppointments).toEqual([]);
   });

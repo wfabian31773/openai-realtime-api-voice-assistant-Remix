@@ -398,7 +398,8 @@ is reading noise.
 | Thing | Where | What it does |
 |---|---|---|
 | Mirror verification | `src/services/patientVerification.ts` | Verifies against `patients_master`; refuses to guess between two people. |
-| Appointment answers | `src/services/appointmentAnswers.ts` | `Schedule.PersonID` join; excludes `Removed`. |
+| Appointment answers | `src/services/appointmentAnswers.ts` | `Schedule.PersonID` join; excludes `Removed`. Also **exports `byPerson()`** — the one `::uuid` comparison in the repo. |
+| Mirror → schedule join | `ScheduleLookupService.lookupByPersonId` | Identity from `patients_master`, then the WHOLE record on `PersonID` through the same `buildContext` as every other rung. Bypasses `splitByPerson` (a primary key cannot mean two people); a failed join leaves the identity standing. |
 | Replay tables | Operations Hub | `new_core_replay_summary`, `new_core_replay_index`, `ticket_agent_config` |
 | Date-of-birth parsing | `src/tools/dobParts.ts` | Reads a date out of a whole spoken sentence, English + Spanish months, two-digit centuries. **Turkish is a known, evidenced gap.** Also exports `dobShape` — the PHI-free shape of what arrived, which is the only way to tell "the model sent nothing" from "the parser refused it". |
 | Spoken DOB from the transcript | `src/tools/spokenDob.ts` | Third filing source after the model's argument and `verifiedDobFor`. A date counts only in the turn that answered a DOB *ask* — not a mere mention. Acknowledgements ("I have your date of birth, thank you. Anything else?") do not open a window. Re-asks that do not use "may I" ("need your date of birth", "except your date of birth", "mis-heard" / "once more") still do. A later attempted-but-refused date clears the cache; a confirmation does not. Same-turn "sorry I meant" replaces the first date in the window. |
@@ -508,9 +509,39 @@ there) → lock the `person_id` → join `Schedule` ON `"PersonID"` in 1.3ms for
 history, office and provider.** The 51 offices are the exact field
 `file_optical_ticket` needs to route without asking.
 
-**PR #292 as it stands stops at identity and returns no history, which is now
-known to leave 81% on the table.** It is green and reviewed; it is not the
-finished shape.
+**BUILT ON #292, and this is what "lock it in" means in code.**
+`ScheduleLookupService.lookupByPersonId(personId, matchedBy)` is the join:
+`byPerson()` — the ONE `::uuid` comparison in the repo, exported from
+`appointmentAnswers.ts` so a second hand-written one cannot drop the cast —
+then the SAME `buildContext` every other rung uses, so office, provider,
+upcoming/past split, the equipment filter and the surgeon rule all behave
+identically to a name match. It runs only after `verifyPatient`/`findByPhone`
+has returned a person, and a throw or an empty result **leaves the identity
+standing**: an unreachable schedule must never unidentify a caller the person
+base has already vouched for.
+
+**ONE THING THE JOIN MUST NOT REUSE: the grouping.** `splitByPerson` keys on
+`first|last|dob` because a phone number and a surname are not identities.
+`PersonID` is, so that grouping is bypassed here and only here — measured over
+1,500 person_ids seen in the last 21 days, 1,372 of them multi-row, **33
+(2.4%) disagree with themselves across their own rows** (15 last name, 13
+first name, 8 date of birth: maiden names, nicknames, a corrected birthday).
+Grouped by spelling, those 33 report a primary-key join as AMBIGUOUS and drop
+the smaller group's visits out of that patient's own history. The mirror's
+name wins on the way out for the same reason — it is what the staffer's chart
+will say.
+
+**Proven offline, four mutations, each caught:** removing the grouping bypass,
+never calling the join, swapping `byPerson` for a bare `eq`, and letting a
+failed join erase the identity. `src/services/lookupJoinsOnPersonId.test.ts`.
+
+**NOT YET MEASURED IN PRODUCTION**, and `docs/BACKEND_HANDOFF.md` applies —
+this widens what `lookup_patient` returns on the ticket path. The before-arm
+is in task #109. The number it must move: of the 627 substantive queue calls
+in ten days that ran `lookup_patient` and found NOBODY, 235 ended with no
+ticket. The guard beside it: optical routes BY location, so tickets filed with
+no `location_id` must not rise — the join can only ADD an office, but that is
+the assumption to check rather than assert.
 
 ---
 
@@ -1662,7 +1693,7 @@ on it is evidence about current code.
 | **v5**-…-20260911 | the West Covina fix: v5 routes a "West Covina" caller to our Covina office, v6 refuses and asks again (#287) |
 | **v5** or **v6**-…-20260911 | the optical unassigned exit (#288, merged 2026-09-11). Without it `file_optical_ticket` never sends `routingAskExhausted`, so an optical request whose office did not resolve is answered HTTP 400 "Missing required information: office" and files NOTHING — 48 calls in the 30 days to 09-11. A build on v5/v6 is the BEFORE arm; do not read a filing rate from it as an after-number |
 
-| earlier than **v10**-…-20260912 | the PERSON BASE rung on `lookup_patient`. Every rung before it reads the Operations Hub APPOINTMENT BOOK, so a real patient with no appointment inside its window cannot be found and the failure looks random from outside — standing instruction 14. Measured 2026-09-12 over ten days, `duration >= 30`: **627 of 2,511 substantive queue calls (25.0%) ran `lookup_patient` and found NOBODY** (tech 277/1173 · surgery 158/638 · optical 122/501 · records 70/199), **235 of those ended with no ticket**, and of the 330 distinct caller numbers behind them **208 (63%) ARE in `patients_master`**. Optical alone reads 76/100 and tech 132/230 — **63% is the fleet figure and 76% overstates it**; tech's sample visibly contains toll-free numbers, so some residue is genuinely not-a-patient. The rung runs ONLY where the method already returned `emptyContext()`, so it can ADD a match and can never change one the schedule made. **v10 brings NO visit history, and the reason given for that WAS WRONG — see the join section below** |
+| earlier than **v10**-…-20260912 | the PERSON BASE rung on `lookup_patient`. Every rung before it reads the Operations Hub APPOINTMENT BOOK, so a real patient with no appointment inside its window cannot be found and the failure looks random from outside — standing instruction 14. Measured 2026-09-12 over ten days, `duration >= 30`: **627 of 2,511 substantive queue calls (25.0%) ran `lookup_patient` and found NOBODY** (tech 277/1173 · surgery 158/638 · optical 122/501 · records 70/199), **235 of those ended with no ticket**, and of the 330 distinct caller numbers behind them **208 (63%) ARE in `patients_master`**. Optical alone reads 76/100 and tech 132/230 — **63% is the fleet figure and 76% overstates it**; tech's sample visibly contains toll-free numbers, so some residue is genuinely not-a-patient. The rung runs ONLY where the method already returned `emptyContext()`, so it can ADD a match and can never change one the schedule made. **v10 also carries THE JOIN**: once the mirror identifies somebody, `lookupByPersonId` pulls their `Schedule` rows on `PersonID` and they come back through the same `buildContext` as every other rung, so history, office and provider arrive with the identity. An earlier draft of this row said v10 brought no history and called that correct; it was wrong, and the join section below has the 81% that disproved it |
 
 **THREE VERSIONS ARE IN FLIGHT ON 2026-09-12 AND THEY DO NOT CONTAIN EACH
 OTHER.** #290 claims v8, #291 claims v9, and the person-base rung claims v10 —
