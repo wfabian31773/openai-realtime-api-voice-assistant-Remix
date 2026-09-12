@@ -70,6 +70,13 @@ export interface VerifiedIdentity {
    * constantly.
    */
   certain: boolean;
+  /**
+   * The person base's primary key, when the lookup that wrote this knew it.
+   * The only thing that can prove a later lookup on the same call is about the
+   * same human — see the downgrade guard, and the father-and-son case that
+   * makes a name insufficient.
+   */
+  personId?: string;
 }
 
 interface Entry extends VerifiedIdentity {
@@ -171,7 +178,30 @@ export function rememberVerifiedIdentity(
    * sweep ever files for the wrong person.
    */
   const existing = verified.get(callSid);
-  if (existing && existing.certain && !certain && now - existing.at <= TTL_MS) {
+  /**
+   * PROOF OF THE SAME PERSON, NOT A MATCHING NAME. Codex P1 on `bfa28ae`,
+   * answering a judgement I had flagged as unmeasured — and it found the case
+   * that breaks it.
+   *
+   * The first version of this guard preserved a certain entry against ANY
+   * uncertain write on the call, and I argued the leak was contained because
+   * `verifiedDobFor` also checks the name. A FATHER AND SON SHARE A NAME. On a
+   * call that confirms one and then gets an uncertain read of the other, the
+   * name guard succeeds and the wrong date of birth goes onto the ticket — a
+   * worse outcome than the regression the guard was written to stop.
+   *
+   * So the entry is preserved only where both sides carry a `personId` and
+   * they agree. That is provable; a name is not.
+   *
+   * WHEN IT CANNOT BE PROVED, THE WRITE WINS. Wrong data on a ticket beats a
+   * refused gate, and a caller-ID retry for the same person does carry the id,
+   * so the case the guard exists for is still covered. Where neither side has
+   * an id — a name-only schedule hit — this leaves the behaviour exactly as it
+   * was before this PR, which is a replace.
+   */
+  const provablySamePerson =
+    !!existing?.personId && !!identity.personId && existing.personId === identity.personId;
+  if (existing && existing.certain && !certain && provablySamePerson && now - existing.at <= TTL_MS) {
     return;
   }
 
@@ -180,6 +210,7 @@ export function rememberVerifiedIdentity(
     firstName,
     lastName,
     ...(dateOfBirth ? { dateOfBirth } : {}),
+    ...(identity.personId ? { personId: identity.personId } : {}),
     certain,
     at: now,
   });

@@ -371,6 +371,8 @@ registerTool({
       rememberVerifiedIdentity(str(input.call_sid), {
         firstName: resolved.patientData?.firstName,
         lastName: resolved.patientData?.lastName,
+        // What makes the downgrade guard provable rather than name-based.
+        personId: resolved.patientData?.personId,
         /**
          * NO DATE OF BIRTH FROM A CALLER-ID-ONLY MATCH. Codex P1 on 1d775a4,
          * answering a challenge I put to it — and my claim was FALSE. I said

@@ -90,6 +90,13 @@ export interface PatientData {
   firstName?: string;
   lastName?: string;
   dateOfBirth?: string;
+  /**
+   * The person base's primary key, when this context came from a source that
+   * knows it. The ONLY thing that can prove two lookups on one call are about
+   * the same human: a father and son share a name and a phone, so neither
+   * settles it (Codex P1 on PR #292, `bfa28ae`).
+   */
+  personId?: string;
   email?: string;
   cellPhone?: string;
   homePhone?: string;
@@ -928,6 +935,7 @@ export class ScheduleLookupService {
           firstName: p.firstName || joined.patientData?.firstName,
           lastName: p.lastName || joined.patientData?.lastName,
           dateOfBirth: p.dob || joined.patientData?.dateOfBirth,
+          personId: p.personId,
         },
       };
     }
@@ -949,7 +957,7 @@ export class ScheduleLookupService {
       pastAppointments: [],
       totalAppointmentsFound: 0,
       identity: { unique: true, candidateCount: 1, candidates: [] },
-      patientData: { firstName: p.firstName, lastName: p.lastName, dateOfBirth: p.dob },
+      patientData: { firstName: p.firstName, lastName: p.lastName, dateOfBirth: p.dob, personId: p.personId },
     };
   }
 
@@ -1097,6 +1105,7 @@ export class ScheduleLookupService {
       homePhone: firstApt.patientHomePhone || undefined,
       preferredLocation: lastLocationSeen || firstApt.officeLocation || undefined,
       preferredProvider: lastProviderSeen || firstApt.renderingPhysician || undefined,
+      personId: firstApt.personId || undefined,
     };
 
     return {

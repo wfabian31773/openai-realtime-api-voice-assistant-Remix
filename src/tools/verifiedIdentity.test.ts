@@ -266,6 +266,32 @@ describe('the sweep only ever sees a CERTAIN identity', () => {
 describe('a caller-ID retry must not erase an identity the caller already confirmed', () => {
   const SID = 'CA000000000000000000000000000000aa';
 
+  it('a FATHER AND SON share a name, so a name must not preserve certainty', () => {
+    /**
+     * Codex P1 on bfa28ae, answering a judgement I had flagged as unmeasured —
+     * and finding the case that breaks it. The first guard preserved a certain
+     * entry against ANY uncertain write, and I argued the leak was contained
+     * because `verifiedDobFor` also checks the name. It is not contained when
+     * the names are the same: the guard succeeds and the FATHER's date of
+     * birth goes onto the SON's ticket. Wrong data on a ticket is worse than
+     * the refused gate the guard was written to prevent.
+     */
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Mirror', dateOfBirth: '1950-01-01',
+      personId: 'person-the-father', certain: true,
+    });
+    // The son: same name, DIFFERENT person, and only an uncertain read of him.
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Mirror',
+      personId: 'person-the-son', certain: false,
+    });
+
+    expect(
+      verifiedDobFor(SID, 'Testcaller', 'Mirror'),
+      "the father's date of birth must not survive onto the son's ticket",
+    ).toBeUndefined();
+  });
+
   it('an UNCERTAIN write does not downgrade a CERTAIN entry', () => {
     /**
      * Codex P2 on PR #292 (1b99eb2), and the regression was mine. lookup_patient
@@ -276,11 +302,13 @@ describe('a caller-ID retry must not erase an identity the caller already confir
      * given, and the teardown sweep lost the name it needs to file at all.
      */
     rememberVerifiedIdentity(SID, {
-      firstName: 'Testcaller', lastName: 'Mirror', dateOfBirth: '1950-01-01', certain: true,
+      firstName: 'Testcaller', lastName: 'Mirror', dateOfBirth: '1950-01-01',
+      personId: 'person-same', certain: true,
     });
-    // The caller-ID retry: same person, but nothing confirmed it this time.
+    // The caller-ID retry: PROVABLY the same person, but nothing confirmed it
+    // this time. The person id is what makes preserving this safe.
     rememberVerifiedIdentity(SID, {
-      firstName: 'Testcaller', lastName: 'Mirror', certain: false,
+      firstName: 'Testcaller', lastName: 'Mirror', personId: 'person-same', certain: false,
     });
 
     expect(verifiedDobFor(SID, 'Testcaller', 'Mirror'), 'the confirmed DOB survives')
@@ -301,6 +329,20 @@ describe('a caller-ID retry must not erase an identity the caller already confir
 
     expect(verifiedIdentityFor(SID)).toMatchObject({ firstName: 'Testsecond' });
     expect(verifiedDobFor(SID, 'Testsecond', 'Patient')).toBe('1962-05-05');
+  });
+
+  it('does NOT preserve when neither side can prove who it is', () => {
+    // A name-only hit knows no person id, so nothing is provable and the write
+    // wins — exactly the behaviour that shipped before this PR. The guard is
+    // deliberately narrow rather than optimistic.
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Mirror', dateOfBirth: '1950-01-01', certain: true,
+    });
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Mirror', certain: false,
+    });
+
+    expect(verifiedDobFor(SID, 'Testcaller', 'Mirror')).toBeUndefined();
   });
 
   it('an uncertain write is still stored when there is nothing to downgrade', () => {
