@@ -36,6 +36,7 @@
  */
 
 import { isTwilioCallSid } from './callSid';
+import { normalizeDobParts } from './dobParts';
 
 export interface VerifiedIdentity {
   firstName: string;
@@ -218,6 +219,19 @@ export function usualOfficeFor(
   callSid: string | undefined,
   firstName: string,
   lastName: string,
+  /**
+   * The date of birth the TICKET is being filed under, when the caller gave
+   * one. Codex P1 on PR #291: the name guard alone cannot separate a parent
+   * and child who share a name, and on that call the filing input already
+   * held a date that says outright they are different people. Ignoring it
+   * routed the child's ticket to the parent's office silently.
+   *
+   * OPTIONAL, and its absence changes nothing — the vast majority of calls
+   * reach here with no date at all, and refusing them would delete the
+   * feature to fix 0.42% of numbers (measured 2026-09-12: 4,633 of 1,095,736
+   * numbers in `patients_master` are shared AND carry a name collision).
+   */
+  dateOfBirth?: string,
 ): string | undefined {
   if (!isTwilioCallSid(callSid)) return undefined;
   const entry = verified.get(callSid);
@@ -226,6 +240,29 @@ export function usualOfficeFor(
   if (!entry.certain) return undefined;
   if (norm(firstName) !== norm(entry.firstName) || norm(lastName) !== norm(entry.lastName)) {
     return undefined;
+  }
+  /**
+   * ONLY AN EXPLICIT, PARSEABLE CONFLICT REFUSES. This asymmetry is the whole
+   * safety of the check.
+   *
+   * A naive string compare would be worse than no check: the stored date
+   * comes off a record ("1950-01-02") and the ticket's comes from the model
+   * out of speech ("01/02/1950"), so the two disagree textually on calls that
+   * are the SAME person. That would silently switch the feature off for
+   * everyone to fix a case in 0.42% of numbers.
+   *
+   * So both sides are parsed, and the office is withheld only when both
+   * parsed AND they name different days. Anything unparseable or absent
+   * leaves the previous behaviour exactly as it was.
+   */
+  if (dateOfBirth && entry.dateOfBirth) {
+    const asked = normalizeDobParts(dateOfBirth);
+    const held = normalizeDobParts(entry.dateOfBirth);
+    if (asked && held) {
+      const differs =
+        asked.year !== held.year || asked.month !== held.month || asked.day !== held.day;
+      if (differs) return undefined;
+    }
   }
   return entry.usualOffice;
 }

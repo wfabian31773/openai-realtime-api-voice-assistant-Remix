@@ -314,7 +314,10 @@ registerTool({
     let officeFromRecord: string | undefined;
     if (!cleanLocation) {
       const { usualOfficeFor } = await import('./verifiedIdentity');
-      const onRecord = usualOfficeFor(callSid, first, last);
+      // `dob` is what the ticket is being filed under. Passed so an explicit,
+      // parseable conflict with the verified record withholds the office
+      // rather than routing a same-named relative's ticket (Codex P1, #291).
+      const onRecord = usualOfficeFor(callSid, first, last, dob);
       if (onRecord) {
         const byRecord = await ticketingApiClient.lookupProviderAndLocation({
           locationName: onRecord,

@@ -239,3 +239,55 @@ describe('the directory is down while we look up the record office', () => {
       .toBe(true);
   });
 });
+
+/**
+ * CODEX P1 ON 7fd040b — a same-named relative with a different birthday.
+ *
+ * The name guard cannot separate a parent and child who share a name, and it
+ * fires precisely when it is useless: the names match, so it passes. The
+ * filing input already carries the date of birth the TICKET is under, and it
+ * says outright that these are two different people.
+ *
+ * SCOPE, measured rather than asserted, because it decides how aggressive the
+ * check may be: 4,633 of 1,095,736 numbers in `patients_master` are shared AND
+ * carry a name collision — 0.42%. A check that misfires on ordinary calls to
+ * fix that would be a bad trade, which is why only an explicit, PARSEABLE
+ * conflict withholds the office.
+ */
+describe('a date of birth that contradicts the verified record', () => {
+  const withDob = (d: string) => ({ ...NO_OFFICE, date_of_birth: d });
+
+  async function fileWith(dob: string) {
+    const api = await client();
+    directoryKnowsOnly(api, ON_RECORD);
+    const create = vi.spyOn(api, 'createTicket')
+      .mockResolvedValue({ success: true, ticketNumber: 'VA-99007' } as never);
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Optical',
+      dateOfBirth: '1950-01-01', usualOffice: ON_RECORD, certain: true,
+    });
+    await runTool('file_optical_ticket', withDob(dob));
+    await runTool('file_optical_ticket', withDob(dob));
+    return create;
+  }
+
+  it('withholds the office — the son does not get the father routing', async () => {
+    const create = await fileWith('03/04/1972');
+    const payload = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.locationId).toBeUndefined();
+    // Still TAKEN, not lost: the unassigned exit is what catches it.
+    expect(payload.routingAskExhausted).toBe(true);
+  });
+
+  it('still routes when the SAME date arrives in a different format', async () => {
+    /**
+     * The trap this check could easily have become. The record holds
+     * "1950-01-01" and the model sends what the caller said. A string compare
+     * would call those different and switch the feature off for everyone, to
+     * fix 0.42% of numbers. Both sides are parsed instead.
+     */
+    const create = await fileWith('January 1, 1950');
+    expect((create.mock.calls[0][0] as unknown as Record<string, unknown>).locationId)
+      .toBe(RECORD_LOCATION_ID);
+  });
+});
