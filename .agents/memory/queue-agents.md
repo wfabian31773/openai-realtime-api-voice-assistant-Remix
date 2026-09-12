@@ -1,3 +1,17 @@
+> **RULE ZERO APPLIES TO EVERY LINE ON THIS PAGE — read
+> [`the-record-and-the-funnel.md`](the-record-and-the-funnel.md) first.**
+> It is binding and it supersedes anything below that contradicts it:
+> **(1)** a validated `patients_master` match, JOINED to `Schedule` on
+> `PersonID`, IS the record — carried forward into every tool and onto the
+> ticket, and nothing may ask for or gate on a field it already holds;
+> **(2)** when we cannot find them, FUNNEL — ask new-or-existing first, then
+> one field per question with the format named inside the question.
+>
+> **The queue lanes do not comply yet.** None of the four asks new-or-existing
+> (that question survives only in `rampEngine.ts`, which the OLD CORE imports
+> and the runtime does not), and the filing gates still refuse on fields the
+> record holds. Do not read anything below as evidence that they do.
+
 # Queue agents — one line, one subject, five tools
 
 The pattern behind Optical, Surgery Coordination and Clinical Tech Support, and

@@ -1,3 +1,145 @@
+# RULE ZERO — THE RECORD AND THE FUNNEL
+
+**Wayne, 2026-09-12. These two rules are BINDING. They SUPERSEDE everything
+else in this file, every other document in this repo, and every prompt.
+They are not guidance and they are not defaults. Do not design around them,
+do not "improve" them, do not weigh them against something else. If anything
+below contradicts them, the thing below is wrong and must be changed.**
+
+> *"This has to be binding. Like, this is my fucking rule. You don't go
+> against this rule. This must be done, like, ironclad. Like, do not break.
+> Forbidden."*
+
+---
+
+## RULE 1 — IF WE HAVE A MATCH, THE JOINED RECORD IS THE RECORD
+
+> *"We always always use — we always match on patient pre-context if we get a
+> match, right, on patient master. We validate. We go to join. That's our
+> record. That's the entire record. That solves every fucking problem that
+> we've had, every single one that we've been having. Wrong date of birth,
+> wrong this, wrong that. No location, no surgeon, no this, no that. That
+> solves every single thing. You have a complete record of the patient."*
+
+The order is fixed and there is no branch in it:
+
+1. **MATCH** on caller-ID pre-context against **`patients_master`**. Always.
+   Every call, every lane, before anything else.
+2. **VALIDATE** the match. A phone number is a candidate to CONFIRM, never an
+   identity (standing instruction 6) — several people share a number, and we
+   never pick between them. Validation is what turns a candidate into a match;
+   an unvalidated candidate is not a match and Rule 1 does not fire on it.
+3. **JOIN** to the schedule on **`PersonID`** the instant a match is
+   established.
+4. **THAT JOINED RECORD IS THE RECORD.** The whole thing. Date of birth,
+   office, provider, surgeon, visit history, contact details.
+5. **CARRY IT FORWARD AUTOMATICALLY**, for the rest of the call, into every
+   tool and onto the ticket. Nothing re-asks for a field the record already
+   holds, and nothing overwrites a field the record already holds.
+
+**It is the SOURCE OF TRUTH for that call.** When the record and anything else
+disagree — a model argument, a transcript guess, a CNAM lookup, a parser — the
+record wins.
+
+**WHAT THIS FORBIDS.** Once the record is in hand:
+
+- Asking the caller for their date of birth. **We have it.**
+- Refusing to file for a missing `date_of_birth`, `location`, `surgeon` or
+  office. **We have them.** A gate that refuses on a field the record holds is
+  a bug in the gate, not a missing answer from the caller.
+- Looking a caller up by name or phone STRINGS when we already hold their
+  `person_id`.
+- Treating the appointment book as the person base. `patients_master` says who
+  somebody is; `Schedule` says what happened to them. Two tables, one key.
+
+Every named gate loss in this file — the 75 date-of-birth refusals, the 21
+optical `location` refusals, the 14 surgery `surgeon` refusals — is a call
+where this rule was not applied. Wayne's claim is that the rule dissolves them
+rather than fixing them one at a time, and the evidence so far agrees: of 64
+callers the appointment book reported no record of, **52 (81%) have a full
+record on the join**, 51 of them with an office and 19 with an appointment
+already booked.
+
+---
+
+## RULE 2 — WHEN WE CANNOT FIND THEM, FUNNEL THE CALLER INTO THE ANSWER
+
+> *"To solve the edge cases is not so much about the coding. You can't solve
+> for every single edge case, because you can't anticipate what the caller is
+> gonna say — unless you guide the caller into what to say."*
+
+**Stop trying to parse whatever arrives. Ask the question that produces the
+shape you need.** This is the standing answer to every "the model sent nothing
+/ the parser refused it" defect, and it is cheaper and more reliable than any
+amount of extraction logic.
+
+### 2a. Ask new-or-existing FIRST, and let the answer close the branch
+
+> *"Are you a new patient or an existing patient? I'm a new patient — now I
+> know I don't need to look for you anymore. Now I know you're not gonna be
+> there. I'm not gonna need to find appointments. I'm an existing patient —
+> now I know I need to find you."*
+
+| answer | what it settles |
+|---|---|
+| **new** | **Stop looking.** No lookup, no appointment search, no "we have no record of you". A miss is now EXPECTED and is not a failure to report, retry or gate on. |
+| **existing** | **Find them, and keep going until you do.** A miss here is a real problem and Rule 2b is how you solve it. |
+
+**Do NOT ask it when Rule 1 already answered it.** A caller recognised from
+their phone number is an existing patient by definition — asking anyway tells
+them we do not know who they are while we are looking at their chart.
+`callFactsLedger.ts:138` already states this and it stays true.
+
+### 2b. One field per question, in the format we need it
+
+> *"If I need date of birth, I'm not gonna say 'name, date of birth'. No. I'm
+> gonna say: what's your first and last name? … Now your date of birth,
+> starting with the month, the day, and then the year."*
+
+Never bundle two fields into one breath. Ask for one thing, in the order that
+produces a clean answer, and **name the format inside the question**:
+
+```
+"What's your first and last name?"
+        <- one field, their own words
+"And your date of birth, starting with the month, then the day,
+ then the year."
+        <- the format is IN the question, so the answer arrives in it
+```
+
+### 2c. The general form, which is the whole point
+
+> *"Everything else that we need, we create a funnel towards — in the
+> questioning — towards that answer in the way that we need it. And then we
+> carry that forward. That's it. That's everything in a nutshell."*
+
+**For every field we need: shape the QUESTION so the answer arrives in the
+format the field requires, then carry the answer forward so it is never asked
+again.** Not a regex over whatever came back. Not a fallback chain. The
+question.
+
+---
+
+## COMPLIANCE — measured 2026-09-12, do not assume any of it
+
+**A rule written here is not a rule the code follows.** This table is the
+honest state; update it when it changes, and never quote the rule as if it
+were the behaviour.
+
+| | state |
+|---|---|
+| Rule 1 · match `patients_master` by phone | **PARTIAL.** `findByPhone` exists and is wired into `lookupPatient`'s LAST rung only (PR #292). Runtime caller-ID pre-context goes through `sage_precontext` over HTTP and **which table it reads is still UNSETTLED** — see instruction 14. Nobody was greeted by name on either pipeline on 2026-09-03. |
+| Rule 1 · validate before trusting | **YES.** `verifyPatient` / `findByPhone` refuse to choose between two people and report a candidate count. |
+| Rule 1 · join on `PersonID` | **BUILT, NOT DEPLOYED.** `ScheduleLookupService.lookupByPersonId`, PR #292. Index `idx_schedule_personid_apptdate` is live. |
+| Rule 1 · carry it forward into every tool and ticket | **NO — this is the largest open gap.** The gates still refuse on `date_of_birth`, `location` and `surgeon` for callers whose record holds all three. |
+| Rule 2a · ask new-or-existing | **MISSING FROM EVERY QUEUE LANE.** Zero hits in `opticalAgent`, `surgeryAgent`, `techAgent`, `recordsAgent`. It exists as `rampEngine.ts:60` (`classify`), and `rampEngine` is imported by **one** file — `voiceAgentRoutes.ts`, the OLD CORE. So the runtime lanes, which take the volume, do not ask it. Wayne asked whether we still had it; we do not, on the lanes that matter. |
+| Rule 2b · DOB asked in month/day/year parts | **YES, all four lanes** — `opticalAgent.ts:193`, `surgeryAgent.ts:203`, `techAgent.ts:189`, `recordsAgent.ts:192`, plus no-ivr and answering-service. |
+| Rule 2b · never two fields in one breath | **NO.** Records was observed asking for first and last name in one breath on 2026-09-03. |
+
+Full working notes: **`.agents/memory/the-record-and-the-funnel.md`**.
+
+---
+
 # READ THIS BEFORE YOU DO ANYTHING
 
 You are working with **Wayne** on the Azul Vision voice agents. Southern
@@ -2093,6 +2235,7 @@ Start there before debugging anything in these areas:
 
 | If you are about to… | Read first |
 |---|---|
+| **anything that touches identity, a gate, or an intake question** | **`the-record-and-the-funnel.md` — RULE ZERO, binding** |
 | debug "the agent won't call the tool" | `realtime-tool-schemas.md` |
 | build or change a queue agent | `queue-agents.md` |
 | file, route or classify a ticket | `ticketing-api-contract.md` |
