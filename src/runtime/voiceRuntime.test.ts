@@ -1626,3 +1626,100 @@ describe("the database outranks the code, but not on the copy a lane must say", 
     expect(chooseGreeting("optical", null, null)).toBe("");
   });
 });
+
+describe("Rule Zero 2a reaches the session, and stands down when Rule 1 answered", () => {
+  /**
+   * THE WIRING, not the function.
+   *
+   * `newOrExistingAsk.test.ts` proves `withNewOrExistingAsk` behaves. It would
+   * pass in full with the runtime never calling it — which is precisely how
+   * #291's office carry was found dead behind five green tests, and CLAUDE.md
+   * failure mode 10. These read the instructions the SESSION actually
+   * received, so deleting the call site fails them.
+   */
+  async function sessionInstructions(
+    over: Parameters<typeof harness>[0],
+    sid: string,
+  ): Promise<string> {
+    const h = await harness(over);
+    const answered = await post(h, "/voice/optical", { CallSid: sid, From: "+1", To: "+2" });
+    const { ws } = await openStream(h, sid, tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.created" } as GrokServerEvent);
+    await settle(4);
+    const update = h.transports[0].ofType("session.update")[0] as {
+      session: { instructions: string };
+    };
+    ws.close();
+    return update.session.instructions;
+  }
+
+  it("asks an UNRECOGNISED caller — the branch that is essentially every call today", async () => {
+    // Pre-context vouched for nobody on 0 of 143 substantive queue calls on
+    // 2026-09-03, so this is the live population, not the edge case.
+    const instructions = await sessionInstructions(
+      { fetchPrecontext: async () => ({ matched: false }) },
+      "CA2A1",
+    );
+    expect(instructions).toContain("new patient or an existing patient");
+    expect(instructions).toContain("STOP LOOKING");
+  });
+
+  it("asks when pre-context could not be reached at all", async () => {
+    // An unreachable lookup is not a recognition. Rule 1 did not answer, so
+    // Rule 2 has to.
+    const instructions = await sessionInstructions({}, "CA2A2");
+    expect(instructions).toContain("new patient or an existing patient");
+  });
+
+  it("does NOT ask a caller the person base recognised", async () => {
+    const instructions = await sessionInstructions(
+      { fetchPrecontext: async () => ({ matched: true, firstName: "Marisol" }) },
+      "CA2A3",
+    );
+    expect(instructions).not.toContain("new patient or an existing patient");
+  });
+
+  it("does NOT ask a recognised caller we have no NAME for", async () => {
+    // `AzulPrecontext` permits `{ matched: true }` with no usable name, and
+    // that person is still an existing patient Rule 1 answered for. Suppress
+    // on the MATCH, not on the name — keying this on `recognisedFirstName`
+    // would interrogate a recognised patient because we happened to have
+    // nothing to call them.
+    const instructions = await sessionInstructions(
+      { fetchPrecontext: async () => ({ matched: true }) },
+      "CA2A4",
+    );
+    expect(instructions).not.toContain("new patient or an existing patient");
+  });
+
+  it("composes with the greeting notice rather than replacing it", async () => {
+    // The two appends are independent and neither may swallow the other.
+    //
+    // This needs a lane that HAS a greeting: `withGreetingAlreadyPlayed`
+    // returns the prompt untouched when there is none, and the module-level
+    // `laneSource()` sets no greeting. The first version of this test used it
+    // anyway and failed on an absent notice that was correctly absent —
+    // asserting against a fixture rather than against the behaviour.
+    const withGreeting = laneSource({
+      greeting: "Thank you for calling Azul Vision. How may I help you?",
+    });
+
+    const unrecognised = await sessionInstructions(
+      { laneSource: withGreeting, fetchPrecontext: async () => ({ matched: false }) },
+      "CA2A5",
+    );
+    expect(unrecognised).toContain("ALREADY been spoken");
+    expect(unrecognised).toContain("new patient or an existing patient");
+
+    const recognised = await sessionInstructions(
+      {
+        laneSource: withGreeting,
+        fetchPrecontext: async () => ({ matched: true, firstName: "Marisol" }),
+      },
+      "CA2A6",
+    );
+    expect(recognised).toContain("ALREADY been spoken");
+    expect(recognised).not.toContain("new patient or an existing patient");
+  });
+});
