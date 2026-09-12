@@ -577,7 +577,114 @@ export class ScheduleLookupService {
       if (result.patientFound) return result;
     }
 
+    /**
+     * THE APPOINTMENT BOOK HAS SAID NOBODY. ASK THE PERSON BASE BEFORE GIVING UP.
+     *
+     * Every rung above reads `schedule` — the Operations Hub's appointment
+     * book — so a real patient with no appointment inside its window cannot be
+     * found, and from outside that failure looks random. Standing instruction
+     * 14: identity belongs to the Eye Care Patient Console.
+     *
+     * MEASURED 2026-09-12, ten days of queue calls, duration >= 30:
+     *   627 of 2,511 substantive calls (25.0%) ran this and found NOBODY
+     *     tech 277/1173 · surgery 158/638 · optical 122/501 · records 70/199
+     *   235 of those 627 ended with no ticket at all
+     *   of 330 distinct caller numbers behind them, 208 (63%) ARE in
+     *     patients_master — optical 76/100, tech 132/230
+     *
+     * DELIBERATELY LAST, AND THAT IS THE SAFETY PROPERTY. It runs only where
+     * this method already returned `emptyContext()`, so it can ADD a match and
+     * can never change one the schedule already made. Nothing above it moves,
+     * and the 1,214 calls that currently reach a certain match take exactly
+     * the path they take today.
+     *
+     * IT BRINGS NO HISTORY, and that is correct rather than a shortfall. These
+     * people have no appointments in the window — that is why the book missed
+     * them. `usual_office` stays empty, so optical still asks rather than
+     * routing on a guess. What this establishes is WHO, which is what the date
+     * of birth carry and the teardown sweep need.
+     *
+     * The risk here runs OPPOSITE to most of this file: the danger is
+     * verification becoming permissive, not strict. `findByPhone` and
+     * `verifyPatient` both refuse to choose between two people and report a
+     * candidate count instead — instruction 6, unchanged.
+     */
+    const fromMirror = await this.lookupInPersonBase({ phone, firstName, lastName, dateOfBirth });
+    // `identity` alone is a real answer: it is the AMBIGUOUS case, where the
+    // person base holds several people for this lookup. Returning only on
+    // `patientFound` discarded it and reported a plain "not found", which is
+    // the opposite of what the comment below it promises — caught by
+    // `lookupPersonBaseRung.test.ts` rather than by reading.
+    if (fromMirror.patientFound || fromMirror.identity) return fromMirror;
+
     return this.emptyContext();
+  }
+
+  /**
+   * Identity from `patients_master`, shaped as a context with no history.
+   *
+   * Ambiguity is reported, never resolved: `identity.unique` is false and
+   * `candidateCount` carries the number, so `lookup_patient` reports
+   * `identity_is_certain: false` exactly as it does for an ambiguous schedule
+   * hit, and no caller of this gets to treat a shared number as a person.
+   */
+  private async lookupInPersonBase(params: {
+    phone?: string;
+    firstName?: string;
+    lastName?: string;
+    dateOfBirth?: string;
+  }): Promise<PatientScheduleContext> {
+    const { phone, firstName, lastName, dateOfBirth } = params;
+    const { verifyPatient, findByPhone } = await import('./patientVerification');
+
+    // Name + date of birth first: it is the stronger claim, and it is the one
+    // the caller actually made out loud.
+    let matchedBy: 'phone' | 'name_and_dob' = 'name_and_dob';
+    let result =
+      firstName && lastName && dateOfBirth
+        ? await verifyPatient({ firstName, lastName, dob: dateOfBirth, callerPhone: phone })
+        : null;
+
+    if (!result || (!result.verified && result.reason !== 'ambiguous')) {
+      if (phone) {
+        const byPhone = await findByPhone(phone);
+        if (byPhone.verified || byPhone.reason === 'ambiguous') {
+          result = byPhone;
+          matchedBy = 'phone';
+        }
+      }
+    }
+
+    if (!result) return this.emptyContext();
+
+    if (!result.verified) {
+      if (result.reason !== 'ambiguous') return this.emptyContext();
+      // Somebody is here, but which one is not established. Say so; do not pick.
+      console.info(
+        `[ScheduleLookup] the person base holds ${result.candidates} people for this lookup — ` +
+          'reporting ambiguity rather than choosing',
+      );
+      return {
+        ...this.emptyContext(),
+        identity: { unique: false, candidateCount: result.candidates, candidates: [] },
+      };
+    }
+
+    const p = result.patient!;
+    console.info(
+      `[ScheduleLookup] the appointment book had nobody; the PERSON BASE identified this caller ` +
+        `by ${matchedBy} (no visit history in the window)`,
+    );
+    return {
+      patientFound: true,
+      patientName: `${p.firstName} ${p.lastName}`.trim(),
+      matchedBy,
+      upcomingAppointments: [],
+      pastAppointments: [],
+      totalAppointmentsFound: 0,
+      identity: { unique: true, candidateCount: 1, candidates: [] },
+      patientData: { firstName: p.firstName, lastName: p.lastName, dateOfBirth: p.dob },
+    };
   }
 
   private buildContext(rows: any[], matchedBy: 'phone' | 'name' | 'dob' | 'name_and_dob'): PatientScheduleContext {
