@@ -102,8 +102,28 @@ import { callEnvironment } from "./callRecord";
  * names — nothing makes it non-optional. Bumping this and not the table in
  * CLAUDE.md leaves the trap armed the other way round, so they move together.
  */
+/**
+ * v14, 2026-09-13: THE PCP QUEUE BECOMES A CHOICE — and it SKIPS v13 on
+ * purpose, which is the part to read before assuming a build is missing.
+ *
+ * #293 (RULE ZERO 2a, the new-or-existing ask) has claimed
+ * `voice-runtime-v13-new-or-existing-20260912` on its own branch since before
+ * this one existed. Two open branches carrying the same version would make two
+ * different builds indistinguishable at `/voice/health`, which is the single
+ * thing this constant exists to prevent — so this takes the next free number
+ * rather than the next sequential one. A gap in the sequence is readable; a
+ * collision is not. #293 still has to merge main and re-bump above whatever
+ * main then carries, exactly as CLAUDE.md already requires of it.
+ *
+ * WHY IT NEEDS A MARKER AT ALL: the change is invisible from outside except on
+ * a PCP call where somebody asks for a person, and its whole effect is that
+ * ONE outcome stops writing a ticket. A build without it files on every
+ * transfer; a build with it files on none of the accepted ones. "Did the
+ * publish take?" is therefore answerable only from here — reading the ticket
+ * table cannot distinguish "not deployed" from "every caller declined".
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v12-optical-office-20260912";
+  "voice-runtime-v14-pcp-queue-choice-20260913";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

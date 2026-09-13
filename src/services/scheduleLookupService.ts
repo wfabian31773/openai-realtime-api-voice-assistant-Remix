@@ -558,7 +558,11 @@ export class ScheduleLookupService {
     }
   }
 
-  async lookupByName(firstName: string, lastName: string): Promise<PatientScheduleContext> {
+  async lookupByName(
+    firstName: string,
+    lastName: string,
+    options: { logIdentifiers?: boolean } = {},
+  ): Promise<PatientScheduleContext> {
     try {
       const normalizedFirst = firstName.trim().toLowerCase();
       const normalizedLast = lastName.trim().toLowerCase();
@@ -578,7 +582,11 @@ export class ScheduleLookupService {
         return this.emptyContext();
       }
 
-      console.log(`[ScheduleLookup] Found ${appointments.length} appointments for ${firstName} ${lastName}`);
+      console.log(
+        options.logIdentifiers === false
+          ? `[ScheduleLookup] Found ${appointments.length} appointments for verified professional lookup`
+          : `[ScheduleLookup] Found ${appointments.length} appointments for ${firstName} ${lastName}`,
+      );
       return this.buildContext(appointments, 'name');
       
     } catch (error) {
@@ -783,11 +791,24 @@ export class ScheduleLookupService {
      * the join falls back to its own relative deadline.
      */
     deadlineAt?: number;
+    /**
+     * Keep the caller's name and date of birth OUT of the console.
+     *
+     * The book rungs below log `<first> <last> (DOB: <dob>)` by default, which
+     * is right on a patient line where the log is the only trace of who was
+     * asked about — and wrong on the PCP line, whose own tool has passed
+     * `logIdentifiers: false` since it was written because the subject of the
+     * lookup is a THIRD PARTY the caller named. Undefined keeps today's
+     * behaviour for every existing caller; only a caller that asks gets the
+     * quieter line.
+     */
+    logIdentifiers?: boolean;
   }): Promise<PatientScheduleContext> {
-    const { phone, firstName, lastName, dateOfBirth, deadlineAt } = params;
+    const { phone, firstName, lastName, dateOfBirth, deadlineAt, logIdentifiers } = params;
+    const logging = { logIdentifiers };
 
     if (firstName && lastName && dateOfBirth) {
-      const result = await this.lookupByNameAndDOB(firstName, lastName, dateOfBirth);
+      const result = await this.lookupByNameAndDOB(firstName, lastName, dateOfBirth, logging);
       if (result.patientFound) return result;
     }
 
@@ -797,7 +818,7 @@ export class ScheduleLookupService {
     }
 
     if (firstName && lastName) {
-      const result = await this.lookupByName(firstName, lastName);
+      const result = await this.lookupByName(firstName, lastName, logging);
       if (result.patientFound) return result;
     }
 

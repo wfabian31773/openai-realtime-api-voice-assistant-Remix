@@ -26,6 +26,7 @@ import {
 import { refusePcp } from '../pcp/refusals';
 import { asksForAPerson } from '../pcp/explicitAsk';
 import { preTransferGaps, preTransferQuestion } from '../pcp/preTransferIntake';
+import { QUEUE_CHOICE_WARNING, readQueueChoice, suppressesTicket } from '../pcp/queueChoice';
 import {
   deliveryAskFor,
   isRecordsRequest,
@@ -299,18 +300,23 @@ more than a few seconds for any reason, say "Still with you — one moment."
 # CONNECTING SOMEONE TO A PERSON
 Only the director decides whether a transfer is available. When it is and they
 ask to be put through — a representative, a person, the team — call
-handoff_to_pcp on that turn, not after one more question. It files before
-dialling, so waiting only makes them ask twice. Never weigh a transfer against
-taking the request.
+handoff_to_pcp on that turn, not after one more question. Never weigh a
+transfer against taking the request.
 
-SAY NOTHING BEFORE THIS ONE TOOL. It speaks for itself: the caller is told they
-are being put through, that we cannot promise the wait, and that their details
-are recorded. Anything you say first is cut off when the line moves.
+THE FIRST CALL ASKS THEM TO CHOOSE and hands you the line to say. Say it, then
+call handoff_to_pcp again with callerAcceptedQueue — true to connect them,
+false if they would rather you took it. Never guess it; if they will not
+choose, call again without it.
 
+Yes means the queue, no ticket and nothing kept: do not warn them twice. No
+means no transfer on this call — collect what is missing and file with
+create_pcp_task.
+
+SAY NOTHING BEFORE THE SECOND CALL; it moves the line and cuts you off mid-word.
 Never promise you will stay with them, and never promise HOW they are reached —
 one person, several, or a queue is a configuration decision. If the tool says it
-did not go through, say exactly that and confirm their request is already
-recorded. Never say somebody answered unless they did.
+did not go through, say exactly that; their request is recorded in that case.
+Never say somebody answered unless they did.
 
 # MEDICAL RECORDS
 Use handle_patient_medical_records_request ONLY when the caller explicitly asks
@@ -522,6 +528,19 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
    * caller answers.
    */
   let preTransferAskUsed = false;
+  /**
+   * THE QUEUE CHOICE HAS BEEN PUT TO THIS CALLER, once, in words.
+   *
+   * A latch and not a parameter read, because it is what makes an acceptance
+   * mean anything. `callerAcceptedQueue: true` on the FIRST invocation is a
+   * model asserting consent from a caller who was never warned — and this is
+   * the one place where consent buys the caller a worse outcome (their request
+   * is filed nowhere). So the first attempt always speaks the warning and
+   * always returns; only the attempt after it can reach the queue.
+   *
+   * Per call, like every other budget here, so it cannot leak between callers.
+   */
+  let queueChoiceOffered = false;
 
   // Tool timeline. The fleet got this on 2026-08-01; the PCP agent was added
   // on 08-03 and never inherited it, so on 08-06 all 167 PCP calls recorded
@@ -654,12 +673,38 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const access = classifyPcpToolAccess(state.callPurpose, state.verificationStatus);
       if (!access.allowed || access.source !== 'scheduling') return refusePcp(access.allowed ? 'scheduling_not_allowed' : access.reason);
       try {
-        const context = await scheduleLookupService.lookupByNameAndDOB(
-          patient.patientFirstName,
-          patient.patientLastName,
-          patient.patientDob,
-          { logIdentifiers: false },
-        );
+        /**
+         * RULE ZERO ON THIS LANE. `lookupByNameAndDOB` is ONE RUNG — the
+         * Operations Hub appointment book, matched on name and date-of-birth
+         * STRINGS. A real patient with no appointment inside its window cannot
+         * be found by it, and the failure looks random from outside
+         * (standing instruction 14).
+         *
+         * `lookupPatient` runs that same rung FIRST, so a book hit answers
+         * exactly as it does today and nothing that works today changes. What
+         * it adds is the tail #292 built: when every book rung returns
+         * `emptyContext()`, the PERSON BASE (`patients_master`) is asked, and
+         * a match there is joined to `Schedule` on `PersonID` — identity from
+         * the mirror, history from the book, one key.
+         *
+         * WHY NO `phone`. `lookupPatient` accepts one, and passing the
+         * caller's would be wrong here in a way that is easy to miss: on this
+         * line the caller is a PROFESSIONAL and the lookup is about SOMEBODY
+         * ELSE. A medical assistant who is also an Azul patient would match
+         * herself and we would answer a question about the wrong person. The
+         * patient's identity is the only thing that may key this lookup, so
+         * only the three patient fields are passed. Do not add the phone.
+         */
+        const context = await scheduleLookupService.lookupPatient({
+          firstName: patient.patientFirstName,
+          lastName: patient.patientLastName,
+          dateOfBirth: patient.patientDob,
+          // Unchanged from the call this replaced. The book rungs log the
+          // subject's name and date of birth by default; on this line the
+          // subject is a third party the caller named, so they stay out of
+          // the console exactly as they did before.
+          logIdentifiers: false,
+        });
         pcpDirector.recordToolSuccess(callId, 'scheduling');
         return {
           success: true,
@@ -1015,8 +1060,20 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
   const handoff = recordedTool({
     name: 'handoff_to_pcp',
     description: 'Create the required durable PCP ticket, then dial the configured PCP human queue. If transfer fails, update the same ticket as the fallback task.',
-    parameters: z.object({ narrative: z.string().min(1).max(12000), urgency: z.enum(['normal', 'high', 'urgent']).default('high') }),
-    execute: async ({ narrative, urgency }) => {
+    parameters: z.object({
+      narrative: z.string().min(1).max(12000),
+      urgency: z.enum(['normal', 'high', 'urgent']).default('high'),
+      /**
+       * WHAT THE CALLER SAID WHEN WE OFFERED THEM THE CHOICE.
+       *
+       * Optional, and its absence is meaningful rather than neutral — see
+       * `readQueueChoice`. Send it only after the caller has actually heard
+       * the warning and answered it; the tool speaks the warning itself on the
+       * first attempt and will not read this field then.
+       */
+      callerAcceptedQueue: z.boolean().optional(),
+    }),
+    execute: async ({ narrative, urgency, callerAcceptedQueue }) => {
       const { state, missing } = ticketState(callId);
       // An explicit request to be CONNECTED to a person. Deliberately narrow:
       // "caller from the front desk asking about a referral" is not a request
@@ -1072,6 +1129,75 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         });
       }
       /**
+       * THE QUEUE IS A CHOICE, NOT A DESTINATION. Operator ruling, 2026-09-13.
+       *
+       *   "For anyone that requests to speak to a representative, that should
+       *    trigger the warning... We Will Not create tickets for anyone that
+       *    chooses to be transferred. if they drop off, their record is lost.
+       *    Their choice. If they accept, we transfer them to the queue, if they
+       *    want to continue, we create a ticket with all the information
+       *    needed."
+       *
+       * PLACED AFTER THE ELIGIBILITY CHECK, for the reason the pre-transfer
+       * intake is: offering a choice we cannot honour is worse than not
+       * offering it. A caller the director will not transfer must not be asked
+       * to pick the queue and then told no.
+       *
+       * PLACED BEFORE THE PRE-TRANSFER INTAKE, because the choice decides
+       * whether there is a transfer to prepare for at all. Asking for a name
+       * and a callback number and only then asking "did you want to be
+       * connected?" spends a round on a caller who was about to decline, and
+       * on the accept path it spends it on a briefing nobody will read.
+       *
+       * WHAT THIS COSTS THE ACCEPTING CALLER: one extra turn. They hear the
+       * choice, say connect me, and are then asked the one intake question
+       * before the dial. Whether that second question should be dropped on the
+       * accept path — the warning has just told them nothing carries over, so
+       * asking for their name immediately after is arguably incoherent — is a
+       * question for the operator, not a decision to take here. The 2026-09-08
+       * "one round then transfer anyway" ruling is left standing verbatim.
+       *
+       * THREE OUTCOMES, AND ONLY TWO OF THEM ARE NEW:
+       *
+       *   accepted          hand them over, file NOTHING. The only path that
+       *                     dials with the request recorded nowhere, and the
+       *                     only one that needs the durability gate relaxed.
+       *   declined          no dial. Back to the intake; create_pcp_task files
+       *                     it with its own readiness rules behind it.
+       *   not_established   EXACTLY TODAY'S BEHAVIOUR — file, then dial.
+       *
+       * That third row is the safety property of this whole change. The new
+       * rule only ever fires on words the caller actually said; anything
+       * vague, anything the model failed to bring back, and anything after a
+       * wandered-off turn falls through to the proven path. So the only way to
+       * lose the ticket is an explicit yes, and the only way to lose the dial
+       * is an explicit no.
+       */
+      /**
+       * SCOPED TO A CALLER WHO ASKED, because that is what the ruling says:
+       * *"for anyone that requests to speak to a representative."*
+       *
+       * `handoffEligible` is wider than the ask — `eligibleByAsk ||` a purpose
+       * whose default disposition is HAND_OFF with a complete intake, which
+       * dials somebody who never requested a person. Offering that caller a
+       * choice would be inventing procedure, and honouring their yes would
+       * suppress a ticket the operator never said to suppress. They keep
+       * today's path untouched.
+       *
+       * The same latched `askedForAPerson` the rest of this tool reads, not a
+       * fresh look at this turn's narrative — for the reason recorded above
+       * it: the model comes back describing the ANSWER, not the original ask.
+       */
+      const choice = askedForAPerson ? readQueueChoice(callerAcceptedQueue) : 'not_established';
+      if (askedForAPerson && !queueChoiceOffered) {
+        queueChoiceOffered = true;
+        return refusePcp('queue_choice', { say: QUEUE_CHOICE_WARNING });
+      }
+      if (choice === 'declined') {
+        console.info(`[PCP] the caller chose to have it taken here rather than hold for the queue (${callId})`);
+        return refusePcp('queue_choice_declined');
+      }
+      /**
        * ONE ROUND OF INTAKE, THEN THE DIAL — WHATEVER THEY SAID.
        *
        * Operator ruling, 2026-09-08: "the ask wins, one round then transfer
@@ -1095,7 +1221,35 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * src/pcp/preTransferIntake.ts for why one turn beats three, and why the
        * patient's name is deliberately not on the list.
        */
-      if (!preTransferAskUsed) {
+      /**
+       * AND A CALLER WHO SAID YES IS NOT ASKED ANYTHING ELSE. Operator,
+       * 2026-09-13: *"they asked for a person, get them to a person."*
+       *
+       * This narrows the 2026-09-08 "one round then transfer anyway" ruling
+       * to the paths where the round still buys something, and it does so on
+       * the operator's word rather than on my reading of the transport.
+       *
+       * WHY THE ROUND IS EMPTY ON THIS PATH. It exists to fill the briefing
+       * the staffer hears and the ticket the request lands on. A caller who
+       * chose the queue gets neither: nothing is filed by rule, and a blind
+       * redirect briefs nobody. Worse, the sentence immediately before it has
+       * just told them that what we have gone over does not carry over — so
+       * asking for their name straight afterwards contradicts the warning we
+       * made them listen to, in the same breath.
+       *
+       * WHAT IT COSTS, and where the cost is paid instead: if the queue then
+       * fails to answer, the fallback ticket carries less than it would have.
+       * That is the right place to ask, because it is the first moment a
+       * ticket is actually going to exist — and `handoff_no_answer`'s guidance
+       * already tells the model to confirm the callback number and collect
+       * what is missing. `callbackNumber` is seeded from caller ID before
+       * anyone speaks, so the fallback is not blind even before that.
+       *
+       * Every other path — declined, unclear, no answer, and a transfer the
+       * caller never asked for — still gets the round, unchanged.
+       */
+      const transferWithoutATicket = suppressesTicket(choice);
+      if (!transferWithoutATicket && !preTransferAskUsed) {
         const question = preTransferQuestion(preTransferGaps(state));
         if (question) {
           preTransferAskUsed = true;
@@ -1111,9 +1265,20 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const handoffState = state.callPurpose
         ? state
         : { ...state, callPurpose: 'service_inquiry' as const };
-      const initial = await submitPcpTicket(buildPayload(metadata, handoffState, 'HAND_OFF', narrative, urgency, {
-        requested: true, requestedAt, attempted: false, finalStatus: 'REQUESTED',
-      }, undefined, missing));
+      /**
+       * NO PRE-DIAL TICKET WHEN THE CALLER CHOSE THE QUEUE.
+       *
+       * `initial` is `undefined` on exactly that path and defined on every
+       * other, which is what the gate below reads. Deliberately not a boolean
+       * beside a ticket that was written anyway: the promise the operator made
+       * is that no ticket exists, so the honest encoding is an absent write,
+       * not a suppressed flag.
+       */
+      const initial = transferWithoutATicket
+        ? undefined
+        : await submitPcpTicket(buildPayload(metadata, handoffState, 'HAND_OFF', narrative, urgency, {
+            requested: true, requestedAt, attempted: false, finalStatus: 'REQUESTED',
+          }, undefined, missing));
       /**
        * THE PRECONDITION IS "THE REQUEST IS ON RECORD" — NOT "THIS WRITE
        * RETURNED 200". CAa37f1a42, 2026-09-04 16:11.
@@ -1183,14 +1348,33 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         console.warn(`[PCP] the call has ended — NOT dialling (${callId})`);
         return refusePcp('durable_ticket_required_before_handoff');
       }
-      if (!initial.success && !requestIsOnRecord) {
+      if (initial && !initial.success && !requestIsOnRecord) {
         return refusePcp('durable_ticket_required_before_handoff');
       }
-      if (!initial.success) {
+      if (initial && !initial.success) {
         console.warn(
           `[PCP] handoff ticket write failed but the request is already durable (${state.dispositionRecorded}) — dialling`,
         );
       }
+      /**
+       * THE INVARIANT NOW HAS A SECOND SATISFIER, AND ONLY ONE.
+       *
+       * The gate above exists so we never dial a caller whose request is
+       * recorded nowhere — CAa37f1a42, where a coordinator was told "give me
+       * one moment while I connect you" and connected to nobody, with the
+       * refusal reading its own failed write instead of the invariant. That
+       * invariant is unchanged for every caller who did not choose the queue:
+       * `initial` is defined for them, so both branches above still run.
+       *
+       * What the operator's ruling changes is not the invariant but who it
+       * protects. A caller on this path was told, in the turn immediately
+       * before, that nothing we have gathered goes with them — and chose it.
+       * "Their choice" is the whole ruling, and a choice needs to have been
+       * offered: `queueChoiceOffered` is a latch that always returns on the
+       * first attempt, so there is no reachable path where `accepted` is read
+       * from a caller who never heard the warning. That structure, not the
+       * model's word, is what makes this safe.
+       */
 
       escalationDetailsMap.set(callId, {
         agentSlug: 'pcp',
@@ -1233,13 +1417,52 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
          * unanswered. The test named for it guards that shape.
          */
         briefingGaps: preTransferGaps(state),
+        /**
+         * FALSE BY DESIGN ON AN ACCEPTED TRANSFER, not by failure.
+         *
+         * The pair reads "we asked, and this is what we still did not get".
+         * On the queue-choice accept path we deliberately do not ask, so this
+         * is false and `briefingGaps` is full — which is the intended shape,
+         * not a round that misfired. Anyone measuring "does one round fill the
+         * briefing?" (the 2026-09-08 telemetry ask) must exclude those calls
+         * rather than score them as empty answers; they are absent from the
+         * population, not zeroes in it.
+         */
         askedBeforeDial: preTransferAskUsed,
         /** The one field the operator named first, and the one never sent. */
         callerName: state.callerName,
       });
       const attemptedAt = new Date().toISOString();
+      /**
+       * ARM THE SWEEP EXEMPTION BEFORE THE DIAL, BECAUSE THE RACE IS THE DIAL.
+       *
+       * On the blind path `redirectCallerToQueue` ends the Media Stream, so
+       * teardown starts while this await is still outstanding —
+       * `voiceAgentRoutes.ts` marks the call ended and eventually reaches
+       * `sweepPcpUnfiledCall`. None of that sweep's existing exits catch this
+       * caller: no disposition is recorded (that is the promise), and
+       * `handoffStatus` is not `CONNECTED` and never will be, because a queue
+       * is not a person. It would file "CALLER HUNG UP BEFORE THE REQUEST WAS
+       * COMPLETE" for the one caller we undertook not to file for.
+       *
+       * Setting it after the dial would lose that race every time the redirect
+       * is fast, which is the normal case.
+       */
+      if (transferWithoutATicket) pcpDirector.setCallerChoseTheQueue(callId, true);
       const outcome = await handoffCallback();
       const ok = Boolean(outcome && outcome.ok);
+      /**
+       * A DIAL THAT NEVER LANDED RE-ARMS THE SWEEP, AND OWES THEM A TICKET.
+       *
+       * "If they drop off, their record is lost — their choice" is about a
+       * caller who LEFT. It is not about a caller still on the line because
+       * the queue did not answer: their choice was the queue, and they did not
+       * get it. So a failed dial withdraws the exemption, the fallback write
+       * below files the CREATE_TASK, and `handoff_no_answer` — whose copy says
+       * "I have your request recorded" — becomes true again rather than the
+       * broken promise this line keeps being corrected for.
+       */
+      if (transferWithoutATicket && !ok) pcpDirector.setCallerChoseTheQueue(callId, false);
       /**
        * A BLIND TRANSFER IS NOT A CONNECTION, and the ticket must not claim
        * one. Rosa's design, approved 2026-09-08: the PCP caller is put into
@@ -1272,25 +1495,53 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const finalState = rawFinalState.callPurpose
         ? rawFinalState
         : { ...rawFinalState, callPurpose: 'service_inquiry' as const };
-      const updated = await submitPcpTicket(buildPayload(metadata, finalState, finalDisposition, narrative, urgency, {
-        requested: true,
-        requestedAt,
-        attempted: true,
-        attemptedAt,
-        // Recorded whether or not it connected. A failed transfer with no
-        // destination is an unanswerable question later; see HandoffOutcome.
-        destination: outcome ? outcome.destination : undefined,
-        humanAnswerStatus: handedToQueue ? 'TRANSFERRED_TO_QUEUE' : finalStatus,
-        connectedAt: ok && !handedToQueue ? new Date().toISOString() : undefined,
-        finalStatus,
-        failureReason: outcome && !outcome.ok ? outcome.reason : undefined,
-        fallbackTicketStatus: ok ? undefined : 'OPEN',
-      }, outcome && !outcome.ok ? outcome.reason : undefined, finalMissing));
-      if (updated.success) pcpDirector.recordDisposition(callId, finalDisposition);
+      /**
+       * THE PROMISE IS KEPT HERE, and this is the line that keeps it.
+       *
+       * A successful hand-over on the caller's own choice writes NO ticket at
+       * all — not the pre-dial one, not this one. Every other combination
+       * still writes: a failed dial files the CREATE_TASK fallback (see the
+       * withdrawal above), and a caller who never chose the queue is on the
+       * unchanged path.
+       *
+       * WHAT THIS COSTS, and it is not small: an accepted transfer becomes
+       * INVISIBLE IN `tickets`. `tickets.pcp_handoff_*` is the only working
+       * instrument for PCP transfers today — CLAUDE.md says to measure them
+       * from there and never from `call_logs` — so the baseline this line was
+       * measured against (72 attempted, 12 reached a human) cannot be
+       * continued across this change for the accepted arm. What is left is
+       * `recordHandoffResult` on the director, the console line below, and
+       * Twilio's own `<Dial action>` callback via `blindTransferDialResult`.
+       * Flagged for the operator rather than worked around here: filing a
+       * shadow ticket to keep the metric would be the ticket he said not to
+       * file.
+       */
+      const updated = transferWithoutATicket && ok
+        ? undefined
+        : await submitPcpTicket(buildPayload(metadata, finalState, finalDisposition, narrative, urgency, {
+            requested: true,
+            requestedAt,
+            attempted: true,
+            attemptedAt,
+            // Recorded whether or not it connected. A failed transfer with no
+            // destination is an unanswerable question later; see HandoffOutcome.
+            destination: outcome ? outcome.destination : undefined,
+            humanAnswerStatus: handedToQueue ? 'TRANSFERRED_TO_QUEUE' : finalStatus,
+            connectedAt: ok && !handedToQueue ? new Date().toISOString() : undefined,
+            finalStatus,
+            failureReason: outcome && !outcome.ok ? outcome.reason : undefined,
+            fallbackTicketStatus: ok ? undefined : 'OPEN',
+          }, outcome && !outcome.ok ? outcome.reason : undefined, finalMissing));
+      if (updated?.success) pcpDirector.recordDisposition(callId, finalDisposition);
+      if (transferWithoutATicket && ok) {
+        console.info(
+          `[PCP] handed to the queue on the caller's own choice — no ticket, by design (${callId}, ${finalStatus})`,
+        );
+      }
       const settled = {
         handoffStatus: finalStatus,
-        ticketNumber: initial.ticketNumber ?? updated.ticketNumber,
-        fallbackRecorded: updated.success,
+        ticketNumber: initial?.ticketNumber ?? updated?.ticketNumber,
+        fallbackRecorded: Boolean(updated?.success),
       };
       if (ok) return { success: true, ...settled };
       /**
@@ -1567,6 +1818,27 @@ export async function sweepPcpUnfiledCall(callId: string): Promise<void> {
      */
     if (state.handoffStatus === 'CONNECTED') {
       console.info(`[PCP] SWEEP: ${callId} connected to a person — nothing to file`);
+      return;
+    }
+    /**
+     * NOR IS A CALLER WHO CHOSE THE QUEUE, and this one needs its own exit.
+     *
+     * Operator ruling, 2026-09-13: no ticket for anyone who chooses to be
+     * transferred, and if they drop off their record is lost — their choice.
+     * Neither exit above reaches them. There is no disposition, because not
+     * filing IS the ruling; and `handoffStatus` is `DIALING`, not `CONNECTED`,
+     * because on a blind transfer nothing ever observes a human answering.
+     *
+     * So without this the safety net would break the promise the rule makes,
+     * a second or two after the rule kept it — and it would break it with the
+     * worst possible wording, telling a staffer the caller hung up before
+     * finishing when in fact they are in the queue where they asked to be.
+     *
+     * `handoff_to_pcp` withdraws the flag if the dial fails, so a caller whose
+     * transfer never happened still falls through to the filing below.
+     */
+    if (state.callerChoseTheQueue) {
+      console.info(`[PCP] SWEEP: ${callId} chose the live queue over a ticket — nothing to file, by design`);
       return;
     }
 

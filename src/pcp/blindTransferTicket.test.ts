@@ -82,11 +82,44 @@ vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient:
 
 const { createPcpAgent } = await import('../agents/pcpAgent');
 
+/**
+ * SPEND THE QUEUE-CHOICE TURN, so these tests keep asserting what they are for.
+ *
+ * Operator ruling 2026-09-13 put a question in front of every transfer a
+ * caller ASKED for: the first `handoff_to_pcp` speaks the warning and returns,
+ * and only the attempt after it can dial. That is one extra round-trip in
+ * front of every sequence in this file, and none of the behaviour these tests
+ * cover — the ticket's shape, the briefing, the words after a failed dial —
+ * changed with it.
+ *
+ * So the turn is spent here rather than by editing forty call sites, which is
+ * where a real assertion quietly becomes a vacuous one. It is spent PRECISELY:
+ * only a `queue_choice` refusal is swallowed, and anything else comes straight
+ * back, so a caller who was never offered the choice (a policy-driven HAND_OFF
+ * with no ask) is not silently double-dialled.
+ *
+ * The re-invocation carries no `callerAcceptedQueue`, which reads as "not
+ * established" — the branch that keeps the pre-ruling behaviour exactly:
+ * file, then dial. That is the behaviour these files were written against.
+ *
+ * The choice itself is owned by `queueIsAChoice.test.ts`, mutation-proven
+ * there against eight mutations. It is deliberately not re-asserted here.
+ */
+const queueChoiceSpent = new WeakSet<object>();
+
 async function call(agent: any, name: string, args: Record<string, unknown> = {}) {
   const t = agent.tools.find((x: any) => x.name === name);
   expect(t, `${name} is not on the agent`).toBeTruthy();
-  const raw = await t.invoke({}, JSON.stringify(args));
-  return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  const invoke = async () => {
+    const raw = await t.invoke({}, JSON.stringify(args));
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  };
+  if (name === 'handoff_to_pcp' && !queueChoiceSpent.has(agent)) {
+    queueChoiceSpent.add(agent);
+    const offered = await invoke();
+    if (offered?.error !== 'queue_choice') return offered;
+  }
+  return invoke();
 }
 
 let n = 0;
