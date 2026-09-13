@@ -40,6 +40,28 @@ export interface PcpConversationState {
    */
   callerRequestedHuman?: boolean;
   /**
+   * THE CALLER WAS WARNED AND CHOSE THE QUEUE, so no ticket is coming.
+   *
+   * Operator ruling, 2026-09-13: *"We Will Not create tickets for anyone that
+   * chooses to be transferred. if they drop off, their record is lost. Their
+   * choice."*
+   *
+   * This exists for ONE reader — `sweepPcpUnfiledCall`. On the blind path the
+   * redirect ends the media stream, so teardown begins while `handoff_to_pcp`
+   * is still awaiting its dial. The sweep's own early exits do not cover this
+   * caller: no disposition was recorded (that is the point), and
+   * `handoffStatus` is not yet `CONNECTED` (it never will be — a queue is not
+   * a person). Without this flag the sweep would file "CALLER HUNG UP BEFORE
+   * THE REQUEST WAS COMPLETE" for exactly the caller we promised not to file
+   * for, and the promise would be broken by the safety net rather than by the
+   * rule.
+   *
+   * Set BEFORE the dial, not after, because the race is with the dial itself.
+   * Cleared again if the dial fails, which re-arms the sweep — a caller whose
+   * transfer never happened is owed the ticket after all.
+   */
+  callerChoseTheQueue?: boolean;
+  /**
    * THE CALLER IS THE PATIENT, and it stays true once established.
    *
    * `callPurpose` is not safe to read for this. The records tool reclassifies
@@ -252,6 +274,16 @@ export class PcpDirector {
   /** Record that the caller explicitly asked to speak to a person. */
   markCallerRequestedHuman(callId: string): void {
     this.get(callId).callerRequestedHuman = true;
+  }
+
+  /**
+   * Record — or withdraw — the caller's choice of the live queue over a ticket.
+   *
+   * Takes an explicit value rather than latching, because this one has to be
+   * reversible: it is set before the dial and withdrawn if the dial fails.
+   */
+  setCallerChoseTheQueue(callId: string, chose: boolean): void {
+    this.get(callId).callerChoseTheQueue = chose;
   }
 
   clear(callId: string): void {

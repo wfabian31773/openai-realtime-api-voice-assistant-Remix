@@ -184,6 +184,49 @@ export const PCP_REFUSALS: Record<string, RefusalCopy> = {
       'do not ask for the patient, and do not ask a second time in different words.',
   },
 
+  /**
+   * THE WARNING BECAME A QUESTION. Operator ruling, 2026-09-13.
+   *
+   * Rosa's 09-08 design put the wait warning in the TwiML, which plays AFTER
+   * the redirect has already begun and the Media Stream is gone — so the
+   * caller heard it with no way to answer. It was an announcement. This is the
+   * same content asked as a question, in the agent's own turn, before anything
+   * is filed or dialled.
+   *
+   * The `say` line is supplied by the call site from `QUEUE_CHOICE_WARNING`
+   * so the wording lives in one place next to the ruling that produced it.
+   *
+   * WHAT THE GUIDANCE MUST NOT DO is let the model answer on the caller's
+   * behalf. Only a spoken yes goes to the queue; the tool treats a missing
+   * answer as "not established" and keeps today's behaviour, which files.
+   */
+  queue_choice: {
+    guidance:
+      'NOT AN ERROR — say nothing about a system, a problem, or a requirement. The caller asked for a person and ' +
+      'they are entitled to one; this is the choice we owe them first. Say the line above, then call handoff_to_pcp ' +
+      'again with callerAcceptedQueue set to what they actually said: true if they want to be connected, false if ' +
+      'they would rather you took it here. Do NOT guess, do not leave it out because they were vague, and do not ' +
+      'ask twice — if they will not choose, call handoff_to_pcp again without the field and it will be handled.',
+  },
+
+  /**
+   * They heard the warning and chose to have it taken here. No dial.
+   *
+   * Deliberately does NOT file a ticket at this point. "If they want to
+   * continue, we create a ticket with all the information needed" — filing
+   * from here would file it with whatever we happen to hold, which is the
+   * 27-second ticket of CA7a5f2bfa all over again. The model goes back to the
+   * intake and `create_pcp_task` applies its own readiness rules, with
+   * `sweepPcpUnfiledCall` behind it if the caller drops.
+   */
+  queue_choice_declined: {
+    guidance:
+      'NOT AN ERROR — say nothing about a system or a problem, and do not mention the transfer again. The caller ' +
+      'chose to have you take the request rather than hold for the queue, so there will be no transfer on this ' +
+      'call. Thank them, collect what is still missing for the request, and file it with create_pcp_task. Do NOT ' +
+      'call handoff_to_pcp again unless the caller themselves asks to be connected after all.',
+  },
+
   handoff_no_answer: {
     say: "I wasn't able to get someone on the line just now, but I have your request recorded and the team will follow up with you.",
     guidance:
