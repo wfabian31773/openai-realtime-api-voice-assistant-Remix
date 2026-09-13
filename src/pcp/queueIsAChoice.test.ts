@@ -186,6 +186,76 @@ describe('an explicit yes: the queue, and no ticket', () => {
   });
 });
 
+describe('a caller who said yes is asked nothing else', () => {
+  /**
+   * Operator, 2026-09-13: *"they asked for a person, get them to a person."*
+   *
+   * THE SETUP IS THE WHOLE TEST. `INTAKE` above fills callerName, callerRole
+   * and callPurpose, which are exactly `preTransferGaps`' three fields — so
+   * with it the pre-transfer question never fires and this passes whatever
+   * the code does. It has to be a BARE ask with no intake at all, which
+   * `eligibleByAsk` permits (it carries no field requirement), so all three
+   * gaps are open and the question WOULD fire on any other path.
+   *
+   * That is not hypothetical: the first version of the accept test above used
+   * INTAKE and was green before this behaviour existed and after it. The
+   * distinguishing case is here.
+   */
+  it('skips the pre-transfer intake and dials on the answer', async () => {
+    const dial = vi.fn(QUEUE_OK);
+    const { agent } = freshCall(dial);
+
+    const offered = await call(agent, 'handoff_to_pcp', { narrative: ASKED });
+    expect(offered.say).toBe(QUEUE_CHOICE_WARNING);
+
+    const r = await call(agent, 'handoff_to_pcp', {
+      narrative: 'Caller said to connect them.',
+      callerAcceptedQueue: true,
+    });
+
+    expect(
+      r.error,
+      'the warning just told them nothing carries over — asking for their name next contradicts it',
+    ).not.toBe('pre_transfer_intake');
+    expect(r.success).toBe(true);
+    expect(dial).toHaveBeenCalledTimes(1);
+    expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
+  });
+
+  /**
+   * THE CONTROL, and it is what stops the test above from being a claim about
+   * the intake round in general. Same bare ask, same open gaps, no explicit
+   * yes — the round still fires. The 2026-09-08 "one round then transfer
+   * anyway" ruling is narrowed to the accept path, not removed.
+   */
+  it('but an unanswered choice still gets the one round', async () => {
+    const dial = vi.fn(QUEUE_OK);
+    const { agent } = freshCall(dial);
+
+    await call(agent, 'handoff_to_pcp', { narrative: ASKED });
+    const r = await call(agent, 'handoff_to_pcp', { narrative: 'Caller said something unclear.' });
+
+    expect(r.error).toBe('pre_transfer_intake');
+    expect(r.say, 'the one round asks for what the briefing is missing').toBeTruthy();
+    expect(dial).not.toHaveBeenCalled();
+  });
+
+  /** And a decline never reaches the round either — there is no transfer to prepare. */
+  it('and a decline does not get it, because nothing is being prepared', async () => {
+    const dial = vi.fn(QUEUE_OK);
+    const { agent } = freshCall(dial);
+
+    await call(agent, 'handoff_to_pcp', { narrative: ASKED });
+    const r = await call(agent, 'handoff_to_pcp', {
+      narrative: 'Caller said to take it here.',
+      callerAcceptedQueue: false,
+    });
+
+    expect(r.error).toBe('queue_choice_declined');
+    expect(dial).not.toHaveBeenCalled();
+  });
+});
+
 describe('an explicit no: taken here, and no dial', () => {
   it('does not transfer, and leaves the filing to create_pcp_task', async () => {
     const dial = vi.fn(QUEUE_OK);

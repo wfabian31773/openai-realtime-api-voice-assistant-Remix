@@ -1221,7 +1221,35 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * src/pcp/preTransferIntake.ts for why one turn beats three, and why the
        * patient's name is deliberately not on the list.
        */
-      if (!preTransferAskUsed) {
+      /**
+       * AND A CALLER WHO SAID YES IS NOT ASKED ANYTHING ELSE. Operator,
+       * 2026-09-13: *"they asked for a person, get them to a person."*
+       *
+       * This narrows the 2026-09-08 "one round then transfer anyway" ruling
+       * to the paths where the round still buys something, and it does so on
+       * the operator's word rather than on my reading of the transport.
+       *
+       * WHY THE ROUND IS EMPTY ON THIS PATH. It exists to fill the briefing
+       * the staffer hears and the ticket the request lands on. A caller who
+       * chose the queue gets neither: nothing is filed by rule, and a blind
+       * redirect briefs nobody. Worse, the sentence immediately before it has
+       * just told them that what we have gone over does not carry over — so
+       * asking for their name straight afterwards contradicts the warning we
+       * made them listen to, in the same breath.
+       *
+       * WHAT IT COSTS, and where the cost is paid instead: if the queue then
+       * fails to answer, the fallback ticket carries less than it would have.
+       * That is the right place to ask, because it is the first moment a
+       * ticket is actually going to exist — and `handoff_no_answer`'s guidance
+       * already tells the model to confirm the callback number and collect
+       * what is missing. `callbackNumber` is seeded from caller ID before
+       * anyone speaks, so the fallback is not blind even before that.
+       *
+       * Every other path — declined, unclear, no answer, and a transfer the
+       * caller never asked for — still gets the round, unchanged.
+       */
+      const transferWithoutATicket = suppressesTicket(choice);
+      if (!transferWithoutATicket && !preTransferAskUsed) {
         const question = preTransferQuestion(preTransferGaps(state));
         if (question) {
           preTransferAskUsed = true;
@@ -1246,7 +1274,6 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * is that no ticket exists, so the honest encoding is an absent write,
        * not a suppressed flag.
        */
-      const transferWithoutATicket = suppressesTicket(choice);
       const initial = transferWithoutATicket
         ? undefined
         : await submitPcpTicket(buildPayload(metadata, handoffState, 'HAND_OFF', narrative, urgency, {
@@ -1390,6 +1417,17 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
          * unanswered. The test named for it guards that shape.
          */
         briefingGaps: preTransferGaps(state),
+        /**
+         * FALSE BY DESIGN ON AN ACCEPTED TRANSFER, not by failure.
+         *
+         * The pair reads "we asked, and this is what we still did not get".
+         * On the queue-choice accept path we deliberately do not ask, so this
+         * is false and `briefingGaps` is full — which is the intended shape,
+         * not a round that misfired. Anyone measuring "does one round fill the
+         * briefing?" (the 2026-09-08 telemetry ask) must exclude those calls
+         * rather than score them as empty answers; they are absent from the
+         * population, not zeroes in it.
+         */
         askedBeforeDial: preTransferAskUsed,
         /** The one field the operator named first, and the one never sent. */
         callerName: state.callerName,
