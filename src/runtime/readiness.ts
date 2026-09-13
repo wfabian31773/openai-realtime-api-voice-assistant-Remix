@@ -122,8 +122,21 @@ import { callEnvironment } from "./callRecord";
  * publish take?" is therefore answerable only from here — reading the ticket
  * table cannot distinguish "not deployed" from "every caller declined".
  */
+/**
+ * v15, 2026-09-13: PCP RECORDS REACH MEDICAL RECORDS.
+ *
+ * The effect is invisible from outside except in which DEPARTMENT a ticket
+ * lands in, and the before-state is stark: 54 PCP records tickets in
+ * department 18 against 2 in department 16, both of those predating the
+ * 2026-08-14 route that was supposed to fix it. So "did the publish take?" is
+ * answerable only from here — a run of department-18 records tickets looks
+ * identical whether the build is old or the classifier simply did not fire.
+ *
+ * Stacked on v14 (the queue choice), which is stacked on v12. v13 stays
+ * skipped: #293 holds it on its own branch.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v14-pcp-queue-choice-20260913";
+  "voice-runtime-v15-pcp-records-20260913";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

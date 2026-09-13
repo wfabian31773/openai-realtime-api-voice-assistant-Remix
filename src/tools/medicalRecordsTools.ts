@@ -161,6 +161,17 @@ registerTool({
           'personal_representative | provider | health_plan | legal | other. Send it when the ' +
           'caller has told you plainly who they are. Leave it out and it is read from `requester`.',
       },
+      /**
+       * THE ASK IS SPENT — file with the gap rather than refuse. See the gate
+       * in the handler for why, and for why it is opt-in. Operator, 2026-09-13.
+       */
+      on_clock_ask_exhausted: {
+        type: 'boolean',
+        description:
+          'Only for a lane that cannot ask for a delivery destination or date range. Files the ' +
+          'case with the gap recorded on it instead of refusing. Do not set this to skip a question ' +
+          'you are able to ask.',
+      },
       deliver_to: {
         type: 'string',
         description: 'Where it should go: a fax number, an office and city, an address, or "to the patient".',
@@ -271,11 +282,47 @@ registerTool({
     // The gate is on PRESENCE, not content. "All of it" and "I'm not sure" are
     // both valid answers; the agent asks once, the caller says something, it
     // files. What is not acceptable is silence in a column the CAP report reads.
+    const askExhausted = input.on_clock_ask_exhausted === true;
     if (cap.onClock) {
       const gaps: string[] = [];
       if (!str(input.deliver_to)) gaps.push('deliver_to');
       if (!str(input.date_range)) gaps.push('date_range');
-      if (gaps.length) {
+      /**
+       * THE UNASSIGNED EXIT, FOR A RECORDS CASE. Operator ruling, 2026-09-13,
+       * choosing this over adding the question to the PCP lane.
+       *
+       * The gate below is his own (2026-08-13, *"can we hard gate the records
+       * to require the appropriate fields"*) and it is right for a lane that
+       * can ask: an `mr_cases` row with no destination starts a statutory clock
+       * nobody can work. But PCP has never collected a date range, so applied
+       * there the gate does not produce an answer — it produces a REFUSAL, and
+       * the request stays in department 18 where Medical Records never sees it.
+       * Measured: 54 PCP records tickets in department 18 against 2 in
+       * department 16, both of those predating the route that was supposed to
+       * fix it.
+       *
+       * So a caller that has nothing left to ask sets this flag and the request
+       * lands in department 16 with the gap written on it, rather than not
+       * landing at all. Exactly the shape of optical's `routingAskExhausted`
+       * (#288): take the request unassigned and let a human triage it, because
+       * a row a clerk can chase beats a row in the wrong queue.
+       *
+       * OPT-IN, so the records lane is untouched. That lane CAN ask and does,
+       * and its gate still refuses — nothing here relaxes it. Only a caller
+       * that says it has exhausted the ask gets the exit.
+       *
+       * AND IT FIRES ON THE FIRST INVOCATION, not the second. That is the whole
+       * lesson of `decideDobEscape` and of #291's Codex P1: an escape reachable
+       * only on a retry is unreachable on these lanes, where 42 of 75 refusals
+       * were the LAST tool event of their call. An escape that needs the model
+       * to come back is not an escape.
+       */
+      if (gaps.length && askExhausted) {
+        console.warn(
+          `[RECORDS] on-clock fields not captured (${gaps.join(', ')}) and the ask is spent — ` +
+            'filing to Medical Records with the gap recorded rather than refusing',
+        );
+      } else if (gaps.length) {
         return missing(
           gaps,
           gaps.length === 2
@@ -304,8 +351,25 @@ registerTool({
       `${cap.note}`,
       `\n\n${description}`,
       `\n\nRequested by: ${requesterRaw} [${requesterType}]`,
-      deliverTo ? `\nSend to: ${deliverTo}` : '',
-      dateRange ? `\nDates needed: ${dateRange}` : '',
+      /**
+       * A GAP SAYS SO, IN THE PLACE THE ANSWER WOULD HAVE BEEN.
+       *
+       * These two lines used to vanish when empty, which is fine when the gate
+       * guarantees they are filled — and is exactly wrong once the on-clock
+       * exit above can file without them. A missing line reads as "not
+       * applicable"; a clerk chasing nothing is how a case sits until the
+       * statutory clock runs out.
+       *
+       * Only spelled out when the clock applies, because that is when somebody
+       * has to act on the absence. Same wording as `ticketDeliveryNote`, so a
+       * staffer sees one phrase whichever path filed the case.
+       */
+      deliverTo
+        ? `\nSend to: ${deliverTo}`
+        : cap.onClock ? '\nSend to: NOT CAPTURED — confirm with the requester before sending anything.' : '',
+      dateRange
+        ? `\nDates needed: ${dateRange}`
+        : cap.onClock ? '\nDates needed: NOT CAPTURED — confirm the range with the requester.' : '',
     ].join('');
 
     // Free text becomes the body of a patient-facing SMS on the other side. One

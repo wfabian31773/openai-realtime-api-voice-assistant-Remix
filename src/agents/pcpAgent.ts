@@ -817,7 +817,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // CAP fields go with it stated rather than defaulted. Left in
         // department 18 instead, a patient's right-of-access request is
         // invisible to the report the CAP exists to produce.
-        const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative);
+        const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative, ticketBlocksUsed >= MAX_BLOCKS);
         if (toMedicalRecords) return toMedicalRecords as never;
 
         const redirect = detectCrossQueue(narrative, PCP_DEPARTMENT_ID);
@@ -1598,7 +1598,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * routing change must not cost a filing, and a request in the wrong
        * department is recoverable while a request nowhere is not.
        */
-      const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative);
+      const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative, ticketBlocksUsed >= MAX_BLOCKS);
       if (toMedicalRecords) return toMedicalRecords as never;
 
       const response = await submitPcpTicket(
@@ -1691,6 +1691,27 @@ async function fileToMedicalRecords(
   metadata: PcpAgentMetadata,
   state: PcpConversationState,
   narrative: string,
+  /**
+   * PCP'S FLOOR OUTRANKS THE LIBRARY'S REQUIREMENTS — and this parameter is
+   * the whole reason the routing does not cost a filing.
+   *
+   * The two rules genuinely conflict. PCP's is "after the strike budget, file
+   * with whatever we have" (2026-08-06, when 21 records requests were lost in
+   * a day to blocking fields). The records library's is "these fields are
+   * required" — `callback_number` among them, on a `required` list enforced
+   * before the handler runs, which no `on_clock_ask_exhausted` flag can reach.
+   *
+   * Routing through the library without this made the library's rule win, and
+   * `pcpIntakeDegradation` said so in the plainest possible terms: "never
+   * filed after 6 attempts — the floor is broken". A degraded call that used
+   * to leave a PCP ticket would have left nothing.
+   *
+   * So: while the budget is intact a refusal is returned and the agent asks —
+   * that is the library working. Once the floor is reached, a refusal returns
+   * `null` instead and the caller files its own ticket. Medical Records is the
+   * preference; never losing the request is the rule.
+   */
+  floorReached: boolean,
 ): Promise<Record<string, unknown> | null> {
   const { classifyRecords } = await import('../tools/medicalRecordsTaxonomy');
   const recordsHit = classifyRecords(narrative);
@@ -1754,34 +1775,75 @@ async function fileToMedicalRecords(
      * hit every patient records call on the lane.
      *
      * `date_range` is deliberately NOT invented here. PCP has never asked for
-     * one, and the library's refusal for it is a QUESTION with its own askAs,
-     * which the model puts to the caller. Filling it with "all records" would
-     * put words in the caller's mouth on a compliance record.
+     * one, and filling it with "all records" would put words in a caller's
+     * mouth on a compliance record. So the request files WITHOUT it and the
+     * gap is written on the ticket — `on_clock_ask_exhausted` below.
      */
     ...(state.recordsDeliveryDestination
       ? { deliver_to: `${state.recordsDeliveryMethod ?? 'as arranged'} to ${state.recordsDeliveryDestination}` }
       : state.recordsDeliveryMethod && state.recordsDeliveryMethod !== 'unspecified'
         ? { deliver_to: String(state.recordsDeliveryMethod) }
         : {}),
+    /**
+     * PCP CANNOT ASK, SO IT SAYS SO. Operator ruling, 2026-09-13, choosing this
+     * over adding a date-range question to this lane.
+     *
+     * The library hard-gates `deliver_to` and `date_range` on an on-clock
+     * request. PCP forwards the destination it already collects and has never
+     * collected a range — so without this flag every patient records call comes
+     * back a refusal and the request stays in department 18, which is the
+     * defect this whole change exists to fix.
+     *
+     * The flag does not skip a question we could ask; it declares that this
+     * lane has none left. The records lane, which does ask, never sets it and
+     * its gate is untouched.
+     */
+    on_clock_ask_exhausted: true,
     ...(metadata.callSid ? { call_sid: metadata.callSid } : {}),
     ...(metadata.callerPhone ? { caller_phone: metadata.callerPhone } : {}),
   })) as Record<string, any>;
 
   // A refusal here is a question for the caller, not a fault. Hand it back
-  // verbatim so the model speaks the tool's own askAs.
-  if (recordsResult?.success === false) return recordsResult;
+  // verbatim so the model speaks the tool's own askAs — unless the caller's
+  // own floor is spent, in which case the request must land somewhere.
+  if (recordsResult?.success === false) {
+    if (floorReached) {
+      console.warn(
+        `[PCP] Medical Records refused (${String(recordsResult.error ?? 'unknown')}) and the intake floor ` +
+          'is spent — falling back to a PCP ticket rather than losing the request',
+      );
+      return null;
+    }
+    return recordsResult;
+  }
+
+  /**
+   * `ticket_number`, NOT `ticketNumber` — and this was live.
+   *
+   * `file_records_ticket` returns snake_case (`ticket_number`, `requester_type`,
+   * `cap_clock_applies`); the code extracted here read `recordsResult.ticketNumber`,
+   * which is always undefined. So the one path that DID reach Medical Records
+   * told the agent *"Filed as undefined with our medical records team. Read the
+   * ticket number back"* — and the agent would have read it out.
+   *
+   * Not caught before because the path is nearly untravelled: 2 tickets ever,
+   * both before the 2026-08-14 migration. Surfaced only when the extraction
+   * put it under a test that asserts the number a caller is told. Filing a
+   * ticket the caller cannot quote is most of the way to not filing one.
+   */
+  const filedNumber = recordsResult.ticket_number ?? recordsResult.ticketNumber;
 
   pcpDirector.recordDisposition(callId, 'CREATE_TASK');
   console.info(
-    `[PCP] records request filed to Medical Records as ${recordsResult.ticketNumber} ` +
+    `[PCP] records request filed to Medical Records as ${filedNumber} ` +
       `(${recordsHit.requestReason}, requester ${recordsResult.requester_type}, ` +
       `clock ${recordsResult.cap_clock_applies ? 'ON' : 'off'})`,
   );
   return {
     success: true,
-    ticketNumber: recordsResult.ticketNumber,
+    ticketNumber: filedNumber,
     routed_to: 'Medical Records',
-    message: `Filed as ${recordsResult.ticketNumber} with our medical records team. Read the ticket number back and say that team will follow up. Do not promise a date.`,
+    message: `Filed as ${filedNumber} with our medical records team. Read the ticket number back and say that team will follow up. Do not promise a date.`,
   };
 }
 
