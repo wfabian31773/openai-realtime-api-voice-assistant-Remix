@@ -135,6 +135,32 @@ registerTool({
           'be guessed or left out.',
         askAs: 'And just so I route this correctly — are you the patient yourself, or calling on someone\'s behalf?',
       },
+      /**
+       * THE SAME ANSWER, STATED RATHER THAN INFERRED — added 2026-09-13.
+       *
+       * `requester` is prose and `classifyRequester` reads it. That works when
+       * a caller introduces themselves, and it is the ONLY input a caller-facing
+       * lane can offer. It does not work for a lane that already KNOWS: PCP
+       * holds `callerIsThePatient` and `statedRelationship` on its director,
+       * and its one attempt to express that knowledge as prose produced
+       * "…calling on the patient's behalf", which matched SPEAKING_FOR_ANOTHER
+       * and resolved to `other` — a family member taken OFF a clock that
+       * applies to them. Round-tripping a known fact through a text classifier
+       * is what broke; this is the field that stops it.
+       *
+       * NEVER LETS A REQUEST OFF THE CLOCK. See `resolveRequesterType`: a
+       * stated type is trusted except where it would move a request the prose
+       * puts ON the clock to one that is off it. That asymmetry is the
+       * taxonomy's own — being wrongly on costs a self-imposed deadline, being
+       * wrongly off is a CAP violation on the obligation the CAP polices.
+       */
+      requester_type: {
+        type: 'string',
+        description:
+          'OPTIONAL, and only when you actually know rather than infer: patient | ' +
+          'personal_representative | provider | health_plan | legal | other. Send it when the ' +
+          'caller has told you plainly who they are. Leave it out and it is read from `requester`.',
+      },
       deliver_to: {
         type: 'string',
         description: 'Where it should go: a fax number, an office and city, an address, or "to the patient".',
@@ -205,7 +231,7 @@ registerTool({
     }
 
     const { MEDICAL_RECORDS_DEPARTMENT_ID, recordsReasonById, classifyRecordsRequest,
-            classifyRequester, determineCapClock } = await import('./medicalRecordsTaxonomy');
+            classifyRequester, determineCapClock, resolveRequesterType } = await import('./medicalRecordsTaxonomy');
 
     // WHO IS ASKING IS HARD-REQUIRED ON THIS QUEUE, the way LOCATION is on
     // Optical — and for a stronger reason than assignment.
@@ -225,7 +251,7 @@ registerTool({
         'And just so I route this correctly — are you the patient yourself, or calling on someone\'s behalf?',
       );
     }
-    const requesterType = classifyRequester(requesterRaw) ?? 'other';
+    const requesterType = resolveRequesterType(str(input.requester_type), classifyRequester(requesterRaw));
     const cap = determineCapClock(requesterType);
 
     // ON THE CLOCK MEANS THE FIELDS ARE NOT OPTIONAL.

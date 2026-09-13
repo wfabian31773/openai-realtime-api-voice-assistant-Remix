@@ -817,99 +817,8 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // CAP fields go with it stated rather than defaulted. Left in
         // department 18 instead, a patient's right-of-access request is
         // invisible to the report the CAP exists to produce.
-        const { classifyRecords } = await import('../tools/medicalRecordsTaxonomy');
-        const recordsHit = classifyRecords(narrative);
-        if (recordsHit) {
-          /**
-           * FILE THROUGH THE LIBRARY, NOT ALONGSIDE IT — migrated 2026-08-14.
-           *
-           * This block used to call `ticketingApiClient.createTicket` directly
-           * with its own copy of the CAP logic. It worked, and it had already
-           * drifted: `file_records_ticket` gained the operator's hard gate on
-           * 2026-08-13 — "can we hard gate the records to require the
-           * appropriate fields" — and this copy never did.
-           *
-           * So a patient's right-of-access request arriving through PCP opened
-           * an `mr_cases` row with no destination and no date range, starting a
-           * statutory clock nobody could actually work. That is precisely what
-           * the gate exists to prevent, and it was being bypassed by the one
-           * path where we KNOW the requester.
-           *
-           * It also missed the department-16 reason ownership guard and the
-           * structured body a records clerk reads (Requested by / Send to /
-           * Dates needed, each on its own line).
-           *
-           * One library, one records contract. A missing-field refusal comes
-           * straight back to the model as a question to ask — the same envelope
-           * every queue agent already answers.
-           */
-          const { getTool } = await import('../tools/registry');
-          await import('../tools/medicalRecordsTools');
-          const fileRecords = getTool('file_records_ticket');
-          if (!fileRecords) {
-            return refusePcp('records_tool_unavailable', { retryable: true });
-          }
-
-          const nameBits = String(state.callerName ?? '').trim().split(/\s+/).filter(Boolean);
-          const recordsResult = (await fileRecords.handler({
-            first_name: state.patientFirstName || nameBits[0] || 'Unknown',
-            last_name: state.patientLastName || nameBits.slice(1).join(' ') || 'Caller',
-            date_of_birth: state.patientDob ?? '',
-            callback_number: String(state.callbackNumber ?? metadata.callerPhone ?? ''),
-            request_description: `Patient called the PCP Support line.\n\n${narrative}`,
-            request_reason_id: String(recordsHit.requestReasonId),
-            /**
-             * LEFT AS IT WAS, AND THAT IS A DECISION — see the warning below.
-             *
-             * `patient_caller` covers "a patient OR THEIR FAMILY", so this
-             * string tells department 16 that a daughter ringing about her
-             * mother IS the patient. That is a real defect and it is NOT fixed
-             * here.
-             *
-             * I did fix it, with a ternary on `callerIsThePatient`, and the
-             * fifth review pass caught what that actually did: the fallback
-             * wording "…calling on the patient's behalf" matches
-             * SPEAKING_FOR_ANOTHER in the records taxonomy, which suppresses
-             * the `patient` cue and resolves to requesterType `other`,
-             * pathway `third_party_other`, capClockApplies FALSE.
-             *
-             * Azul is under an HHS OCR Corrective Action Plan about LATE
-             * MEDICAL RECORDS. `callerIsThePatient` is a brand-new optional
-             * boolean, so every call where the model simply omits it would
-             * have moved a patient's own right-of-access request OFF the
-             * 15-day statutory clock — and `medicalRecordsTools` applies its
-             * deliver_to/date_range gate only when on-clock, so the case would
-             * also file with no destination and no date range.
-             *
-             * Trading a naming error for a compliance-clock error is not a
-             * trade I get to make at 5pm on the day this line goes back on the
-             * phone. The correct fix needs the taxonomy's own vocabulary and
-             * the ticketing team's confirmation of the personal-representative
-             * pathway. Flagged for the operator; deliberately unshipped.
-             */
-            requester: `the patient themselves${state.callerName ? ` (${state.callerName})` : ''}`,
-            ...(metadata.callSid ? { call_sid: metadata.callSid } : {}),
-            ...(metadata.callerPhone ? { caller_phone: metadata.callerPhone } : {}),
-          })) as Record<string, any>;
-
-          // A refusal here is a question for the caller, not a fault. Hand it
-          // back verbatim so the model speaks the tool's own askAs.
-          if (recordsResult?.success === false) {
-            return recordsResult as never;
-          }
-
-          pcpDirector.recordDisposition(callId, 'CREATE_TASK');
-          console.info(
-            `[PCP] patient records request filed to Medical Records as ${recordsResult.ticketNumber} ` +
-              `(${recordsHit.requestReason}, via the shared library)`,
-          );
-          return {
-            success: true,
-            ticketNumber: recordsResult.ticketNumber,
-            routed_to: 'Medical Records',
-            message: `Filed as ${recordsResult.ticketNumber} with our medical records team. Read the ticket number back and say that team will follow up. Do not promise a date.`,
-          };
-        }
+        const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative);
+        if (toMedicalRecords) return toMedicalRecords as never;
 
         const redirect = detectCrossQueue(narrative, PCP_DEPARTMENT_ID);
         // Never null for 18, but handled rather than asserted: a missing
@@ -1661,6 +1570,37 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * has no field for it, and inventing one would need the other team.
        */
       narrative = `${narrative}${ticketDeliveryNote(state)}`;
+      /**
+       * AND IT GOES TO MEDICAL RECORDS, which is the whole point of the tool.
+       *
+       * Operator, 2026-09-13: *"a medical records request should file a ticket
+       * with medical records, not pcp."*
+       *
+       * IT DID NOT. This tool — the one NAMED for records — filed a plain PCP
+       * ticket through `submitPcpTicket` into department 18 and never touched
+       * the records library, the CAP fields, or department 16. The only route
+       * that reached Medical Records lived inside `create_pcp_task`, gated on
+       * the caller reading as a patient, and this tool sets
+       * `callPurpose = 'patient_medical_records_request'` on entry — which
+       * overwrites the `patient_caller` value that route keys on. So picking
+       * the correctly-named tool actively defeated the correct route.
+       *
+       * MEASURED 2026-09-13, PCP tickets whose description mentions a medical
+       * record: 54 in department 18, 2 in department 16 — and both of those 2
+       * are dated 08-05 and 08-07, BEFORE the 2026-08-14 migration that wrote
+       * the current route. Nothing has reached Medical Records from this lane
+       * in the month since.
+       *
+       * The PCP filing below is kept as the FALLBACK, not the default: if the
+       * narrative does not classify as a records request, or the library is
+       * unavailable, the request is still taken here rather than lost. That
+       * ordering is deliberate — `docs/BACKEND_HANDOFF.md`'s rule is that a
+       * routing change must not cost a filing, and a request in the wrong
+       * department is recoverable while a request nowhere is not.
+       */
+      const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative);
+      if (toMedicalRecords) return toMedicalRecords as never;
+
       const response = await submitPcpTicket(
         buildPayload(metadata, state, 'CREATE_TASK', narrative, 'high', undefined, 'patient_medical_records_request_isolated', missing),
       );
@@ -1723,6 +1663,126 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
   });
   agent.outputGuardrails = pcpSafetyGuardrails;
   return agent;
+}
+
+/**
+ * A RECORDS REQUEST GOES TO MEDICAL RECORDS, THROUGH THE ONE LIBRARY.
+ *
+ * Extracted 2026-09-13 from inside `create_pcp_task`, where it was the only
+ * copy — and where `handle_patient_medical_records_request`, the tool actually
+ * NAMED for records, could not reach it. That tool filed a plain PCP ticket
+ * instead, so the route measured: 54 PCP records tickets in department 18
+ * against 2 in department 16, and both of those 2 predate the 2026-08-14
+ * migration to the shared library. Zero have reached Medical Records since the
+ * route was written.
+ *
+ * Extracted rather than copied for the reason this file already records: the
+ * previous copy DRIFTED. It carried its own CAP logic, never gained the
+ * operator's 2026-08-13 hard gate, and opened `mr_cases` rows with no
+ * destination and no date range — starting a statutory clock nobody could work.
+ * One library, one records contract, and now one call site shape.
+ *
+ * Returns `null` when the narrative is not a records request, so the caller
+ * carries on with its own routing. Otherwise returns the tool's own envelope:
+ * a refusal goes back verbatim so the model speaks the library's `askAs`.
+ */
+async function fileToMedicalRecords(
+  callId: string,
+  metadata: PcpAgentMetadata,
+  state: PcpConversationState,
+  narrative: string,
+): Promise<Record<string, unknown> | null> {
+  const { classifyRecords } = await import('../tools/medicalRecordsTaxonomy');
+  const recordsHit = classifyRecords(narrative);
+  if (!recordsHit) return null;
+
+  const { getTool } = await import('../tools/registry');
+  await import('../tools/medicalRecordsTools');
+  const fileRecords = getTool('file_records_ticket');
+  if (!fileRecords) return refusePcp('records_tool_unavailable', { retryable: true }) as never;
+
+  const nameBits = String(state.callerName ?? '').trim().split(/\s+/).filter(Boolean);
+  const recordsResult = (await fileRecords.handler({
+    first_name: state.patientFirstName || nameBits[0] || 'Unknown',
+    last_name: state.patientLastName || nameBits.slice(1).join(' ') || 'Caller',
+    date_of_birth: state.patientDob ?? '',
+    callback_number: String(state.callbackNumber ?? metadata.callerPhone ?? ''),
+    request_description: `Patient called the PCP Support line.\n\n${narrative}`,
+    request_reason_id: String(recordsHit.requestReasonId),
+    /**
+     * STATED, NOT DESCRIBED — and this is the line the whole extraction is for.
+     *
+     * It read `requester: 'the patient themselves'`, hardcoded, so a daughter
+     * ringing about her mother filed as the patient: `requestor_type` wrong,
+     * `requestor_name` hers reported as the patient's. The fix was attempted
+     * once with a ternary and withdrawn, because the fallback wording
+     * "…calling on the patient's behalf" matches SPEAKING_FOR_ANOTHER in the
+     * taxonomy, resolving to `other` and taking a family member OFF the
+     * statutory clock. Trading a naming error for a clock error under an OCR
+     * Corrective Action Plan was not a trade to make on prose.
+     *
+     * `requester_type` removes the round trip: the director already HOLDS this
+     * as `callerIsThePatient` and `statedRelationship`, so it is asserted
+     * rather than re-derived from a sentence. And it is now safe to assert,
+     * because the operator settled the clock on 2026-09-13 — *"personal rep
+     * stands in for the patient"* — so both values this line can produce are
+     * ON the clock. Getting the label right can no longer move the deadline;
+     * it only fixes who the record says was asking. `resolveRequesterType`
+     * refuses to let any stated value drop a request off the clock regardless.
+     */
+    requester_type: state.callerIsThePatient === true && !state.statedRelationship
+      ? 'patient'
+      : state.statedRelationship
+        ? 'personal_representative'
+        : 'patient',
+    requester: state.statedRelationship
+      ? `${state.callerName ?? 'the caller'} — ${state.statedRelationship} of the patient`
+      : `the patient themselves${state.callerName ? ` (${state.callerName})` : ''}`,
+    /**
+     * PASS THE DELIVERY PCP ALREADY HOLDS — without this the route refuses.
+     *
+     * `file_records_ticket` hard-gates `deliver_to` and `date_range` when the
+     * request is on the clock (operator, 2026-08-13: *"can we hard gate the
+     * records to require the appropriate fields"*), because an `mr_cases` row
+     * with no destination starts a statutory clock nobody can work.
+     *
+     * PCP collects the destination already, through its own records-delivery
+     * intake, and the first version of this extraction did not forward it. The
+     * suite caught it: every on-clock request came back as a refusal instead
+     * of a filing. That is precisely the failure `docs/BACKEND_HANDOFF.md`
+     * exists to stop — a routing change costing filings — and it would have
+     * hit every patient records call on the lane.
+     *
+     * `date_range` is deliberately NOT invented here. PCP has never asked for
+     * one, and the library's refusal for it is a QUESTION with its own askAs,
+     * which the model puts to the caller. Filling it with "all records" would
+     * put words in the caller's mouth on a compliance record.
+     */
+    ...(state.recordsDeliveryDestination
+      ? { deliver_to: `${state.recordsDeliveryMethod ?? 'as arranged'} to ${state.recordsDeliveryDestination}` }
+      : state.recordsDeliveryMethod && state.recordsDeliveryMethod !== 'unspecified'
+        ? { deliver_to: String(state.recordsDeliveryMethod) }
+        : {}),
+    ...(metadata.callSid ? { call_sid: metadata.callSid } : {}),
+    ...(metadata.callerPhone ? { caller_phone: metadata.callerPhone } : {}),
+  })) as Record<string, any>;
+
+  // A refusal here is a question for the caller, not a fault. Hand it back
+  // verbatim so the model speaks the tool's own askAs.
+  if (recordsResult?.success === false) return recordsResult;
+
+  pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+  console.info(
+    `[PCP] records request filed to Medical Records as ${recordsResult.ticketNumber} ` +
+      `(${recordsHit.requestReason}, requester ${recordsResult.requester_type}, ` +
+      `clock ${recordsResult.cap_clock_applies ? 'ON' : 'off'})`,
+  );
+  return {
+    success: true,
+    ticketNumber: recordsResult.ticketNumber,
+    routed_to: 'Medical Records',
+    message: `Filed as ${recordsResult.ticketNumber} with our medical records team. Read the ticket number back and say that team will follow up. Do not promise a date.`,
+  };
 }
 
 /** Live PCP calls, so the teardown sweep can build a payload after the fact. */
