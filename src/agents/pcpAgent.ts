@@ -654,12 +654,38 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const access = classifyPcpToolAccess(state.callPurpose, state.verificationStatus);
       if (!access.allowed || access.source !== 'scheduling') return refusePcp(access.allowed ? 'scheduling_not_allowed' : access.reason);
       try {
-        const context = await scheduleLookupService.lookupByNameAndDOB(
-          patient.patientFirstName,
-          patient.patientLastName,
-          patient.patientDob,
-          { logIdentifiers: false },
-        );
+        /**
+         * RULE ZERO ON THIS LANE. `lookupByNameAndDOB` is ONE RUNG — the
+         * Operations Hub appointment book, matched on name and date-of-birth
+         * STRINGS. A real patient with no appointment inside its window cannot
+         * be found by it, and the failure looks random from outside
+         * (standing instruction 14).
+         *
+         * `lookupPatient` runs that same rung FIRST, so a book hit answers
+         * exactly as it does today and nothing that works today changes. What
+         * it adds is the tail #292 built: when every book rung returns
+         * `emptyContext()`, the PERSON BASE (`patients_master`) is asked, and
+         * a match there is joined to `Schedule` on `PersonID` — identity from
+         * the mirror, history from the book, one key.
+         *
+         * WHY NO `phone`. `lookupPatient` accepts one, and passing the
+         * caller's would be wrong here in a way that is easy to miss: on this
+         * line the caller is a PROFESSIONAL and the lookup is about SOMEBODY
+         * ELSE. A medical assistant who is also an Azul patient would match
+         * herself and we would answer a question about the wrong person. The
+         * patient's identity is the only thing that may key this lookup, so
+         * only the three patient fields are passed. Do not add the phone.
+         */
+        const context = await scheduleLookupService.lookupPatient({
+          firstName: patient.patientFirstName,
+          lastName: patient.patientLastName,
+          dateOfBirth: patient.patientDob,
+          // Unchanged from the call this replaced. The book rungs log the
+          // subject's name and date of birth by default; on this line the
+          // subject is a third party the caller named, so they stay out of
+          // the console exactly as they did before.
+          logIdentifiers: false,
+        });
         pcpDirector.recordToolSuccess(callId, 'scheduling');
         return {
           success: true,
