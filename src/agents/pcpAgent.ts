@@ -20,9 +20,11 @@ import {
   assertPcpDisposition,
   classifyPcpToolAccess,
   getPcpCallPurpose,
+  type PcpCallPurposeSlug,
   type PcpDisposition,
   type PcpVerificationStatus,
 } from '../pcp/policy';
+import type { StatedSchedulingIntent } from '../tools/queueRouting';
 import { refusePcp } from '../pcp/refusals';
 import { asksForAPerson } from '../pcp/explicitAsk';
 import { preTransferGaps, preTransferQuestion } from '../pcp/preTransferIntake';
@@ -801,8 +803,6 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
             import('../services/gsm7'),
           ]);
 
-        const PCP_DEPARTMENT_ID = 18;
-
         // A PATIENT ASKING FOR THEIR OWN RECORDS GOES TO MEDICAL RECORDS, AND
         // ON THE CLOCK. Operator ruling, 2026-08-13.
         //
@@ -976,6 +976,20 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         spendBlock: () => (ticketBlocksUsed += 1),
       });
       if (toMedicalRecords) return toMedicalRecords as never;
+
+      /**
+       * AFTER RECORDS, BEFORE THE PCP TICKET. Both halves of that are chosen.
+       *
+       * Records first because it is the narrower claim — a chart request that
+       * happens to mention an appointment is still a chart request, and
+       * Medical Records is a statutory destination where the Hub is an
+       * operational one. Before `submitPcpTicket` because that is the floor
+       * this route falls back to; see `fileSchedulingToHub`.
+       */
+      const toSchedulingHub = await fileSchedulingToHub(
+        callId, metadata, state, narrative, disposition, missing,
+      );
+      if (toSchedulingHub) return toSchedulingHub as never;
 
       if (isRecordsRequest(state, recordsByNarrative)) narrative = `${narrative}${ticketDeliveryNote(state)}`;
       const response = await submitPcpTicket(
@@ -1731,6 +1745,172 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
  * carries on with its own routing. Otherwise returns the tool's own envelope:
  * a refusal goes back verbatim so the model speaks the library's `askAs`.
  */
+/**
+ * PCP Support. The home department for this lane, and the `homeDepartmentId`
+ * every routing decision on it is made against.
+ *
+ * Module scope because two paths need it — the patient branch's
+ * `detectCrossQueue` call and the scheduling route below — and a second `18`
+ * written out by hand is how two routing rules start disagreeing.
+ */
+const PCP_DEPARTMENT_ID = 18;
+
+/**
+ * A SCHEDULING REQUEST REACHES THE TEAM THAT SCHEDULES — standing instruction
+ * 10, 2026-08-13: "anything that's schedule related that comes through any of
+ * these should go to the HVA hub."
+ *
+ * PCP was the one queue it had never come through. The four lane agents route
+ * on `detectCrossQueue`, and on this line that call sits inside
+ * `create_pcp_task`'s `patient_caller || callerIsThePatient` branch, so a
+ * PROFESSIONAL's scheduling request never passed it. Everything else files
+ * through `/api/voice-agent/pcp-ticket`, which is pinned to department 18
+ * server-side.
+ *
+ * MEASURED BEFORE THIS, over all 217 PCP tickets on 2026-09-14: **75 carry one
+ * of the three scheduling slugs and ZERO have ever reached department 9.** 56
+ * of them attempted a transfer instead and 10 connected — so the request was
+ * neither scheduled by a human nor filed with the schedulers.
+ *
+ * IT ROUTES ON THE STATED SLUG, NOT THE PROSE, and that is deliberate twice
+ * over:
+ *
+ *   IT SEES MORE. 25 of the 75 contain no scheduling cue at all — the intake
+ *   captured the purpose as an enum and the narrative summarised around it.
+ *   Prose alone leaves a third of them behind.
+ *
+ *   IT CANNOT FIRE ON AN EMPLOYER. `detectCrossQueue` is NOT called here, and
+ *   that is a guard rather than an omission: `'surgery center'` in its cue
+ *   list routed a Loma Linda Surgery Center caller's ticket to department 2 on
+ *   2026-09-08 (CAbf717457), which is still open. Running the full classifier
+ *   over a professional's narrative would adopt that defect on this lane for
+ *   subjects nobody asked me to reroute. The narrative is read for ONE thing —
+ *   the surgery exception — inside `schedulingRedirectForStatedIntent`.
+ *
+ * THE PCP TICKET IS THE FLOOR. A declined route, a refused POST, anything but
+ * a ticket number back, and this returns null so `submitPcpTicket` files as it
+ * always did. Losing the request is the one outcome this must never produce —
+ * the guard on this change is that PCP requests filing NOWHERE must not rise.
+ * A failed POST creates nothing, so falling through cannot duplicate; the one
+ * narrow case it could is a success carrying no ticket number, and a possible
+ * duplicate the hub can close beats a request nobody holds.
+ */
+const STATED_SCHEDULING_INTENT: Partial<Record<PcpCallPurposeSlug, StatedSchedulingIntent>> = {
+  schedule_appointment: 'new',
+  reschedule_appointment: 'reschedule',
+  cancel_appointment: 'cancel',
+};
+
+async function fileSchedulingToHub(
+  callId: string,
+  metadata: PcpAgentMetadata,
+  state: PcpConversationState,
+  narrative: string,
+  disposition: PcpDisposition,
+  missing: string[],
+): Promise<Record<string, unknown> | null> {
+  const intent = state.callPurpose ? STATED_SCHEDULING_INTENT[state.callPurpose] : undefined;
+  if (!intent) return null;
+  /**
+   * A TRANSFER IN FLIGHT KEEPS ITS OWN TICKET.
+   *
+   * HAND_OFF here means the director granted it on the caller's explicit ask,
+   * and that ticket is the durable record the dial is gated on: it carries
+   * `dispositionGrantedByExplicitAsk`, the `pcp_handoff_*` columns and the
+   * transfer telemetry, none of which exist on a generic create-ticket
+   * payload. Under the v14 queue choice an accepted queue files nothing at
+   * all. Routing that ticket elsewhere would take the sanction off the
+   * transfer — which is how the transfer died once already, on 2026-08-27.
+   *
+   * 14 of the 75 measured tickets carry HAND_OFF, so this is a real branch and
+   * not a theoretical one.
+   */
+  if (disposition !== 'CREATE_TASK') return null;
+
+  const [{ schedulingRedirectForStatedIntent }, { ticketingApiClient }, { sanitizeForSms }] =
+    await Promise.all([
+      import('../tools/queueRouting'),
+      import('../../server/services/ticketingApiClient'),
+      import('../services/gsm7'),
+    ]);
+
+  const redirect = schedulingRedirectForStatedIntent(intent, narrative, PCP_DEPARTMENT_ID);
+  // Null is the surgery exception: "surgery is an exception to that hva hub
+  // rule" (operator, 2026-08-13). It stays on the PCP ticket for a coordinator
+  // rather than being guessed into another department.
+  if (!redirect) return null;
+
+  /**
+   * WHOSE NUMBER GOES ON THE TICKET, and why it is the caller's.
+   *
+   * `CreateTicketParams` has one phone field. On this lane the person the hub
+   * has to ring is the REQUESTING OFFICE, not the patient — measured over the
+   * 75: every one carries a caller callback number and only 35 carry a real
+   * patient first name. So the callback number goes in the field and the
+   * description says plainly whose it is, rather than the hub dialling a
+   * number that was never the patient's.
+   *
+   * The patient name is NOT asked for to fill this. These purposes take the
+   * short intake (`connectsToHuman`), and adding a blocking field to a filing
+   * path is the 2026-08-06 failure that lost 21 records requests in a day.
+   * `annotateGaps` already writes what was not captured onto the ticket.
+   */
+  const callback = String(state.callbackNumber ?? metadata.callerPhone ?? '');
+  const who = [state.callerName, state.callerRole, state.callerOrganization]
+    .map((v) => String(v ?? '').trim())
+    .filter((v) => v.length > 0 && !/^not /i.test(v))
+    .join(', ');
+  const body = sanitizeForSms(
+    [
+      'Taken on the PCP Support line.',
+      redirect.note,
+      who ? `Requested by ${who}.` : null,
+      callback ? `Callback ${callback} reaches the requesting office, not the patient.` : null,
+      '',
+      // The same gap annotation `buildPayload` puts on a PCP ticket. Routing a
+      // request to another department must not quietly drop the note saying
+      // what the intake did not capture — the hub is the team that has to ask
+      // for it, so it is the team that most needs to know.
+      annotateGaps(narrative, missing, metadata.callerPhone),
+    ].filter((l) => l !== null).join('\n'),
+  ).value;
+
+  const result = await ticketingApiClient.createTicket({
+    departmentId: redirect.departmentId,
+    requestTypeId: redirect.requestTypeId,
+    requestReasonId: redirect.requestReasonId,
+    patientFirstName: String(state.patientFirstName ?? '').trim() || 'Unknown',
+    patientLastName: String(state.patientLastName ?? '').trim() || 'Patient',
+    patientPhone: callback,
+    preferredContactMethod: 'phone',
+    description: body,
+    priority: 'medium',
+    callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
+  });
+
+  if (!result.success || !result.ticketNumber) {
+    console.warn(
+      `[PCP] scheduling route to the HVA Hub declined (${result.error ?? 'no ticket number'}) — ` +
+        'filing the PCP ticket instead',
+    );
+    return null;
+  }
+
+  pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+  console.info(
+    `[PCP] ${intent} appointment filed to the HVA Hub (dept ${redirect.departmentId}, ` +
+      `reason ${redirect.requestReasonId}) as ${result.ticketNumber}`,
+  );
+  return {
+    success: true,
+    ticketNumber: result.ticketNumber,
+    routed_to: redirect.departmentName,
+    message:
+      `Filed as ${result.ticketNumber} with our scheduling team. Read the ticket number back and say ` +
+      'the scheduling team will follow up. Do NOT offer to transfer or connect them.',
+  };
+}
+
 async function fileToMedicalRecords(
   callId: string,
   metadata: PcpAgentMetadata,

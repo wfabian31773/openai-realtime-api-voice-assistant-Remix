@@ -333,7 +333,29 @@ export class PcpDirector {
     // all and the staffer taking the call collects what they need anyway. Blocking on
     // a DOB the caller may not have to hand is how a scheduling request silently
     // became a task instead of a transfer.
-    const connectsToHuman = purpose?.defaultDisposition === 'HAND_OFF';
+    //
+    // READ `allowedDispositions`, NOT THE DEFAULT — and the difference is the
+    // whole reason the intake did not lengthen when scheduling stopped
+    // defaulting to HAND_OFF (2026-09-14).
+    //
+    // This asked `defaultDisposition === 'HAND_OFF'`, which welded the LENGTH
+    // OF THE INTAKE to WHETHER WE DIAL FIRST. Those are two different
+    // questions: a purpose that may end at a human must not open with "what is
+    // the patient's date of birth" whether or not we dial on this particular
+    // call. Left as it was, flipping the three scheduling slugs to CREATE_TASK
+    // would have pushed PATIENT_FIELDS back onto a scheduling caller — the
+    // four-question block whose first line is "What is your professional
+    // relationship to this patient?" — which is the bd89b226 interrogation and
+    // the 2026-08-06 precedent that blocking fields destroy requests.
+    //
+    // PROVABLY INERT ON THE DAY IT WAS WRITTEN, and `policy.test.ts` asserts
+    // it: no purpose differs between the two readings in a way that reaches
+    // this line. The only purposes where they disagree at all are
+    // `pharmaceutical_representative` and the three scheduling slugs, and the
+    // clause below is guarded by `patientContextRequired`, which pharma does
+    // not set. So this is a decoupling, not a behaviour change — the behaviour
+    // change is in policy.ts and is stated there.
+    const connectsToHuman = Boolean(purpose?.allowedDispositions.includes('HAND_OFF'));
     /**
      * AND NOT TO A PATIENT, EITHER.
      *

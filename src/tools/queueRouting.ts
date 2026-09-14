@@ -363,3 +363,76 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
 
   return null;
 }
+
+/**
+ * The three scheduling intents a caller can STATE rather than imply.
+ *
+ * WHY THIS EXISTS BESIDE `detectCrossQueue` RATHER THAN INSIDE IT.
+ *
+ * `detectCrossQueue` reads prose, which is the only evidence a queue lane has:
+ * a patient says what they want and the words are all we get. The PCP line is
+ * different — its intake asks the caller what the call is about and stores the
+ * answer as a closed enum, so on that lane the intent is a STATED FACT and the
+ * description is a summary written around it.
+ *
+ * Reading the stated value is worth a third of the population. Measured over
+ * all 217 PCP tickets, 2026-09-14: **75 carry one of these three slugs, and 25
+ * of them contain no scheduling cue at all** — a narrative like "caller would
+ * like to be seen before their referral expires" states the purpose in the
+ * enum and never uses a word this file cues on. Prose alone leaves those 25 in
+ * department 18.
+ *
+ * It is also the safer read on a professional line, and that is not a
+ * side-benefit. `detectCrossQueue`'s subject cues fire on a caller's EMPLOYER
+ * — `'surgery center'` in SURGERY_CUES routed a Loma Linda Surgery Center
+ * caller's ticket to department 2 on 2026-09-08 (CAbf717457), which is still
+ * open. An enum filled from a closed list has nothing in it to drift.
+ *
+ * THE SURGERY EXCEPTION STILL WINS, and it is enforced HERE rather than at the
+ * call site so it cannot be forgotten by the next caller of this function.
+ * Operator, 2026-08-13: "surgery is an exception to that hva hub rule." A
+ * stated `reschedule` whose narrative names an operation is coordinator work,
+ * so this declines and the request stays with the line that took it. 4 of the
+ * 75 are that shape.
+ */
+export type StatedSchedulingIntent = 'new' | 'reschedule' | 'cancel';
+
+/**
+ * Reason ids for a STATED intent, read back out of SCHEDULING so this cannot
+ * drift from the cue table — the same argument that keeps `hubTaxonomy` on the
+ * shared list rather than a copy of it.
+ */
+const STATED_SCHEDULING_REASON_ID: Record<StatedSchedulingIntent, number> = {
+  new: 146,
+  reschedule: 147,
+  cancel: 148,
+};
+
+export function schedulingRedirectForStatedIntent(
+  intent: StatedSchedulingIntent,
+  text: string,
+  homeDepartmentId: number,
+): QueueRedirect | null {
+  if (homeDepartmentId === HVA_HUB) return null;
+  const t = fold(text);
+  // The exception, before anything else. An operation is not front-desk
+  // scheduling whatever the intake enum says.
+  if (hit(t, SURGERY_CUES)) return null;
+
+  const reasonId = STATED_SCHEDULING_REASON_ID[intent];
+  const row = SCHEDULING.find((s) => s.reasonId === reasonId);
+  // Unreachable while the ids above are in SCHEDULING, and `queueRouting.test.ts`
+  // asserts they are. Handled rather than asserted so a future edit to the cue
+  // table degrades to "keep it here" instead of throwing inside a filing tool.
+  if (!row) return null;
+
+  const specialist = specialistReferral(t);
+  return {
+    departmentId: HVA_HUB,
+    departmentName: 'HVA Hub',
+    requestTypeId: 32,
+    requestReasonId: specialist ? 152 : row.reasonId,
+    requestReason: specialist ? 'Specialist Referral Appointment' : row.reason,
+    note: 'Scheduling request — taken on another line and routed here.',
+  };
+}
