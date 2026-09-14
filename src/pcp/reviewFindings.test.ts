@@ -128,30 +128,65 @@ describe('2 — a patient asking for their own records is not interrogated', () 
     expect(d.get('r7').callerIsThePatient).toBe(false);
   });
 
-  it('the family-member requester gap is recorded as UNSHIPPED, not silently left', () => {
-    /**
-     * `patient_caller` covers "a patient OR THEIR FAMILY", so the department-16
-     * requester names a daughter as the patient. Real defect, deliberately not
-     * fixed here.
-     *
-     * I did fix it, and the sixth review pass caught what the fix actually did:
-     * the fallback wording matched SPEAKING_FOR_ANOTHER in the records
-     * taxonomy, resolving to requesterType `other` and capClockApplies FALSE.
-     * Azul is under an HHS OCR Corrective Action Plan about LATE MEDICAL
-     * RECORDS, and `callerIsThePatient` is a new optional flag — so every call
-     * where the model omitted it would have moved a patient's own
-     * right-of-access request OFF the 15-day statutory clock, and filed with no
-     * destination and no date range because that gate only runs on-clock.
-     *
-     * Trading a naming error for a compliance-clock error is not a trade to
-     * make unilaterally. This test exists so the gap stays visible.
-     */
-    const src = readFileSync(new URL('../agents/pcpAgent.ts', import.meta.url), 'utf8');
-    expect(src).toMatch(/LEFT AS IT WAS, AND THAT IS A DECISION/);
-    expect(src).toMatch(/capClockApplies FALSE/);
-    // The shipped behaviour is the parent commit's: always on-clock.
-    expect(src).toMatch(/requester: `the patient themselves\$\{state\.callerName/);
+  /**
+   * SHIPPED 2026-09-13. This test used to assert the gap was UNSHIPPED.
+   *
+   * It guarded a real hazard: the requester string was hardcoded "the patient
+   * themselves", so a daughter filed as the patient — and the one attempt to
+   * fix it rendered the relationship as prose, which matched
+   * SPEAKING_FOR_ANOTHER in the taxonomy and resolved to `other`, taking a
+   * family member OFF the 15-day clock. Under an OCR Corrective Action Plan
+   * about late records, trading a naming error for a clock error was not a
+   * trade to make unilaterally, so the gap was left visible instead.
+   *
+   * The operator settled it: *"on the clock, personal rep stands in for the
+   * patient, any records going back to the patient are on the clock."* That
+   * removes the hazard rather than accepting it — patient and personal
+   * representative are BOTH on-clock, so labelling the daughter correctly can
+   * no longer move the deadline. Only who the record says was asking changes.
+   *
+   * ASSERTED ON BEHAVIOUR, NOT ON SOURCE TEXT. The old version grepped
+   * pcpAgent.ts for a comment heading, which proves a comment exists and
+   * nothing about what the code does. The clock is what matters, so the clock
+   * is what this reads.
+   */
+  it('a family member is recorded as a personal representative, and stays on the clock', async () => {
+    const { classifyRequester, determineCapClock, resolveRequesterType } =
+      await import('../tools/medicalRecordsTaxonomy');
+
+    // What PCP now sends when its director holds a stated relationship.
+    const prose = 'Jane Doe — daughter of the patient';
+    const stated = resolveRequesterType('personal_representative', classifyRequester(prose));
+    expect(stated).toBe('personal_representative');
+    expect(determineCapClock(stated).onClock, 'a personal representative stands in the patient shoes').toBe(true);
+    expect(determineCapClock(stated).pathway).toBe('roa_patient');
   });
+
+  /**
+   * THE GUARD THAT REPLACES THE OLD HAZARD, and the reason stating a type is
+   * safe at all: a stated value may never take a request OFF the clock. A
+   * model that mislabels a patient as a health plan cannot silently stop a
+   * statutory deadline; the prose classification wins in that direction only.
+   */
+  it('a stated requester type can never move a request off the clock', async () => {
+    const { classifyRequester, determineCapClock, resolveRequesterType } =
+      await import('../tools/medicalRecordsTaxonomy');
+
+    const patientProse = 'I am the patient';
+    expect(classifyRequester(patientProse)).toBe('patient');
+
+    const mislabelled = resolveRequesterType('health_plan', classifyRequester(patientProse));
+    expect(mislabelled, 'the prose wins in the dangerous direction').toBe('patient');
+    expect(determineCapClock(mislabelled).onClock).toBe(true);
+
+    // And it is honoured in every other direction, including onto the clock.
+    expect(resolveRequesterType('personal_representative', 'other')).toBe('personal_representative');
+    expect(resolveRequesterType('legal', 'other')).toBe('legal');
+    // An unrecognised string is ignored rather than defaulted — defaulting is
+    // how all 470 mr_cases rows ended up saying `patient`.
+    expect(resolveRequesterType('sombody', 'provider')).toBe('provider');
+  });
+
   it('a latched patient is never asked the PROFESSIONAL patient block', () => {
     /**
      * The finding two review passes missed: the base field list was switched

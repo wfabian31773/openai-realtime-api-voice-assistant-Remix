@@ -51,7 +51,20 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
       filed.push(payload);
       return { success: true, ticketId: filed.length, ticketNumber: `PCP-${1000 + filed.length}` };
     },
+    /**
+     * THE RECORDS LIBRARY FILES THROUGH HERE, and since 2026-09-13 the records
+     * tool reaches it. Both entries push to the same `filed` array on purpose:
+     * every assertion below is about what a staffer can read on the ticket, and
+     * that question does not change with the department. Without the second
+     * entry the tool THROWS and the SDK returns a plain-text error, which reads
+     * as a broken floor rather than a missing fixture.
+     */
+    createTicket: async (payload: any) => {
+      filed.push(payload);
+      return { success: true, ticketId: filed.length, ticketNumber: `VA-${2000 + filed.length}` };
+    },
   },
+  lookupWasUnavailable: () => false,
 }));
 
 const { createPcpAgent } = await import('../agents/pcpAgent');

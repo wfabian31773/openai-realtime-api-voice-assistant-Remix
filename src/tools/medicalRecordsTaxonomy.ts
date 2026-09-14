@@ -420,8 +420,55 @@ const PATHWAYS: Record<RequesterType, CapDetermination['pathway']> = {
  * they are on the clock too — a daughter with power of attorney asking for
  * her mother's chart is the same right being exercised.
  */
+const REQUESTER_TYPES = new Set<RequesterType>([
+  'patient', 'personal_representative', 'provider', 'health_plan', 'legal', 'other',
+]);
+
+/** Do patient and personal_representative both stand on the clock? Operator, 2026-09-13. */
+function onClockFor(t: RequesterType): boolean {
+  return t === 'patient' || t === 'personal_representative';
+}
+
+/**
+ * A STATED requester type beats the text classifier — but never off the clock.
+ *
+ * Operator ruling, 2026-09-13: *"on the clock, personal rep stands in for the
+ * patient, any records going back to the patient are on the clock."*
+ *
+ * WHY A STATED TYPE IS NEEDED AT ALL. `classifyRequester` reads prose, which is
+ * the only thing a caller-facing lane has. A lane that already KNOWS — PCP holds
+ * `callerIsThePatient` and `statedRelationship` on its director — has to render
+ * that knowledge as a sentence and hope the classifier reads it back the same
+ * way. It did not: PCP's attempt produced "…calling on the patient's behalf",
+ * which matches SPEAKING_FOR_ANOTHER and resolves to `other`, taking a family
+ * member OFF a clock that applies to them. This is the seam that removes the
+ * round trip.
+ *
+ * WHY IT CANNOT MOVE A REQUEST OFF THE CLOCK. The two errors are not symmetric
+ * and the whole file turns on that: wrongly ON costs a self-imposed deadline,
+ * wrongly OFF is a CAP violation on the exact obligation the CAP polices. So a
+ * stated type is honoured in every direction except the one that would drop a
+ * request the prose had already put on the clock — there the prose wins and the
+ * reason is recorded. A model that mislabels a patient as a health plan cannot
+ * silently stop a statutory deadline.
+ *
+ * An unrecognised string is ignored rather than defaulted, because defaulting is
+ * how all 470 rows ended up saying `patient`.
+ */
+export function resolveRequesterType(
+  stated: string | null | undefined,
+  classified: RequesterType | null,
+): RequesterType {
+  const fromProse = classified ?? 'other';
+  const t = String(stated ?? '').trim().toLowerCase() as RequesterType;
+  if (!REQUESTER_TYPES.has(t)) return fromProse;
+  // The one direction a stated value may not take it.
+  if (onClockFor(fromProse) && !onClockFor(t)) return fromProse;
+  return t;
+}
+
 export function determineCapClock(requesterType: RequesterType): CapDetermination {
-  const onClock = requesterType === 'patient' || requesterType === 'personal_representative';
+  const onClock = onClockFor(requesterType);
   return {
     requesterType,
     onClock,
