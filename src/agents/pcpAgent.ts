@@ -946,9 +946,8 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * plan. Literal "peer-to-peer" appears in 2 — which is why the rule
        * reads the CALLER rather than the phrase.
        */
-      const recordsByNarrative = Boolean(
-        (await import('../tools/medicalRecordsTaxonomy')).classifyRecords(narrative),
-      );
+      const recordsByNarrative =
+        (await import('../tools/medicalRecordsTaxonomy')).mentionsRecordsIntent(narrative);
       const deliveryAsk = deliveryAskFor(state, recordsByNarrative);
       if (deliveryAsk && ticketBlocksUsed < MAX_BLOCKS) {
         ticketBlocksUsed += 1;
@@ -1793,8 +1792,23 @@ async function fileToMedicalRecords(
     spendBlock: () => number;
   },
 ): Promise<Record<string, unknown> | null> {
-  const { classifyRecords, classifyRequester, requesterTypeForFacility } =
+  const { classifyRecords, classifyRequester, requesterTypeForFacility, mentionsRecordsIntent } =
     await import('../tools/medicalRecordsTaxonomy');
+  /**
+   * INTENT FIRST, CLASSIFICATION SECOND — Codex P1, #297.
+   *
+   * `classifyRecords` picks WHICH records reason applies and carries bare
+   * organisation words to do it ("primary care", "referring provider",
+   * "legal"). It cannot be asked WHETHER this is a records request: on the
+   * professional route that reads an `outside_referral_status` call as one.
+   *
+   * The patient route is left keyed on the classifier alone, exactly as v15
+   * shipped it. That path is reached only from the `patient_caller` branch,
+   * where the caller is the subject of their own request, and changing its
+   * population is a separate before-and-after measurement rather than
+   * something to slip into this one.
+   */
+  if (budget.route === 'professional' && !mentionsRecordsIntent(narrative)) return null;
   const recordsHit = classifyRecords(narrative);
   if (!recordsHit) return null;
 
@@ -1845,13 +1859,18 @@ async function fileToMedicalRecords(
         // The enum first. It is picked from a closed list, so unlike a cue
         // list matched against free speech there is nothing in it to drift.
         const fromFacility = requesterTypeForFacility(state.callerFacilityType);
-        if (fromFacility) return fromFacility;
+        // A SPECIFIC facility wins outright; the generic bucket does not.
+        // `other_healthcare_organization` is what a law firm picks, because the
+        // enum has no attorney value — so letting it return here would file an
+        // attorney on `third_party_other` and never reach the legal cues below
+        // (Codex P2, #297). It still answers if the prose says nothing.
+        if (fromFacility && fromFacility !== 'other') return fromFacility;
         // Then what they said about themselves, most specific first.
         for (const text of [stated, state.callerRole, state.callerOrganization]) {
           const t = text ? classifyRequester(String(text)) : null;
           if (offClockType(t)) return t;
         }
-        return null;
+        return fromFacility;
       })()
     : state.callerIsThePatient === true
       ? null

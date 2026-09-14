@@ -222,6 +222,43 @@ export const RECORDS_REASON_IDS = new Set([
   RECORDS_CATCHALL.requestReasonId,
 ]);
 
+/**
+ * DOES THIS TEXT ASK FOR A RECORD AT ALL? — Codex P1, #297.
+ *
+ * `classifyRecords` answers "which KIND of records request is this", and it is
+ * not a safe test of WHETHER one was made. Its buckets carry bare
+ * organisation words so that an already-known records request lands in the
+ * right reason: `TO_ANOTHER_PROVIDER_CUES` holds "primary care", "referring
+ * provider" and "another office"; `LEGAL_AND_INSURANCE_CUES` holds "legal".
+ * Read as an intent test it fires on ordinary professional traffic — "the
+ * primary care office is checking the status of an outside referral" is an
+ * `outside_referral_status` call and matches "primary care".
+ *
+ * That mattered the moment the professional route began keying on it: such a
+ * caller would be asked where to send records they never mentioned, and their
+ * referral question would file to Medical Records instead of PCP Support.
+ * Misrouting ordinary traffic into a records queue is a bigger loss than the
+ * one the route exists to fix — the department-2 shape `docs/BACKEND_HANDOFF.md`
+ * exists to prevent.
+ *
+ * So intent is a SEPARATE, narrower question: does the caller name a record,
+ * a chart, or a clinical document? Deliberately conservative — a request this
+ * misses stays in PCP Support, which is exactly where it goes today, while a
+ * false positive moves a call that was never about records.
+ */
+export function mentionsRecordsIntent(text: string): boolean {
+  const t = fold(text);
+  if (!t.trim()) return false;
+  return [
+    'records', 'record request', 'request for record', 'medical record',
+    'the record', 'my record', 'her record', 'his record', 'their record',
+    'patient record', 'record retrieval', 'chart', 'medical report',
+    'progress note', 'operative report', 'consult note', 'consultation note',
+    'visit note', 'office note', 'exam record', 'copy of the record',
+    'expediente', 'historial', 'registros', 'informe medico', 'reporte medico',
+  ].some((cue) => t.includes(fold(cue)));
+}
+
 /** The pair whose cues the caller's words match, or null. */
 export function classifyRecords(text: string): RecordsClassification | null {
   // "power of attorney" contains "attorney", and the legal bucket matches the
@@ -457,6 +494,10 @@ export function requesterTypeForFacility(
       return 'provider';
     case 'health_plan':
       return 'health_plan';
+    // Returned, but the caller treats it as WEAK — see the note there. There is
+    // no attorney value in this enum, so a law firm completing intake picks
+    // this one, and letting it win outright would file them `third_party_other`
+    // instead of `third_party_legal` (Codex P2, #297).
     case 'other_healthcare_organization':
       return 'other';
     default:

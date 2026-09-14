@@ -202,6 +202,57 @@ describe('what the route deliberately does not touch', () => {
     expect(filed.success).toBe(true);
   });
 
+  /**
+   * CODEX P1 ON #297, and it is the finding that mattered most.
+   *
+   * `classifyRecords` answers WHICH records reason applies, and carries bare
+   * organisation words to do it — `TO_ANOTHER_PROVIDER_CUES` holds "primary
+   * care", "referring provider" and "another office". Keyed on as an INTENT
+   * test, it reads this narrative — a real `outside_referral_status` call —
+   * as a records request, asks a clinic where to send records they never
+   * mentioned, and files their referral question to Medical Records.
+   *
+   * Misrouting ordinary professional traffic into a records queue is a larger
+   * loss than the one this route exists to fix. My own negative control used a
+   * narrative with no records vocabulary at all, so it could not see this.
+   */
+  it('leaves an outside-referral call alone, though it names a primary care office', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', { ...CLINIC, callPurpose: 'outside_referral_status' });
+
+    const filed = await call(agent, 'create_pcp_task', {
+      narrative: 'The primary care office is checking the status of an outside referral.',
+    });
+
+    expect(filed.success, `must file: ${JSON.stringify(filed)}`).toBe(true);
+    expect(ticketing.createTicket, 'a referral question is not a records request').not.toHaveBeenCalled();
+    expect(ticketing.createPcpTicket).toHaveBeenCalled();
+    // And nobody was asked where to send records nobody asked for.
+    expect(String(filed.error ?? '')).not.toMatch(/recordsDelivery/);
+  });
+
+  it('files an attorney on the legal pathway, not the generic one', async () => {
+    // CODEX P2. The facility enum has no attorney value, so a law firm picks
+    // `other_healthcare_organization` — and letting that generic bucket win
+    // outright filed them `third_party_other`, never reaching the legal cues.
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', {
+      ...CLINIC,
+      callerName: 'K. Ruiz',
+      callerRole: 'paralegal',
+      callerOrganization: 'Ruiz Law Firm',
+      callerFacilityType: 'other_healthcare_organization',
+      ...DELIVERY,
+    });
+
+    await call(agent, 'create_pcp_task', RECORDS);
+
+    const payload = filedToRecords();
+    expect(payload.requestorType).toBe('legal');
+    expect(payload.requestPathway).toBe('third_party_legal');
+    expect(payload.capClockApplies).toBe(false);
+  });
+
   it('leaves a professional call that is NOT about records alone', async () => {
     const { agent } = freshCall();
     await call(agent, 'record_pcp_intake', CLINIC);
