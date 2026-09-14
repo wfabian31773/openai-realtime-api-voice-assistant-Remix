@@ -230,6 +230,36 @@ function hit(text: string, cues: string[]): boolean {
 }
 
 /**
+ * `hit`, but the cue has to stand as a WHOLE WORD — Codex P2 round 2, PR #298.
+ *
+ * `hit` is a substring test, which is right for `detectCrossQueue`: several of
+ * its cues are deliberate STEMS (`reprogram` catches reprogramar,
+ * reprogramación and reprogramacion; `oculoplastic` catches oculoplastics), and
+ * a boundary would silently disarm them.
+ *
+ * It is wrong for WITHHOLDING a redirect on a professional narrative. The bare
+ * cue `operation` is contained in `operations`, so an "operations coordinator"
+ * or "operations manager" ringing to book an ordinary eye exam matched the
+ * surgery exception and stayed in department 18 — their ROLE NAME withheld the
+ * route. That is the 'surgery center' finding one level down, and it survived
+ * removing 'surgery center'.
+ *
+ * Safe here and only here because `OPERATION_CUES` contains no stems — every
+ * entry is a complete word or phrase — and `schedulingReachesTheHub.test.ts`
+ * fires each cue on its own to prove none was disarmed by the boundary.
+ *
+ * The text is already folded (lowercased, diacritics stripped), so a boundary
+ * is "not a letter or a digit". Hyphens count as boundaries, which is what
+ * `pre-op` and `post-op` need.
+ */
+function hitWord(text: string, cues: string[]): boolean {
+  return cues.some((c) => {
+    const cue = fold(c).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^a-z0-9])${cue}([^a-z0-9]|$)`).test(text);
+  });
+}
+
+/**
  * Where this request really belongs, or null to keep it on the queue that took
  * the call.
  *
@@ -456,7 +486,7 @@ export function schedulingRedirectForStatedIntent(
   // The exception, before anything else. An operation is not front-desk
   // scheduling whatever the intake enum says — but a surgery CENTRE is an
   // employer, not an operation. See OPERATION_CUES.
-  if (hit(t, OPERATION_CUES)) return null;
+  if (hitWord(t, OPERATION_CUES)) return null;
 
   const reasonId = STATED_SCHEDULING_REASON_ID[intent];
   const row = SCHEDULING.find((s) => s.reasonId === reasonId);
@@ -465,13 +495,33 @@ export function schedulingRedirectForStatedIntent(
   // table degrades to "keep it here" instead of throwing inside a filing tool.
   if (!row) return null;
 
-  const specialist = specialistReferral(t);
+  /**
+   * NO SPECIALIST REFINEMENT ON THIS PATH — Codex P2 round 2, PR #298.
+   *
+   * `specialistReferral` read `SPECIALIST_CUES` over the whole narrative, and
+   * on this path the narrative is dominated by the caller's own organisation
+   * and role BY CONSTRUCTION — that is what the PCP intake collects. So
+   * "coordinator at Example Retina Specialist", booking a routine exam, graded
+   * as reason 152.
+   *
+   * There is no lexical way to separate that employer from a patient who
+   * genuinely needs a retina specialist: the two sentences contain the same
+   * string. So this stops guessing rather than guessing better — the same
+   * ruling as `detectCrossQueue` not being called here at all.
+   *
+   * The cost is small and was checked rather than assumed: reason 152 has been
+   * used ONCE in 90 days (see the note on `specialistReferral`). A refinement
+   * that fires once a quarter is not worth a class of mislabelled tickets.
+   *
+   * `detectCrossQueue` keeps its own specialist read. That is the PATIENT path,
+   * where the narrative is the caller's own words about their own care.
+   */
   return {
     departmentId: HVA_HUB,
     departmentName: 'HVA Hub',
     requestTypeId: 32,
-    requestReasonId: specialist ? 152 : row.reasonId,
-    requestReason: specialist ? 'Specialist Referral Appointment' : row.reason,
+    requestReasonId: row.reasonId,
+    requestReason: row.reason,
     note: 'Scheduling request — taken on another line and routed here.',
   };
 }

@@ -47,7 +47,7 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
 const { createPcpAgent } = await import('../agents/pcpAgent');
 const { pcpDirector } = await import('./director');
 const { PCP_CALL_PURPOSES, getPcpCallPurpose } = await import('./policy');
-const { schedulingRedirectForStatedIntent } = await import('../tools/queueRouting');
+const { schedulingRedirectForStatedIntent, OPERATION_CUES } = await import('../tools/queueRouting');
 
 async function call(agent: any, name: string, args: Record<string, unknown> = {}) {
   const t = agent.tools.find((x: any) => x.name === name);
@@ -222,9 +222,12 @@ describe('schedulingRedirectForStatedIntent', () => {
     expect(schedulingRedirectForStatedIntent('new', 'wants an appointment', 9)).toBeNull();
   });
 
-  it('uses the specialist reason when one is named', () => {
+  it('does not refine the reason on a specialist mention — see round 2 below', () => {
+    // This asserted 152 when it was written. Codex round 2 showed the same
+    // cue fires on an EMPLOYER name on this path, so the refinement is gone
+    // and the plain stated-intent reason stands.
     const r = schedulingRedirectForStatedIntent('new', 'was referred to a retina specialist', 18);
-    expect(r?.requestReasonId).toBe(152);
+    expect(r?.requestReasonId).toBe(146);
   });
 });
 
@@ -489,5 +492,58 @@ describe('Codex #298 — urgency and an ambiguous Hub response', () => {
     // A 4xx is proof the server rejected it before committing, so warning a
     // staffer about a duplicate that cannot exist is noise.
     expect(pcp.narrative).not.toMatch(/may already hold a scheduling ticket/i);
+  });
+});
+
+/**
+ * CODEX ROUND 2, PR #298. Both findings are the SAME CLASS as round 1's
+ * surgery-centre one, a level further down: `hit()` is a substring test, and on
+ * this path the narrative is dominated by the caller's own organisation and
+ * role — because that is precisely what the PCP intake collects.
+ */
+describe('Codex #298 round 2 — substring cues reading the caller, not the request', () => {
+  it.each([
+    'Operations coordinator would like to book an eye exam.',
+    'Operations manager calling to book the patient in.',
+  ])('routes an ordinary booking from an OPERATIONS role: %s', (prose) => {
+    // 'operation' is a bare cue and `hit` matches substrings, so 'operations'
+    // contained it. The role name withheld the Hub route from a routine
+    // booking — the same defect as 'surgery center', surviving its fix.
+    expect(schedulingRedirectForStatedIntent('new', prose, 18)?.departmentId).toBe(9);
+  });
+
+  it.each([
+    ['rescheduling after the operation', 'reschedule'],
+    ['needs to move the surgery date', 'reschedule'],
+    ['cancelling her cataract surgery', 'cancel'],
+    ['asking about the pre-op appointment', 'reschedule'],
+  ] as const)('still withholds when the request IS the procedure: %s', (prose, intent) => {
+    expect(schedulingRedirectForStatedIntent(intent, prose, 18)).toBeNull();
+  });
+
+  it('boundary matching does not silently disarm a cue — every one still fires alone', () => {
+    // The guard against fixing the collision by breaking the list: if a future
+    // cue is added as a STEM (as SPECIALIST_CUES deliberately has), a trailing
+    // boundary would stop it matching and the exception would quietly weaken.
+    for (const cue of OPERATION_CUES) {
+      expect(
+        schedulingRedirectForStatedIntent('new', `the patient asked about ${cue} today`, 18),
+        `${cue} no longer withholds the redirect`,
+      ).toBeNull();
+    }
+  });
+
+  it('does NOT read a specialist reason off a professional narrative', () => {
+    // 'retina specialist' in an EMPLOYER name graded an ordinary new
+    // appointment as reason 152. There is no lexical way to tell that from a
+    // patient who needs to see one, so this path stops guessing: reason 152 has
+    // been used ONCE in 90 days, and trading it away removes a whole class of
+    // mislabelled Hub tickets. detectCrossQueue's own specialist read is
+    // untouched — that is the patient path, and #99 territory.
+    const r = schedulingRedirectForStatedIntent(
+      'new', 'Coordinator at Example Retina Specialist, booking a routine exam.', 18,
+    );
+    expect(r?.departmentId).toBe(9);
+    expect(r?.requestReasonId, 'the plain new-appointment reason').toBe(146);
   });
 });
