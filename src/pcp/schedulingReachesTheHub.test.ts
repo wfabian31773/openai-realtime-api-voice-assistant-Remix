@@ -85,6 +85,14 @@ const COORDINATOR = {
 
 const SCHEDULING_SLUGS = ['schedule_appointment', 'reschedule_appointment', 'cancel_appointment'] as const;
 
+/**
+ * `handoff_to_pcp` reads the ask out of the NARRATIVE via `asksForAPerson` —
+ * there is no boolean argument for it. A first draft of these tests passed
+ * `{ askedForAPerson: true }`, which the schema rejected, and the thrown error
+ * surfaced as a JSON parse failure rather than as "no transfer was requested".
+ */
+const ASKS_FOR_A_PERSON = 'Caller would like to speak to a representative.';
+
 beforeEach(() => {
   ticketing.createPcpTicket.mockClear();
   ticketing.createPcpTicket.mockResolvedValue({ success: true, ticketNumber: 'PCP-59000' });
@@ -315,5 +323,171 @@ describe('create_pcp_task routes a professional scheduling request to the Hub', 
 
     expect(filed.routed_to).toBe('HVA Hub');
     expect(hubPayload().departmentId).toBe(9);
+  });
+});
+
+/**
+ * CODEX REVIEW, PR #298. Four findings, all verified against the code before
+ * anything was changed. Each test below is the finding stated as a call.
+ */
+describe('Codex #298 — the surgery exception must not fire on an employer', () => {
+  /**
+   * THE FINDING I HAD ALREADY CLAIMED TO HAVE AVOIDED, in the one line where
+   * this route reads prose. `SURGERY_CUES` contains the literal
+   * `'surgery center'` — that is #99 — so a referral coordinator AT a surgery
+   * centre, ringing to book an ordinary eye exam, hit the exception and stayed
+   * in department 18. The PR body said "it cannot fire on an employer"; the
+   * surgery guard is exactly where it could.
+   *
+   * The operator's exception is the OPERATION, not the word: *"The exception
+   * is the OPERATION, not the word 'reschedule'"* (queueRouting.ts, 2026-08-13).
+   * A place that performs surgery is not a surgery being performed.
+   */
+  it('routes a caller AT a surgery center who is booking an ordinary exam', () => {
+    const r = schedulingRedirectForStatedIntent(
+      'new',
+      'Referral coordinator at Example Surgery Center asking to book an eye exam.',
+      18,
+    );
+    expect(r?.departmentId, 'the employer is not the subject of the request').toBe(9);
+  });
+
+  it.each([
+    'needs to move the surgery date',
+    'cancelling her cataract surgery',
+    'asking about the pre-op appointment',
+    'rescheduling after the operation',
+  ])('still declines when the request itself is about an operation: %s', (prose) => {
+    expect(schedulingRedirectForStatedIntent('reschedule', prose, 18)).toBeNull();
+  });
+});
+
+describe('Codex #298 — a transfer in flight keeps its ticket on the PCP endpoint', () => {
+  /**
+   * THE P1, AND MY GUARD READ THE WRONG THING.
+   *
+   * `create_pcp_task`'s `disposition` is a MODEL argument with
+   * `.default('CREATE_TASK')`. So when `handoff_to_pcp`'s own ticket write
+   * fails, it refuses `durable_ticket_required_before_handoff`, the model is
+   * told to file first, and the filing it makes is indistinguishable from an
+   * ordinary one. The Hub route fired, `recordDisposition('CREATE_TASK')` made
+   * `requestIsOnRecord` true, and the retried dial then rested on a
+   * department-9 scheduling ticket carrying none of the `pcp_handoff_*`
+   * columns and no `dispositionGrantedByExplicitAsk`.
+   *
+   * The dial itself is not new — the pre-change code recorded the same
+   * disposition from the same fallback. What this change moved is WHERE that
+   * durable record lives, and a transfer must not rest on a ticket filed to
+   * another department's queue.
+   *
+   * Fixed with a SERVER-OWNED latch, which is what Codex asked for: the model
+   * cannot set or clear it.
+   */
+  it('does NOT route to the Hub while a transfer is waiting on a durable ticket', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', COORDINATOR);
+
+    // The caller asks. First handoff_to_pcp offers the queue choice (v14).
+    const offered = await call(agent, 'handoff_to_pcp', { narrative: ASKS_FOR_A_PERSON });
+    expect(offered.success).toBe(false);
+    // They do not answer it, so the pre-ruling path applies: file, then dial.
+    // Make that filing fail, which is what puts the tool in the state this
+    // test is about.
+    ticketing.createPcpTicket.mockResolvedValue({ success: false, error: 'upstream 500' });
+    const blocked = await call(agent, 'handoff_to_pcp', { narrative: ASKS_FOR_A_PERSON });
+    expect(blocked.error).toBe('durable_ticket_required_before_handoff');
+
+    // The model does as the refusal says and files — with the DEFAULT
+    // disposition, because it is not asked to supply one.
+    ticketing.createPcpTicket.mockResolvedValue({ success: true, ticketNumber: 'PCP-59001' });
+    await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
+
+    expect(
+      ticketing.createTicket,
+      'the durable ticket a transfer rests on must stay on the PCP endpoint',
+    ).not.toHaveBeenCalled();
+    expect(ticketing.createPcpTicket).toHaveBeenCalled();
+  });
+
+  it('but routes normally once the caller DECLINES the queue — they chose the ticket', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', COORDINATOR);
+
+    await call(agent, 'handoff_to_pcp', { narrative: ASKS_FOR_A_PERSON });
+    ticketing.createPcpTicket.mockResolvedValue({ success: false, error: 'upstream 500' });
+    await call(agent, 'handoff_to_pcp', { narrative: ASKS_FOR_A_PERSON });
+    ticketing.createPcpTicket.mockResolvedValue({ success: true, ticketNumber: 'PCP-59002' });
+
+    // "No, just take the request." No transfer is in flight any more.
+    const declined = await call(agent, 'handoff_to_pcp', {
+      narrative: ASKS_FOR_A_PERSON,
+      callerAcceptedQueue: false,
+    });
+    expect(declined.success).toBe(false);
+
+    await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
+    expect(ticketing.createTicket, 'a declined queue is an ordinary filing').toHaveBeenCalled();
+    expect(hubPayload().departmentId).toBe(9);
+  });
+});
+
+describe('Codex #298 — urgency and an ambiguous Hub response', () => {
+  it.each([
+    ['urgent', 'high'],
+    ['high', 'high'],
+    ['normal', 'medium'],
+    ['routine', 'medium'],
+  ] as const)('carries urgency %s to the Hub as priority %s', async (urgency, priority) => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', COORDINATOR);
+    await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.', urgency });
+    // Before this, the Hub ticket was hardcoded `medium`, so rerouting
+    // silently deprioritised a time-sensitive request that `buildPayload`
+    // would have carried through.
+    expect(hubPayload().priority).toBe(priority);
+  });
+
+  it('sends an idempotency key, so a second invocation cannot open a second Hub ticket', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', COORDINATOR);
+    await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
+    expect(hubPayload().idempotencyKey).toBeTruthy();
+  });
+
+  /**
+   * A STATUSLESS FAILURE IS NOT A PROVEN REFUSAL. `createTicket` reports a
+   * timeout, a DNS failure or a socket reset with no `statusCode` — the
+   * distinction `CreateTicketResponse.statusCode` was added to carry. So the
+   * POST may well have landed and committed.
+   *
+   * The floor does not change: the request must never file NOWHERE, so the
+   * PCP ticket still goes. What changes is that the possible duplicate stops
+   * being SILENT — the PCP ticket says so, and a staffer can close one. The
+   * PR body claimed "a failed POST creates nothing, so falling through cannot
+   * duplicate", and that is false for exactly this case.
+   */
+  it('files the PCP ticket on an ambiguous failure AND says the Hub may hold one too', async () => {
+    ticketing.createTicket.mockResolvedValue({ success: false, error: 'network timeout' });
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', COORDINATOR);
+
+    const filed = await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
+
+    expect(filed.success, 'the request must still land somewhere').toBe(true);
+    const pcp = (ticketing.createPcpTicket.mock.calls as any[])[0][0];
+    expect(pcp.narrative).toMatch(/may already hold a scheduling ticket/i);
+  });
+
+  it('says nothing of the sort when the Hub gave a PROVEN refusal', async () => {
+    ticketing.createTicket.mockResolvedValue({ success: false, error: 'Validation failed', statusCode: 400 });
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', COORDINATOR);
+
+    await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
+
+    const pcp = (ticketing.createPcpTicket.mock.calls as any[])[0][0];
+    // A 4xx is proof the server rejected it before committing, so warning a
+    // staffer about a duplicate that cannot exist is noise.
+    expect(pcp.narrative).not.toMatch(/may already hold a scheduling ticket/i);
   });
 });

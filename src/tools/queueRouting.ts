@@ -164,8 +164,14 @@ const OPTICAL_CUES = [
   'sunglasses', 'my glasses are', 'pick up my glasses', 'lentes', 'gafas', 'armazon', 'armazón',
 ];
 
-/** Surgery, when the words are unmistakably about an operation. */
-const SURGERY_CUES = [
+/**
+ * Surgery, when the words are unmistakably about an operation.
+ *
+ * Exported for the same reason `SCHEDULING` and `SPECIALIST_CUES` are: so the
+ * invariant `OPERATION_CUES` claims about it — a strict subset, differing by
+ * exactly the facility words — can be asserted rather than trusted.
+ */
+export const SURGERY_CUES = [
   'my surgery', 'the surgery', 'cataract surgery', 'lasik', 'surgery date',
   'surgery center', 'pre-op', 'post-op', 'operation', 'cirugía', 'cirugia',
 ];
@@ -394,8 +400,40 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
  * stated `reschedule` whose narrative names an operation is coordinator work,
  * so this declines and the request stays with the line that took it. 4 of the
  * 75 are that shape.
+ *
+ * BUT IT READS `OPERATION_CUES`, NOT `SURGERY_CUES` — Codex P2, PR #298, and
+ * it caught this route doing the exact thing the paragraph above boasts it
+ * cannot. `SURGERY_CUES` contains the literal `'surgery center'`, so a
+ * referral coordinator AT a surgery centre, ringing to book an ordinary eye
+ * exam, hit the exception on their EMPLOYER's name and stayed in department
+ * 18. That is #99 arriving through the one line here that reads prose.
+ *
+ * The operator's own wording settles which list is right: "The exception is
+ * the OPERATION, not the word 'reschedule'." A place that performs surgery is
+ * not a surgery being performed.
  */
 export type StatedSchedulingIntent = 'new' | 'reschedule' | 'cancel';
+
+/**
+ * Surgery cues that name a PLACE rather than a procedure.
+ *
+ * Derived by subtraction rather than written out, so this list stays visibly
+ * a statement about `SURGERY_CUES` — if a future facility word is added there
+ * and not here, the subtraction is where to add it. `queueRouting.test.ts`
+ * asserts the two lists still differ by exactly this.
+ *
+ * NOT removed from `SURGERY_CUES` itself. That list is read by
+ * `detectCrossQueue`, which routes on subject matter across every lane, and
+ * changing it is the open #99 work that `docs/BACKEND_HANDOFF.md` requires a
+ * before-and-after department-2 misroute measurement for. This narrower list
+ * is used ONLY to decide whether to WITHHOLD a scheduling redirect, where a
+ * false positive costs a routed ticket and can never misroute one.
+ */
+const SURGERY_CUES_NAMING_A_PLACE = ['surgery center'];
+
+export const OPERATION_CUES = SURGERY_CUES.filter(
+  (cue) => !SURGERY_CUES_NAMING_A_PLACE.includes(cue),
+);
 
 /**
  * Reason ids for a STATED intent, read back out of SCHEDULING so this cannot
@@ -416,8 +454,9 @@ export function schedulingRedirectForStatedIntent(
   if (homeDepartmentId === HVA_HUB) return null;
   const t = fold(text);
   // The exception, before anything else. An operation is not front-desk
-  // scheduling whatever the intake enum says.
-  if (hit(t, SURGERY_CUES)) return null;
+  // scheduling whatever the intake enum says — but a surgery CENTRE is an
+  // employer, not an operation. See OPERATION_CUES.
+  if (hit(t, OPERATION_CUES)) return null;
 
   const reasonId = STATED_SCHEDULING_REASON_ID[intent];
   const row = SCHEDULING.find((s) => s.reasonId === reasonId);

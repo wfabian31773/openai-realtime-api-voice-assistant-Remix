@@ -531,6 +531,21 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
    */
   let preTransferAskUsed = false;
   /**
+   * A TRANSFER IS WAITING FOR A DURABLE TICKET SO IT CAN DIAL.
+   *
+   * Server-owned, per call, and the model can neither set nor clear it — which
+   * is the whole reason it exists rather than a read of `create_pcp_task`'s
+   * `disposition` argument (Codex P1, PR #298; the long note on
+   * `fileSchedulingToHub`'s parameter has the chain).
+   *
+   * Set when `handoff_to_pcp` refuses `durable_ticket_required_before_handoff`
+   * because its OWN ticket write failed with nothing yet on record — the one
+   * refusal that tells the model to file and come back. Cleared the moment the
+   * caller declines the queue, because then no dial is coming and their
+   * scheduling request is an ordinary filing again.
+   */
+  let transferAwaitingTicket = false;
+  /**
    * THE QUEUE CHOICE HAS BEEN PUT TO THIS CALLER, once, in words.
    *
    * A latch and not a parameter read, because it is what makes an acceptance
@@ -987,9 +1002,13 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * this route falls back to; see `fileSchedulingToHub`.
        */
       const toSchedulingHub = await fileSchedulingToHub(
-        callId, metadata, state, narrative, disposition, missing,
+        callId, metadata, state, narrative, disposition, urgency, missing, transferAwaitingTicket,
       );
-      if (toSchedulingHub) return toSchedulingHub as never;
+      if (toSchedulingHub.filed) return toSchedulingHub.filed as never;
+      // Only ever set when the Hub's answer was AMBIGUOUS — see the note on
+      // that branch. A proven 4xx carries nothing, because warning a staffer
+      // about a duplicate that cannot exist is noise.
+      if (toSchedulingHub.pcpNote) narrative = `${narrative}\n\n${toSchedulingHub.pcpNote}`;
 
       if (isRecordsRequest(state, recordsByNarrative)) narrative = `${narrative}${ticketDeliveryNote(state)}`;
       const response = await submitPcpTicket(
@@ -1158,6 +1177,9 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         return refusePcp('queue_choice', { say: QUEUE_CHOICE_WARNING });
       }
       if (choice === 'declined') {
+        // No dial is coming. Their request is an ordinary filing again, so it
+        // may route like one.
+        transferAwaitingTicket = false;
         console.info(`[PCP] the caller chose to have it taken here rather than hold for the queue (${callId})`);
         return refusePcp('queue_choice_declined');
       }
@@ -1313,6 +1335,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         return refusePcp('durable_ticket_required_before_handoff');
       }
       if (initial && !initial.success && !requestIsOnRecord) {
+        // The dial is coming back the moment something durable exists, so the
+        // filing the model is about to make belongs on the PCP endpoint with
+        // the handoff columns — not routed to another department's queue.
+        transferAwaitingTicket = true;
         return refusePcp('durable_ticket_required_before_handoff');
       }
       if (initial && !initial.success) {
@@ -1801,16 +1827,53 @@ const STATED_SCHEDULING_INTENT: Partial<Record<PcpCallPurposeSlug, StatedSchedul
   cancel_appointment: 'cancel',
 };
 
+/**
+ * What the route did. `filed` is the tool result when the Hub took it;
+ * otherwise the PCP ticket files and `pcpNote`, when present, is appended to
+ * its narrative.
+ *
+ * A plain `null` was not enough once an AMBIGUOUS Hub failure had to be told
+ * apart from a declined route: the caller has to be able to write something on
+ * the PCP ticket, and returning the note is the only way out of this function.
+ */
+type HubRouteOutcome =
+  | { filed: Record<string, unknown> }
+  | { filed: null; pcpNote?: string };
+
 async function fileSchedulingToHub(
   callId: string,
   metadata: PcpAgentMetadata,
   state: PcpConversationState,
   narrative: string,
   disposition: PcpDisposition,
+  urgency: 'routine' | 'normal' | 'high' | 'urgent',
   missing: string[],
-): Promise<Record<string, unknown> | null> {
+  /**
+   * SERVER-OWNED, and that is the whole point — Codex P1, PR #298.
+   *
+   * True while `handoff_to_pcp` is waiting for a durable ticket so it can
+   * retry the dial. Set by that tool when its own write failed and nothing was
+   * on record; cleared when the caller declines the queue.
+   *
+   * The guard below used to read `disposition`, which is a MODEL argument with
+   * `.default('CREATE_TASK')`. So the filing a mid-transfer caller's model is
+   * TOLD to make — by `durable_ticket_required_before_handoff`, in those words
+   * — arrived here indistinguishable from an ordinary one. It routed to the
+   * Hub, `recordDisposition('CREATE_TASK')` satisfied `requestIsOnRecord`, and
+   * the retried dial then rested on a department-9 scheduling ticket carrying
+   * none of the `pcp_handoff_*` columns and no `dispositionGrantedByExplicitAsk`
+   * — the field whose absence is what killed this transfer on 2026-08-27.
+   *
+   * The dial is not new: before this change the same fallback filed a PCP
+   * ticket and recorded the same disposition. What moved is WHERE the durable
+   * record lives, and a transfer must not rest on a ticket filed into another
+   * department's queue.
+   */
+  transferAwaitingTicket: boolean,
+): Promise<HubRouteOutcome> {
   const intent = state.callPurpose ? STATED_SCHEDULING_INTENT[state.callPurpose] : undefined;
-  if (!intent) return null;
+  if (!intent) return { filed: null };
+  if (transferAwaitingTicket) return { filed: null };
   /**
    * A TRANSFER IN FLIGHT KEEPS ITS OWN TICKET.
    *
@@ -1825,7 +1888,7 @@ async function fileSchedulingToHub(
    * 14 of the 75 measured tickets carry HAND_OFF, so this is a real branch and
    * not a theoretical one.
    */
-  if (disposition !== 'CREATE_TASK') return null;
+  if (disposition !== 'CREATE_TASK') return { filed: null };
 
   const [{ schedulingRedirectForStatedIntent }, { ticketingApiClient }, { sanitizeForSms }] =
     await Promise.all([
@@ -1838,7 +1901,7 @@ async function fileSchedulingToHub(
   // Null is the surgery exception: "surgery is an exception to that hva hub
   // rule" (operator, 2026-08-13). It stays on the PCP ticket for a coordinator
   // rather than being guessed into another department.
-  if (!redirect) return null;
+  if (!redirect) return { filed: null };
 
   /**
    * WHOSE NUMBER GOES ON THE TICKET, and why it is the caller's.
@@ -1884,16 +1947,60 @@ async function fileSchedulingToHub(
     patientPhone: callback,
     preferredContactMethod: 'phone',
     description: body,
-    priority: 'medium',
+    /**
+     * THE TOOL'S OWN URGENCY, mapped exactly as the patient branch maps it —
+     * Codex P2, PR #298. This was hardcoded `medium`, so a `create_pcp_task`
+     * called with `high` or `urgent` reached the Hub deprioritised, where
+     * before the change `buildPayload` carried it onto the PCP ticket. A
+     * routing change must not quietly reorder somebody's queue.
+     */
+    priority: urgency === 'urgent' || urgency === 'high' ? 'high' : 'medium',
+    /**
+     * ONE HUB TICKET PER CALL. `create_pcp_task` is a tool the model can call
+     * more than once — the refusal paths above it exist precisely to send it
+     * back — and without a key each attempt opens another department-9 ticket.
+     * CLAUDE.md measured the keyed duplicate rate at 3 calls in 2,086 (0.14%).
+     */
+    idempotencyKey: `${metadata.callSid || callId}-scheduling-hub`,
     callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
   });
 
   if (!result.success || !result.ticketNumber) {
+    /**
+     * A STATUSLESS FAILURE IS NOT A PROVEN REFUSAL — Codex P2, PR #298, and it
+     * corrects a claim this PR made out loud: "a failed POST creates nothing,
+     * so falling through cannot duplicate."
+     *
+     * `CreateTicketResponse.statusCode` exists for exactly this distinction:
+     * it is set when the server answered and said no, and ABSENT for a
+     * timeout, a DNS failure or a socket reset — where the POST may have
+     * landed and committed before the answer was lost. A `success: true`
+     * carrying no ticket number is ambiguous in the same way.
+     *
+     * The floor does not move: a request must never file NOWHERE, so the PCP
+     * ticket still goes. What changes is that a possible duplicate stops being
+     * SILENT. An idempotency key cannot help here — the second write is to a
+     * different endpoint — so the answer is to write it on the ticket a person
+     * will read, and let them close one.
+     */
+    const provenRefusal = typeof result.statusCode === 'number'
+      && result.statusCode >= 400 && result.statusCode < 500;
     console.warn(
-      `[PCP] scheduling route to the HVA Hub declined (${result.error ?? 'no ticket number'}) — ` +
+      `[PCP] scheduling route to the HVA Hub declined (${result.error ?? 'no ticket number'}` +
+        `${provenRefusal ? `, HTTP ${result.statusCode}` : ', no HTTP status — outcome unknown'}) — ` +
         'filing the PCP ticket instead',
     );
-    return null;
+    return {
+      filed: null,
+      ...(provenRefusal
+        ? {}
+        : {
+            pcpNote:
+              '[The scheduling hub may already hold a scheduling ticket for this call — the '
+              + 'request to it did not come back with an answer, so it may have been recorded '
+              + 'there as well. Check before acting, and close whichever is the duplicate.]',
+          }),
+    };
   }
 
   pcpDirector.recordDisposition(callId, 'CREATE_TASK');
@@ -1902,12 +2009,14 @@ async function fileSchedulingToHub(
       `reason ${redirect.requestReasonId}) as ${result.ticketNumber}`,
   );
   return {
-    success: true,
-    ticketNumber: result.ticketNumber,
-    routed_to: redirect.departmentName,
-    message:
-      `Filed as ${result.ticketNumber} with our scheduling team. Read the ticket number back and say ` +
-      'the scheduling team will follow up. Do NOT offer to transfer or connect them.',
+    filed: {
+      success: true,
+      ticketNumber: result.ticketNumber,
+      routed_to: redirect.departmentName,
+      message:
+        `Filed as ${result.ticketNumber} with our scheduling team. Read the ticket number back and say ` +
+        'the scheduling team will follow up. Do NOT offer to transfer or connect them.',
+    },
   };
 }
 
