@@ -360,13 +360,28 @@ registerTool({
        * applicable"; a clerk chasing nothing is how a case sits until the
        * statutory clock runs out.
        *
-       * Only spelled out when the clock applies, because that is when somebody
-       * has to act on the absence. Same wording as `ticketDeliveryNote`, so a
-       * staffer sees one phrase whichever path filed the case.
+       * A MISSING DESTINATION SAYS SO WHETHER OR NOT THE CLOCK APPLIES, and
+       * that is a change from the first version of this line — which read
+       * "only spelled out when the clock applies, because that is when
+       * somebody has to act on the absence."
+       *
+       * True while the only off-clock cases came from the records lane, which
+       * asks. It stopped being true on 2026-09-14, when professional records
+       * requests began reaching this queue from PCP: those are off the clock
+       * by definition, PCP can run out of asks, and nobody can send a chart
+       * anywhere without knowing where. An empty line reads as "not
+       * applicable" and the case sits.
+       *
+       * The DATE RANGE below is deliberately still keyed on the clock. A plan
+       * or a clinic usually wants one specific encounter, so a chase line for
+       * a range nobody needs is noise on a ticket rather than a gap in it.
+       *
+       * Same wording as `ticketDeliveryNote`, so a staffer sees one phrase
+       * whichever path filed the case.
        */
       deliverTo
         ? `\nSend to: ${deliverTo}`
-        : cap.onClock ? '\nSend to: NOT CAPTURED — confirm with the requester before sending anything.' : '',
+        : '\nSend to: NOT CAPTURED — confirm with the requester before sending anything.',
       dateRange
         ? `\nDates needed: ${dateRange}`
         : cap.onClock ? '\nDates needed: NOT CAPTURED — confirm the range with the requester.' : '',

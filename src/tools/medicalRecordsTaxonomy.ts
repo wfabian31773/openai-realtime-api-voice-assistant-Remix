@@ -424,6 +424,46 @@ const REQUESTER_TYPES = new Set<RequesterType>([
   'patient', 'personal_representative', 'provider', 'health_plan', 'legal', 'other',
 ]);
 
+/**
+ * A HEALTHCARE ORGANISATION TYPE, WHICH IS THE ONE SIGNAL THAT IS NOT PROSE.
+ *
+ * Operator ruling, 2026-09-14: a records request from any professional caller
+ * — provider, health plan, attorney — files to Medical Records OFF the clock.
+ * Measured before it: of 41 live PCP records tickets sitting in department 18,
+ * 16 came from a provider organisation, 6 from a medical assistant or a
+ * referral coordinator, and 6 from a health plan. Literal "peer-to-peer"
+ * appears in 2, which is why this reads the CALLER, not the phrase.
+ *
+ * PCP already collects `callerFacilityType` as an enum the model picks from a
+ * closed list, so this is a lookup rather than a classification — no cue list,
+ * no wording to drift. It is consulted BEFORE the prose classifier for exactly
+ * that reason.
+ *
+ * `pharmaceutical_representative` is deliberately absent and must stay absent.
+ * A pharma rep has no treatment relationship to the patient, so their asking
+ * for a chart is not a records request to be routed — it is something a person
+ * should look at. Returning null here leaves it in PCP Support, which is where
+ * the operator's rule about entities does NOT reach.
+ */
+export function requesterTypeForFacility(
+  facility: string | null | undefined,
+): RequesterType | null {
+  switch (String(facility ?? '').trim()) {
+    case 'pcp_office':
+    case 'referring_provider':
+    case 'ipa_medical_group':
+    case 'hospital_medical_facility':
+    case 'pharmacy':
+      return 'provider';
+    case 'health_plan':
+      return 'health_plan';
+    case 'other_healthcare_organization':
+      return 'other';
+    default:
+      return null;
+  }
+}
+
 /** Do patient and personal_representative both stand on the clock? Operator, 2026-09-13. */
 function onClockFor(t: RequesterType): boolean {
   return t === 'patient' || t === 'personal_representative';

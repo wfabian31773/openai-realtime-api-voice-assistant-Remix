@@ -42,8 +42,19 @@ vi.mock('../../server/db', () => ({ db: {} }));
 
 const ticketing = vi.hoisted(() => ({
   createPcpTicket: vi.fn(async () => ({ success: true, ticketNumber: 'PCP-57918' })),
+  /**
+   * The records library files through `createTicket`, and this fixture needed
+   * it from 2026-09-14: a PROFESSIONAL records request now reaches Medical
+   * Records rather than PCP Support, so the tool runs and an absent mock makes
+   * it throw — the SDK then hands back a plain-text error this harness cannot
+   * parse, which reads like a source defect and is not one.
+   */
+  createTicket: vi.fn(async () => ({ success: true, ticketNumber: 'VA-58300' })),
 }));
-vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient: ticketing }));
+vi.mock('../../server/services/ticketingApiClient', () => ({
+  ticketingApiClient: ticketing,
+  lookupWasUnavailable: () => false,
+}));
 
 const { createPcpAgent } = await import('../agents/pcpAgent');
 const { pcpDirector } = await import('./director');
@@ -184,6 +195,17 @@ describe('every door to a records filing asks where they go', () => {
     expect(ticketing.createPcpTicket, 'nothing may file without a destination').not.toHaveBeenCalled();
   });
 
+  /**
+   * THE DOOR MOVED, THE PROPERTY DID NOT — operator ruling, 2026-09-14.
+   *
+   * This caller is `callerFacilityType: 'pcp_office'`, which is precisely the
+   * population that ruling sends to Medical Records off the clock: of 41 live
+   * PCP records tickets in department 18, 16 came from a provider
+   * organisation. So the destination this test asserts changed, and the
+   * assertion moved with it rather than being relaxed — what it exists to
+   * prove is that whichever door the request leaves by, it carries the place
+   * the records have to be sent. That is asserted here exactly as before.
+   */
   it('and files through that door once the answer is in, carrying the instruction', async () => {
     const { agent } = freshCall();
     await call(agent, 'record_pcp_intake', PROFESSIONAL);
@@ -192,8 +214,11 @@ describe('every door to a records filing asks where they go', () => {
     const r = await call(agent, 'create_pcp_task', { narrative: 'Wants the records.' });
 
     expect(r.success, `must file: ${JSON.stringify(r)}`).toBe(true);
-    const blob = JSON.stringify((ticketing.createPcpTicket.mock.calls as any[])[0][0]);
-    expect(blob, 'the clerk cannot send anything without this').toMatch(/Deliver by FAX to 760-555-1234/);
+    expect(r.routed_to, 'a provider records request belongs with Medical Records').toBe('Medical Records');
+    const blob = JSON.stringify((ticketing.createTicket.mock.calls as any[])[0][0]);
+    expect(blob, 'the clerk cannot send anything without this').toMatch(/760-555-1234/i);
+    expect(blob, 'and it is off the patient clock').toMatch(/"capClockApplies":false/);
+    expect(ticketing.createPcpTicket, 'it must not also file a PCP ticket').not.toHaveBeenCalled();
   });
 
   it('a NON-records call through create_pcp_task is not asked about delivery', async () => {

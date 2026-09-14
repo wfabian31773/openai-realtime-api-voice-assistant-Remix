@@ -818,6 +818,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // department 18 instead, a patient's right-of-access request is
         // invisible to the report the CAP exists to produce.
         const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative, {
+          route: 'patient',
           floorReached: ticketBlocksUsed >= MAX_BLOCKS,
           spendBlock: () => (ticketBlocksUsed += 1),
         });
@@ -927,7 +928,28 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * caller who will not answer cannot be held forever — the floor in
        * ticketRequirements.ts, not a second budget beside it.
        */
-      const deliveryAsk = deliveryAskFor(state);
+      /**
+       * A PROFESSIONAL RECORDS REQUEST IS STILL A RECORDS REQUEST — operator
+       * ruling, 2026-09-14: any professional caller's records request files to
+       * Medical Records, off the clock.
+       *
+       * It has to be read off the NARRATIVE, because the purpose slug cannot
+       * see it: only a patient request carries
+       * `patient_medical_records_request`, since the records tool sets that
+       * slug itself. A clinic asking for a chart is `peer_to_peer` or
+       * `service_inquiry`, so `isRecordsRequest` returns false for every one
+       * of them and both the delivery ask and the route would be skipped.
+       *
+       * Measured before this, over live PCP records tickets in department 18
+       * (backfills excluded): 41 of them, 16 from a provider organisation, 6
+       * from a medical assistant or referral coordinator, 6 from a health
+       * plan. Literal "peer-to-peer" appears in 2 — which is why the rule
+       * reads the CALLER rather than the phrase.
+       */
+      const recordsByNarrative = Boolean(
+        (await import('../tools/medicalRecordsTaxonomy')).classifyRecords(narrative),
+      );
+      const deliveryAsk = deliveryAskFor(state, recordsByNarrative);
       if (deliveryAsk && ticketBlocksUsed < MAX_BLOCKS) {
         ticketBlocksUsed += 1;
         return refusePcp(`missing_required_field:${deliveryAsk.field}`, {
@@ -939,7 +961,24 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
             'the ticket will say so.',
         });
       }
-      if (isRecordsRequest(state)) narrative = `${narrative}${ticketDeliveryNote(state)}`;
+      /**
+       * ROUTED BEFORE THE NOTE IS APPENDED, and the order is the point.
+       *
+       * `file_records_ticket` writes its own "Send to:" line from the state,
+       * so appending `ticketDeliveryNote` first would put the same sentence on
+       * the case twice. The note is for the PCP ticket this falls back to when
+       * the route declines — which it does whenever the narrative is not a
+       * records request, or the caller cannot be established as a professional
+       * one, or Medical Records refuses and the strike budget is spent.
+       */
+      const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative, {
+        route: 'professional',
+        floorReached: ticketBlocksUsed >= MAX_BLOCKS,
+        spendBlock: () => (ticketBlocksUsed += 1),
+      });
+      if (toMedicalRecords) return toMedicalRecords as never;
+
+      if (isRecordsRequest(state, recordsByNarrative)) narrative = `${narrative}${ticketDeliveryNote(state)}`;
       const response = await submitPcpTicket(
         buildPayload(metadata, state, disposition, narrative, urgency, undefined, failureInformation, missing),
       );
@@ -1602,6 +1641,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * department is recoverable while a request nowhere is not.
        */
       const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative, {
+          route: 'patient',
           floorReached: ticketBlocksUsed >= MAX_BLOCKS,
           spendBlock: () => (ticketBlocksUsed += 1),
         });
@@ -1731,9 +1771,30 @@ async function fileToMedicalRecords(
    * the request filed NOWHERE, where before this route existed it left a PCP
    * ticket. That is the exact number this change promised not to move.
    */
-  budget: { floorReached: boolean; spendBlock: () => number },
+  budget: {
+    /**
+     * WHICH CALLER THIS IS, STATED RATHER THAN SNIFFED — operator ruling,
+     * 2026-09-14, when professional records requests were let through.
+     *
+     * The two routes read WHO IS ASKING from different evidence and must not
+     * borrow each other's. `patient` reads only the prose of
+     * `statedRelationship`, exactly as it did before this parameter existed.
+     * `professional` may read `callerFacilityType`, an enum a PROFESSIONAL
+     * intake fills from a closed list and a patient has no business carrying.
+     *
+     * One shared rule would run the dangerous direction: a caller the model
+     * classified `patient_caller` who somehow also carried a facility type
+     * would read as a provider and come OFF the statutory clock. A patient's
+     * own deadline can only be switched off by a mistake nobody sees, so the
+     * routes are separated at the call site rather than inferred here.
+     */
+    route: 'patient' | 'professional';
+    floorReached: boolean;
+    spendBlock: () => number;
+  },
 ): Promise<Record<string, unknown> | null> {
-  const { classifyRecords, classifyRequester } = await import('../tools/medicalRecordsTaxonomy');
+  const { classifyRecords, classifyRequester, requesterTypeForFacility } =
+    await import('../tools/medicalRecordsTaxonomy');
   const recordsHit = classifyRecords(narrative);
   if (!recordsHit) return null;
 
@@ -1767,17 +1828,62 @@ async function fileToMedicalRecords(
    * request the narrative put on the clock off it.
    */
   const stated = String(state.statedRelationship ?? '').trim();
-  const professional = state.callerIsThePatient === true
-    ? null
-    : (() => {
-        const fromRelationship = stated ? classifyRequester(stated) : null;
-        return fromRelationship === 'provider'
-          || fromRelationship === 'health_plan'
-          || fromRelationship === 'legal'
-          ? fromRelationship
-          : null;
-      })();
+  const offClockType = (t: unknown) =>
+    t === 'provider' || t === 'health_plan' || t === 'legal' || t === 'other';
+  const professional = budget.route === 'professional'
+    ? (() => {
+        /**
+         * A PHARMA REP IS THE ONE EXCLUSION from "any professional caller".
+         *
+         * They have no treatment relationship to the patient, so their asking
+         * for a chart is not a request to route anywhere automatically — it is
+         * something a person should look at. Returning null leaves it in PCP
+         * Support, which is exactly where it goes today.
+         */
+        if (state.callerFacilityType === 'pharmaceutical_representative'
+          || state.callPurpose === 'pharmaceutical_representative') return null;
+        // The enum first. It is picked from a closed list, so unlike a cue
+        // list matched against free speech there is nothing in it to drift.
+        const fromFacility = requesterTypeForFacility(state.callerFacilityType);
+        if (fromFacility) return fromFacility;
+        // Then what they said about themselves, most specific first.
+        for (const text of [stated, state.callerRole, state.callerOrganization]) {
+          const t = text ? classifyRequester(String(text)) : null;
+          if (offClockType(t)) return t;
+        }
+        return null;
+      })()
+    : state.callerIsThePatient === true
+      ? null
+      : (() => {
+          const fromRelationship = stated ? classifyRequester(stated) : null;
+          return fromRelationship === 'provider'
+            || fromRelationship === 'health_plan'
+            || fromRelationship === 'legal'
+            ? fromRelationship
+            : null;
+        })();
+
+  /**
+   * THE PROFESSIONAL ROUTE FILES ONLY WHEN IT KNOWS WHO IS ASKING.
+   *
+   * The patient route has a sound default — a caller on the patient branch who
+   * named no relationship IS the patient, and `patient` is the on-clock answer
+   * that protects them. The professional route has no such default: falling
+   * back to it there would put a stranger's request on the patient's own
+   * right-of-access clock and name them as the requester on a CAP record.
+   *
+   * So an unidentifiable professional caller is not routed at all, and their
+   * request files to PCP Support exactly as it does today. Declining to route
+   * costs the department-16 improvement on that call; guessing costs a
+   * statutory deadline on somebody else's.
+   */
+  if (budget.route === 'professional' && !professional) return null;
+
   const requesterType = professional ?? (stated ? 'personal_representative' : 'patient');
+  /** Who the CAP record names as the requester when it is not the patient. */
+  const professionalDescriptor = [state.callerRole, state.callerOrganization]
+    .map((v) => String(v ?? '').trim()).filter(Boolean).join(', ');
 
   const nameBits = String(state.callerName ?? '').trim().split(/\s+/).filter(Boolean);
   const recordsResult = (await fileRecords.handler({
@@ -1809,11 +1915,13 @@ async function fileToMedicalRecords(
      * refuses to let any stated value drop a request off the clock regardless.
      */
     requester_type: requesterType,
-    requester: stated
-      ? professional
-        ? `${state.callerName ?? 'the caller'} — ${stated}`
-        : `${state.callerName ?? 'the caller'} — ${stated} of the patient`
-      : `the patient themselves${state.callerName ? ` (${state.callerName})` : ''}`,
+    requester: budget.route === 'professional'
+      ? `${state.callerName ?? 'the caller'} — ${professionalDescriptor || stated || 'professional caller'}`
+      : stated
+        ? professional
+          ? `${state.callerName ?? 'the caller'} — ${stated}`
+          : `${state.callerName ?? 'the caller'} — ${stated} of the patient`
+        : `the patient themselves${state.callerName ? ` (${state.callerName})` : ''}`,
     /**
      * PASS THE DELIVERY PCP ALREADY HOLDS — without this the route refuses.
      *
