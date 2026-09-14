@@ -1897,7 +1897,14 @@ async function fileSchedulingToHub(
       import('../services/gsm7'),
     ]);
 
-  const redirect = schedulingRedirectForStatedIntent(intent, narrative, PCP_DEPARTMENT_ID);
+  const redirect = schedulingRedirectForStatedIntent(intent, narrative, PCP_DEPARTMENT_ID, [
+    // The caller's own organisation and role, so the surgery exception reads
+    // the REQUEST and not the letterhead — Codex round 3, PR #298. On this
+    // line the intake records both, so they are available as stated values
+    // rather than having to be found in the prose.
+    String(state.callerOrganization ?? ''),
+    String(state.callerRole ?? ''),
+  ]);
   // Null is the surgery exception: "surgery is an exception to that hva hub
   // rule" (operator, 2026-08-13). It stays on the PCP ticket for a coordinator
   // rather than being guessed into another department.

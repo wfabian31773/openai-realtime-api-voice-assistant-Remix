@@ -480,9 +480,47 @@ export function schedulingRedirectForStatedIntent(
   intent: StatedSchedulingIntent,
   text: string,
   homeDepartmentId: number,
+  /**
+   * THE CALLER'S OWN METADATA, REMOVED BEFORE THE GUARD READS THE TEXT —
+   * Codex P2 round 3, PR #298, and the point where this stopped being a cue
+   * list problem.
+   *
+   * The same finding arrived three times in three shapes: `surgery center`,
+   * then `operation` inside `operations coordinator`, then `lasik` inside
+   * "Coordinator at Example LASIK Clinic". No edit to the cue list closes it,
+   * because in the last case the employer token and the procedure token are
+   * the SAME TOKEN — a word boundary cannot separate them and neither can a
+   * narrower list.
+   *
+   * What separates them is provenance, not spelling. Codex's own framing was
+   * "request-scoped evidence rather than matching the whole narrative", and
+   * this makes that literal: whatever the intake recorded as the caller's
+   * organisation and role is removed from the text, and the guard reads what
+   * is left. On the PCP line that metadata is a large share of the narrative
+   * by construction, which is why every one of these findings landed here.
+   *
+   * IT CANNOT LOOSEN THE EXCEPTION BEYOND ITS OWN STRING. Only exact
+   * occurrences of the supplied text are removed, so "Coordinator at Example
+   * LASIK Clinic — needs to move the surgery date" still withholds, and
+   * "Booking her LASIK" still withholds because "example lasik clinic" does
+   * not occur in it. Omitted entirely, the behaviour is exactly as before.
+   *
+   * MEASURED, all 217 PCP tickets: 7 organisations contain an operation cue,
+   * and 2 of the 75 scheduling tickets are this shape. Small — and the reason
+   * to fix it at the source anyway is that it closes all three rounds at one
+   * point rather than waiting for the fourth token.
+   */
+  callerMetadata: readonly string[] = [],
 ): QueueRedirect | null {
   if (homeDepartmentId === HVA_HUB) return null;
-  const t = fold(text);
+  let t = fold(text);
+  for (const raw of callerMetadata) {
+    const m = fold(raw).trim();
+    // A one- or two-character fragment would blank half the narrative; a
+    // missing organisation arrives as '' and must not match everywhere.
+    if (m.length < 3) continue;
+    t = t.split(m).join(' ');
+  }
   // The exception, before anything else. An operation is not front-desk
   // scheduling whatever the intake enum says — but a surgery CENTRE is an
   // employer, not an operation. See OPERATION_CUES.

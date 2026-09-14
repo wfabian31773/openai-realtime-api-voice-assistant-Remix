@@ -547,3 +547,123 @@ describe('Codex #298 round 2 — substring cues reading the caller, not the requ
     expect(r?.requestReasonId, 'the plain new-appointment reason').toBe(146);
   });
 });
+
+/**
+ * CODEX ROUND 3, PR #298 — and the last round spent on this cue.
+ *
+ * The finding arrived a third time in a third shape: `lasik` in "Coordinator at
+ * Example LASIK Clinic" withholds the Hub route from a routine booking. Word
+ * boundaries cannot help, because the employer token and the procedure token
+ * are the same token.
+ *
+ * MEASURED before deciding what to do, over all 217 PCP tickets: SEVEN have an
+ * organisation name containing an operation cue, and **TWO of the 75 scheduling
+ * tickets** are the shape this finding describes. A false positive costs
+ * nothing against today — the request stays in department 18, which is where
+ * all 75 sit now — while loosening the guard risks routing a real surgery date
+ * to the Hub against the operator's explicit exception.
+ *
+ * So rather than a fourth patch to the cue list, this takes Codex's own framing
+ * — "request-scoped evidence rather than matching the whole narrative" — and
+ * makes it literal: the caller's OWN organisation and role are removed from the
+ * text before the guard reads it. That closes all three rounds at one point
+ * instead of chasing the next token.
+ */
+describe('Codex #298 round 3 — the guard reads the request, not the caller', () => {
+  it.each([
+    ['Example LASIK Clinic', 'Coordinator at Example LASIK Clinic calling to book a routine exam.'],
+    ['Example Surgery Center', 'Referral coordinator at Example Surgery Center, booking an eye exam.'],
+    ['Example Cataract Institute', 'Scheduler at Example Cataract Institute wants the patient seen.'],
+  ])('routes a booking when the cue is only in the employer name: %s', (org, prose) => {
+    expect(
+      schedulingRedirectForStatedIntent('new', prose, 18, [org])?.departmentId,
+      'the employer is not the subject of the request',
+    ).toBe(9);
+  });
+
+  it('STILL withholds when the procedure is named outside the employer', () => {
+    // The guard that stops this becoming "never withhold": the org is removed,
+    // and what remains still names an operation.
+    expect(schedulingRedirectForStatedIntent(
+      'reschedule',
+      'Coordinator at Example LASIK Clinic — needs to move the surgery date.',
+      18, ['Example LASIK Clinic'],
+    )).toBeNull();
+  });
+
+  it('STILL withholds when the procedure IS the request and shares the employer word', () => {
+    // org is "Example LASIK Clinic"; the request says "her LASIK". The org
+    // string does not occur in that phrase, so nothing is stripped from it and
+    // the cue stands.
+    expect(schedulingRedirectForStatedIntent(
+      'new', 'Booking her LASIK.', 18, ['Example LASIK Clinic'],
+    )).toBeNull();
+  });
+
+  it('is unchanged when no caller metadata is supplied', () => {
+    expect(schedulingRedirectForStatedIntent('new', 'book an eye exam', 18)?.departmentId).toBe(9);
+    expect(schedulingRedirectForStatedIntent('reschedule', 'move the surgery date', 18)).toBeNull();
+  });
+
+  /**
+   * AN EMPTY ORGANISATION MUST NOT BLANK THE TEXT, and this is the one the
+   * mutation run caught rather than I did.
+   *
+   * `state.callerOrganization` is routinely absent — 4 of the 75 measured
+   * tickets carry no organisation at all — so `''` reaches this function as a
+   * matter of course. Without the length guard, `t.split('').join(' ')`
+   * separates every character and NO cue can ever match again: the surgery
+   * exception would be silently dead for every call, which is the failure
+   * direction that actually matters (a real surgery date routed to the Hub
+   * against the operator's explicit exception).
+   */
+  it.each([[['']], [['ab']], [['', 'Example Family Practice']]])(
+    'a short or empty metadata entry cannot disarm the exception: %j',
+    (meta) => {
+      expect(
+        schedulingRedirectForStatedIntent('reschedule', 'move the surgery date', 18, meta),
+        'the exception must still fire',
+      ).toBeNull();
+    },
+  );
+});
+
+describe('Codex #298 round 3 — the call site actually passes the caller metadata', () => {
+  /**
+   * THE SINK-NOT-THE-SOURCE TEST, made real. Every other test above calls
+   * `schedulingRedirectForStatedIntent` directly, so deleting the argument at
+   * the `create_pcp_task` call site failed nothing — the fix could have been
+   * wired to nothing and the suite stayed green.
+   */
+  it('routes end to end when the operation cue is only in the caller organisation', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', {
+      ...COORDINATOR,
+      callerOrganization: 'Example LASIK Clinic',
+    });
+
+    const filed = await call(agent, 'create_pcp_task', {
+      narrative: 'Coordinator at Example LASIK Clinic calling to book a routine eye exam.',
+    });
+
+    expect(filed.success, `must file: ${JSON.stringify(filed)}`).toBe(true);
+    expect(filed.routed_to, 'the employer is not the subject of the request').toBe('HVA Hub');
+    expect(hubPayload().departmentId).toBe(9);
+  });
+
+  it('but a real surgery date from that same caller still stays in PCP', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', {
+      ...COORDINATOR,
+      callPurpose: 'reschedule_appointment',
+      callerOrganization: 'Example LASIK Clinic',
+    });
+
+    await call(agent, 'create_pcp_task', {
+      narrative: 'Needs to move the surgery date for the patient.',
+    });
+
+    expect(ticketing.createTicket, 'the Hub must not take a surgery date').not.toHaveBeenCalled();
+    expect(ticketing.createPcpTicket).toHaveBeenCalled();
+  });
+});
