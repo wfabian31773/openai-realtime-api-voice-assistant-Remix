@@ -135,8 +135,29 @@ import { callEnvironment } from "./callRecord";
  * Stacked on v14 (the queue choice), which is stacked on v12. v13 stays
  * skipped: #293 holds it on its own branch.
  */
+/**
+ * v17, 2026-09-14: PCP SCHEDULING STOPS DIALLING AND REACHES THE HUB.
+ *
+ * Two changes that only a marker can separate from a quiet day.
+ *
+ * The DISPOSITION change is invisible except as an absence: the three
+ * scheduling slugs and `grievance_follow_up` no longer default to HAND_OFF, so
+ * the director stops granting a transfer to a caller who never asked for one.
+ * A build without it dials; a build with it files. 56 of the 75 measured
+ * scheduling tickets attempted a transfer, so a fall in PCP transfer attempts
+ * is the SIGNAL here, not a fault — and it is indistinguishable from a quiet
+ * week without this string.
+ *
+ * The ROUTING change shows up only in which department a ticket lands in, and
+ * the before-state is absolute: **0 of 75 PCP scheduling tickets had ever
+ * reached department 9.** A run of department-18 scheduling tickets looks
+ * identical whether the publish failed or no scheduling calls came in.
+ *
+ * Stacked on v16 → v15 → v14 → v12, so it contains all of them. v13 stays
+ * skipped: #293 holds it on its own branch and must re-bump above THIS.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v16-professional-records-20260914";
+  "voice-runtime-v17-pcp-scheduling-to-hub-20260914";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

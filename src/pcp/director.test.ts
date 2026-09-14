@@ -75,11 +75,25 @@ describe('PcpDirector', () => {
   });
 
   /**
-   * Scheduling was the dominant PCP purpose in production and defaulted to CREATE_TASK,
-   * so handoffEligible was never true and handoff_to_pcp refused before dialing —
-   * 8 of the first 10 PCP tickets were schedule_appointment with handoff NOT_REQUESTED.
+   * THESE THREE ASSERTED THE OPPOSITE UNTIL 2026-09-14, and the history is
+   * worth keeping because both versions were right for their own ruling.
+   *
+   * They were written when scheduling defaulted to CREATE_TASK and so could
+   * never be connected to anyone — 8 of the first 10 PCP tickets were
+   * `schedule_appointment` with handoff NOT_REQUESTED. Flipping the default to
+   * HAND_OFF fixed that, and then bought very little: measured over all 217
+   * PCP tickets, 56 of the 75 scheduling ones attempted a transfer and **10
+   * connected, 17.9%**, while ZERO reached the team that actually schedules.
+   *
+   * The operator withdrew auto-transfer on 2026-09-04 — "never auto-transfer;
+   * transfer only when the caller ASKS and is an entity" — so the second arm
+   * of `handoffEligible` no longer fires for these purposes. What replaces it
+   * is not a task in department 18: `create_pcp_task` routes the request to
+   * the HVA Hub (standing instruction 10). The original complaint, that a
+   * scheduling caller reached nobody, is answered by the destination rather
+   * than by the dial.
    */
-  it('makes scheduling requests eligible for handoff once patient context is known', () => {
+  it('does NOT dial a scheduling caller who never asked for a person', () => {
     for (const purpose of ['schedule_appointment', 'reschedule_appointment', 'cancel_appointment'] as const) {
       const director = new PcpDirector({ lunchClosure: () => false });
       director.update(purpose, {
@@ -90,28 +104,49 @@ describe('PcpDirector', () => {
         patientLastName: 'Lee',
         patientDob: '1980-01-02',
       });
-      expect(director.next(purpose)).toMatchObject({ disposition: 'HAND_OFF', handoffEligible: true });
+      expect(director.next(purpose)).toMatchObject({ disposition: 'CREATE_TASK', handoffEligible: false });
+    }
+  });
+
+  it('but connects the same caller the moment they ask — the ask was never the problem', () => {
+    for (const purpose of ['schedule_appointment', 'reschedule_appointment', 'cancel_appointment'] as const) {
+      const director = new PcpDirector({ lunchClosure: () => false });
+      director.update(`ask-${purpose}`, {
+        ...professional,
+        callPurpose: purpose,
+        callerRequestedHuman: true,
+      });
+      expect(director.next(`ask-${purpose}`)).toMatchObject({ disposition: 'HAND_OFF', handoffEligible: true });
     }
   });
 
   /**
-   * The transfer must not wait on a DOB the caller may not have to hand. This line
-   * cannot schedule at all, so the staffer who takes the call collects what they need;
-   * gating the connection on patient context is how a scheduling request silently
-   * became a task instead of a transfer.
+   * THE INTAKE DID NOT LENGTHEN, and this is the half of the old test that
+   * still has to hold.
+   *
+   * The transfer must not wait on a DOB the caller may not have to hand, and
+   * neither must the FILING: `connectsToHuman` is what keeps PATIENT_FIELDS —
+   * whose first question is "What is your professional relationship to this
+   * patient?" — off a scheduling intake. It now reads `allowedDispositions`
+   * rather than the default, precisely so that flipping the default above did
+   * not quietly add four questions to a live call.
    */
-  it('offers the scheduling handoff on professional identity alone', () => {
+  it('still asks a scheduling caller nothing beyond professional identity', () => {
     const director = new PcpDirector({ lunchClosure: () => false });
     director.update('sched-minimal', { ...professional, callPurpose: 'schedule_appointment' });
-    const decision = director.next('sched-minimal');
-    expect(decision.handoffEligible).toBe(true);
-    expect(decision.nextQuestion).toBeUndefined();
+    expect(director.next('sched-minimal').nextQuestion).toBeUndefined();
   });
 
-  it('still requires full professional identity before any scheduling handoff', () => {
+  /**
+   * Moved onto `peer_to_peer` deliberately. This guards the SECOND arm of
+   * `handoffEligible` — a complete intake on a HAND_OFF purpose — and after
+   * the ruling above that arm is unreachable from a scheduling slug, so asking
+   * it there would pass for the wrong reason and protect nothing.
+   */
+  it('still requires full professional identity before an unasked-for handoff', () => {
     const director = new PcpDirector({ lunchClosure: () => false });
-    director.update('sched-anon', { callPurpose: 'schedule_appointment', callerName: 'Dr. Lee' });
-    const decision = director.next('sched-anon');
+    director.update('p2p-anon', { callPurpose: 'peer_to_peer', callerName: 'Dr. Lee' });
+    const decision = director.next('p2p-anon');
     expect(decision.handoffEligible).toBe(false);
     expect(decision.nextQuestion).toBeDefined();
   });

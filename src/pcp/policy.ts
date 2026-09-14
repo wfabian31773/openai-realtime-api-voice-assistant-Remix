@@ -37,23 +37,48 @@ export type PcpCallPurpose = {
 };
 
 export const PCP_CALL_PURPOSES: readonly PcpCallPurpose[] = [
-  // Scheduling requests hand off to the PCP queue. These carried HAND_OFF in
-  // allowedDispositions but defaulted to CREATE_TASK, and the director only offers a
-  // transfer when the DEFAULT is HAND_OFF (see director.next) — so a scheduling caller
-  // could never be connected to anyone. It was also the dominant purpose in
-  // production: 8 of 10 PCP tickets in the first 24 hours were schedule_appointment,
-  // every one filed as a task with handoff status NOT_REQUESTED. A failed transfer
-  // still degrades to CREATE_TASK via the handoffFailed path, so the task-filing
-  // behavior remains the floor rather than the ceiling.
-  // The PCP line CANNOT schedule. Scheduling is only set up for San Diego and PCPs
-  // call from everywhere, so a scheduling request must reach a human in the PCP queue.
-  // AUTOMATE is therefore not permitted on these purposes: with it allowed, the agent
-  // could call record_automated_resolution off a read-only appointment lookup and
-  // represent a booking that never happened. HAND_OFF is the default; CREATE_TASK
-  // remains only as the fallback when the transfer does not connect.
-  { slug: 'schedule_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
-  { slug: 'reschedule_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
-  { slug: 'cancel_appointment', defaultDisposition: 'HAND_OFF', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
+  /**
+   * SCHEDULING TAKES THE REQUEST. It no longer dials on its own.
+   *
+   * This defaulted to HAND_OFF, and `director.next` grants `handoffEligible`
+   * on its second arm whenever the default IS HAND_OFF and the intake is
+   * complete — with no explicit ask from the caller. That is an auto-transfer,
+   * and the operator withdrew auto-transfer on 2026-09-04: "Default is to take
+   * the request and file the ticket. Never auto-transfer. Transfer only when
+   * BOTH the caller asks for a representative AND the caller is an entity."
+   * The v14 queue choice (2026-09-13) is built on the same footing — it is
+   * offered to a caller who ASKED, and nothing else reaches it.
+   *
+   * WHAT THE OLD DEFAULT BOUGHT, measured over all 217 PCP tickets on
+   * 2026-09-14: 75 carry one of these three slugs, 56 attempted a transfer and
+   * **10 connected — 17.9%**. The other 46 rang out and fell back to a task in
+   * department 18, which is the department that cannot schedule. So the
+   * transfer was not reaching the human the old comment below was written for;
+   * it was spending the caller's patience and then filing anyway.
+   *
+   * The argument that comment makes is still correct and is now ANSWERED
+   * rather than overturned: "the PCP line CANNOT schedule, so a scheduling
+   * request must reach a human". It reaches one — the HVA Hub, which is the
+   * team that schedules. `create_pcp_task` routes these on the stated slug
+   * (standing instruction 10, "anything that's schedule related that comes
+   * through any of these should go to the HVA hub"), so the ticket IS the
+   * answer instead of a consolation prize. Of the 75, ZERO had ever reached
+   * department 9.
+   *
+   * HAND_OFF STAYS IN `allowedDispositions`, and that is load-bearing three
+   * times: `eligibleByAsk` still grants a transfer to a professional who asks
+   * for a person, `PCP_CALLER_TYPES` in handoffPolicy is DERIVED from this
+   * list so removing it would refuse that caller at the dial, and
+   * `director.next`'s `connectsToHuman` reads this list rather than the
+   * default so the short intake is unchanged. Only the DEFAULT moved.
+   *
+   * AUTOMATE remains forbidden for the original reason: with it allowed the
+   * agent could call record_automated_resolution off a read-only appointment
+   * lookup and represent a booking that never happened.
+   */
+  { slug: 'schedule_appointment', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
+  { slug: 'reschedule_appointment', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
+  { slug: 'cancel_appointment', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'notify_referral_approval', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'check_patient_scheduled', defaultDisposition: 'AUTOMATE', allowedDispositions: ['AUTOMATE', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
   { slug: 'check_patient_kept_appointment', defaultDisposition: 'AUTOMATE', allowedDispositions: ['AUTOMATE', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: 'scheduling', containsPhi: true },
@@ -65,7 +90,22 @@ export const PCP_CALL_PURPOSES: readonly PcpCallPurpose[] = [
   { slug: 'provider_information', defaultDisposition: 'AUTOMATE', allowedDispositions: ['AUTOMATE', 'CREATE_TASK'], patientContextRequired: false, authoritativeSource: 'knowledge_base', containsPhi: false },
   { slug: 'plan_participation', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK'], patientContextRequired: false, authoritativeSource: null, containsPhi: false },
   { slug: 'health_plan_visit_inquiry', defaultDisposition: 'HAND_OFF', allowedDispositions: ['HAND_OFF', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
-  { slug: 'grievance_follow_up', defaultDisposition: 'HAND_OFF', allowedDispositions: ['HAND_OFF', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
+  /**
+   * A GRIEVANCE FOLLOW-UP IS TICKETABLE, so it is ticketed. Same ruling as the
+   * three scheduling slugs above: "ticketable -> ticket it", and never
+   * auto-transfer (operator, 2026-09-04). A caller who asks for a person still
+   * gets the queue choice through `eligibleByAsk`, which is why HAND_OFF stays
+   * permitted here too.
+   *
+   * WHERE IT FILES IS DELIBERATELY UNCHANGED — department 18, as today.
+   * Department 19 "Grievances" exists and holds ONE ticket, staff-created;
+   * nothing the fleet files has ever reached it, and whether that desk is
+   * worked is a fact this repo does not have. Two PCP tickets read as
+   * grievances, both in 18. Routing them into an unread queue would be worse
+   * than leaving them where a person already looks, so the destination is an
+   * open question for the operator rather than a guess made here.
+   */
+  { slug: 'grievance_follow_up', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['HAND_OFF', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'peer_to_peer', defaultDisposition: 'HAND_OFF', allowedDispositions: ['HAND_OFF', 'CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   { slug: 'patient_medical_records_request', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK'], patientContextRequired: true, authoritativeSource: null, containsPhi: true },
   // A PATIENT REACHED THE PROFESSIONAL LINE, which happens constantly.
