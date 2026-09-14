@@ -817,7 +817,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // CAP fields go with it stated rather than defaulted. Left in
         // department 18 instead, a patient's right-of-access request is
         // invisible to the report the CAP exists to produce.
-        const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative, ticketBlocksUsed >= MAX_BLOCKS);
+        const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative, {
+          floorReached: ticketBlocksUsed >= MAX_BLOCKS,
+          spendBlock: () => (ticketBlocksUsed += 1),
+        });
         if (toMedicalRecords) return toMedicalRecords as never;
 
         const redirect = detectCrossQueue(narrative, PCP_DEPARTMENT_ID);
@@ -1598,7 +1601,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * routing change must not cost a filing, and a request in the wrong
        * department is recoverable while a request nowhere is not.
        */
-      const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative, ticketBlocksUsed >= MAX_BLOCKS);
+      const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative, {
+          floorReached: ticketBlocksUsed >= MAX_BLOCKS,
+          spendBlock: () => (ticketBlocksUsed += 1),
+        });
       if (toMedicalRecords) return toMedicalRecords as never;
 
       const response = await submitPcpTicket(
@@ -1710,10 +1716,24 @@ async function fileToMedicalRecords(
    * that is the library working. Once the floor is reached, a refusal returns
    * `null` instead and the caller files its own ticket. Medical Records is the
    * preference; never losing the request is the rule.
+   *
+   * A LIBRARY REFUSAL SPENDS A STRIKE, and without that the floor is
+   * unreachable — Codex P1, #296.
+   *
+   * `ticketBlocksUsed` was only ever advanced by PCP's OWN gates: the intake
+   * readiness check and the delivery ask. A call whose intake is complete and
+   * whose destination is already captured spends neither, so a refusal from
+   * the library's own `required` list came back with the budget still at zero
+   * — `callback_number` is on that list, enforced before the handler, and it
+   * refuses under ten digits or over eleven while `record_pcp_intake` accepts
+   * the same answer. Every retry then returned the identical refusal,
+   * `floorReached` could never become true, and the fallback below never ran:
+   * the request filed NOWHERE, where before this route existed it left a PCP
+   * ticket. That is the exact number this change promised not to move.
    */
-  floorReached: boolean,
+  budget: { floorReached: boolean; spendBlock: () => number },
 ): Promise<Record<string, unknown> | null> {
-  const { classifyRecords } = await import('../tools/medicalRecordsTaxonomy');
+  const { classifyRecords, classifyRequester } = await import('../tools/medicalRecordsTaxonomy');
   const recordsHit = classifyRecords(narrative);
   if (!recordsHit) return null;
 
@@ -1721,6 +1741,43 @@ async function fileToMedicalRecords(
   await import('../tools/medicalRecordsTools');
   const fileRecords = getTool('file_records_ticket');
   if (!fileRecords) return refusePcp('records_tool_unavailable', { retryable: true }) as never;
+
+  /**
+   * A PROFESSIONAL RELATIONSHIP IS NOT A PERSONAL ONE — Codex P1, #296.
+   *
+   * `statedRelationship`'s own question is *"What is your PROFESSIONAL
+   * relationship to this patient?"*, so the modal caller on this line — a
+   * medical assistant or coordinator at a doctor's office, 49% of it — answers
+   * "primary care provider" or "referring provider". Mapping every non-empty
+   * answer to `personal_representative` filed all of them as the patient's
+   * personal representative on the `roa_patient` pathway with the statutory
+   * clock running: the wrong requester on a CAP record, and a deadline
+   * invented for records that are not going back to the patient.
+   *
+   * `resolveRequesterType` cannot correct it downstream. Its guard is
+   * deliberately one-directional — never OFF the clock — so a stated on-clock
+   * value beats an off-clock `provider` read from the prose. The stated value
+   * has to be right at the source.
+   *
+   * Only the three OFF-clock professional types are taken from the classifier,
+   * and only when the caller has not said they are the patient. Everything
+   * else keeps the previous answer, so the daughter this ternary was written
+   * for is still a personal representative and still on the clock. The guard
+   * still stands behind it either way: a professional label can never pull a
+   * request the narrative put on the clock off it.
+   */
+  const stated = String(state.statedRelationship ?? '').trim();
+  const professional = state.callerIsThePatient === true
+    ? null
+    : (() => {
+        const fromRelationship = stated ? classifyRequester(stated) : null;
+        return fromRelationship === 'provider'
+          || fromRelationship === 'health_plan'
+          || fromRelationship === 'legal'
+          ? fromRelationship
+          : null;
+      })();
+  const requesterType = professional ?? (stated ? 'personal_representative' : 'patient');
 
   const nameBits = String(state.callerName ?? '').trim().split(/\s+/).filter(Boolean);
   const recordsResult = (await fileRecords.handler({
@@ -1751,13 +1808,11 @@ async function fileToMedicalRecords(
      * it only fixes who the record says was asking. `resolveRequesterType`
      * refuses to let any stated value drop a request off the clock regardless.
      */
-    requester_type: state.callerIsThePatient === true && !state.statedRelationship
-      ? 'patient'
-      : state.statedRelationship
-        ? 'personal_representative'
-        : 'patient',
-    requester: state.statedRelationship
-      ? `${state.callerName ?? 'the caller'} — ${state.statedRelationship} of the patient`
+    requester_type: requesterType,
+    requester: stated
+      ? professional
+        ? `${state.callerName ?? 'the caller'} — ${stated}`
+        : `${state.callerName ?? 'the caller'} — ${stated} of the patient`
       : `the patient themselves${state.callerName ? ` (${state.callerName})` : ''}`,
     /**
      * PASS THE DELIVERY PCP ALREADY HOLDS — without this the route refuses.
@@ -1807,7 +1862,12 @@ async function fileToMedicalRecords(
   // verbatim so the model speaks the tool's own askAs — unless the caller's
   // own floor is spent, in which case the request must land somewhere.
   if (recordsResult?.success === false) {
-    if (floorReached) {
+    // An ask costs a strike wherever it comes from, and this one is the
+    // library's. Read the floor AFTER spending, or the budget is exhausted one
+    // invocation before anything notices — and on this lane the next
+    // invocation is the one that never comes.
+    const spent = budget.spendBlock();
+    if (budget.floorReached || spent >= MAX_BLOCKS) {
       console.warn(
         `[PCP] Medical Records refused (${String(recordsResult.error ?? 'unknown')}) and the intake floor ` +
           'is spent — falling back to a PCP ticket rather than losing the request',

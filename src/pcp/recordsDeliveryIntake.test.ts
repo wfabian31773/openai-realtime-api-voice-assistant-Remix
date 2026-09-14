@@ -200,17 +200,31 @@ describe('the caller is told what happened before the line goes quiet', () => {
    * unassigned exit (#288): a row a clerk can chase beats a row in the wrong
    * queue. What must NOT happen is the gap going out silently, because an
    * absent line reads as "not applicable" and nobody chases it.
+   *
+   * AND THE CALLER HERE IS THE PATIENT, not the clinic of the 12:21 call —
+   * changed 2026-09-14 with Codex's P1 on #296. The gate this exits only
+   * applies ON the clock, and a provider request is not on it; the clinic
+   * fixture reached this branch solely because every professional caller was
+   * being filed as the patient's personal representative, which is the defect
+   * that P1 removed. Proving an on-clock exit with an off-clock caller is
+   * testing the bug, so the fixture moves to a caller the clock really
+   * covers.
    */
   it('files without a date range and says so on the ticket', async () => {
     const { agent } = freshCall();
     await call(agent, 'record_pcp_intake', {
-      ...INTAKE_AS_ON_THE_CALL,
+      callPurpose: 'patient_medical_records_request',
+      callerName: 'A B',
+      callerIsThePatient: true,
+      patientFirstName: 'A',
+      patientLastName: 'B',
+      patientDob: '1973-03-17',
       recordsDeliveryMethod: 'fax',
       recordsDeliveryDestination: '9095550199',
     });
 
     const filed = await call(agent, 'handle_patient_medical_records_request', {
-      narrative: 'Records request for a mutual patient, to be faxed.',
+      narrative: 'I need a copy of my records, to be faxed.',
     });
 
     expect(filed.success, 'the request must land, not be refused for a field this lane cannot ask').toBe(true);
