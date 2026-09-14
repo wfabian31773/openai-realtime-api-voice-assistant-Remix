@@ -157,7 +157,7 @@ import { callEnvironment } from "./callRecord";
  * skipped: #293 holds it on its own branch and must re-bump above THIS.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v17-pcp-scheduling-to-hub-20260914";
+  "voice-runtime-v18-no-ivr-prompt-trim-20260914";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
