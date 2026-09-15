@@ -26,6 +26,9 @@
  * missing a location to 1.9%. Prompt instructions alone never achieved that.
  */
 
+import type { DobCarry } from './verifiedIdentity';
+import { dobCarry } from './verifiedIdentity';
+
 /** A tool refused to run because the caller has not supplied enough. */
 export interface MissingFields {
   success: false;
@@ -55,6 +58,11 @@ export interface MissingFields {
    * loop.
    */
   fix?: string;
+  /**
+   * WHY inherit did not fill `date_of_birth`. PHI-free closed enum.
+   * Only set when this refusal withholds that field. See `dobCarry`.
+   */
+  carry?: DobCarry;
 }
 
 export interface ToolFailure {
@@ -155,6 +163,25 @@ export function manifest(includePrimitives = false): Array<{
  */
 export function missing(fields: string[], message: string, fix?: string): MissingFields {
   return { success: false, missingFields: fields, message, ...(fix ? { fix } : {}) };
+}
+
+/**
+ * The date-of-birth refusal, with the carry enum attached.
+ *
+ * Same spoken `message` / model `fix` as `missing(['date_of_birth'], …)`.
+ * The extra field is the instrument: it says why `verifiedDobFor` did not
+ * fill the gate, without writing a name or a date.
+ */
+export function refuseDob(
+  callSid: string | undefined,
+  firstName: string,
+  lastName: string,
+  message: string,
+  fix?: string,
+): MissingFields {
+  const carry = dobCarry(callSid, firstName, lastName);
+  console.info(`[DOB] carry ${carry}`);
+  return { ...missing(['date_of_birth'], message, fix), carry };
 }
 
 /**

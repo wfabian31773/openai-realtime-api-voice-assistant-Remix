@@ -263,6 +263,43 @@ export function verifiedDobFor(
 }
 
 /**
+ * WHY inherit did not fill `date_of_birth` on this refusal.
+ *
+ * `verifiedDobFor` returns a date or `undefined`. Those five `undefined`s
+ * are one bucket in every log we have, which is why Bug B in PR #307
+ * (32 certain matches that still refused) cannot be proven from what is
+ * persisted. This is the same walk, with a named exit at each guard.
+ *
+ * PHI-free: the value is a closed enum. It never carries a name or a date.
+ * `fired` means a date WAS in the map under this name — inherit would have
+ * returned it. A refusal that still happens then is an unparseable stored
+ * date, not a miss. See `the-dob-carry.md` on #307.
+ *
+ * Expired entries read as `no_entry`: they are gone for every other reader.
+ */
+export type DobCarry =
+  | 'fired'
+  | 'no_entry'
+  | 'entry_without_dob'
+  | 'name_mismatch'
+  | 'bad_call_sid';
+
+export function dobCarry(
+  callSid: string | undefined,
+  firstName: string,
+  lastName: string,
+): DobCarry {
+  if (!isTwilioCallSid(callSid)) return 'bad_call_sid';
+  const entry = verified.get(callSid);
+  if (!entry || Date.now() - entry.at > TTL_MS) return 'no_entry';
+  if (norm(firstName) !== norm(entry.firstName) || norm(lastName) !== norm(entry.lastName)) {
+    return 'name_mismatch';
+  }
+  if (!entry.dateOfBirth) return 'entry_without_dob';
+  return 'fired';
+}
+
+/**
  * The office this patient attends, IF the ticket is for that same person AND
  * the match was unambiguous.
  *
