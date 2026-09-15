@@ -61,12 +61,41 @@
  *
  * `office` and `team` are here because callers say them and the prompt
  * promises them; a person who asks for "the team" is asking for a person.
- * Nothing is added beyond what one of the two original branches already had,
- * plus nothing — widening the grant is a policy change, and this is a
- * consistency fix.
+ *
+ * `operator` was added 2026-09-15 and it is the only word ever added that was
+ * not already in one of the two original branches, so it was measured first.
+ * Over the 170 substantive PCP calls of 2026-09-14, on the callers' own lines:
+ *
+ *     operator      6 occurrences — 6 asks, 0 role statements
+ *     coordinator  24 occurrences — 1 ask, 23 ROLE STATEMENTS
+ *     supervisor    3 occurrences — 1 ask, 2 role statements
+ *
+ * `coordinator` and `supervisor` are NOT added, and the honest reason is
+ * narrower than it first looks. "Outreach coordinator." (x7), "Referral
+ * coordinator." (x6), "Coordinator." (x5) are answers to "What is your role?"
+ * — the caller's own job title, and the #99 shape, where `'surgery center'`
+ * matched a caller's EMPLOYER and misrouted their ticket to department 2.
+ *
+ * BUT THEY WOULD NOT ACTUALLY MISFIRE HERE, and the claim that they would was
+ * caught by mutation testing before it shipped: adding `coordinator` to this
+ * list fails NO test, because every one of those 23 lines is a bare noun and
+ * all three branches require a verb. The verb requirement, not the noun list,
+ * is what keeps a job title out of a phone dial.
+ *
+ * So the refusal rests on what it can actually claim. The benefit is ONE call
+ * in 170. The cost is latent rather than live: these two words are, on the
+ * measured evidence, overwhelmingly job titles on this line, so they are the
+ * first things to misfire if this module is ever widened toward bare nouns —
+ * and the grant behind it is a real dial into a queue staffed by three or four
+ * people. Widening the grant is a policy change and the operator's to make;
+ * this is a consistency fix plus one measured word.
+ *
+ * `operator` is safe for a reason that is a property of the word rather than
+ * of one day's sample: nobody introduces themselves as "the operator" to an
+ * answering line. It is a role you ask FOR, never one you claim.
  */
 const HUMAN_NOUNS =
-  '(?:person|human|someone|somebody|rep|representative|agent|front desk|receptionist|office|team)';
+  '(?:person|human|someone|somebody|rep|representative|agent|front desk|receptionist|office|team|operator)';
 
 /** Asking to be connected: "can I speak to the team", "talk with someone". */
 const SPEAK_TO = new RegExp(`\\b(?:speak|talk)\\b\\s+(?:to|with)\\b[^.]{0,25}\\b${HUMAN_NOUNS}\\b`, 'i');
@@ -100,6 +129,49 @@ const CONNECT_TO = new RegExp(
   'i',
 );
 
+/**
+ * ASKING FOR ONE, WITHOUT A VERB OF CONNECTION.
+ *
+ * "Caller asked for a representative." — the plainest narration of the whole
+ * rule — matched NEITHER existing branch, because both require a verb of
+ * connection (`speak|talk to/with`, or `connect|transfer|put through|get me`)
+ * and "asked FOR" is neither.
+ *
+ * This module's own header records that exact phrase failing a test on
+ * 2026-09-08, and records the author fixing THE TEST instead of the code. It
+ * was never fixed. On 2026-09-14 it cost a VP of Partnerships at a surgery
+ * centre his transfer: he asked three ways across one 86-second call and the
+ * flag never latched, so the director refused a caller the operator's own
+ * 2026-09-04 rule entitles to a person — an entity who asked.
+ *
+ * THE PHRASE BOUNDARY IS THE SAFETY PROPERTY, and it is there because `office`
+ * and `team` can OWN things. Under a bare `for ... <noun>` these would all
+ * become dials into a queue staffed by three or four people:
+ *
+ *     "Caller asked for the office fax number."       <- rejected: " fax"
+ *     "Caller asked for the team's direct line."      <- rejected: "'s"
+ *     "Caller asked for the representative case
+ *      number they were given."                       <- rejected: " case"
+ *
+ * So the noun must END the phrase — punctuation or end of string.
+ *
+ * THE NOUN LIST IS NOT SPLIT to achieve that, however tempting. One shared
+ * list is the entire point of this module: two near-identical lists is what
+ * let `team` drift out of one branch and cost the operator his own transfer
+ * on CAa2a3a1c1. The boundary is a property of this BRANCH; the nouns stay
+ * common to all three.
+ */
+const ASKED_FOR = new RegExp(
+  '\\b(?:ask(?:ed|s|ing)?|request(?:ed|s|ing)?|want(?:s|ed)?|would\\s+like)\\b' +
+    '(?:\\s+(?:us|me|them|him|her))?' +
+    '(?:\\s+for)?' +
+    '\\s+(?:a|an|the|another|your|our)?\\s*' +
+    '(?:live|real|actual|human)?\\s*' +
+    HUMAN_NOUNS +
+    '(?=\\s*[.,;!?]|\\s*$)',
+  'i',
+);
+
 /** Naming a human without a verb: "I want a real person." */
 const A_REAL_PERSON = /\b(?:live person|real person|actual person|human being)\b/i;
 
@@ -110,5 +182,10 @@ const A_REAL_PERSON = /\b(?:live person|real person|actual person|human being)\b
  * `handoff_to_pcp`; the director's `eligibleByAsk` reads the flag this sets.
  */
 export function asksForAPerson(narrative: string): boolean {
-  return SPEAK_TO.test(narrative) || CONNECT_TO.test(narrative) || A_REAL_PERSON.test(narrative);
+  return (
+    SPEAK_TO.test(narrative) ||
+    CONNECT_TO.test(narrative) ||
+    ASKED_FOR.test(narrative) ||
+    A_REAL_PERSON.test(narrative)
+  );
 }
