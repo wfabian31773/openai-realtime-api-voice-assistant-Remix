@@ -31,6 +31,8 @@ import { preTransferGaps, preTransferQuestion } from '../pcp/preTransferIntake';
 import { QUEUE_CHOICE_WARNING, readQueueChoice, choseTheQueue } from '../pcp/queueChoice';
 import { handoffAfterQueueDial } from '../pcp/queueDialSettlement';
 import { callerLines, saidMoreThanTheirOwnIdentity } from '../runtime/requestSweep';
+import { NARRATIVE_MAX_CHARS } from '../pcp/pcpTicketing';
+import { persistSettlement, trimToBudget } from '../pcp/queueDialSettlement';
 import {
   deliveryAskFor,
   isRecordsRequest,
@@ -466,15 +468,39 @@ function ticketState(callId: string): { state: PcpConversationState; missing: st
 
 /** Note the intake gaps on the ticket itself, in the caller's terms, so the
  *  staffer working it knows what to ask for rather than wondering. */
+/**
+ * THE LAST HAND ON THE NARRATIVE, so this is where it is made to fit.
+ *
+ * `PcpTicketPayloadSchema` caps `narrative` at `NARRATIVE_MAX_CHARS` and
+ * `submitPcpTicket` safeParses BEFORE the wire, so an over-long one files
+ * NOWHERE: no POST, no 400 in `voice_agent_api_logs`, one console line.
+ * (Codex P2 on #313, found after the merge and correct.)
+ *
+ * IT IS CLAMPED HERE RATHER THAN AT THE CALL SITE, and that is the whole
+ * lesson of the first attempt at this fix. Budgeting the excerpt inside the
+ * teardown sweep looked right and still filed nothing, because THIS function
+ * appends its annotation AFTERWARDS — the call site cannot see the string
+ * that is actually validated. Every PCP filing path goes through
+ * `buildPayload` and every one of those through here, so one clamp covers
+ * them all and no future caller can out-run it.
+ *
+ * THE ANNOTATION IS NEVER WHAT GETS CUT. It names the fields a staffer still
+ * has to collect, it is bounded by the field list, and it is the more
+ * actionable half of a long ticket; the body is trimmed to make room for it
+ * instead. `trimToBudget` says on the ticket that it cut, and the full
+ * conversation goes out separately in `transcript` (cap 50,000).
+ */
 function annotateGaps(narrative: string, missing: string[], callerPhone?: string): string {
-  if (!missing.length) return narrative;
+  if (!missing.length) return trimToBudget(narrative, NARRATIVE_MAX_CHARS);
   const labels = missing.map((f) => FIELD_LABELS[f] ?? f).join(', ');
   const ani = callerPhone && !missing.includes('callbackNumber')
     ? ''
     : callerPhone
       ? ` Inbound caller ID was ${callerPhone}.`
       : ' Caller ID was withheld on this call.';
-  return `${narrative}\n\n[Intake incomplete — not captured on the call: ${labels}.${ani}]`.trim();
+  const annotation = `[Intake incomplete — not captured on the call: ${labels}.${ani}]`;
+  const body = trimToBudget(narrative, NARRATIVE_MAX_CHARS - annotation.length - '\n\n'.length);
+  return `${body}\n\n${annotation}`.trim();
 }
 
 function buildPayload(
@@ -1449,11 +1475,27 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
                 requestedAt,
                 attemptedAt,
               });
-              const res = await submitPcpTicket({ ...preDialPayload, disposition, handoff });
+              /**
+               * RETRIED, because nothing else will. Codex P1 on #313.
+               *
+               * `handleBlindDialResult` forgets the pending dial and answers
+               * Twilio 200 before this resolves, so a transient failure here
+               * used to be one log line and the ticket stayed at DIALING —
+               * on a `no_answer` that means the request is never reopened as
+               * an OPEN task and the caller is never called back, which is
+               * the loss v30 exists to close.
+               *
+               * This does NOT delay the webhook: the callback is already
+               * fired-and-forgotten by the transport, so the retry window
+               * sits entirely after Twilio has its TwiML.
+               */
+              const res = await persistSettlement(
+                () => submitPcpTicket({ ...preDialPayload, disposition, handoff }),
+              );
               console.info(
                 `[PCP] queue dial settled ${settlement.outcome} after ${settlement.ringSeconds}s ringing` +
                   `${settlement.connected ? `, ${settlement.talkSeconds ?? 0}s bridged` : ''}` +
-                  ` — ticket ${res.success ? 'updated' : 'NOT updated'} (${callId})`,
+                  ` — ticket ${res.ok ? `updated on attempt ${res.attempts}` : 'NOT updated'} (${callId})`,
               );
             }
           : undefined,
@@ -2690,6 +2732,13 @@ export async function sweepPcpUnfiledCall(callId: string): Promise<void> {
      * from a line that says we do not know what they wanted. Agent lines are
      * stripped — a staffer needs what the CALLER said, not our questions back
      * at them.
+     */
+    /**
+     * NOT TRIMMED HERE. `annotateGaps` clamps the finished narrative to
+     * `NARRATIVE_MAX_CHARS` on its way into the payload — the first attempt at
+     * this budgeted the excerpt at THIS call site and still filed nothing,
+     * because the annotation is appended afterwards and the call site cannot
+     * see the string that is actually validated.
      */
     const theirWords = unclassified
       ? `What the caller said:\n${callerLines(transcript).map((l) => `  - ${l}`).join('\n')}`

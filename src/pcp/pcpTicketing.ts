@@ -5,6 +5,23 @@ import { spokenDates } from '../services/identityArgGuard';
 
 const optionalText = (max: number) => z.string().trim().min(1).max(max).optional();
 
+/**
+ * The payload schema's own ceiling on `narrative`, EXPORTED so a caller that
+ * builds a long one can trim to fit instead of discovering the limit as a
+ * local safeParse failure.
+ *
+ * That failure mode is not hypothetical and it is the worst shape this path
+ * has: `submitPcpTicket` safeParses BEFORE the wire, so an over-long
+ * narrative files NOWHERE — no POST, no 400 in `voice_agent_api_logs`, just a
+ * console line. The teardown sweep pastes the caller's own words into the
+ * narrative precisely so a human can route a call nobody classified, which
+ * makes the longest calls the ones most likely to be silently dropped by it.
+ *
+ * Exported rather than duplicated because a second hand-written 12000 is the
+ * `explicitAsk.ts` noun-list shape: two copies that drift and nothing says so.
+ */
+export const NARRATIVE_MAX_CHARS = 12000;
+
 export const PcpTicketPayloadSchema = z.object({
   callSid: z.string().trim().min(3).max(120),
   agentSlug: z.literal('pcp'),
@@ -48,7 +65,7 @@ export const PcpTicketPayloadSchema = z.object({
   patientPhone: optionalText(40),
   providerRequested: optionalText(255),
   officeLocation: optionalText(255),
-  narrative: z.string().trim().min(1).max(12000),
+  narrative: z.string().trim().min(1).max(NARRATIVE_MAX_CHARS),
   transcript: optionalText(50000),
   handoff: z.object({
     requested: z.boolean(),

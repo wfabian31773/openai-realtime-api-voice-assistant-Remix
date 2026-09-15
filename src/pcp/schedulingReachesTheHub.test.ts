@@ -27,7 +27,34 @@
  * FIXTURES ARE SYNTHETIC. No real patient, clinic, number or date of birth —
  * see task #106.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
+
+/**
+ * PIN THE CLOCK — this file was RED for one hour of every weekday.
+ *
+ * `isLunchClosure()` turns `eligibleByAsk` off between 12:00 and 12:59
+ * Pacific, so three assertions here about a transfer being granted failed
+ * whenever the suite happened to run in that hour, and passed the other
+ * twenty-three. Caught on 2026-09-15 at 12:40 Pacific, reproduced on a
+ * pristine `main` checkout to prove it was the clock and not the change
+ * under review.
+ *
+ * Every sibling that depends on `eligibleByAsk` already does this —
+ * `lostRequestFloor.test.ts` and `queueIsAChoice.test.ts` both pin a
+ * weekday morning and both say why. This file was the one that did not.
+ *
+ * NOT a way of dodging the rule: the tests still assert the transfer is
+ * granted, they simply stop asking that question during the one hour the
+ * product answers it differently on purpose.
+ */
+const NOT_LUNCH = new Date('2026-09-09T17:00:00Z');
+beforeAll(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOT_LUNCH);
+});
+afterAll(() => {
+  vi.useRealTimers();
+});
 
 process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';
