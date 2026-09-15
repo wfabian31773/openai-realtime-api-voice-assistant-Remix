@@ -296,9 +296,9 @@ describe('How a call runs agrees with the block — leftover on #310', () => {
   it('an unrecognised caller is still told to collect last name and date of birth', () => {
     const cold = identityCertainMeaning(undefined);
     expect(cold).toMatch(/identity_is_certain is false/);
-    expect(cold).toContain('Collect their last name and date of birth');
+    expect(cold).toContain('ask as above');
     expect(cold).toContain('CALL lookup_patient AGAIN');
-    expect(cold).toMatch(/do not read their history back/i);
+    expect(cold).toMatch(/Never tell the caller how many records matched/);
   });
 
   it('does not tell an unrecognised caller that false ONLY means more than one person', () => {
@@ -311,7 +311,7 @@ describe('How a call runs agrees with the block — leftover on #310', () => {
     const warm = identityCertainMeaning(RECOGNISED);
     expect(warm).not.toContain('Collect their last name and date of birth');
     expect(warm).toMatch(/Do not collect their last name/);
-    expect(warm).toMatch(/do not collect their date of birth/);
+    expect(warm).toMatch(/do not\s+collect their date of birth/);
   });
 
   it('a recognised caller is told false is NOT more than one person', () => {
@@ -373,7 +373,8 @@ describe('How a call runs agrees with the block — leftover on #310', () => {
     });
 
     it(`${lane} still asks an unrecognised caller`, () => {
-      expect(build({})).toContain('Collect their last name and date of birth');
+      expect(build({})).toContain('ask as above');
+      expect(build({})).toContain('CALL lookup_patient AGAIN');
     });
   }
 });

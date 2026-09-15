@@ -182,6 +182,7 @@ ${askScript}
 ### How a call runs
 1. Find them. Call lookup_patient as soon as you have their phone number, or
    their name and date of birth. ${certainMeaning}
+   Do not read their history back to them until you are certain who they are.
 2. Find their office. This is the one thing a ticket cannot be filed without:
    there is one optician per office, and the request is assigned by location.
    lookup_patient returns usual_clinic — confirm it rather than assuming

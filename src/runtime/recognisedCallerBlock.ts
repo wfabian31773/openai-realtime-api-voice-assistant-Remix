@@ -215,24 +215,13 @@ export function identityCertainMeaning(pc: RecognisedCaller | undefined): string
   const recognised = !!pc?.matched && !!pc.firstName;
 
   if (!recognised) {
-    return `If it says identity_is_certain is false, we have not confirmed who
-   is speaking — that flag is also a unique patients_master phone hit, not
-   only "more than one person". Collect their last name and date of birth,
-   then CALL lookup_patient AGAIN with first name, last name and date of
-   birth together. That almost always resolves it to one person, and it is
-   the whole point of asking.
-   Never tell the caller how many records matched. That is our problem, not
-   theirs. Do not read their history back to them until you are certain who
-   they are.`;
+    return `If it says identity_is_certain is false, that is also a unique patients_master phone hit, not only more than one person — ask as above, then CALL lookup_patient AGAIN with all three. Never tell the caller how many records matched.`;
   }
 
   return `If lookup_patient says identity_is_certain is false, that is NOT
-   "more than one person" on this call — this number already matched one
+   more than one person on this call — this number already matched one
    person. Confirm the greeting. Do not collect their last name and do not
    collect their date of birth; we hold both. Use the script above ONLY if
    they said no, or gave a different name, or the tool says several people
-   (a candidate count).
-   Never tell the caller how many records matched. That is our problem, not
-   theirs. Do not read their history back until they have affirmed who they
-   are.`;
+   (a candidate count). Never tell the caller how many records matched.`;
 }
