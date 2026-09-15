@@ -199,9 +199,25 @@ describe('copy a lane must say whatever the database holds', () => {
 
   it('requires nothing of a lane with no mandated copy', () => {
     // Deliberately narrow. Every other line's wording is the operator's.
+    //
+    // `pcp` USED TO BE ONE OF THESE EXAMPLES and is not any more: it gained a
+    // recording-disclosure requirement on 2026-09-15, because the lane spoke
+    // no disclosure on any of the 219 calls of 2026-09-14 and putting one in
+    // the registry greeting alone left `agents.welcome_greeting` free to
+    // override it (Codex P1, #304). The property this test asserts is
+    // unchanged — a lane with no entry is unconstrained — so the example
+    // moved rather than the rule.
     expect(missingMandatoryCopy('optical', 'Thanks for calling!')).toEqual([]);
-    expect(missingMandatoryCopy('pcp', '')).toEqual([]);
+    expect(missingMandatoryCopy('surgery', '')).toEqual([]);
     expect(missingMandatoryCopy(undefined, '')).toEqual([]);
+  });
+
+  /** The lane that moved, asserted where a reader will look for it. */
+  it('requires the disclosure of pcp, and only that', () => {
+    expect(missingMandatoryCopy('pcp', '')).toEqual(['recording disclosure']);
+    expect(
+      missingMandatoryCopy('pcp', 'Thank you for calling. All calls are being recorded.'),
+    ).toEqual([]);
   });
 
   it('treats an empty or absent greeting as missing everything', () => {
