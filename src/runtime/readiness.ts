@@ -153,12 +153,17 @@ import { callEnvironment } from "./callRecord";
  * reached department 9.** A run of department-18 scheduling tickets looks
  * identical whether the publish failed or no scheduling calls came in.
  *
- * v19 (#300), v20 (#302), v21 (#301), v22 (#303) and v23 (#304) are SIBLINGS
- * of this — all six branched off v18 rather than stacked, and #305 is the
- * verified merge of the first five. Whichever lands last must rebase and
- * confirm it still carries the highest number; distinct numbers were assigned
- * up front only so two open branches can never make two different builds read
- * alike at /voice/health.
+ * THIS BUILD IS THE VERIFIED MERGE OF ALL SIX 2026-09-15 PCP FIXES at
+ * sibling-HEAD quality, including the four Codex follow-ups Wayne named:
+ * v19 the lost-request floor (#300, withheld-ANI ask), v20 blind-transfer
+ * truth (#302), v21 ask detection (#301, negation / required-for / connected),
+ * v22 the question format (#303, DOB ends in ?), v23 the recording
+ * disclosure (#304, DB greeting cannot drop it) and v24 the answerable
+ * queue choice (#306). They were SIBLINGS off v18, not a chain. Distinct
+ * numbers were assigned up front so two open branches can never make two
+ * different builds read alike at /voice/health; this branch takes the
+ * highest, v24, because it is the one place the number and the
+ * containment agree.
  *
  * Stacked under v18: v16 → v15 → v14 → v12. v13 stays skipped: #293 holds it
  * on its own branch and must re-bump above THIS.
