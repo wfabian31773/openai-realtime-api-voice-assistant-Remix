@@ -82,3 +82,69 @@ describe('the PCP greeting discloses recording', () => {
     expect(greeting).not.toMatch(/offices are currently closed/i);
   });
 });
+
+/**
+ * THE GREETING AN ADMIN CAN EDIT IS THE ONE THAT GETS SPOKEN.
+ *
+ * Codex P1 on #304, and it is exactly the hole in this PR's own claim. Both
+ * live call paths prefer `agents.welcome_greeting` over the registry literal
+ * (`chooseGreeting` in voiceRuntime.ts, and the override in
+ * voiceAgentRoutes.ts). `chooseGreeting` only falls back to the registry when
+ * `missingMandatoryCopy` reports a gap — and `MANDATORY_GREETING_COPY` had a
+ * single key, `no-ivr`, so for `pcp` it returned `[]` for ANY string.
+ *
+ * So adding the disclosure to `pcpAgentConfig.greeting` closed the gap only
+ * while nobody had ever set a database greeting for this lane. One row in
+ * `agents` reopens it silently, and 219 calls a day go back to saying nothing.
+ *
+ * THE PREDICATE IS SHARED, NOT COPIED. `no-ivr`'s recording-disclosure check
+ * has been through four Codex rounds — the adverb hole ("not currently being
+ * recorded"), the token-vs-statement inversion ("ask about our recording
+ * policy" passed), and the coordination false-reject ("monitored or
+ * recorded"). Writing a second one for pcp would be the `explicitAsk.ts` noun
+ * lists all over again: two near-identical checks, one of them maintained.
+ */
+describe('a database greeting for pcp must carry the disclosure too', () => {
+  it('reports the gap on a configured greeting that omits it', async () => {
+    const { missingMandatoryCopy } = await import('../services/greetingPersonalisation');
+    expect(
+      missingMandatoryCopy('pcp', 'Thank you for calling Azul Vision PCP Support. How can I help you today?'),
+      'this is the greeting that was live for all 219 calls',
+    ).toContain('recording disclosure');
+  });
+
+  it('accepts one that carries it', async () => {
+    const { missingMandatoryCopy } = await import('../services/greetingPersonalisation');
+    expect(missingMandatoryCopy('pcp', greeting)).toEqual([]);
+  });
+
+  /** The four rounds `no-ivr` already paid for, inherited rather than rewritten. */
+  it('inherits the hardening: negation, token-not-statement, coordination', async () => {
+    const { missingMandatoryCopy } = await import('../services/greetingPersonalisation');
+    const gap = (g: string) => missingMandatoryCopy('pcp', g);
+    expect(gap('Thank you for calling. Calls are not being recorded.'), 'negation').toContain(
+      'recording disclosure',
+    );
+    expect(gap('Thank you for calling. Ask about our recording policy.'), 'token, not statement').toContain(
+      'recording disclosure',
+    );
+    expect(
+      gap('Thank you for calling. This call may be monitored or recorded for quality assurance.'),
+      'coordination must NOT be a false reject',
+    ).toEqual([]);
+  });
+
+  /** no-ivr keeps all three of its own requirements — pcp must not dilute it. */
+  it('does not weaken no-ivr', async () => {
+    const { missingMandatoryCopy } = await import('../services/greetingPersonalisation');
+    expect(missingMandatoryCopy('no-ivr', 'Thank you for calling. How can I help?').sort()).toEqual(
+      ['911 direction', 'closed-office notice', 'recording disclosure'],
+    );
+  });
+
+  /** A lane with no entry is still unconstrained — this adds pcp, nothing else. */
+  it('leaves the other lanes alone', async () => {
+    const { missingMandatoryCopy } = await import('../services/greetingPersonalisation');
+    expect(missingMandatoryCopy('optical', 'anything at all')).toEqual([]);
+  });
+});
