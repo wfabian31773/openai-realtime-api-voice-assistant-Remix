@@ -2227,6 +2227,53 @@ it. On 2026-09-03 18:24:56 that ratio was 4 of 12.
 
 ---
 
+## THE ACCEPTANCE INSTRUMENT: `src/pcp/replay20260914.test.ts`
+
+Wayne, 2026-09-15: *"If we run the same transcripts through our process, they
+must pass our tests to clear them."* That file is it, and it lives on the
+integration branch (#305) because it goes green only with all six of that
+day's PCP fixes present.
+
+**WHAT IT IS.** The 17 calls of 2026-09-14 that left no ticket of any
+provenance, each by its real `call_sid`, each with the caller's own first
+substantive line read out of `call_logs.transcript`. It drives the real agent
+tools twice over the same corpus — once with the ticketing app accepting, once
+with it refusing — and asserts the caller is never told their request was
+recorded when it was not, and that the request exists somewhere afterwards.
+
+**THE TICKETING MOCK CARRIES THE APP'S REAL SLUG LIST.** The 17 were not lost
+in this repo: the agent POSTed correctly and the app answered HTTP 400 because
+its `PCP_CALL_PURPOSE_SLUGS` held 18 of the agent's 19. A mock that accepts
+everything would have been green on the day it happened. It also re-derives
+the agent's own list and fails if the two drift again — the check nobody had.
+
+**WHAT IT CANNOT DO, and this is the part to read before trusting it.**
+`voice_agent_api_logs.request_body` stores every `narrative` as the literal
+string `[REDACTED - stored securely]`, so **the sentences the model actually
+sent are not recoverable** and the narratives in the file are constructed. The
+`callPurpose` column is NOT redacted and is what grounds the replay
+(`patient_caller` on all 17, read from the table). So a case turning on
+narrative PHRASING is a fact about that phrasing — two such known misses are
+asserted as misses at the end of the file rather than quietly fixed.
+
+**IT EARNED ITS KEEP TWICE BEFORE IT SHIPPED.** It found `"Live
+representative."` — a bare noun phrase from the caller who rang SIX times —
+failing `asksForAPerson`, which review had not (see the v20 row). And
+**mutation testing found the suite itself lying**: the first version replayed
+only against an app that accepts, so the whole failure arm was unreachable and
+three mutations survived it, including reverting the refusal copy that cost us
+the 17. A fourth was hidden by module-level state — `pcpDirector` is keyed on
+call id and only the sweep clears it, so replaying the same SID twice carried
+`dispositionRecorded` into the second arm and fourteen floor assertions were
+measuring a sweep that never ran.
+
+**Six mutations, six caught**, each reproducing a distinct piece of the day:
+the app rejecting `patient_caller` (20 fail), the false completion sentence
+(18), the missing ask-for branch (2), the either/or queue question (1), the
+sweep demanding a name (15), and `A_REAL_PERSON` without the phrase family (1).
+
+---
+
 ## My recurring failure modes — check yourself against this list
 
 1. **Building instead of swapping.** He asked for a pipeline swap; I built a
