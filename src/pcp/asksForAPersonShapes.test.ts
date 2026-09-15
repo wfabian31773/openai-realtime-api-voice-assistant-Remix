@@ -233,3 +233,60 @@ describe('asking a person is not asking for one', () => {
     expect(asksForAPerson('Caller would like an operator.')).toBe(true);
   });
 });
+
+/**
+ * "LIVE REPRESENTATIVE." — A REAL CALLER, NOT A CONSTRUCTED ONE.
+ *
+ * `CA0cecc9296e`, 2026-09-14, 368 seconds. It is one of the 17 that ended
+ * with no ticket, and it is from the number that rang SIX times that evening
+ * — the caller whose last words on the line at 23:01 were "Why you sending me
+ * to the same AI thing again? I need to talk to a human being."
+ *
+ * The line did not latch. Every verb branch needs a verb and there is none,
+ * and `A_REAL_PERSON` — which exists precisely so a bare noun PHRASE can
+ * count — listed only `live person`, `real person`, `actual person` and
+ * `human being`. "Live representative" and "live agent" are the same
+ * construction with a different head noun.
+ *
+ * WHY THE ADJECTIVE IS THE SAFETY PROPERTY HERE, and why this is not the
+ * bare-noun widening the block below forbids. The measured danger on this
+ * lane is the caller's own JOB TITLE — 23 of 24 `coordinator` mentions are
+ * answers to "What is your role?". Nobody's job title is "live
+ * representative": `live`, `real` and `actual` are words a caller reaches for
+ * to say "not this machine", never words they use to introduce themselves.
+ * That is a property of the construction, not of one day's sample.
+ *
+ * The verb requirement stands for every OTHER branch. This one narrow phrase
+ * family is the exception `A_REAL_PERSON` already was; it is now the right
+ * size.
+ *
+ * Found by `replay20260914.test.ts` — the point of that file.
+ */
+describe('a bare "live/real/actual <human>" is an ask, and nothing wider is', () => {
+  const asks = [
+    'Caller said: Live representative.',
+    'Caller said: Live agent.',
+    'Caller said: I want a real person.',
+    'Caller said: Real representative.',
+    'Caller said: Actual human.',
+    'Caller said: Human being.',
+  ];
+  for (const n of asks) {
+    it(`matches: ${n}`, () => expect(asksForAPerson(n)).toBe(true));
+  }
+
+  /**
+   * The adjective is doing the work. Without it these are the job titles and
+   * bare mentions the module refuses on measurement, and they stay refused.
+   */
+  const notAsks = [
+    'Caller said: Representative.',
+    'Caller said: Agent.',
+    'Caller is the live events coordinator at a medical group.',
+    'Caller asked for the live chat link.',
+    'Caller mentioned a real problem with the referral.',
+  ];
+  for (const n of notAsks) {
+    it(`does NOT match: ${n}`, () => expect(asksForAPerson(n)).toBe(false));
+  }
+});

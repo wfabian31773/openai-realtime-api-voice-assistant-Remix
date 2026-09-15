@@ -224,8 +224,31 @@ function asksForOneUnnegated(narrative: string): boolean {
   return false;
 }
 
-/** Naming a human without a verb: "I want a real person." */
-const A_REAL_PERSON = /\b(?:live person|real person|actual person|human being)\b/i;
+/**
+ * NAMING A HUMAN WITHOUT A VERB — the one exception to the verb requirement,
+ * and the adjective is what earns it.
+ *
+ * It read `live person|real person|actual person|human being`, which missed
+ * `CA0cecc9296e` of 2026-09-14: a 368-second call, one of the 17 that left no
+ * ticket, from the number that rang SIX times that evening. The line was
+ * "Live representative." — the same construction as "live person" with a
+ * different head noun, and nothing in this module caught it. Found by
+ * `replay20260914.test.ts`.
+ *
+ * `live`, `real` and `actual` are the disambiguator, not the noun. They are
+ * what a caller reaches for to say "not this machine"; nobody introduces
+ * themselves with one. That matters because the measured danger on this lane
+ * is the caller's own JOB TITLE — 23 of 24 `coordinator` mentions are answers
+ * to "What is your role?" — and "live representative" is not a job title in
+ * any organisation. So this widens the phrase family and NOT the bare-noun
+ * rule: "Representative." alone is still not an ask, and a describe block in
+ * the test file fails if that ever changes.
+ *
+ * `human being` keeps its own alternative because `being` is not in the noun
+ * list and never should be.
+ */
+const A_REAL_PERSON =
+  /\b(?:(?:live|real|actual)\s+(?:person|human|representative|rep|agent|operator)|human being)\b/i;
 
 /**
  * True when the narrative records an explicit request to be put through.
