@@ -120,7 +120,7 @@ question.
 
 ---
 
-## COMPLIANCE — measured 2026-09-12, do not assume any of it
+## COMPLIANCE — re-measured 2026-09-12 22:30 UTC, AFTER the deploy. Do not assume any of it
 
 **A rule written here is not a rule the code follows.** This table is the
 honest state; update it when it changes, and never quote the rule as if it
@@ -130,11 +130,24 @@ were the behaviour.
 |---|---|
 | Rule 1 · match `patients_master` by phone | **PARTIAL.** `findByPhone` exists and is wired into `lookupPatient`'s LAST rung only (PR #292). Runtime caller-ID pre-context goes through `sage_precontext` over HTTP and **which table it reads is still UNSETTLED** — see instruction 14. Nobody was greeted by name on either pipeline on 2026-09-03. |
 | Rule 1 · validate before trusting | **YES.** `verifyPatient` / `findByPhone` refuse to choose between two people and report a candidate count. |
-| Rule 1 · join on `PersonID` | **BUILT, NOT DEPLOYED.** `ScheduleLookupService.lookupByPersonId`, PR #292. Index `idx_schedule_personid_apptdate` is live. |
-| Rule 1 · carry it forward into every tool and ticket | **NO — this is the largest open gap.** The gates still refuse on `date_of_birth`, `location` and `surgeon` for callers whose record holds all three. |
-| Rule 2a · ask new-or-existing | **MISSING FROM EVERY QUEUE LANE.** Zero hits in `opticalAgent`, `surgeryAgent`, `techAgent`, `recordsAgent`. It exists as `rampEngine.ts:60` (`classify`), and `rampEngine` is imported by **one** file — `voiceAgentRoutes.ts`, the OLD CORE. So the runtime lanes, which take the volume, do not ask it. Wayne asked whether we still had it; we do not, on the lanes that matter. |
+| Rule 1 · join on `PersonID` | **LIVE.** `ScheduleLookupService.lookupByPersonId` (#292, v10) merged 2026-09-12 and DEPLOYED — `/voice/health` read `voice-runtime-v12-optical-office-20260912` at 20:4x UTC, and v12 contains v10. Index `idx_schedule_personid_apptdate` is a live database object in no branch. Exercised on `CAb04962a559c013987d12958542b2b02c`: `matched_by name_and_dob`, `identity_is_certain true`. **ONE CALL IS NOT A MEASUREMENT** — the production before/after is task #109. |
+| Rule 1 · carry it forward into every tool and ticket | **LIVE, and it was the largest open gap until today.** Both missing ends merged 2026-09-12 and are in v12: the caller-ID match now reaches `verifiedIdentity` (#290, v11) and optical reads the office off the record (#291, v12). The date-of-birth carry and surgery's surgeon ladder already existed. On `CAb04962a559c013987d12958542b2b02c` the agent did NOT ask which office, routed to the office on the record, and the ticket carried `location_id`. **Still unproven at scale** — the guard is that optical tickets with NO `location_id` must FALL, not rise. |
+| Rule 2a · ask new-or-existing | **BUILT, NOT MERGED — PR #293, marker v13.** `src/runtime/newOrExistingAsk.ts` appends it at the session seam on optical/surgery/tech/records only, suppressed when pre-context already recognised the caller. It was MISSING FROM EVERY QUEUE LANE: zero hits in the four agent files; it survived only as `rampEngine.ts:60`, imported by ONE file — `voiceAgentRoutes.ts`, the OLD CORE — so the lanes taking the volume never asked it. **It GATES nothing**: a spoken "new" does not stop `lookup_patient`, and whether it should is an OPEN question for Wayne. |
 | Rule 2b · DOB asked in month/day/year parts | **YES, all four lanes** — `opticalAgent.ts:193`, `surgeryAgent.ts:203`, `techAgent.ts:189`, `recordsAgent.ts:192`, plus no-ivr and answering-service. |
 | Rule 2b · never two fields in one breath | **NO.** Records was observed asking for first and last name in one breath on 2026-09-03. |
+
+**WHERE THE TWO RULES STAND, in one line each, as of 2026-09-12 22:30 UTC:**
+**RULE 1 is running in production** — match, validate, join and carry are all in
+v12 and deployed. **RULE 2 is half running** — 2b (one field, format named) is
+live on all four lanes; 2a (new-or-existing) is built and waiting on an operator
+decision in #293; and 2b's "never two fields in one breath" is still broken on
+records.
+
+**WHAT IS NOT YET TRUE OF EITHER: a production measurement.** Everything above
+was proven by tests and by ONE operator call on a Saturday. Queue lanes take
+essentially nothing at weekends, so the numbers in tasks #109/#110/#111 need a
+full business day. Do not report a rate before then, and do not let the absence
+of one be read as the rules not working — or its presence as proof they do.
 
 Full working notes: **`.agents/memory/the-record-and-the-funnel.md`**.
 
