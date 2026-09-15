@@ -256,11 +256,37 @@ describe('caller recognition — credibility, not cosmetics', () => {
    */
   it('does not tell a recognised caller that a false flag means re-collect last name and DOB', () => {
     expect(matched).toMatch(/Do not collect their last name/);
-    expect(matched).toMatch(/do not\s+collect their date of birth/);
+    // Whitespace-tolerant across the wrap only; the phrase is unchanged.
+    expect(matched).toMatch(/do not\s+collect their date\s+of\s+birth/);
     expect(matched).not.toContain('Collect their last name and date of birth');
-    expect(matched).toMatch(/NOT[\s\S]*more than one person/);
     // Denial still has the words — the ask script keeps them.
     expect(matched).toContain('May I please have your last name?');
+  });
+
+  /**
+   * CODEX P1 ON #311, ROUND 2, ASSERTED ON THE BUILT PROMPT.
+   *
+   * This block used to assert the prompt says false is "NOT more than one
+   * person". That claim is FALSE unconditionally: on the found:true path with
+   * identityUnconfirmed false, false means exactly more than one person, the
+   * warning says so, and the record returned is "only the most recently seen
+   * of them". Asserting the withdrawn claim would pin the bug.
+   *
+   * The conditional property is what belongs here, and on the BUILT prompt
+   * rather than only on the helper — a helper-only test stayed green while
+   * `How a call runs` carried the contradiction, which is how #310 shipped
+   * with it.
+   */
+  it('routes an ambiguous lookup to the ask and only the unconfirmed one to the record', () => {
+    expect(matched).toMatch(/Several or different people on file/);
+    expect(matched).toMatch(/means ASK/);
+    expect(matched).toMatch(/ONLY "nobody has confirmed the caller\s+is that person"/);
+    expect(matched).not.toMatch(/that is NOT\s+more than one person/);
+    expect(matched).not.toMatch(/false does NOT mean more than one person/);
+    const several = matched.search(/Several or different people on file/);
+    const ban = matched.search(/Do not collect their last name/);
+    expect(several).toBeGreaterThan(-1);
+    expect(several).toBeLessThan(ban);
   });
 
   it('says nothing about recognition when the number matches nobody', () => {
