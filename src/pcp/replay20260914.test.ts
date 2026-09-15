@@ -69,13 +69,29 @@ process.env.OPENAI_API_KEY ||= 'test-unused';
 vi.mock('../../server/db', () => ({ db: {} }));
 
 /**
- * The ticketing app's accepted call purposes, as deployed.
+ * The ticketing app's accepted call purposes.
  *
  * Copied from `ticketing-app/lib/pcp/call-purposes.ts` (`PCP_CALL_PURPOSE_SLUGS`)
  * after ticketing-app #267 added `patient_caller`. It is a copy across a repo
- * boundary and there is no way to import it — so `theAppStillTakesEveryPurpose`
- * below re-derives the agent's own list and fails if the two drift, which is
- * the check that would have caught 2026-09-14 the morning it shipped.
+ * boundary and there is no way to import it — so the drift check below
+ * re-derives the agent's own list and fails if the two disagree, which is the
+ * check that would have caught 2026-09-14 the morning it shipped.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * `unclassified_call` IS A SHIP-ORDER DEPENDENCY, NOT A FREE ADDITION.
+ *
+ * It is on this list because ticketing-app #270 adds it. That PR MUST BE
+ * DEPLOYED BEFORE this repo's `unclassified_call` reaches production: the
+ * app's list is a `z.enum`, and a slug the agent sends that the app does not
+ * declare is refused with HTTP 400 — which is the precise mechanism that
+ * turned 17 requests into nothing on 2026-09-14.
+ *
+ * The exposure is bounded and worth stating exactly: the calls that would
+ * carry this slug file NOWHERE today, because the sweep's `callPurpose` gate
+ * turns them away before any POST. So shipping out of order costs those calls
+ * nothing they are not already losing — but it silently buys nothing either,
+ * and a green suite here would say otherwise. Hence this paragraph rather
+ * than a bare list entry.
  */
 const APP_ACCEPTS = new Set([
   'schedule_appointment', 'reschedule_appointment', 'cancel_appointment',
@@ -85,6 +101,7 @@ const APP_ACCEPTS = new Set([
   'plan_participation', 'health_plan_visit_inquiry', 'grievance_follow_up',
   'peer_to_peer', 'patient_medical_records_request', 'pharmaceutical_representative',
   'patient_caller',
+  'unclassified_call', // ticketing-app #270 — deploy that FIRST. See above.
 ]);
 
 let filed: Array<Record<string, unknown>> = [];

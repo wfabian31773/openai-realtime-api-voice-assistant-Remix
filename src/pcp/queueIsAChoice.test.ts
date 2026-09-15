@@ -151,8 +151,19 @@ describe('the caller is asked before anything is filed or dialled', () => {
   });
 });
 
-describe('an explicit yes: the queue, and no ticket', () => {
-  it('transfers and files nothing at all', async () => {
+/**
+ * THE v14 REVERSAL — operator, 2026-09-15: "yes to the v14 reversal."
+ *
+ * These assertions used to pin the OPPOSITE: `createPcpTicket` NOT called at
+ * all on an accepted transfer. That was the 2026-09-13 ruling, and the
+ * operator withdrew its filing half on 09-15 in favour of Rosa's 09-08
+ * design. They are REWRITTEN rather than loosened, because a test that merely
+ * stopped asserting "no ticket" would pass whether or not the ticket carries
+ * a status that lies about reaching a human — which is the whole risk of
+ * filing again.
+ */
+describe('an explicit yes: the queue, AND a ticket that does not claim a human', () => {
+  it('transfers and files, at DIALING and never CONNECTED', async () => {
     const dial = vi.fn(QUEUE_OK);
     const { agent } = freshCall(dial);
 
@@ -163,18 +174,62 @@ describe('an explicit yes: the queue, and no ticket', () => {
     expect(dial).toHaveBeenCalledTimes(1);
     expect(
       ticketing.createPcpTicket,
-      'the operator said no ticket for anyone who chooses the transfer',
-    ).not.toHaveBeenCalled();
+      'Rosa 2026-09-08, restored 09-15: a ticket is created even when they are transferred',
+    ).toHaveBeenCalled();
+
+    /**
+     * THE PRE-DIAL WRITE IS THE ONE THAT SURVIVES A CALLER WHO HANGS UP IN
+     * hold music, so it has to happen BEFORE the redirect, not only after.
+     */
+    const payloads = ticketing.createPcpTicket.mock.calls.map((c: any[]) => c[0]);
+    const first = payloads[0];
+    expect(first.handoff.finalStatus, 'filed before the dial goes out').toBe('REQUESTED');
+    expect(first.handoff.attempted).toBe(false);
+
+    const last = payloads[payloads.length - 1];
+    expect(last.handoff.finalStatus, 'a queue is not a person').toBe('DIALING');
+    expect(last.handoff.humanAnswerStatus).toBe('TRANSFERRED_TO_QUEUE');
+    expect(
+      last.handoff.connectedAt,
+      'nothing on the blind path observes a human answering — v20',
+    ).toBeUndefined();
+
+    /**
+     * THE APP KEYS ITS UPSERT ON callSid, so both writes must carry the SAME
+     * one or the second opens a second ticket instead of updating the first.
+     */
+    for (const payload of payloads) {
+      expect(payload.callSid).toBe(first.callSid);
+    }
   });
 
   /**
-   * The promise has to survive teardown. On the blind path the redirect ends
-   * the Media Stream, so the sweep runs seconds later on a caller with no
-   * disposition and a status that is not CONNECTED — neither of its existing
-   * exits catches them, and it would file "CALLER HUNG UP BEFORE THE REQUEST
-   * WAS COMPLETE" for somebody sitting in the queue where they asked to be.
+   * CONNECTED IS RESERVED FOR THE WARM PATH'S KEYPRESS, and the ticketing app
+   * computes `humanHandoffOccurred` from exactly that word. Asserting the
+   * absence separately from the presence above, because a future change that
+   * "improves" the status to CONNECTED would still satisfy every assertion
+   * that only checks DIALING is somewhere in the payload.
    */
-  it('the teardown sweep does not file behind them', async () => {
+  it('no write on this path ever says CONNECTED', async () => {
+    const { agent } = freshCall(QUEUE_OK);
+    await askThenAnswer(agent, true);
+
+    for (const call of ticketing.createPcpTicket.mock.calls as any[][]) {
+      expect(call[0].handoff?.finalStatus).not.toBe('CONNECTED');
+      expect(call[0].handoff?.connectedAt).toBeUndefined();
+    }
+  });
+
+  /**
+   * The sweep exit SURVIVES the reversal, and for its original reason.
+   *
+   * On the blind path the redirect ends the Media Stream, so the sweep runs
+   * seconds later on a caller whose status is DIALING, not CONNECTED. Without
+   * the exit it would file "CALLER HUNG UP BEFORE THE REQUEST WAS COMPLETE"
+   * over somebody sitting in the queue where they asked to be — wrong prose
+   * on a ticket that now exists, rather than a ticket that should not.
+   */
+  it('the teardown sweep does not file AGAIN behind them', async () => {
     const { agent, callId } = freshCall(QUEUE_OK);
     await askThenAnswer(agent, true);
     ticketing.createPcpTicket.mockClear();
@@ -219,7 +274,18 @@ describe('a caller who said yes is asked nothing else', () => {
     ).not.toBe('pre_transfer_intake');
     expect(r.success).toBe(true);
     expect(dial).toHaveBeenCalledTimes(1);
-    expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
+    /**
+     * AND THE SKIPPED ROUND DOES NOT SKIP THE RECORD. This line asserted the
+     * opposite until the 2026-09-15 reversal, which put v14's FILING rule
+     * inside a test about what we ASK — the two questions this file now keeps
+     * apart (`choseTheQueue` vs the ticket writes). Asserted positively here
+     * so the thin intake and the ticket are pinned together: a caller who was
+     * asked nothing is exactly the caller whose ticket is easiest to lose.
+     */
+    expect(
+      ticketing.createPcpTicket,
+      'no questions asked is not the same as nothing written down',
+    ).toHaveBeenCalled();
   });
 
   /**

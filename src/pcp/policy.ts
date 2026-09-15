@@ -21,6 +21,21 @@ export const PCP_CALL_PURPOSE_SLUGS = [
   'patient_medical_records_request',
   'pharmaceutical_representative',
   'patient_caller',
+  /**
+   * THE CALL ENDED AND NOTHING CLASSIFIED IT — the teardown sweep's slug.
+   *
+   * Operator, 2026-09-15: *"anything we dont classify we log as a new slug"*,
+   * and on where it lands: *"leave it in the PCP queue and let the PCP agents
+   * route it manually to where it needs to go rather safe than sorry rather
+   * than dump it into medical records and create a case unnecessarily."*
+   *
+   * MUST STAY IN STEP WITH the ticketing app's own `PCP_CALL_PURPOSE_SLUGS`,
+   * which is a `z.enum` and rejects anything it does not declare. A slug this
+   * list has and the app does not is the HTTP 400 that cost 17 requests on
+   * 2026-09-14; `replay20260914.test.ts` re-derives both and fails on drift.
+   * Added to the app in its #270.
+   */
+  'unclassified_call',
 ] as const;
 
 export type PcpCallPurposeSlug = (typeof PCP_CALL_PURPOSE_SLUGS)[number];
@@ -130,6 +145,14 @@ export const PCP_CALL_PURPOSES: readonly PcpCallPurpose[] = [
   // the scheduling hub. Nobody is told to call back — the operator's ruling.
   { slug: 'patient_caller', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK'], patientContextRequired: false, authoritativeSource: null, containsPhi: true },
   { slug: 'pharmaceutical_representative', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK', 'HAND_OFF'], patientContextRequired: false, authoritativeSource: null, containsPhi: false },
+  // CREATE_TASK ONLY, and the reason is not symmetry: we could not establish
+  // what the call was about, so we certainly cannot establish it came from an
+  // entity who asked for a person — the 2026-09-04 transfer rule can never
+  // grant HAND_OFF here. `patientContextRequired` false because the sweep
+  // files what the transcript holds, and gating on patient identity is what
+  // stopped these filing at all. `containsPhi` true: the narrative carries
+  // the caller's own words and we do not know what is in them.
+  { slug: 'unclassified_call', defaultDisposition: 'CREATE_TASK', allowedDispositions: ['CREATE_TASK'], patientContextRequired: false, authoritativeSource: null, containsPhi: true },
 ];
 
 const PURPOSES = new Map(PCP_CALL_PURPOSES.map((purpose) => [purpose.slug, purpose]));

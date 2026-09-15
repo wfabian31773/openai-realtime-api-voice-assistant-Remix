@@ -547,6 +547,12 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                 ...(details?.askedBeforeDial !== undefined
                   ? { askedBeforeDial: details.askedBeforeDial }
                   : {}),
+                // Snapshotted for the same reason as the two above: the side
+                // channel is deleted in `attempt`'s finally, and the dial
+                // result arrives on a later HTTP request with no closure left.
+                ...(details?.onBlindDialSettled
+                  ? { onSettled: details.onBlindDialSettled }
+                  : {}),
               });
             }
             return blindOutcome;
