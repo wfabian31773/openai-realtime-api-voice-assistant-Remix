@@ -98,7 +98,7 @@ const HUMAN_NOUNS =
   '(?:person|human|someone|somebody|rep|representative|agent|front desk|receptionist|office|team|operator)';
 
 /** Asking to be connected: "can I speak to the team", "talk with someone". */
-const SPEAK_TO = new RegExp(`\\b(?:speak|talk)\\b\\s+(?:to|with)\\b[^.]{0,25}\\b${HUMAN_NOUNS}\\b`, 'i');
+const SPEAK_TO = new RegExp(`\\b(?:speak|talk)\\b\\s+(?:to|with)\\b[^.]{0,25}\\b${HUMAN_NOUNS}\\b`, 'ig');
 
 /**
  * Asking to be moved: "put me through to the office", "get me a rep",
@@ -122,11 +122,52 @@ const SPEAK_TO = new RegExp(`\\b(?:speak|talk)\\b\\s+(?:to|with)\\b[^.]{0,25}\\b
  * upstream of a real phone dial into a queue staffed by three or four people.
  * Bare `transfer` was already here and stays; adding "transferred" would buy a
  * rare phrasing at the cost of a class of false dials.
+ *
+ * AND EVERY WORD OF THAT APPLIED TO `connected`, WHICH I INFLECTED ANYWAY.
+ * Codex P1 on #305, with Cursor flagging the same branch from the other side
+ * in the same round:
+ *
+ *     "Caller was connected to the representative earlier."   <- matched
+ *     "Caller was not connected to a representative."         <- matched
+ *     "Caller was connected to the office last week."         <- matched
+ *
+ * The reasoning three lines above and the code below disagreed inside one
+ * regex, and the review caught what the author did not.
+ *
+ * WHAT IT COST IS WORSE THAN A STRAY DIAL. A false latch on
+ * `callerRequestedHuman` grants handoff eligibility, which opens the queue
+ * choice — and since the v14 ruling an accepted queue choice files NO TICKET.
+ * A narrative about a PREVIOUS connection could therefore dial the queue and
+ * suppress the record, for a caller who asked for neither.
+ *
+ * So the inflections now need `REQUEST_LEAD` in front of them and bare
+ * `connect` does not, because bare `connect` cannot narrate a past event.
+ * "Caller asked to be connected to the office" — the phrasing the inflection
+ * was added for — still matches, through the lead-in rather than around it.
  */
+/**
+ * Verbs that mark a sentence as a REQUEST rather than a report.
+ *
+ * Needed because `connected` narrates something that already happened at
+ * least as often as it narrates a wish for it. See below.
+ */
+const REQUEST_LEAD =
+  '(?:ask(?:ed|s|ing)?|request(?:ed|s|ing)?|want(?:s|ed)?|would\\s+like|need(?:s|ed)?)';
+
 const CONNECT_TO = new RegExp(
-  '\\b(?:connect(?:ed|ing)?|transfer|put\\s+(?:me|them|us|him|her)\\s+through|put\\s+(?:me|them|us|him|her)|get\\s+(?:me|them|us))\\b' +
+  '\\b(?:' +
+    // Bare `connect` needs no lead-in: it is imperative or infinitive
+    // ("connect me", "asked us to connect them") and cannot narrate a past
+    // event. `\\b` after it keeps it out of "connected" and "disconnected".
+    'connect' +
+    '|' +
+    // THE INFLECTED FORMS REQUIRE REQUEST SYNTAX. See the comment above.
+    REQUEST_LEAD + '[^.]{0,20}\\bconnect(?:ed|ing)' +
+    '|' +
+    'transfer|put\\s+(?:me|them|us|him|her)\\s+through|put\\s+(?:me|them|us|him|her)|get\\s+(?:me|them|us)' +
+    ')\\b' +
     `[^.]{0,25}\\b${HUMAN_NOUNS}\\b`,
-  'i',
+  'ig',
 );
 
 /**
@@ -214,11 +255,35 @@ const ASKED_FOR = new RegExp(
  * `n't` carries no leading `\b` on purpose: there is no word boundary inside
  * "didn't", so `\bn't` would never fire and every contraction would slip past.
  */
-const NEGATOR_IMMEDIATELY_BEFORE = /(?:\bnot|n't|\bnever|\bno)\s+(?:\w+ly\s+)?$/i;
+const NEGATOR_IMMEDIATELY_BEFORE = new RegExp(
+  "(?:\\bnot|n't|\\bnever|\\bno)\\s+(?:\\w+ly\\s+)?" +
+    // A REQUEST VERB MAY SIT BETWEEN THE NEGATOR AND THE MATCH, because the
+    // natural phrasing puts them in that order: "never ASKED TO speak with
+    // someone" negates `asked`, while SPEAK_TO matches at `speak`. Without
+    // this the guard sees "to " in front of the verb and lets it through.
+    //
+    // Only a REQUEST verb, and only with its infinitive marker. "was not able
+    // to speak" and "did not get to speak" are deliberately NOT suppressed —
+    // both negate the OUTCOME rather than the desire, and a caller who could
+    // not reach a person is one who wanted one. That distinction is asserted
+    // in the test file rather than decided here.
+    '(?:' + REQUEST_LEAD + "\\s+to\\s+(?:be\\s+)?)?$",
+  'i',
+);
 
-/** True when at least one ask-for match is not governed by a negation. */
-function asksForOneUnnegated(narrative: string): boolean {
-  for (const m of narrative.matchAll(ASKED_FOR)) {
+/**
+ * True when at least one match of `re` is not governed by a negation.
+ *
+ * Applied to EVERY verb branch, not just the ask-for one. Cursor, #305: the
+ * guard was written for `ASKED_FOR` and `SPEAK_TO` / `CONNECT_TO` could still
+ * fire on a locally negated clause. Extending it is mechanical rather than a
+ * new risk, because the check was match-scoped from the start.
+ *
+ * `re` must carry the `g` flag — `matchAll` throws without it, which is the
+ * failure mode that says "you added a branch and forgot".
+ */
+function matchesUnnegated(re: RegExp, narrative: string): boolean {
+  for (const m of narrative.matchAll(re)) {
     if (!NEGATOR_IMMEDIATELY_BEFORE.test(narrative.slice(0, m.index))) return true;
   }
   return false;
@@ -258,9 +323,9 @@ const A_REAL_PERSON =
  */
 export function asksForAPerson(narrative: string): boolean {
   return (
-    SPEAK_TO.test(narrative) ||
-    CONNECT_TO.test(narrative) ||
-    asksForOneUnnegated(narrative) ||
+    matchesUnnegated(SPEAK_TO, narrative) ||
+    matchesUnnegated(CONNECT_TO, narrative) ||
+    matchesUnnegated(ASKED_FOR, narrative) ||
     A_REAL_PERSON.test(narrative)
   );
 }

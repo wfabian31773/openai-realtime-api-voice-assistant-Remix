@@ -290,3 +290,111 @@ describe('a bare "live/real/actual <human>" is an ask, and nothing wider is', ()
     it(`does NOT match: ${n}`, () => expect(asksForAPerson(n)).toBe(false));
   }
 });
+
+/**
+ * `CONNECTED` NARRATES SOMETHING THAT ALREADY HAPPENED.
+ *
+ * Codex P1 on #305, and Cursor flagged the same branch from the other side in
+ * the same round. Two reviewers converging on one spot is why this got looked
+ * at properly instead of being filed as an outlier.
+ *
+ * THE MODULE ALREADY KNEW. Three lines above the branch that accepts
+ * `connected`, its own comment explains why `transfer` is deliberately NOT
+ * inflected:
+ *
+ *     "Transferred to" routinely narrates something that already happened to
+ *     a record or a patient — "records were transferred to the office", "her
+ *     care was transferred" — and this field sits upstream of a real phone
+ *     dial into a queue staffed by three or four people.
+ *
+ * Every word of that applies to `connected`, and I inflected it anyway when I
+ * widened the branch for "Caller asked to be connected to the office." The
+ * reasoning and the code disagreed inside one regex.
+ *
+ * WHAT IT COSTS NOW IS WORSE THAN A STRAY DIAL. A false latch on
+ * `callerRequestedHuman` grants handoff eligibility, which opens the queue
+ * choice — and since the v14 ruling an accepted queue choice files NO TICKET.
+ * So a narrative describing a PREVIOUS connection could dial the queue and
+ * suppress the record, on a caller who never asked for either.
+ *
+ * THE FIX IS THE ONE CODEX NAMED: the inflected forms need request syntax in
+ * front of them. Bare `connect` keeps none — it is imperative or infinitive
+ * ("connect me", "asked us to connect them") and cannot narrate a past event.
+ */
+describe('a past connection is not a request for one', () => {
+  const narrations = [
+    'Caller was connected to the representative earlier.',
+    'Caller was not connected to a representative.',
+    'Caller was connected to the office last week about a referral.',
+    'Caller says they were connected to someone yesterday.',
+    'The call was transferred to the office and disconnected.',
+  ];
+  for (const n of narrations) {
+    it(`does NOT match: ${n}`, () => expect(asksForAPerson(n)).toBe(false));
+  }
+
+  /** The asks the inflected form was widened for still work. */
+  const asks = [
+    'Caller asked to be connected to the office.',
+    'Caller wants to be connected to someone.',
+    'Caller requested to be connected to a representative.',
+    'Caller asked us to connect them to a representative.',
+  ];
+  for (const n of asks) {
+    it(`still matches: ${n}`, () => expect(asksForAPerson(n)).toBe(true));
+  }
+});
+
+/**
+ * AND THE NEGATION GUARD NOW COVERS EVERY BRANCH, not just `ASKED_FOR`.
+ *
+ * Cursor: *"negation is only on `ASKED_FOR`. `SPEAK_TO` / `CONNECT_TO` can
+ * still match a locally negated clause."* Correct, and the guard was already
+ * written and match-scoped, so extending it is mechanical rather than a new
+ * risk.
+ *
+ * It stays NARROW in the way that matters: the negator must directly govern
+ * the verb that matched, adverbs allowed and nothing else. So a caller who
+ * was refused and asked again is untouched — "did not get to speak to
+ * anyone" puts "to" immediately before the verb, not a negator.
+ */
+describe('a negated clause is not an ask, on any branch', () => {
+  const negated = [
+    'Caller did not speak to a representative.',
+    'Caller did not want a representative.',
+    'Caller never asked to speak with someone.',
+  ];
+  for (const n of negated) {
+    it(`does NOT match: ${n}`, () => expect(asksForAPerson(n)).toBe(false));
+  }
+
+  it('but a refusal followed by a fresh ask still counts', () => {
+    expect(
+      asksForAPerson('Caller did not get to speak to anyone and asked for a representative.'),
+    ).toBe(true);
+  });
+
+  /**
+   * ABILITY-NEGATION IS DELIBERATELY NOT PINNED IN EITHER DIRECTION, and this
+   * block exists so the next reader does not "fix" it blind.
+   *
+   * My first draft of this describe block asserted that "Caller was not able
+   * to speak with someone." must NOT match, alongside the plain negations
+   * above. That was careless: **it negates the OUTCOME, not the desire.** A
+   * caller who could not reach a person is precisely a caller who wanted one,
+   * so latching the ask on it may well be the CORRECT behaviour.
+   *
+   * Today the guard splits them by accident of spelling rather than by
+   * design — "couldn't speak" is suppressed because the contraction sits
+   * directly before the verb, "was not able to speak" is not because "able
+   * to" intervenes. Neither is asserted here. Deciding it needs a measured
+   * population of such narratives and a ruling on which reading wins, and we
+   * have neither; inventing one would be filling a gap instead of asking.
+   */
+  it('plain negation is what the guard claims, and all it claims', () => {
+    // Directly governed: suppressed, and that is the designed behaviour.
+    expect(asksForAPerson('Caller did not ask for a representative.')).toBe(false);
+    // Governed through an ability phrase: NOT suppressed, and not claimed.
+    expect(asksForAPerson('Caller was not able to speak with someone.')).toBe(true);
+  });
+});
