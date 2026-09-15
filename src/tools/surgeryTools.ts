@@ -26,7 +26,7 @@
  * resolve_location, check_open_tickets — come from `sharedPatientTools`, one
  * definition each, made queue-aware rather than forked.
  */
-import { registerTool, missing, type ToolResult } from './registry';
+import { registerTool, missing, refuseDob, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
@@ -325,8 +325,10 @@ registerTool({
          * the model "ask the caller again" when it simply omitted the argument
          * is what built the loop.
          */
-        return missing(
-          ['date_of_birth'],
+        return refuseDob(
+          callSid,
+          first,
+          last,
           'I did not catch that — may I please have the date of birth, starting with the month, then the day, then the year?',
           dob
             ? 'The date_of_birth you sent could not be read as a date. Say the message to the caller, '
