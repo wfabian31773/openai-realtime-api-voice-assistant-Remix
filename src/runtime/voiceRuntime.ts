@@ -894,7 +894,7 @@ export function mountVoiceRuntime(
                       // transfer as `transferred` rather than the
                       // caller_hangup the stream's death looks like
                       // (Codex, PR #230 round 2).
-                      onCallerRedirectStarting: () => bridge?.noteTransferStarting(),
+                      onCallerRedirectStarting: (method) => bridge?.noteTransferStarting(method),
                       onCallerRedirectFailed: () => bridge?.noteTransferFailed(),
                       // The watchdog must span the accept window while the
                       // office is being dialed and briefed, or the caller

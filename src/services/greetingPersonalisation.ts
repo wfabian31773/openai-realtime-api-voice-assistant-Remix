@@ -239,9 +239,44 @@ function negated(greeting: string, phrase: string): boolean {
   return new RegExp(`${NEGATOR}${ADVERBS}\\s+(?:be|being|been)?\\s*${phrase}\\b`, 'i').test(greeting);
 }
 
+/**
+ * THE RECORDING DISCLOSURE, SHARED — used by every lane that must carry one.
+ *
+ * Extracted 2026-09-15 when `pcp` gained the requirement (Codex P1, #304).
+ * It is REFERENCED rather than copied, and that is the whole point: this one
+ * predicate has been through four Codex rounds — the adverb hole ("not
+ * currently being recorded"), the token-versus-statement inversion ("ask about
+ * our recording policy" used to pass), and the coordination false-reject
+ * ("monitored or recorded"). A second lane writing its own would be the
+ * `explicitAsk.ts` noun lists again: two near-identical checks, one of them
+ * maintained, and the unmaintained one guarding a compliance boundary.
+ *
+ * The comment block that earned each clause stays on the no-ivr entry below.
+ */
+const RECORDING_DISCLOSURE: { label: string; present: (g: string) => boolean } = {
+  label: 'recording disclosure',
+  present: (g) =>
+    /\b(?:is|are|was|were|be|being|been)\s+(?:being\s+)?(?:\w+(?:ed|ing)(?:\s*,\s*|\s+(?:and|or)\s+))*record(?:ed|ing)\b/i.test(g) &&
+    !negated(g, String.raw`(?:being\s+)?record(?:ed|ing)`),
+};
+
 const MANDATORY_GREETING_COPY: Readonly<
   Record<string, ReadonlyArray<{ label: string; present: (g: string) => boolean }>>
 > = {
+  /**
+   * PCP, added 2026-09-15. The lane spoke no disclosure on any of the 219
+   * calls of 2026-09-14; #304 put one in `pcpAgentConfig.greeting`, and that
+   * alone was not enough — `chooseGreeting` prefers `agents.welcome_greeting`
+   * whenever it passes this check, and with no `pcp` key here the check
+   * passed for ANY string. One database row would have reopened the gap
+   * silently. (Codex P1, #304.)
+   *
+   * ONE requirement, not three. The closed-office notice and the 911
+   * direction belong to the after-hours line; PCP is a business-hours
+   * professional line, and requiring a clinical-safety sentence here would
+   * be inventing a rule rather than applying one (standing instruction 1).
+   */
+  pcp: [RECORDING_DISCLOSURE],
   'no-ivr': [
     // THREE, not two. `noIvrAgent` names them: "the two things this line
     // exists to say: that offices are closed, and that a medical emergency
@@ -326,10 +361,7 @@ const MANDATORY_GREETING_COPY: Readonly<
        * recorded". Only `-ed`/`-ing` words joined by and/or/comma qualify, so
        * `not` still cannot slip in, and the negation guard is untouched.
        */
-      label: 'recording disclosure',
-      present: (g) =>
-        /\b(?:is|are|was|were|be|being|been)\s+(?:being\s+)?(?:\w+(?:ed|ing)(?:\s*,\s*|\s+(?:and|or)\s+))*record(?:ed|ing)\b/i.test(g) &&
-        !negated(g, String.raw`(?:being\s+)?record(?:ed|ing)`),
+      ...RECORDING_DISCLOSURE,
     },
   ],
 };
@@ -373,6 +405,16 @@ export function lunchGreetingFor(
   if (!candidate) return null;
   return isLunchClosure(now) ? candidate : null;
 }
+
+/**
+ * The lanes that have mandatory greeting copy at all.
+ *
+ * Exported so `compliantFallbackGreeting.test.ts` can walk them and fail when
+ * a lane gains mandatory copy without gaining a compliant greeting to fall
+ * back on — the hole #304 opened by adding `pcp` beside a call site whose own
+ * comment said no second lane existed.
+ */
+export const MANDATED_COPY_LANES: ReadonlyArray<string> = Object.keys(MANDATORY_GREETING_COPY);
 
 /**
  * What a candidate greeting is missing for this lane, or [] when it is

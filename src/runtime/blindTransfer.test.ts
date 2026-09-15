@@ -37,6 +37,7 @@ type Redirect = {
 
 function harness(over: { redirectThrows?: boolean } = {}) {
   const order: string[] = [];
+  const methods: Array<"warm" | "blind"> = [];
   const redirects: Redirect[] = [];
   const deps = {
     twilio: {
@@ -48,11 +49,14 @@ function harness(over: { redirectThrows?: boolean } = {}) {
     },
     dialResultUrl: "https://example.test/voice/transfer-dial-result",
     callerId: "+15550000000",
-    onCallerRedirectStarting: () => void order.push("markStarting"),
+    onCallerRedirectStarting: (method: "warm" | "blind") => {
+      methods.push(method);
+      order.push("markStarting");
+    },
     onCallerRedirectFailed: () => void order.push("markFailed"),
     log: () => {},
   };
-  return { deps, order, redirects };
+  return { deps, order, methods, redirects };
 }
 
 describe("the caller is told, in the operator's own words", () => {
@@ -136,6 +140,30 @@ describe("the transfer mark precedes the redirect", () => {
     const { deps, order } = harness();
     await performBlindTransfer({ callerCallSid: "CAcaller", destination: "+1714" }, deps);
     expect(order).toEqual(["markStarting", "redirect"]);
+  });
+
+  /**
+   * THE MARK MUST SAY WHICH PATH IT IS, and until 2026-09-15 it did not.
+   *
+   * This module's own header states that `method: 'blind'` is what separates
+   * "the caller is no longer ours" from "the caller reached a person", and
+   * that "every consumer that turns a TransferOutcome into a record or a
+   * ticket status branches on it". The hook took no argument, so the consumer
+   * that writes the CALL RECORD — the one named in that sentence — could not:
+   * `transferInFlight` was a single undifferentiated boolean, `callRecord`
+   * turned it into `transferredToHuman: true`, and `ticketingSyncService`
+   * carried that into `humanHandoffOccurred`.
+   *
+   * 2026-09-14, PCP tickets: 20 read DIALING / TRANSFERRED_TO_QUEUE with
+   * `human_handoff_occurred = true`, and 3 more claimed it with no handoff
+   * recorded at all. Nothing on this path observed a human. Asserting the
+   * ARGUMENT here, at the source, is the point — `callRecord`'s own test can
+   * be green on a value this hook never sends.
+   */
+  it("tells the recorder this was BLIND, not warm", async () => {
+    const { deps, methods } = harness();
+    await performBlindTransfer({ callerCallSid: "CAcaller", destination: "+1714" }, deps);
+    expect(methods).toEqual(["blind"]);
   });
 
   it("clears the mark FIRST when the redirect fails, so a later hangup is a hangup", async () => {
