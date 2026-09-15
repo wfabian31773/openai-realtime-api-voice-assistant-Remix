@@ -30,6 +30,7 @@ import { asksForAPerson } from '../pcp/explicitAsk';
 import { preTransferGaps, preTransferQuestion } from '../pcp/preTransferIntake';
 import { QUEUE_CHOICE_WARNING, readQueueChoice, choseTheQueue } from '../pcp/queueChoice';
 import { handoffAfterQueueDial } from '../pcp/queueDialSettlement';
+import { callerLines, saidMoreThanTheirOwnIdentity } from '../runtime/requestSweep';
 import {
   deliveryAskFor,
   isRecordsRequest,
@@ -2588,7 +2589,78 @@ export async function sweepPcpUnfiledCall(callId: string): Promise<void> {
      * Wayne rather than papered over here.
      */
     const askedForAPersonAndDidNotGetOne = Boolean(state.callPurpose && state.callerRequestedHuman);
-    if (!toldUsSomething && !askedForAPersonAndDidNotGetOne) {
+    /**
+     * A CALL NOBODY CLASSIFIED IS STILL A CALL SOMEBODY MADE.
+     *
+     * Operator, 2026-09-15, answering all three of his own questions in one
+     * go: *"are we capturing the transcripts for these calls? … if we're
+     * capturing the transcripts then why are we not reading the transcripts
+     * for the call purpose … actually now that I think about it, why don't we
+     * just leave it in the PCP queue and let the PCP agents route it manually
+     * to where it needs to go — rather safe than sorry rather than dump it
+     * into medical records and create a case unnecessarily."*
+     *
+     * READ THE TRANSCRIPT, DO NOT CLASSIFY FROM IT. That third sentence
+     * supersedes the second and it is the whole design: the transcript goes
+     * ON the ticket so a human can route it, and the SLUG is
+     * `unclassified_call`, which lands in PCP Support (department 18) where a
+     * person already looks. Machine-guessing a department here would be the
+     * `'surgery center'` mistake of 2026-09-08 with worse consequences — an
+     * `mr_cases` row opened on a guess starts a statutory clock on a request
+     * nobody has read.
+     *
+     * MEASURED 2026-09-15, PCP's first 2h23m on the current build: 32 real
+     * conversations that did not transfer, 18 with no ticket of ANY
+     * provenance. Every existing exit above turns them away, and the gate
+     * below is why: `toldUsSomething` demands a purpose AND an identity
+     * field, and the model never recorded a purpose at all.
+     *
+     * THE ADMISSION IS `saidMoreThanTheirOwnIdentity`, NOT A NEW PREDICATE.
+     * `requestSweep.ts` is the queue lanes' teardown filer and CLAUDE.md
+     * lists it under "do NOT rebuild these"; that function is deliberately
+     * the narrowest possible version — it suppresses a call only when every
+     * caller line is exhausted by their own name and a spoken date — and its
+     * own docstring already says it "does NOT try to decide what a request
+     * is … meaning is the model's job and not a regex's". That is the
+     * operator's conclusion, already written down, so it is reused rather
+     * than reasoned about again.
+     *
+     * THE NARROWNESS IS STILL THE POINT. A caller who said nothing beyond
+     * "yes" and their date of birth files nothing, exactly as before — which
+     * is what keeps this from recreating azul's 2026-07-28 sweep, where 9 of
+     * 12 spurious tickets were callbacks for patients already helped.
+     */
+    const transcript = metadata?.getTranscript?.() ?? '';
+    /**
+     * EVERY NAME WE HOLD, WHICH ON THIS ARM IS USUALLY NONE — and that is a
+     * real weakening of the guard, stated rather than hidden.
+     *
+     * `saidMoreThanTheirOwnIdentity` subtracts the caller's own name from
+     * their lines, so a call that was only an identity interview files
+     * nothing. It can only subtract a name we CAPTURED, and a call the model
+     * never classified is usually one where it never recorded a name either
+     * — so "This is <name>." and a hang-up WILL file on this arm, where on
+     * the others it would not.
+     *
+     * ACCEPTED, and the direction is deliberate. That predicate's own
+     * docstring already chose it: *"the failure mode it accepts is filing the
+     * occasional identity-only ticket, which is the right direction to err on
+     * a path whose whole purpose is not losing requests."* A department-18
+     * ticket a staffer discards costs ten seconds; a lost request costs a
+     * caller. And the alternative is a name DETECTOR, which is standing
+     * instruction 3 in as many words — *"why are you trying to determine what
+     * a first name is? You'll never ever get it to work like that."*
+     *
+     * `callerName` is passed beside the patient's because on the PCP line the
+     * two are often the same person and the model may have recorded one
+     * without the other.
+     */
+    const spokeBeyondTheirOwnIdentity = saidMoreThanTheirOwnIdentity(transcript, {
+      firstName: state.patientFirstName ?? state.callerName,
+      lastName: state.patientLastName,
+    });
+    const unclassified = !state.callPurpose && spokeBeyondTheirOwnIdentity;
+    if (!toldUsSomething && !askedForAPersonAndDidNotGetOne && !unclassified) {
       console.info(`[PCP] SWEEP: ${callId} ended with nothing to file (no purpose or no identity) — no ticket`);
       return;
     }
@@ -2606,20 +2678,47 @@ export async function sweepPcpUnfiledCall(callId: string): Promise<void> {
      * asked for a person, was refused, and was left holding nothing — which is
      * a worse experience and a more urgent callback.
      */
-    const headline = askedForAPersonAndDidNotGetOne && !toldUsSomething
+    const headline = unclassified
+      ? 'THIS CALL WAS NOT CLASSIFIED AND NEEDS ROUTING BY HAND. The caller spoke but the agent never established what the call was about, so nothing here has been routed to a department — please read what they said below and send it where it belongs.'
+      : askedForAPersonAndDidNotGetOne && !toldUsSomething
       ? 'CALLER ASKED TO SPEAK TO A PERSON AND WAS NOT CONNECTED, and the request was not captured on the call. Filed so it is not lost. They gave no further detail.'
       : 'CALLER HUNG UP BEFORE THE REQUEST WAS COMPLETE. Filed from what was gathered on the call so it is not lost.';
+    /**
+     * THE CALLER'S OWN WORDS ARE THE ROUTING INSTRUCTION on this arm, so they
+     * go in the narrative rather than only in the `transcript` field: the
+     * headline says a person has to route this, and a person cannot route it
+     * from a line that says we do not know what they wanted. Agent lines are
+     * stripped — a staffer needs what the CALLER said, not our questions back
+     * at them.
+     */
+    const theirWords = unclassified
+      ? `What the caller said:\n${callerLines(transcript).map((l) => `  - ${l}`).join('\n')}`
+      : '';
     const narrative = [
       headline,
+      theirWords,
       gaps,
       'Please call back to complete this request.',
     ]
       .filter(Boolean)
       .join('\n\n');
 
-    console.warn(`[PCP] SWEEP: ${callId} ended with no disposition — filing what we have`);
+    console.warn(
+      `[PCP] SWEEP: ${callId} ended with no disposition — filing what we have` +
+        (unclassified ? ' as unclassified_call, for a person to route' : ''),
+    );
+    /**
+     * `unclassified_call` is the ticketing app's slug for exactly this, added
+     * in its #270. It resolves to `General / Other` -> `Other - See
+     * Description` in department 18 — the same pair `patient_caller` already
+     * proves live — and is CREATE_TASK only, because a call we could not
+     * classify is certainly not one we can establish asked for a person.
+     */
+    const sweptState = unclassified
+      ? { ...state, callPurpose: 'unclassified_call' as const }
+      : state;
     const response = await submitPcpTicket(
-      buildPayload(metadata, state, 'CREATE_TASK', narrative, 'high', undefined, 'caller_hung_up_before_completion', missing),
+      buildPayload(metadata, sweptState, 'CREATE_TASK', narrative, 'high', undefined, unclassified ? 'call_not_classified' : 'caller_hung_up_before_completion', missing),
     );
     if (response.success) {
       pcpDirector.recordDisposition(callId, 'CREATE_TASK');
