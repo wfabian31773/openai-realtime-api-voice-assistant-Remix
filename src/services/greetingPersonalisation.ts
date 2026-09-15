@@ -407,6 +407,16 @@ export function lunchGreetingFor(
 }
 
 /**
+ * The lanes that have mandatory greeting copy at all.
+ *
+ * Exported so `compliantFallbackGreeting.test.ts` can walk them and fail when
+ * a lane gains mandatory copy without gaining a compliant greeting to fall
+ * back on — the hole #304 opened by adding `pcp` beside a call site whose own
+ * comment said no second lane existed.
+ */
+export const MANDATED_COPY_LANES: ReadonlyArray<string> = Object.keys(MANDATORY_GREETING_COPY);
+
+/**
  * What a candidate greeting is missing for this lane, or [] when it is
  * complete (and always [] for a lane with nothing mandatory).
  */
