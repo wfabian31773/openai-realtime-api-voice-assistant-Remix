@@ -990,6 +990,36 @@ describe("VoiceCallBridge — a transfer is not a hangup", () => {
     expect(h.outcomes).toEqual(["transferred"]);
   });
 
+  /**
+   * THE MARK MUST CARRY WHICH PATH, and these two tests exist because
+   * mutation testing found nothing else covering the wire between
+   * `performBlindTransfer` (which sends "blind") and `toCallLogRow` (which
+   * honours it). Both ends had tests; the bridge in the middle could discard
+   * the argument and every one of them stayed green.
+   *
+   * On a blind transfer nothing observes a human — the caller is redirected
+   * into an ACD and we let go of the leg. 2026-09-14: 23 PCP tickets recorded
+   * `human_handoff_occurred = true` off the back of this flag.
+   */
+  it("carries the method onto the record, so blind is not read as a human", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.bridge.noteTransferStarting("blind");
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(h.outcomes).toEqual(["transferred"]);
+    expect(records[0]?.transferMethod).toBe("blind");
+  });
+
+  it("carries warm through unchanged — the keypress proved a person", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.bridge.noteTransferStarting("warm");
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0]?.transferMethod).toBe("warm");
+  });
+
   it("a FAILED redirect unmarks it — the caller never moved", () => {
     const h = makeBridge();
     h.bridge.noteTransferStarting();

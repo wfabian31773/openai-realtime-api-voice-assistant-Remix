@@ -146,7 +146,7 @@ export interface WarmTransferDeps {
    * recorded as a transfer, not a caller hangup; the close can race the
    * redirect's own resolution, so the mark has to precede it (Codex,
    * PR #230 round 2). */
-  onCallerRedirectStarting?: () => void;
+  onCallerRedirectStarting?: (method: "warm" | "blind") => void;
   /** Invoked FIRST in the redirect's failure path, so a later genuine
    * hangup on the still-live call is not mislabeled as a transfer. */
   onCallerRedirectFailed?: () => void;
@@ -276,7 +276,7 @@ export async function performWarmTransfer(
     // the resulting close can race this await's own resolution — an
     // unmarked close records the transfer as a caller hangup (Codex,
     // PR #230 round 2).
-    deps.onCallerRedirectStarting?.();
+    deps.onCallerRedirectStarting?.("warm");
     await deps.twilio.redirectCallerToConference({
       callerCallSid: request.callerCallSid,
       conferenceName,

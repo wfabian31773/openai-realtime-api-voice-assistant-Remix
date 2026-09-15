@@ -273,10 +273,26 @@ export function toCallLogRow(
     // distinction the column exists to record.
     telemetrySource: "realtime_events",
     environment: callEnvironment(env),
-    // The transfer column the SIP path writes and the dashboards read.
-    // Omitted (never false) except on a transferred outcome, so this
-    // writer cannot erase a transfer someone else recorded.
-    ...(record.outcome === "transferred" ? { transferredToHuman: true as const } : {}),
+    /**
+     * The transfer column the SIP path writes and the dashboards read.
+     * Omitted (never false) except on a transferred outcome, so this writer
+     * cannot erase a transfer someone else recorded.
+     *
+     * A BLIND TRANSFER IS EXCLUDED, because nothing on that path observes a
+     * human. The caller is redirected into an ACD queue and we let go of the
+     * leg; Rosa's design reserves the claim for the warm path's keypress. On
+     * 2026-09-14 this column carried `true` into `humanHandoffOccurred` on 23
+     * PCP tickets whose handoff status was DIALING or NOT_REQUESTED, and a
+     * staffer reading "handoff occurred" skips the callback — the one thing
+     * that ticket exists to prevent.
+     *
+     * An UNSET method reads as warm rather than blind: warm is the per-lane
+     * default everywhere except pcp, so defaulting the other way would trade
+     * this bug for its mirror image and zero the metric instead.
+     */
+    ...(record.outcome === "transferred" && record.transferMethod !== "blind"
+      ? { transferredToHuman: true as const }
+      : {}),
     // Omitted entirely when unknown rather than written as null: the queue
     // agents' own stampVerifiedIdentity may already have set these during
     // the call, and a null would erase what it learned.

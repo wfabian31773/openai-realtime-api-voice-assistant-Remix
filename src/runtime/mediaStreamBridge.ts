@@ -302,6 +302,21 @@ export interface VoiceCallRecord {
   callerPhone: string;
   dialedNumber: string;
   outcome: CallOutcome;
+  /**
+   * HOW the caller was moved, on a `transferred` outcome — and therefore
+   * whether anything observed a human answering.
+   *
+   * Warm holds the caller until a person presses a key, so a redirect on that
+   * path IS proof. Blind hands them to an ACD and lets go; Rosa's design
+   * (2026-09-08) reserves "accepted" for the keypress and gives the blind path
+   * `handed_to_queue` -> `queue_answered`/`no_answer` instead, where even
+   * `queue_answered` means the ACD picked up and NOT that a person spoke.
+   *
+   * Undefined means "not recorded", which is read as warm — warm is the
+   * per-lane default for every transfer-capable lane but pcp, and treating an
+   * unset value as blind would silently zero the transfer metric instead.
+   */
+  transferMethod?: "warm" | "blind";
   /** CALLER/AGENT lines in spoken order — '' when nothing was said. */
   transcript: string;
   toolEvents: ToolEvent[];
@@ -1601,15 +1616,27 @@ export class VoiceCallBridge {
    * redirect's own resolution; cleared when a redirect fails, so a later
    * genuine hangup is not mislabeled.
    */
-  noteTransferStarting(): void {
+  noteTransferStarting(method: "warm" | "blind" = "warm"): void {
     this.transferInFlight = true;
+    this.transferMethod = method;
   }
 
   noteTransferFailed(): void {
     this.transferInFlight = false;
+    this.transferMethod = undefined;
   }
 
   private transferInFlight = false;
+  /**
+   * Which path moved the caller. Set with the flag above so the record can say
+   * whether a human was PROVEN to answer — `blindTransfer.ts` states that
+   * "every consumer that turns a TransferOutcome into a record or a ticket
+   * status branches on `method`", and until 2026-09-15 the consumer that
+   * writes the record was the one that could not, because the hook carried no
+   * argument. 23 PCP tickets on 2026-09-14 claimed a human handoff on a dial
+   * that only rang a queue.
+   */
+  private transferMethod: "warm" | "blind" | undefined;
 
   /**
    * A transfer attempt began: the handoff runs as an ordinary tool
@@ -1697,6 +1724,9 @@ export class VoiceCallBridge {
         callerPhone: this.deps.context.callerPhone,
         dialedNumber: this.deps.context.dialedNumber,
         outcome,
+        ...(outcome === "transferred" && this.transferMethod
+          ? { transferMethod: this.transferMethod }
+          : {}),
         transcript: this.transcriptLog.render(),
         toolEvents: [...this.toolEvents],
         ...(usageAtTeardown ? { usage: usageAtTeardown } : {}),
