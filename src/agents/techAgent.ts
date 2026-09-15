@@ -40,7 +40,11 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 import '../tools/sharedPatientTools';
 import '../tools/techTools';
 import '../tools/languageTools';
-import { identityAskScript, recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
+import {
+  identityAskScript,
+  identityCertainMeaning,
+  recognisedCallerBlock,
+} from '../runtime/recognisedCallerBlock';
 
 export interface TechAgentMetadata {
   callId?: string;
@@ -100,6 +104,7 @@ export function buildTechPrompt(metadata: TechAgentMetadata): string {
   const pc = metadata.precontext;
   const recognitionSection = recognisedCallerBlock(pc);
   const askScript = identityAskScript(pc);
+  const certainMeaning = identityCertainMeaning(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -172,9 +177,7 @@ ${askScript}
 
 ### How a call runs
 1. Find them. Call lookup_patient as soon as you have their phone number, or
-   their last name and date of birth. identity_is_certain false means the number
-   matches more than one person — ask as above, then CALL lookup_patient AGAIN
-   with all three. Never tell the caller how many records matched.
+   their last name and date of birth. ${certainMeaning}
 2. Get the request in their words, then the medication, the prescriber and the
    pharmacy.
 3. Check check_open_tickets before you file. Many of these callers are chasing a

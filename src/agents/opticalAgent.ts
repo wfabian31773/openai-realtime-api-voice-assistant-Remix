@@ -40,7 +40,11 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
 import '../tools/opticalTools';
 import '../tools/languageTools';
-import { identityAskScript, recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
+import {
+  identityAskScript,
+  identityCertainMeaning,
+  recognisedCallerBlock,
+} from '../runtime/recognisedCallerBlock';
 
 export interface OpticalAgentMetadata {
   callId?: string;
@@ -114,6 +118,7 @@ export function buildOpticalPrompt(metadata: OpticalAgentMetadata): string {
   const pc = metadata.precontext;
   const recognitionSection = recognisedCallerBlock(pc);
   const askScript = identityAskScript(pc);
+  const certainMeaning = identityCertainMeaning(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -176,14 +181,7 @@ ${askScript}
 
 ### How a call runs
 1. Find them. Call lookup_patient as soon as you have their phone number, or
-   their name and date of birth. If it says identity_is_certain is false, the
-   number matches more than one person — collect their last name and date of
-   birth, then CALL lookup_patient AGAIN with first name, last name and date of
-   birth together. That almost always resolves it to one person, and it is the
-   whole point of asking.
-   Never tell the caller how many records matched. That is our problem, not
-   theirs. Do not read their history back to them until you are certain who
-   they are.
+   their name and date of birth. ${certainMeaning}
 2. Find their office. This is the one thing a ticket cannot be filed without:
    there is one optician per office, and the request is assigned by location.
    lookup_patient returns usual_clinic — confirm it rather than assuming

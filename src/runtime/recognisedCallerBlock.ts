@@ -182,3 +182,57 @@ Never both in one breath, never a bare "date of birth" — say the order every
 time you DO ask. Asked open, people answer in any shape, and the shape is what
 loses it.`;
 }
+
+/**
+ * WHAT `identity_is_certain: false` MEANS — and it has to agree with the block
+ * and the ask script, not contradict them one heading later.
+ *
+ * Cursor second-pass on #310. #310 swapped `### Lead the ask` for
+ * `identityAskScript(pc)`. Eleven lines below THAT, `### How a call runs`
+ * still said `identity_is_certain` false means "the number matches more than
+ * one person" and told the model to collect last name and date of birth.
+ *
+ * After #292 that flag is ALSO a unique `patients_master` phone hit
+ * (`identityUnconfirmed: true`). The Bug A population. A recognised caller
+ * who affirmed the greeting then calls `lookup_patient`, gets false, and
+ * obeys step 1 — same failure mode this PR exists to stop, one heading down.
+ *
+ * Lives here because it is the same decision as the block and the script:
+ * whether we are asking this caller to identify themselves. Split across
+ * four agent files it is four leftover copies of the old meaning.
+ *
+ * THE UNRECOGNISED ARM STILL ASKS. A cold caller has no greeting to affirm,
+ * so last name + date of birth in the RULE ZERO 2b shape is still how they
+ * are found. What changed is the FACT: false is not only "more than one
+ * person". The true ambiguous case (candidate count > 1) still asks.
+ *
+ * THE RECOGNISED ARM DOES NOT. Confirm the greeting. Do not re-collect a
+ * last name or a date the record holds. Denial, a different name, or a
+ * candidate count still use the script above. Does not invent a date.
+ * Does not require one on create-ticket.
+ */
+export function identityCertainMeaning(pc: RecognisedCaller | undefined): string {
+  const recognised = !!pc?.matched && !!pc.firstName;
+
+  if (!recognised) {
+    return `If it says identity_is_certain is false, we have not confirmed who
+   is speaking — that flag is also a unique patients_master phone hit, not
+   only "more than one person". Collect their last name and date of birth,
+   then CALL lookup_patient AGAIN with first name, last name and date of
+   birth together. That almost always resolves it to one person, and it is
+   the whole point of asking.
+   Never tell the caller how many records matched. That is our problem, not
+   theirs. Do not read their history back to them until you are certain who
+   they are.`;
+  }
+
+  return `If lookup_patient says identity_is_certain is false, that is NOT
+   "more than one person" on this call — this number already matched one
+   person. Confirm the greeting. Do not collect their last name and do not
+   collect their date of birth; we hold both. Use the script above ONLY if
+   they said no, or gave a different name, or the tool says several people
+   (a candidate count).
+   Never tell the caller how many records matched. That is our problem, not
+   theirs. Do not read their history back until they have affirmed who they
+   are.`;
+}

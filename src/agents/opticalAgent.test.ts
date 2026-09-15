@@ -178,6 +178,7 @@ describe('what it tells the caller about themselves', () => {
     const p = buildOpticalPrompt({});
     expect(p).toMatch(/identity_is_certain is false/);
     expect(p).toMatch(/do not read their history\s*\n?\s*back/i);
+    expect(p).toContain('Collect their last name and date of birth');
   });
 
   it('is told never to emit markdown, because it is spoken aloud', () => {
@@ -245,6 +246,20 @@ describe('caller recognition — credibility, not cosmetics', () => {
     expect(matched).toMatch(/Do not ask for their last name/i);
     expect(matched).toMatch(/matched the WRONG\s+person/i);
     expect(matched).toMatch(/ignore this block from then on/i);
+  });
+
+  /**
+   * CURSOR SECOND-PASS ON #310. The block and the ask script agreed; How a
+   * call runs still said identity_is_certain false means collect last name
+   * and date of birth. After #292 that flag is also a unique phone hit.
+   */
+  it('does not tell a recognised caller that a false flag means re-collect last name and DOB', () => {
+    expect(matched).toMatch(/Do not collect their last name/);
+    expect(matched).toMatch(/do not collect their date of birth/);
+    expect(matched).not.toContain('Collect their last name and date of birth');
+    expect(matched).toMatch(/NOT[\s\S]*more than one person/);
+    // Denial still has the words — the ask script keeps them.
+    expect(matched).toContain('May I please have your last name?');
   });
 
   it('says nothing about recognition when the number matches nobody', () => {

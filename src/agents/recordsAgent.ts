@@ -35,7 +35,11 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 import '../tools/sharedPatientTools';
 import '../tools/medicalRecordsTools';
 import '../tools/languageTools';
-import { identityAskScript, recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
+import {
+  identityAskScript,
+  identityCertainMeaning,
+  recognisedCallerBlock,
+} from '../runtime/recognisedCallerBlock';
 
 export interface RecordsAgentMetadata {
   callId?: string;
@@ -94,6 +98,7 @@ export function buildRecordsPrompt(metadata: RecordsAgentMetadata): string {
   const pc = metadata.precontext;
   const recognitionSection = recognisedCallerBlock(pc);
   const askScript = identityAskScript(pc);
+  const certainMeaning = identityCertainMeaning(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -173,9 +178,7 @@ ${askScript}
 
 ### How a call runs
 1. Find the patient. Call lookup_patient as soon as you have a phone number, or
-   the last name and date of birth. identity_is_certain false means the number
-   matches more than one person — ask as above, then CALL lookup_patient AGAIN
-   with all three. Never tell the caller how many records matched.
+   the last name and date of birth. ${certainMeaning}
    The caller may not be the patient: take the PATIENT's name and date of birth
    for the record, and the CALLER's details separately.
 2. Get the request in their words. Then WHO IS ASKING — the tool will not file

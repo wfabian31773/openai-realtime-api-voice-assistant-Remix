@@ -55,7 +55,11 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 import '../tools/sharedPatientTools';
 import '../tools/surgeryTools';
 import '../tools/languageTools';
-import { identityAskScript, recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
+import {
+  identityAskScript,
+  identityCertainMeaning,
+  recognisedCallerBlock,
+} from '../runtime/recognisedCallerBlock';
 
 export interface SurgeryAgentMetadata {
   callId?: string;
@@ -128,6 +132,7 @@ export function buildSurgeryPrompt(metadata: SurgeryAgentMetadata): string {
   const pc = metadata.precontext;
   const recognitionSection = recognisedCallerBlock(pc);
   const askScript = identityAskScript(pc);
+  const certainMeaning = identityCertainMeaning(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -185,13 +190,11 @@ ${recognitionSection}
 ${askScript}
 
 ### How a call runs
-1. lookup_patient with whatever you have. identity_is_certain false is a
-   candidate, not an identity: confirm the name aloud, collect the date of
-   birth, look up again with all three. Never say how many records matched, and
-   read nothing back until you are sure who they are. If it finds nobody, ask
-   once whether they are new or have been seen before. New: stop looking and
-   take what they can give you. Seen before: the date of birth was probably
-   mis-heard — ask for it again and look up ONCE more before you file.
+1. lookup_patient with whatever you have. ${certainMeaning}
+   If it finds nobody, ask once whether they are new or have been seen before.
+   New: stop looking and take what they can give you. Seen before: the date of
+   birth was probably mis-heard — ask for it again and look up ONCE more
+   before you file.
 
 2. Take the request in their own words. Ask for the surgery date and pass it as
    surgery_date.

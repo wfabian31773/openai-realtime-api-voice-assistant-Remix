@@ -209,7 +209,14 @@ import { callEnvironment } from "./callRecord";
  * recognised caller keeps the QUESTIONS (the block self-destructs on a denial,
  * and records may be collecting for somebody who is not the caller) and loses
  * the instruction to use them. The unrecognised arm is byte-identical to what
- * all four lanes carried before. Stacks on v27.
+ * all four lanes carried before.
+ *
+ * Same ship, one heading down: `### How a call runs` still said
+ * `identity_is_certain` false means "more than one person" and told the
+ * model to collect last name and date of birth. After #292 that flag is
+ * also a unique patients_master phone hit. `identityCertainMeaning(pc)`
+ * lives beside the script. Marker stays v28 — this is the leftover that
+ * made v28 not pull-safe, not a new ship. Stacks on v27.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v28-ask-script-agrees-with-the-block-20260915";
