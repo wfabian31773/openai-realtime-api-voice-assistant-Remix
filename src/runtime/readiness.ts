@@ -153,11 +153,18 @@ import { callEnvironment } from "./callRecord";
  * reached department 9.** A run of department-18 scheduling tickets looks
  * identical whether the publish failed or no scheduling calls came in.
  *
- * Stacked on v16 → v15 → v14 → v12, so it contains all of them. v13 stays
- * skipped: #293 holds it on its own branch and must re-bump above THIS.
+ * v19 (#300), v20 (#302), v21 (#301), v22 (#303) and v23 (#304) are SIBLINGS
+ * of this — all six branched off v18 rather than stacked, and #305 is the
+ * verified merge of the first five. Whichever lands last must rebase and
+ * confirm it still carries the highest number; distinct numbers were assigned
+ * up front only so two open branches can never make two different builds read
+ * alike at /voice/health.
+ *
+ * Stacked under v18: v16 → v15 → v14 → v12. v13 stays skipped: #293 holds it
+ * on its own branch and must re-bump above THIS.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v18-no-ivr-prompt-trim-20260914";
+  "voice-runtime-v24-pcp-queue-choice-answerable-20260915";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
