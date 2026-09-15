@@ -155,22 +155,74 @@ const CONNECT_TO = new RegExp(
  *
  * So the noun must END the phrase — punctuation or end of string.
  *
- * THE NOUN LIST IS NOT SPLIT to achieve that, however tempting. One shared
- * list is the entire point of this module: two near-identical lists is what
- * let `team` drift out of one branch and cost the operator his own transfer
- * on CAa2a3a1c1. The boundary is a property of this BRANCH; the nouns stay
- * common to all three.
+ * `FOR` IS MANDATORY AFTER `ASK` AND OPTIONAL AFTER THE OTHERS, because `ask`
+ * is the one verb here that takes a PERSON as its direct object (Codex P2,
+ * #301). It was optional for all four, so:
+ *
+ *     "Caller asked the representative, but they could
+ *      not provide the status."                       <- matched, and should
+ *                                                        not: that caller SPOKE
+ *                                                        to somebody
+ *     "Caller asked the office, and was told to
+ *      call back."                                    <- same shape
+ *
+ * `want`, `request` and `would like` have no such reading — nobody "wants a
+ * representative" in the sense of addressing one — so they keep the optional
+ * `for` and "Caller wants a representative." still matches with none.
+ *
+ * THE NOUN LIST IS NOT SPLIT to achieve any of that, however tempting. One
+ * shared list is the entire point of this module: two near-identical lists is
+ * what let `team` drift out of one branch and cost the operator his own
+ * transfer on CAa2a3a1c1. The boundary and the `for` rule are properties of
+ * this BRANCH; the nouns stay common to all three.
  */
 const ASKED_FOR = new RegExp(
-  '\\b(?:ask(?:ed|s|ing)?|request(?:ed|s|ing)?|want(?:s|ed)?|would\\s+like)\\b' +
-    '(?:\\s+(?:us|me|them|him|her))?' +
-    '(?:\\s+for)?' +
+  '\\b(?:' +
+    // forms of `ask` REQUIRE `for` — "asked for a rep", never "asked the rep"
+    'ask(?:ed|s|ing)?(?:\\s+(?:us|me|them|him|her))?\\s+for' +
+    '|' +
+    // these three take no person as an object, so `for` stays optional
+    '(?:request(?:ed|s|ing)?|want(?:s|ed)?|would\\s+like)(?:\\s+(?:us|me|them|him|her))?(?:\\s+for)?' +
+    ')' +
     '\\s+(?:a|an|the|another|your|our)?\\s*' +
     '(?:live|real|actual|human)?\\s*' +
     HUMAN_NOUNS +
     '(?=\\s*[.,;!?]|\\s*$)',
-  'i',
+  'ig',
 );
+
+/**
+ * A NEGATED ASK IS NOT AN ASK — and the SCOPE of this check is the design.
+ *
+ * "Caller did not ask for a representative." matched the branch above, which
+ * reads the verb and never looks at what sits in front of it (Codex P2, #301).
+ *
+ * The obvious fix — test the whole narrative for a negation and refuse if one
+ * is found — is a mistake this codebase has already made THREE TIMES in one
+ * check. CLAUDE.md records the grader's `connect you` rule being written and
+ * rewritten because a narrative-wide negation suppressed the affirmative half
+ * of "I can't transfer you, BUT I can connect you with the team", so real
+ * broken promises graded as passes. Pointed this way it would be worse: it
+ * would drop a real ask and cost a caller their transfer.
+ *
+ * So this is anchored with `$` and tested ONLY against the text immediately
+ * preceding a match — the negator has to govern the verb that actually
+ * matched, with nothing but an adverb allowed in between. Every match in the
+ * narrative is examined separately, so a negation in one clause cannot reach
+ * an ask in the next.
+ *
+ * `n't` carries no leading `\b` on purpose: there is no word boundary inside
+ * "didn't", so `\bn't` would never fire and every contraction would slip past.
+ */
+const NEGATOR_IMMEDIATELY_BEFORE = /(?:\bnot|n't|\bnever|\bno)\s+(?:\w+ly\s+)?$/i;
+
+/** True when at least one ask-for match is not governed by a negation. */
+function asksForOneUnnegated(narrative: string): boolean {
+  for (const m of narrative.matchAll(ASKED_FOR)) {
+    if (!NEGATOR_IMMEDIATELY_BEFORE.test(narrative.slice(0, m.index))) return true;
+  }
+  return false;
+}
 
 /** Naming a human without a verb: "I want a real person." */
 const A_REAL_PERSON = /\b(?:live person|real person|actual person|human being)\b/i;
@@ -185,7 +237,7 @@ export function asksForAPerson(narrative: string): boolean {
   return (
     SPEAK_TO.test(narrative) ||
     CONNECT_TO.test(narrative) ||
-    ASKED_FOR.test(narrative) ||
+    asksForOneUnnegated(narrative) ||
     A_REAL_PERSON.test(narrative)
   );
 }

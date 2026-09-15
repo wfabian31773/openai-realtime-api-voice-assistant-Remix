@@ -164,3 +164,72 @@ describe('a bare noun is never an ask, whatever the noun list holds', () => {
     it(`bare noun does not reach the dial: ${n}`, () => expect(asksForAPerson(n)).toBe(false));
   }
 });
+
+/**
+ * TWO WAYS THE ASK-FOR BRANCH SAID YES WHEN THE CALLER HAD NOT ASKED.
+ * Both found by Codex on PR #301, both in the branch added above, both live
+ * until this block.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * 1. A NEGATED ASK IS NOT AN ASK. "Caller did not ask for a representative."
+ *    matched, because the branch reads the verb and never looks at what sits
+ *    in front of it.
+ *
+ *    THE GUARD IS SCOPED TO THE MATCH, NOT TO THE NARRATIVE, and that is the
+ *    whole design. CLAUDE.md records the grader's `connect you` check being
+ *    written THREE times: the first two suppressed the entire sentence on
+ *    finding a negation, so "I can't transfer you, but I can connect you with
+ *    the team" lost its affirmative half and a real broken promise graded as a
+ *    pass. A narrative-wide `/not.*ask/` here is that same mistake pointed the
+ *    other way — it would drop a real transfer. So the check looks only at the
+ *    text IMMEDIATELY BEFORE the verb it matched, and every match in the
+ *    narrative gets its own look. The last case below is the one that pins it.
+ *
+ * 2. `ASK` TAKES A PERSON AS ITS OBJECT, so `for` cannot be optional after it.
+ *    "Caller asked the representative, but they could not provide the status."
+ *    is a caller who SPOKE to somebody, narrated with the same verb. `want`,
+ *    `request` and `would like` have no such reading — "Caller wants a
+ *    representative." is an ask with no `for` in it — so `for` stays optional
+ *    for those three and is now mandatory for forms of `ask`.
+ */
+describe('a negated ask is not an ask', () => {
+  const negated = [
+    'Caller did not ask for a representative.',
+    'Caller did not request a representative.',
+    'Caller never asked for a person.',
+    "Caller didn't ask for a rep.",
+    'Caller was not asking for the operator.',
+  ];
+  for (const n of negated) {
+    it(`does NOT match: ${n}`, () => expect(asksForAPerson(n)).toBe(false));
+  }
+
+  /**
+   * THE CASE THE SCOPING EXISTS FOR. A negation earlier in the narrative must
+   * not swallow a real ask later in it — that is the grader's own three-times
+   * mistake, and here it would cost a caller their transfer.
+   */
+  it('a negation does not suppress a real ask later in the same narrative', () => {
+    expect(
+      asksForAPerson('Caller did not ask for a representative, but later asked for the operator.'),
+    ).toBe(true);
+  });
+});
+
+describe('asking a person is not asking for one', () => {
+  const spokeTo = [
+    'Caller asked the representative, but they could not provide the status.',
+    'Caller asked the office, and was told to call back.',
+    'Caller asked the front desk.',
+  ];
+  for (const n of spokeTo) {
+    it(`does NOT match: ${n}`, () => expect(asksForAPerson(n)).toBe(false));
+  }
+
+  /** `for` is mandatory only after `ask`; these three never take a person. */
+  it('want, request and would like still need no "for"', () => {
+    expect(asksForAPerson('Caller wants a representative.')).toBe(true);
+    expect(asksForAPerson('Caller requested a live agent.')).toBe(true);
+    expect(asksForAPerson('Caller would like an operator.')).toBe(true);
+  });
+});
