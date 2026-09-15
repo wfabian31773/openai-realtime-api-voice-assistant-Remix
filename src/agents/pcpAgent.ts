@@ -2505,9 +2505,19 @@ export async function sweepPcpUnfiledCall(callId: string): Promise<void> {
      * (`CONNECTED`) and the ones who chose the queue and accepted the cost
      * (operator, 2026-09-13), so what is left here asked and was refused.
      *
-     * AND WE ARE NEVER SHORT OF A CALLBACK NUMBER: caller ID seeds it at the
-     * top of `createPcpAgent`, so "this number asked for a person and did not
-     * get one" is a complete, workable ticket rather than a stub.
+     * AND WE USUALLY HAVE A CALLBACK NUMBER: caller ID seeds it at the top of
+     * `createPcpAgent`, so "this number asked for a person and did not get
+     * one" is normally a complete, workable ticket rather than a stub.
+     *
+     * NOT ALWAYS, and this comment said "never short of" until the withheld-ANI
+     * fork in `refusals.ts` proved otherwise (Cursor, #300). The seeding regex
+     * correctly rejects a non-E.164 ANI — "anonymous", blocked, restricted —
+     * so a caller who withholds their number AND hangs up before giving one
+     * leaves a ticket with no way to reach them. That is still better than
+     * silence: a staffer sees the request and the timestamp rather than
+     * nothing at all. Closing it properly means either declining to file or
+     * inventing a placeholder, and both are routing decisions rather than code
+     * ones — OPEN FOR WAYNE (standing instruction 1).
      *
      * THE NARROWNESS IS THE POINT. Filing on every unidentified call would
      * recreate azul's 2026-07-28 sweep, where 9 of 12 spurious tickets were
