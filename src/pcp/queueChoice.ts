@@ -49,12 +49,45 @@
  * caller who chose, not about one who was never asked.
  */
 
-/** What the caller hears, in the operator's own content. Option B, chosen 2026-09-13. */
+/**
+ * What the caller hears, in the operator's own content. Option B, chosen
+ * 2026-09-13 — and RESHAPED 2026-09-15 without losing a clause of it.
+ *
+ * IT USED TO END IN AN EITHER/OR AND THE FIELD IS A BOOLEAN.
+ * `readQueueChoice` takes `boolean | undefined`, so the answer this question
+ * has to produce is yes or no. It asked the caller to pick between two VERB
+ * PHRASES — "connect you" and "take it here" — and on CA02f7febc the caller
+ * answered:
+ *
+ *   agent   [the 53-word warning, ending in the either/or]
+ *   caller  "Me."
+ *
+ * That is the last line of the transcript, and NO TICKET OF ANY PROVENANCE
+ * exists for that call. "Me." maps to neither option — it can be read as
+ * "connect ME" or as "YOU take it, not me" — so `callerAcceptedQueue` could
+ * not be filled honestly and the request went nowhere.
+ *
+ * RULE ZERO 2c in its purest form: the shape of the question did not match the
+ * shape of the field. It now ends on ONE proposition, answerable yes or no.
+ *
+ * It was also 53 words before reaching the question, marked [interrupted] on
+ * 8+ calls of 2026-09-14, and CA606bc754 answered it with "For how long am I
+ * going to stay representative? The zero doesn't even have, they transferred
+ * me here."
+ *
+ * EVERY CLAUSE THE OPERATOR APPROVED SURVIVES, in their own words down to
+ * "transfers with you", which `queueIsAChoice.test.ts` already pins verbatim —
+ * nothing carries over, we cannot promise a wait, we can take it here — and
+ * `queueChoiceIsAnswerable.test.ts` pins each one separately so a later trim
+ * cannot quietly drop one. Only the closing question changed.
+ *
+ * The tri-state is untouched: silence is still not consent.
+ */
 export const QUEUE_CHOICE_WARNING =
-  "Of course. Before I do — none of what we've gone over transfers with you, " +
-  "and I can't tell you how long the wait will be, if any. I can also take it " +
-  'from here and get it straight to the team. Would you like me to connect ' +
-  'you, or take it here?';
+  "Of course. Before I put you through — nothing we've gone over transfers " +
+  "with you, and I can't tell you how long the wait will be. I can take it from " +
+  'here instead and get it straight to the team. Would you still like me to ' +
+  'put you through?';
 
 export type QueueChoice = 'accepted' | 'declined' | 'not_established';
 

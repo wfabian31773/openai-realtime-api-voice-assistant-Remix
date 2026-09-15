@@ -19,6 +19,7 @@ import {
 } from '@openai/agents/realtime';
 import { getTwilioClient, getTwilioFromPhoneNumber } from './lib/twilioClient';
 import { medicalSafetyGuardrails, WELCOME_GREETING, getUrgentTriageGreeting } from './agents/afterHoursAgent';
+import { compliantFallbackGreeting } from './services/compliantFallbackGreeting';
 import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulHoldingCallback, registerAzulOfficeTransferCallback, unregisterAzulOfficeTransferCallback, registerAzulTranscriptProvider, unregisterAzulTranscriptProvider } from './agents/azulSchedulingAgent';
 import { flushAzulTimeline, getAzulTimeline, recordDirectorAction } from './services/toolTimeline';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
@@ -4452,7 +4453,12 @@ async function observeCall(
          * safe fallback.
          */
         if (!agentGreeting || agentGreeting.trim() === '') {
-          const fallback = agentSlug === 'no-ivr' ? WELCOME_GREETING : null;
+          // A TABLE, because this line used to be a single-lane ternary under a
+          // comment asserting no other lane had mandatory copy — and #304 gave
+          // `pcp` some, which made the `null` arm below reachable for the first
+          // time. `compliantFallbackGreeting.test.ts` walks MANDATED_COPY_LANES
+          // and goes red if a third lane repeats it.
+          const fallback = compliantFallbackGreeting(agentSlug);
           if (fallback) {
             agentGreeting = fallback;
             console.warn(
@@ -4460,9 +4466,10 @@ async function observeCall(
                 `using the compliant code greeting for ${agentSlug} rather than letting the model open`,
             );
           } else {
-            // No lane but no-ivr has mandatory copy today, so this is
-            // unreachable — and it says so rather than failing silently if a
-            // second lane is ever added to MANDATORY_GREETING_COPY.
+            // Reached only when a lane has mandatory copy, a bad database row
+            // and no entry in COMPLIANT_FALLBACK_GREETINGS. The table's own
+            // test makes that combination fail in CI rather than at 1am on a
+            // live call, so this is the belt behind the braces.
             console.error(
               `[GREETING] ✗✗ ${agentSlug} has mandatory copy, a bad database row and no code ` +
                 `greeting to fall back on — the model will open this call unscripted`,

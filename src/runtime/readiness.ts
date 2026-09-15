@@ -153,11 +153,23 @@ import { callEnvironment } from "./callRecord";
  * reached department 9.** A run of department-18 scheduling tickets looks
  * identical whether the publish failed or no scheduling calls came in.
  *
- * Stacked on v16 → v15 → v14 → v12, so it contains all of them. v13 stays
- * skipped: #293 holds it on its own branch and must re-bump above THIS.
+ * THIS BUILD IS THE VERIFIED MERGE OF ALL SIX 2026-09-15 PCP FIXES at
+ * sibling-HEAD quality, including the four Codex follow-ups Wayne named:
+ * v19 the lost-request floor (#300, withheld-ANI ask), v20 blind-transfer
+ * truth (#302), v21 ask detection (#301, negation / required-for / connected),
+ * v22 the question format (#303, DOB ends in ?), v23 the recording
+ * disclosure (#304, DB greeting cannot drop it) and v24 the answerable
+ * queue choice (#306). They were SIBLINGS off v18, not a chain. Distinct
+ * numbers were assigned up front so two open branches can never make two
+ * different builds read alike at /voice/health; this branch takes the
+ * highest, v24, because it is the one place the number and the
+ * containment agree.
+ *
+ * Stacked under v18: v16 → v15 → v14 → v12. v13 stays skipped: #293 holds it
+ * on its own branch and must re-bump above THIS.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v18-no-ivr-prompt-trim-20260914";
+  "voice-runtime-v24-pcp-queue-choice-answerable-20260915";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

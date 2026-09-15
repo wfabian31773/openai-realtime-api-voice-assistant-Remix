@@ -52,14 +52,27 @@
  * All three have to hold. Remove any one and this becomes 08-06 again.
  */
 
-import type { PcpConversationState } from './director';
+import { PROMPTS, type PcpConversationState } from './director';
 import { getPcpCallPurpose } from './policy';
 
 /** Field names as the caller would hear them, for the spoken question. */
+/**
+ * ONE WORDING, NOT TWO. `callerName` and `callbackNumber` were written out
+ * again here, so the same spoken question existed in two files and could drift
+ * — which is exactly what happened to the noun lists in `explicitAsk.ts`, and
+ * it cost the operator his own transfer on CAa2a3a1c1. They are now taken from
+ * the director, which is where the intake order lives.
+ *
+ * `patientName` stays local because it is not a director field: it covers
+ * first AND last in one gate. THAT BUNDLING IS A RULE ZERO 2b VIOLATION —
+ * "never bundle two fields into one breath" — and it is NOT fixed here,
+ * because splitting it means splitting the required field behind it, which
+ * changes the gate rather than the wording. Flagged for the operator.
+ */
 export const REQUIRED_PROMPTS: Record<string, string> = {
-  callerName: 'May I have your full name?',
+  callerName: PROMPTS.callerName!,
   patientName: "And who is the call about — the patient's first and last name?",
-  callbackNumber: 'What is the best callback number?',
+  callbackNumber: PROMPTS.callbackNumber!,
 };
 
 export type RequiredField = 'callerName' | 'patientName' | 'callbackNumber';

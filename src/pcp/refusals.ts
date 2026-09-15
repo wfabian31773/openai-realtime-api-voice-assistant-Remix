@@ -110,12 +110,79 @@ export const PCP_REFUSALS: Record<string, RefusalCopy> = {
       'Never tell a caller that a handoff or transfer is "unavailable", "not available for this purpose", or blocked.',
   },
 
-  /** Transfer refused AND the fallback filing failed. The only genuinely bad one. */
+  /**
+   * Transfer refused AND the fallback filing failed. The only genuinely bad one
+   * — and for two months it was the only one that told the caller it had gone
+   * well.
+   *
+   * THE COPY CLAIMED THE RECORD THAT THIS BRANCH IS DEFINED BY NOT HAVING.
+   * It read "I've taken this down and I'm making sure it reaches the right
+   * team", which is its sibling's line, and the sibling is the one reached when
+   * `fallback.success` is TRUE. Here it is false by construction.
+   *
+   * 2026-09-14, the PCP line's first full day: 17 callers heard that sentence
+   * and no ticket of any provenance carries their call SID. Every one of them
+   * had said one thing — "speak to a representative" — and every one of their
+   * POSTs is in `voice_agent_api_logs` as HTTP 400 ["Validation failed"],
+   * because the ticketing app's slug list was one entry short of the agent's
+   * (`patient_caller`; ticketing-app #267, since deployed).
+   *
+   * That cause is closed. This sentence is why it cost us seventeen requests
+   * instead of being visible the first time it happened: a caller who is told
+   * their request is filed does not call back, and a staffer never sees a
+   * ticket to work. The next filing failure will have a different cause —
+   * a timeout, an outage, a schema that drifts again — and it must not be
+   * silent.
+   *
+   * WHAT IT SAYS NOW, and why each part is load-bearing:
+   *   - it does NOT say the request is recorded, because it is not;
+   *   - it does NOT mention a system, an error or a retry (#265 and the
+   *     CA1de3229a rule that produced this whole module);
+   *   - it ASKS FOR THE CALLBACK NUMBER, which is standing instruction 12 and
+   *     is also the one field that makes the teardown floor useful.
+   * The commitment it does make — that someone will call back — is kept by
+   * `sweepPcpUnfiledCall`, which now files for a caller who asked for a person
+   * and did not get one even when they never gave a name.
+   */
   handoff_not_eligible: {
-    say: "I've taken this down and I'm making sure it reaches the right team.",
+    say: "I'm not able to put you through from this line, but I do want the right team to call you back. Is this the best number to reach you on?",
     guidance:
-      'Say the line above, then call create_pcp_task again to get the request on record. ' +
-      'Do not mention a system problem and do not promise a transfer.',
+      'The filing did NOT go through — do not tell the caller it did, and do not mention a system, an error or a retry. ' +
+      'Say the line above, take the number they give you with record_pcp_intake, then call create_pcp_task again to get the request on record. ' +
+      'Do not promise a transfer.',
+  },
+
+  /**
+   * THE SAME BRANCH, FOR A CALLER WHOSE NUMBER WE DO NOT HAVE.
+   *
+   * "Is this the best number to reach you on?" presupposes a number (Codex P2,
+   * #300). It is right for the common case — `pcpAgent.ts:510` seeds
+   * `callbackNumber` from caller ID on every call whose ANI is E.164, and
+   * confirming beats asking. It is wrong when there is nothing to confirm: a
+   * withheld or blocked caller ID arrives as a non-E.164 string, the seeding
+   * regex correctly rejects it, and the caller is then asked to confirm a
+   * number nobody holds. An answer of "yes" to that question produces a
+   * request that cannot be called back, which is the one outcome this whole
+   * branch exists to prevent.
+   *
+   * THE FORK IS THE HOUSE PATTERN, not a new one. `knowledgeBase.ts:283`
+   * already writes it — "I have your callback number as ending in ####. Is
+   * that correct?" against "What is the best number to reach you?" — and this
+   * refusal's own sibling pair is already selected by a ternary at the call
+   * site. So this is a second key, chosen there, rather than logic inside the
+   * copy table.
+   *
+   * Everything else is deliberately identical to the sibling: it refuses the
+   * transfer plainly, it does NOT claim the record, and it asks for the
+   * callback number (standing instruction 12).
+   */
+  handoff_not_eligible_no_callback: {
+    say: "I'm not able to put you through from this line, but I do want the right team to call you back. What's the best number to reach you on?",
+    guidance:
+      'The filing did NOT go through — do not tell the caller it did, and do not mention a system, an error or a retry. ' +
+      'We have no callback number for this caller, so ASK for one rather than confirming one. ' +
+      'Say the line above, take the number they give you with record_pcp_intake, then call create_pcp_task again to get the request on record. ' +
+      'Do not promise a transfer.',
   },
 
   /**

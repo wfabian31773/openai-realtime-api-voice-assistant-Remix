@@ -116,7 +116,7 @@ export interface BlindTransferDeps {
    * the resulting close must be recorded as a transfer rather than a caller
    * hangup. The close races the redirect's own resolution, so the mark has to
    * precede it (the same ordering warmTransfer.ts documents). */
-  onCallerRedirectStarting?: () => void;
+  onCallerRedirectStarting?: (method: "warm" | "blind") => void;
   /** Invoked FIRST in the failure path, so a later genuine hangup on the
    * still-live call is not mislabeled as a transfer. */
   onCallerRedirectFailed?: () => void;
@@ -155,7 +155,7 @@ export async function performBlindTransfer(
     // BEFORE the redirect. The redirect ends the Media Stream and the close
     // can beat this await's own resolution; an unmarked close records the
     // transfer as a caller hangup (Codex, PR #230 round 2).
-    deps.onCallerRedirectStarting?.();
+    deps.onCallerRedirectStarting?.("blind");
     await deps.twilio.redirectCallerToQueue({
       callerCallSid: request.callerCallSid,
       destination,
