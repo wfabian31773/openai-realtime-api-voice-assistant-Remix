@@ -40,7 +40,7 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
 import '../tools/opticalTools';
 import '../tools/languageTools';
-import { recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
+import { identityAskScript, recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
 
 export interface OpticalAgentMetadata {
   callId?: string;
@@ -113,6 +113,7 @@ export function buildOpticalPrompt(metadata: OpticalAgentMetadata): string {
   // when it is false would name the wrong patient out loud.
   const pc = metadata.precontext;
   const recognitionSection = recognisedCallerBlock(pc);
+  const askScript = identityAskScript(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -171,12 +172,7 @@ If they want to book, change or cancel an appointment, take the request in their
 own words and file it — the tool routes it to our scheduling hub. Do not attempt
 to schedule anything yourself, and do not tell them to call another number.
 
-### Lead the ask — one at a time, in this shape
-  "May I please have your last name?"
-  "And may I please have your date of birth, starting with the month,
-   then the day, then the year?"
-Never both in one breath, never a bare "date of birth" — say the order every
-time. Asked open, people answer in any shape, and the shape is what loses it.
+${askScript}
 
 ### How a call runs
 1. Find them. Call lookup_patient as soon as you have their phone number, or

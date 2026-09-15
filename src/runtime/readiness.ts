@@ -196,8 +196,23 @@ import { callEnvironment } from "./callRecord";
  * the name guard would then reject. `recognisedCallerBlock.test.ts` is the
  * drift guard. Stacks on v26.
  */
+/**
+ * v28, 2026-09-15: THE ASK SCRIPT AGREES WITH THE BLOCK ABOVE IT.
+ *
+ * v27 made the recognised-caller block say "do not ask for their last name and
+ * do not ask for their date of birth" and left the identity ask script, eleven
+ * lines below it in the same prompt, saying to ask for exactly those — "say the
+ * order EVERY TIME". Two contradicting instructions on one page, for exactly
+ * the population v27 was written for. Codex P1 on #307, caught after merge.
+ *
+ * `identityAskScript` now takes the same pre-context as the block. A
+ * recognised caller keeps the QUESTIONS (the block self-destructs on a denial,
+ * and records may be collecting for somebody who is not the caller) and loses
+ * the instruction to use them. The unrecognised arm is byte-identical to what
+ * all four lanes carried before. Stacks on v27.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v27-recognition-block-is-runtime-owned-20260915";
+  "voice-runtime-v28-ask-script-agrees-with-the-block-20260915";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

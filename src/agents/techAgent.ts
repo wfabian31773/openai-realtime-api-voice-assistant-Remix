@@ -40,7 +40,7 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 import '../tools/sharedPatientTools';
 import '../tools/techTools';
 import '../tools/languageTools';
-import { recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
+import { identityAskScript, recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
 
 export interface TechAgentMetadata {
   callId?: string;
@@ -99,6 +99,7 @@ export function buildTechPrompt(metadata: TechAgentMetadata): string {
 
   const pc = metadata.precontext;
   const recognitionSection = recognisedCallerBlock(pc);
+  const askScript = identityAskScript(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -167,12 +168,7 @@ ring the patient back to ask. Get both, every time:
 If they genuinely do not know, take the request anyway and say the team will
 follow up. Never turn a caller away over a detail they cannot supply.
 
-### Lead the ask — one at a time, in this shape
-  "May I please have your last name?"
-  "And may I please have your date of birth, starting with the month,
-   then the day, then the year?"
-Never both in one breath, never a bare "date of birth" — say the order every
-time. Asked open, people answer in any shape, and the shape is what loses it.
+${askScript}
 
 ### How a call runs
 1. Find them. Call lookup_patient as soon as you have their phone number, or

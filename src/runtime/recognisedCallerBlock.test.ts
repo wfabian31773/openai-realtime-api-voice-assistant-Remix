@@ -38,7 +38,9 @@ process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';
 vi.mock('../../server/db', () => ({ db: {} }));
 
-const { recognisedCallerBlock, RECOGNITION_BLOCK_LANES } = await import('./recognisedCallerBlock');
+const { recognisedCallerBlock, identityAskScript, RECOGNITION_BLOCK_LANES } = await import(
+  './recognisedCallerBlock'
+);
 const { personaliseGreeting, greetingStyleFor } = await import(
   '../services/greetingPersonalisation'
 );
@@ -206,4 +208,64 @@ describe('an unrecognised caller gets no block at all', () => {
       'Am I speaking with Rosa?',
     );
   });
+});
+
+describe('the ask script agrees with the block above it', () => {
+  /**
+   * CODEX P1 ON #307, AND IT WAS THIS AUTHOR'S REGRESSION.
+   *
+   * The block says "the identity step is DONE. Do not ask for their last name
+   * and do not ask for their date of birth". Eleven lines below it, in the same
+   * prompt, the ask script said to ask for exactly those and ended "say the
+   * order EVERY TIME".
+   *
+   * It is a regression rather than a pre-existing bug because the OLD block
+   * agreed with that script — it said "still collect the date of birth". The
+   * rule changed and the script did not, which put two contradicting
+   * instructions on one page for exactly the population the change was for. A
+   * model given both may keep asking, and then the affirmed match buys the
+   * caller nothing while the change still reads as shipped.
+   */
+  const RECOGNISED = { matched: true, firstName: 'Wayne' };
+
+  it('an unrecognised caller still gets the unconditional instruction', () => {
+    const cold = identityAskScript(undefined);
+    expect(cold).toContain('say the order every\ntime.');
+    expect(cold).not.toMatch(/ONLY when/);
+  });
+
+  it('a recognised caller is NOT told to ask every time', () => {
+    expect(identityAskScript(RECOGNISED)).not.toContain('say the order every\ntime.');
+  });
+
+  it('a recognised caller\u2019s script defers to the block', () => {
+    const warm = identityAskScript(RECOGNISED);
+    expect(warm).toMatch(/not to ask for them/);
+    expect(warm).toMatch(/ONLY when that block no longer applies/);
+  });
+
+  // The block self-destructs on a denial, and records may be collecting for
+  // somebody who is not the caller. Both need these words to still exist.
+  it.each([
+    ['unrecognised', undefined],
+    ['recognised', RECOGNISED],
+  ])('keeps the actual questions for a %s caller', (_label, pc) => {
+    const script = identityAskScript(pc as never);
+    expect(script).toContain('May I please have your last name?');
+    expect(script).toMatch(/date of birth, starting with the month/);
+  });
+
+  it('names the denial and the not-the-caller case as the times it applies', () => {
+    const warm = identityAskScript(RECOGNISED);
+    expect(warm).toMatch(/they said no, or gave a different name/i);
+    expect(warm).toMatch(/is not the caller/);
+  });
+
+  // Same device as the block: one copy, composed, never pasted back.
+  for (const { module } of RECOGNITION_BLOCK_LANES) {
+    it(`${module} composes the ask script rather than inlining it`, () => {
+      expect(agentSource(module)).toMatch(/identityAskScript\s*\(/);
+      expect(agentPromptText(module)).not.toContain('May I please have your last name?');
+    });
+  }
 });

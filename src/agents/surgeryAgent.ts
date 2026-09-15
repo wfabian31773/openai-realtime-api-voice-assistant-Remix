@@ -55,7 +55,7 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 import '../tools/sharedPatientTools';
 import '../tools/surgeryTools';
 import '../tools/languageTools';
-import { recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
+import { identityAskScript, recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
 
 export interface SurgeryAgentMetadata {
   callId?: string;
@@ -127,6 +127,7 @@ export function buildSurgeryPrompt(metadata: SurgeryAgentMetadata): string {
   // when it is false would name the wrong patient out loud.
   const pc = metadata.precontext;
   const recognitionSection = recognisedCallerBlock(pc);
+  const askScript = identityAskScript(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -181,12 +182,7 @@ have a date and something around it has gone wrong. All of it is yours.
 
 ## Conversation Flow
 ${recognitionSection}
-### Lead the ask — one at a time, in this shape
-  "May I please have your last name?"
-  "And may I please have your date of birth, starting with the month,
-   then the day, then the year?"
-Never both in one breath, never a bare "date of birth" — say the order every
-time. Asked open, people answer in any shape, and the shape is what loses it.
+${askScript}
 
 ### How a call runs
 1. lookup_patient with whatever you have. identity_is_certain false is a

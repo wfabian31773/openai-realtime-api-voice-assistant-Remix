@@ -35,7 +35,7 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 import '../tools/sharedPatientTools';
 import '../tools/medicalRecordsTools';
 import '../tools/languageTools';
-import { recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
+import { identityAskScript, recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
 
 export interface RecordsAgentMetadata {
   callId?: string;
@@ -93,6 +93,7 @@ export function buildRecordsPrompt(metadata: RecordsAgentMetadata): string {
 
   const pc = metadata.precontext;
   const recognitionSection = recognisedCallerBlock(pc);
+  const askScript = identityAskScript(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -168,12 +169,7 @@ said. Ask once. Never interrogate, and never turn a caller away over a detail
 they genuinely cannot supply: say so in their words and file it. When somebody
 else is asking, these are worth getting but the tool will not block on them.
 
-### Lead the ask — one at a time, in this shape
-  "May I please have your last name?"
-  "And may I please have your date of birth, starting with the month,
-   then the day, then the year?"
-Never both in one breath, never a bare "date of birth" — say the order every
-time. Asked open, people answer in any shape, and the shape is what loses it.
+${askScript}
 
 ### How a call runs
 1. Find the patient. Call lookup_patient as soon as you have a phone number, or
