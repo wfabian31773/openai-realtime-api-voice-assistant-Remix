@@ -57,7 +57,30 @@ export const pcpAgentConfig = {
    * Says what the line is FOR without telling anyone they should not have
    * called it.
    */
-  greeting: 'Thank you for calling Azul Vision PCP Support. How can I help you today?',
+  /**
+   * THE DISCLOSURE IS IN THE GREETING, not in the prompt.
+   *
+   * 219 calls on 2026-09-14 and not one told the caller the call was recorded.
+   * California is a two-party-consent state and this is a healthcare practice,
+   * so that is a compliance gap rather than a stylistic one. Task #79 carries
+   * the same gap for the four queue lines; this fixes PCP only.
+   *
+   * The clause is `noIvrAgent`'s, verbatim — an operator-approved sentence
+   * already live on another lane, not a new one written here. What is
+   * deliberately NOT copied from it: "dial 911" and "our offices are currently
+   * closed". no-ivr carries those because it is the after-hours line with no
+   * humans behind it. PCP is a business-hours professional line, and adding a
+   * clinical-safety instruction to it would be inventing a rule rather than
+   * applying one (standing instruction 1).
+   *
+   * IT HAS TO LIVE HERE. On the runtime the bridge plays this as audio BEFORE
+   * the model's first turn and `withGreetingAlreadyPlayed` then tells the model
+   * not to repeat it — so a disclosure written into the prompt is one the model
+   * MAY say, while a disclosure written here is on every call by construction.
+   * Same reasoning #299 applied to the no-ivr greeting block a day earlier.
+   */
+  greeting:
+    'Thank you for calling Azul Vision PCP Support. All calls are being recorded for quality assurance purposes. How can I help you today?',
   voice: 'sage',
   language: 'en',
 } as const;
