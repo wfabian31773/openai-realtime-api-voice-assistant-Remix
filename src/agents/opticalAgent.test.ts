@@ -218,10 +218,33 @@ describe('caller recognition — credibility, not cosmetics', () => {
     expect(matched).toMatch(/NEVER open with "can I get your name and date of birth"/i);
   });
 
-  it('still treats the match as a hint, not as verification', () => {
-    expect(matched).toMatch(/A first name is not verification/i);
-    expect(matched).toMatch(/still collect the date of birth/i);
-    expect(matched).toMatch(/matched the WRONG person/i);
+  /**
+   * THIS ASSERTION WAS REVERSED ON 2026-09-15, ON THE OPERATOR'S APPROVAL, AND
+   * THE OLD FORM IS KEPT HERE SO THE REVERSAL IS READABLE.
+   *
+   * It used to demand "A first name is not verification ... still collect the
+   * date of birth". The INTENT was RULE ZERO step 2 — validate a phone match
+   * before trusting it — and the implementation inverted the outcome: the
+   * caller's spoken surname went to `verifiedDobFor`'s name guard, which reads
+   * ANY textual difference as the wrong person. A confirmation mechanism
+   * became a rejection mechanism, and the patient lost a date of birth the
+   * process was already holding.
+   *
+   * Measured on the 30 certain-phone date-of-birth refusals of 2026-09-14
+   * (`src/tools/dobNameMismatch.test.ts`, the corpus): 24 were greeted by
+   * name, 19 of those were asked for their last name anyway, and 27 of 30
+   * were asked for both a name and a date of birth.
+   *
+   * THE VALIDATION DID NOT GO AWAY — it moved to the answer the greeting's own
+   * question already collects. Over the same period 228 callers affirmed it
+   * and 13 denied it, so it discriminates. A denial still discards the match
+   * entirely, which is the half that was always right and is asserted below.
+   */
+  it('takes the greeting\u2019s own answer as the validation, and drops the match on a denial', () => {
+    expect(matched).toMatch(/If they said YES, the identity step is DONE/i);
+    expect(matched).toMatch(/Do not ask for their last name/i);
+    expect(matched).toMatch(/matched the WRONG\s+person/i);
+    expect(matched).toMatch(/ignore this block from then on/i);
   });
 
   it('says nothing about recognition when the number matches nobody', () => {
