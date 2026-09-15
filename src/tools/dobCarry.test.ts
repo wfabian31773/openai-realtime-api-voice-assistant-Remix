@@ -74,6 +74,16 @@ describe('dobCarry names the same exits verifiedDobFor collapses', () => {
     expect(dobCarry(CALL, '  WAYNE ', 'fabian')).toBe('fired');
     expect(verifiedDobFor(CALL, 'Wayne', 'Fabian')).toBe('03/17/1973');
   });
+
+  it('fired — hyphenated surname matches the unhyphenated ticket name', () => {
+    rememberVerifiedIdentity(CALL, {
+      firstName: 'Ana',
+      lastName: 'Garcia-Lopez',
+      dateOfBirth: '03/17/1973',
+    });
+    expect(dobCarry(CALL, 'Ana', 'Garcia Lopez')).toBe('fired');
+    expect(verifiedDobFor(CALL, 'Ana', 'Garcia Lopez')).toBe('03/17/1973');
+  });
 });
 
 describe('refuseDob attaches the enum and never a value', () => {

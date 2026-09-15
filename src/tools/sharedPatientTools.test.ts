@@ -287,6 +287,21 @@ describe('lookup_patient', () => {
     expect(rememberVerifiedIdentity).toHaveBeenCalled();
   });
 
+  it('a unique caller-ID-only hit still caches the chart date — name guard is the confirmation', async () => {
+    lookupPatient.mockResolvedValue({
+      ...FOUND,
+      matchedBy: 'phone',
+      identityUnconfirmed: true,
+      patientData: { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17' },
+    });
+    const r = await run('lookup_patient', { caller_phone: '+17605551234', call_sid: 'CA4' });
+    expect(r.identity_is_certain).toBe(false);
+    expect(rememberVerifiedIdentity).toHaveBeenCalledWith(
+      'CA4',
+      expect.objectContaining({ dateOfBirth: '1973-03-17', certain: false }),
+    );
+  });
+
   it('never carries a date of birth forward from a NON-UNIQUE match', async () => {
     // Wayne's own number resolves to eight records in the mirror. Banking one
     // of their dates of birth would file a ticket against the wrong person —

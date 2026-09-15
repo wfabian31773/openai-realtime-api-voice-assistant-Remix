@@ -169,18 +169,18 @@ import { callEnvironment } from "./callRecord";
  * on its own branch and must re-bump above THIS.
  */
 /**
- * v25, 2026-09-15: DATE-OF-BIRTH CARRY INSTRUMENT.
+ * v26, 2026-09-15: CHART DATE-OF-BIRTH INHERIT.
  *
- * A `date_of_birth` refusal now records `outcome.carry` — a PHI-free enum
- * (`fired` | `no_entry` | `entry_without_dob` | `name_mismatch` |
- * `bad_call_sid`) that says why inherit did not fill the gate. Diagnosis
- * is PR #307. This does NOT stop the person-base wipe (Bug A) and does
- * NOT change inherit. Without the bump a live deploy is indistinguishable
- * from v24, and `dobShape` still only answers whether the model sent the
- * field. Stacks on the integrated v24 (#305); not a v19–v24 sibling.
+ * Stop-erase: empty must not overwrite a full DOB already in
+ * `verifiedIdentity` for the same person. Inherit-on-file: when the
+ * ticket first+last matches the stored name, filing tools put the chart
+ * birth year/month/day on the create payload even if the model omitted
+ * `date_of_birth`. Name guard uses `nameKey` (hyphen / accent /
+ * apostrophe) — not nicknames. The v25 `carry` enum rides along.
+ * Diagnosis is PR #307. Stacks on v25; not a v19–v24 sibling.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v25-dob-carry-instrument-20260915";
+  "voice-runtime-v26-chart-dob-inherit-20260915";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

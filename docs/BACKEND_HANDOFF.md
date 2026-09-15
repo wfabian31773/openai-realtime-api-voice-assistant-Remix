@@ -219,13 +219,16 @@ was `(none)` on 93 of 93 recorded refusals — the model sent nothing, same as
 PR #307 splits those: Bug A (24) the person-base rung erases a date
 pre-context stored; Bug B (32) a certain appointment-book match stored the
 date and the read still refused. Nothing persisted could tell those apart.
-Marker `voice-runtime-v25-dob-carry-instrument-20260915` writes
-`outcome.carry` on the refusal (`fired` / `no_entry` / `entry_without_dob` /
-`name_mismatch` / `bad_call_sid`). **That is an instrument, not a fix.** Do
-not read a change in the refusal rate on a v25 build as a change in inherit.
+Marker `voice-runtime-v26-chart-dob-inherit-20260915` is the **fix**:
+stop-erase (empty must not overwrite a full chart DOB) plus inherit-on-file
+when the ticket name matches the stored name. The v25 `carry` enum
+(`fired` / `no_entry` / `entry_without_dob` / `name_mismatch` /
+`bad_call_sid`) rides along. **Do not read a change in the refusal rate
+on a v25-only build as inherit — that build is instrument-only (#308,
+folded into the v26 PR). The after-arm starts at v26.**
 
 ```sql
--- One day of traffic, once v25 is live. Canonical SIDs, CALL's day.
+-- One day of traffic, once v26 is live. Canonical SIDs, CALL's day.
 SELECT e->'outcome'->>'carry' AS carry, count(*)
 FROM call_logs c, LATERAL jsonb_array_elements(c.tool_timeline->'events') e
 WHERE c.voice_provider = 'grok'

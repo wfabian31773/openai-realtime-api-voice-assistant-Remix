@@ -106,8 +106,37 @@ const verified = new Map<string, Entry>();
 const TTL_MS = 30 * 60_000;
 const MAX_ENTRIES = 5_000;
 
-function norm(s: string | undefined): string {
-  return (s ?? '').trim().toLowerCase();
+/**
+ * The name guard. Trim + case-fold is not enough: a hyphenated surname
+ * (`Garcia-Lopez` vs `Garcia Lopez`) and an accent (`José` vs `Jose`) are
+ * the same person on these lines, and the exact `norm` used to refuse the
+ * carry for them — the surviving hypothesis for Bug B in PR #307.
+ *
+ * WHAT THIS IS NOT. A nickname list (Bill/William), a maiden-name table, or
+ * a first-name-only match. Those would put a relative's birthday on the
+ * ticket, which is worse than refusing. Residual after this: nicknames,
+ * married-vs-maiden surnames, and fully different transcriptions. `carry:
+ * name_mismatch` still measures that residue.
+ */
+export function nameKey(s: string | undefined): string {
+  return (s ?? '')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[-.\u2010-\u2015\u2018\u2019'`]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function namesAgree(
+  firstA: string | undefined,
+  lastA: string | undefined,
+  firstB: string | undefined,
+  lastB: string | undefined,
+): boolean {
+  const first = nameKey(firstA);
+  const last = nameKey(lastA);
+  return first !== '' && last !== '' && first === nameKey(firstB) && last === nameKey(lastB);
 }
 
 function sweep(now: number): void {
@@ -157,8 +186,9 @@ export function rememberVerifiedIdentity(
    * These used to be stored lower-cased, because the only reader compared them
    * and never showed them. The request sweep now puts this name on a ticket a
    * human reads, and "testpatient example" on a patient record is wrong in a
-   * way nobody would have caught from a passing test. Matching is unchanged —
-   * `norm` is applied at the comparison instead of at the write.
+   * way nobody would have caught from a passing test. Matching is unchanged
+   * in that sense — `nameKey` is applied at the comparison instead of at
+   * the write.
    */
   const firstName = (identity.firstName ?? '').trim();
   const lastName = (identity.lastName ?? '').trim();
@@ -172,55 +202,55 @@ export function rememberVerifiedIdentity(
   sweep(now);
 
   /**
-   * A LESS CERTAIN ANSWER NEVER REPLACES A MORE CERTAIN ONE ON THE SAME CALL.
+   * MERGE, DO NOT REPLACE, WHEN IT IS THE SAME PERSON.
    *
-   * Codex P2 on PR #292 (`1b99eb2`), and the regression was mine. `lookup_patient`
-   * can run several times in one call, and the person base now answers a
-   * caller-ID-only retry with a match. That write is `certain: false` and — since
-   * the commit before this one — carries no date of birth. Landing it on top of an
-   * earlier CONFIRMED name+DOB entry erased both: the filing tools went back to
-   * refusing for a date of birth the caller had already given, and the teardown
-   * sweep lost the name it needs to file at all ("no name, no ticket" costs 47
-   * recoveries a day).
+   * v11 writes the pre-context chart date into this map (`certain: false`,
+   * no `personId`). The person-base rung of `lookup_patient` then writes
+   * again with `identityUnconfirmed: true` and, until v26, no date. The
+   * old guard required `existing.certain === true` AND the same `personId`
+   * — neither is true of that write — so it deleted the date (Bug A, 24
+   * calls on 2026-09-14). Empty must not overwrite full.
    *
-   * So the downgrade is refused. A CERTAIN write still wins — including over
-   * another certain one, so a call that legitimately moves to a second patient
-   * still updates once that patient is confirmed.
+   * SAME PERSON if both sides have a `personId` and they agree, OR we
+   * cannot prove by id and the names agree (`nameKey`). DIFFERENT
+   * `personId` replaces the whole row — a father then a son (Invariant C).
+   * Names that do not match, and ids that do not prove same, also replace.
    *
-   * KNOWN AND ACCEPTED: a call that switches to a second patient and only ever
-   * gets an UNCERTAIN read of them keeps the first patient's confirmed identity.
-   * `verifiedDobFor` still cannot leak across, because its name guard fails; the
-   * exposure is the sweep filing under the earlier name. That is the same class of
-   * risk as filing under no name at all, and strictly rarer than the regression
-   * above — but it is a judgement, not a measurement, and worth revisiting if the
-   * sweep ever files for the wrong person.
+   * Incoming date wins when present (the record). Incoming empty keeps the
+   * date already stored. Certainty never downgrades. Names come from the
+   * incoming write so the store tracks the record's spelling.
    */
+  const incomingPersonId = (identity.personId ?? '').trim() || undefined;
   const existing = verified.get(callSid);
-  /**
-   * PROOF OF THE SAME PERSON, NOT A MATCHING NAME. Codex P1 on `bfa28ae`,
-   * answering a judgement I had flagged as unmeasured — and it found the case
-   * that breaks it.
-   *
-   * The first version of this guard preserved a certain entry against ANY
-   * uncertain write on the call, and I argued the leak was contained because
-   * `verifiedDobFor` also checks the name. A FATHER AND SON SHARE A NAME. On a
-   * call that confirms one and then gets an uncertain read of the other, the
-   * name guard succeeds and the wrong date of birth goes onto the ticket — a
-   * worse outcome than the regression the guard was written to stop.
-   *
-   * So the entry is preserved only where both sides carry a `personId` and
-   * they agree. That is provable; a name is not.
-   *
-   * WHEN IT CANNOT BE PROVED, THE WRITE WINS. Wrong data on a ticket beats a
-   * refused gate, and a caller-ID retry for the same person does carry the id,
-   * so the case the guard exists for is still covered. Where neither side has
-   * an id — a name-only schedule hit — this leaves the behaviour exactly as it
-   * was before this PR, which is a replace.
-   */
-  const provablySamePerson =
-    !!existing?.personId && !!identity.personId && existing.personId === identity.personId;
-  if (existing && existing.certain && !certain && provablySamePerson && now - existing.at <= TTL_MS) {
-    return;
+  const existingFresh = existing && now - existing.at <= TTL_MS ? existing : undefined;
+
+  if (existingFresh) {
+    const bothIds = !!existingFresh.personId && !!incomingPersonId;
+    const differentPerson = bothIds && existingFresh.personId !== incomingPersonId;
+    const sameById = bothIds && existingFresh.personId === incomingPersonId;
+    const sameByName = namesAgree(
+      existingFresh.firstName,
+      existingFresh.lastName,
+      firstName,
+      lastName,
+    );
+    const samePerson = sameById || (!bothIds && sameByName);
+
+    if (!differentPerson && samePerson) {
+      const keptDate = dateOfBirth || existingFresh.dateOfBirth || '';
+      const keptOffice = usualOffice || existingFresh.usualOffice || '';
+      const keptPersonId = incomingPersonId || existingFresh.personId;
+      verified.set(callSid, {
+        firstName,
+        lastName,
+        ...(keptDate ? { dateOfBirth: keptDate } : {}),
+        ...(keptOffice ? { usualOffice: keptOffice } : {}),
+        ...(keptPersonId ? { personId: keptPersonId } : {}),
+        certain: existingFresh.certain || certain,
+        at: now,
+      });
+      return;
+    }
   }
 
   verified.delete(callSid);
@@ -229,7 +259,7 @@ export function rememberVerifiedIdentity(
     lastName,
     ...(dateOfBirth ? { dateOfBirth } : {}),
     ...(usualOffice ? { usualOffice } : {}),
-    ...(identity.personId ? { personId: identity.personId } : {}),
+    ...(incomingPersonId ? { personId: incomingPersonId } : {}),
     certain,
     at: now,
   });
@@ -256,7 +286,7 @@ export function verifiedDobFor(
   const entry = verified.get(callSid);
   if (!entry) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;
-  if (norm(firstName) !== norm(entry.firstName) || norm(lastName) !== norm(entry.lastName)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
     return undefined;
   }
   return entry.dateOfBirth;
@@ -292,7 +322,7 @@ export function dobCarry(
   if (!isTwilioCallSid(callSid)) return 'bad_call_sid';
   const entry = verified.get(callSid);
   if (!entry || Date.now() - entry.at > TTL_MS) return 'no_entry';
-  if (norm(firstName) !== norm(entry.firstName) || norm(lastName) !== norm(entry.lastName)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
     return 'name_mismatch';
   }
   if (!entry.dateOfBirth) return 'entry_without_dob';
@@ -336,7 +366,7 @@ export function usualOfficeFor(
   if (!entry) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;
   if (!entry.certain) return undefined;
-  if (norm(firstName) !== norm(entry.firstName) || norm(lastName) !== norm(entry.lastName)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
     return undefined;
   }
   /**
@@ -460,10 +490,10 @@ export function forgetIfSameName(
   lastName: string | undefined,
 ): boolean {
   if (!isTwilioCallSid(callSid)) return false;
-  if (!norm(firstName) || !norm(lastName)) return false;
+  if (!nameKey(firstName) || !nameKey(lastName)) return false;
   const entry = verified.get(callSid);
   if (!entry) return false;
-  if (norm(firstName) !== norm(entry.firstName) || norm(lastName) !== norm(entry.lastName)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
     return false;
   }
   verified.delete(callSid);
