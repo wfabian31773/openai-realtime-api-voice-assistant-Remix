@@ -1861,11 +1861,26 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v22 IS THE
-NEWEST** — v14 (the PCP queue choice), v15 (PCP records), v16 (professional
-records), v17 (PCP scheduling to the Hub), then v18 (the no-IVR prompt trim
-and its greeting fix), each stacked on the one before, so v18 contains all
-five. #293 has held
+**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v24 IS THE
+NEWEST, AND v19-v24 ARE SIBLINGS RATHER THAN A CHAIN.** All six branched off
+v18 on 2026-09-15 — v19 the PCP lost-request floor (#300), v20 the blind
+transfer telemetry (#302), v21 the ask detection (#301), v22 the question
+formats (#303), v23 the recording disclosure (#304), v24 the answerable queue
+choice (#306). Distinct numbers were assigned UP FRONT precisely so six open
+branches could never make six different builds read alike at `/voice/health`;
+they are not evidence that one contains another. **So whichever lands last
+must confirm it still carries the highest number after merging `main`** — and
+a deployment reading v21 tells you only that #301 is live, not that #300,
+#302, #303 or #304 are. The integration branch (#305) carries v24 because it
+contains all six, which is the one place the number and the containment
+agree.
+
+**v14-v18 WERE a chain, which is why the distinction matters.** v14 (the PCP
+queue choice), v15 (PCP records), v16 (professional records), v17 (PCP
+scheduling to the Hub) and v18 (the no-IVR prompt trim and its greeting fix)
+each merged after the one before and brought it in, so v18 genuinely contains
+all five. Reading v19-v24 the same way is the error this paragraph exists to
+prevent. #293 has held
 `voice-runtime-v13-new-or-existing-20260912` on its branch since before the
 PCP queue choice existed, and two open branches carrying one version would
 make two different builds indistinguishable at `/voice/health` — the single
