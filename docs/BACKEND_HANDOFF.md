@@ -213,6 +213,38 @@ this paragraph that the fix is still unshipped. The after-control is unchanged:
 the `[DOB] refused a date of birth in the shape (none)` count falling. **It has
 not been taken.**
 
+**THE NEXT QUESTION `dobShape` CANNOT ANSWER.** On 2026-09-14, `dobShape`
+was `(none)` on 93 of 93 recorded refusals — the model sent nothing, same as
+09-08. 51 of 94 refusals were on callers already addressed from their record.
+PR #307 splits those: Bug A (24) the person-base rung erases a date
+pre-context stored; Bug B (32) a certain appointment-book match stored the
+date and the read still refused. Nothing persisted could tell those apart.
+Marker `voice-runtime-v26-chart-dob-inherit-20260915` is the **fix**:
+stop-erase (empty must not overwrite a full chart DOB) plus inherit-on-file
+when the ticket name matches the stored name. The v25 `carry` enum
+(`fired` / `no_entry` / `entry_without_dob` / `name_mismatch` /
+`bad_call_sid`) rides along. **Do not read a change in the refusal rate
+on a v25-only build as inherit — that build is instrument-only (#308,
+folded into the v26 PR). The after-arm starts at v26.**
+
+```sql
+-- One day of traffic, once v26 is live. Canonical SIDs, CALL's day.
+SELECT e->'outcome'->>'carry' AS carry, count(*)
+FROM call_logs c, LATERAL jsonb_array_elements(c.tool_timeline->'events') e
+WHERE c.voice_provider = 'grok'
+  AND c.created_at::date = '<day>'
+  AND e->>'tool' LIKE 'file_%_ticket'
+  AND e->'outcome'->'missingFields' ? 'date_of_birth'
+GROUP BY 1
+ORDER BY 2 DESC;
+```
+
+`name_mismatch` dominating is Bug B at the read guard. `entry_without_dob`
+dominating is Bug A (or an empty chart) wider than 24. `no_entry` is never
+stored. `bad_call_sid` is a sentinel. `fired` on a refusal is a date that
+was in the map and still withheld (unparseable stored value, or a wiring
+bug). `dobShape` on the same event still answers whether the model sent it.
+
 **2. The success-loop.** A filing tool refuses for a missing field and the
 model answers by re-running a LOOKUP tool that keeps returning success,
 instead of asking the caller. Nine calls had struck the per-call tool ceiling

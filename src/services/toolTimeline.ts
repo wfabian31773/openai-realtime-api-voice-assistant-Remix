@@ -287,6 +287,22 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     out.missingFields = parsed.missingFields.map(String);
   }
   /**
+   * WHY inherit did not fill date_of_birth — a closed enum, never a value.
+   *
+   * `dobShape` on args already answers "did the model send it?". This
+   * answers the next question: if it did not, and the gate still fired,
+   * was there an entry, did it hold a date, and did the name guard reject
+   * it? The five arms are the diagnosis in PR #307. A string that is not
+   * one of those five is dropped rather than stored — the allow-list is
+   * the safety mechanism, same as every other outcome key.
+   */
+  if (
+    typeof parsed?.carry === 'string'
+    && ['fired', 'no_entry', 'entry_without_dob', 'name_mismatch', 'bad_call_sid'].includes(parsed.carry)
+  ) {
+    out.carry = parsed.carry;
+  }
+  /**
    * THE DIRECTOR'S VERDICT — the other half of the PCP blind spot.
    *
    * record_pcp_intake returns a PcpDirectorDecision, and none of its keys were

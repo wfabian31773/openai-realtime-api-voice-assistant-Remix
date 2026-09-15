@@ -316,12 +316,12 @@ registerTool({
      * it was treated. I widened `matchedBy: 'phone'` and left the comment
      * above it standing.
      *
-     * COST OF BEING WRONG THE OTHER WAY: an unconfirmed match no longer
-     * auto-fills a date of birth through `rememberVerifiedIdentity`. That
-     * removes nothing that existed before this PR — the mirror phone rung is
-     * itself new, so these calls previously reached `emptyContext()` and
-     * filled nothing. It declines to add an unsafe shortcut; it does not take
-     * a working one away.
+     * THE DATE STILL GOES INTO THE MAP. v11 already wrote the chart date
+     * from pre-context; stripping it here was Bug A (24 calls on 2026-09-14)
+     * — an empty person-base write overwrote a full one. The name guard on
+     * `verifiedDobFor` IS the confirmation (a caller who says "no, that's my
+     * father" is not filed under that name). We do not invent a date, and we
+     * do not promote `certain: false` to `true`.
      */
     const certain =
       uniqueMatch &&
@@ -339,10 +339,10 @@ registerTool({
      * refused for a date of birth in fourteen days, 23 of them for a patient
      * this tool had already identified.
      *
-     * Only a CERTAIN match is remembered, and it is only ever read back for
-     * the same name — see verifiedIdentity.ts. An uncertain match still has to
-     * be confirmed out loud, which is the rule the identity_warning above
-     * exists to enforce.
+     * A unique match is remembered, including an unconfirmed caller-ID hit.
+     * It is only ever read back for the same name — see verifiedIdentity.ts.
+     * `certain` stays false until something else confirms; the name guard
+     * is what lets a filing tool inherit the chart date.
      */
     /**
      * DELIBERATELY `uniqueMatch`, NOT `certain` — do not "tidy" this to the
@@ -374,31 +374,19 @@ registerTool({
         // What makes the downgrade guard provable rather than name-based.
         personId: resolved.patientData?.personId,
         /**
-         * NO DATE OF BIRTH FROM A CALLER-ID-ONLY MATCH. Codex P1 on 1d775a4,
-         * answering a challenge I put to it — and my claim was FALSE. I said
-         * an unconfirmed match "no longer auto-fills a date of birth". It
-         * did: `certain` went false, but the DOB was still cached, and
-         * `verifiedDobFor` returns `entry.dateOfBirth` WITHOUT reading
-         * `entry.certain`. So a caller who then gives the matched name and
-         * withholds their birthday gets the mirror's one auto-filled onto the
-         * ticket, which is exactly the confirmation this change exists to
-         * require.
+         * THE CHART DATE, WHEN THE UNIQUE HIT HAD ONE. Until v26 this
+         * stripped `dateOfBirth` on `identityUnconfirmed` (the person-base
+         * phone rung). That write then replaced the v11 pre-context entry
+         * and erased a date the process already held — Bug A.
          *
-         * WHY THE WRITE AND NOT THE READ. `verifiedIdentity.ts` records a
-         * deliberate decision to leave `verifiedDobFor` unnarrowed: it answers
-         * a different question, has its own name guard, and narrowing it is a
-         * ticket-path change that BACKEND_HANDOFF says needs a before/after
-         * number. That reasoning was made when uncertain entries could only
-         * come from a name-only hit. This PR adds a far larger uncertain
-         * population — every caller-ID match — so the hole is mine to close,
-         * and closing it at MY write leaves every pre-existing caller of that
-         * reader behaving exactly as it does today. No measurement is owed for
-         * behaviour that has not changed.
-         *
-         * The entry is still stored: `certain: false` is what the ambiguity
-         * consumers read, and dropping the entry would break them.
+         * The name guard on `verifiedDobFor` is the confirmation. Storing a
+         * date the unique hit actually returned is not inventing one. We
+         * still do not set `certain: true` here. A non-unique match never
+         * reaches this branch.
          */
-        ...(resolved.identityUnconfirmed ? {} : { dateOfBirth: resolved.patientData?.dateOfBirth }),
+        ...(resolved.patientData?.dateOfBirth
+          ? { dateOfBirth: resolved.patientData.dateOfBirth }
+          : {}),
         /**
          * The office this queue routes on, carried rather than only spoken.
          *

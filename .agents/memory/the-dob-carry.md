@@ -1,9 +1,52 @@
+# THE DATE-OF-BIRTH CARRY
+
+Diagnosis is PR #307 (2026-09-15, over 2026-09-14). The instrument was
+#308 / v25. **Wayne rejected instrument-only** — the professional line
+cannot leave ticket-create failing (agent says filed, staff never sees
+it) for 100–200 calls. #308 does not fix tickets. The fix is v26.
+
+---
+
+## WHAT SHIPPED (v26)
+
+Marker: `voice-runtime-v26-chart-dob-inherit-20260915`.
+
+1. **Bug A — stop-erase.** `rememberVerifiedIdentity` **merges** when it
+   is the same person. Empty must not overwrite a full date of birth
+   already stored. Same person = both `personId`s exist and agree, OR we
+   cannot prove by id and the names agree. Different `personId` replaces
+   the whole row (father then son). Certainty never downgrades.
+2. **Person-base write no longer strips the date.** A unique
+   `identityUnconfirmed` hit that returned a chart date stores it.
+   `certain` stays `false`. We do not invent a date.
+3. **Inherit on file.** Already the path: model argument →
+   `verifiedDobFor` (name match, **not** `certain: true`) → spoken →
+   escape. When first+last match, chart `patientBirthMonth` / `Day` /
+   `Year` go on the create payload even if the model omitted
+   `date_of_birth`. Ticketing already accepts omitted birth fields; we
+   do **not** require DOB on create-ticket.
+4. **Bug B — name guard.** `nameKey` (NFD, strip marks, hyphen /
+   apostrophe / period → space) is the shared comparison for
+   `verifiedDobFor`, `dobCarry`, `usualOfficeFor`, `forgetIfSameName`,
+   and the merge. `Garcia-Lopez` / `Garcia Lopez` and `José` / `Jose`
+   inherit. **Residual, not guessed:** nicknames (Bill/William),
+   maiden-vs-married surnames, fully different transcriptions. Those
+   still read `carry: name_mismatch` after deploy.
+5. **`carry` enum** from #308 rides along. Telemetry with the fix, not
+   instead of it.
+
+**Do not promote `certain: false` → `true`.** The name guard is the
+confirmation. A caller who says "no, that's my father" is not filed
+under that name.
+
+---
+
 # WHY THE DATE-OF-BIRTH GATE STILL FIRES ON A RECORD WE ARE HOLDING
 
 **Measured 2026-09-15 over 2026-09-14, the first full weekday with all seven
-lanes live. Diagnosis only — no fix in this commit.** Wayne asked the question
-this file answers: *"how is it possible that we're passing null on date of
-birth when we're locked on to a verified patient record?"*
+lanes live. Diagnosis — the mechanism below is what v26 changes.** Wayne asked
+the question this file answers: *"how is it possible that we're passing null on
+date of birth when we're locked on to a verified patient record?"*
 
 There are **two different bugs**, they need different fixes, and one of them is
 a line of code that discards the field on purpose.
@@ -52,14 +95,15 @@ flags a caller-ID hit:
 identityUnconfirmed: matchedBy === 'phone',
 ```
 
-`src/tools/sharedPatientTools.ts:401` — the carry then strips the date:
+`src/tools/sharedPatientTools.ts` — the carry then stripped the date
+(removed in v26):
 
 ```ts
 ...(resolved.identityUnconfirmed ? {} : { dateOfBirth: resolved.patientData?.dateOfBirth }),
 ```
 
-`src/tools/verifiedIdentity.ts` — and the downgrade guard does not protect the
-entry v11 already wrote:
+`src/tools/verifiedIdentity.ts` — and the downgrade guard did not protect the
+entry v11 already wrote (replaced by a merge in v26):
 
 ```ts
 if (existing && existing.certain && !certain && provablySamePerson && ...) return;
@@ -68,146 +112,76 @@ verified.set(callSid, { ... });
 ```
 
 **`existing.certain` must be TRUE for the guard to fire, and v11's pre-context
-write is `certain: false` with no `personId`.** So the guard never fires, the
-entry is deleted and replaced, and the replacement carries no date of birth.
+write is `certain: false` with no `personId`.** So the guard never fired, the
+entry was deleted and replaced, and the replacement carried no date of birth.
 
 Sequence on a real call:
 
 1. Pre-context matches → `rememberVerifiedIdentity` stores name + `dobOnFile`,
    `certain: false`, no `personId`. **The date is in the map.**
 2. `lookup_patient` runs, the appointment book misses, the person-base rung
-   hits on phone → `identityUnconfirmed: true` → line 401 strips the date →
+   hits on phone → `identityUnconfirmed: true` → the strip drops the date →
    `rememberVerifiedIdentity` with name + `personId`, no date.
 3. The guard sees `existing.certain === false`, declines to protect, and
    replaces. **The date is gone.**
 4. `file_*_ticket` asks `verifiedDobFor` and gets `undefined`. The gate refuses
    for a field the process held ninety seconds earlier.
 
-**THE CODE COMMENT BESIDE THE STRIP IS NOW FALSE.** It reads: *"It declines to
-add an unsafe shortcut; it does not take a working one away."* That was true
-when written — the person-base rung was new, and those callers previously
-reached `emptyContext()`. **Once v11 landed, there IS a working one to take
-away, and this takes it.** Two PRs, each correct alone, wrong together.
+**THE CODE COMMENT BESIDE THE STRIP WAS FALSE after v11.** It read: *"It
+declines to add an unsafe shortcut; it does not take a working one away."*
+That was true when written — the person-base rung was new, and those callers
+previously reached `emptyContext()`. **Once v11 landed, there WAS a working
+one to take away, and this took it.** Two PRs, each correct alone, wrong
+together.
 
 This is the exact population RULE ZERO exists for: phone match on
 `patients_master`, appointment-book miss, join holds the whole record.
 
-### The second half: the caller's confirmation is never recorded
+Cursor's position, which shipped: don't promote at all — the name guard on
+`verifiedDobFor` IS the confirmation, because a caller who says "no, that's
+my father" is not filed under that name. Bug A's fix is **stop erasing**,
+not **start promoting**.
 
-Even without the erasure, `certain: false` is doing real work and should stay —
-a phone number is a candidate to confirm (instruction 6, RULE ZERO step 2).
-But the greeting has **already asked** "Am I speaking with <name>?" and the
-caller has **already answered**, and nothing in the code reads that answer.
-There is no path from a caller's "yes" to a promotion.
-
-Cursor's position, which is well argued: don't promote at all — the name guard
-on `verifiedDobFor` IS the confirmation, because a caller who says "no, that's
-my father" is not filed under that name. That is a cheaper and safer rail than
-a new confirmation signal, and it means Bug A's fix is simply **stop erasing**
-rather than **start promoting**.
-
-What counts as confirmation remains procedural and the operator's (standing
-instruction 1) if the name guard turns out not to be enough.
+---
 
 ## BUG B — we stored it and the read refused anyway (32 calls)
 
-**THE ERASURE ABOVE DOES NOT EXPLAIN THESE, AND THAT IS THIS FILE'S ONE
-CORRECTION TO THE SPEC.** Cursor's mechanism accounts for the person-base
-population; it treats the wipe as the cause of all 51. The measurement splits
-them: these 32 reported `identity_is_certain: true`, which means
-`identityUnconfirmed` was false, which means they came from the APPOINTMENT
-BOOK rung, where line 401 **did** store the date. 18 of the 32 ran exactly one
-lookup and it was certain; only 2 ever saw an uncertain one. So the date was in
-the map at filing time and the read still refused.
+**THE ERASURE ABOVE DOES NOT EXPLAIN THESE.** These 32 reported
+`identity_is_certain: true`, which means `identityUnconfirmed` was false,
+which means they came from the APPOINTMENT BOOK rung, where the date **was**
+stored. 18 of the 32 ran exactly one lookup and it was certain; only 2 ever
+saw an uncertain one. So the date was in the map at filing time and the read
+still refused.
 
-Two candidates were tested and **both are dead**:
+The surviving hypothesis is the read guard: exact first+last after trim +
+case-fold. A hyphenated surname, an accent, a curly apostrophe would miss.
 
-| candidate | test | result |
-|---|---|---|
-| the matched record has no date of birth | `Schedule."PatientDateOfBirth"`, 1% TABLESAMPLE | **0 null, 0 blank of 10,438 — 100% populated** |
-| a later ambiguous lookup cleared the entry (`forgetIfSameName`) | count lookups per call | **30 of 32 had only certain lookups; at most 2 explained** |
+**v26's safe read-path fix:** `nameKey` — NFD + strip combining marks,
+hyphen / apostrophe / period → space. That is the SPEC's own example
+(`Garcia-Lopez` vs `Garcia Lopez`) and the 2.4% self-disagreement on
+`person_id` rows. Father/son with different first names still fail.
 
-**That leaves ONE surviving hypothesis: the read guard.**
+**Residual after v26, not guessed:** nicknames, maiden vs married surnames,
+fully different transcriptions. `carry: name_mismatch` still measures that
+residue. Do not loosen the guard to first-name-only.
 
-`src/tools/verifiedIdentity.ts` — `verifiedDobFor`:
-
-```ts
-if (norm(firstName) !== norm(entry.firstName) || norm(lastName) !== norm(entry.lastName)) {
-  return undefined;
-}
-```
-
-`entry.firstName` / `entry.lastName` come from the **record**.
-`firstName` / `lastName` are the **model's tool arguments**. They must match
-exactly (case- and whitespace-insensitively, nothing more).
-
-A model that omits `date_of_birth` on 93 of 93 attempts is not one to trust
-with a verbatim surname. Any of these opens the jaw: a nickname for a legal
-name, a transcribed spelling, a hyphenated or two-part surname split
-differently, a missing `last_name` argument, a maiden name (2.4% of person_ids
-are spelled more than one way across their own rows — CLAUDE.md).
-
-**NOT PROVEN, and it cannot be proven from what is persisted today.** The
-timeline records neither the model's name arguments nor whether the carry
-fired. That is the instrument gap below. It is the only candidate left
-standing, not a measurement.
+The `name_and_dob` five (matched using a birthday, then refused for it) are
+a separate miss if the model then files under a different spelling; inherit
+closes them only when the ticket name matches the stored name.
 
 ---
 
-## THE `name_and_dob` FIVE
+## THE INSTRUMENT (folded into v26)
 
-Five calls matched by **name AND date of birth** — the caller gave a birthday,
-the lookup used it to find them — and the filing tool then refused for want of
-a date of birth. Whatever the cause, any fix has to close this: the field was
-on the call, in the model's hands, used successfully by another tool.
-
----
-
-## THE INSTRUMENT GAP — this is what to build first
-
-`dobShape` was built to answer "did the model send it, or did the parser refuse
-it?" and it did. It now answers `(none)` every time and **the trail stops
-there.** Nothing records:
-
-- whether `verifiedDobFor` was consulted;
-- whether an entry existed for the call;
-- whether it held a date of birth;
-- whether the name guard rejected it, and on which side.
-
-One PHI-free enum on the refusal event settles Bug B in a day of traffic:
+`outcome.carry` on a `date_of_birth` refusal:
 
 ```
 carry: 'fired' | 'no_entry' | 'entry_without_dob' | 'name_mismatch' | 'bad_call_sid'
 ```
 
-`name_mismatch` is the discriminating value. If it dominates, the fix is at the
-read guard. If `entry_without_dob` dominates, Bug A is wider than measured and
-something else is dropping the field too.
-
-**Build the instrument before the fix.** CLAUDE.md failure mode 8: *before
-quoting a rate, find the control that proves the measure.* Every fix below Bug
-A is currently a guess.
-
----
-
-## WHAT IS NOT ESTABLISHED
-
-Stated plainly so nobody promotes it by repetition:
-
-- **Why the model omits `date_of_birth`.** 93 of 93, unchanged since 09-08.
-  The field is in the schema with a description telling it to send it,
-  deliberately absent from `required`, and `strict: false`. The `fix` channel
-  demonstrably reaches the model. Cause unknown.
-- **Whether the name guard is actually firing.** Sole surviving hypothesis for
-  Bug B, zero direct evidence.
-- **The 28 "no `matched_by`" calls.** Not investigated.
-- **Which table `sage_precontext` reads.** Still unsettled (CLAUDE.md), and it
-  matters here because `matchedRecord` reads `dobOnFile` from that payload and
-  nothing verifies the service sends it. 299 of 309 recognised greetings name
-  ONE token (a first name), which is *consistent with* a payload carrying no
-  `lastNameOnFile` — and `rememberVerifiedIdentity` stores NOTHING without both
-  names. That is suggestive and no more: the prompt may simply be telling the
-  agent to use a first name. **Not tested.**
+Wayne overrode "build the instrument before the fix." The enum ships **with**
+the fix so a day of traffic can still split residual Bug B from everything
+else. #308 alone is not the next ship.
 
 ---
 

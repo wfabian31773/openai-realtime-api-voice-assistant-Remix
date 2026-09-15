@@ -168,8 +168,19 @@ import { callEnvironment } from "./callRecord";
  * Stacked under v18: v16 → v15 → v14 → v12. v13 stays skipped: #293 holds it
  * on its own branch and must re-bump above THIS.
  */
+/**
+ * v26, 2026-09-15: CHART DATE-OF-BIRTH INHERIT.
+ *
+ * Stop-erase: empty must not overwrite a full DOB already in
+ * `verifiedIdentity` for the same person. Inherit-on-file: when the
+ * ticket first+last matches the stored name, filing tools put the chart
+ * birth year/month/day on the create payload even if the model omitted
+ * `date_of_birth`. Name guard uses `nameKey` (hyphen / accent /
+ * apostrophe) — not nicknames. The v25 `carry` enum rides along.
+ * Diagnosis is PR #307. Stacks on v25; not a v19–v24 sibling.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v24-pcp-queue-choice-answerable-20260915";
+  "voice-runtime-v26-chart-dob-inherit-20260915";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

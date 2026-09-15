@@ -142,6 +142,45 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     );
     expect(getAzulTimeline(callId)![0].outcome.missingFields).toEqual(['surgeon name']);
   });
+
+  /**
+   * WHY inherit failed, without the birthday. The five arms are the
+   * diagnosis in PR #307. A string that is not one of them is dropped —
+   * the allow-list is the safety mechanism, same as every other outcome key.
+   */
+  it('records carry on a date-of-birth refusal, and never a date', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId, 'file_surgery_ticket', TICKET_ARGS,
+      JSON.stringify({
+        success: false,
+        missingFields: ['date_of_birth'],
+        carry: 'name_mismatch',
+        dateOfBirth: '03/17/1973',
+        firstName: 'Wayne',
+      }),
+      5,
+      { agentSlug: 'surgery' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome.carry).toBe('name_mismatch');
+    expect(ev.outcome.missingFields).toEqual(['date_of_birth']);
+    const blob = JSON.stringify(ev);
+    expect(blob).not.toContain('03/17/1973');
+    expect(blob).not.toContain('Wayne');
+  });
+
+  it('drops a carry value that is not one of the five arms', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId, 'file_tech_ticket', TICKET_ARGS,
+      JSON.stringify({ success: false, missingFields: ['date_of_birth'], carry: 'Wayne Fabian 03/17/1973' }),
+      1,
+      { agentSlug: 'tech' },
+    );
+    expect(getAzulTimeline(callId)![0].outcome).not.toHaveProperty('carry');
+    expect(JSON.stringify(getAzulTimeline(callId))).not.toContain('Wayne');
+  });
 });
 
 describe('classifyFleetCall — "promised and filed" vs "promised and did not"', () => {

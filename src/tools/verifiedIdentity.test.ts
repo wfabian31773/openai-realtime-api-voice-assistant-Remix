@@ -331,10 +331,9 @@ describe('a caller-ID retry must not erase an identity the caller already confir
     expect(verifiedDobFor(SID, 'Testsecond', 'Patient')).toBe('1962-05-05');
   });
 
-  it('does NOT preserve when neither side can prove who it is', () => {
-    // A name-only hit knows no person id, so nothing is provable and the write
-    // wins — exactly the behaviour that shipped before this PR. The guard is
-    // deliberately narrow rather than optimistic.
+  it('keeps the date when neither side has a personId and the names match', () => {
+    // SPEC 4.2: later unique hit, no personId on either side, same names,
+    // incoming empty → keep the date. Empty must not overwrite full.
     rememberVerifiedIdentity(SID, {
       firstName: 'Testcaller', lastName: 'Mirror', dateOfBirth: '1950-01-01', certain: true,
     });
@@ -342,7 +341,7 @@ describe('a caller-ID retry must not erase an identity the caller already confir
       firstName: 'Testcaller', lastName: 'Mirror', certain: false,
     });
 
-    expect(verifiedDobFor(SID, 'Testcaller', 'Mirror')).toBeUndefined();
+    expect(verifiedDobFor(SID, 'Testcaller', 'Mirror')).toBe('1950-01-01');
   });
 
   it('an uncertain write is still stored when there is nothing to downgrade', () => {
