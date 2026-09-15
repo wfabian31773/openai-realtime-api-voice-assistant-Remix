@@ -651,8 +651,13 @@ was filed**, not what the home queue classified.
 Prompt: `buildOpticalPrompt`, `src/agents/opticalAgent.ts:91-247`
 (~1,200-token ceiling, `:151-154`). "HOW A CALL RUNS", `:191-214`:
 
-1. `lookup_patient` as soon as a phone, or name+DOB, is available; if
-   `identity_is_certain` is false, collect last name + DOB and call it **again**.
+1. `lookup_patient` as soon as a phone, or name+DOB, is available.
+   `identity_is_certain` false is **not** only "more than one person" — after
+   #292 it is also a unique `patients_master` phone hit. A recognised /
+   pre-context caller confirms the greeting and does **not** re-collect last
+   name or date of birth (`identityCertainMeaning(pc)`). An unrecognised
+   caller still collects last name + DOB and calls it **again**. A true
+   ambiguous case (candidate count > 1), or a denial, still asks.
 2. Find the office — "the one thing a ticket cannot be filed without". Confirm
    `usual_clinic`; otherwise `resolve_location`. **Never ask a patient which city
    one of our offices is in.**

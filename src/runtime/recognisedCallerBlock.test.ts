@@ -38,10 +38,19 @@ process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';
 vi.mock('../../server/db', () => ({ db: {} }));
 
-const { recognisedCallerBlock, RECOGNITION_BLOCK_LANES } = await import('./recognisedCallerBlock');
+const {
+  recognisedCallerBlock,
+  identityAskScript,
+  identityCertainMeaning,
+  RECOGNITION_BLOCK_LANES,
+} = await import('./recognisedCallerBlock');
 const { personaliseGreeting, greetingStyleFor } = await import(
   '../services/greetingPersonalisation'
 );
+const { buildOpticalPrompt } = await import('../agents/opticalAgent');
+const { buildSurgeryPrompt } = await import('../agents/surgeryAgent');
+const { buildTechPrompt } = await import('../agents/techAgent');
+const { buildRecordsPrompt } = await import('../agents/recordsAgent');
 
 const agentSource = (module: string) =>
   readFileSync(join(__dirname, '..', 'agents', `${module}.ts`), 'utf8');
@@ -206,4 +215,166 @@ describe('an unrecognised caller gets no block at all', () => {
       'Am I speaking with Rosa?',
     );
   });
+});
+
+describe('the ask script agrees with the block above it', () => {
+  /**
+   * CODEX P1 ON #307, AND IT WAS THIS AUTHOR'S REGRESSION.
+   *
+   * The block says "the identity step is DONE. Do not ask for their last name
+   * and do not ask for their date of birth". Eleven lines below it, in the same
+   * prompt, the ask script said to ask for exactly those and ended "say the
+   * order EVERY TIME".
+   *
+   * It is a regression rather than a pre-existing bug because the OLD block
+   * agreed with that script — it said "still collect the date of birth". The
+   * rule changed and the script did not, which put two contradicting
+   * instructions on one page for exactly the population the change was for. A
+   * model given both may keep asking, and then the affirmed match buys the
+   * caller nothing while the change still reads as shipped.
+   */
+  const RECOGNISED = { matched: true, firstName: 'Wayne' };
+
+  it('an unrecognised caller still gets the unconditional instruction', () => {
+    const cold = identityAskScript(undefined);
+    expect(cold).toContain('say the order every\ntime.');
+    expect(cold).not.toMatch(/ONLY when/);
+  });
+
+  it('a recognised caller is NOT told to ask every time', () => {
+    expect(identityAskScript(RECOGNISED)).not.toContain('say the order every\ntime.');
+  });
+
+  it('a recognised caller\u2019s script defers to the block', () => {
+    const warm = identityAskScript(RECOGNISED);
+    expect(warm).toMatch(/not to ask for them/);
+    expect(warm).toMatch(/ONLY when that block no longer applies/);
+  });
+
+  // The block self-destructs on a denial, and records may be collecting for
+  // somebody who is not the caller. Both need these words to still exist.
+  it.each([
+    ['unrecognised', undefined],
+    ['recognised', RECOGNISED],
+  ])('keeps the actual questions for a %s caller', (_label, pc) => {
+    const script = identityAskScript(pc as never);
+    expect(script).toContain('May I please have your last name?');
+    expect(script).toMatch(/date of birth, starting with the month/);
+  });
+
+  it('names the denial and the not-the-caller case as the times it applies', () => {
+    const warm = identityAskScript(RECOGNISED);
+    expect(warm).toMatch(/they said no, or gave a different name/i);
+    expect(warm).toMatch(/is not the caller/);
+  });
+
+  // Same device as the block: one copy, composed, never pasted back.
+  for (const { module } of RECOGNITION_BLOCK_LANES) {
+    it(`${module} composes the ask script rather than inlining it`, () => {
+      expect(agentSource(module)).toMatch(/identityAskScript\s*\(/);
+      expect(agentPromptText(module)).not.toContain('May I please have your last name?');
+    });
+  }
+});
+
+describe('How a call runs agrees with the block — leftover on #310', () => {
+  /**
+   * CURSOR SECOND-PASS ON #310.
+   *
+   * #310 swapped `### Lead the ask`. The NEXT heading — `### How a call runs`
+   * — still said `identity_is_certain` false means "the number matches more
+   * than one person" and told the model to collect last name and date of
+   * birth. After #292 that flag is also a unique patients_master phone hit.
+   * A recognised caller who affirmed the greeting then calls lookup_patient,
+   * gets false, and obeys step 1. Same failure mode, one heading down.
+   *
+   * Tests that only asserted `identityAskScript` stayed green with that
+   * paragraph intact. Mutate the leftover or the review is decoration.
+   */
+  const RECOGNISED = { matched: true, firstName: 'Wayne' };
+
+  it('an unrecognised caller is still told to collect last name and date of birth', () => {
+    const cold = identityCertainMeaning(undefined);
+    expect(cold).toMatch(/identity_is_certain is false/);
+    expect(cold).toContain('ask as above');
+    expect(cold).toContain('CALL lookup_patient AGAIN');
+    expect(cold).toMatch(/Never tell the caller how many records matched/);
+  });
+
+  it('does not tell an unrecognised caller that false ONLY means more than one person', () => {
+    const cold = identityCertainMeaning(undefined);
+    expect(cold).toMatch(/unique patients_master phone hit/);
+    expect(cold).not.toMatch(/false, the\s+number matches more than one person/);
+  });
+
+  it('a recognised caller is NOT told to collect last name and date of birth on a false flag', () => {
+    const warm = identityCertainMeaning(RECOGNISED);
+    expect(warm).not.toContain('Collect their last name and date of birth');
+    expect(warm).toMatch(/Do not collect their last name/);
+    expect(warm).toMatch(/do not\s+collect their date of birth/);
+  });
+
+  it('a recognised caller is told false is NOT more than one person', () => {
+    expect(identityCertainMeaning(RECOGNISED)).toMatch(/NOT[\s\S]*more than one person/);
+  });
+
+  it('a recognised caller still has the denial and the candidate-count exit', () => {
+    const warm = identityCertainMeaning(RECOGNISED);
+    expect(warm).toMatch(/said no, or gave a different name/i);
+    expect(warm).toMatch(/candidate count/);
+  });
+
+  it('does not invent a date and does not require one on create-ticket', () => {
+    for (const pc of [undefined, RECOGNISED]) {
+      const text = identityCertainMeaning(pc as never);
+      expect(text).not.toMatch(/invent/i);
+      expect(text).not.toMatch(/require.{0,40}date of birth/i);
+      expect(text).not.toMatch(/create-ticket/i);
+    }
+  });
+
+  // Paste-back: the leftover sentences must not live in the agents. A test
+  // that only exercises the helper stays green if How a call runs is left
+  // intact — that was the first-pass hole.
+  const LEFTOVER = [
+    'matches more than one person',
+    'collect their last name and date of birth',
+    'collect the date of birth',
+    'identity_is_certain false means',
+    'identity_is_certain false is a',
+  ];
+
+  for (const { module } of RECOGNITION_BLOCK_LANES) {
+    it(`${module} composes identityCertainMeaning rather than inlining the leftover`, () => {
+      expect(agentSource(module)).toMatch(/identityCertainMeaning\s*\(/);
+    });
+
+    for (const phrase of LEFTOVER) {
+      it(`${module} no longer carries the leftover inline: "${phrase}"`, () => {
+        expect(agentPromptText(module).toLowerCase()).not.toContain(phrase);
+      });
+    }
+  }
+
+  // Calling the helper is not enough — How a call runs has to INTERPOLATE it.
+  // A computed-and-discarded variable would keep every source check green.
+  const promptBuilders: Array<[string, (m: { precontext?: typeof RECOGNISED }) => string]> = [
+    ['optical', buildOpticalPrompt],
+    ['surgery', buildSurgeryPrompt],
+    ['tech', buildTechPrompt],
+    ['records', buildRecordsPrompt],
+  ];
+
+  for (const [lane, build] of promptBuilders) {
+    it(`${lane} interpolates the recognised meaning into How a call runs`, () => {
+      const p = build({ precontext: RECOGNISED });
+      expect(p).toMatch(/Do not collect their last name/);
+      expect(p).not.toContain('Collect their last name and date of birth');
+    });
+
+    it(`${lane} still asks an unrecognised caller`, () => {
+      expect(build({})).toContain('ask as above');
+      expect(build({})).toContain('CALL lookup_patient AGAIN');
+    });
+  }
 });

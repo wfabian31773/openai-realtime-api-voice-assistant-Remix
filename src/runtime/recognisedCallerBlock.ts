@@ -122,3 +122,106 @@ export const RECOGNITION_BLOCK_LANES: ReadonlyArray<RecognitionBlockLane> = [
   { slug: 'tech', module: 'techAgent' },
   { slug: 'records', module: 'recordsAgent' },
 ];
+
+/**
+ * THE IDENTITY ASK SCRIPT — RULE ZERO 2b's wording, and it has to agree with
+ * the block above it.
+ *
+ * Codex P1 on #307, and it was MY regression. The block now says "the identity
+ * step is DONE. Do not ask for their last name and do not ask for their date of
+ * birth" — and eleven lines below it, in the same prompt, this script said to
+ * ask for exactly those, ending "say the order EVERY TIME". Unconditional.
+ *
+ * The old block is what makes that a regression rather than a pre-existing
+ * bug. It used to say *"A first name is not verification. Ask for the last name
+ * in their own words, and still collect the date of birth"* — which AGREED with
+ * this script. Changing the rule and leaving the script alone is what put two
+ * contradicting instructions on the same page, for exactly the population the
+ * change was for. A model given both may keep asking, and then the affirmed
+ * match buys the caller nothing: the surname comparison happens anyway, the
+ * name guard refuses anyway, and the measured number does not move while the
+ * change reads as shipped.
+ *
+ * WHY IT LIVES HERE, beside the block, rather than in its own module: the two
+ * are ONE decision — whether we are asking this caller to identify themselves.
+ * Split across two files they drift, which is the defect this whole module
+ * exists to stop. It was already written FIVE times, byte-identical, in
+ * `opticalAgent`, `surgeryAgent`, `techAgent` and `recordsAgent`.
+ *
+ * THE QUESTIONS SURVIVE IN BOTH ARMS, and that is load-bearing. The block
+ * self-destructs on a denial — "they said NO, or gave a different name" — and
+ * the model then needs these words. So a recognised caller does not lose the
+ * script, it loses the INSTRUCTION TO USE IT. Records has a second reason:
+ * the caller may not be the patient, and the patient's own details are still
+ * to be collected.
+ *
+ * The unrecognised arm is byte-for-byte what all four lanes carried before, so
+ * that population is provably unchanged.
+ */
+const ASK_QUESTIONS = `  "May I please have your last name?"
+  "And may I please have your date of birth, starting with the month,
+   then the day, then the year?"`;
+
+export function identityAskScript(pc: RecognisedCaller | undefined): string {
+  const recognised = !!pc?.matched && !!pc.firstName;
+
+  if (!recognised) {
+    return `### Lead the ask — one at a time, in this shape
+${ASK_QUESTIONS}
+Never both in one breath, never a bare "date of birth" — say the order every
+time. Asked open, people answer in any shape, and the shape is what loses it.`;
+  }
+
+  return `### Lead the ask — one at a time, in this shape
+You already hold this caller's name and date of birth, and the block above says
+not to ask for them. Use these words ONLY when that block no longer applies —
+they said no, or gave a different name — or when the person you need details
+for is not the caller.
+${ASK_QUESTIONS}
+Never both in one breath, never a bare "date of birth" — say the order every
+time you DO ask. Asked open, people answer in any shape, and the shape is what
+loses it.`;
+}
+
+/**
+ * WHAT `identity_is_certain: false` MEANS — and it has to agree with the block
+ * and the ask script, not contradict them one heading later.
+ *
+ * Cursor second-pass on #310. #310 swapped `### Lead the ask` for
+ * `identityAskScript(pc)`. Eleven lines below THAT, `### How a call runs`
+ * still said `identity_is_certain` false means "the number matches more than
+ * one person" and told the model to collect last name and date of birth.
+ *
+ * After #292 that flag is ALSO a unique `patients_master` phone hit
+ * (`identityUnconfirmed: true`). The Bug A population. A recognised caller
+ * who affirmed the greeting then calls `lookup_patient`, gets false, and
+ * obeys step 1 — same failure mode this PR exists to stop, one heading down.
+ *
+ * Lives here because it is the same decision as the block and the script:
+ * whether we are asking this caller to identify themselves. Split across
+ * four agent files it is four leftover copies of the old meaning.
+ *
+ * THE UNRECOGNISED ARM STILL ASKS. A cold caller has no greeting to affirm,
+ * so last name + date of birth in the RULE ZERO 2b shape is still how they
+ * are found. What changed is the FACT: false is not only "more than one
+ * person". The true ambiguous case (candidate count > 1) still asks.
+ *
+ * THE RECOGNISED ARM DOES NOT. Confirm the greeting. Do not re-collect a
+ * last name or a date the record holds. Denial, a different name, or a
+ * candidate count still use the script above. Does not invent a date.
+ * Does not require one on create-ticket.
+ */
+export function identityCertainMeaning(pc: RecognisedCaller | undefined): string {
+  const recognised = !!pc?.matched && !!pc.firstName;
+
+  if (!recognised) {
+    return `If it says identity_is_certain is false, that is also a unique patients_master phone hit, not only more than one person — ask as above, then CALL lookup_patient AGAIN with all three. Never tell the caller how many records matched.`;
+  }
+
+  return `If lookup_patient says identity_is_certain is false, that is NOT
+   more than one person on this call — this number already matched one
+   person. Confirm the greeting. Do not collect their last name and do not
+   collect their date of birth; we hold both. Use the script above ONLY if
+   they said no, or gave a different name, or the tool says several people
+   (a candidate count). Never tell the caller how many records matched.`;
+}
