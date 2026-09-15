@@ -82,7 +82,7 @@ export function transferModeFor(
  * the transfer — see WarmTransferDeps for why the mark precedes the
  * redirect (Codex, PR #230 round 2). */
 export interface TransferLifecycleHooks {
-  onCallerRedirectStarting?: () => void;
+  onCallerRedirectStarting?: (method: "warm" | "blind") => void;
   onCallerRedirectFailed?: () => void;
   /** The attempt is starting: the dial plus the briefing-and-keypress
    * wait legitimately runs up to `expectedWaitMs` (the accept window),
