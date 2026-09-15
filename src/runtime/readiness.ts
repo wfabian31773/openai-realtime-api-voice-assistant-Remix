@@ -219,7 +219,7 @@ import { callEnvironment } from "./callRecord";
  * made v28 not pull-safe, not a new ship. Stacks on v27.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v31-unclassified-calls-still-file-20260915";
+  "voice-runtime-v32-settlement-and-narrative-survive-20260915";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

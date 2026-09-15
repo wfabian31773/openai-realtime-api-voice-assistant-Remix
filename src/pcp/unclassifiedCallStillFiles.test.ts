@@ -281,6 +281,58 @@ describe('the narrowness is the point', () => {
   });
 });
 
+describe('a long call is trimmed, not dropped', () => {
+  /**
+   * THE SINK-VERSUS-SOURCE TEST. `trimToBudget` has its own unit tests in
+   * settlementSurvivesAFlake.test.ts; this one asserts the SWEEP actually
+   * calls it, which is the link a revert would break while those stayed
+   * green. CLAUDE.md failure mode 10, and v20 is the worked example.
+   */
+  it('files a call whose caller talked past the narrative cap', async () => {
+    const { NARRATIVE_MAX_CHARS } = await import('./pcpTicketing');
+    // Comfortably past the 12,000-character narrative ceiling.
+    const enormous = [
+      'AGENT: Thank you for calling Azul Vision PCP Support.',
+      ...Array.from({ length: 600 }, (_, i) =>
+        `CALLER: This is part ${i} of a very long explanation about a referral.`),
+    ].join('\n');
+    const { callId } = unclassifiedCall(enormous);
+
+    await sweep(callId);
+
+    expect(
+      ticketing.createPcpTicket,
+      'the longest calls are exactly the ones this arm exists to keep',
+    ).toHaveBeenCalledTimes(1);
+
+    const payload = ticketing.createPcpTicket.mock.calls[0][0] as any;
+    expect(payload.narrative.length).toBeLessThanOrEqual(NARRATIVE_MAX_CHARS);
+    expect(payload.narrative, 'and it says it was cut').toContain('trimmed');
+    expect(payload.narrative, 'the headline survives the trim').toMatch(/NOT CLASSIFIED/i);
+  });
+});
+
+describe('the settlement update is retried, not dropped', () => {
+  /**
+   * Also sink-versus-source: `persistSettlement` is unit-tested elsewhere, and
+   * what matters here is that the PCP callback routes its POST through it
+   * rather than calling submitPcpTicket bare. Pinned by reading the source,
+   * the device ticketRequirements.test.ts already uses for the sweep's wiring
+   * — a single lambda on the dial path no unit test can reach without
+   * standing up Twilio.
+   */
+  it('pcpAgent posts the settlement through persistSettlement', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync('src/agents/pcpAgent.ts', 'utf8');
+
+    expect(src).toMatch(/persistSettlement\(/);
+    expect(
+      src,
+      'a bare submitPcpTicket in the settle callback has no second chance anywhere',
+    ).toMatch(/persistSettlement\(\s*\(\)\s*=>\s*submitPcpTicket\(\{ \.\.\.preDialPayload/);
+  });
+});
+
 describe('the slug the app has to know', () => {
   /**
    * `PcpTicketPayloadSchema` takes a `z.enum` built from this list, and so
