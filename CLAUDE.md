@@ -140,6 +140,59 @@ Full working notes: **`.agents/memory/the-record-and-the-funnel.md`**.
 
 ---
 
+# RULE THREE — THE CORPUS IS THE TEST, AND WE WORK UNTIL IT PASSES
+
+**Wayne, 2026-09-15. BINDING, and it sits beside RULE ZERO because it is how
+every rule in this file gets proven.**
+
+> *"That's the whole point of grabbing those calls and putting them on disk. So
+> that we can identify every single issue on every single call, build a tester,
+> run it through the test, and see if it would fail again. That's the whole
+> idea. That was the whole purpose. We can't get away from that. We have a hard
+> set of transcripts that we get. And we run all those failures and we work
+> until those failures are passing."*
+
+**THIS IS THE METHOD. It is not optional and it is not a nice-to-have.**
+
+1. **A real failure day gets its calls pulled to disk.** Every call, by its real
+   `call_sid`, with its transcript. On disk, not in a summary.
+2. **Every call is read** and its failure named — the specific one, not the
+   category. "The name guard refused" is a category; "the record says
+   Espinosa and the caller said Espinoza" is the failure.
+3. **The corpus becomes a test**, indexed by the real SIDs, that reproduces
+   each named failure.
+4. **We work until the corpus passes.** Not until a reviewer is happy, not
+   until the tests we already had go green — until *those* calls pass.
+5. **A fix that claims to address a failure class runs the corpus first.** If
+   you cannot say how many of the corpus it rescues and how many it does not,
+   you have not measured it and must not claim it.
+
+**WHAT THIS FORBIDS.**
+
+- Saying a share is "unmeasured" when the calls are on disk. **They are the
+  measurement.** If you find yourself writing "we won't know until a day of
+  traffic", check the corpus first — the answer is usually already sitting
+  there. *(This rule exists because I did exactly that on 2026-09-15 and Wayne
+  had to point out I was holding the evidence.)*
+- Shipping a fix for a class of failure without running it against the calls
+  in that class.
+- Letting the corpus rot. When a fix lands, the corpus is re-run and the row
+  for each call says rescued / still fails / correctly refused.
+
+**PHI: the transcripts live on disk and in `call_logs`, never in git.** What
+goes in the repo is the real `call_sid` list, the failure SHAPE, and synthetic
+stand-ins that reproduce it — the pattern `src/pcp/replay20260914.test.ts`
+already established.
+
+**THE CORPORA THAT EXIST TODAY:**
+
+| corpus | what it is | the test |
+|---|---|---|
+| PCP, 2026-09-14 | the 17 calls that left no ticket of any provenance | `src/pcp/replay20260914.test.ts` |
+| queue lanes, 2026-09-14 | the 30 certain-phone date-of-birth refusals | `src/tools/dobNameMismatch.test.ts` |
+
+---
+
 # READ THIS BEFORE YOU DO ANYTHING
 
 You are working with **Wayne** on the Azul Vision voice agents. Southern
