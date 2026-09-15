@@ -413,10 +413,19 @@ describe('the trim actually happened', () => {
  * THREE OF FOUR LANES ARE ALREADY PAST THE OPERATOR'S CEILING ON IT:
  *
  *   lane      ceiling   cold   recognised   over by
- *   surgery      1800   1298         1641   -- inside
- *   tech         1600   1594         1936        336
- *   optical      1500   1385         1727        227
- *   records      1750   1697         2040        290
+ *   surgery      1800   1298         1652   -- inside
+ *   tech         1600   1594         1948        348
+ *   optical      1500   1385         1739        239
+ *   records      1750   1697         2051        301
+ *
+ * THOSE THREE NUMBERS WERE RAISED ONCE, DELIBERATELY, AND THIS IS THE RECORD
+ * OF IT. They were first pinned at 1936 / 1727 / 2040. Codex's round-2 P1 on
+ * #311 showed the recognised arm keyed its exception on a `candidate_count`
+ * field that two of the three ambiguous lookup shapes do not carry, so a
+ * genuinely ambiguous match read as a single one. Correcting it to key on the
+ * tool's warning cost ~12 tokens per lane. The ratchet went red, which is the
+ * ratchet working; it is raised here with the reason rather than quietly
+ * relaxed. Correctness over twelve tokens, on an arm already 200-350 over.
  *
  * THIS IS NOT A v29 REGRESSION. The block was inline in all four agents long
  * before it moved into the runtime; v27 and v28 each added to that arm, and
@@ -453,9 +462,9 @@ describe('the recognised-caller prompt is measured too', () => {
   // Ratchets at the 2026-09-15 measurement. Going UP fails; going down is
   // always welcome and the number should be lowered when it does.
   for (const [lane, baseline] of [
-    ['tech', 1936],
-    ['optical', 1727],
-    ['records', 2040],
+    ['tech', 1948],
+    ['optical', 1739],
+    ['records', 2051],
   ] as const) {
     it(`${lane}'s recognised prompt does not grow past ${baseline} tokens`, () => {
       expect(warm[lane]).toBeLessThanOrEqual(baseline);

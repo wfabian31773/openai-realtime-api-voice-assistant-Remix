@@ -311,11 +311,30 @@ describe('How a call runs agrees with the block — leftover on #310', () => {
     const warm = identityCertainMeaning(RECOGNISED);
     expect(warm).not.toContain('Collect their last name and date of birth');
     expect(warm).toMatch(/Do not collect their last name/);
-    expect(warm).toMatch(/do not\s+collect their date of birth/);
+    // Whitespace-tolerant ONLY across the wrap: the phrase itself is unchanged.
+    expect(warm).toMatch(/do not\s+collect their date\s+of\s+birth/);
   });
 
-  it('a recognised caller is told false is NOT more than one person', () => {
-    expect(identityCertainMeaning(RECOGNISED)).toMatch(/NOT[\s\S]*more than one person/);
+  /**
+   * DELETED ASSERTION, AND THE DELETION IS THE POINT — not a guard loosened
+   * to fit new prose.
+   *
+   * This used to assert the prompt says false is "NOT more than one person".
+   * Codex's round-2 P1 is that the claim is FALSE as an unconditional
+   * statement: on the found:true path with identityUnconfirmed false, false
+   * means exactly "more than one person", and the tool says so in its warning
+   * while handing back only the most recently seen of them. An assertion that
+   * pins a claim the fix had to withdraw is not a guard, it is the bug.
+   *
+   * What replaces it is stronger and sits directly above: the single-record
+   * reading is admitted ONLY for the unconfirmed-caller warning, and the
+   * several-people warning is routed to the ask. Those two together say
+   * everything this one said, and say it conditionally, which is correct.
+   */
+  it('never states unconditionally that a false flag means one person', () => {
+    const warm = identityCertainMeaning(RECOGNISED);
+    expect(warm).not.toMatch(/that is NOT\s+more than one person/);
+    expect(warm).not.toMatch(/false does NOT mean more than one person/);
   });
 
   it('a recognised caller still has the denial and the candidate-count exit', () => {
@@ -347,19 +366,61 @@ describe('How a call runs agrees with the block — leftover on #310', () => {
     expect(candidate).toBeLessThan(ban);
   });
 
-  it('scopes the no-recollection rule to a false flag WITHOUT a candidate count', () => {
+  /**
+   * ROUND 2, AND CODEX WAS RIGHT AGAIN — the first fix keyed on the wrong thing.
+   *
+   * `certain` is false in THREE shapes, not two, and only one of them carries a
+   * `candidate_count` FIELD:
+   *
+   *   1. found:false `several`  -> identity_is_certain false + candidate_count
+   *   2. found:true, identityUnconfirmed TRUE  -> warning "nobody has confirmed
+   *      the CALLER is that person". ONE record. The no-recollection case.
+   *   3. found:true, identityUnconfirmed FALSE -> warning "matches N different
+   *      people on file, and what follows is only the most recently seen of
+   *      them". GENUINELY AMBIGUOUS, and the count exists only inside the
+   *      prose — there is NO candidate_count field on this path.
+   *      (`opticalTools.production.test.ts:165` pins exactly this shape.)
+   *
+   * Keying the exception on "a candidate count" therefore told the model to
+   * treat shape 3 as a single match — while the tool was handing back the
+   * WRONG patient's record and saying so. That is the defect this whole module
+   * exists to prevent, reintroduced through a different door.
+   *
+   * So the rule keys on WHAT THE WARNING SAYS, which maps onto the code's own
+   * discriminator (`identityUnconfirmed`, sharedPatientTools.ts:330) rather
+   * than onto a field name that two of the three shapes do not have.
+   */
+  it('keys the exception on the warning, not on a candidate_count field', () => {
     const warm = identityCertainMeaning(RECOGNISED);
-    // The "not more than one person" claim must be qualified, not absolute:
-    // something between the candidate-count branch and the claim has to say
-    // the claim only holds when no candidate count came back.
-    expect(warm).toMatch(/Without one[^.]*does NOT mean more than one person/);
+    // Shape 3 carries no candidate_count, so the rule must not turn on one.
+    expect(warm).toMatch(/different people/);
+    expect(warm).not.toMatch(/Without one/);
+  });
+
+  it('admits ONLY the unconfirmed-caller warning to the no-recollection rule', () => {
+    const warm = identityCertainMeaning(RECOGNISED);
+    // The exact sentence shape 2 uses, and nothing wider.
+    expect(warm).toMatch(/ONLY "nobody has confirmed the caller\s+is that person"/);
+    const only = warm.search(/ONLY "nobody has confirmed/);
+    const ban = warm.search(/Do not collect their last name/);
+    expect(only).toBeGreaterThan(-1);
+    expect(only).toBeLessThan(ban);
+  });
+
+  it('sends the several-people warning to the ask, not to the no-recollection rule', () => {
+    const warm = identityCertainMeaning(RECOGNISED);
+    const several = warm.search(/Several or different people on file/);
+    const ban = warm.search(/Do not collect their last name/);
+    expect(several).toBeGreaterThan(-1);
+    expect(several).toBeLessThan(ban);
+    expect(warm).toMatch(/means ASK/);
   });
 
   it('tells the model to ask, not merely to consult the script, when several are on file', () => {
     const warm = identityCertainMeaning(RECOGNISED);
-    expect(warm).toMatch(/Several people on file/);
+    expect(warm).toMatch(/Several or different people on file/);
     expect(warm).toMatch(/means ASK/);
-    expect(warm).toMatch(/call lookup_patient again with all\s+three/);
+    expect(warm).toMatch(/call\s+lookup_patient again with all\s+three/);
   });
 
   it('does not invent a date and does not require one on create-ticket', () => {

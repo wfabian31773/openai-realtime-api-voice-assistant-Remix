@@ -243,6 +243,35 @@ loses it.`;
  * in the timeline. A query for "how often is false actually ambiguous?"
  * returns zero on every lane, and that zero is the instrument, not the
  * fleet. Do not quote it as evidence the case does not happen.
+ *
+ * ## ROUND 2: THE FIRST FIX KEYED ON THE WRONG THING — Codex P1 on #311
+ *
+ * `certain` is false in THREE shapes, and only ONE carries a `candidate_count`
+ * FIELD:
+ *
+ *   1. found:false, the `several` branch -> false + `candidate_count`.
+ *   2. found:true, `identityUnconfirmed` TRUE -> warning "nobody has confirmed
+ *      the CALLER is that person". ONE record. This is the no-recollection case.
+ *   3. found:true, `identityUnconfirmed` FALSE -> warning "matches N different
+ *      people on file, and what follows is only the most recently seen of
+ *      them". GENUINELY AMBIGUOUS — and the count lives only inside that
+ *      PROSE. There is no `candidate_count` field on this path at all.
+ *      `opticalTools.production.test.ts:165` pins exactly this shape.
+ *
+ * So "without a candidate count, false does not mean more than one person"
+ * told the model to read shape 3 as a single match, while the tool was handing
+ * back the WRONG patient's record and saying so in the same breath. The round-1
+ * fix removed the defect from one door and reintroduced it through another.
+ *
+ * The rule now keys on WHAT THE WARNING SAYS, which is the code's own
+ * discriminator (`identityUnconfirmed`, sharedPatientTools.ts:330) rather than
+ * a field name two of the three shapes do not have. Several or different
+ * people -> ASK. ONLY the unconfirmed-caller warning admits the single-record
+ * reading.
+ *
+ * THE LESSON, and it is the one this file keeps relearning: a rule keyed on a
+ * FIELD is only as good as that field's presence on every branch that should
+ * trigger it. Enumerate the branches before choosing the key.
  */
 export function identityCertainMeaning(pc: RecognisedCaller | undefined): string {
   const recognised = !!pc?.matched && !!pc.firstName;
@@ -251,11 +280,11 @@ export function identityCertainMeaning(pc: RecognisedCaller | undefined): string
     return `If it says identity_is_certain is false, that is also a unique patients_master phone hit, not only more than one person — ask as above, then CALL lookup_patient AGAIN with all three. Never tell the caller how many records matched.`;
   }
 
-  return `If lookup_patient says identity_is_certain is false, read the candidate
-   count FIRST. Several people on file — or a no, or a different name —
-   means ASK: use the script above, then call lookup_patient again with all
-   three. Without one, false does NOT mean more than one person; this
-   number matched one. Confirm the greeting. Do not collect their last name
-   and do not collect their date of birth; we hold both. Never tell the
-   caller how many records matched.`;
+  return `If lookup_patient says identity_is_certain is false, its warning says
+   which kind. Several or different people on file — or a candidate count, or
+   a no, or a different name — means ASK: use the script above, then call
+   lookup_patient again with all three. ONLY "nobody has confirmed the caller
+   is that person" means one record we already hold. Then confirm the
+   greeting. Do not collect their last name and do not collect their date of
+   birth; we hold both. Never tell the caller how many records matched.`;
 }
