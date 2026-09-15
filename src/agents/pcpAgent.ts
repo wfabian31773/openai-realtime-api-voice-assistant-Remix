@@ -2451,7 +2451,48 @@ export async function sweepPcpUnfiledCall(callId: string): Promise<void> {
       state.callPurpose &&
         (state.callerName || state.patientFirstName || state.patientLastName || state.statedRelationship),
     );
-    if (!toldUsSomething) {
+    /**
+     * AN UNHONOURED ASK FOR A PERSON IS A REQUEST, even with no name attached.
+     *
+     * The identity rule above selects against exactly the population it exists
+     * to serve, and 2026-09-14 is the measurement that finally says so: all 17
+     * callers whose requests were lost that day reached this line and were
+     * turned away by it. Each had said one thing — "speak to a
+     * representative" — refused to give a name when asked, and been told, in
+     * words, that we had taken it down. `callPurpose` was `patient_caller` on
+     * every one of them, so the first clause held; none of the four identity
+     * fields did, so `toldUsSomething` was false and the safety net skipped
+     * them. CLAUDE.md carries this as an open question ("no name, no ticket",
+     * 47 of 53 skipped). For this one shape it is answerable.
+     *
+     * WHY THIS CASE AND NOT THE GENERAL ONE. `callerRequestedHuman` is a
+     * latched, explicit ask for a person that we did not honour — not an
+     * absence of information but a request in its own right, and the only one
+     * a caller can make without volunteering anything about themselves. The
+     * two exits above have already removed the callers who DID get a person
+     * (`CONNECTED`) and the ones who chose the queue and accepted the cost
+     * (operator, 2026-09-13), so what is left here asked and was refused.
+     *
+     * AND WE ARE NEVER SHORT OF A CALLBACK NUMBER: caller ID seeds it at the
+     * top of `createPcpAgent`, so "this number asked for a person and did not
+     * get one" is a complete, workable ticket rather than a stub.
+     *
+     * THE NARROWNESS IS THE POINT. Filing on every unidentified call would
+     * recreate azul's 2026-07-28 sweep, where 9 of 12 spurious tickets were
+     * callbacks for patients who had already been helped.
+     *
+     * STILL GATED ON `callPurpose`, deliberately. `buildPayload` reads
+     * `state.callPurpose!` and the payload schema takes an enum, so filing
+     * without one is refused before it reaches the wire — a silent loss of
+     * exactly the kind this block is closing. Picking a slug to stand in would
+     * be choosing a department for the request, which is a routing rule and
+     * the operator's to make (standing instruction 1). All 17 carried a
+     * purpose, so this covers them; a caller who asks for a person with no
+     * purpose recorded at all is a narrower residual gap, and it is noted for
+     * Wayne rather than papered over here.
+     */
+    const askedForAPersonAndDidNotGetOne = Boolean(state.callPurpose && state.callerRequestedHuman);
+    if (!toldUsSomething && !askedForAPersonAndDidNotGetOne) {
       console.info(`[PCP] SWEEP: ${callId} ended with nothing to file (no purpose or no identity) — no ticket`);
       return;
     }
@@ -2463,8 +2504,17 @@ export async function sweepPcpUnfiledCall(callId: string): Promise<void> {
     const { missing } = ticketState(callId);
     const readiness = ticketReadiness(state, MAX_BLOCKS);
     const gaps = annotationFor([...readiness.blocking, ...readiness.annotate]);
+    /**
+     * Two different calls reach this point and a staffer must be able to tell
+     * them apart from the ticket alone. One drifted off mid-intake; the other
+     * asked for a person, was refused, and was left holding nothing — which is
+     * a worse experience and a more urgent callback.
+     */
+    const headline = askedForAPersonAndDidNotGetOne && !toldUsSomething
+      ? 'CALLER ASKED TO SPEAK TO A PERSON AND WAS NOT CONNECTED, and the request was not captured on the call. Filed so it is not lost. They gave no further detail.'
+      : 'CALLER HUNG UP BEFORE THE REQUEST WAS COMPLETE. Filed from what was gathered on the call so it is not lost.';
     const narrative = [
-      'CALLER HUNG UP BEFORE THE REQUEST WAS COMPLETE. Filed from what was gathered on the call so it is not lost.',
+      headline,
       gaps,
       'Please call back to complete this request.',
     ]
