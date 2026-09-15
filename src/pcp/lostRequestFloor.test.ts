@@ -112,6 +112,21 @@ function patientAskingForAPerson() {
 const THE_ASK = 'Caller asked to speak to a representative.';
 
 /**
+ * The same caller with no number of ours to refer to. Twilio sends a
+ * non-E.164 string for a withheld or blocked caller ID ("anonymous",
+ * "unavailable", "restricted"), which is exactly what the seeding regex at
+ * `pcpAgent.ts:510` is there to reject — so `callbackNumber` stays empty.
+ */
+function withheldCallerIdAskingForAPerson() {
+  const callId = `CAlost${++n}`;
+  const agent = createPcpAgent(
+    (async () => ({ status: 'CONNECTED' })) as never,
+    { callId, callSid: callId, callerPhone: 'anonymous' } as never,
+  );
+  return { agent, callId };
+}
+
+/**
  * Reach the live state the way the live calls reached it.
  *
  * `isPatient` is `callPurpose === 'patient_caller' || callerIsThePatient`, and
@@ -294,5 +309,63 @@ describe('the floor: an unhonoured ask for a person always leaves a record', () 
     ticketing.createPcpTicket.mockClear();
     await sweepPcpUnfiledCall(callId);
     expect(ticketing.createPcpTicket, 'their choice, their record — 2026-09-13').not.toHaveBeenCalled();
+  });
+});
+
+
+/**
+ * "IS THIS THE BEST NUMBER TO REACH YOU ON?" PRESUPPOSES A NUMBER.
+ *
+ * Codex P2, #300. The refusal above asks the caller to confirm the number we
+ * are holding — standing instruction 12, and right for the common case, since
+ * `pcpAgent.ts:510` seeds `callbackNumber` from caller ID on every call whose
+ * ANI is E.164. It is NOT right when there is nothing to confirm: a withheld
+ * or blocked caller ID arrives as a non-E.164 string, the seeding regex
+ * correctly rejects it, and the caller is then asked to confirm a number
+ * nobody has. Confirming a number we do not hold is how a request comes back
+ * un-callable, which is the one thing this whole branch exists to prevent.
+ *
+ * The branch is the house pattern, not a new one: `knowledgeBase.ts:283`
+ * already writes exactly this fork — "I have your callback number as ending
+ * in ####. Is that correct?" against "What is the best number to reach you?"
+ * — and the sibling pair `handoff_not_eligible` /
+ * `handoff_not_eligible_task_created` already picks its copy with a ternary at
+ * the call site. This follows both.
+ */
+describe('the question matches what we actually hold', () => {
+  it('the no-number copy asks for a number instead of confirming one', () => {
+    const said = PCP_REFUSALS.handoff_not_eligible_no_callback?.say ?? '';
+    expect(said, 'the caller is owed words here too').not.toBe('');
+    expect(said, 'there is no "this number" to point at').not.toMatch(/\bthis (?:the )?number\b/i);
+    expect(said, 'still standing instruction 12').toMatch(/number/i);
+  });
+
+  it('the no-number copy makes the same two promises and no more', () => {
+    const said = PCP_REFUSALS.handoff_not_eligible_no_callback?.say ?? '';
+    // It must not claim the record — that is the defect this file is about.
+    expect(said).not.toMatch(/taken this down|reaches the right team|will follow up/i);
+    // And it must still refuse the transfer plainly, as its sibling does.
+    expect(said).toMatch(/not able to|can't|cannot/i);
+  });
+
+  it('a caller we DO have a number for is still asked to confirm it', () => {
+    expect(PCP_REFUSALS.handoff_not_eligible.say ?? '').toMatch(/is this the best number/i);
+  });
+
+  it('a withheld caller ID gets the no-number words, live', async () => {
+    const { agent } = withheldCallerIdAskingForAPerson();
+    await reachTheLiveState(agent);
+    const r = await call(agent, 'handoff_to_pcp', { narrative: THE_ASK });
+    expect(r.success).toBe(false);
+    expect(r.error).toBe('handoff_not_eligible_no_callback');
+    expect(String(r.say ?? '')).not.toMatch(/is this the best number/i);
+  });
+
+  it('a caller with an E.164 caller ID still gets the confirm-it words, live', async () => {
+    const { agent } = patientAskingForAPerson();
+    await reachTheLiveState(agent);
+    const r = await call(agent, 'handoff_to_pcp', { narrative: THE_ASK });
+    expect(r.error).toBe('handoff_not_eligible');
+    expect(String(r.say ?? '')).toMatch(/is this the best number/i);
   });
 });

@@ -153,6 +153,39 @@ export const PCP_REFUSALS: Record<string, RefusalCopy> = {
   },
 
   /**
+   * THE SAME BRANCH, FOR A CALLER WHOSE NUMBER WE DO NOT HAVE.
+   *
+   * "Is this the best number to reach you on?" presupposes a number (Codex P2,
+   * #300). It is right for the common case — `pcpAgent.ts:510` seeds
+   * `callbackNumber` from caller ID on every call whose ANI is E.164, and
+   * confirming beats asking. It is wrong when there is nothing to confirm: a
+   * withheld or blocked caller ID arrives as a non-E.164 string, the seeding
+   * regex correctly rejects it, and the caller is then asked to confirm a
+   * number nobody holds. An answer of "yes" to that question produces a
+   * request that cannot be called back, which is the one outcome this whole
+   * branch exists to prevent.
+   *
+   * THE FORK IS THE HOUSE PATTERN, not a new one. `knowledgeBase.ts:283`
+   * already writes it — "I have your callback number as ending in ####. Is
+   * that correct?" against "What is the best number to reach you?" — and this
+   * refusal's own sibling pair is already selected by a ternary at the call
+   * site. So this is a second key, chosen there, rather than logic inside the
+   * copy table.
+   *
+   * Everything else is deliberately identical to the sibling: it refuses the
+   * transfer plainly, it does NOT claim the record, and it asks for the
+   * callback number (standing instruction 12).
+   */
+  handoff_not_eligible_no_callback: {
+    say: "I'm not able to put you through from this line, but I do want the right team to call you back. What's the best number to reach you on?",
+    guidance:
+      'The filing did NOT go through — do not tell the caller it did, and do not mention a system, an error or a retry. ' +
+      'We have no callback number for this caller, so ASK for one rather than confirming one. ' +
+      'Say the line above, take the number they give you with record_pcp_intake, then call create_pcp_task again to get the request on record. ' +
+      'Do not promise a transfer.',
+  },
+
+  /**
    * WE DIALLED AND NOBODY PICKED UP. CAa2a3a1c1, 2026-09-08 12:28.
    *
    * This is the one the whole module was written for and the one call site it

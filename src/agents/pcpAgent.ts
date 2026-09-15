@@ -1105,7 +1105,16 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           buildPayload(metadata, state, 'CREATE_TASK', narrative, urgency, undefined, 'handoff_not_eligible', missing),
         );
         if (fallback.success) pcpDirector.recordDisposition(callId, 'CREATE_TASK');
-        return refusePcp(fallback.success ? 'handoff_not_eligible_task_created' : 'handoff_not_eligible', {
+        // Which failure copy: the one that CONFIRMS a number, or the one that
+        // ASKS for one. `callbackNumber` is seeded from caller ID above, so it
+        // is empty only when the ANI was withheld, blocked or non-E.164 — and
+        // then "Is this the best number to reach you on?" points at nothing.
+        // (Codex P2, #300.) The `_task_created` sibling is unaffected: the
+        // request is on record there, and the number question is not its job.
+        const failureSlug = state.callbackNumber
+          ? 'handoff_not_eligible'
+          : 'handoff_not_eligible_no_callback';
+        return refusePcp(fallback.success ? 'handoff_not_eligible_task_created' : failureSlug, {
           handoffStatus: 'HANDOFF_UNAVAILABLE',
           ticketNumber: fallback.ticketNumber,
           fallbackRecorded: fallback.success,
