@@ -398,6 +398,80 @@ describe('the trim actually happened', () => {
   it('records stays under 1,750 prompt tokens', () => {
     expect(Math.round(records.length / 4)).toBeLessThan(1750);
   });
+});
+
+/**
+ * THE CEILINGS ABOVE MEASURE THE PROMPT NOBODY IS RECOGNISED ON.
+ *
+ * Every constant above is built with `{ callerPhone }` and no `precontext`,
+ * so `pc` is undefined and `recognisedCallerBlock` / `identityAskScript` /
+ * `identityCertainMeaning` all emit their COLD arm. The recognised arm is
+ * strictly larger — it adds the whole recognition block — and until this
+ * block existed nothing measured it at all.
+ *
+ * Measured 2026-09-15, the recognised arm costs a uniform +342 tokens, and
+ * THREE OF FOUR LANES ARE ALREADY PAST THE OPERATOR'S CEILING ON IT:
+ *
+ *   lane      ceiling   cold   recognised   over by
+ *   surgery      1800   1298         1641   -- inside
+ *   tech         1600   1594         1936        336
+ *   optical      1500   1385         1727        227
+ *   records      1750   1697         2040        290
+ *
+ * THIS IS NOT A v29 REGRESSION. The block was inline in all four agents long
+ * before it moved into the runtime; v27 and v28 each added to that arm, and
+ * v29 adds ~10 tokens more, but the bulk predates all three. What is new is
+ * that anybody can see it.
+ *
+ * WHY IT MATTERS MORE THAN THE NUMBER LOOKS: tasks #88 and #110 exist to make
+ * pre-context recognise MOST callers (135 of 170 are on file). Succeeding
+ * there moves nearly every call onto the arm that busts the ceiling — so the
+ * better pre-context gets, the more often we serve the oversized prompt.
+ *
+ * THESE ARE RATCHETS, NOT CEILINGS, AND THAT IS DELIBERATE. Lowering the
+ * recognised arm to the operator's stated numbers means deleting capability
+ * from it, which is his call under standing instruction 1 and a
+ * `docs/BACKEND_HANDOFF.md` change — not something a test should decide. So
+ * today's measured values are pinned: they may not GROW without somebody
+ * justifying it, which is what the ceiling block above says it exists for.
+ * Surgery is the exception and keeps its real ceiling, because it still fits.
+ */
+describe('the recognised-caller prompt is measured too', () => {
+  const PC = { matched: true, firstName: 'Casey' } as const;
+  const meta = { callerPhone: '+17605551234', precontext: PC } as never;
+  const warm = {
+    surgery: Math.round(buildSurgeryPrompt(meta).length / 4),
+    tech: Math.round(buildTechPrompt(meta).length / 4),
+    optical: Math.round(buildOpticalPrompt(meta).length / 4),
+    records: Math.round(buildRecordsPrompt(meta).length / 4),
+  };
+
+  it('surgery still fits its real ceiling when the caller is recognised', () => {
+    expect(warm.surgery).toBeLessThan(1800);
+  });
+
+  // Ratchets at the 2026-09-15 measurement. Going UP fails; going down is
+  // always welcome and the number should be lowered when it does.
+  for (const [lane, baseline] of [
+    ['tech', 1936],
+    ['optical', 1727],
+    ['records', 2040],
+  ] as const) {
+    it(`${lane}'s recognised prompt does not grow past ${baseline} tokens`, () => {
+      expect(warm[lane]).toBeLessThanOrEqual(baseline);
+    });
+  }
+
+  it('the recognised arm is measurably larger than the cold one on every lane', () => {
+    // The guard above this one is worthless if `precontext` stops reaching
+    // the block — the warm build would silently equal the cold build and
+    // every ratchet would pass while measuring nothing. This is the check
+    // that the arm under test is actually the recognised one.
+    expect(warm.surgery).toBeGreaterThan(Math.round(surgery.length / 4));
+    expect(warm.tech).toBeGreaterThan(Math.round(tech.length / 4));
+    expect(warm.optical).toBeGreaterThan(Math.round(optical.length / 4));
+    expect(warm.records).toBeGreaterThan(Math.round(records.length / 4));
+  });
 
   it('neither prompt carries a war story — those belong in code comments', () => {
     // "a war story is not an instruction" — surgeryAgent.ts's own comment,

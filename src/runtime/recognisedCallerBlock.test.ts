@@ -320,8 +320,46 @@ describe('How a call runs agrees with the block — leftover on #310', () => {
 
   it('a recognised caller still has the denial and the candidate-count exit', () => {
     const warm = identityCertainMeaning(RECOGNISED);
-    expect(warm).toMatch(/said no, or gave a different name/i);
-    expect(warm).toMatch(/candidate count/);
+    expect(warm).toMatch(/a no, or a different name/i);
+    expect(warm).toMatch(/candidate\s+count/);
+  });
+
+  /**
+   * CODEX P1 ON #310, found AFTER the merge — THE ORDER IS THE FIX.
+   *
+   * The first version stated both prohibitions and only then allowed the
+   * candidate-count exception. `lookupPatient`'s multi-person branch returns
+   * identity_is_certain false WITH a candidate_count and a message telling
+   * the model to ask for full name and date of birth — so the tool said ASK
+   * while this paragraph said DO NOT, on the same result. ~21% of phone
+   * matches resolve to more than one person.
+   *
+   * An assertion that the two phrases merely EXIST passes under the broken
+   * order too. These compare positions, which is the only thing that fails
+   * when somebody moves the carve-out back to the end.
+   */
+  it('states the ambiguity branch BEFORE the no-recollection rule', () => {
+    const warm = identityCertainMeaning(RECOGNISED);
+    const candidate = warm.search(/candidate\s+count/);
+    const ban = warm.search(/Do not collect their last name/);
+    expect(candidate).toBeGreaterThan(-1);
+    expect(ban).toBeGreaterThan(-1);
+    expect(candidate).toBeLessThan(ban);
+  });
+
+  it('scopes the no-recollection rule to a false flag WITHOUT a candidate count', () => {
+    const warm = identityCertainMeaning(RECOGNISED);
+    // The "not more than one person" claim must be qualified, not absolute:
+    // something between the candidate-count branch and the claim has to say
+    // the claim only holds when no candidate count came back.
+    expect(warm).toMatch(/Without one[^.]*does NOT mean more than one person/);
+  });
+
+  it('tells the model to ask, not merely to consult the script, when several are on file', () => {
+    const warm = identityCertainMeaning(RECOGNISED);
+    expect(warm).toMatch(/Several people on file/);
+    expect(warm).toMatch(/means ASK/);
+    expect(warm).toMatch(/call lookup_patient again with all\s+three/);
   });
 
   it('does not invent a date and does not require one on create-ticket', () => {
