@@ -40,66 +40,85 @@ gate refused anyway. It IS improving (45 of 61 = 73.8% on 2026-09-11 before
 
 ---
 
-## BUG A — we throw the date of birth away on purpose (24 calls)
+## BUG A — the person-base lookup ERASES the date pre-context stored (24 calls)
 
-Two lines, in two files.
+**Found by Cursor (SPEC, 2026-09-15). I had this as a passive omission and it
+is an active erasure — the stronger and more damning version.** Three links:
 
-`src/services/scheduleLookupService.ts:941` and `:976` — the person-base rung:
+`src/services/scheduleLookupService.ts:941` and `:976` — the person-base rung
+flags a caller-ID hit:
 
 ```ts
 identityUnconfirmed: matchedBy === 'phone',
 ```
 
-`src/tools/sharedPatientTools.ts:401` — the carry:
+`src/tools/sharedPatientTools.ts:401` — the carry then strips the date:
 
 ```ts
 ...(resolved.identityUnconfirmed ? {} : { dateOfBirth: resolved.patientData?.dateOfBirth }),
 ```
 
-So a caller-ID match through the **person base** stores the name, stores
-`certain: false`, and **deliberately does not store the date of birth**.
-`verifiedDobFor` then answers `undefined` and the gate refuses.
+`src/tools/verifiedIdentity.ts` — and the downgrade guard does not protect the
+entry v11 already wrote:
 
-**This was written on purpose and the reasoning is sound in isolation** — it is
-the Codex P1 on `1d775a4`: a phone number is a candidate to confirm, not an
-identity, so it must not auto-fill a birthday onto a ticket. Standing
-instruction 6 and RULE ZERO step 2 both say the same thing.
+```ts
+if (existing && existing.certain && !certain && provablySamePerson && ...) return;
+verified.delete(callSid);
+verified.set(callSid, { ... });
+```
 
-**IT IS NOT A REGRESSION.** Before the person-base rung (v10) existed these
-calls reached `emptyContext()` and found nobody at all, so nothing was taken
-away. It is an unfinished feature, not a break.
+**`existing.certain` must be TRUE for the guard to fire, and v11's pre-context
+write is `certain: false` with no `personId`.** So the guard never fires, the
+entry is deleted and replaced, and the replacement carries no date of birth.
 
-### The hole: the caller's confirmation is never recorded
+Sequence on a real call:
 
-The greeting has **already asked** "Am I speaking with <name>?" and the caller
-has **already answered**. That answer is the validation RULE ZERO step 2
-requires — the thing that turns a candidate into a match. **Nothing in the code
-ever reads it.** There is no path from the caller saying "yes" to
-`rememberVerifiedIdentity` being called again with `certain: true`.
+1. Pre-context matches → `rememberVerifiedIdentity` stores name + `dobOnFile`,
+   `certain: false`, no `personId`. **The date is in the map.**
+2. `lookup_patient` runs, the appointment book misses, the person-base rung
+   hits on phone → `identityUnconfirmed: true` → line 401 strips the date →
+   `rememberVerifiedIdentity` with name + `personId`, no date.
+3. The guard sees `existing.certain === false`, declines to protect, and
+   replaces. **The date is gone.**
+4. `file_*_ticket` asks `verifiedDobFor` and gets `undefined`. The gate refuses
+   for a field the process held ninety seconds earlier.
 
-So the record sits one confirmed word away from being usable and never gets
-promoted. That is the clamp Wayne has been describing and it does not exist.
+**THE CODE COMMENT BESIDE THE STRIP IS NOW FALSE.** It reads: *"It declines to
+add an unsafe shortcut; it does not take a working one away."* That was true
+when written — the person-base rung was new, and those callers previously
+reached `emptyContext()`. **Once v11 landed, there IS a working one to take
+away, and this takes it.** Two PRs, each correct alone, wrong together.
 
-**What counts as confirmation is a PROCEDURAL question and is the operator's**
-(standing instruction 1). Do not invent it. The candidates, for him to rule on:
+This is the exact population RULE ZERO exists for: phone match on
+`patients_master`, appointment-book miss, join holds the whole record.
 
-- the caller answers the greeting affirmatively;
-- the caller states a name matching the record;
-- the model calls a tool saying so (a `confirm_identity` tool exists nowhere
-  today);
-- nothing — a phone match is never enough, and the correct fix is instead to
-  ASK for the date of birth once, early, in the funnel (RULE ZERO 2b).
+### The second half: the caller's confirmation is never recorded
 
-The last of those is a real option and should not be dismissed: it needs no
-new identity machinery at all.
+Even without the erasure, `certain: false` is doing real work and should stay —
+a phone number is a candidate to confirm (instruction 6, RULE ZERO step 2).
+But the greeting has **already asked** "Am I speaking with <name>?" and the
+caller has **already answered**, and nothing in the code reads that answer.
+There is no path from a caller's "yes" to a promotion.
 
----
+Cursor's position, which is well argued: don't promote at all — the name guard
+on `verifiedDobFor` IS the confirmation, because a caller who says "no, that's
+my father" is not filed under that name. That is a cheaper and safer rail than
+a new confirmation signal, and it means Bug A's fix is simply **stop erasing**
+rather than **start promoting**.
+
+What counts as confirmation remains procedural and the operator's (standing
+instruction 1) if the name guard turns out not to be enough.
 
 ## BUG B — we stored it and the read refused anyway (32 calls)
 
-These reported `identity_is_certain: true`, which means `identityUnconfirmed`
-was false, which means line 401 **did** store
-`resolved.patientData?.dateOfBirth`. And the filing tool still refused.
+**THE ERASURE ABOVE DOES NOT EXPLAIN THESE, AND THAT IS THIS FILE'S ONE
+CORRECTION TO THE SPEC.** Cursor's mechanism accounts for the person-base
+population; it treats the wipe as the cause of all 51. The measurement splits
+them: these 32 reported `identity_is_certain: true`, which means
+`identityUnconfirmed` was false, which means they came from the APPOINTMENT
+BOOK rung, where line 401 **did** store the date. 18 of the 32 ran exactly one
+lookup and it was certain; only 2 ever saw an uncertain one. So the date was in
+the map at filing time and the read still refused.
 
 Two candidates were tested and **both are dead**:
 
