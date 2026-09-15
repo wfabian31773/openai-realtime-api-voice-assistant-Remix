@@ -167,17 +167,50 @@ export const PATIENT_FIELDS: Array<keyof PcpConversationState> = ['statedRelatio
  * one.
  */
 export const PATIENT_INTAKE_ORDER: Array<keyof PcpConversationState> = ['callPurpose', 'callerName', 'callbackNumber'];
+/**
+ * RULE ZERO 2b/2c — THE FORMAT GOES IN THE QUESTION.
+ *
+ *   "Everything else that we need, we create a funnel towards — in the
+ *    questioning — towards that answer in the way that we need it."
+ *
+ * Three of these were rewritten on 2026-09-15 against the PCP line's first
+ * full day. None of them removes a question or changes which fields are
+ * required — that is the interrogation, a POLICY matter and the operator's
+ * under standing instruction 1. Only the wording moved.
+ *
+ * `callerFacilityType` is an EIGHT-VALUE ENUM (`PCP_FACILITY_TYPES`) and was
+ * asked as an open question, so callers could not tell it was a multiple
+ * choice. At least six answered with the ORGANISATION NAME AGAIN on 2026-09-14
+ * — Regal Medical Group four times, Children's Surgery Centers, Optum. It now
+ * names the common options; the list is deliberately short of all eight
+ * because a spoken question that recites eight categories is not a question
+ * anybody answers, and `other_healthcare_organization` is the catch-all the
+ * classifier already has.
+ *
+ * `patientDob` was the one lane asking bare. CLAUDE.md's compliance table
+ * records Rule 2b as satisfied on "all four lanes — opticalAgent.ts:193,
+ * surgeryAgent.ts:203, techAgent.ts:189, recordsAgent.ts:192, plus no-ivr and
+ * answering-service", and PCP is simply absent from that list. Month, then
+ * day, then year is what makes the answer arrive parseable; `dobParts.ts`
+ * records what the alternative costs.
+ *
+ * `statedRelationship` followed `callerRole` closely enough to read as a
+ * rephrase of it, and CLAUDE.md already records the pair drawing the same
+ * answer twice. It now asks plainly about the caller's connection to the
+ * patient rather than about their role a second time.
+ */
 export const PROMPTS: Partial<Record<keyof PcpConversationState, string>> = {
   callerName: 'May I have your full name?',
   callerRole: 'What is your role?',
   callerOrganization: 'Which organization are you calling from?',
-  callerFacilityType: 'What type of healthcare organization is that?',
+  callerFacilityType:
+    "Is that a doctor's office or provider, a health plan, a medical group, a hospital, or something else?",
   callbackNumber: 'What is the best callback number?',
   callPurpose: 'What are you calling about today?',
-  statedRelationship: 'What is your professional relationship to this patient?',
+  statedRelationship: 'And how are you involved in this patient\'s care?',
   patientFirstName: "What is the patient's first name?",
   patientLastName: "What is the patient's last name?",
-  patientDob: "What is the patient's date of birth?",
+  patientDob: "And the patient's date of birth, starting with the month, then the day, then the year.",
   recordsDeliveryMethod: 'How would you like to receive the records — by fax, by email, or by mail?',
   // Replaced at ask-time by DESTINATION_PROMPTS once the method is known. A
   // generic "what is the destination?" is the thing this change exists to
