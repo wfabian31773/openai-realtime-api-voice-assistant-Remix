@@ -210,7 +210,12 @@ export const PROMPTS: Partial<Record<keyof PcpConversationState, string>> = {
   statedRelationship: 'And how are you involved in this patient\'s care?',
   patientFirstName: "What is the patient's first name?",
   patientLastName: "What is the patient's last name?",
-  patientDob: "And the patient's date of birth, starting with the month, then the day, then the year.",
+  // The question mark is the turn boundary this line runs on (pcpAgent.ts:190),
+  // and this was the only ask written as a statement. The wording is now the
+  // four queue lanes' own, pointed at the patient: opticalAgent.ts:193,
+  // surgeryAgent.ts:203, techAgent.ts:189, recordsAgent.ts:192. (Codex P2, #303.)
+  patientDob:
+    "And may I please have the patient's date of birth, starting with the month, then the day, then the year?",
   recordsDeliveryMethod: 'How would you like to receive the records — by fax, by email, or by mail?',
   // Replaced at ask-time by DESTINATION_PROMPTS once the method is known. A
   // generic "what is the destination?" is the thing this change exists to

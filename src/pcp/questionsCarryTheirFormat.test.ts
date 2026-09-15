@@ -51,7 +51,7 @@
  * wording moves, which is the half RULE ZERO actually calls binding.
  */
 import { describe, it, expect } from 'vitest';
-import { PROMPTS, PCP_FACILITY_TYPES } from './director';
+import { PROMPTS, DESTINATION_PROMPTS, PCP_FACILITY_TYPES } from './director';
 import { REQUIRED_PROMPTS } from './ticketRequirements';
 
 describe('callerFacilityType names the choices it accepts', () => {
@@ -132,5 +132,49 @@ describe('a question is worded in exactly one place', () => {
   });
   it('callbackNumber matches the director', () => {
     expect(REQUIRED_PROMPTS.callbackNumber).toBe(PROMPTS.callbackNumber);
+  });
+});
+
+/**
+ * EVERY ASK IS A QUESTION, BECAUSE THE PROMPT DEFINES THE TURN BOUNDARY AS
+ * THE QUESTION MARK.
+ *
+ * `pcpAgent.ts:190` — "Your turn ends the moment the question mark lands." —
+ * sits directly under the rule this line's callers complain about most: one
+ * question, then silence. A prompt written as a statement gives the model no
+ * boundary to stop at, and the sentence after it is the one nobody wants.
+ *
+ * `patientDob` was the only entry ending in a period (Codex P2, #303). It was
+ * also the only one that had drifted from the four queue lanes CLAUDE.md
+ * names as Rule 2b-compliant — `opticalAgent.ts:193`, `surgeryAgent.ts:203`,
+ * `techAgent.ts:189`, `recordsAgent.ts:192` all say "And may I please have
+ * your date of birth, starting with the month, then the day, then the year?"
+ * and all four end in a question mark. PCP now says the same thing about the
+ * patient, so the format is still inside the question and the turn still has
+ * an end.
+ *
+ * `ticketRequirements.test.ts` and `pcpIntakeDegradation.test.ts` already
+ * assert this over `REQUIRED_PROMPTS` and `nextRequiredAsk`. `PROMPTS` — the
+ * director's own list, which is where the model actually gets its next
+ * question — had no such assertion, which is how a statement got in.
+ */
+describe('every director ask ends where the turn ends', () => {
+  for (const [field, prompt] of Object.entries(PROMPTS)) {
+    it(`${field} is a question`, () => expect(prompt).toMatch(/\?$/));
+  }
+
+  /**
+   * The destination questions too — except `unspecified`, which is empty on
+   * purpose: it is the caller declining, and nothing is asked after it.
+   */
+  for (const [method, prompt] of Object.entries(DESTINATION_PROMPTS)) {
+    if (!prompt) continue;
+    it(`the ${method} destination is a question`, () => expect(prompt).toMatch(/\?$/));
+  }
+
+  it('the patient date of birth still carries its format', () => {
+    const dob = PROMPTS.patientDob!;
+    expect(dob.toLowerCase().indexOf('month')).toBeLessThan(dob.toLowerCase().indexOf('day'));
+    expect(dob.toLowerCase().indexOf('day')).toBeLessThan(dob.toLowerCase().indexOf('year'));
   });
 });
