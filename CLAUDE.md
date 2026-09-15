@@ -131,12 +131,65 @@ were the behaviour.
 | Rule 1 · match `patients_master` by phone | **PARTIAL.** `findByPhone` exists and is wired into `lookupPatient`'s LAST rung only (PR #292). Runtime caller-ID pre-context goes through `sage_precontext` over HTTP and **which table it reads is still UNSETTLED** — see instruction 14. Nobody was greeted by name on either pipeline on 2026-09-03. |
 | Rule 1 · validate before trusting | **YES.** `verifyPatient` / `findByPhone` refuse to choose between two people and report a candidate count. |
 | Rule 1 · join on `PersonID` | **BUILT, NOT DEPLOYED.** `ScheduleLookupService.lookupByPersonId`, PR #292. Index `idx_schedule_personid_apptdate` is live. |
-| Rule 1 · carry it forward into every tool and ticket | **PARTIAL.** Date of birth inherit on name match + person-base wipe stopped (v26). The gates still refuse on `location` and `surgeon` for callers whose record holds them. |
+| Rule 1 · carry it forward into every tool and ticket | **PARTIAL.** Date of birth inherit on name match + person-base wipe stopped (v26). A caller who AFFIRMS the greeting's *"Am I speaking with <name>?"* is no longer asked for a surname or a date of birth we already hold (v27) — on 2026-09-14, 19 of the 24 recognised callers behind a date-of-birth refusal had been asked for their last name anyway. The gates still refuse on `location` and `surgeon` for callers whose record holds them. |
 | Rule 2a · ask new-or-existing | **MISSING FROM EVERY QUEUE LANE.** Zero hits in `opticalAgent`, `surgeryAgent`, `techAgent`, `recordsAgent`. It exists as `rampEngine.ts:60` (`classify`), and `rampEngine` is imported by **one** file — `voiceAgentRoutes.ts`, the OLD CORE. So the runtime lanes, which take the volume, do not ask it. Wayne asked whether we still had it; we do not, on the lanes that matter. |
 | Rule 2b · DOB asked in month/day/year parts | **YES, all four lanes** — `opticalAgent.ts:193`, `surgeryAgent.ts:203`, `techAgent.ts:189`, `recordsAgent.ts:192`, plus no-ivr and answering-service. |
 | Rule 2b · never two fields in one breath | **NO.** Records was observed asking for first and last name in one breath on 2026-09-03. |
 
 Full working notes: **`.agents/memory/the-record-and-the-funnel.md`**.
+
+---
+
+# RULE THREE — THE CORPUS IS THE TEST, AND WE WORK UNTIL IT PASSES
+
+**Wayne, 2026-09-15. BINDING, and it sits beside RULE ZERO because it is how
+every rule in this file gets proven.**
+
+> *"That's the whole point of grabbing those calls and putting them on disk. So
+> that we can identify every single issue on every single call, build a tester,
+> run it through the test, and see if it would fail again. That's the whole
+> idea. That was the whole purpose. We can't get away from that. We have a hard
+> set of transcripts that we get. And we run all those failures and we work
+> until those failures are passing."*
+
+**THIS IS THE METHOD. It is not optional and it is not a nice-to-have.**
+
+1. **A real failure day gets its calls pulled to disk.** Every call, by its real
+   `call_sid`, with its transcript. On disk, not in a summary.
+2. **Every call is read** and its failure named — the specific one, not the
+   category. "The name guard refused" is a category; "the record says
+   Espinosa and the caller said Espinoza" is the failure.
+3. **The corpus becomes a test**, indexed by the real SIDs, that reproduces
+   each named failure.
+4. **We work until the corpus passes.** Not until a reviewer is happy, not
+   until the tests we already had go green — until *those* calls pass.
+5. **A fix that claims to address a failure class runs the corpus first.** If
+   you cannot say how many of the corpus it rescues and how many it does not,
+   you have not measured it and must not claim it.
+
+**WHAT THIS FORBIDS.**
+
+- Saying a share is "unmeasured" when the calls are on disk. **They are the
+  measurement.** If you find yourself writing "we won't know until a day of
+  traffic", check the corpus first — the answer is usually already sitting
+  there. *(This rule exists because I did exactly that on 2026-09-15 and Wayne
+  had to point out I was holding the evidence.)*
+- Shipping a fix for a class of failure without running it against the calls
+  in that class.
+- Letting the corpus rot. When a fix lands, the corpus is re-run and the row
+  for each call says rescued / still fails / correctly refused.
+
+**PHI: the transcripts live on disk and in `call_logs`, never in git.** What
+goes in the repo is the real `call_sid` list, the failure SHAPE, and synthetic
+stand-ins that reproduce it — the pattern `src/pcp/replay20260914.test.ts`
+already established.
+
+**THE CORPORA THAT EXIST TODAY:**
+
+| corpus | what it is | the test |
+|---|---|---|
+| PCP, 2026-09-14 | the 17 calls that left no ticket of any provenance | `src/pcp/replay20260914.test.ts` |
+| queue lanes, 2026-09-14 | the 30 certain-phone date-of-birth refusals | `src/tools/dobNameMismatch.test.ts` |
 
 ---
 
@@ -1839,6 +1892,7 @@ voice-runtime-v23-pcp-recording-disclosure-20260915
 voice-runtime-v24-pcp-queue-choice-answerable-20260915
 voice-runtime-v25-dob-carry-instrument-20260915
 voice-runtime-v26-chart-dob-inherit-20260915
+voice-runtime-v27-recognition-block-is-runtime-owned-20260915
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -1869,13 +1923,14 @@ on it is evidence about current code.
 | **v23** or earlier — NOT the date | the queue-choice question being answerable. **`CA02f7febc`, 2026-09-14, 124 seconds, the entire call:** greeting → caller says *"Representative?"* → the 53-word warning ending *"Would you like me to connect you, or take it here?"* → caller says **"Me."** → end of transcript, and **no ticket of any provenance exists for that call SID.** The caller answered the question and left with nothing. **"Me." maps to NEITHER option.** The question offered two VERB PHRASES — "connect you" and "take it here" — and the reply is a pronoun that reads equally as "connect ME" or "YOU take it, not me", so `callerAcceptedQueue` could not be filled honestly and the tri-state's `not_established` branch was the only correct one. **THE FIELD IS A BOOLEAN AND THE QUESTION WAS NOT:** `readQueueChoice` takes `boolean \| undefined`, so the answer has to be yes or no; asking an either/or between two paraphrases is RULE ZERO 2c in its purest form — the shape of the question not matching the shape of the field. It now ends on ONE proposition. It was also 53 words before reaching the question, marked `[interrupted]` on 8+ calls that day, and `CA606bc754` answered it with *"For how long am I going to stay representative? The zero doesn't even have, they transferred me here."* **EVERY CLAUSE THE OPERATOR APPROVED ON 2026-09-13 SURVIVES, in their own words down to "transfers with you"** — which `queueIsAChoice.test.ts` already pins verbatim, and keeping it was the right call over loosening that assertion to fit new phrasing. `queueChoiceIsAnswerable.test.ts` pins each clause SEPARATELY so a later trim cannot quietly drop one. **THE TRI-STATE IS UNTOUCHED:** silence is still not consent, only an explicit yes suppresses the ticket, and that property still belongs to `queueIsAChoice.test.ts`. 8 assertions, **5 mutations, 5 caught**, including one that smuggles a second proposition back into the closing question. **NOT MEASURED IN PRODUCTION**, `docs/BACKEND_HANDOFF.md` applies. The number: PCP calls that reach the queue choice and end with neither a ticket nor a transfer — at least 1 on 2026-09-14 (`CA02f7febc`), target 0. The guard: the share choosing the QUEUE must not jump, because a question that is easier to say yes to is also easier to say yes to by accident |
 | **v24** or earlier — NOT the date | the date-of-birth carry instrument. A `date_of_birth` refusal now records `outcome.carry`: `fired` \| `no_entry` \| `entry_without_dob` \| `name_mismatch` \| `bad_call_sid`. Diagnosis is PR #307 (`the-dob-carry.md`). **This is not a fix.** It does not stop the person-base wipe (Bug A, 24 calls) and it does not change inherit. `dobShape` still answers "did the model send the field?" (`(none)` on 93 of 93 refusals on 09-14); `carry` answers "why didn't inherit fill it?". `name_mismatch` is the discriminator for Bug B (32 certain matches that still refused). A build without this cannot tell those two apart from SQL. **NOT MEASURED IN PRODUCTION.** The number it makes readable: among runtime `file_*_ticket` events with `missingFields` containing `date_of_birth`, the share of each arm. The guard: filing behaviour must not move — a refusal that used to file still files, a refusal that used to refuse still refuses |
 | **v25** or earlier — NOT the date | chart date-of-birth inherit (the fix). Empty must not overwrite a full DOB already in `verifiedIdentity` for the same person (Bug A — person-base lookup wiping the v11 pre-context date). When the ticket first+last matches the stored name, `file_*_ticket` puts chart `patientBirthMonth` / `Day` / `Year` on the create payload even if the model omitted `date_of_birth`. Does not invent a date. Does not require DOB on create-ticket. Does not promote `certain: false`. Bug B: `nameKey` treats hyphen / accent / apostrophe as the same person; nicknames and maiden names stay refused and still read as `carry: name_mismatch`. The v25 instrument rides along. **NOT MEASURED IN PRODUCTION.** Before-arm is 2026-09-14: 94 DOB refusals / 644 substantive, 61 no ticket. The number: runtime `date_of_birth` refusals on callers already addressed from their record (51 that day), target down. The guard: tickets filed with a date of birth that is not the patient's must not appear |
+| **v26** or earlier — NOT the date | the recognised-caller block being ONE thing the runtime owns. Operator, 2026-09-15: *"the things that are applicable to any conversation should be in the runtime; things applicable to that agent itself should be in the prompt"* — and caller recognition is applicable to any conversation. It was written FOUR times instead, inline in `opticalAgent`, `surgeryAgent`, `techAgent` and `recordsAgent`, and the copies drifted into contradicting each other. `personaliseGreeting` (`greetingPersonalisation.ts:147`) replaces the greeting's closing question with *"Am I speaking with <name>?"*, so the greeting ASKS it; tech and records said so, optical and surgery told the model to *"go straight to confirming"* and ask it again. **Measured 2026-09-14/15 over substantive runtime calls whose transcript contains the phrase, where the lane's wording is the only variable: optical 7 of 76 asked TWICE (9.2%), surgery 3 of 85 (3.5%), tech 0 of 142.** Zero on the lane worded correctly. **THE RULE CHANGE BESIDE IT IS THE OPERATOR'S, AND IT IS THE HALF THAT MOVES A NUMBER.** The old block said *"A first name is not verification. Ask for the last name in their own words, and still collect the date of birth."* The INTENT is RULE ZERO step 2 — validate a phone match before trusting it — and the implementation inverted the outcome: the caller's spoken surname went to `verifiedDobFor`'s name guard, which reads ANY textual difference as the wrong person (an accent, a compound surname, a mis-hearing), so a confirmation mechanism became a rejection mechanism and the patient lost a date of birth the process was already holding. On the 30 certain-phone date-of-birth refusals of 2026-09-14 (`src/tools/dobNameMismatch.test.ts`, the corpus) **24 were greeted by name, 19 of those were then asked for their last name anyway, and 27 of 30 were asked for both.** The validation did not go away — it moved to the answer the greeting's own question already collects, which discriminates: **228 callers affirmed it and 13 denied it** over the same period. An affirmed greeting now ends the identity step; a DENIAL still discards the match entirely and the block self-destructs, which was always right. **WHAT WAS NEARLY LOST IN THE MOVE, and what caught it:** the first draft dropped the *"NEVER open with 'can I get your name and date of birth' when you have a match"* bullet, keeping its reasoning and losing its imperative. `opticalAgent.test.ts` failed — and optical is the ONLY one of the four that had a test at all, which is exactly how three inline copies drifted unnoticed. **THE DRIFT GUARD IS THE DELIVERABLE AS MUCH AS THE BLOCK** (`src/runtime/recognisedCallerBlock.test.ts`), because the operator asked for one in as many words: *"maybe put in some type of guard against that type of drifting."* It walks the exported `RECOGNITION_BLOCK_LANES` and fails when an agent drops the import, stops calling it, or carries an inline copy of any of the block's own sentences — comparing PROMPT TEXT with full-line comments stripped, so a comment quoting the rule is documentation rather than a second copy. It also runs `personaliseGreeting` per lane and fails if a greeting stops asking the question the block asserts as fact, and it pins the lane table itself, because deleting a lane from the table would silently stop guarding it. 42 assertions across the two files; **11 mutations, 11 caught** — a lane re-inlining the block (5 fail), an agent keeping the import but not calling it, the *"go straight to confirming"* wording returning, the YES bullet reverting to the old rule, the denial bullet deleted, the NEVER-open bullet deleted, the block emitted for an UNMATCHED caller, the name no longer interpolated, a lane losing its greeting style, and a lane quietly dropped from the table. **NOT MEASURED IN PRODUCTION**, `docs/BACKEND_HANDOFF.md` applies. The numbers: callers asked *"Am I speaking with X?"* twice — 7 of 76 optical and 3 of 85 surgery on 2026-09-14/15, target 0 on both, tech's 0 of 142 is the control that must stay 0; and runtime `date_of_birth` refusals on callers the greeting already addressed by name — 51 on 2026-09-14, target down. The guard: a caller who DENIES the greeting's question must still be treated as unidentified, so tickets carrying a date of birth that is not the patient's must not appear |
 
 **READ THE VERSION, NEVER THE DATE — FOUR BUILDS SHARE 2026-09-12.**
 v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v26 IS THE
+**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v27 IS THE
 NEWEST.** v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-request
 floor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
 (#301), v22 the question format (#303), v23 the recording disclosure (#304),
@@ -1887,7 +1942,8 @@ one place those six numbers and the containment agree. **v25 stacks on that
 integrated v24** — it is the date-of-birth `carry` instrument, not another
 sibling. **v26 stacks on v25** — stop-erase + inherit-on-file; the instrument
 rides along. A deployment reading v25 does not contain the fix. Do not treat
-#308 (v25 alone) as the next ship.
+#308 (v25 alone) as the next ship. **v27 stacks on v26** — the recognised-caller
+block moved into the runtime, with its drift guard.
 
 **v14-v18 WERE a chain, which is why the distinction matters.** v14 (the PCP
 queue choice), v15 (PCP records), v16 (professional records), v17 (PCP

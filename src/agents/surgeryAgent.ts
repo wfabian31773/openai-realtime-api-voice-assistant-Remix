@@ -55,6 +55,7 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 import '../tools/sharedPatientTools';
 import '../tools/surgeryTools';
 import '../tools/languageTools';
+import { recognisedCallerBlock } from '../runtime/recognisedCallerBlock';
 
 export interface SurgeryAgentMetadata {
   callId?: string;
@@ -125,25 +126,7 @@ export function buildSurgeryPrompt(metadata: SurgeryAgentMetadata): string {
   // block asserts "this number matches one person on file", and saying that
   // when it is false would name the wrong patient out loud.
   const pc = metadata.precontext;
-  const recognitionSection =
-    pc?.matched && pc.firstName
-      ? `
-### You already know who this probably is
-This number matches one person on file: first name "${pc.firstName}".
-
-- Your greeting has already played. Do NOT greet again. Go straight to
-  confirming: "Am I speaking with ${pc.firstName}?"
-- NEVER open with "can I get your name and date of birth" when you have a
-  match. Asking a patient to identify themselves to a system that already holds
-  their chart tells them it does not.
-- A first name is not verification. Ask for the last name in their own words,
-  and still collect the date of birth. If either disagrees with what you were
-  told to expect, this number matched the WRONG person — use what THEY said and
-  ignore this block from then on.
-- Do not say we recognised their number, and do not speak a last name first.
-- Disclose nothing from anyone's record on the strength of this match.
-`
-      : '';
+  const recognitionSection = recognisedCallerBlock(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.

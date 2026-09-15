@@ -179,8 +179,25 @@ import { callEnvironment } from "./callRecord";
  * apostrophe) — not nicknames. The v25 `carry` enum rides along.
  * Diagnosis is PR #307. Stacks on v25; not a v19–v24 sibling.
  */
+/**
+ * v27, 2026-09-15: THE RECOGNISED-CALLER BLOCK IS THE RUNTIME'S, NOT FOUR
+ * AGENTS'.
+ *
+ * One copy in `src/runtime/recognisedCallerBlock.ts`, imported by optical,
+ * surgery, tech and records — operator, same day: "the things that are
+ * applicable to any conversation should be in the runtime; things applicable
+ * to that agent itself should be in the prompt." Two of the four copies had
+ * drifted into telling the model to ASK a question the greeting had already
+ * asked, and it was asked twice on 7 of 76 optical and 3 of 85 surgery calls
+ * against 0 of 142 on tech, which carried the correct wording.
+ *
+ * It also carries the operator-approved rule change: an affirmed greeting
+ * ends the identity step, so a recognised caller is not asked for a surname
+ * the name guard would then reject. `recognisedCallerBlock.test.ts` is the
+ * drift guard. Stacks on v26.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v26-chart-dob-inherit-20260915";
+  "voice-runtime-v27-recognition-block-is-runtime-owned-20260915";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
