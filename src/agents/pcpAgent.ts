@@ -28,7 +28,8 @@ import type { StatedSchedulingIntent } from '../tools/queueRouting';
 import { refusePcp } from '../pcp/refusals';
 import { asksForAPerson } from '../pcp/explicitAsk';
 import { preTransferGaps, preTransferQuestion } from '../pcp/preTransferIntake';
-import { QUEUE_CHOICE_WARNING, readQueueChoice, suppressesTicket } from '../pcp/queueChoice';
+import { QUEUE_CHOICE_WARNING, readQueueChoice, choseTheQueue } from '../pcp/queueChoice';
+import { handoffAfterQueueDial } from '../pcp/queueDialSettlement';
 import {
   deliveryAskFor,
   isRecordsRequest,
@@ -1266,8 +1267,17 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * Every other path — declined, unclear, no answer, and a transfer the
        * caller never asked for — still gets the round, unchanged.
        */
-      const transferWithoutATicket = suppressesTicket(choice);
-      if (!transferWithoutATicket && !preTransferAskUsed) {
+      /**
+       * ONE NAME, ONE JOB. This decides what we ASK — not whether we FILE.
+       *
+       * It was `transferWithoutATicket` and it answered both questions with
+       * one boolean until the operator reversed the filing half on
+       * 2026-09-15. Keeping the old name while only one of its two meanings
+       * survived is how `connectsToHuman` welded the length of the intake to
+       * whether we dial; see the reversal note in `queueChoice.ts`.
+       */
+      const callerChoseTheQueue = choseTheQueue(choice);
+      if (!callerChoseTheQueue && !preTransferAskUsed) {
         const question = preTransferQuestion(preTransferGaps(state));
         if (question) {
           preTransferAskUsed = true;
@@ -1284,19 +1294,26 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         ? state
         : { ...state, callPurpose: 'service_inquiry' as const };
       /**
-       * NO PRE-DIAL TICKET WHEN THE CALLER CHOSE THE QUEUE.
+       * THE PRE-DIAL TICKET, ON EVERY PATH — Rosa's design, restored by the
+       * operator on 2026-09-15 ("yes to the v14 reversal").
        *
-       * `initial` is `undefined` on exactly that path and defined on every
-       * other, which is what the gate below reads. Deliberately not a boolean
-       * beside a ticket that was written anyway: the promise the operator made
-       * is that no ticket exists, so the honest encoding is an absent write,
-       * not a suppressed flag.
+       * This was `transferWithoutATicket ? undefined : ...` from 09-13, so a
+       * caller who chose the queue was dialled with nothing written anywhere.
+       * `initial` is now always defined, which means the two gates below —
+       * "the request is on record" and "the call is still live" — protect the
+       * accepted arm again as well. That is not a side effect to tolerate, it
+       * is the invariant those gates exist for: CAa37f1a42 is a caller told
+       * "give me one moment while I connect you" and connected to nobody,
+       * with no record of the request anywhere.
+       *
+       * `REQUESTED` is what it says before the dial. The line below turns it
+       * into DIALING / TRANSFERRED_TO_QUEUE once the redirect goes out, and
+       * never into CONNECTED.
        */
-      const initial = transferWithoutATicket
-        ? undefined
-        : await submitPcpTicket(buildPayload(metadata, handoffState, 'HAND_OFF', narrative, urgency, {
-            requested: true, requestedAt, attempted: false, finalStatus: 'REQUESTED',
-          }, undefined, missing));
+      const preDialPayload = buildPayload(metadata, handoffState, 'HAND_OFF', narrative, urgency, {
+        requested: true, requestedAt, attempted: false, finalStatus: 'REQUESTED',
+      }, undefined, missing);
+      const initial = await submitPcpTicket(preDialPayload);
       /**
        * THE PRECONDITION IS "THE REQUEST IS ON RECORD" — NOT "THIS WRITE
        * RETURNED 200". CAa37f1a42, 2026-09-04 16:11.
@@ -1400,6 +1417,45 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
 
       escalationDetailsMap.set(callId, {
         agentSlug: 'pcp',
+        /**
+         * THE TICKET LEARNS WHAT THE DIAL DID — and it is registered HERE
+         * because there is nowhere later to register it.
+         *
+         * On the blind path the redirect ends the Media Stream, so by the time
+         * Twilio's `<Dial action>` callback lands there is no agent, no tool
+         * invocation and no closure left. `runtimeTransfer` snapshots this into
+         * the pending-dial entry exactly as it snapshots `briefingGaps`,
+         * because this map is deleted in `attempt`'s finally.
+         *
+         * ONLY WHEN THE PRE-DIAL WRITE SUCCEEDED. The ticketing app updates a
+         * ticket it can find by `callSid` and INSERTS when it cannot, so
+         * registering this after a failed write could open a SECOND ticket
+         * minutes after the call, carrying a dial outcome and none of the
+         * intake. A failed pre-dial write is already handled above.
+         *
+         * WHAT IT HOLDS: `preDialPayload`, which carries the caller's name and
+         * callback number, for as long as the dial runs (the runtime evicts a
+         * pending entry after an hour). That is a real extension of how long
+         * this process holds those fields; it is the same payload the call
+         * already built, and the entry is dropped the moment the dial settles.
+         */
+        onBlindDialSettled: initial.success
+          ? async (settlement) => {
+              // No `destination` here on purpose: at registration time the
+              // dial has not happened. `settlement.dialedNumber` carries the
+              // number the runtime actually dialled, off the pending entry.
+              const { handoff, disposition } = handoffAfterQueueDial(settlement, {
+                requestedAt,
+                attemptedAt,
+              });
+              const res = await submitPcpTicket({ ...preDialPayload, disposition, handoff });
+              console.info(
+                `[PCP] queue dial settled ${settlement.outcome} after ${settlement.ringSeconds}s ringing` +
+                  `${settlement.connected ? `, ${settlement.talkSeconds ?? 0}s bridged` : ''}` +
+                  ` — ticket ${res.success ? 'updated' : 'NOT updated'} (${callId})`,
+              );
+            }
+          : undefined,
         callerRequestedHuman: askedForAPerson,
         callerType: state.callPurpose,
         reason: narrative,
@@ -1470,7 +1526,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * Setting it after the dial would lose that race every time the redirect
        * is fast, which is the normal case.
        */
-      if (transferWithoutATicket) pcpDirector.setCallerChoseTheQueue(callId, true);
+      if (callerChoseTheQueue) pcpDirector.setCallerChoseTheQueue(callId, true);
       const outcome = await handoffCallback();
       const ok = Boolean(outcome && outcome.ok);
       /**
@@ -1484,7 +1540,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * "I have your request recorded" — becomes true again rather than the
        * broken promise this line keeps being corrected for.
        */
-      if (transferWithoutATicket && !ok) pcpDirector.setCallerChoseTheQueue(callId, false);
+      if (callerChoseTheQueue && !ok) pcpDirector.setCallerChoseTheQueue(callId, false);
       /**
        * A BLIND TRANSFER IS NOT A CONNECTION, and the ticket must not claim
        * one. Rosa's design, approved 2026-09-08: the PCP caller is put into
@@ -1518,46 +1574,44 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         ? rawFinalState
         : { ...rawFinalState, callPurpose: 'service_inquiry' as const };
       /**
-       * THE PROMISE IS KEPT HERE, and this is the line that keeps it.
+       * THE POST-DIAL WRITE, ON EVERY PATH — the other half of the reversal.
        *
-       * A successful hand-over on the caller's own choice writes NO ticket at
-       * all — not the pre-dial one, not this one. Every other combination
-       * still writes: a failed dial files the CREATE_TASK fallback (see the
-       * withdrawal above), and a caller who never chose the queue is on the
-       * unchanged path.
+       * This was `transferWithoutATicket && ok ? undefined : ...`, so an
+       * accepted transfer wrote nothing here either and the arm was INVISIBLE
+       * in `tickets` — which is the instrument CLAUDE.md says to measure PCP
+       * transfers from, and never `call_logs`. The 09-13 baseline (72
+       * attempted, 12 reached a human) could not be continued past that line
+       * for the callers it applied to.
        *
-       * WHAT THIS COSTS, and it is not small: an accepted transfer becomes
-       * INVISIBLE IN `tickets`. `tickets.pcp_handoff_*` is the only working
-       * instrument for PCP transfers today — CLAUDE.md says to measure them
-       * from there and never from `call_logs` — so the baseline this line was
-       * measured against (72 attempted, 12 reached a human) cannot be
-       * continued across this change for the accepted arm. What is left is
-       * `recordHandoffResult` on the director, the console line below, and
-       * Twilio's own `<Dial action>` callback via `blindTransferDialResult`.
-       * Flagged for the operator rather than worked around here: filing a
-       * shadow ticket to keep the metric would be the ticket he said not to
-       * file.
+       * The fields carry Rosa's vocabulary exactly, and none of it is new:
+       * `handedToQueue` gives `DIALING` with `humanAnswerStatus =
+       * TRANSFERRED_TO_QUEUE` and NO `connectedAt`, so the ticketing app's
+       * `humanHandoffOccurred = finalStatus === 'CONNECTED'` stays false. The
+       * v20 rule — nothing on the blind path may record that a human answered
+       * — is untouched by filing; it was never the ticket's existence that
+       * claimed a person, it was the status.
+       *
+       * The app upserts on `callSid`, so this is an UPDATE of the pre-dial
+       * row rather than a second ticket.
        */
-      const updated = transferWithoutATicket && ok
-        ? undefined
-        : await submitPcpTicket(buildPayload(metadata, finalState, finalDisposition, narrative, urgency, {
-            requested: true,
-            requestedAt,
-            attempted: true,
-            attemptedAt,
-            // Recorded whether or not it connected. A failed transfer with no
-            // destination is an unanswerable question later; see HandoffOutcome.
-            destination: outcome ? outcome.destination : undefined,
-            humanAnswerStatus: handedToQueue ? 'TRANSFERRED_TO_QUEUE' : finalStatus,
-            connectedAt: ok && !handedToQueue ? new Date().toISOString() : undefined,
-            finalStatus,
-            failureReason: outcome && !outcome.ok ? outcome.reason : undefined,
-            fallbackTicketStatus: ok ? undefined : 'OPEN',
-          }, outcome && !outcome.ok ? outcome.reason : undefined, finalMissing));
+      const updated = await submitPcpTicket(buildPayload(metadata, finalState, finalDisposition, narrative, urgency, {
+        requested: true,
+        requestedAt,
+        attempted: true,
+        attemptedAt,
+        // Recorded whether or not it connected. A failed transfer with no
+        // destination is an unanswerable question later; see HandoffOutcome.
+        destination: outcome ? outcome.destination : undefined,
+        humanAnswerStatus: handedToQueue ? 'TRANSFERRED_TO_QUEUE' : finalStatus,
+        connectedAt: ok && !handedToQueue ? new Date().toISOString() : undefined,
+        finalStatus,
+        failureReason: outcome && !outcome.ok ? outcome.reason : undefined,
+        fallbackTicketStatus: ok ? undefined : 'OPEN',
+      }, outcome && !outcome.ok ? outcome.reason : undefined, finalMissing));
       if (updated?.success) pcpDirector.recordDisposition(callId, finalDisposition);
-      if (transferWithoutATicket && ok) {
+      if (callerChoseTheQueue && ok) {
         console.info(
-          `[PCP] handed to the queue on the caller's own choice — no ticket, by design (${callId}, ${finalStatus})`,
+          `[PCP] handed to the queue on the caller's own choice — ticket filed at ${finalStatus}, not CONNECTED (${callId})`,
         );
       }
       const settled = {
