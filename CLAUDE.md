@@ -1156,7 +1156,7 @@ IS NOT FIVE DIFFERENT PEOPLE — IT IS ONE PERSON RINGING BACK.** I reported thi
 as a defect in the day's analysis before running the control. The control
 kills it:
 
-| ticket | first call | second call | same caller? |
+| ticket | first call | second call | same calling NUMBER? |
 |---|---|---|---|
 | VA-59960 | CAd8e2ca 15:31 | CAcda5884 15:34 | **yes** |
 | VA-60085 | CA85e4eef 17:52 | CA2f7688e 17:54 | **yes** |
@@ -1168,7 +1168,25 @@ kills it:
 
 Identical caller number on both legs of all seven, and **every second call has
 a `ticket_contact_entries` row on that same ticket.** That row is the app's
-consolidation record, and it is the whole answer.
+consolidation record, and it is what answers the question.
+
+**BUT THE COLUMN SAYS NUMBER, NOT PERSON, AND THAT DISTINCTION IS THIS FILE'S
+OWN RULE.** Standing instruction 6 and RULE ZERO step 2 both say a phone match
+is a candidate to CONFIRM, never an identity. I wrote "same caller" in that
+column anyway, forty lines below the rule forbidding it (Codex P2, #315).
+Re-measured against `patients_master`, all five phone columns:
+
+| the 7 numbers behind these pairs | |
+|---|---|
+| resolve to exactly ONE person | **2** |
+| resolve to NOBODY in the person base | **5** |
+| resolve to two or more | 0 |
+
+**Five of seven are not in the person base at all, and this is the PCP lane** —
+doctors' offices, medical groups, surgery centres, insurers. A clinic
+switchboard is the normal caller here, so two calls from one number can be two
+different staffers about two different patients. Nothing above establishes they
+are not. See the exposure below, which this measurement WIDENS.
 
 **THE CHAIN, all three links read from the source:**
 
@@ -1181,9 +1199,13 @@ consolidation record, and it is the whole answer.
 2. `create-ticket` then answers `{ consolidated: true, ticketNumber: <the
    EXISTING ticket> }`. The agent read back the number the app gave it.
 3. So the model invented nothing and remembered nothing. `check_open_tickets`
-   is read-only and was not even needed. **Both the tool and the app did the
-   right thing** — a patient chasing a request should be told their own ticket
-   number, not handed a second one. This is item 2 of the measurement traps
+   is read-only and was not even needed. **THAT is what is proven, and it is
+   the whole answer to the question asked** — the number the agent spoke came
+   from the API, not from memory, a cache or a stale variable. Whether
+   consolidating those two calls was CORRECT is a separate claim resting on
+   identity, and for 5 of the 7 nothing establishes it. Where the two calls
+   really are one patient chasing their own request, reading their own ticket
+   number back is right and handing them a second one would be wrong. This is item 2 of the measurement traps
    above ("the transcript `VA-#####` proxy OVER-counts") firing for the fourth
    time, and I walked into it after writing it down.
 
@@ -1225,22 +1247,39 @@ and **`update-call-data`'s `ticketNumber`-first lookup**, which stamps the row.
 The conclusion the file draws is right — it is not the #71/#77 retry sweep —
 and the named mechanism is wrong.
 
-**The open question is the OTHER consolidation rule, which has no phone in it.**
-Same first+last name, same department, within 24 hours. Wayne's ruling was
-about a returning patient landing on their own ticket. This rule can put **two
-different patients with the same common name** on one ticket, and then one of
-them re-stamps it with the other's call and transcript. That is the only path
-by which the original 2.6% note's *"sometimes a different caller entirely"*
-could be literally true. **NOT MEASURED.** Count it before deciding anything,
-and the decision is his, not mine.
+**The open question is CROSS-PATIENT CONSOLIDATION, and it is wider than I
+first wrote.** Wayne's ruling was about a returning patient landing on their
+own ticket. Two arms can put **two different patients** on one ticket instead,
+and then one of them re-stamps it with the other's call and transcript:
+
+- **The name-only arm.** Same first+last name, same department, within 24
+  hours, no phone check at all. Two people with a common name.
+- **The phone arm, on a PROFESSIONAL line.** I first called this one sound, on
+  the strength of the number matching. The measurement above withdraws that:
+  5 of the 7 numbers are not in the person base, and a clinic switchboard
+  calling PCP twice in 48 hours about two different patients matches on last-7
+  + department and consolidates. On a patient line the phone arm is a
+  reasonable proxy; on this lane the modal caller is an organisation.
+
+Either is a path by which the original 2.6% note's *"sometimes a different
+caller entirely"* could be literally true. **NEITHER IS MEASURED.** Count them
+before deciding anything, and the decision is his, not mine.
 
 **WHAT THIS CHANGES ABOUT MEASURING — this part is not a defect claim.**
 A ticket's `call_sid` names the last call that touched it, so it cannot be used
 to ask *which call filed*. On 2026-09-15 PCP, **8 of the 89 calls I scored as
 "no ticket" carry a ticket number on their own `call_logs` row** — they filed,
 and the callback took the ticket's SID. Read `call_logs.ticket_number` for that
-question (the filing alarm already does, deliberately), and read the ticket's
-`call_sid` only for "who rang most recently".
+question; the filing alarm already does, deliberately.
+
+**AND IT IS THE LAST SUCCESSFUL WRITER, NOT THE LATEST CALLER** (Codex P2,
+#315). `ticketingSyncService.runSync` selects its batch with **no `ORDER BY`**
+and each row retries on its own schedule, so an older call can land after a
+newer one. `VA-59856` is the proof and it was sitting in my own evidence:
+`call_start_time` from the 20:34 call, `call_sid` from the 21:35 call — one
+row carrying two different calls' data, which an ordered single writer cannot
+produce. So do not read that column as "who rang most recently" either.
+**Chronology comes from `call_logs` timestamps, never from the ticket.**
 
 `VA-59856` is the shape at its clearest: `call_start_time` from the 09-15 20:34
 pcp call and `call_sid` from the 09-15 21:35 **records** call, four contact

@@ -232,9 +232,21 @@ run at all** for a ticket's call fields to change. Traced end to end on
    `callStartTime`, `callEndTime`, `callDurationSeconds`, `transcript`,
    `recordingUrl`, `qualityScore`, `patientSentiment` and `agentOutcome` onto
    the ticket row. `ticketingSyncService.syncCall`
-   (`server/services/ticketingSyncService.ts:170`) always sends a
-   `ticketNumber`, so the endpoint's `ticket_contact_entries` fallback — which
-   exists and would be the right target — is never reached.
+   (`server/services/ticketingSyncService.ts:170`) sends the call's
+   `ticketNumber` whenever its row has one — which the write-back has already
+   set on a consolidated callback — and on those calls the lookup goes by
+   NUMBER and the row is re-stamped.
+
+   **THE `ticket_contact_entries` FALLBACK IS STILL REACHABLE, and an earlier
+   version of this entry said it was "never reached"** (Codex P2, #315).
+   `runSync` selects on `or(isNotNull(ticketNumber), isNotNull(callSid))`
+   (`:112-115`) and `syncCall` serialises a missing number as
+   `ticketNumber: undefined` (`:171-174`), so a call carrying only a SID
+   reaches the endpoint with no number, matches by `callSid`, and lands on its
+   contact entry — which is the correct target. Saying otherwise would
+   misdirect anyone investigating exactly those unsynced calls. The accurate
+   statement is narrower: **a call whose row already holds a ticket number
+   bypasses the fallback**, and that is the consolidation case.
 
 The ruling above still stands over all of it. What is NOT covered by the ruling
 is the **name-only** arm of rule 1: two different patients with the same common
