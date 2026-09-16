@@ -40,7 +40,7 @@ process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';
 
 const { buildPcpPrompt } = await import('../agents/pcpAgent');
-const { PROFESSIONAL_FIELDS, PROFESSIONAL_ENRICHMENT, PATIENT_INTAKE_ORDER, PROMPTS, PcpDirector } = await import('./director');
+const { PROFESSIONAL_FIELDS, PROFESSIONAL_ENRICHMENT, ENRICHMENT_AFTER_FILING, PATIENT_INTAKE_ORDER, PROMPTS, PcpDirector } = await import('./director');
 
 const prompt = buildPcpPrompt({ callerPhone: '+18455317471' } as never);
 
@@ -141,7 +141,18 @@ describe('the model cannot read ahead, because it is not given the list', () => 
     // `plan_participation` has no patient behind it, so the two professional
     // blocks run back to back and the order is the whole interview.
     d.update('pro1', { callPurpose: 'plan_participation' });
-    for (const field of [...PROFESSIONAL_FIELDS, ...PROFESSIONAL_ENRICHMENT].filter((f) => f !== 'callPurpose')) {
+    // `ENRICHMENT_AFTER_FILING` holds the title and the email back until a
+    // disposition is on the record, so the walk is in two halves. The ORDER
+    // within the whole list is unchanged — only where the filing sits in it.
+    const before = [...PROFESSIONAL_FIELDS, ...PROFESSIONAL_ENRICHMENT]
+      .filter((f) => f !== 'callPurpose' && !ENRICHMENT_AFTER_FILING.includes(f));
+    for (const field of before) {
+      expect(d.next('pro1').nextQuestion?.field, `expected ${field} next`).toBe(field);
+      d.update('pro1', answerFor(String(field)));
+    }
+    expect(d.next('pro1').nextQuestion, 'the request files before the credentials').toBeUndefined();
+    d.recordDisposition('pro1', 'CREATE_TASK');
+    for (const field of ENRICHMENT_AFTER_FILING) {
       expect(d.next('pro1').nextQuestion?.field, `expected ${field} next`).toBe(field);
       d.update('pro1', answerFor(String(field)));
     }

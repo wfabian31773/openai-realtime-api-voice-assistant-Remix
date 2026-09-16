@@ -477,8 +477,26 @@ describe('what the prompt costs', () => {
    * the largest of the eight; how far it should come down is Wayne's call,
    * not this file's.
    */
+  /**
+   * RAISED 2,400 -> 2,420 ON 2026-09-16, naming its own cause as the note
+   * above requires.
+   *
+   * v37 stops the interview asking for a title and an email in front of the
+   * filing, and the model has to be told that the questions continue AFTER it
+   * files or it simply never asks them. That is four lines, ~54 tokens,
+   * landing the prompt at ~2,402. It was 96 tokens on the first draft and was
+   * cut in half before this number was touched.
+   *
+   * WHAT IT BUYS: on 2026-09-16, 25 substantive PCP calls were asked for an
+   * email, 18 ended on that question, and 10 left no ticket of any
+   * provenance. Twenty tokens against ten lost requests a day.
+   *
+   * Nothing else was allowed to grow — every other section is still pinned by
+   * the ruling coverage above, and this still asserts the only thing it ever
+   * asserted: the prompt does not grow while nobody is looking.
+   */
   it('does not grow beyond where it stands today', () => {
-    expect(Math.round(pcp.length / 4)).toBeLessThan(2400);
+    expect(Math.round(pcp.length / 4)).toBeLessThan(2420);
   });
 
   it('carries no war story — those belong in code comments', () => {

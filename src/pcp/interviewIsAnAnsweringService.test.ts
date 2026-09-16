@@ -86,17 +86,29 @@ describe('the order the operator asked for', () => {
     const d = director();
     // A purpose with no patient behind it: the whole list is the caller.
     d.update('pro', { callPurpose: 'plan_participation' });
+    // BEFORE THE TICKET EXISTS, only what the request needs. The title and the
+    // email used to be in this walk; on 2026-09-16 ten calls died on the email
+    // question and left no ticket of any provenance, so they moved behind the
+    // filing — `ENRICHMENT_AFTER_FILING`.
     expect(questionsAsked(d, 'pro')).toEqual([
-      'callerName', 'callerOrganization', 'callerRole', 'callerEmail', 'callbackNumber',
+      'callerName', 'callerOrganization', 'callbackNumber',
     ]);
+    // AND THE FIELDS ARE NOT DROPPED — they are asked once the request is safe.
+    d.recordDisposition('pro', 'CREATE_TASK');
+    expect(questionsAsked(d, 'pro')).toEqual(['callerRole', 'callerEmail']);
   });
 
   it('and the patient comes before the title when there is a patient', () => {
     const d = director();
     d.update('ord', { callPurpose: 'outside_referral_status' });
     const asked = questionsAsked(d, 'ord');
-    expect(asked.indexOf('patientFirstName')).toBeLessThan(asked.indexOf('callerRole'));
-    expect(asked.indexOf('patientFirstName')).toBeLessThan(asked.indexOf('callerEmail'));
+    expect(asked).toContain('patientFirstName');
+    // The title and the email are not merely later in this walk — they are not
+    // in it at all until a disposition is on the record.
+    expect(asked).not.toContain('callerRole');
+    expect(asked).not.toContain('callerEmail');
+    d.recordDisposition('ord', 'CREATE_TASK');
+    expect(questionsAsked(d, 'ord')).toEqual(['callerRole', 'callerEmail']);
   });
 
   it('puts WHO THE CALL IS ABOUT in the intake, not behind five credentials', () => {
@@ -125,7 +137,7 @@ describe('the questions do the extra work, so the turns do not', () => {
     d.update('both', { callerName: 'Karina', callerOrganization: 'Optum Medical Clinics' });
     const next = d.askNext('both').nextQuestion?.field;
     expect(next, 'the organisation was asked despite being given').not.toBe('callerOrganization');
-    expect(next).toBe('callerRole');
+    expect(next).toBe('callbackNumber');
   });
 
   it('a caller who gives only a name IS still asked the organisation', () => {
@@ -166,6 +178,12 @@ describe('the call a real caller gets', () => {
     // patient, and a callback the call itself supplied. What remains is the
     // enrichment block, which cannot cost us the ticket.
     expect(asked).toEqual(['callerName', 'patientFirstName']);
+    // AND THE INTERVIEW STOPS THERE so the model files. It used to hand back
+    // `callerRole` here, and then the email — which is where ten calls ended
+    // on 2026-09-16 with no ticket at all.
+    expect(d.askNext('real').nextQuestion).toBeUndefined();
+    // Once the request is durable, the credentials are asked and enrich it.
+    d.recordDisposition('real', 'CREATE_TASK');
     expect(d.askNext('real').nextQuestion?.field).toBe('callerRole');
   });
 
@@ -180,7 +198,7 @@ describe('the call a real caller gets', () => {
    * never once asked which patient. Under this order she is asked the patient
    * second, and hanging up on the title question leaves a workable ticket.
    */
-  it('a caller who hangs up on the title question still leaves a filable request', async () => {
+  it('is never asked a credential question before the request is filable', async () => {
     const { ticketReadiness } = await import('./ticketRequirements');
     const d = director();
     d.update('quit', { callPurpose: 'outside_referral_status', callbackNumber: '+19095551234' });
@@ -188,8 +206,13 @@ describe('the call a real caller gets', () => {
     d.update('quit', { callerName: 'Karina', callerOrganization: 'Optum Medical Clinics' });
     d.askNext('quit');
     d.update('quit', { patientFirstName: 'Sam', patientLastName: 'Rivera' });
-    // The next question is the title. They hang up instead of answering it.
-    expect(d.askNext('quit').nextQuestion?.field).toBe('callerRole');
+    // THIS ASSERTION USED TO READ `toBe('callerRole')`, under the heading "a
+    // caller who hangs up on the title question still leaves a filable
+    // request". The request was filABLE and it did not FILE: the model files
+    // when it runs out of questions, and the title and the email were still
+    // questions. Ten calls on 2026-09-16 ended on the email ask with no ticket
+    // of any provenance.
+    expect(d.askNext('quit').nextQuestion).toBeUndefined();
 
     const readiness = ticketReadiness(d.get('quit') as never);
     expect(readiness.ready).toBe(true);
