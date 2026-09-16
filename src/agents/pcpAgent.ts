@@ -8,6 +8,7 @@ import { recordingExecute } from '../services/toolTimeline';
 import { withToolDirection } from '../services/toolDirection';
 import { scheduleLookupService } from '../services/scheduleLookupService';
 import {
+  MAX_ASKS_PER_FIELD,
   PCP_FACILITY_TYPES,
   PROFESSIONAL_FIELDS,
   PATIENT_INTAKE_ORDER,
@@ -708,7 +709,24 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * this cannot throw into the intake.
        */
       await syncDirectorFactsToLedger(callId, pcpDirector.get(callId));
-      return pcpDirector.next(callId);
+      const decision = pcpDirector.next(callId);
+      /**
+       * THE ONLY PLACE A PCP QUESTION IS SPOKEN, so the only place the ask
+       * budget is charged. See `PcpDirector.noteAsked` for why this is not
+       * inside `next()`.
+       *
+       * On CA908f93dae322ed0e0dd862673ebf77fb (2026-09-15) this tool handed
+       * back `patientFirstName` seven times and the agent asked it seven
+       * times. After MAX_ASKS_PER_FIELD the director stops offering it, the
+       * form moves on, and the field rides onto the ticket as NOT CAPTURED.
+       */
+      if (decision.nextQuestion) pcpDirector.noteAsked(callId, decision.nextQuestion.field);
+      if (decision.askBudgetSpent?.length) {
+        // Console-visible AND, through toolTimeline, countable from SQL. The
+        // tool ceiling's stops are console-only and this is not repeating that.
+        console.log(`[PCP ASK BUDGET] ${callId}: stopped asking for ${decision.askBudgetSpent.join(', ')} after ${MAX_ASKS_PER_FIELD} attempts each`);
+      }
+      return decision;
     },
   });
 

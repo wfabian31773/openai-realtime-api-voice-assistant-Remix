@@ -321,7 +321,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
   if (parsed?.nextQuestion || parsed?.mayTerminate !== undefined || parsed?.handoffEligible !== undefined) {
     if (parsed?.nextQuestion?.field) out.nextField = String(parsed.nextQuestion.field);
     else if (parsed?.mayTerminate !== undefined) out.nextField = null; // intake complete
-    for (const k of ['disposition', 'handoffEligible', 'mayTerminate', 'phiDisclosureAllowed', 'authoritativeToolAllowed', 'mustCreateFallbackTicket']) {
+    // `askBudgetSpent` is an array of FIELD NAMES — no caller data — and it is
+    // the signal that answers "did the line get stuck on a question?" from
+    // SQL. The tool ceiling's own stops never reach this table and cannot be
+    // counted at all; this one deliberately does not repeat that.
+    for (const k of ['disposition', 'handoffEligible', 'mayTerminate', 'phiDisclosureAllowed', 'authoritativeToolAllowed', 'mustCreateFallbackTicket', 'askBudgetSpent']) {
       if (parsed?.[k] !== undefined) out[k] = parsed[k];
     }
   }

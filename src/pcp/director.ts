@@ -28,6 +28,12 @@ export interface PcpConversationState {
   verificationStatus: PcpVerificationStatus;
   toolFailures: Record<string, number>;
   completedTools: string[];
+  /**
+   * HOW MANY TIMES WE HAVE PUT EACH FIELD TO THE CALLER — see
+   * MAX_ASKS_PER_FIELD. Written only by `noteAsked`, which only the intake
+   * tool calls, because that is the one place a question is actually spoken.
+   */
+  askCounts?: Partial<Record<keyof PcpConversationState, number>>;
   dispositionRecorded?: PcpDisposition;
   handoffStatus?: 'HANDOFF_UNAVAILABLE' | 'NO_ANSWER' | 'FAILED' | 'CONNECTED';
   handoffFailureReason?: string;
@@ -92,6 +98,8 @@ export interface PcpConversationState {
 
 export interface PcpDirectorDecision {
   nextQuestion?: { field: keyof PcpConversationState; prompt: string };
+  /** Fields still unset that we have stopped asking for — see MAX_ASKS_PER_FIELD. */
+  askBudgetSpent?: string[];
   disposition?: PcpDisposition;
   phiDisclosureAllowed: boolean;
   authoritativeToolAllowed: boolean;
@@ -147,6 +155,47 @@ export type PcpRecordsDeliveryMethod = (typeof PCP_RECORDS_DELIVERY_METHODS)[num
 export const RECORDS_FIELDS: Array<keyof PcpConversationState> = [
   'recordsDeliveryMethod', 'recordsDeliveryDestination',
 ];
+
+/**
+ * A QUESTION THE CALLER HAS NOT ANSWERED TWICE IS NOT ASKED A THIRD TIME.
+ *
+ * Operator, 2026-09-16, naming this as one of his three priorities for the
+ * line: *"being able to quickly identify when we have an issue on the line
+ * like that, one that asks somebody something seven times or something like
+ * that, like that shouldn't be possible, right?"*
+ *
+ * SEVEN IS THE MEASURED NUMBER, NOT A FIGURE OF SPEECH.
+ * `CA908f93dae322ed0e0dd862673ebf77fb`, 2026-09-15, 150 seconds, no ticket of
+ * any provenance:
+ *
+ *   CALLER: Representative?
+ *   AGENT:  What is the patient's first name?
+ *     ... seven times, then the caller was gone
+ *
+ * NOTHING EXISTING COULD STOP IT, and that is the point of putting the bound
+ * here rather than anywhere else:
+ *
+ *  - `toolCeiling`'s `identicalFailures` (3) and `perToolFailures` (6) count
+ *    FAILURES. Every one of those `record_pcp_intake` calls SUCCEEDED — the
+ *    model kept re-recording `statedRelationship` from the same word — so a
+ *    success cleared the counters by design. `tool_call_count` reached 15,
+ *    nowhere near `perCallDispatches` (40).
+ *  - `ticketRequirements.MAX_BLOCKS` (3) bounds how many times a FILING may be
+ *    HELD. No filing tool was ever called on that call, so that budget was
+ *    never touched. It is a different question and stays untouched here.
+ *
+ * What was missing was a bound on the INTAKE FORM repeating itself, and that
+ * is this. Two is a judgement, not a measurement: once to ask, once in case
+ * the first answer was mis-heard. It is deliberately not 1 — a genuine ASR
+ * drop on the first pass is common on this line and a second ask recovers it.
+ *
+ * WHAT IT DOES NOT DO. An exhausted field is skipped as a QUESTION; it is not
+ * invented, and it does not become "answered". It rides onto the ticket as
+ * NOT CAPTURED through the annotation path that already exists, which is the
+ * #288 unassigned-exit shape the operator has already approved elsewhere: a
+ * request that files short beats a request that never files.
+ */
+export const MAX_ASKS_PER_FIELD = 2;
 
 export const PROFESSIONAL_FIELDS: Array<keyof PcpConversationState> = [
   'callPurpose', 'callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber',
@@ -328,6 +377,23 @@ export class PcpDirector {
     this.states.delete(callId);
   }
 
+  /**
+   * RECORD THAT WE PUT A FIELD TO THE CALLER. Counts toward MAX_ASKS_PER_FIELD.
+   *
+   * SEPARATE FROM `next()` ON PURPOSE. `next()` is read five times per call by
+   * callers that want `handoffEligible`, `disposition` or `mayTerminate` and
+   * are not asking anybody anything (`pcpAgent.ts` 785, 842, 1154, 1852).
+   * Counting inside `next()` would charge the budget for those reads and burn
+   * a caller's two asks without a word being spoken. Only the intake tool —
+   * the one place a question is handed back to the model to say out loud —
+   * calls this.
+   */
+  noteAsked(callId: string, field: keyof PcpConversationState): void {
+    const state = this.get(callId);
+    const counts = state.askCounts ?? {};
+    state.askCounts = { ...counts, [field]: (counts[field] ?? 0) + 1 };
+  }
+
   next(callId: string): PcpDirectorDecision {
     const state = this.get(callId);
     const purpose = state.callPurpose ? getPcpCallPurpose(state.callPurpose) : undefined;
@@ -424,7 +490,33 @@ export class PcpDirector {
       // question. Without this the escape hatch reopens the loop it closes.
       if (deliveryDestinationNeeded(state)) required.push('recordsDeliveryDestination');
     }
-    const missing = required.find((field) => !state[field]);
+    const stillUnset = required.filter((field) => !state[field]);
+    /**
+     * TWO QUESTIONS, TWO ANSWERS — AND WELDING THEM IS THE BUG THIS AVOIDS.
+     *
+     * `intakeIncomplete` is whether the form is genuinely short of something.
+     * `missing` is what we will ASK FOR NEXT, which the budget bounds.
+     *
+     * They must not be one boolean. `handoffEligible`'s SECOND arm reads
+     * "a complete intake on a HAND_OFF purpose", and that arm is the
+     * AUTO-transfer the operator withdrew on 2026-09-04 ("never
+     * auto-transfer; transfer only when the caller ASKS and is an entity").
+     * If it read the budget-aware value, spending the budget would silently
+     * complete the intake and DIAL — a caller dialled into the PCP queue
+     * because we gave up asking them a question. That is the exact
+     * `connectsToHuman` welding this file already records, pointed at
+     * something worse than a long intake.
+     *
+     * So the budget changes what the agent SAYS and nothing about who we
+     * connect. `directorAskBudget.test.ts` fails if these are collapsed.
+     */
+    const intakeIncomplete = stillUnset.length > 0;
+    const askBudgetSpent = stillUnset.filter(
+      (field) => (state.askCounts?.[field] ?? 0) >= MAX_ASKS_PER_FIELD,
+    );
+    const missing = stillUnset.find(
+      (field) => (state.askCounts?.[field] ?? 0) < MAX_ASKS_PER_FIELD,
+    );
 
     let disposition = purpose?.defaultDisposition;
     if (state.callPurpose === 'pharmaceutical_representative' && this.options.pharmaHandoffEnabled) {
@@ -507,7 +599,7 @@ export class PcpDirector {
      * where the parent commit returned false.
      */
     const handoffEligible =
-      eligibleByAsk || Boolean(!isPatient && purpose && disposition === 'HAND_OFF' && !missing && !handoffFailed);
+      eligibleByAsk || Boolean(!isPatient && purpose && disposition === 'HAND_OFF' && !intakeIncomplete && !handoffFailed);
 
     return {
       nextQuestion: missing
@@ -521,6 +613,14 @@ export class PcpDirector {
               ?? `Please provide ${String(missing)}.`,
           }
         : undefined,
+      /**
+       * Fields we have stopped asking for. Field NAMES only — no caller data —
+       * so it is safe on the ticket and in `tool_timeline`, and it is what
+       * makes "the line got stuck on a question" countable from SQL. The tool
+       * ceiling's own stops are console-only and uncountable; this one is not
+       * repeating that.
+       */
+      askBudgetSpent: askBudgetSpent.length ? askBudgetSpent.map(String) : undefined,
       disposition,
       phiDisclosureAllowed,
       authoritativeToolAllowed,
