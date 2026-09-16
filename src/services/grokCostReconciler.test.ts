@@ -50,6 +50,10 @@ function ports(calls: GrokCallRow[]): ReconcilerPorts & { written: Array<{ callS
 
 beforeEach(() => {
   vi.spyOn(console, "info").mockImplementation(() => undefined);
+  // A refusal now warns (Codex P2, #319). Silenced here so the suite output
+  // stays readable; the announcement itself is asserted in
+  // costRefusesAnImplausibleDay.test.ts.
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 afterEach(() => vi.restoreAllMocks());
 

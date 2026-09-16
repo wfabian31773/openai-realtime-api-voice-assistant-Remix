@@ -68,6 +68,7 @@ const THE_ONE_CALL = "CAb04962a559c013987d12958542b2b02c";
 
 beforeEach(() => {
   vi.spyOn(console, "info").mockImplementation(() => undefined);
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -160,5 +161,75 @@ describe("wiring, read from the source", () => {
     // branch cannot be left in the source and stone dead — the shape that
     // survived a first attempt on #318.
     expect(reconciler.slice(guard, guard + 400)).toMatch(/reconciled: false/);
+  });
+});
+
+/**
+ * THE REFUSAL HAS TO REACH A HUMAN, or the guard only half works.
+ *
+ * Codex P2, #319: `startGrokCostReconciler` discards the fulfilled outcome
+ * and catches only rejections, so a refused day left the rows estimated, was
+ * retried every six hours, and said nothing anywhere. The anomalous charge —
+ * the one thing this guard exists to surface — was the most invisible of all.
+ */
+describe("a refused day is announced", () => {
+  it("says so on the console, with the charge and the derived rate in it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const p = ports([{ callSid: THE_ONE_CALL, durationSeconds: 104, estimatedCents: 14 }]);
+    await reconcileGrokCostsForDay(SATURDAY, p, { setup: SETUP, fetchImpl: spending(37.43) });
+
+    const line = warn.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(line).toContain("[GROK COST]");
+    expect(line).toContain("not reconciled");
+    expect(line).toContain(SATURDAY);
+    expect(line).toMatch(/37\.43/);
+    expect(line).toMatch(/c\/min/);
+  });
+
+  it("announces EVERY refusal, not just the rate one", async () => {
+    // A day with no runtime calls at all. Different branch, same requirement:
+    // the scheduler cannot see the returned outcome, so the log is the only
+    // channel there is.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await reconcileGrokCostsForDay(SATURDAY, ports([]), { setup: SETUP, fetchImpl: spending(37.43) });
+
+    const line = warn.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(line).toContain("not reconciled");
+    expect(line).toContain("no runtime-served calls");
+  });
+
+  it("still announces a SUCCESSFUL day on info, and does not warn about it", async () => {
+    // The guard must not have turned the good path into an alarm, and the
+    // marker it has always printed must survive the move to the wrapper.
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const p = ports([{ callSid: THE_ONE_CALL, durationSeconds: 104, estimatedCents: 14 }]);
+    const out = await reconcileGrokCostsForDay(SATURDAY, p, { setup: SETUP, fetchImpl: spending(0.14) });
+
+    expect(out.reconciled).toBe(true);
+    expect(info.mock.calls.map((c) => String(c[0])).join("\n")).toContain("reconciled 1 call(s)");
+    expect(warn.mock.calls.map((c) => String(c[0])).join("\n")).not.toContain("not reconciled");
+  });
+
+  it("logs at ONE exit, so a refusal branch added later cannot forget", () => {
+    // Read from the source, because a test that only drives today's branches
+    // proves nothing about the next one somebody adds (failure mode 10).
+    const src = readFileSync(path.resolve(__dirname, "./grokCostReconciler.ts"), "utf8");
+    // Exactly one site renders the marker for each outcome, and it is in the
+    // wrapper — not scattered through the branches, which is the bug.
+    expect(src.match(/console\.info\(reconcileMarker\(/g) ?? []).toHaveLength(1);
+    expect(src.match(/console\.warn\(reconcileMarker\(/g) ?? []).toHaveLength(1);
+    // And the branches themselves live in a function that cannot return to
+    // the caller without passing through it.
+    expect(src).toContain("const outcome = await runReconciliation(day, ports, options);");
+    expect(src).toMatch(/async function runReconciliation\(/);
+    // BOTH sites are in the WRAPPER, above the branching function — counting
+    // them is not the same as locating them, and a mutation that moved the
+    // success marker back inside the branches kept the count at one and
+    // sailed through. The whole logging story has to read in one place.
+    const body = src.indexOf("async function runReconciliation(");
+    expect(body).toBeGreaterThan(-1);
+    expect(src.indexOf("console.info(reconcileMarker(")).toBeLessThan(body);
+    expect(src.indexOf("console.warn(reconcileMarker(")).toBeLessThan(body);
   });
 });

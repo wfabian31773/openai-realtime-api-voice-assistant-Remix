@@ -155,10 +155,42 @@ export function reconcileMarker(outcome: ReconcileOutcome): string {
   );
 }
 
+/**
+ * THE ONLY PLACE EITHER OUTCOME IS ANNOUNCED, and that is the point.
+ *
+ * Every refusal below returns early, and `startGrokCostReconciler` throws the
+ * fulfilled outcome away — it only catches rejections. So before this wrapper
+ * existed, a day the reconciler REFUSED was invisible to the operator: the
+ * rows stayed estimated, the scheduler retried every six hours, and nothing
+ * anywhere said why. That is worst for the guard that matters most, the
+ * rate-sanity refusal, whose whole job is to surface a charge the durations
+ * cannot account for (Codex P2, #319).
+ *
+ * Logging at the single exit rather than inside each branch is deliberate: a
+ * refusal branch added later cannot forget to announce itself, which is the
+ * shape of the bug being fixed. `reconcileMarker` already renders BOTH
+ * outcomes, so this reuses that renderer rather than writing a second copy of
+ * the sentence — the `explicitAsk.ts` noun-list lesson.
+ */
 export async function reconcileGrokCostsForDay(
   day: string,
   ports: ReconcilerPorts,
   options: { setup?: XaiBillingSetup; fetchImpl?: FetchLike } = {},
+): Promise<ReconcileOutcome> {
+  const outcome = await runReconciliation(day, ports, options);
+  if (outcome.reconciled) console.info(reconcileMarker(outcome));
+  // warn, not info: a refusal means the day was NOT settled and those rows are
+  // still priced from a constant. Uniform across every refusal — a weekend
+  // with no calls is as unreconciled as an unexplained charge, and a severity
+  // table per branch is one more thing to drift.
+  else console.warn(reconcileMarker(outcome));
+  return outcome;
+}
+
+async function runReconciliation(
+  day: string,
+  ports: ReconcilerPorts,
+  options: { setup?: XaiBillingSetup; fetchImpl?: FetchLike },
 ): Promise<ReconcileOutcome> {
   const spend = await fetchDailySpend(day, { setup: options.setup, fetchImpl: options.fetchImpl });
   if (!spend.ok) return { day, reconciled: false, reason: spend.reason };
@@ -318,7 +350,6 @@ export async function reconcileGrokCostsForDay(
     estimateCoversCalls: stillEstimated.length,
     derivedCentsPerSecond: allocation.derivedCentsPerSecond,
   };
-  console.info(reconcileMarker(outcome));
   return outcome;
 }
 
