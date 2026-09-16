@@ -350,6 +350,34 @@ Green tests did not prevent any of the regressions listed there.
     resolves which office they mean. So the shape is mirror-first for
     identity, then the schedule for history. Not one replacing the other.
 
+15. **ADVISE, DO NOT WAIT.** (2026-09-16) *"Don't just sit there and wait for
+    me for everything. Make your suggestions, recommendations. I'm trusting you
+    and allowing you to guide this operation in the best practice the way it
+    should be... if I tell you do something and you know that there's a much
+    better way to do it, or much more efficient or more modern way to do
+    something, then it's your obligation to bring that to my attention. Don't
+    just take what I give you and act on what I give you. Take what I give you
+    as what I'm trying to accomplish and then you suggest the best way to
+    accomplish that. That's the way we need to operate."*
+
+    **A request is a GOAL, not a specification.** Read what he is trying to
+    accomplish, then propose the best way to accomplish it — with a
+    RECOMMENDATION, not a menu. Bringing a better approach to his attention is
+    an obligation, not an option, and that includes saying so when the thing he
+    asked for is not the best way to get what he wants.
+
+    **THIS DOES NOT REPEAL INSTRUCTION 1, IT BOUNDS IT.** Instruction 1 is
+    about not INVENTING business rules — who may receive records, which
+    department a request belongs to, what the practice's policy is. Those still
+    go to him. Instruction 15 is about not WITHHOLDING engineering judgement.
+    The test: *would getting this wrong be a wrong policy, or a worse
+    implementation?* Policy asks. Implementation recommends and proceeds, with
+    the reasoning and the trade-off stated so he can overrule it.
+
+    **A blocking question is a last resort**, reserved for a decision where
+    proceeding either way would be unsafe or would waste the work. Everything
+    that does not depend on the answer gets built while the question is open.
+
 ---
 
 ## Line status — check this before saying anything about what is on or off
@@ -1262,8 +1290,52 @@ and then one of them re-stamps it with the other's call and transcript:
   reasonable proxy; on this lane the modal caller is an organisation.
 
 Either is a path by which the original 2.6% note's *"sometimes a different
-caller entirely"* could be literally true. **NEITHER IS MEASURED.** Count them
-before deciding anything, and the decision is his, not mine.
+caller entirely"* could be literally true. **BOTH ARE NOW MEASURED, AND THE
+OPERATOR HAS RULED. PCP SUPPORT NO LONGER DEDUPES AT ALL.**
+
+Wayne, 2026-09-16: *"this is a professional line, the same office, same group,
+same number might call several times a day, regarding different patients. And
+the system is designed to recognize the phone number, and base the dedupe on
+the phone number... we need to throw away that dedupe rule on the tickets for
+the PCP department."*
+
+Measured the same morning, Support Center, department 18:
+
+| | |
+|---|---|
+| voice-agent contact entries, all time | **11** across 9 parent tickets |
+| … since 2026-09-14, the lane's first full day | **9** |
+| agent-filed dept-18 tickets carrying a patient phone | 47 |
+| … carrying the **CALLER's** number in `patient_phone` | **43** |
+| … sharing a last-7 with another dept-18 ticket | **0** |
+
+**It is the PHONE arm, and the reason it fires here is a second defect.** On a
+professional line the caller IS a clinic switchboard, and 43 of 47 tickets
+store that switchboard as the PATIENT's phone — so last-7 matching folds
+together calls that share nothing but the building they were dialled from. The
+zero in the last row is the consolidation working as designed and is why it is
+invisible in `tickets`: the second call never became a row.
+
+**The 43 is NOT fixed by the exemption and must not be treated as fixed.** A
+staffer reading "patient phone" on those tickets is reading the caller's
+office. Exempting the department stops the dedupe acting on the wrong value; it
+does not stop the wrong value being written.
+
+**AND THE PCP LANE'S OWN TICKETS NEVER CONSOLIDATED.**
+`app/api/voice-agent/pcp-ticket/route.ts` does not call
+`consolidateIfDuplicate` at all, so the 311 `PCP-` tickets in department 18
+were never exposed. All 11 entries are `VA-` tickets routed INTO department 18
+through `create-ticket` — which is the cross-queue and `unclassified_call`
+path, not the PCP agent's own filing.
+
+Shipped as ticketing-app #273, **exempting the department in ONE module read by
+both consolidation paths** — the live filing path and the admin Consolidation
+page, which collapses whole tickets rather than appending an entry. Keyed on
+`departments.type = 'pcp_support'`, not id 18, because the pcp-ticket route
+already resolves it that way. A department row that cannot be read is NOT
+exempted, so a database blip cannot switch dedupe off fleet-wide. The
+after-number: dept-18 voice-agent contact entries, **9 in two days, target 0**;
+the guard: contact entries on every OTHER department must not fall.
 
 **WHAT THIS CHANGES ABOUT MEASURING — this part is not a defect claim.**
 A ticket's `call_sid` names the last call that touched it, so it cannot be used
