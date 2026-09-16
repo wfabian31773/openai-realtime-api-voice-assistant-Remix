@@ -273,6 +273,47 @@ function check(prompt: string, rulings: readonly Ruling[], label: string) {
   });
 }
 
+/**
+ * THE CLOCK IS PINNED, AND IT IS PINNED TO THE WIDEST RENDERING THERE IS.
+ *
+ * Every queue prompt embeds `getPacificTimeContext()`, and that block is
+ * VARIABLE WIDTH: the weekday appears twice, the month once, the date is one
+ * or two digits, and `timeStr` appears twice. So the measured length of a
+ * prompt depends on the day the suite happens to run.
+ *
+ * THIS IS NOT HYPOTHETICAL. The recognised-arm ratchets below were pinned on
+ * 2026-09-15, a Tuesday, and on Wednesday 2026-09-16 all three failed by
+ * EXACTLY ONE TOKEN — "Wednesday" is one character longer than "Tuesday",
+ * twice over. The slack guard failed the same morning by exactly one
+ * character. Nothing in any prompt had changed. Reproduced on a pristine
+ * checkout before touching anything, which is the only way to tell the
+ * calendar from the diff (CLAUDE.md's v32 row records the same lesson from
+ * `schedulingReachesTheHub.test.ts`).
+ *
+ * The comment above the slack guard already warned that "'Wednesday' instead
+ * of 'Saturday' would have failed this suite on the calendar rather than on
+ * the diff" — and then the v29 ratchets were added without that protection.
+ * A guard whose warning is written down and not applied is how this happens.
+ *
+ * Swept every hour of a year against the real formatter: the widest the block
+ * ever renders is 111 characters, at a Wednesday in September with a
+ * two-digit date and a two-digit twelve-hour clock —
+ *
+ *   Current Pacific Coast Time: Wednesday, September 16, 2026 at 12:59 AM
+ *   Today is Wednesday.
+ *   The time is 12:59 AM.
+ *
+ * Pinning THERE rather than at an arbitrary instant makes every number below
+ * both reproducible AND worst-case: a prompt that fits here fits on every day
+ * of the year. September is inside PDT (UTC-7), so 12:59 AM Pacific is 07:59
+ * UTC.
+ *
+ * Set at module scope on purpose — the prompts on the next lines are built
+ * when this module is evaluated, so a `beforeAll` would run far too late.
+ */
+vi.useFakeTimers({ shouldAdvanceTime: true });
+vi.setSystemTime(new Date('2026-09-16T07:59:00.000Z'));
+
 const surgery = buildSurgeryPrompt({ callerPhone: '+17605551234' });
 const tech = buildTechPrompt({ callerPhone: '+17605551234' });
 /**
@@ -349,15 +390,36 @@ describe('the trim actually happened', () => {
    * This test asserts the SLACK rather than the length, so a future prompt
    * that eats it fails here with the reason attached.
    */
+  /**
+   * THE PIN ITSELF, ASSERTED.
+   *
+   * Every length below is only worst-case while the fake clock is actually in
+   * effect. Drop the `vi.setSystemTime` at the top of this file and the
+   * ratchets keep passing on most days — they measure a SMALLER prompt — and
+   * then fail on the one day of the week nobody is looking. That is the exact
+   * failure this pin exists to remove, so the pin gets its own assertion
+   * rather than being trusted.
+   */
+  it('is measuring the widest clock, not whatever day the suite ran on', () => {
+    expect(tech).toContain('Wednesday, September 16, 2026 at 12:59 AM');
+    expect(tech).toContain('Today is Wednesday.');
+    expect(tech).toContain('The time is 12:59 AM.');
+  });
+
   it('tech keeps enough slack that the clock cannot fail the ceiling', () => {
     // Math.round(len / 4) reaches 1600 at 6398, so 6398 is the first failing
     // length — NOT 1600 * 4, which this used and which was two characters
     // optimistic about the room left.
     const boundary = 6398;
     const slack = boundary - tech.length;
-    // The widest weekday, a two-digit date and a two-digit hour rendered
-    // twice come to well under 20 characters of swing.
-    expect(slack, `tech has only ${slack} characters of slack`).toBeGreaterThan(20);
+    // GREATER THAN ZERO, not greater than 20, and that is STRONGER rather
+    // than weaker. The 20 was a cushion for clock swing, guessed at. The
+    // clock is now pinned to its widest rendering of the year (see the top of
+    // this file), so there is no swing left to absorb: a prompt that fits
+    // here fits on every day of the year, and the cushion has moved from a
+    // guess into the fixture. Whoever eats the remaining room should buy tech
+    // room, not raise the number.
+    expect(slack, `tech has only ${slack} characters of slack at the widest clock`).toBeGreaterThan(0);
   });
 
   /**
@@ -459,12 +521,16 @@ describe('the recognised-caller prompt is measured too', () => {
     expect(warm.surgery).toBeLessThan(1800);
   });
 
-  // Ratchets at the 2026-09-15 measurement. Going UP fails; going down is
-  // always welcome and the number should be lowered when it does.
+  // Ratchets at the WORST-CASE clock, re-measured 2026-09-16 under the pin at
+  // the top of this file. Each is exactly one token above the 2026-09-15
+  // value it replaces, and that one token is the weekday, not a prompt
+  // change — these numbers now describe the widest day of the year rather
+  // than whichever day the suite ran on. Going UP fails; going down is always
+  // welcome and the number should be lowered when it does.
   for (const [lane, baseline] of [
-    ['tech', 1948],
-    ['optical', 1739],
-    ['records', 2051],
+    ['tech', 1949],
+    ['optical', 1740],
+    ['records', 2052],
   ] as const) {
     it(`${lane}'s recognised prompt does not grow past ${baseline} tokens`, () => {
       expect(warm[lane]).toBeLessThanOrEqual(baseline);

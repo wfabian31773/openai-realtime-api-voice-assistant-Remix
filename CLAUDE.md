@@ -350,6 +350,34 @@ Green tests did not prevent any of the regressions listed there.
     resolves which office they mean. So the shape is mirror-first for
     identity, then the schedule for history. Not one replacing the other.
 
+15. **ADVISE, DO NOT WAIT.** (2026-09-16) *"Don't just sit there and wait for
+    me for everything. Make your suggestions, recommendations. I'm trusting you
+    and allowing you to guide this operation in the best practice the way it
+    should be... if I tell you do something and you know that there's a much
+    better way to do it, or much more efficient or more modern way to do
+    something, then it's your obligation to bring that to my attention. Don't
+    just take what I give you and act on what I give you. Take what I give you
+    as what I'm trying to accomplish and then you suggest the best way to
+    accomplish that. That's the way we need to operate."*
+
+    **A request is a GOAL, not a specification.** Read what he is trying to
+    accomplish, then propose the best way to accomplish it — with a
+    RECOMMENDATION, not a menu. Bringing a better approach to his attention is
+    an obligation, not an option, and that includes saying so when the thing he
+    asked for is not the best way to get what he wants.
+
+    **THIS DOES NOT REPEAL INSTRUCTION 1, IT BOUNDS IT.** Instruction 1 is
+    about not INVENTING business rules — who may receive records, which
+    department a request belongs to, what the practice's policy is. Those still
+    go to him. Instruction 15 is about not WITHHOLDING engineering judgement.
+    The test: *would getting this wrong be a wrong policy, or a worse
+    implementation?* Policy asks. Implementation recommends and proceeds, with
+    the reasoning and the trade-off stated so he can overrule it.
+
+    **A blocking question is a last resort**, reserved for a decision where
+    proceeding either way would be unsafe or would waste the work. Everything
+    that does not depend on the answer gets built while the question is open.
+
 ---
 
 ## Line status — check this before saying anything about what is on or off
@@ -1130,14 +1158,217 @@ GROUP BY 1 ORDER BY 2 DESC;
    2026-09-03 — every one a caller ringing to chase an existing request and
    `check_open_tickets` correctly reading it back to them. Three separate calls
    from one number all quote VA-57151. That is the tool working, not a filing.
-3. **2.6% of tickets carry a `call_sid` from a LATER call** (5 of 196, average
-   49 minutes later, sometimes a different caller entirely). Call attribution
-   is being overwritten after the fact — related to #71. Small enough not to
-   move a rate, big enough to ruin a single-call forensic.
+3. **A ticket's `call_sid` can be the LAST call that touched it, not the one
+   that created it.** Measured 2026-09-03 at 5 of 196 (2.6%, average 49 minutes
+   later); **root-caused 2026-09-15 and it is not a mystery, a race or #71.**
+   It is the ticketing app consolidating a caller's CALLBACK onto their own
+   open ticket, and the operator APPROVED the overwrite on 2026-09-03 — see
+   "THE SAME TICKET NUMBER READ TO TWO CALLERS" below before treating it as a
+   bug. What it costs is measurement, not data: a ticket's `call_sid` cannot
+   answer *which call filed*, and `call_logs.ticket_number` can.
 
 **And `call_logs.total_turns` counts something that is not transcript turns.**
 It fell 16.1 → 9.7 across the tech cutover while the callers actually said
 MORE. Count `CALLER:` lines in the transcript instead.
+
+---
+
+## THE SAME TICKET NUMBER READ TO TWO CALLERS — answered 2026-09-15
+
+Wayne: *"how does the model repeat the same ticket number to five different
+people? what's feeding it that information, where does it get it from, why does
+it do that?"*
+
+**NOTHING FEEDS IT. THE TICKETING APP HANDS THE NUMBER BACK, ON PURPOSE, AND IT
+IS NOT FIVE DIFFERENT PEOPLE — IT IS ONE PERSON RINGING BACK.** I reported this
+as a defect in the day's analysis before running the control. The control
+kills it:
+
+| ticket | first call | second call | same calling NUMBER? |
+|---|---|---|---|
+| VA-59960 | CAd8e2ca 15:31 | CAcda5884 15:34 | **yes** |
+| VA-60085 | CA85e4eef 17:52 | CA2f7688e 17:54 | **yes** |
+| VA-60100 | CA3961d7c 17:56 | CA8fd116a 18:01 | **yes** |
+| VA-60206 | CA0758ba7 19:45 | CAdaea4a1 19:47 | **yes** |
+| VA-60218 | CA32cd719 20:12 | CA2fd062d 20:58 | **yes** |
+| VA-60298 | CAe14d364 21:28 | CA674a90c 23:02 | **yes** |
+| VA-59856 | CA3439dc5 09-14 22:57 | CA945200c + CAb82e442 09-15 | **yes** |
+
+Identical caller number on both legs of all seven, and **every second call has
+a `ticket_contact_entries` row on that same ticket.** That row is the app's
+consolidation record, and it is what answers the question.
+
+**BUT THE COLUMN SAYS NUMBER, NOT PERSON, AND THAT DISTINCTION IS THIS FILE'S
+OWN RULE.** Standing instruction 6 and RULE ZERO step 2 both say a phone match
+is a candidate to CONFIRM, never an identity. I wrote "same caller" in that
+column anyway, forty lines below the rule forbidding it (Codex P2, #315).
+Re-measured against `patients_master`, all five phone columns:
+
+| the 7 numbers behind these pairs | |
+|---|---|
+| resolve to exactly ONE person | **2** |
+| resolve to NOBODY in the person base | **5** |
+| resolve to two or more | 0 |
+
+**Five of seven are not in the person base at all, and this is the PCP lane** —
+doctors' offices, medical groups, surgery centres, insurers. A clinic
+switchboard is the normal caller here, so two calls from one number can be two
+different staffers about two different patients. Nothing above establishes they
+are not. See the exposure below, which this measurement WIDENS.
+
+**THE CHAIN, all three links read from the source:**
+
+1. `lib/services/ticket-consolidation.ts` (ticketing app) — a new contact whose
+   **phone matches on the last 7 digits, in the same department, within 48
+   hours**, against a ticket still `open | in_progress | waiting_on_customer`,
+   is **appended to that ticket** instead of opening a second one. There is a
+   second rule with NO PHONE IN IT: **same first+last name, same department,
+   within 24 hours** — see the exposure below.
+2. `create-ticket` then answers `{ consolidated: true, ticketNumber: <the
+   EXISTING ticket> }`. The agent read back the number the app gave it.
+3. So the model invented nothing and remembered nothing. `check_open_tickets`
+   is read-only and was not even needed. **THAT is what is proven, and it is
+   the whole answer to the question asked** — the number the agent spoke came
+   from the API, not from memory, a cache or a stale variable. Whether
+   consolidating those two calls was CORRECT is a separate claim resting on
+   identity, and for 5 of the 7 nothing establishes it. Where the two calls
+   really are one patient chasing their own request, reading their own ticket
+   number back is right and handing them a second one would be wrong. This is item 2 of the measurement traps
+   above ("the transcript `VA-#####` proxy OVER-counts") firing for the fourth
+   time, and I walked into it after writing it down.
+
+**WHAT HAPPENS NEXT IS DECIDED, AND I ALMOST RE-RAISED IT AS A BUG.**
+
+`ticketingSyncService.syncCall` (`server/services/ticketingSyncService.ts:170`)
+posts post-call enrichment as
+
+```
+{ ticketNumber: call.ticketNumber,   // the ticket this call TOUCHED
+  callSid, callStartTime, callEndTime, callDurationSeconds,
+  transcript, recordingUrl, qualityScore, patientSentiment, agentOutcome }
+```
+
+and `app/api/voice-agent/update-call-data/route.ts:217` **looks the ticket up by
+`ticketNumber` FIRST** (`lookupMethod = ticketNumber ? 'ticketNumber' :
+'callSid'`) and then assigns every one of those fields onto the **ticket row**.
+So the consolidated callback re-stamps the parent ticket with its own identity
+and its own transcript.
+
+**Wayne ruled on exactly this on 2026-09-03:** *"overwrite is fine, that's the
+most recent request anyway."* The ticket is a live request, not an audit log —
+staff working it need the call that just came in.
+`.agents/memory/ticketing-api-contract.md` records the ruling and says in as
+many words not to re-raise it as data loss. **I drafted a fix for it anyway
+before reading that file.** Nothing is lost: the earlier call keeps its own
+`call_logs` row carrying the same ticket number, so the association is
+recoverable from that side. **Do not "fix" this.**
+
+**WHAT THE RULING DOES NOT COVER — one correction and one open question.**
+
+**The correction, and it matters because someone will grep for the writer.**
+That memory file attributes the overwrite to *"the `check_open_tickets`
+dedupe"*. It is not. `check_open_tickets` (`sharedPatientTools.ts:714`) calls
+`SyncAgentService.checkOpenTickets` and returns; it writes nothing and need not
+run at all for this to happen. The two writers are **`consolidateIfDuplicate`
+on `create-ticket`**, which attaches the call and returns the existing number,
+and **`update-call-data`'s `ticketNumber`-first lookup**, which stamps the row.
+The conclusion the file draws is right — it is not the #71/#77 retry sweep —
+and the named mechanism is wrong.
+
+**The open question is CROSS-PATIENT CONSOLIDATION, and it is wider than I
+first wrote.** Wayne's ruling was about a returning patient landing on their
+own ticket. Two arms can put **two different patients** on one ticket instead,
+and then one of them re-stamps it with the other's call and transcript:
+
+- **The name-only arm.** Same first+last name, same department, within 24
+  hours, no phone check at all. Two people with a common name.
+- **The phone arm, on a PROFESSIONAL line.** I first called this one sound, on
+  the strength of the number matching. The measurement above withdraws that:
+  5 of the 7 numbers are not in the person base, and a clinic switchboard
+  calling PCP twice in 48 hours about two different patients matches on last-7
+  + department and consolidates. On a patient line the phone arm is a
+  reasonable proxy; on this lane the modal caller is an organisation.
+
+Either is a path by which the original 2.6% note's *"sometimes a different
+caller entirely"* could be literally true. **BOTH ARE NOW MEASURED, AND THE
+OPERATOR HAS RULED. PCP SUPPORT NO LONGER DEDUPES AT ALL.**
+
+Wayne, 2026-09-16: *"this is a professional line, the same office, same group,
+same number might call several times a day, regarding different patients. And
+the system is designed to recognize the phone number, and base the dedupe on
+the phone number... we need to throw away that dedupe rule on the tickets for
+the PCP department."*
+
+Measured the same morning, Support Center, department 18:
+
+| | |
+|---|---|
+| voice-agent contact entries, all time | **11** across 9 parent tickets |
+| … since 2026-09-14, the lane's first full day | **9** |
+| agent-filed dept-18 tickets carrying a patient phone | 47 |
+| … carrying the **CALLER's** number in `patient_phone` | **43** |
+| … sharing a last-7 with another dept-18 ticket | **0** |
+
+**It is the PHONE arm, and the reason it fires here is a second defect.** On a
+professional line the caller IS a clinic switchboard, and 43 of 47 tickets
+store that switchboard as the PATIENT's phone — so last-7 matching folds
+together calls that share nothing but the building they were dialled from. The
+zero in the last row is the consolidation working as designed and is why it is
+invisible in `tickets`: the second call never became a row.
+
+**The 43 is NOT fixed by the exemption and must not be treated as fixed.** A
+staffer reading "patient phone" on those tickets is reading the caller's
+office. Exempting the department stops the dedupe acting on the wrong value; it
+does not stop the wrong value being written.
+
+**AND THE PCP LANE'S OWN TICKETS NEVER CONSOLIDATED.**
+`app/api/voice-agent/pcp-ticket/route.ts` does not call
+`consolidateIfDuplicate` at all, so the 311 `PCP-` tickets in department 18
+were never exposed. All 11 entries are `VA-` tickets routed INTO department 18
+through `create-ticket` — which is the cross-queue and `unclassified_call`
+path, not the PCP agent's own filing.
+
+Shipped as ticketing-app #273, **exempting the department in ONE module read by
+both consolidation paths** — the live filing path and the admin Consolidation
+page, which collapses whole tickets rather than appending an entry. Keyed on
+`departments.type = 'pcp_support'`, not id 18, because the pcp-ticket route
+already resolves it that way. A department row that cannot be read is NOT
+exempted, so a database blip cannot switch dedupe off fleet-wide. The
+after-number: dept-18 voice-agent contact entries, **9 in two days, target 0**;
+the guard: contact entries on every OTHER department must not fall.
+
+**WHAT THIS CHANGES ABOUT MEASURING — this part is not a defect claim.**
+A ticket's `call_sid` names the last call that touched it, so it cannot be used
+to ask *which call filed*. On 2026-09-15 PCP, **8 of the 89 calls I scored as
+"no ticket" carry a ticket number on their own `call_logs` row** — they filed,
+and the callback took the ticket's SID. Read `call_logs.ticket_number` for that
+question; the filing alarm already does, deliberately.
+
+**AND IT IS THE LAST SUCCESSFUL WRITER, NOT THE LATEST CALLER** (Codex P2,
+#315). `ticketingSyncService.runSync` selects its batch with **no `ORDER BY`**
+and each row retries on its own schedule, so an older call can land after a
+newer one. `VA-59856` is the proof and it was sitting in my own evidence:
+`call_start_time` from the 20:34 call, `call_sid` from the 21:35 call — one
+row carrying two different calls' data, which an ordered single writer cannot
+produce. So do not read that column as "who rang most recently" either.
+**Chronology comes from `call_logs` timestamps, never from the ticket.**
+
+`VA-59856` is the shape at its clearest: `call_start_time` from the 09-15 20:34
+pcp call and `call_sid` from the 09-15 21:35 **records** call, four contact
+entries, two different calls' data in two fields of one row. That is repeated
+re-stamping across lanes, and it is the same decided behaviour — not a new bug.
+
+**AND THE METHOD LESSON, which is why this is written at length.** The SQL
+agreed with itself all the way through: the tickets exist, the SIDs are real,
+the numbers are read aloud on two calls. What broke the false finding was one
+control I had not run — *is it the same phone?* — and RULE THREE is what forced
+me to the transcripts where the question became askable. Then a second failure
+on top of the first: having finally found the mechanism, I started writing a
+fix for behaviour the operator had already approved, because I had not read the
+memory file indexed for exactly this topic. **Before reporting that the agent
+did something impossible, check whether the caller is the same person. Before
+proposing a fix, read the memory file for that area — the answer is usually
+already there, and that is failure mode 5.**
 
 ---
 
@@ -1898,6 +2129,7 @@ voice-runtime-v29-ambiguity-is-stated-first-20260915
 voice-runtime-v30-queue-transfer-files-a-ticket-20260915
 voice-runtime-v31-unclassified-calls-still-file-20260915
 voice-runtime-v32-settlement-and-narrative-survive-20260915
+voice-runtime-v33-the-ask-budget-20260916
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -1934,13 +2166,14 @@ on it is evidence about current code.
 | **v29** or earlier — NOT the date | a ticket for the caller who chose the live queue, and a ticket that ever learns what the dial did. **THE OPERATOR REVERSED HIMSELF, 2026-09-15: *"yes to the v14 reversal."*** v14 (09-13) said *"We Will Not create tickets for anyone that chooses to be transferred. if they drop off, their record is lost. Their choice"*, on the reason that the queue answers at 36% and nobody works the voicemails. Asked on 09-15 whether to go back to Rosa's 09-08 design — file it anyway with a status that does not claim a person was reached — he said yes. **WHAT v14 COST WHILE IT STOOD:** `tickets.pcp_handoff_*` is the only working PCP transfer instrument (this file says to measure them there and never from `call_logs`), so the accepted arm was invisible in it, and the 36% the ruling rests on could not be re-measured on the callers it applied to. Rosa's reason was never answered, only outvoted: a caller who gives up in hold music has no record anywhere and nobody knows to call them back. **THE STATUS IS WHAT MAKES BOTH TRUE AT ONCE** — `DIALING` with `humanAnswerStatus = TRANSFERRED_TO_QUEUE` and no `connectedAt`, so the app's `humanHandoffOccurred = finalStatus === 'CONNECTED'` stays false and **v20 is untouched**: it was never the ticket's existence that claimed a human, it was the status. **TWO THINGS THE CHOICE STILL GOVERNS AND THIS DOES NOT CHANGE:** the empty round (*"they asked for a person, get them to a person"*, 09-13) and the sweep's exit. `suppressesTicket` answered all three questions with one boolean, which is the `connectsToHuman` welding this file already records — so it is DELETED rather than made to return false, and the two survivors ask `choseTheQueue`, which names what it decides. **THE SECOND HALF IS THE MEASUREMENT, and without it the reversal only half works:** the ticket said `DIALING` FOREVER, because `handoff_to_pcp` returns while the queue is still ringing and Twilio's `<Dial action>` callback lands minutes later on its own HTTP request, reaching `call_logs.transfer_outcome` and nothing else. A lane callback (`onBlindDialSettled`) is now registered before the redirect and SNAPSHOTTED onto the pending dial for the same reason `briefingGaps` is — `attempt`'s own `finally` deletes the side channel, because it holds a caller's name and callback number. The app upserts on `callSid` and updates the handoff columns whenever a payload carries a `handoff` block, so this needs **no new endpoint and nothing from that team**. `queue_answered` leaves `finalStatus` at `DIALING` and puts the bridge duration in `humanAnswerStatus` (a two-second bridge is a caller who gave up in hold music, and only the number says so); `no_answer` / `failed` go to `NO_ANSWER` / `FAILED` with `fallbackTicketStatus: OPEN` and `CREATE_TASK`, which the app permits against a HAND_OFF-default purpose for exactly those three statuses. **ORDERING IS THE SAFETY PROPERTY:** `deps.record` writes `call_logs` FIRST and the lane callback cannot cost us it — a throwing lane is swallowed into a log line, and the webhook still answers Twilio 200. **REGISTERED ONLY WHEN THE PRE-DIAL WRITE SUCCEEDED**, because the app INSERTS when it cannot find the `callSid`, so registering behind a failed write could open a SECOND ticket minutes later carrying a dial outcome and no intake. `src/pcp/queueDialReachesTheTicket.test.ts` tests the CHAIN and not just its last link — v20 is the worked example of both ends being covered while the two links between them were not — with links 3 and 4 pinned by reading the source, the device `ticketRequirements.test.ts` already uses. 12 assertions there plus the rewritten `queueIsAChoice.test.ts`; **8 mutations, 8 caught**: `queue_answered` promoted to CONNECTED, the runtime dropping the snapshot, the webhook never calling back, the v14 suppression returning on either write, the welding returning, `no_answer` no longer re-opening the request, and the settle registering behind a failed write. **NOT MEASURED IN PRODUCTION**, `docs/BACKEND_HANDOFF.md` applies. The numbers: PCP tickets for accepted queue transfers — 0 under v14, target ~the transfer count; and tickets stuck at `DIALING` with no later status — target 0. The guards: `human_handoff_occurred` must stay FALSE on every blind transfer (v20's number, 20 on 2026-09-14, target 0), and PCP transfer ATTEMPTS must not fall, because filing again must not come with a gate that dials less |
 | **v30** or earlier — NOT the date | a ticket for a PCP call the model never classified. **Measured 2026-09-15, PCP's first 2h23m on the current build: 32 real conversations that did not transfer, 18 with NO TICKET OF ANY PROVENANCE.** `sweepPcpUnfiledCall` turned every one away, and the gate is why — `toldUsSomething` demands a `callPurpose` AND an identity field, and on these calls the model recorded no purpose at all. The v18 row already names this as the residual gap it deliberately left (*"a caller who asks for a person with no purpose recorded at all is a narrower residual gap, and it is noted for Wayne rather than papered over here"*); this closes it, with his answer. **OPERATOR, 2026-09-15, THREE QUESTIONS AND HIS OWN ANSWER TO THEM:** *"are we capturing the transcripts for these calls? … if we're capturing the transcripts then why are we not reading the transcripts for the call purpose … actually now that I think about it, why don't we just leave it in the PCP queue and let the PCP agents route it manually to where it needs to go — rather safe than sorry rather than dump it into medical records and create a case unnecessarily"*, and on the slug, *"anything we dont classify we log as a new slug."* **READ THE TRANSCRIPT, DO NOT CLASSIFY FROM IT** — the third sentence supersedes the second, and that is the whole design. The caller's own lines go ON the ticket so a human can route it; the SLUG is `unclassified_call`, landing in PCP Support where a person already looks. Machine-guessing a department here would be the `'surgery center'` mistake of 2026-09-08 with worse consequences: an `mr_cases` row opened on a guess starts a statutory clock on a request nobody has read. A test drives a transcript containing BOTH a records cue and a surgery cue and asserts it still files unclassified. **THE ADMISSION IS `saidMoreThanTheirOwnIdentity`, REUSED NOT REWRITTEN.** `requestSweep.ts` is the queue lanes' teardown filer and this file lists it under "do NOT rebuild these"; that predicate is deliberately the narrowest possible version, and its own docstring already says it *"does NOT try to decide what a request is … meaning is the model's job and not a regex's"* — the operator's conclusion, already written down. Silence files nothing; filler alone files nothing. **ONE GUARD IS GENUINELY WEAKER ON THIS ARM AND IT IS STATED RATHER THAN HIDDEN:** the predicate subtracts the caller's own name from their own lines, and it can only subtract a name we CAPTURED — a call the model never classified is usually one where it never recorded a name either, so *"This is <name>."* and a hang-up WILL file here where on other arms it would not. Accepted, in the direction that predicate's docstring already chose (*"the failure mode it accepts is filing the occasional identity-only ticket, which is the right direction to err on a path whose whole purpose is not losing requests"*): a department-18 ticket a staffer discards costs ten seconds, a lost request costs a caller, and closing it properly means a name DETECTOR, which is standing instruction 3 in as many words. **Both behaviours are asserted, both ways**, rather than one of them being quietly pretended away. **SHIP ORDER IS LOAD-BEARING: ticketing-app #270 must deploy FIRST.** The app's `PCP_CALL_PURPOSE_SLUGS` is a `z.enum`, and a slug the agent sends that the app does not declare is HTTP 400 — the precise mechanism that turned 17 requests into nothing on 2026-09-14. The exposure is bounded and worth stating exactly: these calls file NOWHERE today, so shipping out of order costs them nothing they are not already losing, but it buys nothing either. `replay20260914.test.ts`'s `APP_ACCEPTS` carries the dependency in a comment so a green suite cannot imply the app is ready. `src/pcp/unclassifiedCallStillFiles.test.ts` — 11 assertions, synthetic transcripts only (RULE THREE: real SIDs and shapes in the repo, real words on disk). **5 mutations, 5 caught**: the admission removed, the admission widened to every unclassified call, the slug reverted to a specialist guess, the caller's words dropped from the narrative, and the slug dropped from the Remix policy list. **NOT MEASURED IN PRODUCTION**, `docs/BACKEND_HANDOFF.md` applies. The number: PCP substantive calls with no ticket of any provenance — **18 of 32 on 2026-09-15, target near 0**. The guards: department-16 and department-9 tickets from PCP must not rise (an unclassified call must never be auto-routed to a specialist queue), and PCP tickets a staffer closes as junk must not rise materially — that is the azul 2026-07-28 shape, where 9 of 12 spurious sweep tickets were callbacks for patients already helped |
 | **v31** or earlier — NOT the date | the two Codex findings on #313, both correct, both on `main` before anybody read them. **The review started NINE SECONDS BEFORE the squash and finished six minutes after it** — ready 19:13:09, merged 19:13:22, completed 19:19:05. That is the THIRD time (v27 row: twelve seconds; v28 row: four minutes; now this), and the pattern is no longer a coincidence: the review is TRIGGERED BY the draft being marked ready, so checking for findings before merging can never see the one your own merge starts. **P1 — A TRANSIENT TICKET FAILURE HAD NO SECOND CHANCE ANYWHERE.** `handleBlindDialResult` fires the lane callback, forgets the pending dial and answers Twilio 200; Twilio has no reason to retry a 200 and the pending entry is gone, so a blip on the ticketing app left the ticket at `DIALING`/`HAND_OFF` for good. On a `no_answer` that is v30's entire point lost — the request is never reopened as an OPEN task and a caller who gave up in hold music is never called back. Confirmed before fixing: `createPcpTicket` has NO outbox behind it, unlike `createTicket`, which goes through `durableTicketFiling` → `ticketOutboxService`. **THE RETRY LIVES IN THE LANE, NOT THE TRANSPORT** — `blindTransferDialResult` knows about dials and TwiML and has no business knowing a ticket POST can fail transiently; its fire-and-forget contract is unchanged, and `persistSettlement` runs INSIDE the callback it already forgets, so Twilio still gets its TwiML immediately. ~26s over four attempts; a refusal `submitPcpTicket` produced ITSELF (`invalid_payload:`, `disposition_not_allowed:`) is NOT retried, because those are pure functions of the payload and the second try sends identical bytes to an identical check. **WHAT IT DOES NOT PROMISE, stated rather than implied:** it is in-process, so a deploy inside the retry window still loses the update; making it survive that means putting PCP payloads through `ticketOutboxService`, which today wraps only `createTicket` shapes, and that is a `docs/BACKEND_HANDOFF.md` change rather than something to smuggle in behind a P1 fix. **P2 — THE LONGEST CALLS WOULD HAVE FILED NOWHERE.** v31 pastes the caller's own lines into `narrative`, capped at 12,000, and `submitPcpTicket` safeParses BEFORE the wire — so a long enough call was refused locally with no POST and no 400 in `voice_agent_api_logs`, one console line. The calls with the most for a staffer to read were the likeliest to be dropped, by the code written to stop them being dropped. **THE FIRST FIX FOR IT WAS WRONG AND THAT IS THE PART WORTH READING:** budgeting the excerpt at the SWEEP's call site measured 11,925 characters, under the cap, and still filed nothing — because `annotateGaps` appends `[Intake incomplete — …]` AFTERWARDS, so the call site cannot see the string that is actually validated. It was found by instrumenting the real path after two rounds of arithmetic that each looked right. The clamp now lives in `annotateGaps`, the LAST hand on the narrative and one every PCP filing path already goes through, so no future caller can out-run it; the annotation is never what gets cut, because it names the fields a staffer still has to collect. `trimToBudget` cuts at a line boundary (the excerpt is a bulleted list of caller turns) and says on the ticket that it cut; the full conversation still goes out in `transcript`, cap 50,000. **AND A THIRD THING, PRE-EXISTING AND FOUND BY THE SAME RUN:** `schedulingReachesTheHub.test.ts` was the one PCP file that did not pin the clock, so `isLunchClosure()` turned `eligibleByAsk` off and three of its assertions went RED for one hour of every weekday. Caught at 12:40 Pacific, **reproduced on a pristine `main` checkout** to prove it was the clock and not the change under review, and fixed the way `lostRequestFloor.test.ts` and `queueIsAChoice.test.ts` already do it. `src/pcp/settlementSurvivesAFlake.test.ts` — 11 assertions, plus two wiring assertions in `unclassifiedCallStillFiles.test.ts` that go red if either fix is reverted at its call site while the helpers stay green (failure mode 10). **5 mutations, 5 caught**: the clamp removed from `annotateGaps`, the settle POST back to a bare `submitPcpTicket`, a deterministic refusal retried, `trimToBudget` never trimming, and the clock pin removed — that last one reproducing the exact three failures live. Full suite 4,086. **NOT MEASURED IN PRODUCTION**, `docs/BACKEND_HANDOFF.md` applies. The numbers: PCP tickets left at `DIALING` after a `no_answer` dial — target 0; and unclassified-call filings refused locally as `invalid_payload: narrative` — target 0, currently invisible in SQL because the refusal never reaches the wire, so read the `[PCP-TICKET] payload rejected` console line. The guard: tickets whose narrative LOSES the `[Intake incomplete …]` annotation must not appear — the body is what gets trimmed, never the annotation |
+| **v32** or earlier — NOT the date | a bound on how many times the PCP intake may ask the same question. **Operator, 2026-09-16, naming this as one of his three priorities for the line: *"being able to quickly identify when we have an issue on the line like that, one that asks somebody something seven times or something like that, like that shouldn't be possible, right?"*** SEVEN IS THE MEASURED NUMBER, NOT A FIGURE OF SPEECH: `CA908f93dae322ed0e0dd862673ebf77fb`, 2026-09-15, 150 seconds, **no ticket of any provenance** — the caller said `"Representative?"` seven times and the agent asked `"What is the patient's first name?"` seven times. **ALL THREE OF HIS PRIORITIES FAIL IN ONE 150-SECOND CALL:** no transfer, no ticket, and nothing detected it. **NOTHING EXISTING COULD HAVE STOPPED IT, and that is why the bound goes in the director rather than anywhere else.** `toolCeiling`'s `identicalFailures` (3) and `perToolFailures` (6) count FAILURES, and every one of those `record_pcp_intake` calls **SUCCEEDED** — the model re-recorded `statedRelationship` from the same one-word reply eight times, and a success CLEARS those counters by design (rule 1 of `toolCeiling.ts`). `tool_call_count` reached 15 against a `perCallDispatches` of 40. `ticketRequirements.MAX_BLOCKS` (3) bounds how many times a FILING may be HELD, and no filing tool was ever called on that call, so that budget was never touched. The gap was a bound on the intake FORM repeating itself. **`MAX_ASKS_PER_FIELD = 2` is a judgement, not a measurement** — once to ask, once in case the first answer was mis-heard; deliberately not 1, because a genuine ASR drop on the first pass is common on this line. An exhausted field is skipped as a QUESTION, is NOT invented, and does NOT become "answered": it rides onto the ticket as NOT CAPTURED through the annotation path that already exists, which is the #288 unassigned-exit shape. **THE DECOUPLING IS THE LOAD-BEARING HALF.** `handoffEligible`'s SECOND arm reads "a complete intake on a HAND_OFF purpose" — the AUTO-transfer the operator withdrew on 2026-09-04 — and it read the same `missing` value the question does. Wired naively, spending the budget would have completed the intake by fiat and **DIALLED**: a caller put into the PCP queue because we gave up asking them a question. `next()` now computes `intakeIncomplete` (what the form genuinely lacks, budget-blind) separately from `missing` (what we ask next, budget-aware), and the handoff arm reads the former. That is the `connectsToHuman` welding this file already records, caught before it shipped rather than after. **THE BUDGET IS CHARGED BY `noteAsked`, NOT BY `next()`** — `pcpAgent` reads `next()` four more times per call (785, 842, 1154, 1852) for `handoffEligible`, `disposition` and `mayTerminate` without speaking to anybody, and charging inside `next()` would burn a caller's two asks with no question asked. Only `record_pcp_intake`, the one place a question is handed back to be spoken, calls it. **AND IT IS COUNTABLE FROM SQL**, deliberately: `askBudgetSpent` (field NAMES only, no caller data) reaches `tool_timeline` through the existing outcome allow-list, because the tool ceiling's own stops are console-only and no query can find one — this does not repeat that. **WHAT IT DOES NOT DO, stated rather than implied:** `ticketRequirements` is UNTOUCHED, so for the three fields a ticket genuinely needs (`callerName`, `patientName`, `callbackNumber`) the filing gate may still ask up to `MAX_BLOCKS` more times with its own wording — a worst case of 2 + 3 across two different budgets. Whether those two should share a counter is a POLICY question (the operator set `MAX_BLOCKS`, and the 2026-08-06 precedent is that tightening filing gates destroys requests) and is **OPEN FOR WAYNE**. On the seven-times call the change ends the `patientFirstName` loop at 2 and the request files. `src/pcp/directorAskBudget.test.ts` — 12 assertions, **6 mutations, 6 caught**: the budget removed from question selection, `handoffEligible` re-welded to the budget-aware value, the intake tool no longer charging, `askBudgetSpent` dropped from the decision, the budget charged by `next()` on every read, and `askBudgetSpent` dropped from the timeline allow-list. **NOT MEASURED IN PRODUCTION**, `docs/BACKEND_HANDOFF.md` applies. The numbers: PCP calls whose transcript repeats one agent question 3+ times — **1 on 2026-09-15 (worst 7), 0 on 2026-09-14, target 0**; and calls repeating a question at all — 18 of 09-15's, target down. The guard: **PCP tickets filed per substantive call must not fall**, because a form that asks less must not file less; and PCP transfer ATTEMPTS must not rise, which is what the decoupling exists to guarantee |
 
 **READ THE VERSION, NEVER THE DATE — FOUR BUILDS SHARE 2026-09-12.**
 v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v32 IS THE
+**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v33 IS THE
 NEWEST.** v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-request
 floor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
 (#301), v22 the question format (#303), v23 the recording disclosure (#304),
@@ -1968,6 +2201,10 @@ department 18 with the caller's own words on it, instead of filing nowhere.
 **v32 stacks on v31** — the two Codex findings on #313: a transient failure on
 the dial-settlement POST is retried instead of lost, and the narrative is
 clamped to the schema's cap in `annotateGaps` so the longest calls still file.
+**v33 stacks on v32** — the ask budget: the PCP intake stops offering a field
+after two unanswered attempts, so the seven-times call cannot happen again,
+and `handoffEligible` is decoupled from that budget so giving up on a question
+can never become a dial.
 
 **v14-v18 WERE a chain, which is why the distinction matters.** v14 (the PCP
 queue choice), v15 (PCP records), v16 (professional records), v17 (PCP
