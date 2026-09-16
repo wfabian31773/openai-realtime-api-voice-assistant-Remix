@@ -72,6 +72,19 @@ const timelines = new Map<string, {
   directorActions?: DirectorTimelineAction[];
   /** Flush idempotence for the director block, mirroring flushedCount. */
   flushedDirectorCount?: number;
+  /**
+   * The tail of this entry's flush chain, so two flushes for one call can
+   * never be in flight at once (Codex P1, #320).
+   *
+   * `mediaStreamBridge.handleToolCall` dispatches every tool call in one model
+   * response CONCURRENTLY, and the per-tool flush turned that into overlapping
+   * UPDATEs on one row. The older write could land last, overwrite the newer
+   * timeline, and then mark the LARGER event count durable — so the reaper saw
+   * a complete entry over a truncated row and never repaired it. That is the
+   * 2026-07-28 race (17 of 51 timelines gutted) with a much shorter fuse,
+   * because this fires per TOOL rather than per call.
+   */
+  flushChain?: Promise<void>;
   /** When this entry was opened. The reaper used to date an entry by its first
    *  TOOL event, which leaks any entry that only ever held director actions. */
   startedAt: number;
@@ -392,6 +405,14 @@ export function recordingExecute<A, R>(
           { callSid: ctx.callSid, callLogId: ctx.callLogId, agentSlug: ctx.agentSlug },
         );
       } catch { /* telemetry must never mask the real error */ }
+      /**
+       * A TOOL THAT THREW IS STILL A TOOL THAT RAN, and its event is the one a
+       * reader most wants (Codex P2, #320). This path records the failure and
+       * rethrows, so without a flush here the error event depended on teardown
+       * or the 2h reaper — exactly the durability gap this change closes,
+       * surviving on the branch that matters most.
+       */
+      void flushAfterRecording(ctx.callId ?? ctx.callSid ?? '');
       throw err;
     }
     try {
@@ -582,6 +603,31 @@ function classifyForAgent(agentSlug: string | undefined, events: AzulToolEvent[]
 /** Persist the finished timeline on the call log and free the memory.
  *  Accepts the OpenAI callId, the Twilio callSid, or the callLogId. */
 export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
+  /**
+   * SERIALIZED PER ENTRY. See `flushChain`. Queueing behind the entry's own
+   * tail is what makes "last write wins" true again; the snapshot discipline
+   * inside `writeTimeline` is the belt to this braces, and both are needed —
+   * serializing alone still lets a write mark a count it did not persist if a
+   * later tool lands mid-await.
+   */
+  const entryForChain = findEntry(callIdOrSid);
+  if (!entryForChain) return;
+  const run = () => writeTimeline(callIdOrSid);
+  entryForChain.flushChain = (entryForChain.flushChain ?? Promise.resolve()).then(run, run);
+  return entryForChain.flushChain;
+}
+
+/** Resolve an entry by call id, call sid or call log id. */
+function findEntry(callIdOrSid: string) {
+  const direct = timelines.get(callIdOrSid);
+  if (direct) return direct;
+  for (const v of timelines.values()) {
+    if (v.callSid === callIdOrSid || v.callLogId === callIdOrSid) return v;
+  }
+  return undefined;
+}
+
+async function writeTimeline(callIdOrSid: string): Promise<void> {
   let key = callIdOrSid;
   let entry = timelines.get(key);
   if (!entry) {
@@ -617,8 +663,18 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
   if (entry.flushedCount === entry.events.length && (entry.flushedDirectorCount ?? 0) === directorCount) {
     return; // nothing new since last write
   }
+  /**
+   * THE COUNT THAT GETS MARKED IS THE ONE THAT WAS WRITTEN.
+   *
+   * `entry.events` is live and the write below is awaited, so reading its
+   * length AFTERWARDS marks a count this write did not persist — and the
+   * entry then reads as durable at a size the row does not hold (Codex P1,
+   * #320). Snapshot here, mark this.
+   */
+  const eventsSnapshot = entry.events.slice();
+  const eventsWritten = eventsSnapshot.length;
   try {
-    const { purpose, result } = classifyForAgent(entry.agentSlug, entry.events);
+    const { purpose, result } = classifyForAgent(entry.agentSlug, eventsSnapshot);
     // A/B carriage arm (Phase 7): stamped on call metadata at session
     // creation; persisted here so per-arm grade comparison reads one field.
     let abArm: string | undefined;
@@ -643,10 +699,13 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
         }
       : null;
     const payload = {
-      events: entry.events,
+      // THE SNAPSHOT, not the live array. `entry.events` keeps growing while
+      // this write is awaited, so a reference here writes a set of events the
+      // marked count does not describe.
+      events: eventsSnapshot,
       purpose,
       result,
-      toolCallCount: entry.events.length,
+      toolCallCount: eventsWritten,
       ...(entry.agentSlug ? { agentSlug: entry.agentSlug } : {}),
       ...(abArm ? { abArm } : {}),
       ...(director ? { director } : {}),
@@ -669,13 +728,13 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
     let rowsTouched = 0;
     if (entry.callLogId) {
       const touched = await db.update(callLogs)
-        .set({ toolTimeline: payload, toolCallCount: entry.events.length })
+        .set({ toolTimeline: payload, toolCallCount: eventsWritten })
         .where(eq(callLogs.id, entry.callLogId))
         .returning({ id: callLogs.id });
       rowsTouched = touched.length;
     } else if (entry.callSid) {
       const touched = await db.update(callLogs)
-        .set({ toolTimeline: payload, toolCallCount: entry.events.length })
+        .set({ toolTimeline: payload, toolCallCount: eventsWritten })
         .where(eq(callLogs.callSid, entry.callSid))
         .returning({ id: callLogs.id });
       rowsTouched = touched.length;
@@ -688,8 +747,9 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
       );
       return;
     }
-    entry.flushedCount = entry.events.length;
-    entry.flushedDirectorCount = directorCount;
+    // Never `entry.events.length` — see eventsWritten above.
+    entry.flushedCount = Math.max(entry.flushedCount ?? 0, eventsWritten);
+    entry.flushedDirectorCount = Math.max(entry.flushedDirectorCount ?? 0, directorCount);
     console.info(
       `[TOOL-TIMELINE] ${entry.agentSlug ?? 'azul-scheduling'}: flushed ${entry.events.length} tool event(s) (${purpose} → ${result})` +
         (director ? ` + ${director.count} director action(s), max ${director.maxEnforcement}` : ''),

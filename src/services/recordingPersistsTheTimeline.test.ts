@@ -33,11 +33,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
+type Timeline = { events: unknown[]; toolCallCount: number };
 type Update = { payload: Record<string, unknown>; touched: number };
+/** The timeline blob inside a `.set()` — `payload.toolTimeline`, not `payload`. */
+const timelineOf = (u: Update) => u.payload.toolTimeline as Timeline;
 const updates: Update[] = [];
 /** How many rows the next UPDATE reports touching. 0 = the call row is not
  *  open yet, which is the case the second half of this fix exists for. */
 let rowsTouched = 1;
+/** Milliseconds the next UPDATE takes, so two flushes can be made to overlap. */
+let writeDelays: number[] = [];
 
 vi.mock('../../server/db', () => ({
   db: {
@@ -45,6 +50,8 @@ vi.mock('../../server/db', () => ({
       set: (payload: Record<string, unknown>) => ({
         where: () => ({
           returning: async () => {
+            const delay = writeDelays.shift() ?? 0;
+            if (delay) await new Promise((r) => setTimeout(r, delay));
             const rows = rowsTouched > 0 ? [{ id: 'row-1' }] : [];
             updates.push({ payload, touched: rows.length });
             return rows;
@@ -69,6 +76,7 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
 beforeEach(() => {
   updates.length = 0;
   rowsTouched = 1;
+  writeDelays = [];
 });
 
 describe('a hand-built agent tool persists without anyone calling the flush', () => {
@@ -111,6 +119,64 @@ describe('a hand-built agent tool persists without anyone calling the flush', ()
     );
     rowsTouched = 0; // the row is not there; the flush takes its own exit
     await expect(wrapped({})).resolves.toContain('PCP-1');
+  });
+});
+
+describe('two flushes for one call cannot race', () => {
+  /**
+   * Codex P1 on #320. `mediaStreamBridge.handleToolCall` dispatches every tool
+   * call in one model response CONCURRENTLY, and the per-tool flush this PR
+   * adds turned that into overlapping UPDATEs on a single row. The older write
+   * could land LAST, overwrite the newer timeline, and then mark the larger
+   * event count durable — so the reaper saw a complete entry sitting over a
+   * truncated row and never repaired it.
+   *
+   * That is the 2026-07-28 race this module's own comment records (17 of 51
+   * timelines gutted), with a much shorter fuse because it now fires per TOOL.
+   */
+  it('the last write to land holds the FULL timeline, not a stale snapshot', async () => {
+    const callId = freshCall();
+    const ctx = { callId, callSid: 'CArace1', agentSlug: 'pcp' };
+
+    // The first write is slow, the second is instant — the ordering that made
+    // the old code overwrite three events with one.
+    writeDelays = [40, 0];
+
+    const first = recordingExecute(ctx, 'record_pcp_intake', async () => '{}')({});
+    await first;
+    // A second and third tool land while that first flush is still in flight.
+    await recordingExecute(ctx, 'create_pcp_task', async () => '{}')({});
+    await recordingExecute(ctx, 'terminate_call', async () => '{}')({});
+    await new Promise((r) => setTimeout(r, 120));
+
+    const last = updates[updates.length - 1]!;
+    expect(
+      last.payload.toolCallCount,
+      'an older flush landed last and overwrote the complete timeline',
+    ).toBe(3);
+    expect(timelineOf(last).events).toHaveLength(3);
+  });
+
+  it('never marks a count larger than the snapshot it actually wrote', async () => {
+    const callId = freshCall();
+    const ctx = { callId, callSid: 'CArace2', agentSlug: 'pcp' };
+
+    writeDelays = [40, 0, 0];
+    await recordingExecute(ctx, 'record_pcp_intake', async () => '{}')({});
+    await recordingExecute(ctx, 'create_pcp_task', async () => '{}')({});
+    await new Promise((r) => setTimeout(r, 120));
+
+    // Every write's marked count must be describable by its own payload.
+    for (const u of updates) {
+      // The blob's own count and its own events must agree, and both must
+      // match the count stamped on the column.
+      expect(timelineOf(u).events).toHaveLength(timelineOf(u).toolCallCount);
+      expect(timelineOf(u).toolCallCount).toBe(u.payload.toolCallCount);
+    }
+    // And the entry ends durable at exactly what the row holds.
+    const finalCount = updates[updates.length - 1]!.payload.toolCallCount;
+    await flushAzulTimeline(callId);
+    expect(updates[updates.length - 1]!.payload.toolCallCount).toBe(finalCount);
   });
 });
 
@@ -186,13 +252,23 @@ describe('wiring, read from the source', () => {
    */
   const read = (p: string) => readFileSync(path.resolve(__dirname, p), 'utf8');
 
-  it('the recorder is what flushes, at one site', () => {
-    const src = read('./toolTimeline.ts');
-    expect(src).toContain('void flushAfterRecording(');
-    // Inside recordingExecute, after the event is recorded — not before it.
-    const recordCall = src.lastIndexOf('recordToolEvent(');
-    const flushCall = src.indexOf('void flushAfterRecording(');
-    expect(flushCall).toBeGreaterThan(recordCall);
+  it('the recorder flushes on BOTH exits, each after its own record', () => {
+    const src = codeOnly(read('./toolTimeline.ts'));
+    // Two exits: the tool threw, and the tool returned. A tool that threw is
+    // still a tool that ran, and its event is the one a reader most wants
+    // (Codex P2, #320) — before this it depended on the 2h reaper.
+    expect(src.match(/void flushAfterRecording\(/g) ?? []).toHaveLength(2);
+
+    // And each flush sits AFTER the record it belongs to, never before.
+    const firstRecord = src.indexOf('recordToolEvent(');
+    const firstFlush = src.indexOf('void flushAfterRecording(');
+    const lastRecord = src.lastIndexOf('recordToolEvent(');
+    const lastFlush = src.lastIndexOf('void flushAfterRecording(');
+    expect(firstFlush).toBeGreaterThan(firstRecord);
+    expect(lastFlush).toBeGreaterThan(lastRecord);
+
+    // The error exit still rethrows — telemetry must not swallow the failure.
+    expect(src.slice(firstFlush, firstFlush + 120)).toContain('throw err;');
   });
 
   it('the adapter no longer keeps a second flush call site', () => {
@@ -203,6 +279,33 @@ describe('wiring, read from the source', () => {
     ).toBe(false);
     // And it must still route tools through the recorder, or nothing persists.
     expect(src).toContain('recordingExecute<unknown, string>(');
+  });
+
+
+  it('marks the snapshot it wrote, never the live count', () => {
+    // `entry.events` keeps growing while the write is awaited, so reading its
+    // length afterwards marks a size the row does not hold — the entry then
+    // reads durable over a truncated row and the reaper never repairs it.
+    const src = codeOnly(read('./toolTimeline.ts'));
+    expect(src).toContain('const eventsSnapshot = entry.events.slice();');
+    expect(src).toContain('const eventsWritten = eventsSnapshot.length;');
+    expect(src).toContain('events: eventsSnapshot,');
+    expect(src).toContain('toolCallCount: eventsWritten');
+    expect(
+      src.includes('entry.flushedCount = entry.events.length'),
+      'the live count is marked again — Codex P1 on #320',
+    ).toBe(false);
+  });
+
+  it('serializes flushes per entry so two cannot overlap', () => {
+    // mediaStreamBridge dispatches every tool call in one model response
+    // CONCURRENTLY, and a per-tool flush turns that into overlapping UPDATEs
+    // on one row. The older write landing last is the 2026-07-28 race.
+    const src = codeOnly(read('./toolTimeline.ts'));
+    expect(src).toContain('flushChain');
+    expect(src).toMatch(/flushChain = \(.*flushChain \?\? Promise\.resolve\(\)\)\.then\(run, run\)/s);
+    // Both arms of .then, so a rejected flush cannot wedge the chain forever.
+    expect(src).toContain('.then(run, run)');
   });
 
   it('every hand-built agent still wraps its tools in the recorder', () => {
@@ -216,7 +319,7 @@ describe('wiring, read from the source', () => {
   it('the flush only marks an entry durable when a row came back', () => {
     const src = read('./toolTimeline.ts');
     const returning = src.indexOf('.returning({ id: callLogs.id })');
-    const marked = src.indexOf('entry.flushedCount = entry.events.length;');
+    const marked = src.indexOf('entry.flushedCount = Math.max(');
     expect(returning).toBeGreaterThan(-1);
     expect(marked).toBeGreaterThan(returning);
     // The zero-row exit sits between them and returns, so the mark is skipped.
