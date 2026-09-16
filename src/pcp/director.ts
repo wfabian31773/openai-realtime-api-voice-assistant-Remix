@@ -226,6 +226,30 @@ export const RECORDS_FIELDS: Array<keyof PcpConversationState> = [
 export const MAX_ASKS_PER_FIELD = 2;
 
 /**
+ * A FIELD MAY BE WORTH LESS THAN A SECOND ASK. Operator, 2026-09-16, on the
+ * email question: "cut the email question to one ask."
+ *
+ * `MAX_ASKS_PER_FIELD` is two because a genuine ASR drop on the first pass is
+ * common on this line and a second ask recovers it. That reasoning is about
+ * the ANSWER being mis-heard. It does not hold for a field whose usual reply
+ * is not a mis-hearing at all: an email address is spelled out letter by
+ * letter, so a second ask is a second spelling, and the callers who have no
+ * email to give ("I don't have access to email" — CA782b4da236a6cc80a485c50e55f4b2a1,
+ * 2026-09-16) do not have one the second time either.
+ *
+ * ONE TABLE, THREE READERS. `noteAsked` and both filters in `next()` compare
+ * against this, so a per-field budget cannot be enforced in one place and not
+ * the other — which is how the two noun lists in `explicitAsk.ts` drifted.
+ */
+export const ASKS_FOR_FIELD: Partial<Record<keyof PcpConversationState, number>> = {
+  callerEmail: 1,
+};
+
+export function askBudgetFor(field: keyof PcpConversationState): number {
+  return ASKS_FOR_FIELD[field] ?? MAX_ASKS_PER_FIELD;
+}
+
+/**
  * THIS LINE IS AN ANSWERING SERVICE, NOT A FORM. Operator, 2026-09-16:
  *
  *   "ensure that the PCP line acts as a literal answering service. Meaning
@@ -329,6 +353,42 @@ export const PROFESSIONAL_FIELDS: Array<keyof PcpConversationState> = [
  */
 export const PROFESSIONAL_ENRICHMENT: Array<keyof PcpConversationState> = [
   'callerRole', 'callerEmail', 'callbackNumber',
+];
+/**
+ * ASKED AFTER THE TICKET EXISTS, NOT BEFORE IT.
+ *
+ * v35 put the enrichment block last on the reasoning that "by the time they
+ * are asked, purpose, name, organisation and the patient are already in hand
+ * and the request files whether or not the caller stays". THE SECOND HALF OF
+ * THAT WAS NOT TRUE, and 2026-09-16 is the measurement that says so: of 25
+ * substantive PCP calls asked for an email, 18 ENDED on that question and
+ * **10 left no ticket of any provenance** — checked against `tickets` by
+ * call SID, not inferred from `call_logs`. Three of the ten had spelled a
+ * complete address out loud first.
+ *
+ * The request files when the model runs out of questions, so a question
+ * standing in front of the filing is a gate whatever the filing tool is
+ * willing to accept. `FILING_MAY_BE_HELD = false` opened the gate on the
+ * TOOL; this opens it on the INTERVIEW, which is where these ten died.
+ *
+ * WHAT MAKES IT SAFE TO ASK AFTERWARDS: ticketing-app #275 makes a second
+ * POST on the same `callSid` ENRICH the row rather than answer `cached` and
+ * discard it, and `pcpCallerRole` / `pcpCallerEmail` are both in that
+ * enrichment set (`lib/pcp/pcp-ticket.ts`). So a title or an email collected
+ * after the ticket exists still lands on it.
+ *
+ * `callbackNumber` IS DELIBERATELY NOT IN THIS LIST. The prompt's own rule is
+ * "THE NUMBER COMES BEFORE THE TICKET, ALWAYS" (standing instruction 12):
+ * confirming a callback number after filing is not confirming it. It is
+ * seeded from caller ID on every call with an E.164 ANI, so in the normal
+ * case it is already answered and nobody is asked anything.
+ *
+ * WHAT IT COSTS: a caller who hangs up immediately after the ticket files is
+ * never asked their title or their email, where today they are asked and the
+ * request is lost. A job title is the cheaper thing to lose.
+ */
+export const ENRICHMENT_AFTER_FILING: Array<keyof PcpConversationState> = [
+  'callerRole', 'callerEmail',
 ];
 /**
  * ONE SLOT, TWO PLACES THE ANSWER CAN LAND.
@@ -648,7 +708,7 @@ export class PcpDirector {
     const counts = state.askCounts ?? {};
     const charged = (counts[field] ?? 0) + 1;
     state.askCounts = { ...counts, [field]: charged };
-    return charged >= MAX_ASKS_PER_FIELD;
+    return charged >= askBudgetFor(field);
   }
 
   /**
@@ -789,9 +849,14 @@ export class PcpDirector {
      *
      * Last, because these are the questions we can afford to lose: by the time
      * they are asked, purpose, name, organisation and the patient are already
-     * in hand and the request files whether or not the caller stays. Putting
-     * `callerRole` second is what made it the biggest single killer on
-     * 2026-09-14/15 — 26 calls died on it for 6 tickets.
+     * in hand. Putting `callerRole` second is what made it the biggest single
+     * killer on 2026-09-14/15 — 26 calls died on it for 6 tickets.
+     *
+     * LAST WAS NOT LATE ENOUGH. This note used to end "and the request files
+     * whether or not the caller stays"; on 2026-09-16 ten calls that died on
+     * the email question left no ticket of any provenance, because the model
+     * files when it runs out of questions and these were still questions.
+     * `ENRICHMENT_AFTER_FILING` is the fix — see the note on that list.
      *
      * `!connectsToHuman` is the load-bearing half and it is a guard on
      * something worse than a long intake. `handoffEligible`'s second arm reads
@@ -809,6 +874,20 @@ export class PcpDirector {
       return (SATISFIED_BY[field] ?? []).some((alternate) => Boolean(state[alternate]));
     };
     const stillUnset = required.filter((field) => !answered(field));
+    /**
+     * WHAT WE MAY ASK RIGHT NOW, which is not the same as what is missing.
+     *
+     * `ENRICHMENT_AFTER_FILING` stays in `stillUnset` and out of this, until a
+     * disposition is on the record. THAT ASYMMETRY IS THE WHOLE POINT and it
+     * is the v33 decoupling reused: `intakeIncomplete` below is computed from
+     * `stillUnset`, and `handoffEligible`'s second arm reads it, so anything
+     * that shortened the missing list would grant the AUTO-transfer the
+     * operator withdrew on 2026-09-04 two questions sooner. Only what the
+     * agent SAYS changes here; who we dial does not move at all.
+     */
+    const askableNow = stillUnset.filter(
+      (field) => Boolean(state.dispositionRecorded) || !ENRICHMENT_AFTER_FILING.includes(field),
+    );
     /**
      * TWO QUESTIONS, TWO ANSWERS — AND WELDING THEM IS THE BUG THIS AVOIDS.
      *
@@ -830,10 +909,10 @@ export class PcpDirector {
      */
     const intakeIncomplete = stillUnset.length > 0;
     const askBudgetSpent = stillUnset.filter(
-      (field) => (state.askCounts?.[field] ?? 0) >= MAX_ASKS_PER_FIELD,
+      (field) => (state.askCounts?.[field] ?? 0) >= askBudgetFor(field),
     );
-    const missing = stillUnset.find(
-      (field) => (state.askCounts?.[field] ?? 0) < MAX_ASKS_PER_FIELD,
+    const missing = askableNow.find(
+      (field) => (state.askCounts?.[field] ?? 0) < askBudgetFor(field),
     );
 
     let disposition = purpose?.defaultDisposition;

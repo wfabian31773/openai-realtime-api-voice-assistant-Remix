@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { PcpDirector, MAX_ASKS_PER_FIELD, DESTINATION_PROMPTS, type PcpConversationState } from './director';
+import { PcpDirector, MAX_ASKS_PER_FIELD, askBudgetFor, DESTINATION_PROMPTS, type PcpConversationState } from './director';
 
 /**
  * THE SEVEN-TIMES CALL.
@@ -80,10 +80,13 @@ describe('the ask budget', () => {
     // are recorded when volunteered but never asked. The caller answers
     // neither.
     d.update(SEVEN_TIMES_CALL, upToPatientFirstName);
-    // The patient's name, then the enrichment block that follows it —
-    // `callerRole` and `callerEmail`, which are asked AFTER the patient
-    // precisely so a hang-up here cannot cost the request. `callbackNumber`
-    // is seeded and so never offered.
+    // A disposition is on the record, so the enrichment block is offered too
+    // and this walk covers the whole remaining form. Without it `callerRole`
+    // and `callerEmail` are held back until the request is filed — see
+    // `ENRICHMENT_AFTER_FILING` and `enrichmentFollowsTheFiling.test.ts`.
+    d.recordDisposition(SEVEN_TIMES_CALL, 'CREATE_TASK');
+    // The patient's name, then the enrichment block that follows it.
+    // `callbackNumber` is seeded and so never offered.
     const outstanding = ['patientFirstName', 'patientLastName', 'callerRole', 'callerEmail'];
 
     const asked: string[] = [];
@@ -92,12 +95,16 @@ describe('the ask budget', () => {
       if (decision.nextQuestion) asked.push(String(decision.nextQuestion.field));
     }
 
-    // Each gets its two asks and no more, and the form does not stall on the
-    // first one forever — twenty turns produce eight questions, not twenty.
+    // Each gets ITS OWN budget and no more, and the form does not stall on the
+    // first one forever — twenty turns produce seven questions, not twenty.
+    // `callerEmail` is one rather than two: operator, 2026-09-16.
     for (const field of outstanding) {
-      expect(asked.filter((f) => f === field).length, field).toBe(MAX_ASKS_PER_FIELD);
+      expect(asked.filter((f) => f === field).length, field)
+        .toBe(askBudgetFor(field as keyof PcpConversationState));
     }
-    expect(asked.length).toBe(MAX_ASKS_PER_FIELD * outstanding.length);
+    expect(asked.length).toBe(
+      outstanding.reduce((n, f) => n + askBudgetFor(f as keyof PcpConversationState), 0),
+    );
   });
 
   it('lets the intake read as complete afterwards, so the request can file', () => {

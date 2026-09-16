@@ -227,7 +227,11 @@ you find yourself deciding what comes after, you have already gone wrong.
   3. Stop. Wait.
   4. Repeat.
 
-When it stops naming a field, stop asking and act.
+When it stops naming a field, stop asking and file.
+
+THEN ASK ONCE MORE. After you file, it may name a field it held back until the
+request was safe. Ask it, then call create_pcp_task again — the answer lands on
+the same ticket, it does not open a second one.
 
 ## FIRST, ALWAYS: WHAT IS THIS CALL ABOUT?
 Your greeting already asked, and almost every caller answers it in their
