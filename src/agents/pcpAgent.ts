@@ -709,18 +709,19 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * this cannot throw into the intake.
        */
       await syncDirectorFactsToLedger(callId, pcpDirector.get(callId));
-      const decision = pcpDirector.next(callId);
+      const decision = pcpDirector.askNext(callId);
       /**
        * THE ONLY PLACE A PCP QUESTION IS SPOKEN, so the only place the ask
-       * budget is charged. See `PcpDirector.noteAsked` for why this is not
-       * inside `next()`.
+       * budget is charged — and `askNext` is what charges it. The plain
+       * `next()` stays uncharged because four other call sites read it for
+       * `handoffEligible`, `disposition` and `mayTerminate` without speaking
+       * to anybody.
        *
        * On CA908f93dae322ed0e0dd862673ebf77fb (2026-09-15) this tool handed
        * back `patientFirstName` seven times and the agent asked it seven
        * times. After MAX_ASKS_PER_FIELD the director stops offering it, the
        * form moves on, and the field rides onto the ticket as NOT CAPTURED.
        */
-      if (decision.nextQuestion) pcpDirector.noteAsked(callId, decision.nextQuestion.field);
       if (decision.askBudgetSpent?.length) {
         // Console-visible AND, through toolTimeline, countable from SQL. The
         // tool ceiling's stops are console-only and this is not repeating that.

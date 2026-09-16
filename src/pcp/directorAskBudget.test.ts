@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { PcpDirector, MAX_ASKS_PER_FIELD, type PcpConversationState } from './director';
+import { PcpDirector, MAX_ASKS_PER_FIELD, DESTINATION_PROMPTS, type PcpConversationState } from './director';
 
 /**
  * THE SEVEN-TIMES CALL.
@@ -46,12 +46,17 @@ const upToPatientFirstName: Partial<PcpConversationState> = {
   statedRelationship: 'referral coordinator',
 };
 
-/** Ask, then record that we asked — what `record_pcp_intake` does per turn. */
-function askOnce(d: PcpDirector, callId: string) {
-  const decision = d.next(callId);
-  if (decision.nextQuestion) d.noteAsked(callId, decision.nextQuestion.field);
-  return decision;
-}
+/**
+ * One turn of `record_pcp_intake`.
+ *
+ * THIS CALLS THE REAL METHOD rather than re-implementing the sequence. The
+ * first version of this helper hand-rolled `next()` + `noteAsked()` to mirror
+ * the call site, and so reproduced Codex's P2 (#315) instead of catching it:
+ * the exhaustion was reported one invocation late and a helper written from
+ * the same misunderstanding could not see it. A helper that duplicates
+ * production logic tests the helper.
+ */
+const askOnce = (d: PcpDirector, callId: string) => d.askNext(callId);
 
 describe('the ask budget', () => {
   it('offers a field at most MAX_ASKS_PER_FIELD times, not seven', () => {
@@ -150,6 +155,123 @@ describe('the ask budget', () => {
 });
 
 /**
+ * THE TWO CODEX P2s ON #315, both on this change, both confirmed in the source
+ * before they were fixed.
+ */
+describe('the exhaustion is reported on the turn it happens', () => {
+  it('names the field on the SAME decision that spends its last ask', () => {
+    const d = director();
+    d.update(SEVEN_TIMES_CALL, upToPatientFirstName);
+
+    // First ask: not spent yet.
+    const first = askOnce(d, SEVEN_TIMES_CALL);
+    expect(first.askBudgetSpent).toBeUndefined();
+
+    // Second ask IS the last one. `next()` read the counts before this ask was
+    // charged, so without the fold-back the field would only appear on a THIRD
+    // invocation — which never happens when the caller hangs up here, and that
+    // is exactly the population the signal exists to count.
+    const second = askOnce(d, SEVEN_TIMES_CALL);
+    expect(second.nextQuestion?.field).toBe('patientFirstName');
+    expect(second.askBudgetSpent).toContain('patientFirstName');
+  });
+
+  it('still asks the question it just charged — only the reporting changes', () => {
+    const d = director();
+    d.update(SEVEN_TIMES_CALL, upToPatientFirstName);
+    askOnce(d, SEVEN_TIMES_CALL);
+    const second = askOnce(d, SEVEN_TIMES_CALL);
+    // The model must put this question to the caller. Suppressing it here
+    // would spend the ask without asking.
+    expect(second.nextQuestion?.prompt).toBeTruthy();
+  });
+
+  it('noteAsked reports exhaustion for the field it charged, and only then', () => {
+    const d = director();
+    d.update(SEVEN_TIMES_CALL, upToPatientFirstName);
+    expect(d.noteAsked(SEVEN_TIMES_CALL, 'patientFirstName')).toBe(false);
+    expect(d.noteAsked(SEVEN_TIMES_CALL, 'patientFirstName')).toBe(true);
+  });
+
+  it('does not list the same field twice', () => {
+    const d = director();
+    d.update(SEVEN_TIMES_CALL, upToPatientFirstName);
+    askOnce(d, SEVEN_TIMES_CALL);
+    const second = askOnce(d, SEVEN_TIMES_CALL);
+    const spent = second.askBudgetSpent ?? [];
+    expect(spent.filter((f) => f === 'patientFirstName')).toHaveLength(1);
+  });
+});
+
+describe('a changed delivery method gets its own asks', () => {
+  /** A records caller who has chosen fax and been asked for the number. */
+  const recordsCaller = {
+    callPurpose: 'patient_medical_records_request' as const,
+    callerName: 'A Caller',
+    callbackNumber: '5555550100',
+    callerIsThePatient: true,
+    recordsDeliveryMethod: 'fax' as const,
+  };
+
+  it('asks for the email address afresh after the caller switches from fax', () => {
+    const d = director();
+    const callId = 'CAtest0000000000000000000000000003';
+    d.update(callId, recordsCaller);
+
+    // Spend both asks on the FAX number, then let the caller answer it.
+    for (let turn = 0; turn < MAX_ASKS_PER_FIELD; turn++) askOnce(d, callId);
+    d.update(callId, { recordsDeliveryDestination: '5555550199' });
+
+    // "Actually, email it" — the destination is invalidated.
+    d.update(callId, { recordsDeliveryMethod: 'email' });
+    d.clearRecordsDestination(callId);
+
+    // This is a DIFFERENT question ("What is the email address?"), so it gets
+    // its own budget. Without the reset it would get none and the case would
+    // file with nowhere to send the records.
+    const asked: string[] = [];
+    for (let turn = 0; turn < 5; turn++) {
+      const decision = askOnce(d, callId);
+      if (decision.nextQuestion) asked.push(String(decision.nextQuestion.field));
+    }
+    expect(asked.filter((f) => f === 'recordsDeliveryDestination').length).toBe(MAX_ASKS_PER_FIELD);
+  });
+
+  it('asks the question in the words of the NEW method', () => {
+    const d = director();
+    const callId = 'CAtest0000000000000000000000000004';
+    d.update(callId, recordsCaller);
+    for (let turn = 0; turn < MAX_ASKS_PER_FIELD; turn++) askOnce(d, callId);
+    d.update(callId, { recordsDeliveryDestination: '5555550199', recordsDeliveryMethod: 'email' });
+    d.clearRecordsDestination(callId);
+
+    expect(d.next(callId).nextQuestion?.prompt).toBe(DESTINATION_PROMPTS.email);
+  });
+
+  it('resets the destination\'s count and leaves every other field alone', () => {
+    const d = director();
+    const callId = 'CAtest0000000000000000000000000005';
+    d.update(callId, recordsCaller);
+
+    // THE DESTINATION MUST HAVE BEEN ASKED, or the reset branch is never
+    // entered and this test cannot see what it does. Mutation testing caught
+    // exactly that: an earlier version charged only `patientFirstName`, so
+    // replacing the targeted reset with a whole-map wipe passed every
+    // assertion. A test that does not reach the branch is not testing it.
+    d.noteAsked(callId, 'recordsDeliveryDestination');
+    d.noteAsked(callId, 'callerName');
+
+    d.clearRecordsDestination(callId);
+
+    expect(d.get(callId).askCounts?.recordsDeliveryDestination).toBe(0);
+    // A reset that swept the whole map would hand every field its asks back —
+    // including ones the caller has already been asked twice, which is the
+    // seven-times loop returning through a side door.
+    expect(d.get(callId).askCounts?.callerName).toBe(1);
+  });
+});
+
+/**
  * THE DECOUPLING, AND IT IS THE LOAD-BEARING HALF.
  *
  * `handoffEligible`'s second arm is "a complete intake on a HAND_OFF purpose"
@@ -212,14 +334,28 @@ describe('the intake tool charges the budget', () => {
   const agent = readFileSync(path.resolve(__dirname, '../agents/pcpAgent.ts'), 'utf8');
   const timeline = readFileSync(path.resolve(__dirname, '../services/toolTimeline.ts'), 'utf8');
 
-  it('record_pcp_intake calls noteAsked on the field it hands back', () => {
-    expect(agent).toContain('pcpDirector.noteAsked(callId, decision.nextQuestion.field)');
+  it('record_pcp_intake goes through askNext, which charges as it decides', () => {
+    expect(agent).toContain('pcpDirector.askNext(callId)');
   });
 
-  it('nothing else in the agent charges it', () => {
+  it('the agent never charges the budget itself', () => {
     // Four other call sites read next() for handoffEligible, disposition and
-    // mayTerminate. A second noteAsked would burn asks nobody spoke.
-    expect((agent.match(/noteAsked\(/g) ?? []).length).toBe(1);
+    // mayTerminate without speaking to anybody. A noteAsked out here would
+    // burn asks nobody spoke — and orchestrating decide/charge/report at the
+    // call site is what put the exhaustion one invocation late (Codex P2,
+    // #315). The sequence belongs to the director; the agent just asks.
+    // A CALL, not a mention — a comment explaining why the charge lives in the
+    // director is documentation, not a second charge. Same distinction
+    // `recognisedCallerBlock.test.ts` draws when it strips comments before
+    // looking for an inlined copy.
+    expect(agent).not.toMatch(/\.noteAsked\s*\(/);
+  });
+
+  it('noteAsked has exactly one caller, and it is askNext', () => {
+    const director = readFileSync(path.resolve(__dirname, './director.ts'), 'utf8');
+    // Its definition, plus the single call inside askNext.
+    expect((director.match(/\bnoteAsked\(/g) ?? []).length).toBe(2);
+    expect(director).toContain('const nowSpent = this.noteAsked(callId, field);');
   });
 
   it('askBudgetSpent reaches tool_timeline, so it is countable from SQL', () => {

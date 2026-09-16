@@ -355,7 +355,29 @@ export class PcpDirector {
    * and the ticket reads "Deliver by EMAIL to <fax number>".
    */
   clearRecordsDestination(callId: string): void {
-    this.get(callId).recordsDeliveryDestination = undefined;
+    const state = this.get(callId);
+    state.recordsDeliveryDestination = undefined;
+    /**
+     * AND FORGET HOW MANY TIMES WE ASKED, because it is a DIFFERENT QUESTION
+     * NOW. Codex P2, #315.
+     *
+     * `DESTINATION_PROMPTS` is per method: "What is the fax number?", "What is
+     * the email address?", "What is the mailing address?". A caller who gives
+     * a fax number and then says "actually, email it" is being asked something
+     * they have never been asked before, so a LIFETIME count on the field name
+     * is the wrong key — two asks spent on the fax number would leave the
+     * email address with none, and the case files with nowhere to send it.
+     * That is the 2026-08-13 hard gate's own failure arriving through a third
+     * door (see the v16 marker row).
+     *
+     * Resetting here rather than scoping the counter by method keeps ONE
+     * counter shape for every field: this function already exists to forget a
+     * destination gathered for a method the caller changed, and forgetting the
+     * asks that gathered it is the same act.
+     */
+    if (state.askCounts?.recordsDeliveryDestination !== undefined) {
+      state.askCounts = { ...state.askCounts, recordsDeliveryDestination: 0 };
+    }
   }
 
   /** Record that the caller explicitly asked to speak to a person. */
@@ -388,10 +410,68 @@ export class PcpDirector {
    * the one place a question is handed back to the model to say out loud —
    * calls this.
    */
-  noteAsked(callId: string, field: keyof PcpConversationState): void {
+  /**
+   * RETURNS whether this field is now SPENT — and that return value is the
+   * whole point. Codex P2, #315.
+   *
+   * `next()` computes `askBudgetSpent` from the counts as they stand, and the
+   * caller charges the ask AFTERWARDS. So on the turn that hands out the LAST
+   * permitted ask, the decision already returned says the field is not yet
+   * spent, and the field only appears in `askBudgetSpent` on the NEXT
+   * invocation. A caller who hangs up after that final unanswered prompt
+   * produces no next invocation — so the SQL signal missed exactly the calls
+   * that end at the cap, which are the ones worth counting. That is the tool
+   * ceiling's uncountability reappearing in the instrument written not to
+   * repeat it.
+   *
+   * Reporting it from HERE rather than recomputing the whole list is
+   * deliberate: charging one ask can only ever exhaust the one field being
+   * charged, so this cannot drift from `next()`'s own view of what is
+   * required — there is no second copy of that list.
+   */
+  noteAsked(callId: string, field: keyof PcpConversationState): boolean {
     const state = this.get(callId);
     const counts = state.askCounts ?? {};
-    state.askCounts = { ...counts, [field]: (counts[field] ?? 0) + 1 };
+    const charged = (counts[field] ?? 0) + 1;
+    state.askCounts = { ...counts, [field]: charged };
+    return charged >= MAX_ASKS_PER_FIELD;
+  }
+
+  /**
+   * THE NEXT QUESTION, AND THE RECORD THAT WE ASKED IT — in one call.
+   *
+   * `next()` stays pure and public because four call sites read it for
+   * `handoffEligible`, `disposition` or `mayTerminate` without speaking to
+   * anybody (`pcpAgent.ts` 785, 842, 1154, 1852). Those must not charge a
+   * caller's asks.
+   *
+   * But the ONE caller that does speak has to do three things in the right
+   * order — decide, charge, then re-report the exhaustion the charge just
+   * caused — and getting that order wrong is silent: the field that hit the
+   * cap simply does not appear in `askBudgetSpent`, and a caller who hangs up
+   * on that final prompt never produces the next invocation that would have
+   * shown it. Codex P2 (#315) found exactly that, and a test helper written
+   * to mirror the call site reproduced the bug rather than catching it.
+   *
+   * So the sequence lives here, once, and `record_pcp_intake` calls this
+   * instead of orchestrating it.
+   */
+  askNext(callId: string): PcpDirectorDecision {
+    const decision = this.next(callId);
+    if (!decision.nextQuestion) return decision;
+
+    const field = decision.nextQuestion.field;
+    const nowSpent = this.noteAsked(callId, field);
+    if (!nowSpent) return decision;
+
+    // The question we just charged STILL GOES TO THE CALLER — only the
+    // reporting changes. Suppressing it here would spend the ask without
+    // asking.
+    const already = decision.askBudgetSpent ?? [];
+    const name = String(field);
+    return already.includes(name)
+      ? decision
+      : { ...decision, askBudgetSpent: [...already, name] };
   }
 
   next(callId: string): PcpDirectorDecision {
