@@ -1153,7 +1153,7 @@ import { escalationDetailsMap, type EscalationDetails } from './services/escalat
 import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
 import { filesTickets } from './config/agentCapabilities';
 import { recordCallerSpeech, releaseCallerSpeech } from './services/symptomCorroboration';
-import { priceVoiceCall } from './services/callCostService';
+import { applyTwilioStatusCallback } from './services/twilioStatusCallback';
 
 
 
@@ -7774,257 +7774,61 @@ export function setupVoiceAgentRoutes(app: Express): void {
     res.send(twimlResponse);
   });
 
-  // Twilio StatusCallback endpoint - comprehensive call outcome tracking
-  // Called by Twilio when call status changes (completed, busy, no-answer, failed, etc.)
-  // Support both /status and /status-callback for Twilio compatibility
+  // Twilio StatusCallback — parent-call hangup bookkeeping.
+  // `/api/voice/status` and `/status-callback` live on the OLD CORE process
+  // (port 8000). The Grok runtime writes local_duration at stream teardown;
+  // this webhook is what was supposed to put Twilio's CallDuration on the
+  // row. On 2026-09-15 it answered HTTP 500 (Twilio 15003) on every completed
+  // PCP inbound. Decision + write: src/services/twilioStatusCallback.ts.
+  // A processing error is HTTP 200 — a 500 is 15003 and hides the exception.
   const statusCallbackHandler = async (req: any, res: any) => {
     try {
-      // Handle both Buffer (raw parser) and object (urlencoded parser) cases
-      let parsedBody: Record<string, string>;
-      
-      if (Buffer.isBuffer(req.body)) {
-        // Raw body-parser middleware - parse manually
-        const rawBody = req.body.toString("utf8");
-        parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
-      } else if (typeof req.body === 'object') {
-        // Already parsed by urlencoded middleware
-        parsedBody = req.body;
-      } else {
-        // Unexpected format
-        console.error('[STATUS CALLBACK] Unexpected body format:', typeof req.body);
-        return res.status(400).json({ success: false, error: 'Invalid request format' });
-      }
-      
-      const {
-        CallSid,
-        CallStatus,
-        CallDuration,
-        AnsweredBy,
-        MachineDetectionDuration,
-        ErrorCode,
-        ErrorMessage,
-        Timestamp,
-      } = parsedBody;
-
-      // Validate required fields
-      if (!CallSid || !CallStatus) {
-        console.error('[STATUS CALLBACK] Missing required fields: CallSid or CallStatus');
-        return res.status(400).json({ success: false, error: 'Missing required fields' });
+      const parsedEarly = Buffer.isBuffer(req.body)
+        ? Object.fromEntries(new URLSearchParams(req.body.toString("utf8")))
+        : req.body && typeof req.body === "object"
+          ? req.body
+          : {};
+      const earlySid = typeof parsedEarly.CallSid === "string" ? parsedEarly.CallSid : "";
+      const earlyStatus = typeof parsedEarly.CallStatus === "string" ? parsedEarly.CallStatus : "";
+      if (earlySid && earlyStatus) {
+        callLifecycleCoordinator.handleTwilioStatusCallback(earlySid, earlyStatus);
       }
 
-      console.info(`[STATUS CALLBACK] CallSid: ${CallSid}, Status: ${CallStatus}, AnsweredBy: ${AnsweredBy || 'N/A'}`);
-
-      // Notify lifecycle coordinator of Twilio status callback (most authoritative signal)
-      callLifecycleCoordinator.handleTwilioStatusCallback(CallSid, CallStatus);
-
-      // Use singleton storage instance for consistency
-      const { storage } = await import('../server/storage');
-
-      // Find the call log by CallSid using direct query (not pagination scan)
-      const callLog = await storage.getCallLogBySid(CallSid);
-
-      if (!callLog) {
-        console.warn(`[STATUS CALLBACK] No call log found for CallSid: ${CallSid}`);
-        return res.json({ success: false, message: 'Call log not found' });
-      }
-
-      // Determine call disposition based on comprehensive Twilio data
-      let callDisposition = CallStatus;
-      let isVoicemail = false;
-
-      // Machine detection results
-      if (AnsweredBy === 'machine_start' || AnsweredBy === 'machine_end_beep' || AnsweredBy === 'machine_end_silence') {
-        callDisposition = 'voicemail';
-        isVoicemail = true;
-      } else if (AnsweredBy === 'fax') {
-        callDisposition = 'fax_machine';
-      }
-
-      // Map Twilio status to our internal status
-      let internalStatus: 'initiated' | 'ringing' | 'in_progress' | 'completed' | 'failed' | 'no_answer' | 'busy' | 'transferred' = 'completed';
-      
-      if (CallStatus === 'busy') {
-        internalStatus = 'busy';
-        callDisposition = 'busy';
-      } else if (CallStatus === 'no-answer') {
-        internalStatus = 'no_answer';
-        callDisposition = 'no_answer';
-      } else if (CallStatus === 'failed' || CallStatus === 'canceled') {
-        internalStatus = 'failed';
-        
-        // Parse error codes for detailed disposition
-        if (ErrorCode === '21217') callDisposition = 'line_disconnected';
-        else if (ErrorCode === '21214') callDisposition = 'wrong_number';
-        else if (ErrorCode === '21211') callDisposition = 'out_of_service';
-        else callDisposition = 'failed';
-      } else if (CallStatus === 'completed') {
-        internalStatus = 'completed';
-      }
-
-      // Use Twilio's timestamp if provided, otherwise current time
-      const endTime = Timestamp ? new Date(Timestamp) : new Date();
-      
-      // Fetch actual Twilio cost for terminal states
-      let actualTwilioCostCents: number | null = null;
-      const terminalStates = ['completed', 'busy', 'no-answer', 'failed', 'canceled'];
-      
-      if (terminalStates.includes(CallStatus)) {
-        try {
+      const { storage } = await import("../server/storage");
+      const result = await applyTwilioStatusCallback(req.body, {
+        storage: {
+          getCallLogBySid: (callSid) => storage.getCallLogBySid(callSid),
+          updateCallLogPreservingReconciledCost: (id, updates) =>
+            storage.updateCallLogPreservingReconciledCost(id, updates),
+          updateCallLogHangup: (id, updates) => storage.updateCallLog(id, updates),
+          updateCampaignContact: (contactId, updates) =>
+            storage.updateCampaignContact(contactId, updates),
+        },
+        fetchTwilioCostCents: async (callSid) => {
           const twilioClient = await getTwilioClient();
-          if (twilioClient) {
-            const twilioCallDetails = await twilioClient.calls(CallSid).fetch();
-            if (twilioCallDetails.price) {
-              // Twilio returns price as negative string like "-0.009"
-              const price = parseFloat(twilioCallDetails.price);
-              actualTwilioCostCents = Math.round(Math.abs(price) * 100);
-              console.info(`[STATUS CALLBACK] Fetched actual Twilio cost: $${Math.abs(price).toFixed(4)} (${actualTwilioCostCents}¢)`);
-            }
-          }
-        } catch (err) {
-          console.warn('[STATUS CALLBACK] Could not fetch Twilio cost:', err);
-        }
-      }
-      
-      // CRITICAL: Only use Twilio's CallDuration if provided, otherwise leave duration unchanged
-      // This prevents overwriting with 0 when Twilio doesn't provide duration
-      const hasTwilioDuration = CallDuration && CallDuration !== '0' && CallDuration !== '';
-      const twilioProvidedDuration = hasTwilioDuration ? parseInt(CallDuration) : null;
-      
-      // Calculate costs only if we have authoritative Twilio duration
-      const duration = twilioProvidedDuration ?? callLog.duration ?? 0;
-
-      /**
-       * ONE RATE, AND NEVER OVER A MEASUREMENT.
-       *
-       * This line was `Math.round(duration / 60 * 19)` — 19c/min, which is
-       * 1.67x the 11.4c/min the rest of the codebase intends. The comment on
-       * OPENAI_COST_CENTS_PER_SECOND has called 19c/min a units slip since the
-       * day it was written; the correction landed in server/routes.ts and never
-       * here, in the Twilio status-callback handler — a live path on every
-       * inbound call, and now on five more numbers since the callbacks were
-       * wired up on 2026-08-15.
-       *
-       * It also had no token guard and set costIsEstimated:false below,
-       * stamping a blended-rate guess as authoritative.
-       *
-       * Now: the shared decision, and only when there is nothing better. A
-       * row carrying real token counts keeps the cost derived from them.
-       */
-      const twilioCostCents = actualTwilioCostCents ?? callLog.twilioCostCents ?? 0;
-      // The shared DECISION now, not only the shared constant: a Grok-served
-      // row's token columns are null exactly like an un-reconciled OpenAI
-      // row's, so a status callback pointed at this handler for a runtime
-      // number would overwrite the correct Grok charge with an OpenAI
-      // estimate (Codex, PR #227 round 14). Token-derived costs are still
-      // kept — that guard lives inside priceVoiceCall.
-      const pricing = priceVoiceCall({
-        voiceProvider: (callLog as { voiceProvider?: string | null }).voiceProvider,
-        inputAudioTokens: callLog.inputAudioTokens,
-        existingOpenaiCostCents: callLog.openaiCostCents,
-        costReconciledAt: (callLog as { costReconciledAt?: Date | null }).costReconciledAt,
-        durationSeconds: duration,
-        twilioCostCents,
+          if (!twilioClient) return null;
+          const twilioCallDetails = await twilioClient.calls(callSid).fetch();
+          if (!twilioCallDetails.price) return null;
+          const price = parseFloat(twilioCallDetails.price);
+          const cents = Math.round(Math.abs(price) * 100);
+          console.info(`[STATUS CALLBACK] Fetched actual Twilio cost: $${Math.abs(price).toFixed(4)} (${cents}¢)`);
+          return cents;
+        },
+        notifyCampaignComplete: (callSid) => {
+          void import("../server/services/campaignExecutor")
+            .then(({ campaignExecutor }) => {
+              campaignExecutor.notifyCallComplete(callSid);
+              console.info(`[STATUS CALLBACK] ✓ Notified campaign executor: ${callSid}`);
+            })
+            .catch((err) => {
+              console.error("[STATUS CALLBACK] Error notifying campaign executor:", err);
+            });
+        },
       });
-      /**
-       * A RECONCILED ROW IS AUTHORITATIVE TOO.
-       *
-       * This asked only about tokens, so a Grok row already priced from
-       * xAI's invoice fell through and got `costIsEstimated = true` set on
-       * it — while `cost_reconciled_at` stayed populated. The cost survived
-       * (priceVoiceCall's guard holds), but the row then said both
-       * "estimated" and "reconciled at 06:00", and the Observatory and the
-       * QVO exports read the flag. A number that is right and labelled wrong
-       * is still a number nobody can trust (Codex, PR #268 round 3).
-       */
-      const hasTokenDerivedCost =
-        pricing.basis === "openai_tokens" || pricing.basis === "reconciled";
-      const openaiCostCents = pricing.providerCostCents ?? callLog.openaiCostCents ?? 0;
-      const totalCostCents = pricing.totalCostCents;
-
-      // Update call log with comprehensive tracking data
-      // ONLY mark as authoritative (costIsEstimated: false) if Twilio provided CallDuration
-      // CRITICAL: Preserve transferredToHuman flag - it was set during handoff and must NOT be overwritten
-      const updateData: Record<string, any> = {
-        status: internalStatus,
-        twilioStatus: CallStatus,
-        answeredBy: AnsweredBy || null,
-        machineDetectionDuration: MachineDetectionDuration ? parseInt(MachineDetectionDuration) : null,
-        callDisposition,
-        isVoicemail,
-        twilioErrorCode: ErrorCode || null,
-        endTime,
-        twilioCostCents,
-        openaiCostCents,
-        totalCostCents,
-        // PRESERVE EXISTING transferredToHuman FLAG - never overwrite with null/false
-        transferredToHuman: callLog.transferredToHuman || false,
-      };
-      
-      // Only update duration and mark as authoritative if Twilio actually provided it
-      if (hasTwilioDuration) {
-        updateData.duration = twilioProvidedDuration;
-        /**
-         * "AUTHORITATIVE" IS ABOUT THE DURATION, NOT THE COST.
-         *
-         * Twilio giving us a CallDuration makes the DURATION authoritative. It
-         * says nothing about how the OpenAI cost was derived — and this branch
-         * set costIsEstimated:false unconditionally, stamping a blended-rate
-         * duration guess as a measurement. The flag then meant nothing, which
-         * is why it could not be used to find the rows this whole
-         * investigation was about.
-         *
-         * It now tracks what it names: false only when the cost came from
-         * token counts.
-         */
-        updateData.costIsEstimated = !hasTokenDerivedCost;
-        console.info(
-          `[STATUS CALLBACK] ✓ TWILIO AUTHORITATIVE: Duration=${twilioProvidedDuration}s` +
-            (pricing.basis === "reconciled"
-              ? ' (cost reconciled against the provider bill, preserved)'
-              : hasTokenDerivedCost
-                ? ' (cost from tokens, preserved)'
-                : ' (cost estimated from duration)'),
-        );
-      } else {
-        // Twilio didn't provide duration - keep costIsEstimated true for reconciliation
-        console.warn(`[STATUS CALLBACK] ⚠️ Twilio did not provide CallDuration, keeping costIsEstimated=true for reconciliation`);
-      }
-      
-      await storage.updateCallLogPreservingReconciledCost(callLog.id, updateData);
-
-      // Update campaign contact if this was a campaign call
-      if (callLog.campaignId && callLog.contactId) {
-        const successful = internalStatus === 'completed' && !isVoicemail;
-        
-        await storage.updateCampaignContact(callLog.contactId, {
-          contacted: true,
-          successful,
-          lastAttemptAt: endTime,
-        });
-
-        console.info(`[STATUS CALLBACK] ✓ Updated campaign contact: ${callLog.contactId}, Successful: ${successful}`);
-      }
-
-      console.info(`[STATUS CALLBACK] ✓ Call log updated: ${callLog.id}, Disposition: ${callDisposition}, Voicemail: ${isVoicemail}, Cost: ${totalCostCents}¢`);
-      
-      // Notify campaign executor that call has completed (ONLY for terminal states)
-      if (callLog.campaignId && callLog.direction === 'outbound' && terminalStates.includes(CallStatus)) {
-        try {
-          const { campaignExecutor } = await import('../server/services/campaignExecutor');
-          campaignExecutor.notifyCallComplete(CallSid);
-          console.info(`[STATUS CALLBACK] ✓ Notified campaign executor (terminal state: ${CallStatus}): ${CallSid}`);
-        } catch (err) {
-          console.error('[STATUS CALLBACK] Error notifying campaign executor:', err);
-          // Don't fail the webhook if notification fails
-        }
-      } else if (callLog.campaignId && callLog.direction === 'outbound') {
-        console.info(`[STATUS CALLBACK] Skipping notification - non-terminal state: ${CallStatus}`);
-      }
-      
-      res.json({ success: true });
+      res.status(result.status).json(result.body);
     } catch (error) {
-      console.error('[STATUS CALLBACK] Error processing webhook:', error);
-      res.status(500).json({ success: false, error: 'Internal server error' });
+      console.error("[STATUS CALLBACK] exception Error:", error);
+      res.status(200).json({ success: false, error: "status_callback_failed" });
     }
   };
   
