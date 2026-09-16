@@ -19,7 +19,13 @@
  * total means nothing, and this codebase has been burned before by a measure
  * that silently covered only part of its population.
  */
-import { allocateDailyCost, rateDriftMarker, type CallToPrice } from "./grokCostAllocation";
+import {
+  allocateDailyCost,
+  impliedRateIsImplausible,
+  rateDriftMarker,
+  RATE_SANITY_MULTIPLE,
+  type CallToPrice,
+} from "./grokCostAllocation";
 import { GROK_COST_CENTS_PER_SECOND } from "./voiceCostRates";
 import {
   fetchDailySpend,
@@ -149,10 +155,42 @@ export function reconcileMarker(outcome: ReconcileOutcome): string {
   );
 }
 
+/**
+ * THE ONLY PLACE EITHER OUTCOME IS ANNOUNCED, and that is the point.
+ *
+ * Every refusal below returns early, and `startGrokCostReconciler` throws the
+ * fulfilled outcome away — it only catches rejections. So before this wrapper
+ * existed, a day the reconciler REFUSED was invisible to the operator: the
+ * rows stayed estimated, the scheduler retried every six hours, and nothing
+ * anywhere said why. That is worst for the guard that matters most, the
+ * rate-sanity refusal, whose whole job is to surface a charge the durations
+ * cannot account for (Codex P2, #319).
+ *
+ * Logging at the single exit rather than inside each branch is deliberate: a
+ * refusal branch added later cannot forget to announce itself, which is the
+ * shape of the bug being fixed. `reconcileMarker` already renders BOTH
+ * outcomes, so this reuses that renderer rather than writing a second copy of
+ * the sentence — the `explicitAsk.ts` noun-list lesson.
+ */
 export async function reconcileGrokCostsForDay(
   day: string,
   ports: ReconcilerPorts,
   options: { setup?: XaiBillingSetup; fetchImpl?: FetchLike } = {},
+): Promise<ReconcileOutcome> {
+  const outcome = await runReconciliation(day, ports, options);
+  if (outcome.reconciled) console.info(reconcileMarker(outcome));
+  // warn, not info: a refusal means the day was NOT settled and those rows are
+  // still priced from a constant. Uniform across every refusal — a weekend
+  // with no calls is as unreconciled as an unexplained charge, and a severity
+  // table per branch is one more thing to drift.
+  else console.warn(reconcileMarker(outcome));
+  return outcome;
+}
+
+async function runReconciliation(
+  day: string,
+  ports: ReconcilerPorts,
+  options: { setup?: XaiBillingSetup; fetchImpl?: FetchLike },
 ): Promise<ReconcileOutcome> {
   const spend = await fetchDailySpend(day, { setup: options.setup, fetchImpl: options.fetchImpl });
   if (!spend.ok) return { day, reconciled: false, reason: spend.reason };
@@ -258,6 +296,38 @@ export async function reconcileGrokCostsForDay(
     };
   }
 
+  /**
+   * A DAY THE DURATIONS CANNOT ACCOUNT FOR IS REFUSED, NOT WRITTEN.
+   *
+   * Third guard, same principle as the two above: an inconsistency between
+   * the bill and the durations is a reconciliation FAILURE, not a result.
+   * Those two catch a zero denominator; this catches one too small to carry
+   * the charge — which is what 2026-09-12 was, and it wrote $37.43 onto a
+   * 104-second call. See RATE_SANITY_MULTIPLE for that call and for the
+   * eight days of derived rates the threshold has to clear.
+   *
+   * REFUSING LEAVES THE ROWS `estimated`, which is the honest state: priced
+   * from a published constant and flagged as such. Writing leaves them
+   * `cost_is_estimated = false`, which every reader — and the Observatory's
+   * per-lane cost report — takes as settled.
+   */
+  if (impliedRateIsImplausible(allocation.derivedCentsPerSecond, GROK_COST_CENTS_PER_SECOND)) {
+    const derivedPerMin = (allocation.derivedCentsPerSecond ?? 0) * 60;
+    return {
+      day,
+      reconciled: false,
+      reason:
+        `xAI billed $${(xaiTotalCents / 100).toFixed(2)} for ${day} against only ` +
+        `${allocation.totalSeconds}s across ${calls.length} runtime call(s) — that works out to ` +
+        `${derivedPerMin.toFixed(2)} c/min, over ${RATE_SANITY_MULTIPLE}x the ` +
+        `${(GROK_COST_CENTS_PER_SECOND * 60).toFixed(2)} c/min we assume. The charge cannot be ` +
+        `attributed to these calls, so nothing was written and they stay estimated`,
+      xaiTotalCents,
+      estimatedTotalCents,
+      derivedCentsPerSecond: allocation.derivedCentsPerSecond,
+    };
+  }
+
   console.info(rateDriftMarker(day, allocation.derivedCentsPerSecond, GROK_COST_CENTS_PER_SECOND));
 
   let callsUpdated: number;
@@ -280,7 +350,6 @@ export async function reconcileGrokCostsForDay(
     estimateCoversCalls: stillEstimated.length,
     derivedCentsPerSecond: allocation.derivedCentsPerSecond,
   };
-  console.info(reconcileMarker(outcome));
   return outcome;
 }
 
