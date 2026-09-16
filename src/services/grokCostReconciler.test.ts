@@ -154,7 +154,11 @@ describe("what it refuses", () => {
     const out = await reconcileGrokCostsForDay(
       DAY,
       {
-        readDay: async () => [{ callSid: "CA1", durationSeconds: 10, estimatedCents: 1 }],
+        // 1,000s against $1.00 is 6 c/min. It was 10s — 600 c/min — which
+        // the rate guard now refuses BEFORE the write, so the write-failure
+        // path this test exists for was never reached. The assertion is
+        // unchanged; only the input is made realistic.
+        readDay: async () => [{ callSid: "CA1", durationSeconds: 1000, estimatedCents: 1 }],
         writeCosts: async () => { throw new Error("deadlock"); },
       },
       { setup: SETUP, fetchImpl: spending(1) },
@@ -204,10 +208,15 @@ describe("what it refuses", () => {
 
   it("reconciles the same day once the missing duration lands", async () => {
     // Refusing is self-correcting: this is the next run.
+    // DURATIONS SCALED x100 AGAINST THE ORIGINAL FIXTURE, and nothing else.
+    // $33.68 across 240s is 842 c/min, which the rate guard now refuses; the
+    // ratios 120:90:30 are preserved exactly, so the allocation and every
+    // assertion below are bit-for-bit what they were. The test is not
+    // loosened — its input stopped being a rate no day could produce.
     const p = ports([
-      { callSid: "CA1", durationSeconds: 120, estimatedCents: 16 },
-      { callSid: "CA2", durationSeconds: 90, estimatedCents: 12 },
-      { callSid: "CA3", durationSeconds: 30, estimatedCents: 4 },
+      { callSid: "CA1", durationSeconds: 12000, estimatedCents: 16 },
+      { callSid: "CA2", durationSeconds: 9000, estimatedCents: 12 },
+      { callSid: "CA3", durationSeconds: 3000, estimatedCents: 4 },
     ]);
     const out = await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(33.68) });
     expect(out.reconciled).toBe(true);
@@ -228,9 +237,11 @@ describe("what it refuses", () => {
    * a day.
    */
   it("does NOT block on a genuinely zero-second call — it just takes no share", async () => {
+    // Durations scaled x100 for the same reason as above; 120:80:0 is
+    // preserved, so CA3 still takes exactly none of it.
     const p = ports([
-      { callSid: "CA1", durationSeconds: 120, estimatedCents: 16 },
-      { callSid: "CA2", durationSeconds: 80, estimatedCents: 11 },
+      { callSid: "CA1", durationSeconds: 12000, estimatedCents: 16 },
+      { callSid: "CA2", durationSeconds: 8000, estimatedCents: 11 },
       { callSid: "CA3", durationSeconds: 0, estimatedCents: 0 }, // 400ms hangup, known
     ]);
     const out = await reconcileGrokCostsForDay(DAY, p, { setup: SETUP, fetchImpl: spending(33.68) });
