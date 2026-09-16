@@ -229,9 +229,9 @@ you find yourself deciding what comes after, you have already gone wrong.
 
 When it stops naming a field, stop asking and file.
 
-THEN ASK ONCE MORE. After you file, it may name a field it held back until the
-request was safe. Ask it, then call create_pcp_task again — the answer lands on
-the same ticket, it does not open a second one.
+THEN ASK ONCE MORE. create_pcp_task may hand back one more question once the
+request is safely filed. Ask it, record the answer, then file again — it lands
+on the same ticket, it does not open a second one.
 
 ## FIRST, ALWAYS: WHAT IS THIS CALL ABOUT?
 Your greeting already asked, and almost every caller answers it in their
@@ -1120,8 +1120,43 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const response = await submitPcpTicket(
         buildPayload(metadata, state, disposition, narrative, urgency, undefined, failureInformation, missing),
       );
-      if (response.success) pcpDirector.recordDisposition(callId, disposition);
-      return response;
+      if (!response.success) return response;
+      pcpDirector.recordDisposition(callId, disposition);
+      /**
+       * THE REQUEST IS SAFE, SO NOW WE MAY ASK FOR THE CREDENTIALS — and this
+       * tool has to hand the question over, because nothing else will.
+       *
+       * `ENRICHMENT_AFTER_FILING` holds `callerRole` and `callerEmail` back
+       * until a disposition is on the record, which is the line above. But
+       * only `record_pcp_intake` names a question, and the model has no
+       * reason to call it again once it has a ticket number to read out — so
+       * without this the two fields unlock into a conversation that has
+       * already moved on, and the enrichment never happens. Codex P1 on #318,
+       * and it is right: the prompt's "then ask once more" is an instruction
+       * competing with a wrap-up the rest of the prompt drives hard, where
+       * this is the tool result itself naming the field.
+       *
+       * `askNext`, NOT `next`, and that is the whole budget question. This is
+       * a question handed back to be SPOKEN, so it charges — v33's rule is
+       * that the place a question is spoken is the place it is charged, and
+       * reading `next()` here instead would give `callerEmail` a second ask
+       * through the back door, which is exactly what the operator cut.
+       *
+       * The answer goes to `record_pcp_intake` because that is where these
+       * fields live; the model then files once more and ticketing-app #275
+       * enriches the SAME ticket rather than opening another.
+       */
+      const enrich = pcpDirector.askNext(callId).nextQuestion;
+      if (!enrich) return response;
+      return {
+        ...response,
+        say: enrich.prompt,
+        guidance:
+          'The ticket is FILED — nothing is wrong, do not apologise, and do not tell the caller to wait. '
+          + `Ask them: "${enrich.prompt}" Then record the answer with record_pcp_intake, and when it stops `
+          + 'naming a field call create_pcp_task once more so the answer lands on the SAME ticket. '
+          + 'If they have already hung up, their request is recorded and nothing more is needed.',
+      };
     },
   });
 

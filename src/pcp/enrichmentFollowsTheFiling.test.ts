@@ -148,6 +148,67 @@ describe('the credentials are asked after the ticket exists, not in front of it'
   });
 });
 
+describe('the filing tool hands the question over, because nothing else will', () => {
+  /**
+   * CODEX P1 ON #318, AND IT WAS RIGHT.
+   *
+   * Unlocking the two fields is not enough on its own: only
+   * `record_pcp_intake` names a question, and the model has no reason to call
+   * it again once it is holding a ticket number to read out. So the fields
+   * would have unlocked into a conversation that had already moved on, and
+   * `pcp_caller_email` would have gone to zero rather than merely down.
+   *
+   * WIRING, READ FROM THE SOURCE — failure mode 10, the device
+   * `directorAskBudget.test.ts` already uses for the charge. A director-level
+   * assertion cannot see whether the agent asks, which is the whole defect.
+   */
+  const agent = source('src/agents/pcpAgent.ts');
+
+  it('create_pcp_task asks the director for the next question after a successful file', () => {
+    const filed = agent.indexOf("pcpDirector.recordDisposition(callId, disposition);");
+    const asks = agent.indexOf('const enrich = pcpDirector.askNext(callId).nextQuestion;');
+    expect(filed).toBeGreaterThan(-1);
+    expect(asks).toBeGreaterThan(filed);
+    /**
+     * AND NOTHING RETURNS BETWEEN THEM. An ordering assertion alone is
+     * decoration here: an early `return response;` above the block leaves the
+     * block sitting in the source, in the right order, and stone dead —
+     * mutation-checked, and the first version of this test passed under
+     * exactly that mutation. The only early return on this path is the
+     * `!response.success` guard, which sits ABOVE `filed`.
+     */
+    expect(agent.slice(filed, asks)).not.toMatch(/\breturn\b/);
+    // The question and the instruction both reach the model.
+    expect(agent).toContain('say: enrich.prompt,');
+    expect(agent).toContain('record the answer with record_pcp_intake');
+  });
+
+  it('charges through askNext, so the one-ask email budget survives the second call site', () => {
+    // `next()` here instead would hand the question over WITHOUT charging, and
+    // `record_pcp_intake` would then offer `callerEmail` again — the operator's
+    // one ask restored to two through the back door.
+    expect(agent).not.toMatch(/const enrich = pcpDirector\.next\(/);
+    // And the budget holds across BOTH call sites, because both go through the
+    // same charging entry point.
+    const d = director();
+    d.update('both', requestComplete);
+    d.recordDisposition('both', 'CREATE_TASK');
+    const asked: string[] = [];
+    for (let turn = 0; turn < 10; turn++) {
+      const q = d.askNext('both').nextQuestion;
+      if (q) asked.push(String(q.field));
+    }
+    expect(asked.filter((f) => f === 'callerEmail').length).toBe(1);
+  });
+
+  it('says the ticket is filed rather than implying something went wrong', () => {
+    // The v18 shape: a branch speaking the sentence that belongs to the other
+    // one. This branch is reached only AFTER a successful POST.
+    expect(agent).toContain('The ticket is FILED');
+    expect(agent).toContain('do not apologise');
+  });
+});
+
 describe('what this must NOT move: who we dial', () => {
   /**
    * THE v33 DECOUPLING, REUSED. `intakeIncomplete` is computed from
