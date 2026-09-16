@@ -1130,14 +1130,134 @@ GROUP BY 1 ORDER BY 2 DESC;
    2026-09-03 — every one a caller ringing to chase an existing request and
    `check_open_tickets` correctly reading it back to them. Three separate calls
    from one number all quote VA-57151. That is the tool working, not a filing.
-3. **2.6% of tickets carry a `call_sid` from a LATER call** (5 of 196, average
-   49 minutes later, sometimes a different caller entirely). Call attribution
-   is being overwritten after the fact — related to #71. Small enough not to
-   move a rate, big enough to ruin a single-call forensic.
+3. **A ticket's `call_sid` can be the LAST call that touched it, not the one
+   that created it.** Measured 2026-09-03 at 5 of 196 (2.6%, average 49 minutes
+   later); **root-caused 2026-09-15 and it is not a mystery, a race or #71.**
+   It is the ticketing app consolidating a caller's CALLBACK onto their own
+   open ticket, and the operator APPROVED the overwrite on 2026-09-03 — see
+   "THE SAME TICKET NUMBER READ TO TWO CALLERS" below before treating it as a
+   bug. What it costs is measurement, not data: a ticket's `call_sid` cannot
+   answer *which call filed*, and `call_logs.ticket_number` can.
 
 **And `call_logs.total_turns` counts something that is not transcript turns.**
 It fell 16.1 → 9.7 across the tech cutover while the callers actually said
 MORE. Count `CALLER:` lines in the transcript instead.
+
+---
+
+## THE SAME TICKET NUMBER READ TO TWO CALLERS — answered 2026-09-15
+
+Wayne: *"how does the model repeat the same ticket number to five different
+people? what's feeding it that information, where does it get it from, why does
+it do that?"*
+
+**NOTHING FEEDS IT. THE TICKETING APP HANDS THE NUMBER BACK, ON PURPOSE, AND IT
+IS NOT FIVE DIFFERENT PEOPLE — IT IS ONE PERSON RINGING BACK.** I reported this
+as a defect in the day's analysis before running the control. The control
+kills it:
+
+| ticket | first call | second call | same caller? |
+|---|---|---|---|
+| VA-59960 | CAd8e2ca 15:31 | CAcda5884 15:34 | **yes** |
+| VA-60085 | CA85e4eef 17:52 | CA2f7688e 17:54 | **yes** |
+| VA-60100 | CA3961d7c 17:56 | CA8fd116a 18:01 | **yes** |
+| VA-60206 | CA0758ba7 19:45 | CAdaea4a1 19:47 | **yes** |
+| VA-60218 | CA32cd719 20:12 | CA2fd062d 20:58 | **yes** |
+| VA-60298 | CAe14d364 21:28 | CA674a90c 23:02 | **yes** |
+| VA-59856 | CA3439dc5 09-14 22:57 | CA945200c + CAb82e442 09-15 | **yes** |
+
+Identical caller number on both legs of all seven, and **every second call has
+a `ticket_contact_entries` row on that same ticket.** That row is the app's
+consolidation record, and it is the whole answer.
+
+**THE CHAIN, all three links read from the source:**
+
+1. `lib/services/ticket-consolidation.ts` (ticketing app) — a new contact whose
+   **phone matches on the last 7 digits, in the same department, within 48
+   hours**, against a ticket still `open | in_progress | waiting_on_customer`,
+   is **appended to that ticket** instead of opening a second one. There is a
+   second rule with NO PHONE IN IT: **same first+last name, same department,
+   within 24 hours** — see the exposure below.
+2. `create-ticket` then answers `{ consolidated: true, ticketNumber: <the
+   EXISTING ticket> }`. The agent read back the number the app gave it.
+3. So the model invented nothing and remembered nothing. `check_open_tickets`
+   is read-only and was not even needed. **Both the tool and the app did the
+   right thing** — a patient chasing a request should be told their own ticket
+   number, not handed a second one. This is item 2 of the measurement traps
+   above ("the transcript `VA-#####` proxy OVER-counts") firing for the fourth
+   time, and I walked into it after writing it down.
+
+**WHAT HAPPENS NEXT IS DECIDED, AND I ALMOST RE-RAISED IT AS A BUG.**
+
+`ticketingSyncService.syncCall` (`server/services/ticketingSyncService.ts:170`)
+posts post-call enrichment as
+
+```
+{ ticketNumber: call.ticketNumber,   // the ticket this call TOUCHED
+  callSid, callStartTime, callEndTime, callDurationSeconds,
+  transcript, recordingUrl, qualityScore, patientSentiment, agentOutcome }
+```
+
+and `app/api/voice-agent/update-call-data/route.ts:217` **looks the ticket up by
+`ticketNumber` FIRST** (`lookupMethod = ticketNumber ? 'ticketNumber' :
+'callSid'`) and then assigns every one of those fields onto the **ticket row**.
+So the consolidated callback re-stamps the parent ticket with its own identity
+and its own transcript.
+
+**Wayne ruled on exactly this on 2026-09-03:** *"overwrite is fine, that's the
+most recent request anyway."* The ticket is a live request, not an audit log —
+staff working it need the call that just came in.
+`.agents/memory/ticketing-api-contract.md` records the ruling and says in as
+many words not to re-raise it as data loss. **I drafted a fix for it anyway
+before reading that file.** Nothing is lost: the earlier call keeps its own
+`call_logs` row carrying the same ticket number, so the association is
+recoverable from that side. **Do not "fix" this.**
+
+**WHAT THE RULING DOES NOT COVER — one correction and one open question.**
+
+**The correction, and it matters because someone will grep for the writer.**
+That memory file attributes the overwrite to *"the `check_open_tickets`
+dedupe"*. It is not. `check_open_tickets` (`sharedPatientTools.ts:714`) calls
+`SyncAgentService.checkOpenTickets` and returns; it writes nothing and need not
+run at all for this to happen. The two writers are **`consolidateIfDuplicate`
+on `create-ticket`**, which attaches the call and returns the existing number,
+and **`update-call-data`'s `ticketNumber`-first lookup**, which stamps the row.
+The conclusion the file draws is right — it is not the #71/#77 retry sweep —
+and the named mechanism is wrong.
+
+**The open question is the OTHER consolidation rule, which has no phone in it.**
+Same first+last name, same department, within 24 hours. Wayne's ruling was
+about a returning patient landing on their own ticket. This rule can put **two
+different patients with the same common name** on one ticket, and then one of
+them re-stamps it with the other's call and transcript. That is the only path
+by which the original 2.6% note's *"sometimes a different caller entirely"*
+could be literally true. **NOT MEASURED.** Count it before deciding anything,
+and the decision is his, not mine.
+
+**WHAT THIS CHANGES ABOUT MEASURING — this part is not a defect claim.**
+A ticket's `call_sid` names the last call that touched it, so it cannot be used
+to ask *which call filed*. On 2026-09-15 PCP, **8 of the 89 calls I scored as
+"no ticket" carry a ticket number on their own `call_logs` row** — they filed,
+and the callback took the ticket's SID. Read `call_logs.ticket_number` for that
+question (the filing alarm already does, deliberately), and read the ticket's
+`call_sid` only for "who rang most recently".
+
+`VA-59856` is the shape at its clearest: `call_start_time` from the 09-15 20:34
+pcp call and `call_sid` from the 09-15 21:35 **records** call, four contact
+entries, two different calls' data in two fields of one row. That is repeated
+re-stamping across lanes, and it is the same decided behaviour — not a new bug.
+
+**AND THE METHOD LESSON, which is why this is written at length.** The SQL
+agreed with itself all the way through: the tickets exist, the SIDs are real,
+the numbers are read aloud on two calls. What broke the false finding was one
+control I had not run — *is it the same phone?* — and RULE THREE is what forced
+me to the transcripts where the question became askable. Then a second failure
+on top of the first: having finally found the mechanism, I started writing a
+fix for behaviour the operator had already approved, because I had not read the
+memory file indexed for exactly this topic. **Before reporting that the agent
+did something impossible, check whether the caller is the same person. Before
+proposing a fix, read the memory file for that area — the answer is usually
+already there, and that is failure mode 5.**
 
 ---
 
