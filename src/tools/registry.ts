@@ -185,6 +185,73 @@ export function refuseDob(
 }
 
 /**
+ * THE DATE-OF-BIRTH REFUSAL'S COPY, IN ONE PLACE, SPLIT THE WAY `fix` ALREADY IS.
+ *
+ * Two branches, and until 2026-09-16 they shared a spoken line that was true of
+ * only one of them. `fix` — the channel the MODEL reads — has always been
+ * correctly split, and its own wording says why:
+ *
+ *   "You did not send the date_of_birth argument at all — that, not the caller,
+ *    is why this was refused. ... Only say the message if they have not given
+ *    it yet."
+ *
+ * The spoken `message` was the SAME string on both: *"I did not catch that —
+ * may I please have the date of birth..."*. On the branch where the model
+ * simply omitted the argument, nobody mis-heard anything and on most calls the
+ * caller had never been asked at all — so we opened by blaming them for a turn
+ * that never happened. That is the v18 shape exactly: the branch defined by one
+ * thing happening spoke the sentence belonging to the other.
+ *
+ * AND THE OMITTED BRANCH IS THE COMMON ONE. CLAUDE.md records `dobShape` as
+ * `(none)` on 93 of 93 refusals on 2026-09-14 — the model omits the field
+ * essentially always — so the wrong line was very nearly the only one callers
+ * ever heard.
+ *
+ * MEASURED BEFORE CHANGING IT, across every lane that files a ticket:
+ * 2026-09-15 carried it on 25 substantive calls (surgery 11, pcp 8, optical 4,
+ * tech 2) and 10 of those ended with NO ticket of any provenance. A worked
+ * example is `CA48a7238f2381ae130d73c9f9221181bb` (pcp, 2026-09-16): a records
+ * request with purpose, caller, organisation, patient, delivery method, fax
+ * number and title all captured — then this line, then the caller hung up, and
+ * nothing filed.
+ *
+ * WHAT IS DELIBERATELY UNCHANGED: the unreadable branch. When the model DID
+ * send something and the parser refused it, "I did not catch that" is a fair
+ * description of what happened and it stays word for word. Only the branch
+ * that never had an answer to mis-hear is reworded, and it keeps the format in
+ * the question (RULE ZERO 2b) by saying the same sentence minus the false
+ * preamble — the smallest edit that stops it lying.
+ *
+ * ONE COPY, NOT FOUR. `opticalTools`, `surgeryTools`, `techTools` and
+ * `medicalRecordsTools` each held a byte-identical literal and an identical
+ * `fix` ternary. That is the shape this repo has already paid for twice — the
+ * `explicitAsk.ts` noun lists that drifted apart and cost the operator his own
+ * transfer, and the recognition block that was written four times and
+ * contradicted itself. Four copies of a sentence is four chances to fix three
+ * of them.
+ */
+export function dobRefusalCopy(dob: string | undefined): { message: string; fix: string } {
+  return dob
+    ? {
+        message:
+          'I did not catch that — may I please have the date of birth, starting with the month, '
+          + 'then the day, then the year?',
+        fix:
+          'The date_of_birth you sent could not be read as a date. Say the message to the caller, '
+          + 'then call this tool again with exactly what they say next.',
+      }
+    : {
+        message:
+          'May I please have the date of birth, starting with the month, then the day, then the year?',
+        fix:
+          'You did not send the date_of_birth argument at all — that, not the caller, is why this '
+          + 'was refused. If they have ALREADY given you a date of birth, call this tool again '
+          + 'right now with date_of_birth set to what they said, and do NOT ask them again. Only '
+          + 'say the message if they have not given it yet.',
+      };
+}
+
+/**
  * Validate input against the declared schema before the handler sees it.
  *
  * Deliberately shallow — required-and-non-empty, and string/number sanity. A
