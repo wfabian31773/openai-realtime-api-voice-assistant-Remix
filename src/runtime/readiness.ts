@@ -219,7 +219,7 @@ import { callEnvironment } from "./callRecord";
  * made v28 not pull-safe, not a new ship. Stacks on v27.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v35-the-lightly-gated-line-20260916";
+  "voice-runtime-v36-the-first-ask-is-not-a-mishearing-20260916";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

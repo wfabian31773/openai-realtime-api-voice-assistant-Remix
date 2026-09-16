@@ -30,7 +30,7 @@
  *
  * NO HANDOFF. Operator ruling 2026-08-12: only PCP and Scheduling transfer.
  */
-import { registerTool, missing, refuseDob, type ToolResult } from './registry';
+import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
@@ -484,19 +484,8 @@ registerTool({
          * the model "ask the caller again" when it simply omitted the argument
          * is what built the loop.
          */
-        return refuseDob(
-          callSid,
-          first,
-          last,
-          'I did not catch that — may I please have the date of birth, starting with the month, then the day, then the year?',
-          dob
-            ? 'The date_of_birth you sent could not be read as a date. Say the message to the caller, '
-              + 'then call this tool again with exactly what they say next.'
-            : 'You did not send the date_of_birth argument at all — that, not the caller, is why this '
-              + 'was refused. If they have ALREADY given you a date of birth, call this tool again '
-              + 'right now with date_of_birth set to what they said, and do NOT ask them again. Only '
-              + 'say the message if they have not given it yet.',
-        );
+        const copy = dobRefusalCopy(dob);
+        return refuseDob(callSid, first, last, copy.message, copy.fix);
       }
       dobStatus = escape.status;
       console.info(dobEscapeMarker('file_records_ticket', dobStatus, callSid));
