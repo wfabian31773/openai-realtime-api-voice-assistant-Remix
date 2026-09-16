@@ -197,10 +197,83 @@ export const RECORDS_FIELDS: Array<keyof PcpConversationState> = [
  */
 export const MAX_ASKS_PER_FIELD = 2;
 
+/**
+ * THIS LINE IS AN ANSWERING SERVICE, NOT A FORM. Operator, 2026-09-16:
+ *
+ *   "ensure that the PCP line acts as a literal answering service. Meaning
+ *    that it gathers the required fields, who is calling, what are you calling
+ *    about, where are you calling from, who is this in regards to, and how
+ *    would you like to receive the information. I think that is the crux of
+ *    any request."
+ *
+ * MEASURED FIRST, over all 369 substantive PCP calls of 2026-09-14/15.
+ *
+ * **The order was inverted and the attrition proves it.** Where the call died,
+ * by the last question the agent asked:
+ *
+ *   caller role      26 calls, 6 filed      organisation   11 calls, 2 filed
+ *   caller name      23 calls, 2 filed      facility type   9 calls, 6 filed
+ *   date of birth    20 calls, 1 filed      relationship    3 calls, 0 filed
+ *   THE PATIENT       5 calls, 0 filed
+ *
+ * **97 calls died inside the caller-credential block and 17 filed — 17.5%.**
+ * Almost nobody died on the patient questions because almost nobody survived
+ * long enough to be asked one. We collected five facts about the CALLER before
+ * asking who the call was ABOUT, so attrition ate the one field a staffer
+ * cannot work without.
+ *
+ * **And these callers speak in fragments.** Median first utterance under five
+ * words; 53% say three words or fewer. "Referrals." "Appointment."
+ * "Representative?" Average 3.8 caller lines for a 138-second call. Every
+ * question spent on a credential is a question not spent on the request.
+ *
+ * CAd00fa911 (1,148 seconds, no ticket) is the whole argument:
+ *
+ *   CALLER: Get, um, diagnosis codes and CPT codes.   <- the purpose, unasked
+ *   AGENT:  May I have your full name?
+ *   CALLER: Karina from Optum Medical Clinics.        <- name AND organisation
+ *   AGENT:  What is your role?                        <- she just said
+ *   CALLER: Medical receptionist.
+ *   AGENT:  Is that a doctor's office or provider, a health plan...
+ *   CALLER: Doctor office.
+ *   AGENT:  And how are you involved in this patient's care?
+ *   CALLER: Speak to representative.                  <- she quits
+ *
+ * She gave purpose, name, organisation and role. We asked four more questions
+ * and never once asked which patient.
+ *
+ * WHAT IS NO LONGER ASKED, and why each one goes:
+ *
+ * - `callerRole` — the single biggest killer, 26 dead calls for 6 tickets.
+ *   Callers volunteer it inside the name answer ("Karina from Optum Medical
+ *   Clinics", "Jackie Pena, MA from Valentine Medical Clinic"). Extraction is
+ *   the model's job, not a question's — standing instruction 3.
+ * - `callerFacilityType` — an eight-value enum read aloud to somebody who has
+ *   already named their organisation. The records route reads it FIRST but
+ *   falls back to prose (`statedRelationship`, role, organisation) by design,
+ *   so dropping the QUESTION does not drop the route.
+ * - `statedRelationship` — drew the same answer as role, which this file has
+ *   recorded twice.
+ * - `patientDob` — 20 dead calls for 1 ticket. On a professional line the
+ *   caller is reading a chart and gives an ID or nothing.
+ *
+ * NONE OF THEM IS DELETED FROM THE STATE. Each is still recorded when the
+ * caller volunteers it, still travels on the ticket, and still feeds the
+ * records route. What changes is that we stop SPENDING A TURN on it.
+ */
 export const PROFESSIONAL_FIELDS: Array<keyof PcpConversationState> = [
-  'callPurpose', 'callerName', 'callerRole', 'callerOrganization', 'callerFacilityType', 'callbackNumber',
+  'callPurpose', 'callerName', 'callerOrganization', 'callbackNumber',
 ];
-export const PATIENT_FIELDS: Array<keyof PcpConversationState> = ['statedRelationship', 'patientFirstName', 'patientLastName', 'patientDob'];
+/**
+ * Who the call is ABOUT — and nothing else. `patientDob` and
+ * `statedRelationship` were here and are not asked any more; see above.
+ *
+ * `patientLastName` stays a separate field so that a caller who answers the
+ * one question with a full name fills BOTH and is never asked again, while a
+ * caller who gives only a first name is still asked for the rest. The question
+ * invites the whole name; the field list catches the half-answer.
+ */
+export const PATIENT_FIELDS: Array<keyof PcpConversationState> = ['patientFirstName', 'patientLastName'];
 /**
  * What the director asks a PATIENT for, in order — and what `next()` itself
  * uses, so the two cannot disagree.
@@ -249,7 +322,22 @@ export const PATIENT_INTAKE_ORDER: Array<keyof PcpConversationState> = ['callPur
  * patient rather than about their role a second time.
  */
 export const PROMPTS: Partial<Record<keyof PcpConversationState, string>> = {
-  callerName: 'May I have your full name?',
+  /**
+   * INVITES THE ORGANISATION TOO, because that is how a professional answers
+   * it anyway — measured, 2026-09-14/15: "Karina from Optum Medical Clinics",
+   * "Jackie Pena, MA from Valentine Medical Clinic", "Calling from Doctor
+   * [X]'s office". The old wording asked for a name, got a name AND an
+   * organisation, and then asked for the organisation.
+   *
+   * THIS IS NOT BUNDLING TWO FIELDS IN ONE BREATH (RULE ZERO 2b). The rule is
+   * about two facts a caller answers separately — name and date of birth. Who
+   * you are and where you are calling from is one self-introduction, and the
+   * measurement says they already give it as one. `callerOrganization` stays a
+   * SEPARATE FIELD so the half-answer is still caught: give both and the
+   * organisation is filled and never asked; give only a name and the next
+   * question asks for the organisation, exactly as before.
+   */
+  callerName: 'And who am I speaking with, and where are you calling from?',
   callerRole: 'What is your role?',
   callerOrganization: 'Which organization are you calling from?',
   callerFacilityType:
@@ -257,7 +345,21 @@ export const PROMPTS: Partial<Record<keyof PcpConversationState, string>> = {
   callbackNumber: 'What is the best callback number?',
   callPurpose: 'What are you calling about today?',
   statedRelationship: 'And how are you involved in this patient\'s care?',
-  patientFirstName: "What is the patient's first name?",
+  /**
+   * THE OPERATOR'S FOURTH FIELD — "who is this in regards to" — and it has
+   * moved from sixth of ten to third of four.
+   *
+   * Over 2026-09-14/15 only 5 calls died on a patient question, and that is
+   * not because the question is easy: it is because 97 calls had already died
+   * on the caller-credential questions in front of it. This is the one field a
+   * staffer genuinely cannot work without, and it was behind everything that
+   * was optional.
+   *
+   * Worded to invite the whole name. `patientLastName` remains its own field,
+   * so a caller who answers with a full name fills both and is never asked
+   * again, and a caller who gives one word is still asked for the rest.
+   */
+  patientFirstName: 'And who is this in regards to — the patient\'s name?',
   patientLastName: "What is the patient's last name?",
   // The question mark is the turn boundary this line runs on (pcpAgent.ts:190),
   // and this was the only ask written as a statement. The wording is now the
