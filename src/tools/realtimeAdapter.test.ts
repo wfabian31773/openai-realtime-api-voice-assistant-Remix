@@ -9,6 +9,8 @@
  * with the call, every time, and cost most of a day.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 
 // vi.mock is hoisted above every const in this file, so the spy has to be
 // hoisted with it or the factory closes over a value in its temporal dead zone.
@@ -54,35 +56,73 @@ beforeEach(() => {
   flushSpy.mockClear();
 });
 
+/**
+ * Source with comments stripped.
+ *
+ * The first version of the assertion below banned the STRING
+ * `flushTimelineSafely` and went red on the COMMENT that explains why the
+ * call site was removed — documentation reading as a second copy. That is the
+ * device `recognisedCallerBlock.test.ts` already settled: compare CODE, not
+ * prose, or the file cannot explain its own history.
+ */
+function codeOnly(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('//'))
+    .join('\n');
+}
+
 describe('a tool call is persisted when it finishes, not when the call does', () => {
-  it('flushes the timeline after the tool returns', async () => {
-    const tool = await buildTool({ callId: 'rtc_test_1', agentSlug: 'surgery' });
-    const out = await callTool(tool as never, {
-      request_description: 'my surgery is Monday and the eye drops never came',
-    });
-
-    expect(JSON.parse(out).success).toBe(true);
+  /**
+   * THE PERSISTENCE MOVED, THE PROPERTY DID NOT.
+   *
+   * The two assertions that used to live here spied on a
+   * `flushTimelineSafely(telemetry)` call in this file. That call site was
+   * removed because it was in the wrong place twice over:
+   *
+   *  - It was ONE TOOL BEHIND. It sat inside the function `recordingExecute`
+   *    wraps, and the event is recorded only after that function returns — so
+   *    it persisted the PREVIOUS tools and never the one that just finished.
+   *    The last tool of every call reached the database through the 2h reaper
+   *    or not at all, which is the exact shape this file's header describes.
+   *  - It was UNREACHABLE for three agents. `pcp`, `no-ivr` and
+   *    `answering-service` build their tools by hand and never come through
+   *    this file, so they had no per-tool flush at all — `tool_call_count`
+   *    was NULL on 90.9% of substantive PCP calls on 2026-09-16.
+   *
+   * Persistence now lives in `recordingExecute`, so recording and persisting
+   * cannot come apart. The BEHAVIOUR is tested in
+   * `src/services/recordingPersistsTheTimeline.test.ts`, against the real
+   * recorder — this file mocks `recordingExecute` to a pass-through, so it
+   * structurally cannot see it. What belongs here is the WIRING: that the
+   * adapter still routes through the recorder, and that no second flush site
+   * has grown back.
+   */
+  it('routes every tool through the recorder, which is what persists it', () => {
+    const src = codeOnly(readFileSync(path.resolve(__dirname, './realtimeAdapter.ts'), 'utf8'));
+    expect(src).toContain('recordingExecute<unknown, string>(');
     expect(
-      flushSpy,
-      'the tool completed but nothing was written — this is the state that hid the failure',
-    ).toHaveBeenCalledWith('rtc_test_1');
+      src.includes('flushTimelineSafely'),
+      'a second flush site grew back — one tool behind, and the drift shape this repo has paid for',
+    ).toBe(false);
   });
 
-  it('falls back to the call sid when there is no call id', async () => {
-    const tool = await buildTool({ callSid: 'CAtest', agentSlug: 'surgery' });
-    await callTool(tool as never, { request_description: 'anything' });
-    expect(flushSpy).toHaveBeenCalledWith('CAtest');
-  });
+  it('does not record when there is no call to record against', async () => {
+    // The HTTP surface has no call, so wrapWithTelemetry passes execute
+    // through untouched and nothing is keyed on nothing.
+    const src = readFileSync(path.resolve(__dirname, './realtimeAdapter.ts'), 'utf8');
+    expect(src).toContain('if (!telemetry) return execute;');
+    expect(src).toContain('if (!telemetry.callId && !telemetry.callSid) return execute;');
 
-  it('does not try to flush when there is no call to flush against', async () => {
-    // The HTTP surface has no call. Flushing there would key on nothing.
     const tool = await buildTool(undefined);
-    await callTool(tool as never, { request_description: 'anything' });
-    expect(flushSpy).not.toHaveBeenCalled();
+    const out = await callTool(tool as never, { request_description: 'anything' });
+    expect(JSON.parse(out).success).toBe(true);
   });
 
   it('never lets a telemetry failure reach the call', async () => {
-    // A patient's call must not break because a write failed.
+    // A patient's call must not break because a write failed. Still true, and
+    // now guaranteed by flushAfterRecording swallowing into a log line.
     flushSpy.mockRejectedValueOnce(new Error('db is down'));
     const tool = await buildTool({ callId: 'rtc_test_2', agentSlug: 'surgery' });
 

@@ -406,8 +406,41 @@ export function recordingExecute<A, R>(
     } catch (e) {
       console.error(`[TOOL-TIMELINE] record failed for ${tool}:`, e);
     }
+    /**
+     * PERSIST HERE, so that RECORDING AND PERSISTING ARE ONE ACT.
+     *
+     * They were two, and the split was invisible: `realtimeAdapter` flushed
+     * after every tool, so the four queue lanes were durable within seconds,
+     * while pcp, no-ivr and answering-service wire `recordingExecute`
+     * THEMSELVES and never flushed at all. Their only route to the database
+     * was the 2h reaper — and `timelines` is an in-memory Map, so every deploy
+     * or restart inside that window destroyed the record outright.
+     *
+     * Measured 2026-09-16: `tool_call_count` NULL on 90.9% of substantive PCP
+     * calls against 16-26% on the adapter-built lanes, and PCP itself read
+     * 36.8% / 31.7% on the two preceding days — the swing is how many times
+     * the process restarted, which is not a property anybody should be
+     * measuring the fleet through.
+     *
+     * Putting it here rather than at each call site is the point: an agent
+     * cannot wire recording and forget persistence, because there is no longer
+     * a way to have one without the other. Fire-and-forget and swallowing,
+     * exactly as the adapter's copy is — telemetry must never delay or break a
+     * patient's call.
+     */
+    void flushAfterRecording(ctx.callId ?? ctx.callSid ?? '');
     return result;
   };
+}
+
+/** The flush `recordingExecute` fires. Never throws into the tool. */
+async function flushAfterRecording(key: string): Promise<void> {
+  if (!key) return;
+  try {
+    await flushAzulTimeline(key);
+  } catch (e) {
+    console.warn('[TOOL-TIMELINE] flush after record failed (call unaffected):', e);
+  }
 }
 
 /**
@@ -618,14 +651,42 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
       ...(abArm ? { abArm } : {}),
       ...(director ? { director } : {}),
     };
+    /**
+     * A WRITE THAT TOUCHED NO ROW IS NOT A FLUSH, and marking it one is how
+     * this timeline goes missing permanently.
+     *
+     * `callRecord.ts` has described the defect since PR #227 without it ever
+     * being fixed: the UPDATE runs `WHERE call_sid = ?`, and if the call's row
+     * has not been opened yet it matches NOTHING — but `flushedCount` was set
+     * regardless, so the entry read as durable, the 2h reaper skipped it, and
+     * the events died in memory. The earlier the flush, the likelier the row is
+     * not there yet, which is precisely the direction this module is moving in.
+     *
+     * `.returning()` is what makes the difference observable; leaving
+     * `flushedCount` alone on a zero-row write leaves the entry DIRTY, so the
+     * next tool call — or the reaper — writes it again once the row exists.
+     */
+    let rowsTouched = 0;
     if (entry.callLogId) {
-      await db.update(callLogs)
+      const touched = await db.update(callLogs)
         .set({ toolTimeline: payload, toolCallCount: entry.events.length })
-        .where(eq(callLogs.id, entry.callLogId));
+        .where(eq(callLogs.id, entry.callLogId))
+        .returning({ id: callLogs.id });
+      rowsTouched = touched.length;
     } else if (entry.callSid) {
-      await db.update(callLogs)
+      const touched = await db.update(callLogs)
         .set({ toolTimeline: payload, toolCallCount: entry.events.length })
-        .where(eq(callLogs.callSid, entry.callSid));
+        .where(eq(callLogs.callSid, entry.callSid))
+        .returning({ id: callLogs.id });
+      rowsTouched = touched.length;
+    }
+    if (rowsTouched === 0) {
+      console.warn(
+        `[TOOL-TIMELINE] ${entry.agentSlug ?? 'azul-scheduling'}: write touched NO row yet ` +
+          `(${entry.events.length} event(s) still held) — the call row is not open. ` +
+          `Left dirty so a later flush retries.`,
+      );
+      return;
     }
     entry.flushedCount = entry.events.length;
     entry.flushedDirectorCount = directorCount;
