@@ -489,3 +489,37 @@ unknown rather than zero.
 `ceilingDocCheck.test.ts` keeps the documented 40 in step with
 `DEFAULT_CEILING_LIMITS.perCallDispatches`. It cannot check the comparator,
 which is the half that was actually wrong.
+
+---
+
+## "The agent did something impossible" — check the caller first
+
+2026-09-15. I reported that the PCP agent had read one ticket number to five
+different people, and named it the day's most important finding. It had not.
+Every one of those pairs was **the same phone number ringing back**, and the
+ticketing app had consolidated the callback onto the caller's own open ticket
+and handed the agent that ticket's number to read out. The agent said what the
+API told it.
+
+**The control that killed it was one column: is it the same caller?** I had run
+the SQL three different ways and it agreed with itself every time, because
+every query I wrote took the finding for granted and asked only how big it was.
+The tickets were real, the SIDs were real, the numbers were spoken on two calls
+— all true, and the conclusion still wrong.
+
+This is the fourth time the transcript `VA-#####` proxy has caught a caller
+chasing an existing request and been read as a filing (CLAUDE.md records the
+first three, on 2026-09-03). **It is written down and I still walked into it.**
+
+The general form, and the reason this is in this file rather than in a ticket:
+
+- A finding of the shape *"the system did something it could not have done"* is
+  far more often a missing control than a real defect. Before reporting it,
+  name the boring explanation and go disprove that instead.
+- If the boring explanation is "it is the same person / the same record / the
+  same call", the column that settles it is usually one join away.
+- Re-running the same query with a bigger denominator is not a control. It
+  measures the size of a thing you have not yet established exists.
+
+Root cause and the ruling that governs it: CLAUDE.md, "THE SAME TICKET NUMBER
+READ TO TWO CALLERS", and `.agents/memory/ticketing-api-contract.md`.
