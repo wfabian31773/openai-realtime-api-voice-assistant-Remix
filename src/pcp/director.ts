@@ -19,6 +19,34 @@ export interface PcpConversationState {
   callerOrganization?: string;
   callerFacilityType?: PcpFacilityType;
   callbackNumber?: string;
+  /**
+   * HOW THIS CALLER WANTS THE ANSWER BACK — the operator's fifth field, and
+   * the one that makes his fourth redundant.
+   *
+   * Operator, 2026-09-16, on the two we used to ask separately: "I think four
+   * and five are completely redundant too, right? What's the best number to
+   * reach you, and then how would you like us to get back to you?"  They are.
+   * `pcpAgent.ts` already seeds `callbackNumber` from caller ID on every call,
+   * so asking for it spends a turn on something we are holding. The channel is
+   * the only part we do not know.
+   *
+   * And on which channel: "a lot of these people are calling from offices. So
+   * that's why I wouldn't use SMS as a way to confirm that the ticket has been
+   * logged. I would probably use email. I would try to get the email for
+   * everyone that's on there, because if they're professionals, they have to
+   * have an email."
+   *
+   * TWO FIELDS, ONE QUESTION. `callerEmail` is what the question funnels
+   * toward, because it is what we want and RULE ZERO 2c says shape the
+   * question so the answer arrives in the field's format.
+   * `deliveryPreference` catches the caller who answers it with something
+   * else — "fax is better", "just call the front desk" — and SATISFIES the
+   * same slot, so answering the question a different way is still answering
+   * it. Without that, a caller who says "no email, fax us" would be asked for
+   * an email again.
+   */
+  callerEmail?: string;
+  deliveryPreference?: string;
   statedRelationship?: string;
   callPurpose?: PcpCallPurposeSlug;
   patientFirstName?: string;
@@ -262,8 +290,65 @@ export const MAX_ASKS_PER_FIELD = 2;
  * records route. What changes is that we stop SPENDING A TURN on it.
  */
 export const PROFESSIONAL_FIELDS: Array<keyof PcpConversationState> = [
-  'callPurpose', 'callerName', 'callerOrganization', 'callbackNumber',
+  'callPurpose', 'callerName', 'callerOrganization',
 ];
+/**
+ * THE SAME INTERVIEW, ASKED AFTER WE KNOW WHO THE CALL IS ABOUT — and the
+ * split is the whole correction the operator made on 2026-09-16.
+ *
+ *   "I think that that was pretty hasteful of you to just go by and create the
+ *    interview like that. Because we know who's calling... the medical
+ *    assistants, referral coordinators, things of that nature. We have to
+ *    tailor this around them... obviously, who's calling, what's your title,
+ *    what organization are you calling from, who is this request in regards
+ *    to, and then how would you like to receive this information."
+ *
+ * HE IS RIGHT AND MY FIRST ANSWER WAS WRONG. The measurement behind the
+ * previous version (2026-09-14/15: `callerRole` last-asked on 26 calls for 6
+ * tickets, the single biggest killer) says what KILLS a call. It does not say
+ * what a staffer NEEDS, and I deleted a field on the first reading alone.
+ *
+ * What the measurement actually indicts is the POSITION, not the field. Role
+ * was question two, so a caller who quit on it took the whole request with
+ * them. Asked here — after purpose, name, organisation and the patient are
+ * already in hand — the same hang-up costs a job title on a ticket that files
+ * anyway. Nothing is gated on these; they are the part of the interview we
+ * can afford to lose.
+ *
+ * NOT ASKED OF A CALLER HEADED FOR A PERSON. See `next()`: a purpose that
+ * allows HAND_OFF skips this block entirely, so the dial is never waiting on
+ * somebody's email address, and `handoffEligible`'s intake arm reads exactly
+ * the value it read before.
+ *
+ * `callbackNumber` sits here rather than in the block above because
+ * `pcpAgent.ts` seeds it from caller ID at the top of every call: in the
+ * normal case it is already answered and this list skips it silently. A
+ * withheld or blocked caller ID is the case where it is genuinely unknown,
+ * and then it is asked — last, where a hang-up is cheapest — with the filing
+ * gate's own three-strike budget still behind it as the backstop.
+ */
+export const PROFESSIONAL_ENRICHMENT: Array<keyof PcpConversationState> = [
+  'callerRole', 'callerEmail', 'callbackNumber',
+];
+/**
+ * ONE SLOT, TWO PLACES THE ANSWER CAN LAND.
+ *
+ * The question funnels toward an email because that is the channel the
+ * operator wants on a professional line. A caller who answers it with a
+ * different channel has still answered it, and asking again would be the
+ * `statedRelationship` mistake — putting the same question twice because the
+ * reply went into a field we were not looking at.
+ *
+ * `recordsDeliveryMethod` IS THAT MISTAKE, CAUGHT BY ITS OWN TEST. A records
+ * request is already asked "How would you like to receive the records — by
+ * fax, by email, or by mail?", which is the operator's fifth question in
+ * almost his own words. Without this entry the first draft asked it and then
+ * asked for an email address as well, on the one purpose that had already
+ * answered. `recordsDeliveryIntake.test.ts` went red rather than me noticing.
+ */
+export const SATISFIED_BY: Partial<Record<keyof PcpConversationState, Array<keyof PcpConversationState>>> = {
+  callerEmail: ['deliveryPreference', 'recordsDeliveryMethod'],
+};
 /**
  * Who the call is ABOUT — and nothing else. `patientDob` and
  * `statedRelationship` were here and are not asked any more; see above.
@@ -338,7 +423,34 @@ export const PROMPTS: Partial<Record<keyof PcpConversationState, string>> = {
    * question asks for the organisation, exactly as before.
    */
   callerName: 'And who am I speaking with, and where are you calling from?',
-  callerRole: 'What is your role?',
+  /**
+   * "TITLE", NOT "ROLE", AND IT IS THE OPERATOR'S WORD — 2026-09-16: "who's
+   * calling, what's your title, what organization are you calling from".
+   *
+   * It also stops the collision this file already records twice. "What is your
+   * role?" and "What is your professional relationship to this patient?" drew
+   * the same answer from the same callers, because "role" is ambiguous between
+   * a job and a connection to the patient. A title is unambiguously the job.
+   *
+   * "there" is doing work: this is now asked AFTER the organisation, so the
+   * question is anchored to a place the caller has already named rather than
+   * floating free.
+   */
+  callerRole: 'And what is your title there?',
+  /**
+   * THE FIFTH FIELD, FUNNELLED AT AN EMAIL ADDRESS (RULE ZERO 2c).
+   *
+   * "How would you like to receive this information?" is the operator's
+   * phrasing of the INTENT, and asked literally it is an open question that
+   * returns prose — the `callerFacilityType` mistake, where an eight-value
+   * enum was asked openly and six callers answered with their organisation
+   * name again. Naming the channel we want in the question is what makes the
+   * answer arrive as the thing the field holds.
+   *
+   * A caller who wants it another way says so, and `SATISFIED_BY` means that
+   * answer counts. It does not trap anybody into an email they do not have.
+   */
+  callerEmail: 'And what is the best email address to send this to?',
   callerOrganization: 'Which organization are you calling from?',
   callerFacilityType:
     "Is that a doctor's office or provider, a health plan, a medical group, a hospital, or something else?",
@@ -672,7 +784,31 @@ export class PcpDirector {
       // question. Without this the escape hatch reopens the loop it closes.
       if (deliveryDestinationNeeded(state)) required.push('recordsDeliveryDestination');
     }
-    const stillUnset = required.filter((field) => !state[field]);
+    /**
+     * THE ENRICHMENT BLOCK GOES LAST, AND NEVER IN FRONT OF A DIAL.
+     *
+     * Last, because these are the questions we can afford to lose: by the time
+     * they are asked, purpose, name, organisation and the patient are already
+     * in hand and the request files whether or not the caller stays. Putting
+     * `callerRole` second is what made it the biggest single killer on
+     * 2026-09-14/15 — 26 calls died on it for 6 tickets.
+     *
+     * `!connectsToHuman` is the load-bearing half and it is a guard on
+     * something worse than a long intake. `handoffEligible`'s second arm reads
+     * `intakeIncomplete`, which is computed from this list — so adding three
+     * fields to a HAND_OFF purpose would leave that arm false until somebody
+     * recited their email address, and the caller headed for a person would be
+     * waiting on it. Skipping the block there leaves `intakeIncomplete`
+     * bit-for-bit what it was for every one of those purposes, which is the
+     * claim `interviewIsAnAnsweringService.test.ts` pins rather than asserts.
+     */
+    if (!isPatient && !connectsToHuman) required.push(...PROFESSIONAL_ENRICHMENT);
+    const answered = (field: keyof PcpConversationState): boolean => {
+      if (state[field]) return true;
+      // One slot, several places the answer can land — see SATISFIED_BY.
+      return (SATISFIED_BY[field] ?? []).some((alternate) => Boolean(state[alternate]));
+    };
+    const stillUnset = required.filter((field) => !answered(field));
     /**
      * TWO QUESTIONS, TWO ANSWERS — AND WELDING THEM IS THE BUG THIS AVOIDS.
      *

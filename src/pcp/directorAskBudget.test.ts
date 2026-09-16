@@ -80,7 +80,11 @@ describe('the ask budget', () => {
     // are recorded when volunteered but never asked. The caller answers
     // neither.
     d.update(SEVEN_TIMES_CALL, upToPatientFirstName);
-    const outstanding = ['patientFirstName', 'patientLastName'];
+    // The patient's name, then the enrichment block that follows it —
+    // `callerRole` and `callerEmail`, which are asked AFTER the patient
+    // precisely so a hang-up here cannot cost the request. `callbackNumber`
+    // is seeded and so never offered.
+    const outstanding = ['patientFirstName', 'patientLastName', 'callerRole', 'callerEmail'];
 
     const asked: string[] = [];
     for (let turn = 0; turn < 20; turn++) {

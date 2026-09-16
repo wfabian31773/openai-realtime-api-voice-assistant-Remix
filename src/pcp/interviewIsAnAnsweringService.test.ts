@@ -65,11 +65,38 @@ describe('what the line no longer spends a turn on', () => {
 });
 
 describe('the order the operator asked for', () => {
-  it('asks a professional four things, in his order', () => {
+  /**
+   * THE OPERATOR'S OWN LIST, 2026-09-16, in his own order — "who's calling,
+   * what's your title, what organization are you calling from, who is this
+   * request in regards to, and then how would you like to receive this
+   * information" — with ONE change I made and am stating rather than hiding.
+   *
+   * He put the TITLE second. It is asked fifth here, after the patient. The
+   * measurement is why: `callerRole` asked second was the single biggest
+   * killer on this line (26 calls died on it over 2026-09-14/15 for 6
+   * tickets), and a caller who quits on question two takes the whole request
+   * with them. Asked after purpose, name, organisation and the patient, the
+   * same hang-up costs a job title on a ticket that files anyway.
+   *
+   * The FIELD is his and is back in. The POSITION is mine, and it is an
+   * implementation call under standing instruction 15 — stated here so he can
+   * overrule it by moving one entry between two arrays.
+   */
+  it('asks a professional for his list, patient before credentials', () => {
     const d = director();
     // A purpose with no patient behind it: the whole list is the caller.
     d.update('pro', { callPurpose: 'plan_participation' });
-    expect(questionsAsked(d, 'pro')).toEqual(['callerName', 'callerOrganization', 'callbackNumber']);
+    expect(questionsAsked(d, 'pro')).toEqual([
+      'callerName', 'callerOrganization', 'callerRole', 'callerEmail', 'callbackNumber',
+    ]);
+  });
+
+  it('and the patient comes before the title when there is a patient', () => {
+    const d = director();
+    d.update('ord', { callPurpose: 'outside_referral_status' });
+    const asked = questionsAsked(d, 'ord');
+    expect(asked.indexOf('patientFirstName')).toBeLessThan(asked.indexOf('callerRole'));
+    expect(asked.indexOf('patientFirstName')).toBeLessThan(asked.indexOf('callerEmail'));
   });
 
   it('puts WHO THE CALL IS ABOUT in the intake, not behind five credentials', () => {
@@ -96,7 +123,9 @@ describe('the questions do the extra work, so the turns do not', () => {
     d.askNext('both'); // callerName
     // One utterance, both facts — which is how the transcripts read.
     d.update('both', { callerName: 'Karina', callerOrganization: 'Optum Medical Clinics' });
-    expect(d.askNext('both').nextQuestion?.field).toBe('callbackNumber');
+    const next = d.askNext('both').nextQuestion?.field;
+    expect(next, 'the organisation was asked despite being given').not.toBe('callerOrganization');
+    expect(next).toBe('callerRole');
   });
 
   it('a caller who gives only a name IS still asked the organisation', () => {
@@ -133,7 +162,37 @@ describe('the call a real caller gets', () => {
     asked.push(String(decision.nextQuestion?.field));
     d.update('real', { patientFirstName: 'Sam', patientLastName: 'Rivera' });
 
-    expect(d.askNext('real').nextQuestion, 'intake should be complete').toBeUndefined();
+    // Two questions in, the REQUEST is complete: who, where from, which
+    // patient, and a callback the call itself supplied. What remains is the
+    // enrichment block, which cannot cost us the ticket.
     expect(asked).toEqual(['callerName', 'patientFirstName']);
+    expect(d.askNext('real').nextQuestion?.field).toBe('callerRole');
+  });
+
+  /**
+   * AND THE ENRICHMENT CANNOT COST THE REQUEST — which is the whole reason it
+   * is at the end rather than at the front.
+   *
+   * `CAd00fa911`, 2026-09-14, 1,148 seconds, no ticket: the caller opened with
+   * her purpose unprompted, answered the name question with name AND
+   * organisation, was then asked her role, her facility type and her
+   * relationship to the patient, and quit with "Speak to representative." We
+   * never once asked which patient. Under this order she is asked the patient
+   * second, and hanging up on the title question leaves a workable ticket.
+   */
+  it('a caller who hangs up on the title question still leaves a filable request', async () => {
+    const { ticketReadiness } = await import('./ticketRequirements');
+    const d = director();
+    d.update('quit', { callPurpose: 'outside_referral_status', callbackNumber: '+19095551234' });
+    d.askNext('quit');
+    d.update('quit', { callerName: 'Karina', callerOrganization: 'Optum Medical Clinics' });
+    d.askNext('quit');
+    d.update('quit', { patientFirstName: 'Sam', patientLastName: 'Rivera' });
+    // The next question is the title. They hang up instead of answering it.
+    expect(d.askNext('quit').nextQuestion?.field).toBe('callerRole');
+
+    const readiness = ticketReadiness(d.get('quit') as never);
+    expect(readiness.ready).toBe(true);
+    expect(readiness.annotate, 'nothing a staffer needs is missing').toEqual([]);
   });
 });
