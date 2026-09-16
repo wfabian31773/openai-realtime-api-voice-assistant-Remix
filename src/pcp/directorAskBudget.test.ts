@@ -39,11 +39,8 @@ const director = () => new PcpDirector({ lunchClosure: () => false });
 const upToPatientFirstName: Partial<PcpConversationState> = {
   callPurpose: 'outside_referral_status',
   callerName: 'A Caller',
-  callerRole: 'coordinator',
   callerOrganization: 'An Organization',
-  callerFacilityType: 'ipa_medical_group',
   callbackNumber: '5555550100',
-  statedRelationship: 'referral coordinator',
 };
 
 /**
@@ -78,11 +75,16 @@ describe('the ask budget', () => {
   it('moves ON to the next unanswered field rather than stopping the intake dead', () => {
     const d = director();
     // `outside_referral_status` sets patientContextRequired and does not allow
-    // HAND_OFF, so PATIENT_FIELDS is appended: with statedRelationship cleared
-    // the outstanding list is statedRelationship, patientFirstName,
-    // patientLastName, patientDob. The caller answers none of them.
-    d.update(SEVEN_TIMES_CALL, { ...upToPatientFirstName, statedRelationship: undefined });
-    const outstanding = ['statedRelationship', 'patientFirstName', 'patientLastName', 'patientDob'];
+    // HAND_OFF, so PATIENT_FIELDS is appended. Since 2026-09-16 that list is
+    // the patient's name and nothing else — statedRelationship and patientDob
+    // are recorded when volunteered but never asked. The caller answers
+    // neither.
+    d.update(SEVEN_TIMES_CALL, upToPatientFirstName);
+    // The patient's name, then the enrichment block that follows it —
+    // `callerRole` and `callerEmail`, which are asked AFTER the patient
+    // precisely so a hang-up here cannot cost the request. `callbackNumber`
+    // is seeded and so never offered.
+    const outstanding = ['patientFirstName', 'patientLastName', 'callerRole', 'callerEmail'];
 
     const asked: string[] = [];
     for (let turn = 0; turn < 20; turn++) {
@@ -289,12 +291,11 @@ describe('spending the budget changes what we SAY, never who we CONNECT', () => 
   it('leaves handoffEligible false while the intake is genuinely short', () => {
     const d = director();
     const callId = 'CAtest0000000000000000000000000001';
-    // peer_to_peer defaults to HAND_OFF. Everything present but the facility type.
+    // peer_to_peer defaults to HAND_OFF. Everything present but the
+    // organisation — the caller who will not say where they are calling from.
     d.update(callId, {
       callPurpose: 'peer_to_peer',
       callerName: 'A Caller',
-      callerRole: 'physician',
-      callerOrganization: 'An Organization',
       callbackNumber: '5555550100',
     });
 
@@ -303,7 +304,7 @@ describe('spending the budget changes what we SAY, never who we CONNECT', () => 
 
     const after = d.next(callId);
     expect(after.nextQuestion).toBeUndefined();          // we stopped asking
-    expect(after.askBudgetSpent).toEqual(['callerFacilityType']);
+    expect(after.askBudgetSpent).toEqual(['callerOrganization']);
     expect(after.handoffEligible).toBe(false);           // and we still do not dial
   });
 
@@ -313,9 +314,7 @@ describe('spending the budget changes what we SAY, never who we CONNECT', () => 
     d.update(callId, {
       callPurpose: 'peer_to_peer',
       callerName: 'A Caller',
-      callerRole: 'physician',
       callerOrganization: 'An Organization',
-      callerFacilityType: 'referring_provider',
       callbackNumber: '5555550100',
     });
     expect(d.next(callId).handoffEligible).toBe(true);

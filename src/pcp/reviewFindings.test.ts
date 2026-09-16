@@ -56,7 +56,10 @@ describe('1 — a call with no patient is not asked for one', () => {
 
   it('still requires one when the purpose IS about a patient', () => {
     const r = ticketReadiness(base({ callPurpose: 'peer_to_peer', callerName: 'Dr Chen office', callbackNumber: '+1845' }));
-    expect(r.blocking).toContain('patientName');
+    // Since 2026-09-16 the filing is never HELD for this — the ticket says so
+    // instead. What this guards is unchanged: that the patient is still a field
+    // this purpose is judged against at all.
+    expect(r.annotate).toContain('patientName');
   });
 
   it('reads it from policy rather than re-encoding the list', () => {
@@ -209,10 +212,14 @@ describe('2 — a patient asking for their own records is not interrogated', () 
     }
   });
 
-  it('a professional records request still names the patient', () => {
+  it('a professional records request still names the patient on the ticket', () => {
     const d = new PcpDirector({ lunchClosure: () => false });
     d.update('r3', { callPurpose: 'patient_medical_records_request', callerName: 'Dr Perez', callbackNumber: '+1760' });
-    expect(ticketReadiness(d.get('r3') as never).blocking).toContain('patientName');
+    // `blocking` since 2026-09-16 is always empty — the filing is never held.
+    // The distinction this test exists for is still the live one: a records
+    // request from a PROFESSIONAL is judged against a patient name, where the
+    // same request from the patient themselves is not.
+    expect(ticketReadiness(d.get('r3') as never).annotate).toContain('patientName');
   });
 });
 

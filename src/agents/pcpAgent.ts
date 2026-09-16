@@ -402,11 +402,24 @@ tool reported a genuine failure AND handed you a "say" line for it.`;
  */
 const FIELD_PLACEHOLDERS = {
   callerName: 'Not provided by caller',
-  callerRole: 'Not provided',
-  callerOrganization: 'Not provided',
-  callerFacilityType: 'other_healthcare_organization' as const,
-  callbackNumber: 'NOT PROVIDED',
 };
+/**
+ * WHY THIS LIST IS DOWN TO ONE ENTRY, 2026-09-16.
+ *
+ * It used to carry `callerRole`, `callerOrganization`, `callerFacilityType`
+ * and `callbackNumber` too, because the ticket schema REQUIRED all four. It
+ * does not any more (ticketing-app #275 and `pcpTicketing.ts`), so an absent
+ * field can simply be absent.
+ *
+ * That is not tidying. A placeholder is indistinguishable from an answer once
+ * it is in the column: "Not provided" in `pcp_caller_role` is a value a
+ * staffer reads, a report groups by, and the buildable role list would have
+ * offered back as a role. An empty column says the same thing honestly, and
+ * `annotateGaps` still writes the intake gaps onto the narrative in words.
+ *
+ * `callerName` keeps its placeholder because the app still requires it — it
+ * is the one field a request cannot be worked without.
+ */
 
 /** Human-readable names for the intake gap note on the ticket. */
 const FIELD_LABELS: Record<string, string> = {
@@ -519,10 +532,15 @@ function buildPayload(
     agentSlug: 'pcp',
     agentVersion: pcpAgentConfig.version,
     callerName: state.callerName || FIELD_PLACEHOLDERS.callerName,
-    callerRole: state.callerRole || FIELD_PLACEHOLDERS.callerRole,
-    callerOrganization: state.callerOrganization || FIELD_PLACEHOLDERS.callerOrganization,
-    callerFacilityType: state.callerFacilityType || FIELD_PLACEHOLDERS.callerFacilityType,
-    callerCallbackNumber: state.callbackNumber || FIELD_PLACEHOLDERS.callbackNumber,
+    // Absent rather than "Not provided" — see FIELD_PLACEHOLDERS.
+    // `sanitizePcpPayload` drops empty strings, so `|| undefined` is belt and
+    // braces against a state field that was set to '' rather than left unset.
+    callerRole: state.callerRole || undefined,
+    callerOrganization: state.callerOrganization || undefined,
+    callerFacilityType: state.callerFacilityType || undefined,
+    callerCallbackNumber: state.callbackNumber || undefined,
+    callerEmail: state.callerEmail || undefined,
+    deliveryPreference: state.deliveryPreference || undefined,
     statedRelationship: state.statedRelationship,
     callPurpose: state.callPurpose!,
     disposition,
@@ -636,6 +654,20 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       callerOrganization: z.string().min(1).optional(),
       callerFacilityType: z.enum(PCP_FACILITY_TYPES).optional(),
       callbackNumber: z.string().min(7).optional(),
+      /**
+       * HOW THE CALLER WANTS THE ANSWER BACK — the operator's fifth field.
+       *
+       * `callerEmail` is what the question funnels toward. `deliveryPreference`
+       * is for the caller who answers it with a different channel ("fax is
+       * better", "just call the front desk"); recording it SATISFIES the same
+       * slot, so they are not asked for an email a second time.
+       *
+       * No format validation on the address on purpose. It arrives through
+       * speech recognition, and a `.email()` here would refuse the whole
+       * intake call rather than one field.
+       */
+      callerEmail: z.string().min(3).optional(),
+      deliveryPreference: z.string().min(1).optional(),
       /**
        * WHERE A RECORDS REQUEST GOES. Operator, 2026-09-08 — his own test
        * call took a records request and never asked. The callback number does

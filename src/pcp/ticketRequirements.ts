@@ -93,6 +93,43 @@ export type RequiredField = 'callerName' | 'patientName' | 'callbackNumber';
  */
 export const MAX_BLOCKS = 3;
 
+/**
+ * WHETHER A FILING MAY BE HELD AT ALL. It may not, since 2026-09-16.
+ *
+ * Operator, naming what this line is: "it's like a voicemail... all it's doing
+ * is transferring... we shouldn't have any gates here about who's calling, why
+ * they're calling. The only thing that we are gating is if it's medical
+ * records, if it's something that doesn't belong here, then that's what we
+ * send out to the other departments."
+ *
+ * So the ticket files on the first attempt, with whatever the call produced,
+ * and everything still missing is WRITTEN ON IT. The machinery for that was
+ * already here — this flag just makes the `spent` branch below unconditional,
+ * which is why the change is one boolean rather than a rewrite. Setting it
+ * back to `true` restores the previous behaviour exactly.
+ *
+ * DELIBERATELY A SEPARATE FLAG RATHER THAN `MAX_BLOCKS = 0`, and this is the
+ * part worth reading. `MAX_BLOCKS` is a CONVERSATION budget shared with the
+ * records-delivery ask (`pcpAgent.ts` — `ticketBlocksUsed < MAX_BLOCKS`).
+ * Zeroing it would have stopped that ask firing at all, so a medical-records
+ * case would open with nowhere to send the records: the 2026-08-13 hard-gate
+ * failure arriving through a side door, and precisely the class of thing the
+ * operator excluded when he said records IS still gated. The two budgets look
+ * like one number and are two different decisions.
+ *
+ * WHAT MAKES THIS SAFE rather than just shorter: the ticket is no longer a
+ * snapshot. ticketing-app #275 makes a second POST on the same callSid ENRICH
+ * the row instead of returning `cached` and discarding everything collected
+ * afterwards, and `ticketingSyncService` already posts the transcript onto it
+ * at teardown. Filing early costs nothing it cannot get back.
+ *
+ * WHAT IT DOES NOT DO: the intake still ASKS. `PROFESSIONAL_FIELDS` and
+ * `PROFESSIONAL_ENRICHMENT` are unchanged, and the director still hands the
+ * model one question at a time. What is gone is the filing tool's power to
+ * refuse. Questions, not gates.
+ */
+export const FILING_MAY_BE_HELD = false;
+
 export interface Readiness {
   /** Fields still missing that we are willing to BLOCK on. */
   blocking: RequiredField[];
@@ -188,10 +225,17 @@ function isPresent(state: PcpConversationState, field: RequiredField): boolean {
 export function ticketReadiness(
   state: PcpConversationState,
   blocksUsed = 0,
+  /**
+   * The revert lever, as a PARAMETER rather than only a module constant — so
+   * both behaviours stay reachable from a test and the machinery behind
+   * `FILING_MAY_BE_HELD` cannot rot unnoticed while it is switched off. No
+   * call site passes it; they all take the module default.
+   */
+  mayHold = FILING_MAY_BE_HELD,
 ): Readiness {
   const fields: RequiredField[] = ['callerName', 'patientName', 'callbackNumber'];
   const absent = fields.filter((field) => !isPresent(state, field));
-  const spent = blocksUsed >= MAX_BLOCKS;
+  const spent = !mayHold || blocksUsed >= MAX_BLOCKS;
 
   return {
     blocking: spent ? [] : absent,
@@ -226,5 +270,17 @@ export function annotationFor(fields: RequiredField[]): string | undefined {
     patientName: 'which patient the call is about',
     callbackNumber: 'a callback number',
   };
-  return `NOT CAPTURED ON THE CALL: ${fields.map((f) => labels[f]).join('; ')}. The caller was asked and did not provide it.`;
+  /**
+   * "The caller was asked and did not provide it" used to be the second
+   * sentence here, and it was true while a filing could be HELD — the only
+   * way to reach this branch was to have asked and been refused.
+   *
+   * With `FILING_MAY_BE_HELD` false it is reachable on the first attempt, so
+   * that sentence would be a false statement about the caller on a durable
+   * record. This module's own history has the same objection raised in review
+   * on 2026-08-17 about a drug rep annotated as having withheld a patient name
+   * nobody asked them for. Say what we know — the field is not on the ticket —
+   * and nothing about how it came to be missing.
+   */
+  return `NOT CAPTURED ON THE CALL: ${fields.map((f) => labels[f]).join('; ')}.`;
 }

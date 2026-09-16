@@ -27,15 +27,21 @@ describe('PcpDirector', () => {
     director.update('call-1', { callPurpose: 'peer_to_peer' });
     expect(director.next('call-1').nextQuestion?.field).toBe('callerName');
     director.update('call-1', { callerName: 'Alex Kim' });
-    expect(director.next('call-1').nextQuestion?.field).toBe('callerRole');
+    // The organisation, NOT the role. The role is no longer asked for at all —
+    // it killed 26 calls for 6 tickets over 2026-09-14/15 and callers
+    // volunteer it inside the name answer anyway.
+    expect(director.next('call-1').nextQuestion?.field).toBe('callerOrganization');
   });
 
   it('collects patient context for patient-specific purposes', () => {
     const director = new PcpDirector({ lunchClosure: () => false });
     director.update('call-2', { ...professional, callPurpose: 'check_patient_scheduled' });
-    expect(director.next('call-2').nextQuestion?.field).toBe('statedRelationship');
-    director.update('call-2', { statedRelationship: 'Referring provider for this patient' });
+    // Straight to WHO THE CALL IS ABOUT. `statedRelationship` used to sit in
+    // front of it and drew the same answer as the role question, which this
+    // repo had already recorded twice.
     expect(director.next('call-2').nextQuestion?.field).toBe('patientFirstName');
+    director.update('call-2', { patientFirstName: 'Sam' });
+    expect(director.next('call-2').nextQuestion?.field).toBe('patientLastName');
   });
 
   it('routes explicit patient medical-record requests to a task, never peer-to-peer handoff', () => {
