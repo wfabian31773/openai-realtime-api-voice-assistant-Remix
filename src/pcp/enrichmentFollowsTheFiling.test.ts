@@ -166,7 +166,10 @@ describe('the filing tool hands the question over, because nothing else will', (
 
   it('create_pcp_task asks the director for the next question after a successful file', () => {
     const filed = agent.indexOf("pcpDirector.recordDisposition(callId, disposition);");
-    const asks = agent.indexOf('const enrich = pcpDirector.askNext(callId).nextQuestion;');
+    // FROM `filed`, not from 0 — `record_pcp_intake` opens with the same
+    // line, and searching from the top finds THAT one and reports the
+    // hand-over as missing.
+    const asks = agent.indexOf('const decision = pcpDirector.askNext(callId);', filed);
     expect(filed).toBeGreaterThan(-1);
     expect(asks).toBeGreaterThan(filed);
     /**
@@ -187,7 +190,7 @@ describe('the filing tool hands the question over, because nothing else will', (
     // `next()` here instead would hand the question over WITHOUT charging, and
     // `record_pcp_intake` would then offer `callerEmail` again — the operator's
     // one ask restored to two through the back door.
-    expect(agent).not.toMatch(/const enrich = pcpDirector\.next\(/);
+    expect(agent).not.toMatch(/const decision = pcpDirector\.next\(/);
     // And the budget holds across BOTH call sites, because both go through the
     // same charging entry point.
     const d = director();
@@ -199,6 +202,33 @@ describe('the filing tool hands the question over, because nothing else will', (
       if (q) asked.push(String(q.field));
     }
     expect(asked.filter((f) => f === 'callerEmail').length).toBe(1);
+  });
+
+  it('carries the spent budget out with the question, so a hang-up is still counted', () => {
+    // Codex P2 on #318 — the #315 lesson at a second call site. A caller who
+    // volunteered their role gets `callerEmail` HERE as their one ask; if they
+    // go, no later record_pcp_intake carries the signal, and the instrument
+    // misses exactly the call it was built for.
+    expect(agent).toContain('const decision = pcpDirector.askNext(callId);');
+    expect(agent).toMatch(/askBudgetSpent: decision\.askBudgetSpent/);
+    // toolTimeline gates the whole outcome read on nextQuestion, so
+    // askBudgetSpent alone would never reach the table.
+    expect(agent).toContain('nextQuestion: enrich,');
+    const timeline = source('src/services/toolTimeline.ts');
+    expect(timeline).toContain('parsed?.nextQuestion || parsed?.mayTerminate !== undefined');
+    expect(timeline).toContain("'askBudgetSpent'");
+  });
+
+  it('does not name MAX_ASKS_PER_FIELD in the budget log, because it is no longer every field\'s budget', () => {
+    // `ASKS_FOR_FIELD` gives callerEmail one ask, so a line naming ANY single
+    // count misreports the one field this PR exists to cap.
+    //
+    // BANNING ONE SPELLING IS NOT A GUARD: the first version of this forbade
+    // only `${MAX_ASKS_PER_FIELD}` and a hardcoded `${2}` sailed through it,
+    // which mutation testing caught. Both budget logs must say what happened
+    // rather than how many times it took.
+    expect(agent).not.toMatch(/attempts each/);
+    expect((agent.match(/— budget spent`\);/g) ?? []).length).toBe(2);
   });
 
   it('says the ticket is filed rather than implying something went wrong', () => {

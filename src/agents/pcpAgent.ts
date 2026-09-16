@@ -8,7 +8,6 @@ import { recordingExecute } from '../services/toolTimeline';
 import { withToolDirection } from '../services/toolDirection';
 import { scheduleLookupService } from '../services/scheduleLookupService';
 import {
-  MAX_ASKS_PER_FIELD,
   PCP_FACILITY_TYPES,
   PROFESSIONAL_FIELDS,
   PATIENT_INTAKE_ORDER,
@@ -761,7 +760,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       if (decision.askBudgetSpent?.length) {
         // Console-visible AND, through toolTimeline, countable from SQL. The
         // tool ceiling's stops are console-only and this is not repeating that.
-        console.log(`[PCP ASK BUDGET] ${callId}: stopped asking for ${decision.askBudgetSpent.join(', ')} after ${MAX_ASKS_PER_FIELD} attempts each`);
+        // Deliberately does NOT name the shared constant: `ASKS_FOR_FIELD`
+        // gives callerEmail a single ask, so a line quoting the default would
+        // misreport the one field this budget exists to cap.
+        console.log(`[PCP ASK BUDGET] ${callId}: stopped asking for ${decision.askBudgetSpent.join(', ')} — budget spent`);
       }
       return decision;
     },
@@ -1146,10 +1148,32 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * fields live; the model then files once more and ticketing-app #275
        * enriches the SAME ticket rather than opening another.
        */
-      const enrich = pcpDirector.askNext(callId).nextQuestion;
+      const decision = pcpDirector.askNext(callId);
+      const enrich = decision.nextQuestion;
       if (!enrich) return response;
+      /**
+       * AND THE EXHAUSTION TRAVELS WITH IT — Codex P2 on #318, and it is the
+       * #315 lesson pointed at a second call site.
+       *
+       * `askNext` reports `askBudgetSpent` on the SAME turn as the final
+       * permitted question, precisely so a caller who hangs up on that prompt
+       * is still counted. Projecting straight to `.nextQuestion` threw the
+       * report away, and this branch is where it matters most: a caller who
+       * volunteered their role gets `callerEmail` here as their ONE ask, and
+       * if they go there is no later `record_pcp_intake` to carry the signal.
+       * The instrument would have missed exactly the calls it was built for.
+       *
+       * `nextQuestion` rides along because `toolTimeline` gates the whole
+       * outcome read on it (`toolTimeline.ts:321`) — `askBudgetSpent` alone
+       * would be dropped before it reached the table.
+       */
+      if (decision.askBudgetSpent?.length) {
+        console.log(`[PCP ASK BUDGET] ${callId}: stopped asking for ${decision.askBudgetSpent.join(', ')} — budget spent`);
+      }
       return {
         ...response,
+        nextQuestion: enrich,
+        ...(decision.askBudgetSpent ? { askBudgetSpent: decision.askBudgetSpent } : {}),
         say: enrich.prompt,
         guidance:
           'The ticket is FILED — nothing is wrong, do not apologise, and do not tell the caller to wait. '
