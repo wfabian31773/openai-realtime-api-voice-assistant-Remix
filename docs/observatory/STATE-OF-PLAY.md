@@ -1086,14 +1086,17 @@ was executed against the live databases. Nothing merges without a Codex
 greenlight; the operator merges.
 
 **Where it is:** `docs/WORKSHEET-20260917.md` is the driving document and its
-*FOR 5AM* block is the hand-off. **PR #321** carries v39–v57 — nineteen ships,
+*FOR 5AM* block is the hand-off. **PR #321** carries v39–v56 — eighteen ships,
 each with its row in the marker table — plus the round-by-round record of
 **twenty-one Codex reviews absorbed** (every finding taken or declined on a
-measurement, every thread answered and resolved) — the twenty-first declined on
-the base rate, with v57's one real cost (it serialises POSTs that used to go out
-in parallel) written into the marker row rather than waved away. Suite 258 files / 4,732 tests, root and client typecheck clean.
+measurement, every thread answered and resolved). **v57, the surgeon ask, was
+built and then WITHDRAWN on the operator's ruling** — *"if it's only 9 callers,
+I would remove if we are unsure"* — after six consecutive rounds of concurrency
+findings on the machinery, the last of which no constant could close. Its
+measurement stands and is kept; the number v57 is retired rather than reused.
+Suite 258 files / 4,714 tests, root and client typecheck clean.
 Live Replit was still on v24 when this was written; the deploy marker to look
-for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
+for is `voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917`.
 
 ## What shipped, by the number it moves
 
@@ -1156,8 +1159,8 @@ for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
   `retries + 1` could clobber the grade or recording writer's reset to 0 and
   strand a row at 3; both writes now add one in the database. Measured first
   (0 rows at 3, 4 at 2 in 14 days) and taken as one expression.
-- **v57 — the surgeon ask is claimed before the POST (task #75's after-number,
-  never taken since 09-02):** 96 surgery calls took the surgeon refusal over
+- **v57 — BUILT AND WITHDRAWN 2026-09-17; the measurement below stands and the
+  code does not ship (task #75's after-number, never taken since 09-02):** 96 surgery calls took the surgeon refusal over
   09-08..09-16, 46 left no ticket anywhere, the exit fired on 57 calls and on
   none of the 46. On every lost call that reached a third POST the attempts
   landed 1–100 ms apart — one model response — so a counter noted after each
@@ -1170,6 +1173,15 @@ for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
   That, not the app, is why dept-2 provider fill held at 100%. Whether the
   triage is the exit working or the ask being spent on the wrong queue's
   caller is Wayne's; the first reading ("the app re-routes") was wrong.
+  **Withdrawn because the claim serialises POSTs that used to go out in
+  parallel, and rounds 16 through 21 each found a new interleaving in the
+  machinery holding it up — round 21 being uncloseable by any constant, since
+  three serialised 15 s client timeouts is exactly the 45 s tool watchdog.
+  9 callers over seven business days did not justify it. The next attempt
+  flags on the SECOND refusal, where no batch of three exists and nothing is
+  serialised.** Rounds 17 through 21 below describe machinery that is no longer
+  in the PR; they are kept because the reasoning is what the next attempt has
+  to avoid repeating.
 - **Round 16 (10:11) caught both of the above one step further:** the sync's
   failure write still stamped *GAVE UP* from the snapshot (now a CASE in the
   same statement, read back with RETURNING, PREPAREd on the Hub), and v57's
@@ -1199,7 +1211,17 @@ for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
   so a late refusal was possible after all. Fixed at the root (`3f66bc9`):
   the timer covers the body, an abort mid-body is a timeout and not a
   bad-body 4xx, and the floor is 23 s so the queue fits under the 45 s
-  watchdog. Real-client test; 3 mutations, 3 caught.
+  watchdog. Real-client test; 3 mutations, 3 caught. **The client half of this
+  STAYS in the PR** — it is a real fleet-wide defect (a hung body read hung a
+  ticket POST forever, on every lane) that the surgeon work merely uncovered.
+  The floor went out with the rest of the claim.
+- **Round 21 (11:09) was declined on the base rate, and then the ship it was
+  about was withdrawn entirely.** A stuck first attempt plus a full-length
+  second leaves the third claiming at ~44.5 s against the 45 s watchdog. That
+  needs a settle that is LOST rather than slow, which round 20 had already
+  turned into an escaped exception; on measured data the worst batch of three
+  lands at 42.3 s. No constant closes it, which is what made the operator's
+  remove-it ruling the right call rather than a seventh round.
 
 **Live database objects, in no branch:** four partial indexes on `call_logs`
 (05:45 UTC, DDL and reversal in the pack) because the four 5-minute sweeps

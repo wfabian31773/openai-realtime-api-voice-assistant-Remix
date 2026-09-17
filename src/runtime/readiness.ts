@@ -350,7 +350,7 @@ import { callEnvironment } from "./callRecord";
  * tells the model to say what the lookup found.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917";
+  "voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

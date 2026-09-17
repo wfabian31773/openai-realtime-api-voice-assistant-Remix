@@ -569,6 +569,35 @@ GROUP BY 1 ORDER BY 1;
 -- before: 09-14 0/0 · 09-15 0/18 · 09-16 0/57 (of 104).
 ```
 
+## WITHDRAWN 2026-09-17 — the surgeon claim is OUT of #321, the measurement below STANDS
+
+**Operator ruling:** *"if it's only 9 callers, I would remove if we are unsure"* —
+and we were unsure. The code (`claimGateAttemptAfterSettlement`, the settle, the
+per-predecessor wait, the claim queue, the abandon) is reverted; the marker is
+back to v56 and **the number v57 is retired rather than reused**. Six Codex
+rounds (16–21) each found a new interleaving in the machinery, and round 21
+cannot be closed by tuning a constant: three serialised 15 s client timeouts is
+45 s, exactly the bridge's tool-dispatch watchdog.
+
+**Everything below is the EVIDENCE and it is unchanged and still true** — the
+96 / 50 / 46 / 29 / 9 split, the batched-POST link, the department-2 landing
+correction, and the queries to re-run. What is no longer true is any sentence
+describing the fix as shipping.
+
+**TWO FIXES THAT RODE WITH IT AND STAY IN #321**, both unrelated to the surgeon
+claim: Codex round 15 (the post-call sync's failure writes add one in the
+database rather than storing a snapshot) and Codex round 20's root fix
+(`ticketingApiClient.makeRequest` keeps its abort timer armed until the response
+BODY is read — it used to clear it at the headers and then await
+`response.json()` unbounded, so a hung body read hung a ticket POST forever, on
+every lane).
+
+**THE NEXT ATTEMPT NEEDS NO CONCURRENCY MACHINERY:** flag on the SECOND refusal
+rather than the third. A batch of two is not the failing shape, so the counter
+never has to be read mid-flight and nothing is serialised.
+
+---
+
 ## v57 — the surgeon ask is claimed before the POST (task #75's after-number, taken 2026-09-17 09:45–10:05 UTC)
 
 The exit merged 2026-09-02 (#254 / ticketing-app #206) and its after-number was never taken. Every query below was run today.

@@ -409,7 +409,8 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v56, ready for review). Codex has reviewed it TWENTY-ONE times: round 1
+   (v39–v56, ready for review; v57 was built and withdrawn — see below).
+   Codex has reviewed it TWENTY-ONE times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
@@ -475,52 +476,40 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
    `retries + 1` that could clobber the grade or recording writer's reset to 0
    and strand the row at 3, ineligible; both now add one in the database.
    Measured first: 0 rows at 3 and 4 at 2 in 14 days — latent, taken as one
-   expression in the write that branch already makes.** Beside it **v57**,
-   task #75's after-number, finally taken: the surgery unassigned exit fired
-   on 57 calls and on NONE of the 46 lost to the surgeon gate over
-   09-08..09-16 — on every lost call that reached a third POST the attempts
-   were 1–100 ms apart, one model response, and a counter noted after each
-   refusal read 0 on all three. The ask is now claimed before the POST and
-   settled after it; sequential rules unchanged; 7 mutations, 7 caught.
-   **Round 16 (10:11, on `68a783b`): two P2s, both on those two changes and
-   both taken — the sync still stamped GAVE UP and reported exhaustion from
-   the snapshot (now a CASE in the same statement, read back with RETURNING),
-   and v57's in-flight count could flag the third of a batch whose first two
-   were 503s or another field's refusal (a claim now waits for the attempts
-   ahead of it and reads confirmed refusals only; 6 mutations, 6 caught).**
-   **Round 17 (10:26, on `5429bf9`): one P2 on that wait, taken on `34d3ecc` —
-   one 20 s deadline for the whole queue where each predecessor may take 15 s;
-   now one bounded wait per predecessor, re-armed on each settle (3 mutations,
-   3 caught).** **Round 18 (10:38, on `34d3ecc`): one P2 on that, taken on
-   `8a11864` — every waiter started its own bound on arrival, so a predecessor
-   past the bound (the create path can legitimately take ~21.5 s) released all
-   of them together; claims are now queued and released one at a time, and the
-   floor is 25 s, above the longest legitimate attempt (3 mutations, 3
-   caught).** **Round 19 (10:47, on `8a11864`): one P2 on that queue, taken
-   on `1b6eb33` — with a stuck first attempt the third waited two bounds
-   (50 s) and the runtime's 45 s tool watchdog tore the call down first; a
-   bound that passes now lets go of the stuck attempt, so a claim's total
-   wait is one bound plus the real duration of what answers.** **Round 20
-   (10:58, on `1b6eb33`): two P2s on that, both taken at the root on
-   `3f66bc9` — the floor is 23 s so a stuck first plus a full-length second
-   stays under the 45 s watchdog, and the ticketing client's 15 s timeout now
-   covers the BODY read (it was cleared at the headers), so no attempt can
-   settle after the floor and a late answer is a timeout by construction
-   (3 mutations, 3 caught).** **Round 21 (11:09, on `3f66bc9`): one P2,
-   DECLINED on the number, and the loop stops here.** A stuck first attempt
-   abandoned at 23 s plus a full-length second leaves the third claiming at
-   ~44.5 s against the 45 s watchdog — but that needs a settle that is LOST, not
-   slow, which round 20 made an escaped exception rather than a slow app. On the
-   measured base rate (p50 2.3 s, p95 5.2 s, max 14.1 s, 0 over 20 s) the worst
-   batch of three lands at **42.3 s**, inside the watchdog. **What IS true and is
-   on the thread and in the marker row: v57 serialises attempts that used to go
-   out in parallel**, so a batched triple costs ~sum(POST) rather than ~max(POST)
-   — about 7 s at p95. **No constant closes the hypothetical** (three serialised
-   15 s timeouts IS 45 s), so if you want it closed the route is to take v57 out
-   of this PR and flag on the SECOND refusal instead; the other eighteen ships do
-   not depend on it. Every thread on #321 is answered and resolved.
+   expression in the write that branch already makes.** Beside it **v57 was BUILT
+   AND THEN WITHDRAWN — read this before looking for it in the diff.**
+   Task #75's after-number was finally taken and it stands: the surgery
+   unassigned exit fired on 57 calls and on NONE of the 46 lost to the surgeon
+   gate over 09-08..09-16; on every lost call that reached a third POST the
+   attempts were 1–100 ms apart, one model response, and a counter noted after
+   each refusal read 0 on all three. The fix claimed the ask before the POST and
+   settled it after — and that serialises attempts that used to go out in
+   parallel. **Six Codex rounds (16 through 21) each found a new interleaving in
+   the machinery holding it up**, and round 21 could not be closed by tuning a
+   constant: three serialised 15 s client timeouts is 45 s, exactly the bridge's
+   tool-dispatch watchdog. **Operator ruling, 2026-09-17:** *"if it's only 9
+   callers, I would remove if we are unsure"* — so it is out, the marker is back
+   to **v56**, and the number v57 is retired rather than reused (the next ship
+   takes v58). **The next attempt needs no concurrency machinery at all: flag on
+   the SECOND refusal rather than the third**, where a batch of two is not the
+   failing shape. The evidence, the landing correction and the queries are in
+   `docs/observatory/AFTER-MEASUREMENTS-20260917.md` under the WITHDRAWN banner,
+   and the operator question about where the exit's tickets land is still open.
+   **TWO FIXES THAT RODE WITH IT AND STAY:** Codex round 15, where the post-call
+   sync's two failure writes add one IN THE DATABASE rather than storing a
+   snapshot that could clobber the grade or recording writer's reset to 0 and
+   strand the row at 3 (0 rows at 3 and 4 at 2 in 14 days — latent, taken as one
+   expression in the write that branch already makes; round 16 then fixed the
+   same branch still stamping GAVE UP and reporting exhaustion from the
+   snapshot — now a CASE in the same statement, read back with RETURNING); and
+   Codex round 20's root fix, where `ticketingApiClient.makeRequest` keeps its
+   abort timer armed until the response BODY has been read. It used to clear it
+   the moment the headers arrived and then await `response.json()` with no bound
+   at all, so a hung body read hung a ticket POST forever, on every lane — a real
+   fleet-wide defect the surgeon work merely uncovered. Every thread on #321 is
+   answered and resolved.
 
-2. **Pull and republish.** `/voice/health` must read the v57 marker below.
+2. **Pull and republish.** `/voice/health` must read the v56 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
    — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
    *Build* checks are green; *Type check* is red with the 22 errors that are
@@ -585,7 +574,7 @@ merged or is in PR #321 waiting for you.
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917
+GET /voice/health   ->   voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:
