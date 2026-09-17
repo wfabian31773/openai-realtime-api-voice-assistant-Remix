@@ -526,6 +526,18 @@ answered; an end-call now waits for its siblings. And a transcript delta
 opened an utterance with zero bytes that read as words. Same queries, same
 targets; `hangupsHeld` still counts the guard firing.
 
+### Round 13 on this ship (08:58 UTC)
+
+The round-12 wait read `pendingSiblings`, which is empty when the hangup is
+the FIRST event of its batch — the sibling that follows it on the wire has
+not been read yet. An end-call now also waits for the batch boundary: the
+carrying response's done, or the late-batch grace window (armed at the late
+event's arrival, so an end-call waiting on it can see it armed). Same
+queries, same targets. One new cost, bounded: a lone late `terminate_call`
+is decided 250 ms after it arrives rather than at once — on `call_logs`,
+PCP `agent_ended` calls should still hang up, and `max_duration` /
+`dead_air` on that lane must not rise.
+
 ## Also on this build, not a version of its own
 
 **`unclassified_call` by provenance (task #138)** — the sweep stamps
