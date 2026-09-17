@@ -10,7 +10,7 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-09-17 10:30 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-09-17 10:50 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
@@ -1066,7 +1066,7 @@ guesses no tool ever made.
 
 ---
 
-## 12. The night of 2026-09-16/17 — one worksheet, nineteen ships, sixteen Codex rounds (written 09-17)
+## 12. The night of 2026-09-16/17 — one worksheet, nineteen ships, seventeen Codex rounds (written 09-17)
 
 **The mandate** (Wayne, 2026-09-17): *"keep working through the worksheet,
 don't wait on me … knock out as many relevant tasks as possible and have
@@ -1088,9 +1088,9 @@ greenlight; the operator merges.
 **Where it is:** `docs/WORKSHEET-20260917.md` is the driving document and its
 *FOR 5AM* block is the hand-off. **PR #321** carries v39–v57 — nineteen ships,
 each with its row in the marker table — plus the round-by-round record of
-**sixteen Codex reviews absorbed** (every finding taken or declined on a
-measurement, every thread answered and resolved) and a seventeenth requested
-on the head. Suite 257 files / 4,723 tests, root and client typecheck clean.
+**seventeen Codex reviews absorbed** (every finding taken or declined on a
+measurement, every thread answered and resolved) and an eighteenth requested
+on the head. Suite 257 files / 4,726 tests, root and client typecheck clean.
 Live Replit was still on v24 when this was written; the deploy marker to look
 for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
 
@@ -1162,15 +1162,25 @@ for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
   landed 1–100 ms apart — one model response — so a counter noted after each
   refusal read 0 on all three. `claimGateAttempt` / `settleGateAttempt`: claimed
   before the POST (refusals + in-flight), counted only when the app refused for
-  the surgeon. Also read on the way: the exit's own tickets land mostly in
-  Technicians Support (19) and the HVA Hub (13), not department 2 — which is
-  why dept-2 provider fill held at 100%; whether those are worked is Wayne's.
+  the surgeon. Also read on the way, and CORRECTED at 10:45: the exit files
+  into department 2 and moves nothing — all 55 of its tickets were created
+  there and 37 were then moved BY A PERSON (`department_transferred`, an actor
+  on every one): 19 to Technicians Support, 13 to the HVA Hub, 5 elsewhere.
+  That, not the app, is why dept-2 provider fill held at 100%. Whether the
+  triage is the exit working or the ask being spent on the wrong queue's
+  caller is Wayne's; the first reading ("the app re-routes") was wrong.
 - **Round 16 (10:11) caught both of the above one step further:** the sync's
   failure write still stamped *GAVE UP* from the snapshot (now a CASE in the
   same statement, read back with RETURNING, PREPAREd on the Hub), and v57's
   in-flight count could flag the third of a batch whose first two were 503s —
   a claim now waits for the attempts ahead of it and reads confirmed refusals
   only. Exposure 0 in the window on both; taken because both doors were new.
+- **Round 17 (10:26) caught the wait one step further:** one 20 s deadline
+  for the whole queue, where each predecessor's POST may take 15 s — the
+  third of a slow batch was released at 20 s reading one refusal of two. Now
+  one bounded wait per predecessor, re-armed on each settle (`34d3ecc`; 3
+  mutations, 3 caught). Exposure 0 in the window; taken because the wait is
+  this PR's.
 
 **Live database objects, in no branch:** four partial indexes on `call_logs`
 (05:45 UTC, DDL and reversal in the pack) because the four 5-minute sweeps

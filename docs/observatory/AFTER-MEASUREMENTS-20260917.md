@@ -603,11 +603,43 @@ FROM voice_agent_api_logs
 WHERE endpoint ILIKE '%create-ticket%' AND request_body->'callData'->>'agentUsed' = 'surgery'
   AND created_at >= '2026-09-08' AND created_at < '2026-09-17'
 GROUP BY 1 ORDER BY 1;
--- 82 flagged POSTs on 57 calls, 82 of 82 accepted. Where the flagged POST's own ticket landed (join tickets ON ticket_number):
--- dept 2 Surgery Coordination 18 (15 with provider, 3 unassigned) · dept 3 Technicians Support 19 (17 unassigned)
--- · dept 9 HVA Hub 13 (12 unassigned) · dept 15/16/4: 5. 5 of the 57 calls have no ticket by SID: 4 answered
+-- 82 flagged POSTs on 57 calls, 82 of 82 accepted. 5 of the 57 calls have no ticket by SID: 4 answered
 -- `consolidated: true` ("Contact appended to existing open ticket"), 1 a re-stamped SID — the approved consolidation, not a loss.
+-- WHERE THE TICKETS ARE NOW (join tickets ON ticket_number): dept 2 Surgery Coordination 18 (15 with provider, 3 unassigned)
+-- · dept 3 Technicians Support 19 · dept 9 HVA Hub 13 · dept 15/16/4: 5. THE FIRST READING OF THAT WAS WRONG — see the correction below.
 ```
+
+**Corrected 10:45 UTC — the exit moves nothing; people do.** The v57 row first said the app's exit *re-routes* a surgeon-less request out of department 2. It does not: `applyRoutingGate` answers `takesUnassignedExit` with `ok: true` and never touches the department, and every flagged surgery POST went to department 2. The tickets were moved afterwards, by hand:
+
+```sql
+-- (1) which department each flagged POST was actually sent to, and what came before it on the call
+--     dept 2: 74 POSTs / 54 calls, 200 on all, 0 with no dept-2 surgeon refusal before them (62 after two or more)
+--     dept 1: 20 POSTs / 17 calls — optical's own exit, not surgery's
+SELECT (request_body->>'departmentId')::int AS dept, http_status_code, count(*), count(DISTINCT request_body->'callData'->>'callSid')
+FROM voice_agent_api_logs
+WHERE endpoint = '/api/voice-agent/create-ticket' AND request_body->>'routingAskExhausted' = 'true'
+  AND created_at >= '2026-09-08' AND created_at < '2026-09-17'
+GROUP BY 1,2;
+
+-- (2) the exit's dept-2 tickets: where they are now, and whether a person moved them
+--     dept 3 Technicians Support 19 (19 with a department_transferred event, actor on all 19)
+--     dept 2 Surgery Coordination 18 (0 moves; 15 with provider, 3 unassigned)
+--     dept 9 HVA Hub 13 (13 moved, 14 moves) · dept 15 OCS Hub 2 (moved) · dept 16 Medical Records 2 (moved) · dept 4 Billing 1 (moved, 6 times)
+--     => 55 created in department 2, 37 moved by a logged-in user, 0 moved by the app
+WITH exit_tickets AS (
+  SELECT DISTINCT response_body->>'ticketNumber' AS ticket_number FROM voice_agent_api_logs
+  WHERE endpoint = '/api/voice-agent/create-ticket' AND request_body->>'routingAskExhausted' = 'true'
+    AND (request_body->>'departmentId')::int = 2 AND http_status_code = 200
+    AND created_at >= '2026-09-08' AND created_at < '2026-09-17'),
+t AS (SELECT tk.id, tk.department_id, tk.provider_id, tk.assigned_to_id FROM tickets tk JOIN exit_tickets e USING (ticket_number)),
+moves AS (SELECT ticket_id, count(*) AS n, count(*) FILTER (WHERE actor_id IS NOT NULL) AS by_a_person
+          FROM ticket_events WHERE ticket_id IN (SELECT id FROM t) AND event_type = 'department_transferred' GROUP BY ticket_id)
+SELECT t.department_id, count(*) AS tickets, count(*) FILTER (WHERE t.provider_id IS NOT NULL) AS with_provider,
+       count(*) FILTER (WHERE t.assigned_to_id IS NULL) AS unassigned, count(m.ticket_id) AS moved, coalesce(sum(m.by_a_person),0) AS moves_by_a_person
+FROM t LEFT JOIN moves m ON m.ticket_id = t.id GROUP BY 1 ORDER BY 2 DESC;
+```
+
+One residue not read: 12 of the 74 flagged dept-2 POSTs had only ONE dept-2 surgeon 400 before them in the API log (the threshold is two confirmed refusals per call). Whether that is a refusal logged under a different SID or endpoint, or the flag arriving one refusal early, is the next thing to read on #75 — it is a fact about the BEFORE build, since v57 is not deployed.
 
 **The control that named the link** — POST timestamps on the 9 lost calls with three or more POSTs against six calls where the flag fired:
 
@@ -660,3 +692,9 @@ DEALLOCATE r16_probe;
 ```
 
 (2) v57's first version counted attempts in flight AS refusals, so a concurrent batch whose first two answered 503 (or refused another field) would have flagged its third — a request filed unassigned on an ask the caller never heard. Exposure in the window: 0 — all 88 POSTs on the 46 lost calls were surgeon 400s and 751 of 751 department-2 refusals since 08-25 name the surgeon — but the door was new and mine, so it is closed regardless of the base rate: a claim now WAITS for the attempts ahead of it to settle and reads confirmed refusals only (`claimGateAttemptAfterSettlement`, bounded at 20 s). Serialises a batch through the POST; costs the third attempt the ~100 ms its siblings take.
+
+### Round 17 on this ship (10:26 UTC) — one P2 on the round-16 wait, taken on `34d3ecc`
+
+The claim held ONE 20 s deadline for the whole queue, and a POST alone may take the client's 15 s (`ticketingApiClient.makeRequest`). A batch of three whose first two predecessors were both slow: the third released at 20 s with the second still pending, read one confirmed refusal where there were two, sent no flag — the lost-third-attempt case back in through the bound. Now one bounded wait PER PREDECESSOR: `waitForSettlement` parks until the next settle on the key or 20 s of none, and the claim loop re-arms on every settle that wakes it. The floor is unchanged (a settle that never comes releases at 20 s); a released waiter removes itself from the list, so a late settle wakes nobody who has gone.
+
+`gateAttempts.test.ts` +3, with fake timers: (a) three claims, the first settles at 15 s, the second at 30 s → the third reads 2 (RED on the single deadline: it read 1 at 20 s); (b) the bound runs from the LAST settle — released at 35 s, not 20 s; (c) a waiter the bound released has left the list, and the late settles count normally. **3 mutations, 3 caught** (against the scratch copy in `mut30/fixed/`): the single deadline restored (2 fail); the bound never releasing — the timeout resolving true (3, by timeout); the wait ending after one predecessor (3). `surgeryUnassignedExit.test.ts` 13/13, typecheck clean, full suite 257 files / 4,726 tests. Base rate in the window: 0 — the 88 refusals on the 46 lost calls answered in well under a second, so no batch reached the bound; taken because the wait is this PR's.
