@@ -259,7 +259,8 @@ function matchedRecord(
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
-import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
+import { openRuntimeCall, persistRuntimeCall, type CallLogInsert, type RuntimeCallIdentity } from "./callRecord";
+import { identityForRow } from "./runtimeIdentity";
 import { runRequestSweep } from "./sweepRunner";
 import { persistRuntimeTurns } from "./runtimeTurns";
 import { makeRecordingStarter } from "./callRecording";
@@ -389,7 +390,9 @@ export interface VoiceRuntimeOptions {
   /** Opens the call_logs row. Injected for tests. */
   openCallRow?: CallLogInsert;
   /** Persists the finished call. Injected for tests. */
-  persistCall?: (record: VoiceCallRecord) => Promise<boolean>;
+  /** The identity the process established for the caller rides with the
+   * record (runtimeIdentity.ts) — a CERTAIN match only, never a candidate. */
+  persistCall?: (record: VoiceCallRecord, identity?: RuntimeCallIdentity) => Promise<boolean>;
   /**
    * The teardown request sweep. Injected for tests, and settable to a no-op
    * to turn it off without a deploy.
@@ -1152,7 +1155,11 @@ export function mountVoiceRuntime(
              * no reason to abandon the caller's request.
              */
             await withinOrNull(
-              persistCall(record),
+              // The record, and who the process established the caller to be
+              // (v51): a certain match only, read from the same store the
+              // teardown sweep reads, so a row carries a name only when the
+              // lookup matched one person and nobody denied it.
+              persistCall(record, identityForRow(record.callSid)),
               options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
             );
             await sweepCall(record).catch(() => undefined);

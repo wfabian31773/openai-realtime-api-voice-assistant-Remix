@@ -335,14 +335,14 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v50, ready for review). Codex has reviewed it three times: round 1
+   (v39–v51, ready for review). Codex has reviewed it three times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s — every one taken, every thread resolved, each with a test
-   and a mutation check. A FOURTH pass was requested on the head that carries v50
-   and the round-3 fixes.
+   and a mutation check. A FOURTH pass was requested on the head that carries v50,
+   v51 and the round-3 fixes.
    **Read that fourth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
-2. **Pull and republish.** `/voice/health` must read the v50 marker below.
+2. **Pull and republish.** `/voice/health` must read the v51 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
    — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
    *Build* checks are green; *Type check* is red with the 22 errors that are
@@ -393,13 +393,14 @@ merged or is in PR #321 waiting for you.
 | **v48** (PR #321) | `found` and `candidate_count` reach the tool timeline — an instrument, no behaviour change | the W1 date-of-birth fix was reverted because the ambiguous-lookup branch could not be counted; after a day on this build it can be |
 | **v49** (PR #321) | the runtime grades its own calls at teardown, the backfill cannot be starved by its own head, and a dead_air ending after a real conversation is `completed` | a third of the fleet read `agent_outcome` NULL at peak on 2026-09-16 (grades lagging 161–203 min); 87 calls from 09-15 stranded behind two empty rows; 58 real conversations on 09-14 recorded `failed` and never graded or synced |
 | **v50** (PR #321) | the second identity miss ends the ask — `lookup_patient` counts misses per call, coaches one shaped re-ask, then says stop and file | 35 runtime calls on 09-16 asked for a date of birth 2+ times, 13 asked 3+, tech's almost all cold callers; 13–16 calls a day missed 3+ times and were never found, 7–10 of them with no ticket |
+| **v51** (PR #321) | a CERTAIN identity the tools established reaches the call row — `patient_found`, `patient_name`, `patient_dob` — never a phone candidate | NULL on 2,471 of 2,471 runtime calls in seven days; the Observatory's identity columns have been dark on every lane since the cutover (task #57's runtime half was done on a runtime that no longer exists) |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v50-the-second-miss-ends-the-identity-ask-20260917
+GET /voice/health   ->   voice-runtime-v51-the-record-reaches-the-call-row-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:

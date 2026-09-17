@@ -118,6 +118,8 @@ function laneSource(over: Partial<LaneConfig> = {}): LaneSource {
 interface Harness {
   openedRows: Array<Record<string, unknown>>;
   persisted: Array<Record<string, unknown>>;
+  /** The identity handed to persistCall beside each record (v51). */
+  persistedIdentity: Array<unknown>;
   /**
    * Calls the teardown request sweep saw, in order.
    *
@@ -165,6 +167,7 @@ async function harness(
   const transports: FakeGrokTransport[] = [];
   const openedRows: Array<Record<string, unknown>> = [];
   const persisted: Array<Record<string, unknown>> = [];
+  const persistedIdentity: Array<unknown> = [];
   const swept: Array<Record<string, unknown>> = [];
   mountVoiceRuntime(app, server, {
     env: over.env ?? ENV,
@@ -196,8 +199,9 @@ async function harness(
     gradeCall: over.gradeCall ?? (async () => "skipped"),
     persistCall:
       over.persistCall ??
-      (async (record) => {
+      (async (record, identity) => {
         persisted.push(record as unknown as Record<string, unknown>);
+        persistedIdentity.push(identity);
         return true;
       }),
     sweepCall:
@@ -216,6 +220,7 @@ async function harness(
   const h: Harness = {
     openedRows,
     persisted,
+    persistedIdentity,
     swept,
     base: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/voice/stream`,
@@ -1704,6 +1709,34 @@ describe("the runtime's turns and recording reach the Observatory", () => {
     expect(graded[0]).toMatchObject({ callSid: "CA43", sweptFirst: 1 });
     // The row id travels with it — whatever the harness's row opener returned.
     expect("callLogId" in graded[0]).toBe(true);
+  });
+
+  /**
+   * THE RECORD REACHES THE CALL ROW (v51). Measured over seven days:
+   * patient_found / patient_name / patient_dob NULL on 2,471 of 2,471 runtime
+   * calls, because nothing supplied persistRuntimeCall's identity argument.
+   * Pinned at the runtime, with a canonical SID (the store refuses any other)
+   * and a CERTAIN entry — an uncertain one must produce nothing.
+   */
+  it("hands persistCall the CERTAIN identity the tools established for the call, and nothing for an uncertain one", async () => {
+    const { rememberVerifiedIdentity, resetVerifiedIdentities } = await import("../tools/verifiedIdentity");
+    resetVerifiedIdentities();
+    const CERTAIN = "CA0000000000000000000000000000005a";
+    const CANDIDATE = "CA0000000000000000000000000000005b";
+    rememberVerifiedIdentity(CERTAIN, { firstName: "Zelda", lastName: "Quixote", dateOfBirth: "1958-01-04", certain: true });
+    rememberVerifiedIdentity(CANDIDATE, { firstName: "Zed", lastName: "Quixote", certain: false });
+    const h = await harness();
+    for (const sid of [CERTAIN, CANDIDATE]) {
+      const answered = await post(h, "/voice/optical", { CallSid: sid, From: "+1", To: "+2" });
+      const { ws } = await openStream(h, sid, tokenFrom(answered.text));
+      await waitFor(() => h.transports.length >= 1, "the transport to register");
+      ws.close();
+      await settle(8);
+    }
+    expect(h.persistedIdentity).toHaveLength(2);
+    expect(h.persistedIdentity[0]).toEqual({ patientFound: true, patientName: "Zelda Quixote", patientDob: "1958-01-04" });
+    expect(h.persistedIdentity[1]).toEqual({});
+    resetVerifiedIdentities();
   });
 
   it("starts a Twilio recording once per call, on the host the webhook was reached on", async () => {

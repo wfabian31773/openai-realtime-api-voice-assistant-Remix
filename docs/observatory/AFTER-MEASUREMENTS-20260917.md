@@ -227,6 +227,27 @@ GROUP BY 1 ORDER BY 1;
 -- 2026-09-15 before: 103 null after 1h, 19 failed with caller lines. 09-16: 3 and 0.
 ```
 
+## v51 — the record reaches the call row
+
+Number: runtime substantive calls with `patient_found = true` — **0 of 2,471 in
+the seven days to 09-17 (tech 926, pcp 605, surgery 532, optical 408), target ≈
+the share whose `lookup_patient` matched one person**. Guard: a row carrying a
+name for a call whose lookup was only a phone candidate must stay 0 — compare
+`patient_name` against calls whose lookup events carry `identity_is_certain =
+false` and no certain event.
+
+```sql
+-- Hub.
+SELECT agent_used, coalesce(voice_provider,'old-core') AS pipeline, count(*) AS substantive,
+       count(*) FILTER (WHERE patient_found) AS patient_found_true,
+       count(*) FILTER (WHERE patient_name IS NOT NULL) AS patient_name_set,
+       count(*) FILTER (WHERE patient_dob IS NOT NULL) AS patient_dob_set
+FROM call_logs
+WHERE duration >= 30 AND created_at >= '<day>'
+GROUP BY 1,2 ORDER BY 3 DESC;
+-- seven days to 09-17 before: 0 / 0 / 0 on every lane.
+```
+
 ## Also on this build, not a version of its own
 
 **`unclassified_call` by provenance (task #138)** — the sweep stamps

@@ -303,9 +303,17 @@ import { callEnvironment } from "./callRecord";
  * of birth; the first coaches the one re-ask in the funnel's shape, the
  * second (LOOKUP_MISS_LIMIT) says stop and file. `lookup_misses` reaches the
  * timeline so the after-number is SQL. Stacks on v49.
+ *
+ * v51: the record reaches the call row. Over the seven days to 2026-09-17
+ * patient_found / patient_name / patient_dob were NULL on all 2,471 runtime
+ * calls: persistRuntimeCall took an identity argument nobody supplied, and
+ * the conflict update excluded identity anyway. A CERTAIN identity the tools
+ * established (verifiedIdentityFor — the sweep's own reader, which refuses a
+ * phone candidate) now rides with the record at teardown, on the insert and
+ * the update path alike, never nulled. Stacks on v50.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v50-the-second-miss-ends-the-identity-ask-20260917";
+  "voice-runtime-v51-the-record-reaches-the-call-row-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

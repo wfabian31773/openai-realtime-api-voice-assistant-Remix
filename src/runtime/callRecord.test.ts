@@ -151,8 +151,14 @@ describe("toCallLogRow", () => {
     expect(update.duration).toBe(93);
     // Anything another writer owns is not in the update at all.
     expect('toolTimeline' in update).toBe(false);
-    expect('patientName' in update).toBe(false);
     expect('ticketNumber' in update).toBe(false);
+    // Identity the runtime ESTABLISHED is carried (v51) — before that it was
+    // excluded here and 0 of 2,471 runtime rows carried a name. What must
+    // never happen is a null erasing another writer's value, and the row
+    // without identity below proves the omission side.
+    expect(update.patientName).toBe('Test Patient');
+    expect(update.patientFound).toBe(true);
+    expect('patientDob' in update).toBe(false);
   });
 
   it("marks the row as Grok-served, so OpenAI cost estimation skips it", () => {
@@ -237,9 +243,11 @@ describe("persistRuntimeCall", () => {
       Record<string, unknown>,
       Record<string, unknown>,
     ];
-    // The insert carries identity; the conflict update must not.
+    // Both carry the identity the runtime was told (v51 — the normal path is
+    // the conflict update, because the row was opened at call start), and
+    // neither carries another writer's columns.
     expect(row.patientName).toBe("Test Patient");
-    expect("patientName" in update).toBe(false);
+    expect(update.patientName).toBe("Test Patient");
     expect("toolTimeline" in update).toBe(false);
     expect(update.transcript).toBe("CALLER: Hi\nAGENT: Hello");
   });
@@ -596,5 +604,27 @@ describe("teardown does not touch transfer_outcome", () => {
     expect(
       "transferOutcome" in (toConflictUpdate(row) as unknown as Record<string, unknown>),
     ).toBe(false);
+  });
+});
+
+/**
+ * THE RECORD REACHES THE CALL ROW (v51). The conflict update — the path every
+ * normally-opened row takes at teardown — used to exclude identity entirely,
+ * so a name the process established never reached a row that already
+ * existed. It now carries identity when present and never nulls it.
+ */
+describe("toConflictUpdate carries an established identity, and never clears one", () => {
+  it("writes name, date of birth and found when the runtime holds a certain identity", () => {
+    const update = toConflictUpdate(
+      toCallLogRow(record(), { patientName: "Zelda Quixote", patientDob: "1958-01-04", patientFound: true }),
+    );
+    expect(update).toMatchObject({ patientName: "Zelda Quixote", patientDob: "1958-01-04", patientFound: true });
+  });
+
+  it("mentions none of the three when nothing was established — unknown never overwrites known", () => {
+    const update = toConflictUpdate(toCallLogRow(record(), {}));
+    expect("patientName" in update).toBe(false);
+    expect("patientDob" in update).toBe(false);
+    expect("patientFound" in update).toBe(false);
   });
 });

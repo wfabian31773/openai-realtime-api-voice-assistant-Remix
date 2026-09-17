@@ -112,9 +112,11 @@ export interface RuntimeCallLogRow {
  * DURING the call — the agents' own tool telemetry, `stampVerifiedIdentity`,
  * the ticket number — and a blanket `set` overwrites all of it, which is
  * how a green migration produces unclassifiable filing outcomes (Codex
- * review, PR #227). Identity is deliberately excluded even when supplied:
- * refreshing it can only ever replace a value someone better informed
- * already wrote.
+ * review, PR #227). Identity is written when the runtime holds a CERTAIN one and
+ * omitted otherwise, never nulled: it can add a name the row lacks and can
+ * never erase one another writer established (v51 — before it, the update
+ * excluded identity entirely and the runtime's rows carried none, 0 of
+ * 2,471 in the seven days to 2026-09-17).
  */
 export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLogRow> {
   return {
@@ -130,6 +132,12 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
     runtimeOutcome: row.runtimeOutcome,
     ...(row.transferredToHuman ? { transferredToHuman: row.transferredToHuman } : {}),
     ...(row.recordingUrl ? { recordingUrl: row.recordingUrl } : {}),
+    // Identity, when established — see the note above. Present means the
+    // lookup matched ONE person and nobody denied it; absent means unknown,
+    // and unknown never overwrites known.
+    ...(row.patientFound !== undefined ? { patientFound: row.patientFound } : {}),
+    ...(row.patientName ? { patientName: row.patientName } : {}),
+    ...(row.patientDob ? { patientDob: row.patientDob } : {}),
     ...(row.firstTranscriptDelayMs !== undefined
       ? { firstTranscriptDelayMs: row.firstTranscriptDelayMs }
       : {}),
