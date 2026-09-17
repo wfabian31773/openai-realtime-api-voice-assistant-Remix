@@ -1,4 +1,4 @@
-# AFTER-MEASUREMENTS — what the 2026-09-17 republish turns on (v37–v53)
+# AFTER-MEASUREMENTS — what the 2026-09-17 republish turns on (v37–v54)
 
 `docs/BACKEND_HANDOFF.md`'s rule, made runnable: every ship in PR #321 and the
 two merged before it (v37, v38) names a number it must move and a guard it must
@@ -20,7 +20,7 @@ the ticket's (`coalesce(call_start_time, created_at)`), substantive means
 check the Support Center before calling a call unfiled.
 
 **First, confirm the build:** `GET /voice/health` must read
-`voice-runtime-v53-the-record-reaches-the-after-hours-row-20260917`. A number
+`voice-runtime-v54-the-affirmed-name-picks-the-person-20260917`. A number
 taken on an older marker is a before-number.
 
 ---
