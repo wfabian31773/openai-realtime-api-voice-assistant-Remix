@@ -56,8 +56,16 @@ jobs:
 
       # The root tsconfig includes src, server and shared and NOT client, so
       # a type error in the Observatory's pages passed this gate unseen
-      # (task #73). Measured 2026-09-17: the client typechecks clean, so this
-      # step starts green and stays green only while it does.
+      # (task #73). The client is its own package with its own lockfile, and
+      # the root `npm ci` above installs none of it — the first version of
+      # this step ran tsc against an empty client/node_modules and failed on
+      # "Cannot find module 'react'" (5f25975), a failure the local check had
+      # not seen because it ran with the client already installed. Measured
+      # 2026-09-17 with the same two commands: 174 packages in 14s, 0 errors.
+      - name: Install the client
+        run: npm ci --no-audit --no-fund
+        working-directory: client
+
       - name: Typecheck the client
         run: npx tsc -p client/tsconfig.json --noEmit
 
