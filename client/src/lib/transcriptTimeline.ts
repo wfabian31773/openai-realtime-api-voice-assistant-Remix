@@ -52,7 +52,10 @@ export function toolChipsFrom(events: TimelineEvent[] | null | undefined): ToolC
         atMs: new Date(e.at as string).getTime() - (ms ?? 0),
         tool: String(e.tool ?? e.name ?? 'tool'),
         ms,
-        ok: e.outcome?.success !== false,
+        // A tool that THREW is recorded as `{ error }` with no `success` key
+        // (recordingExecute), and a cancelled dispatch as `{ cancelled }`;
+        // neither is a success (Codex P2, #321 round 5).
+        ok: e.outcome?.success !== false && e.outcome?.error == null && e.outcome?.cancelled !== true,
         outcome: e.outcome ?? null,
         args: e.args ?? null,
       }

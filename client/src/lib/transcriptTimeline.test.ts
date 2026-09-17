@@ -38,6 +38,27 @@ describe("toolChipsFrom", () => {
     expect(chip.args).toEqual({ dobShape: "(none)" });
   });
 
+  /**
+   * CODEX P2, ROUND 5: a tool that THREW is recorded as `{ error }` with no
+   * `success` key at all, and a cancelled dispatch as `{ cancelled }`. Read
+   * on `success` alone, both rendered as ordinary successes — the one thing
+   * this view exists to expose.
+   */
+  it("a thrown tool ({ error } and no success key) is NOT ok", () => {
+    const [chip] = toolChipsFrom([{ at: iso(1), ms: 1, tool: "lookup_patient", outcome: { error: "boom" } }]);
+    expect(chip.ok).toBe(false);
+  });
+
+  it("a timed-out tool and a cancelled dispatch are NOT ok; a plain success and a missing outcome are", () => {
+    const chips = toolChipsFrom([
+      { at: iso(1), tool: "a", outcome: { success: false, error: "lookup_patient timed out" } },
+      { at: iso(2), tool: "b", outcome: { cancelled: true } },
+      { at: iso(3), tool: "c", outcome: { success: true } },
+      { at: iso(4), tool: "d" },
+    ]);
+    expect(chips.map((c) => c.ok)).toEqual([false, false, true, true]);
+  });
+
   it("an older event that named the tool as `name` still gets its name", () => {
     expect(toolChipsFrom([{ at: iso(1), name: "lookup_schedule" }])[0].tool).toBe("lookup_schedule");
   });

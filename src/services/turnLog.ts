@@ -109,6 +109,15 @@ export function recordTurn(
      * every turn of every runtime call would be stamped with the hang-up.
      */
     at?: number;
+    /**
+     * The runtime records a whole call at teardown and flushes it ONCE, with
+     * retries, in `recordRuntimeTurns`. On that path the incremental flush
+     * below must not fire: `flushTurns` claims before it awaits, so a
+     * fire-and-forget batch still in flight would make "every turn claimed"
+     * read as "every turn durable", and a batch that then failed would roll
+     * back onto a buffer already released (Codex P2, #321 round 5).
+     */
+    deferFlush?: boolean;
   },
 ): void {
   try {
@@ -148,7 +157,7 @@ export function recordTurn(
      * path — flushTurns is already idempotent by count, so the teardown
      * flush writes only what is new.
      */
-    if (b.turns.length - b.flushedCount >= 6) void flushTurns(callId);
+    if (!extra.deferFlush && b.turns.length - b.flushedCount >= 6) void flushTurns(callId);
   } catch (e) {
     console.error('[TURN-LOG] record failed:', e);
   }
@@ -184,6 +193,9 @@ export async function recordRuntimeTurns(
       callLogId: ids.callLogId,
       agentSlug: ids.agentSlug,
       at: t.atMs,
+      // One flush, below, with retries — never a fire-and-forget batch in
+      // flight while `turnsFullyFlushed` is consulted.
+      deferFlush: true,
     });
   }
   /**
@@ -214,7 +226,13 @@ export async function recordRuntimeTurns(
 /** The backoff between runtime flush attempts: three attempts, ~4s in total. */
 export const RUNTIME_TURN_FLUSH_BACKOFF_MS: readonly number[] = [1_000, 3_000];
 
-/** True when nothing is buffered for this call, or everything buffered is on disk. */
+/**
+ * True when nothing is buffered for this call, or everything buffered has been
+ * claimed by a flush. On the runtime path that is the same as durable, because
+ * `recordRuntimeTurns` records with `deferFlush` and is the ONLY flusher — the
+ * awaited one. It is NOT the same on the old core's incremental path, where a
+ * claimed batch may still be in flight; do not read it there.
+ */
 export function turnsFullyFlushed(callId: string): boolean {
   const b = buffers.get(callId);
   return !b || b.flushedCount === b.turns.length;

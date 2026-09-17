@@ -61,6 +61,31 @@ describe("a failed flush does not lose the turns", () => {
     releaseTurns(SID);
   });
 
+  /**
+   * CODEX P2, ROUND 5: `recordTurn` fires an incremental flush every six
+   * unflushed turns, and `flushTurns` claims before it awaits — so on a call
+   * with 6+ turns "every turn claimed" was not "every turn durable", and a
+   * batch that failed after the buffer was released rolled back onto an
+   * orphan. The runtime path now records with `deferFlush` and flushes ONCE.
+   */
+  it("a runtime call with 13 turns is written by ONE insert, never incremental batches", async () => {
+    const { recordRuntimeTurns } = await import("../services/turnLog");
+    const turns = Array.from({ length: 13 }, (_, i) => ({ role: (i % 2 ? "agent" : "caller") as "caller" | "agent", text: `t${i + 1}`, atMs: T0 + i * 1000 }));
+    await recordRuntimeTurns(SID, turns, { state: runtimeTurnState(SID) }, noWait);
+    expect(h.inserted).toHaveLength(1);
+    expect(h.inserted[0]).toHaveLength(13);
+  });
+
+  it("when the first insert of 13 turns fails, all 13 land on the retry — each exactly once", async () => {
+    const { recordRuntimeTurns, getTurns } = await import("../services/turnLog");
+    const turns = Array.from({ length: 13 }, (_, i) => ({ role: "caller" as const, text: `t${i + 1}`, atMs: T0 + i * 1000 }));
+    h.failNext = 1;
+    await recordRuntimeTurns(SID, turns, { state: runtimeTurnState(SID) }, noWait);
+    const indexes = h.inserted.flat().map((r) => r.turnIndex).sort((a, b) => Number(a) - Number(b));
+    expect(indexes).toEqual(Array.from({ length: 13 }, (_, i) => i + 1));
+    expect(getTurns(SID)).toHaveLength(0);
+  });
+
   it("the default backoff is short and bounded", async () => {
     const { RUNTIME_TURN_FLUSH_BACKOFF_MS } = await import("../services/turnLog");
     expect(RUNTIME_TURN_FLUSH_BACKOFF_MS.length).toBeGreaterThanOrEqual(1);
