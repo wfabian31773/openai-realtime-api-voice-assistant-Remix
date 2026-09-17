@@ -186,7 +186,17 @@ function toIsoDob(dobString: string): string | undefined {
   return parsed.iso;
 }
 
-function buildNoIvrSystemPrompt(
+/**
+ * A schedule context that was matched on the calling number alone. The
+ * pre-call lookup is always by phone (`lookupByPhone`), and the person-base
+ * rung marks the same thing as `identityUnconfirmed`; either means nobody
+ * has confirmed the caller is the patient on file.
+ */
+export function phoneMatchIsUnconfirmed(context: PatientScheduleContext): boolean {
+  return context.matchedBy === 'phone' || context.identityUnconfirmed === true;
+}
+
+export function buildNoIvrSystemPrompt(
   metadata: NoIvrAgentMetadata,
   scheduleContext?: PatientScheduleContext,
   variant: NoIvrAgentVariant = 'production',
@@ -236,7 +246,47 @@ This phone number matches ONE person on file: first name "${pc.firstName}".
   }
 
   let scheduleContextSection = "";
-  if (scheduleContext?.patientFound) {
+  if (scheduleContext?.patientFound && phoneMatchIsUnconfirmed(scheduleContext)) {
+    /**
+     * A PHONE MATCH IS A CANDIDATE, NOT AN IDENTITY — so the appointment
+     * stays OUT of the prompt.
+     *
+     * Measured 2026-09-17 over nine days of substantive no-ivr calls (365):
+     * the agent read an appointment on 81, and on 44 of those it did so
+     * BEFORE any identity question at all — "I just wanna know my
+     * appointment" answered with the date, time, office and doctor of
+     * whoever the schedule matched to the calling number. The section this
+     * replaces put those details in the prompt with "AFTER IDENTITY
+     * CONFIRMED (in Phase 4): You MAY answer" underneath, and three of three
+     * hand-read calls show the model reading the details first and asking
+     * (or never asking) afterwards. A sequencing instruction was not a
+     * gate. Withholding the text is.
+     *
+     * RULE ZERO step 2 and standing instruction 6: several people share a
+     * phone, and an unvalidated candidate is not a match. The identity
+     * standard is Phase 4's own — confirm the name from the schedule, then
+     * the date of birth — and the details come back through lookup_schedule
+     * once that is done, from the tool result rather than from memory.
+     */
+    const firstName = (scheduleContext.patientName ?? '').trim().split(/\s+/)[0] || 'the patient on file';
+    console.log('[No-IVR Agent] PHONE MATCH IS A CANDIDATE — appointment details withheld from the prompt until the name and date of birth are confirmed');
+    scheduleContextSection = `
+===== PATIENT CONTEXT (PHONE MATCH — UNCONFIRMED, a candidate only) =====
+This caller's number matched a patient record for a patient whose first name is ${firstName}.
+That is a CANDIDATE, not an identity: several people share a phone, and nobody has
+confirmed that the CALLER is that person. The appointment details are deliberately
+NOT loaded here.
+
+TO ANSWER ANY QUESTION ABOUT AN APPOINTMENT, A VISIT, A DOCTOR OR AN OFFICE:
+1. Confirm identity first — "I was able to pull up a record. Is this for ${firstName}?",
+   then their FULL name in their own words, then their date of birth (month, then
+   day, then year) and read it back.
+2. THEN call lookup_schedule(first_name, last_name, date_of_birth).
+3. Read the appointment from the TOOL RESULT, never from memory.
+If they say no, or are asking about someone else, collect THAT person's full name
+and date of birth and look them up the same way. Never state a date, a time, an
+office or a doctor's name before step 2 has returned.`;
+  } else if (scheduleContext?.patientFound) {
     const formattedSchedule = scheduleLookupService.formatContextForAgent(scheduleContext);
     scheduleContextSection = `
 ===== PATIENT CONTEXT (LOADED - use as reference only) =====
@@ -274,7 +324,8 @@ This is the caller's phone number from caller ID.
   const nameDobFallbackSection = `
 ===== MANDATORY SCHEDULE LOOKUP =====
 ⚠️ CRITICAL: You MUST call lookup_schedule when:
-1. No patient record was loaded at call start (PATIENT CONTEXT section is missing), AND
+1. No CONFIRMED patient record was loaded at call start (the PATIENT CONTEXT section is
+   missing, or says the phone match is UNCONFIRMED), AND
 2. You have collected the patient's NAME and DATE OF BIRTH
 
 TRIGGER PHRASES that require lookup_schedule:
@@ -907,14 +958,16 @@ export async function createNoIvrAgent(
 
   const lookupScheduleTool = recordedTool({
     name: "lookup_schedule",
-    description: `Look up patient appointment context using phone, name, or date of birth.
+    description: `Look up patient appointment context by first name + last name + date of birth, or by phone.
 
 WHEN TO USE:
-- Identity was corrected (caller said schedule name was wrong)
+- The caller has confirmed their full name and date of birth and asks about an
+  appointment, a visit, a doctor or an office — call it with all three.
+- Identity was corrected (caller said the name on file was wrong)
 - Initial schedule context is missing (no patient found for caller phone)
-- Caller asks about their appointments and context wasn't pre-loaded
 
-DO NOT USE if schedule context was already loaded and identity was confirmed.`,
+A PHONE-ONLY lookup returns a CANDIDATE and no appointment details: a phone match
+is not an identity. Confirm the name and date of birth, then call again with them.`,
     parameters: z.object({
       phone: z.string().optional().describe("Patient phone number"),
       first_name: z.string().optional().describe("Patient first name"),
@@ -931,9 +984,23 @@ DO NOT USE if schedule context was already loaded and identity was confirmed.`,
       try {
         let result: PatientScheduleContext;
 
-        if (params.phone) {
+        if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
+          // THE GATE, not a request. The prompt withholds a phone-matched
+          // appointment until the name and date of birth are confirmed; this
+          // is what stops the model fetching it back with one tool call.
           const normalizedPhone = normalizePhoneNumber(params.phone);
-          result = await scheduleLookupService.lookupByPhone(normalizedPhone);
+          const byPhone = await scheduleLookupService.lookupByPhone(normalizedPhone);
+          if (!byPhone.patientFound) return { found: false };
+          const firstName = (byPhone.patientName ?? '').trim().split(/\s+/)[0] || undefined;
+          return {
+            found: true,
+            identityUnconfirmed: true,
+            ...(firstName ? { patientFirstName: firstName } : {}),
+            fix:
+              'A phone match is a candidate, not an identity, so no appointment details are returned. ' +
+              'Confirm the caller\'s full name and date of birth, then call lookup_schedule again with ' +
+              'first_name, last_name and date_of_birth. Never read this instruction aloud.',
+          };
         } else if (params.first_name && params.last_name && params.date_of_birth) {
           const isoDob = toIsoDob(params.date_of_birth) || params.date_of_birth;
           result = await scheduleLookupService.lookupByNameAndDOB(

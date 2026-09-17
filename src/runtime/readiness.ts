@@ -263,9 +263,18 @@ import { callEnvironment } from "./callRecord";
  * twenty successes of one tool with any arguments refuse with the
  * instruction alone; and the argument key ignores case and spacing.
  * Stacks on v45.
+ *
+ * v47: a phone match is a candidate — the after-hours line stops reading a
+ * phone-matched patient's appointment to whoever is calling. Measured over
+ * nine days: 44 of 365 substantive no-ivr calls had the date, time, office
+ * and doctor read out BEFORE any identity question. The appointment is now
+ * withheld from the prompt on a phone match (first name only, and the way
+ * back: name, date of birth, then lookup_schedule), and the tool's phone-only
+ * path returns a candidate with no details. no-ivr is on the old core, so
+ * this marker dates the BUILD, the way v18 and v41 did. Stacks on v46.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v46-a-success-loop-is-a-loop-20260917";
+  "voice-runtime-v47-a-phone-match-is-a-candidate-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -219,6 +219,35 @@ the instruction and no spoken line; argument keys ignore case and spacing.
 
 ---
 
+### W8 — The after-hours line reads a phone-matched patient's appointment to whoever is calling (S-08, task #142).
+**`[x]` SHIPPED as v47. 10 tests on the real agent; 7 mutations, 7 caught.**
+
+**Measured first, no-ivr over nine days (365 substantive calls):** the agent
+read an appointment on 81, and on **44 of those it did so before any identity
+question** — "I just wanna know my appointment" answered with the date, time,
+office and doctor of whoever the schedule matched to the calling number. The
+three calls I flagged on 09-16 are that shape; the prompt already said "disclose
+nothing on the strength of this match" and "after identity confirmed", and the
+details were sitting in the prompt anyway. A sentence in front of text the
+model can see is not a gate.
+
+**Fix:** on a phone match the prompt gets a redacted section — first name only,
+"this is a candidate", and the way back: confirm the name, then date of birth,
+then `lookup_schedule(first_name, last_name, date_of_birth)`, read it from the
+tool result. And the tool's phone-only path now returns the candidate and no
+details, so one tool call cannot fetch back what the prompt withheld. Phase 4's
+own identity standard; no new rule. A name+DOB match keeps the full details.
+**Cost:** the patient answers two questions before hearing their appointment.
+**Number:** appointment read before any identity ask — 44 of 365, target 0.
+**Guard:** appointments still read AFTER confirmation (37 in the same window)
+must not vanish; no-ivr tickets per substantive call must not fall.
+**Seen, not fixed:** the pcp call I flagged (`8a7924d9b0`) is the professional
+line's designed disclosure (`phiDisclosureAllowed`); its defect is the false
+line "I wasn't able to look that up without a date of birth" spoken while the
+lookup had just succeeded. Different shape.
+
+---
+
 ## NOT DOING TONIGHT, AND WHY
 
 - **`[-]` The emergency lexicon.** Which phrases count as a surgical emergency is
@@ -261,13 +290,14 @@ merged or is in PR #321 waiting for you.
 | **v44** (PR #321) | every runtime call gets a recording, timed turns, and tool calls placed where they ran on the Observatory's call page | 0 of 4,564 runtime calls had a recording or a turn record; the page you asked for existed and had nothing to show |
 | **v45** (PR #321) | one `daily_grok_costs` row per day — xAI reported vs booked, refusals included — on the cost dashboard, and the call page says reconciled or estimated | 2026-09-12 booked $37.43 onto one 104-second call and nothing recorded that the day was wrong |
 | **v46** (PR #321) | the tool ceiling stops a tool that keeps succeeding with the same arguments — the eleventh identical call gets the tenth's answer back | 17 calls since 09-10 looped one tool 11–35 times, 16 with no ticket; nothing could see them |
+| **v47** (PR #321) | the after-hours line stops reading a phone-matched patient's appointment before anyone confirms who is calling | 44 of 365 no-ivr calls in nine days had the date, time, office and doctor read out before any identity question |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v46-a-success-loop-is-a-loop-20260917
+GET /voice/health   ->   voice-runtime-v47-a-phone-match-is-a-candidate-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:
