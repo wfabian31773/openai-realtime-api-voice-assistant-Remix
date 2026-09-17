@@ -224,6 +224,9 @@ export function handleVoiceWebhook(
     `<Connect><Stream url="${xmlEscape(streamUrl)}">` +
       `<Parameter name="callSid" value="${xmlEscape(callSid)}"/>` +
       `<Parameter name="token" value="${xmlEscape(entry.streamToken)}"/>` +
+      // The public host this webhook was reached on, so the runtime can name
+      // its recording-status callback without a second way of learning it.
+      `<Parameter name="host" value="${xmlEscape(host)}"/>` +
       `</Stream></Connect>` +
       `<Redirect method="POST">${xmlEscape(`${VOICE_PATH_PREFIX}/${slug}/after`)}</Redirect>`,
   );

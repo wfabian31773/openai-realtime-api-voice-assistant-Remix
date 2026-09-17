@@ -147,11 +147,53 @@ a number. Lower value than I first said; it is last.
 ### W5 — Ticketing app: the name-only consolidation arm.
 **`[x]` BUILT AND PUSHED on the ticketing-app branch (`11db8480`); 25 tests green
 there, type-check unchanged (22 pre-existing errors, identical with the change
-stashed); PR opens when GitHub's rate limit lifts. See decision 2 below.**
+stashed); **PR #279 (draft)** — https://github.com/wfabian31773/ticketing-app/pull/279.
+See decision 2 below.**
 
 13 tickets on 2026-09-16 outside PCP carried two or more unrelated callers.
 The arm doing it matches on **first+last name, same department, 24 hours, with
 no phone check at all.** PCP Support was exempted by #273; nothing else was.
+
+---
+
+### W6 — The two backlog items he named at 03:00: clean logging in the Observatory, and the cost.
+**`[x]` BOTH SHIPPED — v44 (logging) and v45 (cost), one PR. 16 mutations, 16 caught.**
+
+**Operator, 03:00 UTC, with his xAI usage export and a screenshot of xAI's own
+call log:** *"I also need you to make sure we have clean logging in the
+observatory, just like the xai sample I gave you. as well as the cost. those
+are backlogged and I need those done."*
+
+**Logging — measured first: `recording_url` NULL and `call_turns` EMPTY on all
+4,564 runtime calls since the cutover.** The page already had the xAI shape
+(conversation list, waveform player, per-turn transcript, Call / Raw events /
+Evaluation tabs); the runtime simply never wrote a turn or started a recording.
+Instrumentation, not a new page. v44: the bridge keeps the moment each line was
+written and hands timed turns to `call_turns` after the sweep; a dual-channel
+Twilio REST recording starts when the stream starts and posts to the old core's
+recording-status handler, which now accepts a CallSid-keyed callback; the call
+page puts each tool call at its START between the lines it ran between,
+expandable. Nothing on a caller's path. Twilio recording ~$4/day at 1,500
+runtime minutes — parity with the old core, not new policy.
+
+**Cost — measured against his CSV: the reconciler is live and matches the
+export on every runtime day but one.** 2026-09-12 allocated $37.43 onto ONE
+104-second optical call and called it reconciled — the row is corrected, and
+the guard that refuses that (`impliedRateIsImplausible`, already in the code
+since 09-12) would refuse it today. What was missing was the RECORD: a refusal
+lived in a console line. v45: `daily_grok_costs`, one row per day on every
+outcome — xAI's voice total, the lines summed and ignored, booked vs estimate,
+the refusal reason — served at `/api/analytics/grok-usage`, on the cost
+dashboard as "xAI reported vs booked", and the call page's cost badge says
+**reconciled** or **estimated**. The allocation itself is untouched.
+
+**Tests:** `transcriptLog.turns` (5), `callRecording` (4), `recordingStatusTarget`
+(6), `runtimeTurns` (6), `voiceRuntime` (+3, at the runtime — failure mode 10),
+`client/src/lib/transcriptTimeline` (11), `grokDaySummary` (11).
+**Numbers:** runtime calls with a recording — 0 of 4,564, target ~all; rows in
+`daily_grok_costs` — 0, target one per day from the first nightly run.
+**Guards:** filing rate per lane and barely-heard rate must not move; the
+cost-preservation trio must still read 0 at the OpenAI rate.
 
 ---
 
@@ -169,12 +211,16 @@ no phone check at all.** PCP Support was exempted by #273; nothing else was.
 
 ## FOR 5AM — ONE INSTRUCTION
 
-**Pull and republish. Then merge the ticketing-app branch.**
+**Pull and republish. Then merge ticketing-app PR #279.**
 
-The ticketing-app half is commit `11db8480` on its `claude/determined-brown-o5qsft`
-branch (the name-only consolidation arm, W5). GitHub's API was rate-limited all
-night, so if no PR exists for that branch when you read this, open one from it —
-the commit message is the PR body.
+The ticketing-app half is **PR #279 (draft)** —
+https://github.com/wfabian31773/ticketing-app/pull/279 — commit `11db8480` on its
+`claude/determined-brown-o5qsft` branch (the name-only consolidation arm, W5).
+Mark it ready and merge it; it needs nothing from the Remix side.
+
+**One more thing that is yours alone: the xAI management key pasted into an
+earlier session's transcript still has to be rotated.** Console → Settings →
+Management Keys; then set the new `XAI_MANAGEMENT_KEY` on Replit.
 
 The deployment is running a build older than v37. Everything below is already
 merged or is in PR #321 waiting for you.
@@ -190,13 +236,15 @@ merged or is in PR #321 waiting for you.
 | **v41** (PR #321) | the after-hours line asks for a date of birth ONCE, then files with it marked unavailable/unmatched | no-ivr asked 3+ times on 11 calls on 2026-09-16, one of them FIFTEEN times |
 | **v42** (PR #321) | a filed ticket is never spoken as a failure — a duplicate attempt waits for the real one, a timeout is retried once | 2 callers on 2026-09-16 told *"technical issue"* while their ticket sat in the queue |
 | **v43** (PR #321) | the surgery agent stops reading its own emergency rule aloud | *"These are the words we treat as a surgical emergency"* — spoken to a patient |
+| **v44** (PR #321) | every runtime call gets a recording, timed turns, and tool calls placed where they ran on the Observatory's call page | 0 of 4,564 runtime calls had a recording or a turn record; the page you asked for existed and had nothing to show |
+| **v45** (PR #321) | one `daily_grok_costs` row per day — xAI reported vs booked, refusals included — on the cost dashboard, and the call page says reconciled or estimated | 2026-09-12 booked $37.43 onto one 104-second call and nothing recorded that the day was wrong |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v43-the-tool-does-not-narrate-its-rule-20260917
+GET /voice/health   ->   voice-runtime-v45-timed-turns-recording-and-the-day-table-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:
@@ -232,8 +280,8 @@ escape. Red-then-green on the real agent; 6 mutations, 5 caught, the sixth the
 console marker by design. Nothing was invented: the placeholder is a value the
 API has accepted on every POST.
 
-**2. Ticket consolidation outside PCP — BUILT AND PUSHED to the ticketing-app
-branch (`11db8480`), PR pending GitHub's rate limit.** The name arm has no
+**2. Ticket consolidation outside PCP — BUILT, PUSHED and OPEN AS PR #279 on
+the ticketing app (`11db8480`).** The name arm has no
 phone in it at all, so it is the same defect on every lane your PCP ruling
 named. Measured first: **30 consolidations in 30 days on the patient lanes
 where the phone did NOT match the parent — tech 12, surgery 11, optical 5,

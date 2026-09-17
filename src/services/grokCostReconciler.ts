@@ -30,6 +30,8 @@ import { GROK_COST_CENTS_PER_SECOND } from "./voiceCostRates";
 import {
   fetchDailySpend,
   readXaiBillingConfig as readXaiBillingSetup,
+  type DailySpend,
+  type DailySpendLine,
   type FetchLike,
   type XaiBillingSetup,
 } from "./xaiBilling";
@@ -123,6 +125,77 @@ export interface ReconcilerPorts {
   readDay: (day: string) => Promise<GrokCallRow[]>;
   /** Write the allocated cost back. Must be all-or-nothing. */
   writeCosts: (day: string, costs: Array<{ callSid: string; costCents: number }>) => Promise<number>;
+  /**
+   * The day's record, written on EVERY outcome — reconciled or refused.
+   * Optional so a port built for the allocation alone still satisfies the
+   * type; the production ports always supply it. See GrokDaySummary.
+   */
+  writeDaySummary?: (summary: GrokDaySummary) => Promise<void>;
+}
+
+/**
+ * ONE ROW PER DAY, WHATEVER HAPPENED — `daily_grok_costs`.
+ *
+ * Until 2026-09-17 this reconciler persisted only the per-call allocation.
+ * The day's xAI-reported voice total, the lines it summed, the lines it
+ * ignored, and above all a REFUSAL lived in a console line and nowhere else,
+ * so the operator's own usage export could not be compared against what we
+ * booked without a night of SQL — and 2026-09-12, where $37.43 of team spend
+ * was allocated onto one 104-second call, was invisible until someone read
+ * the row. The OpenAI side has had `daily_openai_costs` for this since it was
+ * written. This is the Grok side of that table.
+ *
+ * `bookedCents` is what the call rows carry after the run: xAI's total when
+ * the day reconciled, the sum of what the rows already held when it did not.
+ * The two can be read side by side against the export's `usd` column.
+ */
+export interface GrokDaySummary {
+  day: string;
+  reconciled: boolean;
+  /** Present exactly when `reconciled` is false. */
+  refusedReason?: string;
+  /** xAI's voice spend for the day, cents — absent when xAI could not be read. */
+  xaiVoiceCents?: number;
+  xaiVoiceLines?: DailySpendLine[];
+  xaiIgnoredLines?: DailySpendLine[];
+  bookedCents: number;
+  /** What the estimate said for the rows still estimated before the run. */
+  estimatedCents?: number;
+  runtimeCalls: number;
+  runtimeSeconds: number;
+  derivedCentsPerMinute?: number | null;
+}
+
+/** What `runReconciliation` learned on the way, for the day summary. */
+interface ReconcileScratch {
+  spend?: DailySpend;
+  calls?: GrokCallRow[];
+}
+
+export function daySummaryFrom(outcome: ReconcileOutcome, scratch: ReconcileScratch): GrokDaySummary {
+  const calls = scratch.calls ?? [];
+  const runtimeSeconds = calls.reduce((s, c) => s + (c.durationSeconds || 0), 0);
+  const centsOnRows = calls.reduce((s, c) => s + (c.estimatedCents || 0), 0);
+  return {
+    day: outcome.day,
+    reconciled: outcome.reconciled,
+    ...(outcome.reconciled ? {} : { refusedReason: outcome.reason ?? "refused" }),
+    ...(scratch.spend
+      ? {
+          xaiVoiceCents: Math.round(scratch.spend.totalUsd * 100),
+          xaiVoiceLines: scratch.spend.lines,
+          xaiIgnoredLines: scratch.spend.ignored,
+        }
+      : {}),
+    bookedCents: outcome.reconciled ? (outcome.xaiTotalCents ?? centsOnRows) : centsOnRows,
+    ...(outcome.estimatedTotalCents !== undefined ? { estimatedCents: outcome.estimatedTotalCents } : {}),
+    runtimeCalls: calls.length,
+    runtimeSeconds,
+    derivedCentsPerMinute:
+      outcome.derivedCentsPerSecond === undefined || outcome.derivedCentsPerSecond === null
+        ? outcome.derivedCentsPerSecond
+        : outcome.derivedCentsPerSecond * 60,
+  };
 }
 
 /**
@@ -177,7 +250,18 @@ export async function reconcileGrokCostsForDay(
   ports: ReconcilerPorts,
   options: { setup?: XaiBillingSetup; fetchImpl?: FetchLike } = {},
 ): Promise<ReconcileOutcome> {
-  const outcome = await runReconciliation(day, ports, options);
+  const scratch: ReconcileScratch = {};
+  const outcome = await runReconciliation(day, ports, options, scratch);
+  // The day's row is written whatever the outcome — a refusal is the row
+  // that matters most. It never changes the outcome: a failed summary write
+  // is a log line, not a reconciliation failure.
+  if (ports.writeDaySummary) {
+    try {
+      await ports.writeDaySummary(daySummaryFrom(outcome, scratch));
+    } catch (error) {
+      console.warn(`[GROK COST] could not write the day summary for ${day}:`, error);
+    }
+  }
   if (outcome.reconciled) console.info(reconcileMarker(outcome));
   // warn, not info: a refusal means the day was NOT settled and those rows are
   // still priced from a constant. Uniform across every refusal — a weekend
@@ -191,13 +275,16 @@ async function runReconciliation(
   day: string,
   ports: ReconcilerPorts,
   options: { setup?: XaiBillingSetup; fetchImpl?: FetchLike },
+  scratch: ReconcileScratch = {},
 ): Promise<ReconcileOutcome> {
   const spend = await fetchDailySpend(day, { setup: options.setup, fetchImpl: options.fetchImpl });
   if (!spend.ok) return { day, reconciled: false, reason: spend.reason };
+  scratch.spend = spend.value;
 
   let calls: GrokCallRow[];
   try {
     calls = await ports.readDay(day);
+    scratch.calls = calls;
   } catch (error) {
     return {
       day,
@@ -470,6 +557,59 @@ export function databasePorts(): ReconcilerPorts {
       } finally {
         client.release();
       }
+    },
+
+    async writeDaySummary(summary) {
+      const { pool } = await import("../../server/db");
+      // CREATE TABLE IF NOT EXISTS on first write, like call_events: this
+      // ships as code and the table must exist whether or not anyone
+      // remembered `npm run db:push`. One row per day; a re-run overwrites.
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS daily_grok_costs (
+          day DATE PRIMARY KEY,
+          reconciled BOOLEAN NOT NULL,
+          refused_reason TEXT,
+          xai_voice_cents INTEGER,
+          xai_voice_lines JSONB,
+          xai_ignored_lines JSONB,
+          booked_cents INTEGER NOT NULL,
+          estimated_cents INTEGER,
+          runtime_calls INTEGER NOT NULL,
+          runtime_seconds INTEGER NOT NULL,
+          derived_cents_per_minute NUMERIC,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`);
+      await pool.query(
+        `INSERT INTO daily_grok_costs
+           (day, reconciled, refused_reason, xai_voice_cents, xai_voice_lines, xai_ignored_lines,
+            booked_cents, estimated_cents, runtime_calls, runtime_seconds, derived_cents_per_minute, updated_at)
+         VALUES ($1::date, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11, NOW())
+         ON CONFLICT (day) DO UPDATE SET
+           reconciled = EXCLUDED.reconciled,
+           refused_reason = EXCLUDED.refused_reason,
+           xai_voice_cents = EXCLUDED.xai_voice_cents,
+           xai_voice_lines = EXCLUDED.xai_voice_lines,
+           xai_ignored_lines = EXCLUDED.xai_ignored_lines,
+           booked_cents = EXCLUDED.booked_cents,
+           estimated_cents = EXCLUDED.estimated_cents,
+           runtime_calls = EXCLUDED.runtime_calls,
+           runtime_seconds = EXCLUDED.runtime_seconds,
+           derived_cents_per_minute = EXCLUDED.derived_cents_per_minute,
+           updated_at = NOW()`,
+        [
+          summary.day,
+          summary.reconciled,
+          summary.refusedReason ?? null,
+          summary.xaiVoiceCents ?? null,
+          JSON.stringify(summary.xaiVoiceLines ?? []),
+          JSON.stringify(summary.xaiIgnoredLines ?? []),
+          summary.bookedCents,
+          summary.estimatedCents ?? null,
+          summary.runtimeCalls,
+          summary.runtimeSeconds,
+          summary.derivedCentsPerMinute ?? null,
+        ],
+      );
     },
   };
 }

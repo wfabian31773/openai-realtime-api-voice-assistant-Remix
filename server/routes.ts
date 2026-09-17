@@ -2564,6 +2564,60 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ message: "Failed to fetch OpenAI usage" });
     }
   });
+
+  /**
+   * The Grok runtime's day table — xAI's reported voice spend beside what
+   * the call rows were booked at, one row per day, refusals included. Written
+   * by grokCostReconciler on every nightly outcome (daily_grok_costs). Empty
+   * until the first run after this ships; a missing table reads as "no rows",
+   * not a 500, the same way call_events does.
+   */
+  app.get('/api/analytics/grok-usage', isAuthenticated, async (req, res) => {
+    try {
+      const startDate = (req.query.startDate as string) ||
+        new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const endDate = (req.query.endDate as string) || new Date().toISOString().split('T')[0];
+      const { db } = await import('./db');
+      const { sql } = await import('drizzle-orm');
+      let rows: any[] = [];
+      let tableExists = true;
+      try {
+        const r = await db.execute(sql`
+          SELECT day::text AS day, reconciled, refused_reason, xai_voice_cents, xai_ignored_lines,
+                 booked_cents, estimated_cents, runtime_calls, runtime_seconds, derived_cents_per_minute,
+                 updated_at
+          FROM daily_grok_costs
+          WHERE day >= ${startDate}::date AND day <= ${endDate}::date
+          ORDER BY day ASC
+        `);
+        rows = ((r as any).rows ?? r) as any[];
+      } catch {
+        tableExists = false;
+      }
+      res.json({
+        tableExists,
+        // The published rate the estimate uses, so the page can say how far a
+        // day's derived rate sits from it without a second copy of the number.
+        publishedCentsPerMinute: 8,
+        days: rows.map((d) => ({
+          day: d.day,
+          reconciled: Boolean(d.reconciled),
+          refusedReason: d.refused_reason ?? null,
+          xaiVoiceDollars: d.xai_voice_cents == null ? null : Number(d.xai_voice_cents) / 100,
+          bookedDollars: Number(d.booked_cents) / 100,
+          estimatedDollars: d.estimated_cents == null ? null : Number(d.estimated_cents) / 100,
+          runtimeCalls: Number(d.runtime_calls),
+          runtimeMinutes: Math.round(Number(d.runtime_seconds) / 60),
+          derivedCentsPerMinute: d.derived_cents_per_minute == null ? null : Number(d.derived_cents_per_minute),
+          ignoredLines: Array.isArray(d.xai_ignored_lines) ? d.xai_ignored_lines : [],
+          updatedAt: d.updated_at,
+        })),
+      });
+    } catch (error) {
+      console.error('Error fetching Grok usage:', error);
+      res.status(500).json({ message: 'Failed to fetch Grok usage' });
+    }
+  });
   
   // Manually trigger daily OpenAI cost reconciliation (admin only)
   app.post('/api/analytics/reconcile-openai-daily', isAuthenticated, requireRole('admin'), async (req, res) => {

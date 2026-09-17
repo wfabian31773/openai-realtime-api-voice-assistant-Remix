@@ -149,6 +149,8 @@ async function harness(
     resolveGreeting?: (slug: string) => Promise<string | null>;
     sweepCall?: (record: unknown) => Promise<unknown>;
     persistCall?: (record: unknown) => Promise<boolean>;
+    persistTurns?: (record: unknown, ids: unknown) => Promise<unknown>;
+    startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
     persistBeforeSweepMs?: number;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
     callRowDeadlineMs?: number;
@@ -186,6 +188,10 @@ async function harness(
         return undefined;
       }),
     persistBeforeSweepMs: over.persistBeforeSweepMs,
+    // Telemetry hooks default to no-ops here: the real ones import twilio
+    // and write call_turns, neither of which a harness call should touch.
+    persistTurns: over.persistTurns ?? (async () => 0),
+    startRecording: over.startRecording ?? (async () => "skipped"),
     persistCall:
       over.persistCall ??
       (async (record) => {
@@ -265,6 +271,7 @@ async function openStream(
   h: Harness,
   callSid: string,
   token: string,
+  host?: string,
 ): Promise<{ ws: WebSocket; frames: Array<Record<string, unknown>> }> {
   const ws = new WebSocket(h.wsUrl);
   clients.push(ws);
@@ -281,7 +288,7 @@ async function openStream(
       start: {
         streamSid: "MZ1",
         callSid,
-        customParameters: { callSid, token },
+        customParameters: { callSid, token, ...(host ? { host } : {}) },
       },
     }),
   );
@@ -1631,5 +1638,68 @@ describe("the database outranks the code, but not on the copy a lane must say", 
   it("uses the registry string when nothing is configured", () => {
     expect(chooseGreeting("optical", null, "Registry.")).toBe("Registry.");
     expect(chooseGreeting("optical", null, null)).toBe("");
+  });
+});
+
+/**
+ * THE RUNTIME'S TURNS AND RECORDING REACH THE OBSERVATORY.
+ *
+ * Measured 2026-09-17: recording_url NULL and call_turns empty on all 4,564
+ * runtime calls since the cutover, on lanes that open with "all calls are
+ * being recorded". The page fell back to the flat transcript and called it an
+ * instrumentation gap. Both hooks are pinned HERE, at the runtime, because a
+ * unit test on each helper proves the helper works and not that anything
+ * calls it — failure mode 10.
+ */
+describe("the runtime's turns and recording reach the Observatory", () => {
+  it("starts a Twilio recording once per call, on the host the webhook was reached on", async () => {
+    const started: Array<[string, string | undefined]> = [];
+    const h = await harness({
+      startRecording: async (sid, host) => {
+        started.push([sid, host]);
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA40", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA40", tokenFrom(answered.text), "runtime.test");
+    await settle(4);
+    expect(started).toEqual([["CA40", "runtime.test"]]);
+    ws.close();
+    await settle(6);
+    expect(started, "a second start on the same call").toHaveLength(1);
+  });
+
+  it("the TwiML carries the host the stream started from", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA42", From: "+1", To: "+2" });
+    expect(answered.text).toMatch(/<Parameter name="host" value="127\.0\.0\.1:\d+"\/>/);
+  });
+
+  it("the persisted record carries timed turns, handed to the turn writer AFTER the sweep", async () => {
+    const handed: Array<{ callSid: string; turns: unknown; sweptFirst: number }> = [];
+    let sweeps = 0;
+    const h = await harness({
+      sweepCall: async () => {
+        sweeps += 1;
+        return { filed: false, reason: "caller-said-nothing" };
+      },
+      persistTurns: async (record) => {
+        const r = record as { callSid: string; turns?: unknown };
+        handed.push({ callSid: r.callSid, turns: r.turns, sweptFirst: sweeps });
+        return 0;
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA41", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA41", tokenFrom(answered.text));
+    await settle(4);
+    ws.close();
+    await settle(8);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA41" });
+    const turns = (h.persisted[0] as { turns?: unknown }).turns;
+    expect(Array.isArray(turns), "the record has no turns array").toBe(true);
+    for (const t of turns as Array<Record<string, unknown>>) {
+      expect(typeof t.atMs).toBe("number");
+      expect(["caller", "agent"]).toContain(t.role);
+    }
+    expect(handed).toEqual([{ callSid: "CA41", turns, sweptFirst: 1 }]);
   });
 });

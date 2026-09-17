@@ -261,6 +261,8 @@ import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
 import { runRequestSweep } from "./sweepRunner";
+import { persistRuntimeTurns } from "./runtimeTurns";
+import { makeRecordingStarter } from "./callRecording";
 import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
 import {
   handleAfterRedirect,
@@ -396,6 +398,16 @@ export interface VoiceRuntimeOptions {
    * requestSweep.ts for why, and sweepRunner.ts for the rules it holds to.
    */
   sweepCall?: (record: VoiceCallRecord) => Promise<unknown>;
+  /**
+   * Writes the call's timed turns to `call_turns` — telemetry, after the row
+   * and after the sweep, never awaited by teardown. Injected for tests.
+   */
+  persistTurns?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
+  /**
+   * Starts a Twilio recording on the answered call — see callRecording.ts.
+   * Fire-and-forget from `startCall`. Injected for tests.
+   */
+  startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -479,6 +491,8 @@ export function mountVoiceRuntime(
   // boot or in a health check.
   const persistCall = options.persistCall ?? persistRuntimeCall;
   const sweepCall = options.sweepCall ?? runRequestSweep;
+  const persistTurns = options.persistTurns ?? persistRuntimeTurns;
+  const startRecording = options.startRecording ?? makeRecordingStarter(env);
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -724,7 +738,11 @@ export function mountVoiceRuntime(
           return;
         }
         clearClaimDeadline();
-        void startCall(entry, frame.streamSid);
+        // The public host the webhook was reached on rides in as a stream
+        // parameter, so the recording callback can be named without a second
+        // way of learning it. Absent on older TwiML; the starter falls back
+        // to env.DOMAIN.
+        void startCall(entry, frame.streamSid, params.host);
         return;
       }
 
@@ -762,8 +780,17 @@ export function mountVoiceRuntime(
       }
     };
 
-    async function startCall(entry: CallEntry, streamSid: string): Promise<void> {
+    async function startCall(
+      entry: CallEntry,
+      streamSid: string,
+      recordingHost?: string,
+    ): Promise<void> {
       const startedAtMs = Date.now();
+      // The call is answered once its stream has started, so Twilio will take
+      // a REST recording from here. Never awaited, never on the call's path:
+      // a failure is one console line and the call proceeds unrecorded, as
+      // every runtime call did before 2026-09-17.
+      void startRecording(entry.callSid, recordingHost).catch(() => undefined);
       /** Filled in when the call_logs row lands; read through the metadata
        * getter above for the rest of the call. */
       let callLogId: string | undefined;
@@ -1121,6 +1148,9 @@ export function mountVoiceRuntime(
               options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
             );
             await sweepCall(record).catch(() => undefined);
+            // Telemetry last: the per-turn record lights up the Observatory's
+            // call page but must never delay a caller's request.
+            void persistTurns(record, { callLogId }).catch(() => undefined);
           },
         });
         // Connect AFTER the bridge exists: a connection that fails then has

@@ -235,9 +235,27 @@ import { callEnvironment } from "./callRecord";
  * the model speaks (`message` -> `fix`), so the surgery agent stops reading
  * "these are the words we treat as a surgical emergency" to callers. v42 and
  * v43 ship in one PR; only v43 reaches a deployment. Stacks on v42.
+ *
+ * v44: the Observatory sees a runtime call the way xAI's console shows one.
+ * Measured 2026-09-17: recording_url NULL and call_turns empty on all 4,564
+ * runtime calls since the cutover. The bridge now keeps the moment each
+ * transcript line was written and hands timed turns to call_turns after the
+ * sweep; a Twilio REST recording (dual channel) is started when the stream's
+ * start frame arrives and posts back to the old core's recording-status
+ * handler, which now accepts a CallSid-keyed callback; and the call page
+ * places each tool call at its START between the lines it ran between.
+ * Telemetry only — nothing on a caller's path. Stacks on v43.
+ *
+ * v45: the Grok day table. The reconciler writes one daily_grok_costs row
+ * per day on EVERY outcome — xAI's reported voice total, the lines it summed
+ * and ignored, what the call rows were booked at, and a refusal's reason —
+ * where before a refusal lived in a console line and nowhere else. Served at
+ * /api/analytics/grok-usage, shown on the cost dashboard, and the call page
+ * says whether a cost is reconciled or estimated. v44 and v45 ship in one
+ * PR; only v45 reaches a deployment. Stacks on v44.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v43-the-tool-does-not-narrate-its-rule-20260917";
+  "voice-runtime-v45-timed-turns-recording-and-the-day-table-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

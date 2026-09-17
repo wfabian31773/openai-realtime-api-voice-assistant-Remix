@@ -23,6 +23,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import apiClient from '@/lib/apiClient'
+import { toolChipsFrom, interleave, type TimedTurn } from '../lib/transcriptTimeline'
 import {
   ArrowLeft, Copy, Link as LinkIcon, Download, Play, Pause, Check,
   MessageSquare, ListOrdered, LineChart, Braces, Code2, CircleDollarSign, Gauge,
@@ -449,6 +450,16 @@ export function CallDetailsPage() {
             <div className="flex items-center justify-end gap-2 text-zinc-100">
               <CircleDollarSign className="w-4 h-4 text-zinc-400" />
               <span className="font-semibold">Cost: ${(Math.max(0, costCents) / 100).toFixed(2)}</span>
+              {/* Which kind of number this is. A reconciled cost is xAI's / OpenAI's
+                  bill allocated to the call; an estimate is a published rate times
+                  the duration. The Observatory read both as one figure until
+                  2026-09-17, which is how a $37.43 allocation onto a 104-second
+                  call passed for a fact. */}
+              {log.costIsEstimated === false ? (
+                <span className="rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide bg-emerald-500/15 text-emerald-300" title="Allocated from the provider's own reported spend for the day">reconciled</span>
+              ) : log.costIsEstimated === true ? (
+                <span className="rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide bg-zinc-700/60 text-zinc-300" title="A published rate times the duration; not yet reconciled against the provider's bill">estimated</span>
+              ) : null}
             </div>
             <div className="text-[13px] text-zinc-400">Duration: {fmtDur(log.duration)}</div>
           </div>
@@ -511,7 +522,7 @@ export function CallDetailsPage() {
         </div>
 
         <div className="py-5">
-          {tab === 'transcripts' && <TranscriptsTab turns={turns} log={log} callStart={callStart} />}
+          {tab === 'transcripts' && <TranscriptsTab turns={turns} log={log} callStart={callStart} toolTimeline={data?.toolTimeline ?? null} />}
           {tab === 'logs' && <LogsTab events={events} toolTimeline={data?.toolTimeline ?? null} />}
           {tab === 'analysis' && (
             <AnalysisTab checks={checks} summary={(data?.graderResults as any)?.summary} log={log} />
@@ -534,13 +545,16 @@ function TranscriptsTab({
   turns,
   log,
   callStart,
+  toolTimeline,
 }: {
   turns: TurnRow[]
   log: Record<string, any>
   callStart?: string
+  toolTimeline?: DetailPayload['toolTimeline']
 }) {
   const agentName = log.agentUsed ?? 'Agent'
   const startMs = callStart ? new Date(callStart).getTime() : null
+  const [openChip, setOpenChip] = useState<number | null>(null)
 
   // Fall back to the flat transcript column when the turn table has nothing —
   // the honest rendering of an instrumentation gap, and better than a blank tab.
@@ -555,12 +569,18 @@ function TranscriptsTab({
       })
   }, [turns, log.transcript])
 
-  const rows =
+  const turnRows: TimedTurn[] =
     turns.length > 0
-      ? turns.map((t) => ({ role: t.role, text: t.final_transcript ?? t.raw_transcript ?? '', at: t.at as string | undefined }))
-      : fallback.map((f) => ({ ...f, at: undefined as string | undefined }))
+      ? turns.map((t) => ({ kind: 'turn' as const, role: t.role, text: t.final_transcript ?? t.raw_transcript ?? '', at: t.at as string | undefined }))
+      : fallback.map((f) => ({ kind: 'turn' as const, ...f, at: undefined as string | undefined }))
 
-  if (rows.length === 0) return <Empty label="No transcript was captured for this call" />
+  // Tool calls placed at the moment they ran, the way xAI's own call log
+  // shows them. They only interleave when every turn carries a time — a
+  // flat-transcript fallback has no clock, so they stay on the Logs tab.
+  const chips = useMemo(() => toolChipsFrom(toolTimeline?.events ?? null), [toolTimeline])
+  const rows = useMemo(() => interleave(turnRows, chips), [chips, turnRows])
+
+  if (turnRows.length === 0) return <Empty label="No transcript was captured for this call" />
 
   return (
     <div className="space-y-4 max-w-3xl">
@@ -569,7 +589,30 @@ function TranscriptsTab({
           Rendered from the flat transcript — the per-turn record for this call was lost (instrumentation gap).
         </div>
       )}
-      {rows.map((r, i) => (
+      {rows.map((r, i) => r.kind === 'tool' ? (
+        <div key={`tool-${i}`} className="flex justify-start">
+          <div className={`rounded-full border px-3 py-1 text-[12px] ${r.ok ? 'border-zinc-700 text-zinc-300' : 'border-amber-700/60 text-amber-300'} bg-[#14171c]`}>
+            <button
+              type="button"
+              className="flex items-center gap-2"
+              onClick={() => setOpenChip(openChip === i ? null : i)}
+              aria-expanded={openChip === i}
+            >
+              <span className="text-zinc-500">Tool call</span>
+              <span className="font-mono">{r.tool}</span>
+              {startMs && <span className="text-zinc-500">{fmtOffset(r.atMs - startMs)}</span>}
+              {r.ms != null && <span className="text-zinc-600">{fmtMs(r.ms)}</span>}
+              {!r.ok && <span className="text-amber-400">refused</span>}
+              <span className="text-zinc-600">{openChip === i ? '▴' : '▾'}</span>
+            </button>
+            {openChip === i && (
+              <pre className="mt-2 max-w-[70vw] overflow-x-auto whitespace-pre-wrap text-[11px] text-zinc-400">
+                {JSON.stringify({ ...(r.args ? { args: r.args } : {}), outcome: r.outcome }, null, 2)}
+              </pre>
+            )}
+          </div>
+        </div>
+      ) : (
         <div key={i} className={`flex ${r.role === 'caller' ? 'justify-end' : 'justify-start'}`}>
           <div
             className={`max-w-[78%] rounded-lg px-4 py-2.5 ${

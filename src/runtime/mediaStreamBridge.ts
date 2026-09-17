@@ -107,7 +107,7 @@
  */
 
 import type { BoundAgent } from "./agentBinding";
-import { CallTranscriptLog } from "./transcriptLog";
+import { CallTranscriptLog, type TranscriptTurn } from "./transcriptLog";
 import { noteSpokenDob } from "../tools/spokenDob";
 import { CallUsage, usageSummaryMarker, type UsageTotals } from "./tokenUsage";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
@@ -319,6 +319,10 @@ export interface VoiceCallRecord {
   transferMethod?: "warm" | "blind";
   /** CALLER/AGENT lines in spoken order — '' when nothing was said. */
   transcript: string;
+  /** The same lines with the moment each was first written, for
+   * `call_turns`. Optional only so older fixtures still type-check; the
+   * bridge always sets it. */
+  turns?: TranscriptTurn[];
   toolEvents: ToolEvent[];
   /** Agent utterances that completed. The turn count for telemetry. */
   agentTurns: number;
@@ -1728,6 +1732,7 @@ export class VoiceCallBridge {
           ? { transferMethod: this.transferMethod }
           : {}),
         transcript: this.transcriptLog.render(),
+        turns: this.transcriptLog.turns(),
         toolEvents: [...this.toolEvents],
         ...(usageAtTeardown ? { usage: usageAtTeardown } : {}),
         agentTurns: this.agentTurns,

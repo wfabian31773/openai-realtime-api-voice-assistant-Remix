@@ -24,6 +24,7 @@ import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulH
 import { flushAzulTimeline, getAzulTimeline, recordDirectorAction } from './services/toolTimeline';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
+import { recordingStatusTarget } from './services/recordingStatusTarget';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
@@ -7670,6 +7671,50 @@ export function setupVoiceAgentRoutes(app: Express): void {
       const recordingSid = parsedBody.RecordingSid;
       const conferenceSid = parsedBody.ConferenceSid;
       const recordingStatus = parsedBody.RecordingStatus;
+      const target = recordingStatusTarget(parsedBody);
+
+      /**
+       * Push the recording URL to the ticketing system immediately. The
+       * ticketing sync runs every 5 min and marks calls as synced before the
+       * recording is ready — so once synced, the recording URL is never
+       * re-sent. Shared by the conference branch (old core) and the CallSid
+       * branch (runtime) below.
+       */
+      const pushRecordingToTicketing = async (callLogId: string, recordingUrl: string): Promise<void> => {
+        const { storage } = await import('../server/storage');
+        try {
+          const callLog = await storage.getCallLog(callLogId);
+          if (!callLog) {
+            console.warn(`[RECORDING] ⚠️ Could not fetch call log ${callLogId} for ticketing push`);
+            return;
+          }
+          // Only push if there is something to identify the ticket on the other end
+          if (!callLog.ticketNumber && !callLog.callSid) {
+            console.info(`[RECORDING] No ticketNumber/callSid on call log ${callLogId} — skipping ticketing push`);
+            return;
+          }
+          const { ticketingApiClient } = await import('../server/services/ticketingApiClient');
+          const result = await ticketingApiClient.updateTicketCallData({
+            callSid: callLog.callSid || undefined,
+            ticketNumber: callLog.ticketNumber || undefined,
+            recordingUrl: recordingUrl,
+          });
+          if (result.success) {
+            console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}`);
+            // Record the delivery, or the sweeper re-pushes this call five
+            // minutes from now. With a hard .limit(20) per cycle, normal
+            // traffic would saturate the sweeper re-sending calls that
+            // already landed and crowd out the failures it exists to
+            // recover.
+            await storage.updateCallLog(callLog.id, { callDataSynced: true });
+          } else {
+            console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
+          }
+        } catch (pushErr) {
+          console.error('[RECORDING] ✗ Exception pushing recording URL to ticketing system:', pushErr);
+        }
+      };
+
       
       console.info(`[RECORDING] Conference ${conferenceSid} recording ${recordingStatus}: ${recordingUrl}`);
       
@@ -7716,44 +7761,29 @@ export function setupVoiceAgentRoutes(app: Express): void {
           // The ticketing sync runs every 5 min and marks calls as synced before the
           // recording is ready — so once synced, the recording URL is never re-sent.
           // Fix: push it directly here as soon as Twilio delivers the recording.
-          (async () => {
-            try {
-              const callLog = await storage.getCallLog(callLogId);
-              if (!callLog) {
-                console.warn(`[RECORDING] ⚠️ Could not fetch call log ${callLogId} for ticketing push`);
-                return;
-              }
-              // Only push if there is something to identify the ticket on the other end
-              if (!callLog.ticketNumber && !callLog.callSid) {
-                console.info(`[RECORDING] No ticketNumber/callSid on call log ${callLogId} — skipping ticketing push`);
-                return;
-              }
-              const { ticketingApiClient } = await import('../server/services/ticketingApiClient');
-              const result = await ticketingApiClient.updateTicketCallData({
-                callSid: callLog.callSid || undefined,
-                ticketNumber: callLog.ticketNumber || undefined,
-                recordingUrl: recordingUrl,
-              });
-              if (result.success) {
-                console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}`);
-                // Record the delivery, or the sweeper re-pushes this call five
-                // minutes from now. With a hard .limit(20) per cycle, normal
-                // traffic would saturate the sweeper re-sending calls that
-                // already landed and crowd out the failures it exists to
-                // recover.
-                await storage.updateCallLog(callLog.id, { callDataSynced: true });
-              } else {
-                console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
-              }
-            } catch (pushErr) {
-              console.error('[RECORDING] ✗ Exception pushing recording URL to ticketing system:', pushErr);
-            }
-          })();
+          void pushRecordingToTicketing(callLogId, recordingUrl);
           
           // Clean up mapping
           delete conferenceSidToCallLogId[conferenceSid];
         } else {
           console.warn(`[RECORDING] ⚠️ No call log ID found for conference SID ${conferenceSid}`);
+        }
+      } else if (target?.by === 'call') {
+        /**
+         * A RUNTIME CALL. `<Connect><Stream>` has no conference; the runtime
+         * starts its recording over REST (`src/runtime/callRecording.ts`) and
+         * Twilio posts back with a CallSid. Until 2026-09-17 this handler read
+         * ConferenceSid only, so the runtime lanes — which say "all calls are
+         * being recorded" — had recording_url NULL on 4,564 of 4,564 calls.
+         */
+        const { storage } = await import('../server/storage');
+        const callLog = await storage.getCallLogBySid(target.callSid);
+        if (callLog) {
+          await storage.updateCallLog(callLog.id, { recordingUrl });
+          console.info(`[RECORDING] ✓ Saved recording URL to call log ${callLog.id} by CallSid`);
+          void pushRecordingToTicketing(callLog.id, recordingUrl);
+        } else {
+          console.warn(`[RECORDING] ⚠️ No call log for CallSid ${target.callSid} — recording URL not saved`);
         }
       }
       
