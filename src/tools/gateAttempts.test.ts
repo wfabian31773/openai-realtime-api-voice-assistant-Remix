@@ -198,6 +198,11 @@ describe('waiters are released one at a time when a predecessor outlasts the bou
     expect(GATE_SETTLEMENT_WAIT_MS).toBeGreaterThan(ONE_LONG_ATTEMPT_MS);
   });
 
+  it('and below the runtime tool watchdog less one legitimate attempt: a claim behind a stuck attempt and a full-length one still claims before teardown', () => {
+    const RUNTIME_TOOL_WATCHDOG_MS = 30_000 + 15_000; // DEFAULT_DEAD_AIR_MS + TOOL_DISPATCH_GRACE_MS
+    expect(GATE_SETTLEMENT_WAIT_MS + ONE_LONG_ATTEMPT_MS).toBeLessThan(RUNTIME_TOOL_WATCHDOG_MS);
+  });
+
   it('an answer that arrives AFTER the bound is a client timeout, never a refusal: it can wake the next claim early with a SMALLER count, and never authorise a flag', async () => {
     vi.useFakeTimers();
     try {

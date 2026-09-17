@@ -117,14 +117,19 @@ const settlementWaiters = new Map<string, Array<() => void>>();
  * reach. It sits ABOVE the longest attempt the production create path can
  * legitimately take: two 3 s health probes, the 500 ms retry delay and the
  * 15 s POST come to about 21.5 s (`ticketingApiClient`), so a bound that
- * passes means a settle was lost and nothing else (Codex, #321 round 18). It
+ * passes means a settle was lost and nothing else (Codex, #321 round 18) —
+ * and BELOW the runtime's 45 s tool watchdog less that same 21.5 s, so a
+ * claim behind a stuck attempt and a full-length one still claims before
+ * the bridge tears the call down (Codex, #321 round 20). The client bounds
+ * its BODY read on the same timer as its headers, so no attempt can settle
+ * after this floor: an abandoned attempt never answers late. It
  * is PER PREDECESSOR, re-armed by every settle: one deadline for the whole
  * queue released the third of a batch while its second predecessor was still
  * inside its own POST, so it read one refusal where there were two and the
  * exit did not fire — the lost-third-attempt case this claim exists to close
  * (Codex P2, #321 round 17).
  */
-export const GATE_SETTLEMENT_WAIT_MS = 25_000;
+export const GATE_SETTLEMENT_WAIT_MS = 23_000;
 
 /**
  * Claims on a key are QUEUED and released ONE AT A TIME. Every waiter used to
