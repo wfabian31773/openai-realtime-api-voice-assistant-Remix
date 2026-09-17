@@ -6282,6 +6282,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision optical. All of our opticians are currently ' +
       'assisting other customers, but I can take a message and they will follow up with you. ' +
+      'All calls are being recorded for quality assurance purposes. ' +
       'How can I help you today?',
   });
 
@@ -6294,7 +6295,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision surgery coordination. All of our coordinators are ' +
       'currently assisting other patients, but I can take a message and they will follow up ' +
-      'with you. How can I help you today?',
+      'with you. All calls are being recorded for quality assurance purposes. ' +
+      'How can I help you today?',
   });
 
   // Point the Clinical Tech Support number's Twilio voice webhook here.
@@ -6305,7 +6307,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision clinical support. All of our technicians are ' +
       'currently assisting other patients, but I can take a message and they will follow ' +
-      'up with you. How can I help you today?',
+      'up with you. All calls are being recorded for quality assurance purposes. ' +
+      'How can I help you today?',
   });
 
   // Point the Medical Records number's Twilio voice webhook here. Until that
@@ -6317,7 +6320,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision medical records. Our records team is currently ' +
       'assisting other patients, but I can take the details and they will follow up with ' +
-      'you. How can I help you today?',
+      'you. All calls are being recorded for quality assurance purposes. ' +
+      'How can I help you today?',
   });
 
   // THE DEMO LINE (+1 626-548-2660). Its own webhook so it can never inherit

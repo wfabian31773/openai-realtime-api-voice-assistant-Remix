@@ -80,6 +80,7 @@ export const opticalAgentConfig = {
   greeting:
     'Thank you for calling Azul Vision optical. All of our opticians are currently ' +
     'assisting other patients, but I can take a message and they will follow up with you. ' +
+    'All calls are being recorded for quality assurance purposes. ' +
     'How can I help you today?',
   voice: 'sage',
   language: 'en',

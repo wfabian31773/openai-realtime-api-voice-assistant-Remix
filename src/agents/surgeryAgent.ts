@@ -94,7 +94,8 @@ export const surgeryAgentConfig = {
   greeting:
     'Thank you for calling Azul Vision surgery coordination. All of our coordinators are ' +
     'currently assisting other patients, but I can take a message and they will follow up ' +
-    'with you. How can I help you today?',
+    'with you. All calls are being recorded for quality assurance purposes. ' +
+    'How can I help you today?',
   voice: 'sage',
   language: 'en',
 };

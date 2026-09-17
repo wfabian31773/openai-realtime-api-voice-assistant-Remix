@@ -1592,9 +1592,16 @@ describe("the database outranks the code, but not on the copy a lane must say", 
     "All calls are being recorded for quality assurance purposes, how can I help you?";
 
   it("prefers the configured greeting whenever it is complete", () => {
-    expect(chooseGreeting("optical", "Configured optical line.", "Registry.")).toBe(
-      "Configured optical line.",
-    );
+    // "Configured optical line." was the fixture until 2026-09-17. It kept
+    // PASSING after optical gained a recording-disclosure requirement, and
+    // that is the trap: with BOTH strings deficient `chooseGreeting` falls
+    // into its "neither has it" branch, which also returns `configured` — so
+    // the assertion held while testing a different branch entirely. The
+    // fixture now actually satisfies optical's copy, so this tests what its
+    // name says.
+    const COMPLETE_OPTICAL =
+      "Configured optical line. All calls are being recorded for quality assurance purposes.";
+    expect(chooseGreeting("optical", COMPLETE_OPTICAL, "Registry.")).toBe(COMPLETE_OPTICAL);
     expect(chooseGreeting("no-ivr", BUILT_IN, "something else")).toBe(BUILT_IN);
   });
 
