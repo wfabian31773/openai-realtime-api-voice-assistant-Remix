@@ -1729,7 +1729,7 @@ Respond with a JSON object only, no other text:
    * (gradedAt set, sentiment null), which is the documented recovery shape. */
   private async releaseGradingClaim(callLogId: string): Promise<void> {
     try {
-      await storage.updateCallLog(callLogId, { gradedAt: null });
+      await storage.updateCallLog(callLogId, { gradedAt: null, qualityAnalysis: null });
     } catch (e) {
       console.warn(`[GRADING] could not release the grading claim on ${callLogId}:`, e);
     }

@@ -265,6 +265,7 @@ import { runRequestSweep } from "./sweepRunner";
 import { persistRuntimeTurns } from "./runtimeTurns";
 import { makeRecordingStarter } from "./callRecording";
 import { gradeRuntimeCall } from "./runtimeGrading";
+import { logRuntimeFollowUps } from "./followUpTelemetry";
 import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
 import {
   handleAfterRedirect,
@@ -418,6 +419,12 @@ export interface VoiceRuntimeOptions {
    * the row and after the sweep, never awaited. Injected for tests.
    */
   gradeCall?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
+  /**
+   * Writes the call's tool follow-up summary to `call_events` (v55,
+   * followUpTelemetry.ts) — after the row and after the sweep, never
+   * awaited. Injected for tests.
+   */
+  logFollowUps?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -504,6 +511,7 @@ export function mountVoiceRuntime(
   const persistTurns = options.persistTurns ?? persistRuntimeTurns;
   const startRecording = options.startRecording ?? makeRecordingStarter(env);
   const gradeCall = options.gradeCall ?? gradeRuntimeCall;
+  const logFollowUps = options.logFollowUps ?? logRuntimeFollowUps;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -1170,6 +1178,10 @@ export function mountVoiceRuntime(
             // teardown, as the old core does, instead of hours later from the
             // five-per-cycle backfill (task #139).
             void gradeCall(record, { callLogId }).catch(() => undefined);
+            // And the follow-up summary (v55, task #146): the one record of
+            // whether the turn a tool result is owed was ever requested and
+            // ever answered, which nothing else persists.
+            void logFollowUps(record, { callLogId }).catch(() => undefined);
           },
         });
         // Connect AFTER the bridge exists: a connection that fails then has

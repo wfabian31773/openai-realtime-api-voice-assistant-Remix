@@ -14,17 +14,26 @@ import { readFileSync } from "node:fs";
 process.env.DATABASE_URL ||= "postgresql://unused:unused@127.0.0.1:5432/unused";
 process.env.OPENAI_API_KEY ||= "test-unused";
 
-type Row = { id: string; gradedAt: Date | null; sentiment?: string | null };
+type Row = { id: string; gradedAt: Date | null; sentiment?: string | null; qualityAnalysis?: unknown };
+const LEASE_MS = 10 * 60 * 1000;
 const q = vi.hoisted(() => ({
   rows: new Map<string, Row>(),
   patches: [] as Array<[string, Record<string, unknown>]>,
+  now: 1_000_000_000,
 }));
+/** The store's lease semantics, as server/storage.ts implements them in SQL:
+ * a row is claimable when ungraded, or when it still reads `claimed` from
+ * longer ago than the lease. */
+const claimable = (r: Row, leaseMs: number) =>
+  r.gradedAt === null ||
+  (r.gradedAt.getTime() < q.now - leaseMs && (r.qualityAnalysis as { grading?: string } | undefined)?.grading === "claimed");
 vi.mock("../../server/storage", () => ({
   storage: {
-    claimCallLogForGrading: async (id: string) => {
+    claimCallLogForGrading: async (id: string, leaseMs = LEASE_MS) => {
       const r = q.rows.get(id);
-      if (!r || r.gradedAt !== null) return false;
-      r.gradedAt = new Date();
+      if (!r || !claimable(r, leaseMs)) return false;
+      r.gradedAt = new Date(q.now);
+      r.qualityAnalysis = { grading: "claimed" };
       return true;
     },
     updateCallLog: async (id: string, patch: Record<string, unknown>) => {
@@ -32,6 +41,7 @@ vi.mock("../../server/storage", () => ({
       const r = q.rows.get(id);
       if (r && "gradedAt" in patch) r.gradedAt = patch.gradedAt as Date | null;
       if (r && "sentiment" in patch) r.sentiment = patch.sentiment as string;
+      if (r && "qualityAnalysis" in patch) r.qualityAnalysis = patch.qualityAnalysis;
     },
   },
 }));
@@ -63,6 +73,7 @@ const answers = async () => ({ choices: [{ message: { content: JSON.stringify(AN
 beforeEach(() => {
   q.rows = new Map([["c1", { id: "c1", gradedAt: null }]]);
   q.patches.length = 0;
+  q.now = 1_000_000_000;
   vi.spyOn(console, "info").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -117,5 +128,66 @@ describe("a call is graded once", () => {
       const src = readFileSync(new URL(f, import.meta.url), "utf8");
       expect(src, `${f} bypasses the claim`).not.toMatch(/claim:\s*false/);
     }
+  });
+});
+
+describe("an abandoned claim is recoverable — Codex P2 on #321, round 8", () => {
+  it("a completed grade overwrites the claim marker, so it is never reclaimed", async () => {
+    const { svc } = service(answers);
+    expect(await svc.gradeCall("c1", TRANSCRIPT)).toBeTruthy();
+    const r = q.rows.get("c1")!;
+    expect(r.gradedAt).not.toBeNull();
+    expect((r.qualityAnalysis as { grading?: string }).grading).toBeUndefined();
+    // Even a lease later, nobody can take it again.
+    q.now += LEASE_MS + 1;
+    const { svc: later, create } = service(answers);
+    expect(await later.gradeCall("c1", TRANSCRIPT)).toBeNull();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("a claim the process died on — no grade, no release — is taken again once the lease has passed, and not before", async () => {
+    // The crash: the store holds the claim and nothing else ever happens to it.
+    await (await import("../../server/storage")).storage.claimCallLogForGrading("c1");
+    expect(q.rows.get("c1")!.qualityAnalysis).toEqual({ grading: "claimed" });
+    const { svc: early, create: earlyCreate } = service(answers);
+    q.now += LEASE_MS - 1;
+    expect(await early.gradeCall("c1", TRANSCRIPT)).toBeNull();
+    expect(earlyCreate).not.toHaveBeenCalled();
+    q.now += 2;
+    const { svc: late, create: lateCreate } = service(answers);
+    expect(await late.gradeCall("c1", TRANSCRIPT)).toBeTruthy();
+    expect(lateCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a release clears the marker as well as the stamp", async () => {
+    const { svc } = service(async () => {
+      throw new Error("llm down");
+    });
+    await svc.gradeCall("c1", TRANSCRIPT);
+    const release = q.patches.find(([, p]) => "gradedAt" in p && p.gradedAt === null)!;
+    expect(release[1]).toEqual({ gradedAt: null, qualityAnalysis: null });
+  });
+});
+
+describe("the store's own SQL carries the lease — read from the source", () => {
+  const src = readFileSync(new URL("../../server/storage.ts", import.meta.url), "utf8");
+
+  it("the selector and the claim both read gradingClaimable, which is ungraded OR claimed-and-stale", () => {
+    const pred = src.slice(src.indexOf("export function gradingClaimable"), src.indexOf("export class DatabaseStorage"));
+    expect(pred).toMatch(/isNull\(callLogs\.gradedAt\)/);
+    expect(pred).toMatch(/lt\(callLogs\.gradedAt, staleBefore\)/);
+    expect(pred).toMatch(/->>'grading' = 'claimed'/);
+    const selector = src.slice(src.indexOf("async getCallLogsWithoutGrades("), src.indexOf("async getCallLogsWithStaleGraderVersion("));
+    expect(selector).toMatch(/gradingClaimable\(new Date\(Date\.now\(\) - leaseMs\)\)/);
+    const claim = src.slice(src.indexOf("async claimCallLogForGrading("), src.indexOf("async getCallLogsWithStaleGraderVersion("));
+    expect(claim).toMatch(/gradingClaimable\(new Date\(Date\.now\(\) - leaseMs\)\)/);
+    expect(claim).toMatch(/qualityAnalysis: GRADING_CLAIM_MARKER/);
+  });
+
+  it("the dead-letter and short-transcript stamps never write the marker, so they are never reclaimed", () => {
+    const svc = readFileSync(new URL("./callGradingService.ts", import.meta.url), "utf8");
+    const backfill = svc.slice(svc.indexOf("async gradeCallsWithoutGrades("));
+    for (const m of backfill.matchAll(/updateCallLog\(call\.id, \{ gradedAt: new Date\(\)( \})/g)) expect(m[1]).toBe(" }");
+    expect(backfill).not.toMatch(/grading: ['"]claimed['"]/);
   });
 });

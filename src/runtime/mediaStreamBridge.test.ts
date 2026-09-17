@@ -84,6 +84,7 @@ function makeBridge(
   const twilioClose = vi.fn();
   const outcomes: CallOutcome[] = [];
   let epoch = 0;
+  let responseActive = true;
 
   const session = {
     appendAudio: vi.fn(),
@@ -104,6 +105,7 @@ function makeBridge(
     }),
     close: vi.fn(),
     getResponseEpoch: () => epoch,
+    isResponseActive: () => responseActive,
     setSpokenLanguage: vi.fn(),
   } satisfies BridgeSession;
 
@@ -150,6 +152,10 @@ function makeBridge(
     /** Advance the wire's response cycle, as `response.created` does. */
     newResponse: () => {
       epoch += 1;
+    },
+    /** Whether the wire has a response open — what `response.done` clears. */
+    setResponseActive: (v: boolean) => {
+      responseActive = v;
     },
     marks: () => frames.filter((f) => f.event === "mark") as Array<{ mark: { name: string } }>,
     media: () => frames.filter((f) => f.event === "media"),
@@ -1087,6 +1093,7 @@ describe("VoiceCallBridge — exactly-once teardown", () => {
     speak: vi.fn(),
           close: vi.fn(),
           getResponseEpoch: () => 0,
+          isResponseActive: () => true,
           setSpokenLanguage: vi.fn(),
         };
       },
@@ -2808,5 +2815,76 @@ describe("what the caller said reaches the filing tools", () => {
     h.handlers().onCallerTranscript("March 17th, 1973.", "item-1");
 
     expect(spokenDobFor("CA-test")).toBeUndefined();
+  });
+});
+
+/**
+ * THE FOLLOW-UP DOES NOT WAIT FOR A DONE THAT ALREADY PASSED — v55, task #146.
+ *
+ * Measured 2026-09-10..16: 9–42 runtime calls a day ended in dead air with a
+ * `file_*` refusal as the last tool event, the pre-tool filler as the last
+ * audible line, the refusal answered in 6–18 ms, no barge-in on most, and
+ * the 30 s watchdog firing 37–67 s later. The bridge assumed a function-call
+ * event always arrives inside an open response and waited for that response's
+ * `done` before requesting the follow-up; an event arriving after its done
+ * waited forever. The wire is asked instead.
+ */
+describe("VoiceCallBridge — the follow-up does not wait for a done that already passed (v55)", () => {
+  it("a tool call arriving AFTER its response's done gets its follow-up as soon as the tool settles", async () => {
+    const h = makeBridge();
+    h.newResponse();
+    h.setResponseActive(false); // the wire already delivered this response's done
+    h.handlers().onToolCall("c1", "create_ticket", { reason: "refill" });
+    await Promise.resolve();
+    await Promise.resolve();
+    // No onResponseDone will ever come for that response again.
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it("a tool call INSIDE an open response still waits for that response's done", async () => {
+    const h = makeBridge();
+    h.newResponse(); // open at the wire
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+    h.handlers().onResponseDone();
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it("the record says what was owed, what was requested, how many events arrived after their done, and whether the last follow-up was ever answered", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.newResponse();
+    h.setResponseActive(false);
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    await Promise.resolve();
+    await Promise.resolve();
+    // The wire never created a response for the follow-up.
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].followUps).toEqual({ owed: 1, requested: 1, toolCallsAfterDone: 1, lastUnanswered: true });
+  });
+
+  it("a follow-up the wire answered is not unanswered, and an in-response tool call is not counted as after-done", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.newResponse();
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    h.handlers().onResponseDone();
+    await Promise.resolve();
+    await Promise.resolve();
+    h.newResponse(); // response.created for the follow-up
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].followUps).toEqual({ owed: 1, requested: 1, toolCallsAfterDone: 0, lastUnanswered: false });
+  });
+
+  it("a call that never owed a follow-up says so — zeros, nothing unanswered", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].followUps).toEqual({ owed: 0, requested: 0, toolCallsAfterDone: 0, lastUnanswered: false });
   });
 });

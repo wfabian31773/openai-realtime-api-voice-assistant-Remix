@@ -1,4 +1,4 @@
-# AFTER-MEASUREMENTS — what the 2026-09-17 republish turns on (v37–v54)
+# AFTER-MEASUREMENTS — what the 2026-09-17 republish turns on (v37–v55)
 
 `docs/BACKEND_HANDOFF.md`'s rule, made runnable: every ship in PR #321 and the
 two merged before it (v37, v38) names a number it must move and a guard it must
@@ -20,7 +20,7 @@ the ticket's (`coalesce(call_start_time, created_at)`), substantive means
 check the Support Center before calling a call unfiled.
 
 **First, confirm the build:** `GET /voice/health` must read
-`voice-runtime-v54-the-affirmed-name-picks-the-person-20260917`. A number
+`voice-runtime-v55-the-follow-up-does-not-wait-for-a-done-that-passed-20260917`. A number
 taken on an older marker is a before-number.
 
 ---
@@ -369,6 +369,53 @@ GROUP BY 1,2 ORDER BY 1,2;
 Guard: tickets carrying a date of birth that is not the patient's must stay 0 — read the
 `[TOOLS] lookup_patient: the caller's first name picked one of the N people` console line
 against the ticket's name.
+
+## v55 — the follow-up does not wait for a done that already passed
+
+Before-arm, Hub, runtime lanes, `duration >= 30`, no ticket on the row, `runtime_outcome =
+dead_air`, the last tool event a `file_*` REFUSAL and the last audible agent line the pre-tool
+filler: **09-10: 26 · 09-11: 25 · 09-14: 42 · 09-15: 9 · 09-16: 15.** `dead_air` outcomes on
+the same lanes: 58 · — · 18 · 29 on 09-14/15/16.
+
+```sql
+-- the class, per day — target 0. The filler is the model's own pre-tool line; a refusal
+-- answered in milliseconds and then nothing until the 30 s watchdog.
+WITH c AS (
+  SELECT call_sid, agent_used, created_at::date AS day, ticket_number, runtime_outcome, end_time, tool_timeline,
+         regexp_split_to_array(transcript, E'\n') AS ls
+  FROM call_logs
+  WHERE created_at >= '2026-09-17' AND voice_provider = 'grok' AND duration >= 30
+    AND agent_used IN ('optical','surgery','tech','records','pcp')
+), x AS (
+  SELECT day, agent_used, ticket_number, runtime_outcome, ls[array_length(ls,1)] AS last_line,
+         (SELECT e FROM jsonb_array_elements(coalesce(tool_timeline->'events','[]'::jsonb)) e ORDER BY e->>'at' DESC LIMIT 1) AS last_ev
+  FROM c
+)
+SELECT day,
+       count(*) FILTER (WHERE last_ev->>'tool' LIKE 'file_%' AND (last_ev->'outcome'->>'success') = 'false'
+                          AND last_line LIKE 'AGENT:%' AND (last_line ILIKE '%get this logged%' OR last_line ILIKE '%registrarlo%')
+                          AND ticket_number IS NULL AND runtime_outcome = 'dead_air') AS refusal_then_silence,
+       count(*) FILTER (WHERE runtime_outcome = 'dead_air') AS dead_air_total,
+       count(*) FILTER (WHERE ticket_number IS NULL) AS no_ticket_total
+FROM x GROUP BY 1 ORDER BY 1;
+
+-- THE INSTRUMENT — one row per call that owed the model a turn after a tool. This is the
+-- first runtime writer call_events has ever had. `events_after_done > 0` confirms the
+-- hypothesis the fix rests on (a function-call event landing after its response's done);
+-- `last_follow_up_unanswered` high with it at 0 refutes it and names the next link.
+SELECT at::date AS day, agent_slug,
+       count(*) AS calls_owing_a_follow_up,
+       count(*) FILTER (WHERE (data->>'toolCallsAfterDone')::int > 0) AS events_after_done,
+       count(*) FILTER (WHERE (data->>'lastUnanswered')::boolean) AS last_follow_up_unanswered,
+       count(*) FILTER (WHERE (data->>'lastUnanswered')::boolean AND data->>'outcome' = 'dead_air') AS unanswered_and_dead_air
+FROM call_events
+WHERE category = 'model' AND message = 'follow_up_summary'
+GROUP BY 1,2 ORDER BY 1,2;
+```
+
+Guards: filing rate per lane must not fall; `dead_air` outcomes must FALL and not migrate to
+`caller_hangup` (the second query above, `dead_air_total`); and `provider_failure` per day
+must not rise — a follow-up requested INTO an open response is what that would look like.
 
 ## Also on this build, not a version of its own
 

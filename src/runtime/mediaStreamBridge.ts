@@ -344,6 +344,36 @@ export interface VoiceCallRecord {
    * nothing. Undefined leaves the columns NULL on purpose — see CallUsage.
    */
   usage?: UsageTotals;
+  /** The tool follow-up bookkeeping (v55) — see FollowUpStats. Optional only
+   * so older fixtures still type-check; the bridge always sets it. */
+  followUps?: FollowUpStats;
+}
+
+/**
+ * WHAT HAPPENED TO THE TURN A TOOL RESULT IS OWED (v55, task #146).
+ *
+ * Read from production, 2026-09-10..16: 9–42 runtime calls a DAY ended in
+ * dead air with a filing refusal as the last tool event and the pre-tool
+ * filler as the last audible line — the tool answered in milliseconds and
+ * the model never spoke again. The follow-up path works on most calls (the
+ * ticket readback follows the filler directly 305 times on two days), so it
+ * fails on a SUBSET, and no record could say which link: `call_events` has
+ * no runtime writer, `call_turns` was empty, the console lines are gone.
+ * These four numbers are PHI-free and go to `call_events` at teardown
+ * (followUpTelemetry.ts) so tomorrow's SQL can name the link.
+ */
+export interface FollowUpStats {
+  /** Tools that settled owing the model a turn. */
+  owed: number;
+  /** Follow-up turns actually requested from the wire. */
+  requested: number;
+  /** Function-call events that arrived with NO response open at the wire —
+   * the carrying response's done had already passed. Before v55 each of
+   * these waited forever for a done that was never coming. */
+  toolCallsAfterDone: number;
+  /** True when a follow-up was requested and no response was ever created
+   * after it — the call ended waiting on a turn the wire never started. */
+  lastUnanswered: boolean;
 }
 
 export interface VoiceCallContext {
@@ -375,6 +405,10 @@ export interface BridgeSession {
   speak(text: string, opts?: { interruptible?: boolean }): void;
   close(): void;
   getResponseEpoch(): number;
+  /** Whether a response is open at the wire right now (v55): the follow-up
+   * after a tool waits for the carrying response's done only when that
+   * response is still open when the function-call event arrives. */
+  isResponseActive(): boolean;
   /** Retarget the provider's STT `language_hint` mid-call and tell the model
    * to follow the caller. See the TRANSPORT NOTE — SET_SPOKEN_LANGUAGE. */
   setSpokenLanguage(language: string): void;
@@ -1374,13 +1408,22 @@ export class VoiceCallBridge {
   private pendingToolCalls = 0;
   private followUpOwed = false;
   private awaitingToolResponseDone = false;
+  /** v55 — see FollowUpStats. */
+  private readonly followUps = { owed: 0, requested: 0, toolCallsAfterDone: 0 };
+  /** The response epoch at the moment the last follow-up was requested; a
+   * created response advances the epoch, so equality at teardown means the
+   * wire never answered that request. */
+  private lastFollowUpEpoch: number | null = null;
 
   /** One tool answered. Records what is owed; the request itself fires
    * only when the LAST outstanding tool has settled AND the carrying
    * response has finished delivering. */
   private toolCallSettled(owesFollowUp: boolean): void {
     this.pendingToolCalls = Math.max(0, this.pendingToolCalls - 1);
-    if (owesFollowUp) this.followUpOwed = true;
+    if (owesFollowUp) {
+      this.followUpOwed = true;
+      this.followUps.owed += 1;
+    }
     this.maybeRequestFollowUp();
   }
 
@@ -1403,6 +1446,8 @@ export class VoiceCallBridge {
     // A termination the guards allowed is already arming the hangup on
     // the goodbye's mark; a follow-up would speak over that gate.
     if (!this.endRequested) {
+      this.followUps.requested += 1;
+      this.lastFollowUpEpoch = this.session.getResponseEpoch();
       this.session.requestResponse();
       // The follow-up is a response owed ANEW: it gets its own window,
       // not whatever remains of the tool's (Codex review, PR #227
@@ -1413,10 +1458,19 @@ export class VoiceCallBridge {
 
   private handleToolCall(callId: string, name: string, args: Record<string, unknown>): void {
     if (this.ended) return;
-    // Function-call events precede their response's `response.done` on the
-    // ordered wire, so at this moment the carrying response is still
-    // delivering — arm the boundary wait for this turn.
-    this.awaitingToolResponseDone = true;
+    // The follow-up waits for the carrying response's `response.done` — but
+    // ONLY if that response is still open at the wire. This used to assume
+    // it always was ("function-call events precede their response's done"),
+    // and a function-call event that arrived AFTER its done then waited
+    // forever for a done that had already passed: no follow-up, silence,
+    // dead air at 30s. That is the shape of 9–42 lost requests a day since
+    // 2026-09-10 (task #146) — a filing refusal answered in milliseconds and
+    // the model never speaking again. The wire is asked instead of assumed
+    // (v55); the count of after-done events goes to call_events so the
+    // assumption can be measured rather than argued.
+    const carryingResponseOpen = this.session.isResponseActive();
+    this.awaitingToolResponseDone = carryingResponseOpen;
+    if (!carryingResponseOpen) this.followUps.toolCallsAfterDone += 1;
     this.pendingToolCalls += 1;
     // This event IS the model acting on the caller's turn, and the
     // dispatch it starts has a budget of its own — the queue filing tools
@@ -1764,6 +1818,12 @@ export class VoiceCallBridge {
         ...(usageAtTeardown ? { usage: usageAtTeardown } : {}),
         agentTurns: this.agentTurns,
         interruptions: this.interruptions,
+        followUps: {
+          ...this.followUps,
+          lastUnanswered:
+            this.lastFollowUpEpoch !== null &&
+            this.session.getResponseEpoch() === this.lastFollowUpEpoch,
+        },
         startedAtMs: this.startedAtMs,
         endedAtMs: Date.now(),
         // Independently: a greeting-only call has no caller-latency number

@@ -132,6 +132,29 @@ export interface IStorage {
   }>;
 }
 
+/**
+ * A grading claim that has not turned into a grade within this long is
+ * abandoned — the process died between the claim and the persisted grade —
+ * and may be taken again (Codex P2, #321 round 8). The grade itself takes
+ * seconds; ten minutes cannot double-grade a live one.
+ */
+export const GRADING_CLAIM_LEASE_MS = 10 * 60 * 1000;
+/** What a claim writes into quality_analysis; overwritten by a real grade. */
+export const GRADING_CLAIM_MARKER = { grading: 'claimed' } as const;
+
+/**
+ * Ungraded, OR claimed before `staleBefore` and never graded. The second arm
+ * reads the claim marker, not the timestamp alone: a dead-letter stamp and a
+ * short-transcript skip also set graded_at with no grade, and reclaiming
+ * those would re-spend on them every lease.
+ */
+export function gradingClaimable(staleBefore: Date) {
+  return or(
+    isNull(callLogs.gradedAt),
+    and(lt(callLogs.gradedAt, staleBefore), sql`${callLogs.qualityAnalysis}->>'grading' = 'claimed'`),
+  );
+}
+
 export class DatabaseStorage implements IStorage {
   // User operations (required for Replit Auth)
   async getUser(id: string): Promise<User | undefined> {
@@ -673,13 +696,17 @@ export class DatabaseStorage implements IStorage {
     }, `getCallLogByCallSid(${callSid.slice(-8)})`);
   }
 
-  async getCallLogsWithoutGrades(limit: number = 10): Promise<CallLog[]> {
+  async getCallLogsWithoutGrades(limit: number = 10, leaseMs: number = GRADING_CLAIM_LEASE_MS): Promise<CallLog[]> {
     return await db
       .select()
       .from(callLogs)
       .where(
         and(
-          isNull(callLogs.gradedAt),
+          // Ungraded — or claimed for grading longer ago than the lease and
+          // never graded (Codex P2, #321 round 8): a process that died
+          // between the claim and the persisted grade must not leave the
+          // row claimed forever. See gradingClaimable.
+          gradingClaimable(new Date(Date.now() - leaseMs)),
           isNotNull(callLogs.transcript),
           eq(callLogs.status, 'completed')
         )
@@ -704,11 +731,16 @@ export class DatabaseStorage implements IStorage {
    * nobody has taken it: one row back means this caller grades, none means
    * somebody else already is (or did). Released by the grader on failure.
    */
-  async claimCallLogForGrading(id: string): Promise<boolean> {
+  async claimCallLogForGrading(id: string, leaseMs: number = GRADING_CLAIM_LEASE_MS): Promise<boolean> {
     const rows = await db
       .update(callLogs)
-      .set({ gradedAt: new Date() })
-      .where(and(eq(callLogs.id, id), isNull(callLogs.gradedAt)))
+      // THE CLAIM CARRIES A MARKER (round 8): `gradedAt` alone cannot tell a
+      // claim from a completed grade or a dead-letter stamp. A completed
+      // grade overwrites quality_analysis with the analysis; a release nulls
+      // it; the dead-letter and short-transcript stamps never write it. So
+      // only a row that still reads `claimed` past the lease is reclaimable.
+      .set({ gradedAt: new Date(), qualityAnalysis: GRADING_CLAIM_MARKER })
+      .where(and(eq(callLogs.id, id), gradingClaimable(new Date(Date.now() - leaseMs))))
       .returning({ id: callLogs.id });
     return rows.length === 1;
   }

@@ -332,9 +332,17 @@ import { callEnvironment } from "./callRecord";
  * several people on the number and remembered nobody, and the greeting's
  * affirmed first name never reached lookup_patient. It now narrows the
  * candidates by that name, re-resolves the one hit and carries it as certain.
+ *
+ * v55: the follow-up does not wait for a done that already passed. 9–42
+ * runtime calls a day since 2026-09-10 ended in dead air with a filing
+ * refusal as the last tool event and the pre-tool filler as the last
+ * audible line: the bridge assumed a function-call event always arrives
+ * inside an open response and waited for that response's done before
+ * requesting the follow-up. It now asks the wire whether the response is
+ * still open, and writes a per-call follow-up summary to call_events.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v54-the-affirmed-name-picks-the-person-20260917";
+  "voice-runtime-v55-the-follow-up-does-not-wait-for-a-done-that-passed-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

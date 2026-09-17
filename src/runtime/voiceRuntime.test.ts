@@ -153,6 +153,7 @@ async function harness(
     persistCall?: (record: unknown) => Promise<boolean>;
     persistTurns?: (record: unknown, ids: unknown) => Promise<unknown>;
     gradeCall?: (record: unknown, ids: unknown) => Promise<unknown>;
+    logFollowUps?: (record: unknown, ids: unknown) => Promise<unknown>;
     startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
     persistBeforeSweepMs?: number;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
@@ -197,6 +198,7 @@ async function harness(
     persistTurns: over.persistTurns ?? (async () => 0),
     startRecording: over.startRecording ?? (async () => "skipped"),
     gradeCall: over.gradeCall ?? (async () => "skipped"),
+    logFollowUps: over.logFollowUps ?? (async () => false),
     persistCall:
       over.persistCall ??
       (async (record, identity) => {

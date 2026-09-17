@@ -336,6 +336,49 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
 
 ---
 
+### W10 — The model goes silent after a filing refusal (task #146, found 07:00 while running the #51 corpus).
+**`[x]` SHIPPED as v55 — the gate, and the instrument. 13 new tests across three
+files; 6 mutations, 6 caught.**
+
+**Measured first.** Runtime lanes, substantive, no ticket, `dead_air`, a `file_*`
+refusal as the last tool event and the pre-tool filler (*"Let me get this logged
+for you — one moment"*) as the last audible line: **26 · 25 · 42 · 9 · 15 a day
+on 09-10/11/14/15/16** — the largest lost-request class on the runtime that
+nothing had a name for. Per call on 09-16: the refusal answered in 6–18 ms
+(13 date-of-birth, 2 surgeon), the caller silent because they had just been
+told "one moment", the 30 s watchdog firing 37–67 s later. The refusal's spoken
+question was never heard.
+
+**Three controls, and what each ruled out.** The explicit follow-up path is not
+dead — the ticket readback follows the filler DIRECTLY 305 times on two days.
+It is not a rejected `response.create` — `provider_failure` is 0 on 09-16. It is
+not an invisible barge-in — `interruption_count` never exceeds the transcript's
+`[interrupted]` marks, and 9 of the 12 uncut silent calls had zero.
+
+**What the code had.** `handleToolCall` assumed a function-call event always
+arrives inside an open response and waited for that response's `done` before
+requesting the follow-up; an event arriving after its `done` waited forever.
+Whether the wire ever does that is NOT established from data — nothing
+recorded it — so the fix is the one that is harmless if the hypothesis is
+wrong (ask the wire whether the response is still open; wait only then), and
+the other half is the instrument: one PHI-free `call_events` row per call that
+owed a follow-up, with `toolCallsAfterDone` and `lastUnanswered`. Tomorrow's
+SQL decides, and the pack has the query.
+
+**What it does not do.** No prompt change, no retry, no nudge. If
+`toolCallsAfterDone` reads 0 tomorrow while `lastUnanswered` stays high, the
+next link to look at is the queued follow-up a barge-in discards
+(`cancelResponse` clears `pendingSays`), and that is a separate change with its
+own number.
+
+**Number:** refusal-then-silence dead-air calls per day — 15 on 09-16, target 0.
+**Guards:** filing rate per lane must not fall; `dead_air` must fall, not move
+to `caller_hangup`; `provider_failure` must not rise.
+
+**Beside it, #51 change 2 is withdrawn on its corpus** — 18 of the 23 refusal
+calls with no ticket already ended their refusal turn on a question; the one
+that did not was a four-times loop. The 23 are named on the task.
+
 ## NOT DOING TONIGHT, AND WHY
 
 - **`[-]` The emergency lexicon.** Which phrases count as a surgical emergency is
@@ -351,7 +394,7 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v54, ready for review). Codex has reviewed it SIX times: round 1
+   (v39–v55, ready for review). Codex has reviewed it SIX times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
@@ -363,13 +406,17 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
    P2s: a recording callback that could park its URL AFTER the teardown had already
    peeked (the callback now parks before it looks), and grading with no atomic claim
    (the backfill could grade a call the teardown was already grading — the claim is
-   now the `gradedAt` stamp, taken before the LLM is asked), both taken in the
-   commit that follows `0142526`** — every one with a test and a mutation check,
-   every thread resolved. An EIGHTH pass is requested on that head.
-   **Read that eighth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   now the `gradedAt` stamp, taken before the LLM is asked), both taken on
+   `655a794`**, and **round 8 (07:05 on `655a794`) one P2 on that claim — a process
+   dying between the claim and the grade left the row claimed forever; the claim
+   now carries a marker and a ten-minute lease, so an abandoned one is taken
+   again — taken in the commit that follows `655a794` together with v55** — every
+   one with a test and a mutation check, every thread resolved. A NINTH pass is
+   requested on that head.
+   **Read that ninth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
 
-2. **Pull and republish.** `/voice/health` must read the v54 marker below.
+2. **Pull and republish.** `/voice/health` must read the v55 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
    — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
    *Build* checks are green; *Type check* is red with the 22 errors that are
@@ -424,13 +471,14 @@ merged or is in PR #321 waiting for you.
 | **v52** (PR #321) | the per-call cost UPDATE types its two bound components, so Postgres stops refusing it at PARSE and `twilio_cost_cents` is written again | rejected 3,749 times in the 24h to 05:40 (`operator is not unique: unknown + unknown`, since `8a226a6` on 09-04); Twilio price on 5–25% of completed calls against 100% before; 4,295 calls since 09-04 carry a provider-only total |
 | **v53** (PR #321) | no-ivr's `create_ticket` writes a CERTAIN identity (name + date of birth matched) onto the call row, reading the transport's `callLogId` at write time; the factory-time phone-candidate write is gone | `patient_found` on 0 of 297 substantive no-ivr calls in seven days — the writer read a getter before it was backfilled, and would have written a phone candidate as an identity |
 | **v54** (PR #321) | when a phone carries several people and the caller affirmed a first name, `lookup_patient` narrows to that person, re-resolves them and carries them as CERTAIN — the filing tool inherits the chart date instead of asking | all 26 recognised-caller DOB refusals on 09-16 read `carry = no_entry`: the phone rung found several people and remembered nobody, and the affirmed name never reached the tool. This is W1, measured and fixed |
+| **v55** (PR #321) | the follow-up after a tool no longer waits for a `response.done` that has already passed — the bridge asks the wire whether the carrying response is still open — and every call that owed a follow-up writes a PHI-free `follow_up_summary` row to `call_events` | 9–42 runtime calls a day since 09-10 ended in dead air with a filing refusal answered in milliseconds and the pre-tool filler as the last audible line (15 on 09-16); three controls ruled out a dead follow-up path, a rejected `response.create` and an invisible barge-in. This is W10 — the mechanism is a hypothesis the instrument settles tomorrow |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v54-the-affirmed-name-picks-the-person-20260917
+GET /voice/health   ->   voice-runtime-v55-the-follow-up-does-not-wait-for-a-done-that-passed-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:
