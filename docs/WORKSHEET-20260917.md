@@ -409,7 +409,7 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v56, ready for review). Codex has reviewed it THIRTEEN times: round 1
+   (v39–v56, ready for review). Codex has reviewed it FOURTEEN times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
@@ -462,10 +462,17 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
    found `pendingSiblings` empty and skipped the wait — an end-call now waits
    for its batch boundary (the response's done, or the late-batch window,
    which is armed at the late event's arrival for that reason) as well as
-   the siblings it has seen — taken on `8fee09a`** — every one with a test
-   and a mutation check, every thread resolved. A FOURTEENTH pass is
-   requested on that head.
-   **Read that fourteenth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   the siblings it has seen — taken on `8fee09a`**, and **round 14 (09:25 on
+   `2dcf68a`) a P1 and a P2 on the v45 day table: the preservation decision
+   was a read separate from the write, so two replicas could interleave and a
+   failed run still overwrite a reconciled row (the read-decide-write is now
+   one transaction under a per-day advisory lock); and a first-attempt xAI
+   failure wrote 0 calls / $0.00 as if measured (the day is now read for the
+   summary, and a day nobody could read is NULL — a dash on the dashboard,
+   never a zero) — both taken on `3c7d7c5`** — every one with a test and a
+   mutation check, every thread resolved. A FIFTEENTH pass is requested on
+   that head.
+   **Read that fifteenth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
 
 2. **Pull and republish.** `/voice/health` must read the v56 marker below.

@@ -165,6 +165,20 @@ SELECT to_regclass('public.daily_grok_costs');
 SELECT * FROM daily_grok_costs ORDER BY day DESC LIMIT 14;
 ```
 
+### Round 14 on this ship (09:25 UTC)
+
+The day-summary decision is now atomic (one transaction under a per-day
+advisory lock), and a refusal that could not read the day writes NULL in
+`runtime_calls`, `runtime_seconds` and `booked_cents` rather than 0. Same
+queries; one new reading rule — a NULL row is *unknown*, not an empty day:
+
+```sql
+-- A refused day whose measurements are unknown, as opposed to measured at 0.
+SELECT day, reconciled, refused_reason, runtime_calls, booked_cents, last_attempt_at
+FROM daily_grok_costs WHERE runtime_calls IS NULL ORDER BY day;
+-- target: rows here only when both xAI AND the Hub were unreachable in one run.
+```
+
 ## v46 — a success loop is a loop
 
 Number: substantive runtime calls where one tool returned success 11+ times

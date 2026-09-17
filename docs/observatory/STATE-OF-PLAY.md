@@ -10,7 +10,7 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-09-17 09:25 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-09-17 09:40 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
@@ -1066,7 +1066,7 @@ guesses no tool ever made.
 
 ---
 
-## 12. The night of 2026-09-16/17 — one worksheet, eighteen ships, thirteen Codex rounds (written 09-17)
+## 12. The night of 2026-09-16/17 — one worksheet, eighteen ships, fourteen Codex rounds (written 09-17)
 
 **The mandate** (Wayne, 2026-09-17): *"keep working through the worksheet,
 don't wait on me … knock out as many relevant tasks as possible and have
@@ -1088,9 +1088,9 @@ greenlight; the operator merges.
 **Where it is:** `docs/WORKSHEET-20260917.md` is the driving document and its
 *FOR 5AM* block is the hand-off. **PR #321** carries v39–v56 — eighteen ships,
 each with its row in the marker table — plus the round-by-round record of
-**thirteen Codex reviews absorbed** (every finding taken or declined on a
-measurement, every thread answered and resolved) and a fourteenth requested
-on the head. Suite 257 files / 4,701 tests, root and client typecheck clean.
+**fourteen Codex reviews absorbed** (every finding taken or declined on a
+measurement, every thread answered and resolved) and a fifteenth requested
+on the head. Suite 257 files / 4,709 tests, root and client typecheck clean.
 Live Replit was still on v24 when this was written; the deploy marker to look
 for is `voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917`.
 
@@ -1133,6 +1133,11 @@ for is `voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917`.
   end-call now waits for its batch boundary — the response's done, or the
   late-batch window, which is armed at the late event's arrival so a waiting
   end-call can ever see it — as well as the siblings it has seen.
+- **Round 14 hardened the v45 day table twice:** the preservation decision
+  is now one transaction under a per-day advisory lock (two replicas could
+  otherwise interleave and a failed run overwrite a reconciled row), and a
+  refusal that could not read the day writes UNKNOWN rather than 0 calls /
+  $0.00 — a dash on the dashboard, never a measured empty day.
 - **v52 — the headline finding of the night, read from the Hub's own postgres
   log:** the per-call cost UPDATE had been refused at PARSE 3,749 times a day
   since 2026-09-04 (`operator is not unique: unknown + unknown`), so
