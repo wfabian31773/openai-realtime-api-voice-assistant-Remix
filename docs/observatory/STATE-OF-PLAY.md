@@ -10,7 +10,7 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-09-17 11:05 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-09-17 11:10 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
@@ -1066,7 +1066,7 @@ guesses no tool ever made.
 
 ---
 
-## 12. The night of 2026-09-16/17 — one worksheet, nineteen ships, nineteen Codex rounds (written 09-17)
+## 12. The night of 2026-09-16/17 — one worksheet, nineteen ships, twenty Codex rounds (written 09-17)
 
 **The mandate** (Wayne, 2026-09-17): *"keep working through the worksheet,
 don't wait on me … knock out as many relevant tasks as possible and have
@@ -1088,9 +1088,9 @@ greenlight; the operator merges.
 **Where it is:** `docs/WORKSHEET-20260917.md` is the driving document and its
 *FOR 5AM* block is the hand-off. **PR #321** carries v39–v57 — nineteen ships,
 each with its row in the marker table — plus the round-by-round record of
-**nineteen Codex reviews absorbed** (every finding taken or declined on a
-measurement, every thread answered and resolved) and a twentieth requested
-on the head. Suite 257 files / 4,730 tests, root and client typecheck clean.
+**twenty Codex reviews absorbed** (every finding taken or declined on a
+measurement, every thread answered and resolved) and a twenty-first requested
+on the head. Suite 258 files / 4,732 tests, root and client typecheck clean.
 Live Replit was still on v24 when this was written; the deploy marker to look
 for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
 
@@ -1193,6 +1193,12 @@ for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
   go of the stuck attempt, so a claim's total wait is one bound plus the real
   duration of what answers (`1b6eb33`). Base rate: 0 of 2,532 surgery POSTs
   in 30 days over 20 s, max 14.1 s.
+- **Round 20 (10:58) found the real hole under all of that:** the ticketing
+  client cleared its 15 s timer at the HEADERS and read the body unbounded,
+  so a late refusal was possible after all. Fixed at the root (`3f66bc9`):
+  the timer covers the body, an abort mid-body is a timeout and not a
+  bad-body 4xx, and the floor is 23 s so the queue fits under the 45 s
+  watchdog. Real-client test; 3 mutations, 3 caught.
 
 **Live database objects, in no branch:** four partial indexes on `call_logs`
 (05:45 UTC, DDL and reversal in the pack) because the four 5-minute sweeps

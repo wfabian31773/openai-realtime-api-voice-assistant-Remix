@@ -409,7 +409,7 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v56, ready for review). Codex has reviewed it NINETEEN times: round 1
+   (v39–v56, ready for review). Codex has reviewed it TWENTY times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
@@ -500,9 +500,14 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
    on `1b6eb33` — with a stuck first attempt the third waited two bounds
    (50 s) and the runtime's 45 s tool watchdog tore the call down first; a
    bound that passes now lets go of the stuck attempt, so a claim's total
-   wait is one bound plus the real duration of what answers.** A TWENTIETH
-   pass is requested on that head.
-   **Read that twentieth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   wait is one bound plus the real duration of what answers.** **Round 20
+   (10:58, on `1b6eb33`): two P2s on that, both taken at the root on
+   `3f66bc9` — the floor is 23 s so a stuck first plus a full-length second
+   stays under the 45 s watchdog, and the ticketing client's 15 s timeout now
+   covers the BODY read (it was cleared at the headers), so no attempt can
+   settle after the floor and a late answer is a timeout by construction
+   (3 mutations, 3 caught).** A TWENTY-FIRST pass is requested on that head.
+   **Read that twenty-first pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
 
 2. **Pull and republish.** `/voice/health` must read the v57 marker below.
