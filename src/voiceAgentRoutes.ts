@@ -26,7 +26,6 @@ import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifec
 import { callMetadataForDB } from './services/callMetadataStore';
 import { recordingStatusTarget } from './services/recordingStatusTarget';
 import { parkRecording } from './runtime/parkedRecordings';
-import { recordingDeliveryPlan } from './services/recordingDelivery';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
@@ -7696,22 +7695,28 @@ export function setupVoiceAgentRoutes(app: Express): void {
             return;
           }
           /**
-           * WHO CARRIES THE URL (Codex P1, #321; recordingDelivery.ts). The
-           * post-call sync selects rows with callDataSynced = false and its
-           * payload already carries recordingUrl off the row, so before the
-           * sync has run the row is enough and the sync delivers it — once.
-           * This helper used to push AND stamp the synced flag, which
-           * told the sync the call was done and left the ticket with a
-           * recording and no transcript, duration or outcome whenever the
-           * callback beat the five-minute sweep — the common case on the
-           * runtime, where the recording completes at hangup. Only a call the
-           * sync has already finished with is pushed from here, and the flag
-           * is never written from here again.
+           * A PARTIAL PUSH, AND IT NEVER MARKS THE CALL DELIVERED.
+           *
+           * Codex P1 (#321 round 1) and P2 (round 3) — the same fact, twice.
+           * `ticketingSyncService` selects rows with callDataSynced = false and
+           * carries the FULL payload: transcript, duration, outcome, grading,
+           * and recordingUrl off the row. This helper used to push the URL and
+           * then stamp that flag, which told the sync the call was done and
+           * left every runtime ticket with a recording and nothing else. The
+           * round-1 fix let the sync carry the URL and pushed from here only on
+           * a call the sync had already finished — and that opened the round-3
+           * race: a call the sync had already SNAPSHOTTED into its batch when
+           * the callback saved the URL was pushed from neither side, and the
+           * sync's stale payload then marked it done for good.
+           *
+           * So: push the URL here, every time, and never touch the flag. The
+           * sync still runs (the flag is still false), carries the URL again
+           * off the row (the same value — an idempotent update on the app),
+           * and sets the flag itself. Every ordering delivers it.
+           * `ticketingSyncService.test.ts` exempts this ONE site from its
+           * every-push-records-delivery rule for exactly this reason: this is
+           * the partial push that must not.
            */
-          if (recordingDeliveryPlan(callLog) === 'leave_for_sync') {
-            console.info(`[RECORDING] recording URL saved on call log ${callLogId}; the post-call sync will carry it to the ticket`);
-            return;
-          }
           const { ticketingApiClient } = await import('../server/services/ticketingApiClient');
           const result = await ticketingApiClient.updateTicketCallData({
             callSid: callLog.callSid || undefined,
@@ -7719,14 +7724,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
             recordingUrl: recordingUrl,
           });
           if (result.success) {
-            console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid} (call already synced)`);
-            // Already true on every call that reaches this branch — the plan
-            // above admits only a synced call — so this is a no-op in effect.
-            // It stays so the rule ticketingSyncService.test.ts enforces holds
-            // without an exception: every successful push records itself as
-            // delivered. What changed is that it is now UNREACHABLE on a call
-            // the sync has not handled, which is the whole of the Codex P1.
-            await storage.updateCallLog(callLog.id, { callDataSynced: true });
+            console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}${callLog.callDataSynced ? ' (call already synced)' : ' (the post-call sync carries the rest)'}`);
           } else {
             console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
           }

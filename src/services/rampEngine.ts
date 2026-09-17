@@ -194,11 +194,14 @@ export async function onCallerUtterance(
           return { line: RAMP_LINES.collectFax, status };
         }
         const cb = getLedger(callId)?.callbackNumber;
-        if (cb) {
+        // A number we cannot SPEAK is a number we cannot CONFIRM. With
+        // "anonymous" in the ledger this asked for a number while the ramp sat
+        // in CONFIRM_CALLBACK, so the ten digits the caller answered with were
+        // parsed as a yes/no, rejected, and dropped (Codex P2, #321 round 3).
+        const last4 = cb ? speakableLast4(cb) : null;
+        if (last4) {
           status.state = 'CONFIRM_CALLBACK';
-          return speakableLast4(cb)
-            ? { line: RAMP_LINES.confirmCallback(speakableLast4(cb)!), status }
-            : { line: RAMP_LINES.collectCallback, status };
+          return { line: RAMP_LINES.confirmCallback(last4), status };
         }
         status.state = 'COLLECT_CALLBACK';
         return { line: RAMP_LINES.collectCallback, status };
@@ -238,13 +241,13 @@ export async function onCallerUtterance(
         const prior = getLedger(callId)?.intent;
         updateLedger(callId, { intent: `${prior ? prior + ' — ' : ''}${text.trim().slice(0, 300)}` });
         const cb = getLedger(callId)?.callbackNumber;
-        if (cb && !getLedger(callId)?.callbackConfirmed) {
+        const last4 = cb ? speakableLast4(cb) : null;
+        if (last4 && !getLedger(callId)?.callbackConfirmed) {
           status.state = 'CONFIRM_CALLBACK';
-          return speakableLast4(cb)
-            ? { line: RAMP_LINES.confirmCallback(speakableLast4(cb)!), status }
-            : { line: RAMP_LINES.collectCallback, status };
+          return { line: RAMP_LINES.confirmCallback(last4), status };
         }
-        if (!cb) {
+        if (!last4) {
+          // Absent OR unspeakable: collected, never confirmed — see COLLECT_CALLER.
           status.state = 'COLLECT_CALLBACK';
           return { line: RAMP_LINES.collectCallback, status };
         }

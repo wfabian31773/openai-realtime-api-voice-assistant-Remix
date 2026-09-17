@@ -146,11 +146,32 @@ describe('a successful primary push must record itself as delivered', () => {
     'utf8',
   );
 
-  it('every updateTicketCallData success branch marks the call delivered', () => {
+  it('every FULL updateTicketCallData success branch marks the call delivered — and the recording push, a partial one, must not', () => {
     const sites = [...ROUTES.matchAll(/updateTicketCallData\(/g)].map((m) => m.index!);
     expect(sites.length, 'expected the three known push sites').toBeGreaterThanOrEqual(3);
 
+    /**
+     * THE ONE EXEMPTION, and it is the rule's own reasoning pointed the other
+     * way. `pushRecordingToTicketing` sends ONLY a recording URL. If it
+     * recorded delivery, the sweeper would never send the transcript,
+     * duration and outcome for any call whose recording landed first — every
+     * runtime call (Codex P1, #321 round 1). Letting the sweeper carry the
+     * URL instead opened a race: a call already snapshotted into the
+     * sweeper's batch when the URL landed was sent by neither side (Codex P2,
+     * round 3). So that site pushes every time and never touches the flag;
+     * the sweeper re-sends the URL once, with the rest, and marks the call.
+     */
+    const recStart = ROUTES.indexOf('const pushRecordingToTicketing = async');
+    const recEnd = ROUTES.indexOf('console.info(`[RECORDING] Conference ${conferenceSid} recording', recStart);
+    expect(recStart, 'the recording push helper is missing').toBeGreaterThan(0);
+    expect(recEnd).toBeGreaterThan(recStart);
+    expect(
+      ROUTES.slice(recStart, recEnd).includes('callDataSynced: true'),
+      'the recording push must never mark the call delivered — it carries the URL alone',
+    ).toBe(false);
+
     for (const idx of sites) {
+      if (idx > recStart && idx < recEnd) continue; // the partial push, asserted above
       // Look at the window following the call — the success branch and its body.
       const window = ROUTES.slice(idx, idx + 2600);
       expect(
