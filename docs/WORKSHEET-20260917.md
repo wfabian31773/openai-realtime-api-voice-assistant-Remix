@@ -32,7 +32,7 @@ this worksheet contains: **something that was supposed to happen and did not.**
 ## THE WORK, IN ORDER
 
 ### W1 — The record is matched and never carried. RULE ZERO step 5.
-**`[ ]`**
+**`[-]` WRITTEN, THEN REVERTED. Read why — it is the most important entry here.**
 
 **Evidence, 2026-09-16, measured:** 61 date-of-birth refusal events.
 `carry = "no_entry"` on **55** of them — `verifiedIdentity` held nothing for the
@@ -59,7 +59,7 @@ files carrying the chart date. Mutation: remove the write → red.
 ---
 
 ### W2 — Nothing stops a lane asking the same question over and over.
-**`[ ]`**
+**`[~]` FULLY SPECCED, NOT SHIPPED. First thing tomorrow.**
 
 **Evidence, 2026-09-16, measured in SQL:** the agent asked for a date of birth
 **2+ times on 73 calls**, 3+ times on 30, and **25 of those left no ticket.**
@@ -93,7 +93,7 @@ less must not file less.
 ---
 
 ### W3 — 401 calls a day recorded with no disclosure.
-**`[ ]`**
+**`[x]` SHIPPED as v39. 7 assertions, 5 mutations, 5 caught.**
 
 **Evidence:** of 667 substantive calls on 2026-09-16, the 401 on optical,
 surgery, tech and records carried no recording disclosure. California is
@@ -119,7 +119,7 @@ gets read, not raised blindly.
 ---
 
 ### W4 — Three spoken lines that are false.
-**`[ ]`**
+**`[x]` (b) SHIPPED as v40 — 7 assertions, 4 mutations, 4 caught. `[ ]` (a) and (c) remain.**
 
 **(a) The SUCCESS branch speaks the failure line.** `11e362485f`, no-ivr: the
 ticket filed as VA-60434 and the agent said *"I'm sorry, I'm experiencing a
@@ -154,6 +154,208 @@ no phone check at all.** PCP Support was exempted by #273; nothing else was.
 
 ---
 
-## FOR 5AM
+## FOR 5AM — ONE INSTRUCTION
 
-Filled in as items complete. One instruction, not a discussion.
+**Pull and republish. That is it.**
+
+The deployment is running a build older than v37. Everything below is already
+merged or is in PR #321 waiting for you.
+
+### What the republish turns on
+
+| | what it does | what it is worth |
+|---|---|---|
+| **v37** | the PCP intake stops asking for a title and an email BEFORE filing | **31 lost PCP requests on 2026-09-16 — the single biggest killer in the fleet** |
+| **v38** | a tool call is persisted when it finishes, not by a 2h in-memory reaper | PCP's `tool_call_count` was NULL on 90.9% of calls; nothing could be measured |
+| **v39** (PR #321) | the four queue lanes say the call is recorded | **401 calls/day recorded with no disclosure, in a two-party-consent state** |
+| **v40** (PR #321) | no more *"the number ending in ."* or *"ending in \"mous\""* | 6 call sites |
+
+### How to check the republish actually took, in ten seconds
+
+Do not take my word or yours for it — the marker and the behaviour both say so.
+
+```
+GET /voice/health   ->   voice-runtime-v40-no-invented-callback-number-20260917
+```
+
+and, from the database, the v37 signature disappearing from live traffic:
+
+```sql
+-- If v37 is live this goes to ~0 on pcp.
+SELECT to_char(created_at AT TIME ZONE 'UTC','MM-DD HH24') AS hr,
+       count(*) FILTER (WHERE duration>=30) AS subst,
+       count(*) FILTER (WHERE duration>=30 AND transcript ILIKE '%email address%') AS email_ask
+FROM call_logs WHERE agent_used='pcp' AND created_at >= now() - interval '12 hours'
+GROUP BY 1 ORDER BY 1;
+```
+
+**This is the check I should have run yesterday before telling you to
+republish.** It is why I could tell you tonight that v37 merged at 18:51 UTC and
+still never served a call.
+
+---
+
+## THE THREE DECISIONS I NEED, AND NOTHING ELSE
+
+Each is a yes/no. None of them blocks the republish.
+
+**1. The date-of-birth loop on the after-hours line.** `noIvrAgent`'s own
+`create_ticket` refuses a ticket without a complete date of birth, with no
+counter and no escape — it can refuse forever, which is the call that asked
+fifteen times. The queue lanes solved this with "ask once, then file anyway".
+**Do I give no-ivr the same escape?** The risk is that the after-hours ticket
+API may reject a payload with no date of birth, and I would rather ask than
+find out on live overnight traffic.
+
+**2. Ticket consolidation outside PCP.** You exempted PCP Support because a
+clinic switchboard calls many times a day about different patients. Thirteen
+tickets on 2026-09-16 merged unrelated callers on the OTHER departments. One arm
+matches on **first+last name with no phone check at all**, within 24 hours.
+**Do I delete that name-only arm everywhere?** On the patient lanes the
+phone-based arm is usually right and I would leave it alone.
+
+**3. The emergency word list.** One surgery call said "detached retina" inside
+an ordinary scheduling question and got a 911 warning. Another described
+post-op flashes and a halo — the classic warning sign — and got nothing.
+**Which way do you want it to err?** Purely clinical, so it is yours. The
+half that is mine — the agent reading its own rule out loud — is already on the
+list to fix.
+
+---
+
+## WHAT I DID NOT DO, AND WHY — read this before anything else
+
+**I wrote a fix for the date-of-birth carry, then reverted it.** It would have
+kept a patient's date of birth after the lookup came back ambiguous about a
+shared name. A test was already pinning that behaviour, with its reason written
+out, and it is the same wrong-date-of-birth hazard three separate builds name as
+their guard. I also could not measure how many calls it would actually help,
+because the two branches are indistinguishable in the data we record.
+
+Trading a known hazard for an unmeasurable gain is the thing you told me to
+stop doing. So it is not in the PR — the reasoning is under W1 above, along with
+the one-line telemetry change that would make it answerable with data instead of
+an argument.
+
+
+---
+
+# WHAT HAPPENED, ITEM BY ITEM
+
+## W0 `[x]` — `npm test` could not be trusted, so nothing else could be
+
+No vitest config existed, so a bare run collected the compiled suite under
+`dist/`: **36 files, 113 tests, all failing with ENOENT** on paths that only
+exist in `src/`. The cost was not the red — it was that the red meant nothing.
+With `dist` excluded: **232 files / 4,454 tests, all green.** That is the
+baseline every number below is measured against.
+
+An earlier draft of the config also pinned `include` and silently dropped 17
+files / 226 tests under `server/` and `client/` — the same failure pointed the
+other way. Only `exclude` is set.
+
+## W1 `[-]` — I wrote the fix, then reverted it. This is the entry to read.
+
+`carry = no_entry` on 55 of 61 date-of-birth refusals means `verifiedIdentity`
+held nothing for the call, and on 33 of those `lookup_patient` HAD matched
+somebody. Tracing it found the mechanism: on an ambiguous same-name lookup,
+`sharedPatientTools.ts:425` calls `forgetIfSameName`, which **deletes the whole
+entry** — including a date of birth pre-context had already written.
+
+I changed it to DEMOTE (`certain: false`) instead of delete. Both readers that
+can do damage gate on `certain`; the DOB readers deliberately do not. It looked
+right, the suite went green but for one test — and that test was the point:
+
+> *"the date of birth goes with it: the name guard cannot separate people who
+> share a name, which is exactly the case that got here."*
+
+**That is the wrong-DOB hazard v26, v27 and v28 each name as their guard**, and
+an ambiguous lookup is genuine contrary evidence about identity. Then the
+decisive fact: the subagent trace established that the ambiguous branch and the
+plain not-found branch are **byte-identical in `tool_timeline`** — so I cannot
+measure how many of those 33 calls are actually this branch.
+
+Shipping a safety-relevant change on an unmeasurable population is the exact
+thing this operation is trying to stop doing. Reverted.
+
+**What would settle it:** `toolTimeline`'s outcome allow-list carries
+`matched_by` and `identity_is_certain` but not `candidate_count` or `found`.
+Adding `found` makes the two branches separable, and then this is answerable
+with a day of data rather than an argument.
+
+## W2 `[~]` — specced in full, deliberately not shipped
+
+The recon is complete and is the reason it is not shipped tonight:
+
+- `conversationLoopGuard` already counts asks per topic per call and uses
+  `classifyAsk` — **the same function the grader used to produce the 73 / 30 /
+  15 figures.** It is the only pipeline-agnostic counter in the repo.
+- It is wired on the OLD CORE ONLY. **Nothing under `src/runtime/` imports it**,
+  so the four queue lanes and pcp have no ask counter at all.
+- It did not stop the 15-ask call because **it only injects a system message**,
+  and `src/director/director.ts:11-13` records exactly that: *"The existing
+  conversationLoopGuard DID fire its directive on the third ask. The model
+  ignored it and asked four more times."* Each intervention also fires at most
+  once per topic per call, so a call gets one nudge at 3, one at 5, and nothing
+  at 6…15.
+- The escalating layer that would BIND (`inject` → `author` → `force_exit`)
+  exists and is dark: `.replit:87` sets `DIRECTOR_AGENTS = ""`.
+- On the queue lanes the TOOL path is already bounded — `decideDobEscape`
+  allows exactly one re-ask per (call, tool). **So those 18 surgery / 18 tech /
+  7 optical re-asks are happening in SPEECH, not through a tool**, which is why
+  no tool-side counter sees them.
+- `decideDobEscape` IS unbounded in one case: a sentinel or missing CallSid
+  makes `gateRefusalsSoFar` return 0 forever, so it answers `askAgain: true`
+  every time. That is CLAUDE.md's open "11 of 72 optical calls never reached the
+  CallSid-keyed escape".
+- no-ivr — the worst lane, 19 of 20 — is on the old core and its `create_ticket`
+  is hand-built: `noIvrAgent.ts:1148-1154` returns a date-of-birth validation
+  failure with **no counter, no key and no escape**, so it can return it on
+  every invocation for the life of the call. That is the 15-ask loop.
+
+**Why not tonight:** the no-ivr handler's schema declares `date_of_birth` as a
+required `z.string()`, so giving it the queue lanes' file-anyway escape may
+produce payloads the after-hours ticket API rejects — which is the 2026-09-14
+shape (17 requests → HTTP 400) pointed at the busiest overnight lane. That needs
+the API's answer first, not a guess at 3am.
+
+## W3 `[x]` and W4(b) `[x]` — shipped, see PR #321
+
+## W5 `[!]` — ticketing app, different repo, and half of it is a policy question
+
+---
+
+# THE PER-LANE DEATH MAP (S-03), which I did instead of forcing a third fix
+
+**The question that produced every PCP win — "where did the call die, by LAST
+QUESTION ASKED" — had never been asked of the other five lanes.** Now it has.
+Calls with no ticket, caller spoke at least twice, 2026-09-16:
+
+| lane | died on | calls |
+|---|---|---|
+| **pcp** | **email** | **31** |
+| pcp | other · date of birth · opening | 22 · 4 · 2 |
+| **surgery** | **date of birth** | **12** |
+| surgery | surgeon · other · opening · last name | 5 · 5 · 4 · 3 |
+| **tech** | other | 10 |
+| tech | **date of birth** | **9** |
+| tech | last name · closing | 3 · 2 |
+| **optical** | **which office** | **6** |
+| optical | date of birth · last name | 5 · 2 |
+| **no-ivr** | **which office** | **6** |
+| records | other · date of birth | 4 · 2 |
+
+**Read across it and the fleet has four killers, not twenty:**
+
+| | calls |
+|---|---|
+| the pcp email question | **31 — already fixed by v37, merged, never deployed** |
+| date of birth | **32**, across five lanes |
+| which office | **12**, optical and no-ivr |
+| last name | 8 |
+| surgeon | 5 |
+
+So after the republish lands v37, **the single biggest remaining killer in the
+fleet is the date-of-birth ask, at 32 calls across five lanes** — and W2 above
+is the reason it keeps happening. That is the ranked work list for tomorrow,
+derived from the calls rather than from a category.
