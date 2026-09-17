@@ -141,6 +141,10 @@ nothing failed"; a timeout is retried once against the app's idempotency key.
 one call) and *"the number ending in \"mous\""* (no-ivr, `8d536d6646`).
 **(c) A wrong identifier read aloud then corrected** — 7 of 305 calls that spoke
 a number. Lower value than I first said; it is last.
+**Measured and left, by your rule on outliers:** the PCP line's *"I wasn't able
+to look that up without a date of birth"* spoken while the lookup had just
+succeeded — 1 of 598 substantive PCP calls over 09-14..16, improvised by the
+model (the sentence is in no prompt or tool). Under one percent; not chased.
 
 ---
 
@@ -277,8 +281,9 @@ lookup had just succeeded. Different shape.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
    — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
    *Build* checks are green; *Type check* is red with the 22 errors that are
-   red on `main` too (`lib/intake`, missing optional deps — identical with the
-   change stashed). Mark it ready and merge; it needs nothing from the Remix side.
+   red on `main` too (the latest `main` run, 02:29, concluded failure the same
+   way). Marked ready for review at 04:15 so Codex sees it before you do; it
+   needs nothing from the Remix side.
 
 **One more thing that is yours alone: the xAI management key pasted into an
 earlier session's transcript still has to be rotated.** Console → Settings →
@@ -448,6 +453,16 @@ ask counter. That needs a runtime-owned counter over `classifyAsk` — the
 `conversationLoopGuard` shape, but BINDING (a tool result the model must
 answer, not a nudge). Not built tonight: it is a new runtime component on the
 lanes carrying the day volume and needs its own before/after.
+
+**And the recommendation, which is the reason it is not built tonight:** the
+runtime's speech re-asks were measured on a build WITHOUT v25–v28 — the chart
+date-of-birth inherit, the recognised caller no longer asked for a surname or a
+date we hold, the ask script agreeing with the block. Those four exist to
+remove the re-ask at its source and have never served a call. Building a
+counter on top of them before their after-number exists is a fix on an
+unmeasured population — the thing this operation is trying to stop doing. Take
+the after-arm the first business day on v48; the counter is next only if the
+re-asks survive it.
 
 The recon that led here, kept because it is what makes the above safe:
 
