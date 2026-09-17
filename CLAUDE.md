@@ -2812,4 +2812,5 @@ Start there before debugging anything in these areas:
 | build or change a queue agent | `queue-agents.md` |
 | file, route or classify a ticket | `ticketing-api-contract.md` |
 | touch ticket creation on the after-hours path | `ticket-creation-lock.md` |
+| add a column to `call_logs` that the ticket needs, or touch the post-call sync | `the-sync-snapshot-race.md` |
 | quote a number at Wayne | `measurement-traps.md` |
