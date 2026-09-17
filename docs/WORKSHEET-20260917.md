@@ -59,7 +59,8 @@ files carrying the chart date. Mutation: remove the write → red.
 ---
 
 ### W2 — Nothing stops a lane asking the same question over and over.
-**`[~]` FULLY SPECCED, NOT SHIPPED. First thing tomorrow.**
+**`[x]` THE WORST LANE IS FIXED — v41, `noIvrAgent.ts` + `noIvrDobEscape.test.ts`.
+`[~]` the runtime lanes' SPEECH re-asks are still open (see the W2 section below).**
 
 **Evidence, 2026-09-16, measured in SQL:** the agent asked for a date of birth
 **2+ times on 73 calls**, 3+ times on 30, and **25 of those left no ticket.**
@@ -283,9 +284,28 @@ thing this operation is trying to stop doing. Reverted.
 Adding `found` makes the two branches separable, and then this is answerable
 with a day of data rather than an argument.
 
-## W2 `[~]` — specced in full, deliberately not shipped
+## W2 `[x]` on no-ivr (v41) · `[~]` on the runtime lanes
 
-The recon is complete and is the reason it is not shipped tonight:
+**SHIPPED, 02:20 UTC:** no-ivr's `create_ticket` now calls `decideDobEscape`,
+keyed on the call SID — asks once, then files with `patientDOB: 'Unknown'` and
+`DATE OF BIRTH UNAVAILABLE/UNMATCHED` in `additionalDetails` (NOT at the head
+of `reasonForCalling`, because the `Request Type:` header must stay the first
+line). The secondary name+DOB lookup is skipped on the escape path so a partial
+parse cannot feed it. Red-then-green offline on the real agent; 6 mutations,
+5 caught, the sixth the console marker by design. **The blocker below was
+settled by `voice_agent_api_logs`, not by a ruling:** 347 of 347 accepted
+no-ivr POSTs carried a `patientDOB`, the B2B path already sends `'Unknown'`,
+and the 10 rejections in 14 days were `patientFullName`/`surgeon` — never the
+date. So the placeholder is a value the API has accepted all along.
+
+**What it does not fix:** the 18 surgery / 18 tech / 7 optical re-asks happen
+in SPEECH (the tool path there is already bounded), and no runtime lane has an
+ask counter. That needs a runtime-owned counter over `classifyAsk` — the
+`conversationLoopGuard` shape, but BINDING (a tool result the model must
+answer, not a nudge). Not built tonight: it is a new runtime component on the
+lanes carrying the day volume and needs its own before/after.
+
+The recon that led here, kept because it is what makes the above safe:
 
 - `conversationLoopGuard` already counts asks per topic per call and uses
   `classifyAsk` — **the same function the grader used to produce the 73 / 30 /
@@ -313,11 +333,9 @@ The recon is complete and is the reason it is not shipped tonight:
   failure with **no counter, no key and no escape**, so it can return it on
   every invocation for the life of the call. That is the 15-ask loop.
 
-**Why not tonight:** the no-ivr handler's schema declares `date_of_birth` as a
-required `z.string()`, so giving it the queue lanes' file-anyway escape may
-produce payloads the after-hours ticket API rejects — which is the 2026-09-14
-shape (17 requests → HTTP 400) pointed at the busiest overnight lane. That needs
-the API's answer first, not a guess at 3am.
+**The worry that held it overnight — that the after-hours ticket API might
+reject a DOB-less payload, the 2026-09-14 shape pointed at the busiest
+overnight lane — is answered above by the API's own logs, and the fix shipped.**
 
 ## W3 `[x]` and W4(b) `[x]` — shipped, see PR #321
 

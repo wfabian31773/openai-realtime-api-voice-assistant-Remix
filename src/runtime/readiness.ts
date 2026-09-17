@@ -217,9 +217,16 @@ import { callEnvironment } from "./callRecord";
  * also a unique patients_master phone hit. `identityCertainMeaning(pc)`
  * lives beside the script. Marker stays v28 — this is the leftover that
  * made v28 not pull-safe, not a new ship. Stacks on v27.
+ *
+ * v41: the after-hours line's `create_ticket` asks for a date of birth ONCE
+ * and then files with the date marked unavailable/unmatched — the queue
+ * lanes' 2026-09-04 escape reaching the one lane that built its own tool and
+ * so never had it (the fifteen-ask call of 2026-09-16). no-ivr is on the old
+ * core, so this marker dates the BUILD rather than a runtime lane, the same
+ * way v18 did for that lane's prompt trim. Stacks on v40.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v40-no-invented-callback-number-20260917";
+  "voice-runtime-v41-the-after-hours-line-asks-once-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -15,6 +15,9 @@ import { URGENT_SYMPTOMS, getCurrentDateTimeContext } from "../config/knowledgeB
 // of its entries are conditionals written as prose. See afterHoursTriage.ts.
 import { renderTriagePrompt } from "../tools/afterHoursTriage";
 import { recordingExecute } from "../services/toolTimeline";
+// The queue lanes' "ask once, then file anyway" ruling (operator, 2026-09-04),
+// which this lane never reached because it builds create_ticket by hand.
+import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from "../tools/dobEscape";
 import { buildCompactLocationReference } from "../config/azulVisionKnowledge";
 import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
@@ -1145,13 +1148,35 @@ The ticket will include schedule context (last appointment info) automatically.`
                          dobLower.includes('unavailable') || dobLower.includes('none') ||
                          dobLower === '';
       
-      const parsedDOB = isB2bNoDob ? null : parseDateOfBirth(params.date_of_birth);
+      let parsedDOB = isB2bNoDob ? null : parseDateOfBirth(params.date_of_birth);
+      // ASK ONCE, THEN FILE ANYWAY. Until 2026-09-17 this refusal had no
+      // counter, no key and no escape, so it could be returned on every
+      // invocation for the life of the call — measured on 2026-09-16 as the
+      // fifteen-ask loop, on the lane that takes all overnight volume. The
+      // queue lanes have bounded the same gate at one ask per call since
+      // 2026-09-04 (`decideDobEscape`, keyed on the call SID); this is that
+      // ruling reaching the after-hours line. The value the placeholder
+      // sends ('Unknown') is the one the B2B path below has always sent and
+      // the ticket API has accepted on every POST.
+      let dobEscapeStatus: DobStatus | null = null;
       if (!isB2bNoDob && (!parsedDOB?.month || !parsedDOB?.day || !parsedDOB?.year)) {
-        return {
-          success: false,
-          validation_errors: ["complete date of birth (month, day, and year)"],
-          message: "Missing required information: complete date of birth (month, day, and year)",
-        };
+        const escape = decideDobEscape(
+          metadata.callSid ?? '',
+          'create_ticket',
+          (params.date_of_birth ?? '').trim(),
+        );
+        if (escape.askAgain) {
+          return {
+            success: false,
+            validation_errors: ["complete date of birth (month, day, and year)"],
+            message: "Missing required information: complete date of birth (month, day, and year)",
+          };
+        }
+        dobEscapeStatus = escape.status;
+        console.info(dobEscapeMarker('create_ticket', dobEscapeStatus, metadata.callSid ?? ''));
+        // A partial parse must not feed the name+DOB lookup below — the
+        // secondary lookup is guarded on parsedDOB being usable.
+        parsedDOB = null;
       }
       
       if (isB2bNoDob) {
@@ -1227,14 +1252,20 @@ The ticket will include schedule context (last appointment info) automatically.`
       // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
       const result = await SyncAgentService.submitSimplifiedTicket({
         patientFullName,
-        patientDOB: isB2bNoDob ? 'Unknown' : params.date_of_birth, // B2B callers may not have DOB
+        patientDOB: (isB2bNoDob || dobEscapeStatus) ? 'Unknown' : params.date_of_birth, // B2B callers may not have DOB; the escape never sends unreadable words in a date field
         reasonForCalling: finalSummary,
         preferredContactMethod: preferredContactSimplified,
         patientPhone: callbackNormalized,
         patientEmail: params.email,
         lastProviderSeen: params.doctor_name || enrichedContext?.lastProviderSeen,
         locationOfLastVisit: params.location || enrichedContext?.lastLocationSeen,
-        additionalDetails: params.appointment_time ? `Appointment: ${params.appointment_time}` : undefined,
+        // The status note goes HERE and not at the head of reasonForCalling:
+        // the `Request Type:` header must stay the first line of that field
+        // (operator, 2026-07-25). The note never carries the caller's words.
+        additionalDetails: [
+          dobEscapeStatus ? dobStatusNote(dobEscapeStatus) : null,
+          params.appointment_time ? `Appointment: ${params.appointment_time}` : null,
+        ].filter(Boolean).join('\n') || undefined,
         callSid: metadata.callSid,
         callerPhone: metadata.callerPhone,
         dialedNumber: metadata.dialedNumber,
