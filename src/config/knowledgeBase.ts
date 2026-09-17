@@ -8,6 +8,7 @@ import {
   getLocationsList,
   type Location
 } from './azulVisionKnowledge';
+import { speakableLast4 } from '../utils/timeAware';
 
 export const URGENT_SYMPTOMS = {
   symptoms: [
@@ -147,9 +148,13 @@ export function buildGreeterSystemPrompt(options: {
       break;
   }
 
-  const callerContext = callerPhone 
-    ? `The caller's phone number is ${callerPhone}. You can confirm: "I see you're calling from a number ending in ${callerPhone.slice(-4)}. Is that the best number for a callback?"`
-    : 'Caller ID is not available. You will need to ask for their callback number.';
+  // `speakableLast4` rather than a truthiness check on `callerPhone`: a
+  // withheld caller ID arrives as a WORD, and `"anonymous".slice(-4)` is
+  // "mous", which was spoken to a caller on 2026-09-16.
+  const last4 = speakableLast4(callerPhone);
+  const callerContext = last4
+    ? `The caller's phone number is ${callerPhone}. You can confirm: "I see you're calling from a number ending in ${last4}. Is that the best number for a callback?"`
+    : 'Caller ID is not available or not a number we can ring back. You will need to ask for their callback number.';
 
   return `You are the Greeter Agent for Azul Vision's after-hours service.
 
@@ -280,7 +285,7 @@ ${missingFields.length > 0 ? `
 ` : '1. ALL REQUIRED INFO COLLECTED - Proceed to ticket creation'}
 
 2. VERIFY PHONE NUMBER:
-${callerPhone ? `   Say: "I have your callback number as ending in ${callerPhone.slice(-4)}. Is that correct?"` : '   Ask: "What is the best number to reach you?"'}
+${speakableLast4(callerPhone) ? `   Say: "I have your callback number as ending in ${speakableLast4(callerPhone)}. Is that correct?"` : '   Ask: "What is the best number to reach you?"'}
 
 3. ASK OPTIONAL QUESTIONS (if not already known):
    - "How would you prefer we contact you - phone, text, or email?"

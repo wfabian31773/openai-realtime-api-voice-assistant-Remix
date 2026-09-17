@@ -13,6 +13,7 @@
  * never traps a caller).
  */
 import { getLedger, updateLedger } from './callFactsLedger';
+import { speakableLast4 } from '../utils/timeAware';
 
 export type RampState =
   | 'CAPTURE_INTENT'
@@ -141,7 +142,7 @@ export async function onCallerUtterance(
       case 'TAKE_MESSAGE': return 'What would you like the team to know?';
       case 'CONFIRM_CALLBACK': {
         const cb = getLedger(callId)?.callbackNumber;
-        return cb ? RAMP_LINES.confirmCallback(cb.slice(-4)) : RAMP_LINES.collectCallback;
+        return speakableLast4(cb) ? RAMP_LINES.confirmCallback(speakableLast4(cb)!) : RAMP_LINES.collectCallback;
       }
       case 'COLLECT_CALLBACK': return RAMP_LINES.collectCallback;
       case 'COLLECT_FAX': return RAMP_LINES.collectFax;
@@ -195,7 +196,9 @@ export async function onCallerUtterance(
         const cb = getLedger(callId)?.callbackNumber;
         if (cb) {
           status.state = 'CONFIRM_CALLBACK';
-          return { line: RAMP_LINES.confirmCallback(cb.slice(-4)), status };
+          return speakableLast4(cb)
+            ? { line: RAMP_LINES.confirmCallback(speakableLast4(cb)!), status }
+            : { line: RAMP_LINES.collectCallback, status };
         }
         status.state = 'COLLECT_CALLBACK';
         return { line: RAMP_LINES.collectCallback, status };
@@ -237,7 +240,9 @@ export async function onCallerUtterance(
         const cb = getLedger(callId)?.callbackNumber;
         if (cb && !getLedger(callId)?.callbackConfirmed) {
           status.state = 'CONFIRM_CALLBACK';
-          return { line: RAMP_LINES.confirmCallback(cb.slice(-4)), status };
+          return speakableLast4(cb)
+            ? { line: RAMP_LINES.confirmCallback(speakableLast4(cb)!), status }
+            : { line: RAMP_LINES.collectCallback, status };
         }
         if (!cb) {
           status.state = 'COLLECT_CALLBACK';

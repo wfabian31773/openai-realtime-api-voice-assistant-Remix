@@ -17,6 +17,7 @@
  * `identityArgGuard` are both dependency-free, and that is the whole point.
  */
 import { getPacificTimeContext } from '../utils/timeAware';
+import { speakableLast4 } from '../utils/timeAware';
 import { surnameDisagrees } from '../services/identityArgGuard';
 
 export interface AzulPrecontext {
@@ -680,9 +681,16 @@ function buildDynamicTail(metadata?: AzulSchedulingMetadata): string {
   // style, so it is deliberately not repeated here.
   const parts: string[] = [''];
   if (metadata?.callerPhone) {
-    const last4 = metadata.callerPhone.replace(/\D/g, '').slice(-4);
+    // Gated on `speakableLast4`, not on `callerPhone` being truthy. A withheld
+    // caller ID arrives as a WORD, so the old `.replace(/\D/g,'').slice(-4)`
+    // produced an empty string and the agent said "ending in ." — and simply
+    // swapping in the helper would have said "ending in null", which is worse.
+    // No usable number means no offer to confirm one: ask instead.
+    const last4 = speakableLast4(metadata.callerPhone);
     parts.push(
-      `# Call context\n\nThe caller's phone number is ${metadata.callerPhone}. Offer it as the callback number ("Is this number ending in ${last4} the best one to reach you?") rather than making them read out digits.`,
+      last4
+        ? `# Call context\n\nThe caller's phone number is ${metadata.callerPhone}. Offer it as the callback number ("Is this number ending in ${last4} the best one to reach you?") rather than making them read out digits.`
+        : `# Call context\n\nCaller ID did not give us a number we can ring back. Ask the caller for the best number to reach them; do NOT offer one to confirm.`,
     );
   }
   const pc = metadata?.precontext;
