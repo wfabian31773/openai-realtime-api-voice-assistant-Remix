@@ -409,7 +409,7 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v56, ready for review). Codex has reviewed it SEVENTEEN times: round 1
+   (v39–v56, ready for review). Codex has reviewed it EIGHTEEN times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
@@ -491,8 +491,13 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
    **Round 17 (10:26, on `5429bf9`): one P2 on that wait, taken on `34d3ecc` —
    one 20 s deadline for the whole queue where each predecessor may take 15 s;
    now one bounded wait per predecessor, re-armed on each settle (3 mutations,
-   3 caught).** An EIGHTEENTH pass is requested on that head.
-   **Read that eighteenth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   3 caught).** **Round 18 (10:38, on `34d3ecc`): one P2 on that, taken on
+   `8a11864` — every waiter started its own bound on arrival, so a predecessor
+   past the bound (the create path can legitimately take ~21.5 s) released all
+   of them together; claims are now queued and released one at a time, and the
+   floor is 25 s, above the longest legitimate attempt (3 mutations, 3
+   caught).** A NINETEENTH pass is requested on that head.
+   **Read that nineteenth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
 
 2. **Pull and republish.** `/voice/health` must read the v57 marker below.

@@ -10,7 +10,7 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-09-17 10:50 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-09-17 11:00 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
@@ -1066,7 +1066,7 @@ guesses no tool ever made.
 
 ---
 
-## 12. The night of 2026-09-16/17 — one worksheet, nineteen ships, seventeen Codex rounds (written 09-17)
+## 12. The night of 2026-09-16/17 — one worksheet, nineteen ships, eighteen Codex rounds (written 09-17)
 
 **The mandate** (Wayne, 2026-09-17): *"keep working through the worksheet,
 don't wait on me … knock out as many relevant tasks as possible and have
@@ -1088,9 +1088,9 @@ greenlight; the operator merges.
 **Where it is:** `docs/WORKSHEET-20260917.md` is the driving document and its
 *FOR 5AM* block is the hand-off. **PR #321** carries v39–v57 — nineteen ships,
 each with its row in the marker table — plus the round-by-round record of
-**seventeen Codex reviews absorbed** (every finding taken or declined on a
-measurement, every thread answered and resolved) and an eighteenth requested
-on the head. Suite 257 files / 4,726 tests, root and client typecheck clean.
+**eighteen Codex reviews absorbed** (every finding taken or declined on a
+measurement, every thread answered and resolved) and a nineteenth requested
+on the head. Suite 257 files / 4,729 tests, root and client typecheck clean.
 Live Replit was still on v24 when this was written; the deploy marker to look
 for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
 
@@ -1181,6 +1181,12 @@ for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
   one bounded wait per predecessor, re-armed on each settle (`34d3ecc`; 3
   mutations, 3 caught). Exposure 0 in the window; taken because the wait is
   this PR's.
+- **Round 18 (10:38) caught the wait one step further again:** every waiter
+  started its own bound on arrival, so one predecessor past the bound — and
+  the create path can legitimately take ~21.5 s with its warm-up — released
+  all of them together. Claims are now queued and released one at a time,
+  and the floor is 25 s, above the longest legitimate attempt (`8a11864`; 3
+  mutations, 3 caught).
 
 **Live database objects, in no branch:** four partial indexes on `call_logs`
 (05:45 UTC, DDL and reversal in the pack) because the four 5-minute sweeps
