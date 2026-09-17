@@ -457,7 +457,7 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
    agent-filed tickets on 09-14, 280 of 368, 296 of 387 carry no quality score
    or outcome while every call row has one — so the grade's write re-opens the
    sync and the sync's mark-done refuses a row whose grade landed mid-flight —
-   all three taken on the round-12 commit** — every one with a test and a
+   all three taken on `2dcf68a`** — every one with a test and a
    mutation check, every thread resolved. A THIRTEENTH pass is requested on
    that head.
    **Read that thirteenth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
