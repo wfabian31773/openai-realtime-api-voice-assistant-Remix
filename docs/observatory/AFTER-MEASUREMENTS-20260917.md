@@ -417,6 +417,20 @@ Guards: filing rate per lane must not fall; `dead_air` outcomes must FALL and no
 `caller_hangup` (the second query above, `dead_air_total`); and `provider_failure` per day
 must not rise — a follow-up requested INTO an open response is what that would look like.
 
+### Round 9 on this ship (07:21/07:23 UTC)
+
+Two things changed after the section above was written, and neither changes
+the queries. The follow-up for a LATE batch (function-call events after their
+response's done) now waits `LATE_TOOL_BATCH_GRACE_MS` = 250 ms after the last
+late event settles, so two late tool calls from one response are one
+follow-up, not two — the `requested` count in `follow_up_summary` will read 1
+where the first cut of v55 would have read 2 on such a call. And the
+`follow_up_summary` row is retried on the teardown write's backoff and its
+buffer kept for the reaper when the insert fails, so a database blip at
+teardown no longer deletes the row on exactly the calls it made unmeasurable;
+the instrument query above is unbiased toward healthy-database minutes only
+from this build.
+
 ## Also on this build, not a version of its own
 
 **`unclassified_call` by provenance (task #138)** — the sweep stamps

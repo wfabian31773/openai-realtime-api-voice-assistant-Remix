@@ -20,6 +20,7 @@ const q = vi.hoisted(() => ({
   rows: new Map<string, Row>(),
   patches: [] as Array<[string, Record<string, unknown>]>,
   now: 1_000_000_000,
+  tokens: 0,
 }));
 /** The store's lease semantics, as server/storage.ts implements them in SQL:
  * a row is claimable when ungraded, or when it still reads `claimed` from
@@ -27,27 +28,48 @@ const q = vi.hoisted(() => ({
 const claimable = (r: Row, leaseMs: number) =>
   r.gradedAt === null ||
   (r.gradedAt.getTime() < q.now - leaseMs && (r.qualityAnalysis as { grading?: string } | undefined)?.grading === "claimed");
+/** ... and a completion or a release must carry the claim's own token (round 9). */
+const owns = (r: Row | undefined, token: string) =>
+  !!r && (r.qualityAnalysis as { token?: string } | undefined)?.token === token;
+const apply = (r: Row | undefined, patch: Record<string, unknown>) => {
+  if (r && "gradedAt" in patch) r.gradedAt = patch.gradedAt as Date | null;
+  if (r && "sentiment" in patch) r.sentiment = patch.sentiment as string;
+  if (r && "qualityAnalysis" in patch) r.qualityAnalysis = patch.qualityAnalysis;
+};
 vi.mock("../../server/storage", () => ({
   storage: {
     claimCallLogForGrading: async (id: string, leaseMs = LEASE_MS) => {
       const r = q.rows.get(id);
-      if (!r || !claimable(r, leaseMs)) return false;
+      if (!r || !claimable(r, leaseMs)) return null;
+      const token = `tok-${++q.tokens}`;
       r.gradedAt = new Date(q.now);
-      r.qualityAnalysis = { grading: "claimed" };
+      r.qualityAnalysis = { grading: "claimed", token };
+      return token;
+    },
+    completeGradingClaim: async (id: string, token: string, patch: Record<string, unknown>) => {
+      const r = q.rows.get(id);
+      if (!owns(r, token)) return false;
+      q.patches.push([id, patch]);
+      apply(r, patch);
+      return true;
+    },
+    releaseGradingClaim: async (id: string, token: string) => {
+      const r = q.rows.get(id);
+      if (!owns(r, token)) return false;
+      const patch = { gradedAt: null, qualityAnalysis: null };
+      q.patches.push([id, patch]);
+      apply(r, patch);
       return true;
     },
     updateCallLog: async (id: string, patch: Record<string, unknown>) => {
       q.patches.push([id, patch]);
-      const r = q.rows.get(id);
-      if (r && "gradedAt" in patch) r.gradedAt = patch.gradedAt as Date | null;
-      if (r && "sentiment" in patch) r.sentiment = patch.sentiment as string;
-      if (r && "qualityAnalysis" in patch) r.qualityAnalysis = patch.qualityAnalysis;
+      apply(q.rows.get(id), patch);
     },
   },
 }));
 vi.mock("../../server/db", () => ({ db: {} }));
 
-const { CallGradingService } = await import("./callGradingService");
+const { CallGradingService, gradingRequestLifecycleMs, GRADING_REQUEST_TIMEOUT_MS, GRADING_REQUEST_RETRIES } = await import("./callGradingService");
 
 const TRANSCRIPT = "CALLER: " + "words ".repeat(40);
 const ANSWER = {
@@ -74,6 +96,7 @@ beforeEach(() => {
   q.rows = new Map([["c1", { id: "c1", gradedAt: null }]]);
   q.patches.length = 0;
   q.now = 1_000_000_000;
+  q.tokens = 0;
   vi.spyOn(console, "info").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -148,7 +171,7 @@ describe("an abandoned claim is recoverable — Codex P2 on #321, round 8", () =
   it("a claim the process died on — no grade, no release — is taken again once the lease has passed, and not before", async () => {
     // The crash: the store holds the claim and nothing else ever happens to it.
     await (await import("../../server/storage")).storage.claimCallLogForGrading("c1");
-    expect(q.rows.get("c1")!.qualityAnalysis).toEqual({ grading: "claimed" });
+    expect(q.rows.get("c1")!.qualityAnalysis).toMatchObject({ grading: "claimed", token: expect.any(String) });
     const { svc: early, create: earlyCreate } = service(answers);
     q.now += LEASE_MS - 1;
     expect(await early.gradeCall("c1", TRANSCRIPT)).toBeNull();
@@ -181,7 +204,7 @@ describe("the store's own SQL carries the lease — read from the source", () =>
     expect(selector).toMatch(/gradingClaimable\(new Date\(Date\.now\(\) - leaseMs\)\)/);
     const claim = src.slice(src.indexOf("async claimCallLogForGrading("), src.indexOf("async getCallLogsWithStaleGraderVersion("));
     expect(claim).toMatch(/gradingClaimable\(new Date\(Date\.now\(\) - leaseMs\)\)/);
-    expect(claim).toMatch(/qualityAnalysis: GRADING_CLAIM_MARKER/);
+    expect(claim).toMatch(/qualityAnalysis: gradingClaimMarker\(token\)/);
   });
 
   it("the dead-letter and short-transcript stamps never write the marker, so they are never reclaimed", () => {
@@ -189,5 +212,88 @@ describe("the store's own SQL carries the lease — read from the source", () =>
     const backfill = svc.slice(svc.indexOf("async gradeCallsWithoutGrades("));
     for (const m of backfill.matchAll(/updateCallLog\(call\.id, \{ gradedAt: new Date\(\)( \})/g)) expect(m[1]).toBe(" }");
     expect(backfill).not.toMatch(/grading: ['"]claimed['"]/);
+  });
+});
+
+describe("an expired owner cannot touch its successor's row — Codex P2 on #321, round 9", () => {
+  /** A grader whose LLM answer is held until the test releases it. */
+  function gated(answer: () => Promise<unknown>) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const s = service(async () => {
+      await gate;
+      return answer();
+    });
+    return { ...s, release };
+  }
+
+  it("a grade that lands AFTER the lease expired and another worker took the claim is discarded, not written over the successor's", async () => {
+    const first = gated(async () => ({
+      choices: [{ message: { content: JSON.stringify({ ...ANSWER, sentiment: "irate" }) } }],
+    }));
+    const pending = first.svc.gradeCall("c1", TRANSCRIPT); // claims tok-1, waits on the API
+    await Promise.resolve();
+    q.now += LEASE_MS + 1;
+    const { svc: second, create: secondCreate } = service(answers);
+    expect(await second.gradeCall("c1", TRANSCRIPT)).toBeTruthy(); // takes the stale claim (tok-2) and grades
+    expect(secondCreate).toHaveBeenCalledTimes(1);
+
+    first.release();
+    expect(await pending).toBeNull();
+    // The successor's grade stands; the stale owner's answer went nowhere.
+    expect(q.rows.get("c1")!.sentiment).toBe("neutral");
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("taken over"));
+  });
+
+  it("a late FAILURE from the expired owner cannot release the successor's claim", async () => {
+    const first = gated(async () => {
+      throw new Error("llm down, eventually");
+    });
+    const pending = first.svc.gradeCall("c1", TRANSCRIPT); // tok-1
+    await Promise.resolve();
+    q.now += LEASE_MS + 1;
+    const second = gated(answers);
+    const secondPending = second.svc.gradeCall("c1", TRANSCRIPT); // tok-2, still grading
+    await Promise.resolve();
+    expect(q.rows.get("c1")!.qualityAnalysis).toMatchObject({ grading: "claimed", token: "tok-2" });
+
+    first.release();
+    expect(await pending).toBeNull();
+    // The stale owner's release was a no-op: the successor's claim is intact.
+    expect(q.rows.get("c1")!.qualityAnalysis).toMatchObject({ grading: "claimed", token: "tok-2" });
+    expect(q.rows.get("c1")!.gradedAt).not.toBeNull();
+
+    second.release();
+    expect(await secondPending).toBeTruthy();
+    expect(q.rows.get("c1")!.sentiment).toBe("neutral");
+  });
+
+  it("the grading request cannot outlive the lease — the client is bounded, and the bound fits", () => {
+    // LEASE_MS is this file's copy of GRADING_CLAIM_LEASE_MS; the pin below
+    // keeps the copy honest, so the comparison is against the real lease.
+    expect(readFileSync(new URL("../../server/storage.ts", import.meta.url), "utf8")).toMatch(/export const GRADING_CLAIM_LEASE_MS = 10 \* 60 \* 1000;/);
+    expect(gradingRequestLifecycleMs()).toBeLessThan(LEASE_MS);
+    const svc = readFileSync(new URL("./callGradingService.ts", import.meta.url), "utf8");
+    const ctor = svc.slice(svc.indexOf("constructor() {"), svc.indexOf("runDeterministicGraders("));
+    expect(ctor).toMatch(/timeout: GRADING_REQUEST_TIMEOUT_MS/);
+    expect(ctor).toMatch(/maxRetries: GRADING_REQUEST_RETRIES/);
+    // The lifecycle is computed from the same two numbers the client is built with.
+    expect(gradingRequestLifecycleMs()).toBe((GRADING_REQUEST_RETRIES + 1) * GRADING_REQUEST_TIMEOUT_MS + GRADING_REQUEST_RETRIES * 8_000);
+  });
+
+  it("the store's completion and release both go through the token fence — read from the source", () => {
+    const src = readFileSync(new URL("../../server/storage.ts", import.meta.url), "utf8");
+    const fence = src.slice(src.indexOf("function ownsGradingClaim("), src.indexOf("export class DatabaseStorage"));
+    expect(fence).toMatch(/->>'token' = \$\{token\}/);
+    for (const method of ["async completeGradingClaim(", "async releaseGradingClaim("]) {
+      const at = src.indexOf(method);
+      expect(at, `${method} exists`).toBeGreaterThan(0);
+      const body = src.slice(at, src.indexOf(".returning(", at));
+      expect(body, `${method} is fenced`).toMatch(/\.where\(ownsGradingClaim\(id, token\)\)/);
+    }
+    // And the grader never falls back to the unfenced write while it holds a claim.
+    const svc = readFileSync(new URL("./callGradingService.ts", import.meta.url), "utf8");
+    const gradeCall = svc.slice(svc.indexOf("let claimToken: string | null = null;"), svc.indexOf("private async releaseGradingClaim("));
+    expect(gradeCall).toMatch(/if \(claimToken\) \{[\s\S]*?completeGradingClaim\(callLogId, claimToken, graded\)[\s\S]*?\} else \{\s*await storage\.updateCallLog\(callLogId, graded\);/);
   });
 });

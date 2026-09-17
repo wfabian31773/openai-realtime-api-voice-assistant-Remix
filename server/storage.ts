@@ -53,6 +53,7 @@ import {
 } from "../shared/schema";
 import { db } from "./db";
 import { eq, asc, desc, and, or, count, gte, lte, lt, inArray, isNull, isNotNull, ilike, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 
 export interface IStorage {
   // User operations (required for Replit Auth)
@@ -139,8 +140,18 @@ export interface IStorage {
  * seconds; ten minutes cannot double-grade a live one.
  */
 export const GRADING_CLAIM_LEASE_MS = 10 * 60 * 1000;
-/** What a claim writes into quality_analysis; overwritten by a real grade. */
-export const GRADING_CLAIM_MARKER = { grading: 'claimed' } as const;
+/**
+ * What a claim writes into quality_analysis; overwritten by a real grade.
+ * THE TOKEN IS THE CLAIM'S OWNER (Codex P2, #321 round 9): the lease says
+ * when a claim may be taken over, and nothing about the lease can stop the
+ * worker that lost it from finishing — so a completion and a release must
+ * both carry the token that took the claim, and a worker whose lease expired
+ * can neither write its grade over its successor's nor release its
+ * successor's claim. See ownsGradingClaim.
+ */
+export function gradingClaimMarker(token: string) {
+  return { grading: 'claimed', token } as const;
+}
 
 /**
  * Ungraded, OR claimed before `staleBefore` and never graded. The second arm
@@ -153,6 +164,13 @@ export function gradingClaimable(staleBefore: Date) {
     isNull(callLogs.gradedAt),
     and(lt(callLogs.gradedAt, staleBefore), sql`${callLogs.qualityAnalysis}->>'grading' = 'claimed'`),
   );
+}
+
+/** The row still carries THIS claim — the fence every completion and every
+ * release of a claimed grade goes through. A completed grade overwrites the
+ * marker (token included), so a stale owner's token matches nothing. */
+function ownsGradingClaim(id: string, token: string) {
+  return and(eq(callLogs.id, id), sql`${callLogs.qualityAnalysis}->>'token' = ${token}`);
 }
 
 export class DatabaseStorage implements IStorage {
@@ -731,7 +749,8 @@ export class DatabaseStorage implements IStorage {
    * nobody has taken it: one row back means this caller grades, none means
    * somebody else already is (or did). Released by the grader on failure.
    */
-  async claimCallLogForGrading(id: string, leaseMs: number = GRADING_CLAIM_LEASE_MS): Promise<boolean> {
+  async claimCallLogForGrading(id: string, leaseMs: number = GRADING_CLAIM_LEASE_MS): Promise<string | null> {
+    const token = randomUUID();
     const rows = await db
       .update(callLogs)
       // THE CLAIM CARRIES A MARKER (round 8): `gradedAt` alone cannot tell a
@@ -739,8 +758,35 @@ export class DatabaseStorage implements IStorage {
       // grade overwrites quality_analysis with the analysis; a release nulls
       // it; the dead-letter and short-transcript stamps never write it. So
       // only a row that still reads `claimed` past the lease is reclaimable.
-      .set({ gradedAt: new Date(), qualityAnalysis: GRADING_CLAIM_MARKER })
+      // AND AN OWNER (round 9): the token the caller must present to finish
+      // or release what it claimed.
+      .set({ gradedAt: new Date(), qualityAnalysis: gradingClaimMarker(token) })
       .where(and(eq(callLogs.id, id), gradingClaimable(new Date(Date.now() - leaseMs))))
+      .returning({ id: callLogs.id });
+    return rows.length === 1 ? token : null;
+  }
+
+  /** Write the grade ONLY if the row still carries this claim. False means
+   * another worker took the claim over (the lease expired while this one
+   * waited on the API) and this grade must be discarded, not written over
+   * the successor's. */
+  async completeGradingClaim(id: string, token: string, updates: Partial<InsertCallLog>): Promise<boolean> {
+    const rows = await db
+      .update(callLogs)
+      .set(updates)
+      .where(ownsGradingClaim(id, token))
+      .returning({ id: callLogs.id });
+    return rows.length === 1;
+  }
+
+  /** Give a claim back to the queue — but only THIS claim: a stale owner's
+   * late failure must not null out the claim, or the grade, of whoever took
+   * the row over. */
+  async releaseGradingClaim(id: string, token: string): Promise<boolean> {
+    const rows = await db
+      .update(callLogs)
+      .set({ gradedAt: null, qualityAnalysis: null })
+      .where(ownsGradingClaim(id, token))
       .returning({ id: callLogs.id });
     return rows.length === 1;
   }

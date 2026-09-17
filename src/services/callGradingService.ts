@@ -1436,11 +1436,39 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
   };
 }
 
+/**
+ * THE GRADING REQUEST IS BOUNDED, AND THE BOUND FITS INSIDE THE CLAIM LEASE.
+ * The SDK's defaults — a ten-minute timeout per attempt and two retries —
+ * let one legitimate grade outlive the ten-minute lease during an API
+ * outage, so the backfill could take the row over while a live worker was
+ * still grading it (Codex P2, #321 round 9). Ninety seconds is many times a
+ * typical grade; one retry covers a dropped connection; and
+ * gradingIsClaimedOnce.test.ts proves the whole lifecycle is shorter than
+ * GRADING_CLAIM_LEASE_MS, so a claim cannot be reclaimed from under a
+ * request that is still allowed to finish. The token fence on the claim is
+ * the backstop for anything this bound does not cover.
+ */
+export const GRADING_REQUEST_TIMEOUT_MS = 90_000;
+export const GRADING_REQUEST_RETRIES = 1;
+/** The SDK's longest backoff between retries. */
+export const OPENAI_SDK_MAX_RETRY_BACKOFF_MS = 8_000;
+/** The longest a single gradeCall may legitimately wait on the API. */
+export function gradingRequestLifecycleMs(): number {
+  return (
+    (GRADING_REQUEST_RETRIES + 1) * GRADING_REQUEST_TIMEOUT_MS +
+    GRADING_REQUEST_RETRIES * OPENAI_SDK_MAX_RETRY_BACKOFF_MS
+  );
+}
+
 export class CallGradingService {
   private openaiClient: OpenAI;
 
   constructor() {
-    this.openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    this.openaiClient = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      timeout: GRADING_REQUEST_TIMEOUT_MS,
+      maxRetries: GRADING_REQUEST_RETRIES,
+    });
   }
 
   runDeterministicGraders(input: DeterministicGraderInput): GraderResult[] {
@@ -1582,11 +1610,11 @@ export class CallGradingService {
      * grade an already-graded row (the admin regrade button) says so.
      * A claim that then fails is released below, so the backfill can retry.
      */
-    let claimed = false;
+    let claimToken: string | null = null;
     try {
       if (opts.claim !== false) {
-        claimed = await storage.claimCallLogForGrading(callLogId);
-        if (!claimed) {
+        claimToken = await storage.claimCallLogForGrading(callLogId);
+        if (!claimToken) {
           console.info(`[GRADING] ${callLogId} is already claimed or graded — not graded twice`);
           return null;
         }
@@ -1641,7 +1669,7 @@ Respond with a JSON object only, no other text:
       const content = response.choices[0]?.message?.content;
       if (!content) {
         console.error(`[GRADING] No response content for call ${callLogId}`);
-        if (claimed) await this.releaseGradingClaim(callLogId);
+        if (claimToken) await this.releaseGradingClaim(callLogId, claimToken);
         return null;
       }
 
@@ -1691,7 +1719,7 @@ Respond with a JSON object only, no other text:
         console.warn(`[GRADING] could not price the grade for ${callLogId}:`, e);
       }
 
-      await storage.updateCallLog(callLogId, {
+      const graded: Parameters<typeof storage.updateCallLog>[1] = {
         sentiment: analysis.sentiment,
         agentOutcome: analysis.agentOutcome,
         qualityScore: analysis.qualityScore,
@@ -1704,7 +1732,23 @@ Respond with a JSON object only, no other text:
           patientConcerns: analysis.patientConcerns,
         },
         gradedAt: new Date(),
-      });
+      };
+      if (claimToken) {
+        /**
+         * FENCED ON THE CLAIM'S TOKEN (Codex P2, #321 round 9). The lease
+         * says when a claim may be TAKEN OVER; it cannot stop the worker that
+         * lost it from finishing. A grade landing after its claim was
+         * reclaimed is discarded rather than written over the successor's —
+         * and the same token guards the release in the catch below.
+         */
+        const stillOurs = await storage.completeGradingClaim(callLogId, claimToken, graded);
+        if (!stillOurs) {
+          console.warn(`[GRADING] ${callLogId}: the claim was taken over before this grade landed — discarding it`);
+          return null;
+        }
+      } else {
+        await storage.updateCallLog(callLogId, graded);
+      }
 
       console.info(`[GRADING] Call ${callLogId} graded: ${analysis.sentiment}, ${analysis.qualityScore}/5 stars, ${analysis.agentOutcome}`);
 
@@ -1719,7 +1763,7 @@ Respond with a JSON object only, no other text:
       return analysis;
     } catch (error) {
       console.error(`[GRADING] Error grading call ${callLogId}:`, error);
-      if (claimed) await this.releaseGradingClaim(callLogId);
+      if (claimToken) await this.releaseGradingClaim(callLogId, claimToken);
       return null;
     }
   }
@@ -1727,9 +1771,11 @@ Respond with a JSON object only, no other text:
   /** A claim whose grade never landed goes back to the queue. Never throws:
    * a release that fails leaves the row findable the dead-letter way
    * (gradedAt set, sentiment null), which is the documented recovery shape. */
-  private async releaseGradingClaim(callLogId: string): Promise<void> {
+  private async releaseGradingClaim(callLogId: string, token: string): Promise<void> {
     try {
-      await storage.updateCallLog(callLogId, { gradedAt: null, qualityAnalysis: null });
+      // Only THIS claim: a release that no longer owns the row is a no-op,
+      // never a null written over the successor's claim or grade.
+      await storage.releaseGradingClaim(callLogId, token);
     } catch (e) {
       console.warn(`[GRADING] could not release the grading claim on ${callLogId}:`, e);
     }

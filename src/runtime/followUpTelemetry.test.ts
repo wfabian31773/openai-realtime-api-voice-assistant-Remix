@@ -15,10 +15,15 @@ const log = vi.hoisted(() => ({
   emitted: [] as unknown[][],
   flushed: [] as string[],
   released: [] as Array<string | undefined>,
+  /** What each flush answers, in order; empty means "it landed". */
+  flushOk: [] as boolean[],
 }));
 vi.mock("../services/callEventLog", () => ({
   emitCallEvent: (...a: unknown[]) => void log.emitted.push(a),
-  flushCallEvents: async (id: string) => void log.flushed.push(id),
+  flushCallEvents: async (id: string) => {
+    log.flushed.push(id);
+    return log.flushOk.length ? (log.flushOk.shift() as boolean) : true;
+  },
   releaseCallEvents: (id?: string) => void log.released.push(id),
 }));
 
@@ -47,6 +52,8 @@ beforeEach(() => {
   log.emitted.length = 0;
   log.flushed.length = 0;
   log.released.length = 0;
+  log.flushOk.length = 0;
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
 });
 
 describe("the follow-up summary", () => {
@@ -84,6 +91,35 @@ describe("the follow-up summary", () => {
   it("writes nothing for a call with no follow-up to report", async () => {
     expect(await logRuntimeFollowUps(record(), {})).toBe(false);
     expect(log.emitted).toHaveLength(0);
+  });
+});
+
+describe("the buffer outlives a failed flush — Codex P2 on #321, round 9", () => {
+  const summary = () => record({ owed: 1, requested: 1, toolCallsAfterDone: 1, lastUnanswered: true });
+
+  it("a flush that fails is retried on the backoff, and the buffer is released only once it lands", async () => {
+    log.flushOk.push(false, true);
+    const slept: number[] = [];
+    const wrote = await logRuntimeFollowUps(summary(), {}, { backoffMs: [7, 11], sleep: async (ms) => void slept.push(ms) });
+    expect(wrote).toBe(true);
+    expect(log.flushed).toEqual([SID, SID]);
+    expect(slept).toEqual([7]);
+    expect(log.released).toEqual([SID]);
+  });
+
+  it("a summary that never lands is LEFT for the reaper — the buffer is not released", async () => {
+    log.flushOk.push(false, false);
+    const wrote = await logRuntimeFollowUps(summary(), {}, { backoffMs: [1], sleep: async () => undefined });
+    expect(wrote).toBe(false);
+    expect(log.flushed).toEqual([SID, SID]);
+    expect(log.released).toEqual([]);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("left for the reaper"));
+  });
+
+  it("the production backoff is the teardown write's own", () => {
+    const src = readFileSync(new URL("./followUpTelemetry.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/import \{ PERSIST_RETRY_BACKOFF_MS \} from "\.\/callRecord"/);
+    expect(src).toMatch(/opts\.backoffMs \?\? PERSIST_RETRY_BACKOFF_MS/);
   });
 });
 

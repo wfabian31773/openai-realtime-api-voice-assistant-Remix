@@ -253,8 +253,15 @@ async function ensureTable(): Promise<void> {
   tableEnsured = true;
 }
 
-/** Write pending events. Idempotent by count, like flushTurns. */
-export async function flushCallEvents(callIdOrSid: string): Promise<void> {
+/**
+ * Write pending events. Idempotent by count, like flushTurns. Resolves TRUE
+ * once nothing is left unflushed for this call. A failed insert is caught
+ * here, the events handed back for a retry, and FALSE returned, so the caller
+ * can choose between retrying and leaving the buffer for the reaper — a
+ * caller that released on the old void return deleted the only copy of what
+ * it had just failed to write (Codex P2, #321 round 9).
+ */
+export async function flushCallEvents(callIdOrSid: string): Promise<boolean> {
   let key = callIdOrSid;
   let b = buffers.get(key);
   if (!b) {
@@ -266,7 +273,7 @@ export async function flushCallEvents(callIdOrSid: string): Promise<void> {
       }
     }
   }
-  if (!b || b.events.length === b.flushedCount) return;
+  if (!b || b.events.length === b.flushedCount) return true;
 
   const pending = b.events.slice(b.flushedCount);
   const claimedFrom = b.flushedCount;
@@ -284,9 +291,11 @@ export async function flushCallEvents(callIdOrSid: string): Promise<void> {
     await db.execute(
       sql`INSERT INTO call_events (call_log_id, call_sid, agent_slug, at, level, category, message, data) VALUES ${values}`,
     );
+    return true;
   } catch (e) {
     b.flushedCount = claimedFrom;
     console.error('[CALL-EVENTS] flush failed:', e);
+    return false;
   }
 }
 

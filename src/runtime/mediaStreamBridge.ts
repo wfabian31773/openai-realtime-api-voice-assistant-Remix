@@ -204,6 +204,20 @@ export const DEFAULT_DEAD_AIR_MS = 30_000;
  */
 export const TOOL_DISPATCH_GRACE_MS = 15_000;
 
+/**
+ * A function-call event that arrives AFTER its response's `response.done`
+ * has no done ahead of it to say when its batch is complete, so the bridge
+ * holds the follow-up for this long after the LAST such event settles; a
+ * sibling arriving inside the window joins the batch instead of earning a
+ * second follow-up (Codex P1, #321 round 9 — the v55 gate treated every
+ * after-done event as a batch of one, so a fast first dispatch could request
+ * the model's turn before its sibling's event had been read off the socket).
+ * Siblings of one response come back-to-back on the wire; a quarter of a
+ * second is a wide margin, against the thirty seconds of silence the late
+ * event used to cost.
+ */
+export const LATE_TOOL_BATCH_GRACE_MS = 250;
+
 /** The hangup tools shipped by the Remix agents. Intercepted rather than
  * dispatched — see the TRANSPORT NOTE in the module doc. */
 export const DEFAULT_END_CALL_TOOL_NAMES = ["terminate_call", "end_call"];
@@ -1414,6 +1428,10 @@ export class VoiceCallBridge {
    * created response advances the epoch, so equality at teardown means the
    * wire never answered that request. */
   private lastFollowUpEpoch: number | null = null;
+  /** True while the last function-call event arrived after its response's
+   * done and its batch may still be growing; the grace timer closes it. */
+  private lateBatchOpen = false;
+  private lateBatchTimer: unknown = null;
 
   /** One tool answered. Records what is owed; the request itself fires
    * only when the LAST outstanding tool has settled AND the carrying
@@ -1442,6 +1460,18 @@ export class VoiceCallBridge {
   private maybeRequestFollowUp(): void {
     if (this.pendingToolCalls !== 0 || !this.followUpOwed) return;
     if (this.awaitingToolResponseDone) return;
+    if (this.lateBatchOpen) {
+      // No response.done will close this batch — the wire's already passed.
+      // Wait out the grace window instead; every late sibling re-arms it.
+      if (this.lateBatchTimer === null) {
+        this.lateBatchTimer = this.setTimer(() => {
+          this.lateBatchTimer = null;
+          this.lateBatchOpen = false;
+          if (!this.ended) this.maybeRequestFollowUp();
+        }, LATE_TOOL_BATCH_GRACE_MS);
+      }
+      return;
+    }
     this.followUpOwed = false;
     // A termination the guards allowed is already arming the hangup on
     // the goodbye's mark; a follow-up would speak over that gate.
@@ -1470,7 +1500,17 @@ export class VoiceCallBridge {
     // assumption can be measured rather than argued.
     const carryingResponseOpen = this.session.isResponseActive();
     this.awaitingToolResponseDone = carryingResponseOpen;
-    if (!carryingResponseOpen) this.followUps.toolCallsAfterDone += 1;
+    if (!carryingResponseOpen) {
+      this.followUps.toolCallsAfterDone += 1;
+      // A late event opens (or re-opens) a batch the wire cannot close for
+      // us; the grace window in maybeRequestFollowUp closes it, measured
+      // from this — the latest — arrival.
+      this.lateBatchOpen = true;
+      if (this.lateBatchTimer !== null) {
+        this.clearTimer(this.lateBatchTimer);
+        this.lateBatchTimer = null;
+      }
+    }
     this.pendingToolCalls += 1;
     // This event IS the model acting on the caller's turn, and the
     // dispatch it starts has a budget of its own — the queue filing tools
@@ -1773,6 +1813,10 @@ export class VoiceCallBridge {
       this.maxCallTimer = null;
     }
     this.clearDeadAir();
+    if (this.lateBatchTimer !== null) {
+      this.clearTimer(this.lateBatchTimer);
+      this.lateBatchTimer = null;
+    }
 
     // A line still mid-delivery when the call ends was partially heard —
     // record it as interrupted; lines that never produced audio the caller

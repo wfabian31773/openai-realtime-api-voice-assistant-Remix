@@ -9,6 +9,7 @@ import {
   type BridgeSessionHandlers,
   type CallOutcome,
   type VoiceCallRecord,
+  LATE_TOOL_BATCH_GRACE_MS,
 } from "./mediaStreamBridge";
 import type { TwilioOutboundFrame } from "./twilioFrames";
 import type { BoundAgent } from "./agentBinding";
@@ -2830,14 +2831,18 @@ describe("what the caller said reaches the filing tools", () => {
  * waited forever. The wire is asked instead.
  */
 describe("VoiceCallBridge — the follow-up does not wait for a done that already passed (v55)", () => {
-  it("a tool call arriving AFTER its response's done gets its follow-up as soon as the tool settles", async () => {
+  it("a tool call arriving AFTER its response's done gets its follow-up once the late-batch window closes — no done to wait for", async () => {
     const h = makeBridge();
     h.newResponse();
     h.setResponseActive(false); // the wire already delivered this response's done
     h.handlers().onToolCall("c1", "create_ticket", { reason: "refill" });
     await Promise.resolve();
     await Promise.resolve();
-    // No onResponseDone will ever come for that response again.
+    // No onResponseDone will ever come for that response again. The batch is
+    // closed by the grace window (round 9), never by the wire — and it is
+    // closed: the follow-up goes out when the window elapses.
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+    expect(h.timers.fire(LATE_TOOL_BATCH_GRACE_MS)).toBe(true);
     expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
   });
 
@@ -2860,6 +2865,7 @@ describe("VoiceCallBridge — the follow-up does not wait for a done that alread
     h.handlers().onToolCall("c1", "create_ticket", {});
     await Promise.resolve();
     await Promise.resolve();
+    expect(h.timers.fire(LATE_TOOL_BATCH_GRACE_MS)).toBe(true);
     // The wire never created a response for the follow-up.
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
     await Promise.resolve();
@@ -2886,5 +2892,83 @@ describe("VoiceCallBridge — the follow-up does not wait for a done that alread
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
     await Promise.resolve();
     expect(records[0].followUps).toEqual({ owed: 0, requested: 0, toolCallsAfterDone: 0, lastUnanswered: false });
+  });
+});
+
+describe("VoiceCallBridge — late tool calls are still a batch (Codex P1, #321 round 9)", () => {
+  it("two tool calls arriving after their response's done, the first settling before the second arrives, get ONE follow-up after both", async () => {
+    // The v55 gate read every after-done event as a batch of one: the first
+    // dispatch settled, pendingToolCalls touched zero, and a response was
+    // requested before the sibling's event had been read off the socket —
+    // the round-14/17 race the counter exists to prevent, back through the
+    // late door. The window holds the request until the batch stops growing.
+    const h = makeBridge();
+    h.newResponse();
+    h.setResponseActive(false);
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    await new Promise((r) => setTimeout(r, 0));
+    // First dispatch fully settled; its sibling has not even arrived.
+    expect(h.session.sendToolResult).toHaveBeenCalledTimes(1);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+
+    h.handlers().onToolCall("c2", "create_ticket", {});
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.session.sendToolResult).toHaveBeenCalledTimes(2);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+
+    // The window closes once, after the LAST late event settled.
+    expect(h.timers.fire(LATE_TOOL_BATCH_GRACE_MS)).toBe(true);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    // ... and the sibling re-armed it rather than leaving a second one
+    // behind — a second window would be a second follow-up.
+    expect(h.timers.fire(LATE_TOOL_BATCH_GRACE_MS)).toBe(false);
+  });
+
+  it("a sibling arriving INSIDE the window keeps the batch open until it has settled too", async () => {
+    let releaseSlow!: (v: { ok: boolean; output: string }) => void;
+    const slow = new Promise<{ ok: boolean; output: string }>((r) => (releaseSlow = r));
+    const h = makeBridge({
+      agent: makeAgent({
+        dispatch: async (name: string) =>
+          name === "slow_lookup" ? slow : { ok: true, output: '{"ok":1}' },
+      }),
+    });
+    h.newResponse();
+    h.setResponseActive(false);
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    await new Promise((r) => setTimeout(r, 0));
+    // Window armed for c1 — then its slow sibling arrives inside it.
+    h.handlers().onToolCall("c2", "slow_lookup", {});
+    await new Promise((r) => setTimeout(r, 0));
+    // The arrival cancelled c1's window; nothing fires while c2 is pending.
+    expect(h.timers.fire(LATE_TOOL_BATCH_GRACE_MS)).toBe(false);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+
+    releaseSlow({ ok: true, output: '{"ok":2}' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+    expect(h.timers.fire(LATE_TOOL_BATCH_GRACE_MS)).toBe(true);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it("the window is for LATE events only — an in-response batch is still closed by its done, with no timer and no added wait", async () => {
+    const h = makeBridge();
+    h.newResponse();
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    await new Promise((r) => setTimeout(r, 0));
+    h.handlers().onResponseDone();
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    expect(h.timers.fire(LATE_TOOL_BATCH_GRACE_MS)).toBe(false);
+  });
+
+  it("a call torn down inside the window leaves no timer behind and requests nothing", async () => {
+    const h = makeBridge();
+    h.newResponse();
+    h.setResponseActive(false);
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    await new Promise((r) => setTimeout(r, 0));
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    expect(h.timers.fire(LATE_TOOL_BATCH_GRACE_MS)).toBe(false);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
   });
 });

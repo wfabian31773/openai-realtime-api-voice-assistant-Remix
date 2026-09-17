@@ -13,9 +13,11 @@
  *   GROUP BY 1, 2;
  *
  * Telemetry: after the row, after the sweep, never awaited by teardown, and
- * a failure is one console line.
+ * a failure is one console line — with the buffer kept for a retry, never
+ * deleted on the failure that made it worth keeping.
  */
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import { PERSIST_RETRY_BACKOFF_MS } from "./callRecord";
 
 export const FOLLOW_UP_EVENT = "follow_up_summary";
 
@@ -44,6 +46,7 @@ export function followUpEvent(record: Pick<VoiceCallRecord, "followUps" | "outco
 export async function logRuntimeFollowUps(
   record: VoiceCallRecord,
   ids: { callLogId?: string } = {},
+  opts: { backoffMs?: readonly number[]; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<boolean> {
   const ev = followUpEvent(record);
   if (!ev) return false;
@@ -55,10 +58,27 @@ export async function logRuntimeFollowUps(
     callLogId: ids.callLogId,
     agentSlug: record.slug,
   });
-  try {
-    await flushCallEvents(record.callSid);
-  } finally {
-    releaseCallEvents(record.callSid);
+  /**
+   * The buffer is released ONLY once the row is on disk. `flushCallEvents`
+   * swallows a failed insert and hands the events back for a retry, so an
+   * unconditional release here deleted the only copy of the summary on
+   * precisely the calls a database blip had made unmeasurable (Codex P2,
+   * #321 round 9) — the shape round 4 fixed in the turn writer. A summary
+   * still unflushed after the last attempt is left for the 2h reaper, which
+   * flushes once more before it forgets.
+   */
+  const backoff = opts.backoffMs ?? PERSIST_RETRY_BACKOFF_MS;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let durable = false;
+  for (let attempt = 0; ; attempt++) {
+    durable = await flushCallEvents(record.callSid);
+    if (durable || attempt >= backoff.length) break;
+    await sleep(backoff[attempt]);
   }
-  return true;
+  if (durable) releaseCallEvents(record.callSid);
+  else
+    console.error(
+      `[CALL-EVENTS] follow_up_summary for ${record.callSid} not durable after ${backoff.length + 1} attempt(s) — buffer left for the reaper`,
+    );
+  return durable;
 }
