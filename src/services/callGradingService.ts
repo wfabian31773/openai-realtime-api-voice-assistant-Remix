@@ -1732,6 +1732,24 @@ Respond with a JSON object only, no other text:
           patientConcerns: analysis.patientConcerns,
         },
         gradedAt: new Date(),
+        /**
+         * THE GRADE RE-OPENS THE TICKET SYNC (Codex P2, #321 round 12).
+         * `ticketingSyncService` carries qualityScore, sentiment and
+         * agentOutcome to the ticket, selects `callDataSynced = false`, and
+         * on a call that ended shortly before its five-minute sweep it
+         * snapshots the row BEFORE this grade lands, sends nulls, and marks
+         * the call done for good. Measured 2026-09-17 in the Support Center:
+         * 291 of 383 agent-filed tickets on 09-14, 280 of 368 on 09-15 and
+         * 296 of 387 on 09-16 carried a transcript and NO quality score or
+         * outcome while every one of their call rows had one. So the grade
+         * clears the flag (a no-op on a row the sweep has not reached) and
+         * the retry count (or a row that synced on its third attempt is
+         * never selected again); the next pass carries the grade,
+         * idempotent on the app. The sweep's own mark-done refuses a row
+         * whose grade landed mid-flight, so this holds under every ordering.
+         */
+        callDataSynced: false,
+        ticketingSyncRetries: 0,
       };
       if (claimToken) {
         /**

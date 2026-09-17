@@ -211,6 +211,17 @@ describe('the mark-done is conditional on the recording the payload carried — 
     expect(SUCCESS).toMatch(/\.where\(\s*and\(\s*eq\(callLogs\.id, call\.id\),\s*sql`\$\{callLogs\.recordingUrl\} IS NOT DISTINCT FROM \$\{call\.recordingUrl \?\? null\}::text`/);
   });
 
+  it('… and the grade the payload carried — quality score, outcome and sentiment, each typed (Codex P2, round 12)', () => {
+    // The enum columns are cast to text on BOTH sides: an enum has no
+    // equality operator against a text parameter.
+    expect(SUCCESS).toMatch(/sql`\$\{callLogs\.qualityScore\} IS NOT DISTINCT FROM \$\{call\.qualityScore \?\? null\}::integer`/);
+    expect(SUCCESS).toMatch(/sql`\$\{callLogs\.agentOutcome\}::text IS NOT DISTINCT FROM \$\{call\.agentOutcome \?\? null\}::text`/);
+    expect(SUCCESS).toMatch(/sql`\$\{callLogs\.sentiment\}::text IS NOT DISTINCT FROM \$\{call\.sentiment \?\? null\}::text`/);
+    // All four inside the ONE and(): a condition outside it would be a second statement.
+    const where = SUCCESS.slice(SUCCESS.indexOf('.where('), SUCCESS.indexOf('.returning('));
+    expect((where.match(/IS NOT DISTINCT FROM/g) ?? []).length).toBe(4);
+  });
+
   it('a write that matched no row leaves the call pending rather than reporting it synced', () => {
     expect(SUCCESS).toMatch(/\.returning\(\{ id: callLogs\.id \}\)/);
     const zeroRows = SUCCESS.indexOf('if (marked.length === 0) {');

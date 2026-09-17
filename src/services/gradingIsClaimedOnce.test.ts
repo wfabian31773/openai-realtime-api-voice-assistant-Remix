@@ -192,6 +192,29 @@ describe("an abandoned claim is recoverable — Codex P2 on #321, round 8", () =
   });
 });
 
+describe("a completed grade re-opens the ticket sync — Codex P2 on #321, round 12", () => {
+  // The five-minute sweep can snapshot a completed row before the teardown
+  // grade lands, send nulls for the quality fields, and mark the call done.
+  // Measured 2026-09-17: three quarters of agent-filed tickets carried no
+  // grade while their call rows did. So the grade's write clears the flag and
+  // the retry count; the sweep's next pass carries it.
+  it("the completion write carries callDataSynced: false and ticketingSyncRetries: 0", async () => {
+    const { svc } = service(answers);
+    await svc.gradeCall("c1", TRANSCRIPT);
+    const completion = q.patches.find(([, patch]) => "qualityScore" in patch);
+    expect(completion).toBeDefined();
+    expect(completion![1]).toMatchObject({ callDataSynced: false, ticketingSyncRetries: 0 });
+  });
+
+  it("so does the manual regrade's unfenced write — the same object", async () => {
+    q.rows = new Map([["c1", { id: "c1", gradedAt: new Date(q.now - 1) }]]);
+    const { svc } = service(answers);
+    await svc.gradeCall("c1", TRANSCRIPT, undefined, { claim: false });
+    const completion = q.patches.find(([, patch]) => "qualityScore" in patch);
+    expect(completion![1]).toMatchObject({ callDataSynced: false, ticketingSyncRetries: 0 });
+  });
+});
+
 describe("the store's own SQL carries the lease — read from the source", () => {
   const src = readFileSync(new URL("../../server/storage.ts", import.meta.url), "utf8");
 

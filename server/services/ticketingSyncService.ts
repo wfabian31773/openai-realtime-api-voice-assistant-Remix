@@ -202,7 +202,16 @@ export class TicketingSyncService {
          * its retry count untouched, and the next pass carries it. Typed
          * explicitly — the v52 lesson: a bare parameter beside NULL has no
          * type for Postgres to infer, and the statement was PREPAREd against
-         * the live Hub with this cast before it shipped.
+         * the live Hub with these casts before it shipped.
+         *
+         * AND THE GRADE, THE SAME WAY (Codex P2, round 12): qualityScore,
+         * sentiment and agentOutcome land on the row from the teardown
+         * grader seconds to minutes after the call, and a sweep that
+         * snapshotted the row first sent nulls. Three quarters of
+         * agent-filed tickets carried no grade while their rows did
+         * (291 of 383 on 2026-09-14). A grade that landed mid-flight makes
+         * this match zero rows too; the grade's own write re-opens the sync
+         * for the row a sweep had already finished.
          */
         const marked = await db
           .update(callLogs)
@@ -219,12 +228,15 @@ export class TicketingSyncService {
             and(
               eq(callLogs.id, call.id),
               sql`${callLogs.recordingUrl} IS NOT DISTINCT FROM ${call.recordingUrl ?? null}::text`,
+              sql`${callLogs.qualityScore} IS NOT DISTINCT FROM ${call.qualityScore ?? null}::integer`,
+              sql`${callLogs.agentOutcome}::text IS NOT DISTINCT FROM ${call.agentOutcome ?? null}::text`,
+              sql`${callLogs.sentiment}::text IS NOT DISTINCT FROM ${call.sentiment ?? null}::text`,
             ),
           )
           .returning({ id: callLogs.id });
 
         if (marked.length === 0) {
-          console.warn(`[TICKETING SYNC] ○ a recording landed on call ${identifier} while this pass was in flight — the payload did not carry it, so the call is left pending for the next pass`);
+          console.warn(`[TICKETING SYNC] ○ a recording or a grade landed on call ${identifier} while this pass was in flight — the payload did not carry it, so the call is left pending for the next pass`);
           return {
             callId: call.id,
             callSid: call.callSid,

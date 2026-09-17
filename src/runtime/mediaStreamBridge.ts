@@ -1168,8 +1168,22 @@ export class VoiceCallBridge {
     if (this.unvoicedToolAnswerSeq === null) return false;
     if (this.unvoicedToolAnswerSeq !== this.agentLineSeq) return false;
     // An utterance already streaming IS the words; requestHangup waits on it.
-    if (this.current !== null) return false;
+    // Streaming means AUDIO: a transcript delta opens `current` before any
+    // byte has reached Twilio, and text nobody has heard is not words
+    // (Codex P2, #321 round 12).
+    if (this.current !== null && this.current.bytes > 0) return false;
     return this.hangupHoldsSinceLastLine < HANGUP_HOLD_LIMIT;
+  }
+
+  private siblingsSettled(): Promise<void> {
+    if (this.pendingSiblings.size === 0) return Promise.resolve();
+    return new Promise((resolve) => this.siblingWaiters.push(resolve));
+  }
+
+  private wakeSiblingWaiters(): void {
+    if (this.pendingSiblings.size > 0) return;
+    const waiting = this.siblingWaiters.splice(0);
+    for (const wake of waiting) wake();
   }
 
   private handleAudioDone(transcript?: string): void {
@@ -1200,7 +1214,9 @@ export class VoiceCallBridge {
     const done = this.current;
     this.current = null;
     if (!done) return;
-    this.noteAgentWords();
+    // Words the caller heard — so bytes, not text: an utterance whose
+    // transcript arrived and whose audio never did is not them (round 12).
+    if (done.bytes > 0) this.noteAgentWords();
     this.agentTurns += 1;
     this.lastCompletedUtteranceBytes = done.bytes;
 
@@ -1506,6 +1522,11 @@ export class VoiceCallBridge {
   private unvoicedToolAnswerSeq: number | null = null;
   private hangupHoldsSinceLastLine = 0;
   private hangupsHeld = 0;
+  /** Round 12: the non-end-call dispatches still in flight, by call id, and
+   * the end-call dispatches waiting for them to settle. A sibling that has
+   * not answered yet is an answer the model cannot have voiced. */
+  private pendingSiblings = new Set<string>();
+  private siblingWaiters: Array<() => void> = [];
 
   /** One tool answered. Records what is owed; the request itself fires
    * only when the LAST outstanding tool has settled AND the carrying
@@ -1588,6 +1609,8 @@ export class VoiceCallBridge {
       }
     }
     this.pendingToolCalls += 1;
+    const isEndCall = this.endCallToolNames.has(name);
+    if (!isEndCall) this.pendingSiblings.add(callId);
     // This event IS the model acting on the caller's turn, and the
     // dispatch it starts has a budget of its own — the queue filing tools
     // are allowed up to 30 seconds, the same span as this watchdog. A
@@ -1602,6 +1625,22 @@ export class VoiceCallBridge {
     // The hangup tool goes through this same path: its guards are the
     // agent's, and only its transport step is ours (see the TRANSPORT NOTE).
     void (async () => {
+      try {
+      /**
+       * A SIBLING STILL IN FLIGHT IS AN ANSWER THE MODEL HAS NOT VOICED
+       * (Codex P2, #321 round 12). When one response carries a lookup or a
+       * filing AND the hangup, the hangup's event arrives before the sibling
+       * has settled — `unvoicedToolAnswerSeq` is set only in
+       * `toolCallSettled`, so the v56 guard below would read null and let
+       * the call end before the sibling's result could be spoken. That is
+       * the v56 shape itself, arriving in one batch. So an end-call waits
+       * for its siblings first; the wait is bounded by their own dispatch
+       * budgets, and teardown wakes it.
+       */
+      if (isEndCall && this.pendingSiblings.size > 0) {
+        await this.siblingsSettled();
+        if (this.ended) return;
+      }
       /**
        * THE REPEATED-FAILURE CEILING (toolCeiling.ts).
        *
@@ -1766,6 +1805,15 @@ export class VoiceCallBridge {
       // response finishes — and coalesced above, so it fires once however
       // many tools that response carried.
       this.toolCallSettled(true);
+      } finally {
+        // Whichever way this dispatch ended, an end-call waiting on it may
+        // now decide — after `toolCallSettled` above, so the guard it runs
+        // sees the settled answer.
+        if (!isEndCall) {
+          this.pendingSiblings.delete(callId);
+          this.wakeSiblingWaiters();
+        }
+      }
     })().catch(() => {
       // dispatch() is documented never to throw; if it somehow does, the
       // call still gets an answer rather than a stalled turn — and the
@@ -1911,6 +1959,10 @@ export class VoiceCallBridge {
       this.clearTimer(this.lateBatchTimer);
       this.lateBatchTimer = null;
     }
+    // An end-call waiting on a sibling is released; it reads `ended` and
+    // returns.
+    this.pendingSiblings.clear();
+    this.wakeSiblingWaiters();
 
     // A line still mid-delivery when the call ends was partially heard —
     // record it as interrupted; lines that never produced audio the caller

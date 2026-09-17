@@ -237,6 +237,35 @@ GROUP BY 1 ORDER BY 1;
 -- 2026-09-15 before: 103 null after 1h, 19 failed with caller lines. 09-16: 3 and 0.
 ```
 
+### Round 12 on this ship (08:39 UTC) — the grade reaches the ticket
+
+The teardown grade lands seconds to minutes after the row; the five-minute
+sync could snapshot the row first, send nulls, and mark the call done. The
+grade's write now re-opens the sync and the sync's mark-done refuses a row
+whose grade landed mid-flight. **Before, Support Center, agent-filed tickets
+with a synced transcript: 291 of 383 (09-14), 280 of 368 (09-15), 296 of 387
+(09-16) carry no `quality_score` and no `agent_outcome`. Target ~0.**
+
+```sql
+-- Support Center. The number: synced tickets with no grade, per day.
+SELECT coalesce(call_start_time, created_at)::date AS day,
+       count(*) FILTER (WHERE transcript IS NOT NULL) AS synced_with_transcript,
+       count(*) FILTER (WHERE transcript IS NOT NULL AND quality_score IS NULL) AS synced_no_quality,
+       count(*) FILTER (WHERE transcript IS NOT NULL AND agent_outcome IS NULL) AS synced_no_outcome
+FROM tickets
+WHERE call_sid ~* '^CA[0-9a-f]{32}$' AND created_by_id IS NULL AND agent_used IS NOT NULL
+  AND coalesce(call_start_time, created_at)::date >= '<day>'
+GROUP BY 1 ORDER BY 1;
+
+-- Hub. The guard: at most one extra update-call-data POST per call, and no
+-- rise in sync errors. Rows graded after their sync stamp are the population
+-- the re-open exists for (197 · 135 · 185 a day on 09-14/15/16).
+SELECT created_at::date AS day,
+       count(*) FILTER (WHERE call_data_synced AND quality_score IS NOT NULL AND graded_at > ticketing_synced_at) AS graded_after_sync,
+       count(*) FILTER (WHERE ticketing_sync_error IS NOT NULL) AS sync_errors
+FROM call_logs WHERE created_at::date >= '<day>' AND duration >= 30 GROUP BY 1 ORDER BY 1;
+```
+
 ## v51 — the record reaches the call row
 
 Number: runtime substantive calls with `patient_found = true` — **0 of 2,471 in
@@ -488,6 +517,14 @@ now advances only on words the caller heard. No new number: the v56 queries
 above measure it, and `hangupsHeld` still counts the guard firing. If the
 class above stays at 09-16 levels on a v56 build while `hangupsHeld` reads 0,
 suspect another door of this shape before suspecting the guard.
+
+### Round 12 on this ship (08:39 UTC)
+
+The `lookup > record_automated_resolution > terminate_call` shape above can
+arrive in ONE response, and the guard was decided before the sibling had
+answered; an end-call now waits for its siblings. And a transcript delta
+opened an utterance with zero bytes that read as words. Same queries, same
+targets; `hangupsHeld` still counts the guard firing.
 
 ## Also on this build, not a version of its own
 

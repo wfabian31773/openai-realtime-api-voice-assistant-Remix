@@ -409,7 +409,7 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v56, ready for review). Codex has reviewed it ELEVEN times: round 1
+   (v39–v56, ready for review). Codex has reviewed it TWELVE times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
@@ -447,10 +447,20 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
    mark-done is now conditional on the row still holding the recording the
    payload carried); and the reopen left the retry count at a value the
    selector excludes (reset with it — 0 of 5,904 synced rows in 14 days carried
-   it) — all three taken on the round-11 commit** — every one with a test and
-   a mutation check, every thread resolved. A TWELFTH pass is requested on that
-   head.
-   **Read that twelfth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   it) — all three taken on `f927ffd`**, and **round 12 (08:39 on `f927ffd`)
+   three P2s, one of them load-bearing for v56's own headline: an end-call in
+   the SAME response as a lookup or a filing was decided before its sibling
+   had answered (it now waits for its siblings, then holds); a transcript delta
+   opened an utterance with zero audio bytes and read as words (audio, not
+   text, now counts); and the teardown grade could land AFTER the five-minute
+   sync had snapshotted the row — measured, not an outlier: 291 of 383
+   agent-filed tickets on 09-14, 280 of 368, 296 of 387 carry no quality score
+   or outcome while every call row has one — so the grade's write re-opens the
+   sync and the sync's mark-done refuses a row whose grade landed mid-flight —
+   all three taken on the round-12 commit** — every one with a test and a
+   mutation check, every thread resolved. A THIRTEENTH pass is requested on
+   that head.
+   **Read that thirteenth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
 
 2. **Pull and republish.** `/voice/health` must read the v56 marker below.

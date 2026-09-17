@@ -3055,6 +3055,88 @@ describe("VoiceCallBridge — a tool answer the agent never voiced cannot end th
     expect(h.outcomes).toEqual(["agent_ended"]);
   });
 
+  it("a transcript delta with no audio behind it is not streaming words — the hangup is still held (Codex P2, round 12)", async () => {
+    // The provider's text can arrive before its audio. `current` exists the
+    // moment the first transcript delta lands, with zero bytes sent — and
+    // text nobody has heard must not read as an utterance in flight.
+    const { agent, dispatch } = permitting();
+    const h = makeBridge({ agent });
+    await toolAnswered(h);
+    h.newResponse();
+    h.handlers().onAgentTranscriptDelta("Filed as VA-1. Goodbye."); // no audio delta
+    await terminate(h);
+    expect(lastResult(h)[2]).toMatchObject({ error: "unvoiced_tool_result" });
+    expect(dispatch).not.toHaveBeenCalledWith("terminate_call", expect.anything());
+  });
+
+  it("a completion whose utterance carried text and never a byte is not the words either (round 12)", async () => {
+    const { agent, dispatch } = permitting();
+    const h = makeBridge({ agent });
+    await toolAnswered(h);
+    h.newResponse();
+    h.handlers().onAgentTranscriptDelta("Filed as VA-1. Goodbye.");
+    h.handlers().onAudioDone("Filed as VA-1. Goodbye."); // completed, 0 bytes
+    h.newResponse();
+    await terminate(h);
+    expect(lastResult(h)[2]).toMatchObject({ error: "unvoiced_tool_result" });
+    expect(dispatch).not.toHaveBeenCalledWith("terminate_call", expect.anything());
+  });
+
+  it("an end-call in the same batch as a slower tool waits for that tool, then holds — the v56 shape in one response (Codex P2, round 12)", async () => {
+    let answerLookup!: (v: { ok: boolean; output: string }) => void;
+    const lookup = new Promise<{ ok: boolean; output: string }>((r) => (answerLookup = r));
+    const dispatch = vi.fn(async (name: string) =>
+      name === "terminate_call"
+        ? { ok: true, output: JSON.stringify({ success: false, reason: "completed", status: 404 }) }
+        : name === "lookup_patient_appointments"
+          ? lookup
+          : { ok: true, output: '{"success":true}' },
+    );
+    const h = makeBridge({ agent: makeAgent({ dispatch }) });
+    h.newResponse();
+    h.handlers().onToolCall("c-look", "lookup_patient_appointments", {});
+    h.handlers().onToolCall("call-end", "terminate_call", { reason: "completed" });
+    h.handlers().onResponseDone();
+    await new Promise((r) => setTimeout(r, 0));
+    // The hangup has NOT been decided: its sibling has not answered.
+    const decided = () => h.session.sendToolResult.mock.calls.filter((c) => c[0] === "call-end");
+    expect(decided()).toHaveLength(0);
+    expect(dispatch).not.toHaveBeenCalledWith("terminate_call", expect.anything());
+    expect(h.bridge.lastArmedFinalFallbackMs).toBeNull();
+
+    answerLookup({ ok: true, output: JSON.stringify({ success: true, appointment: "2026-10-01 09:00" }) });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    // Now it is decided — and held, because the answer that just landed has
+    // not been put into words.
+    expect(decided()).toHaveLength(1);
+    expect(decided()[0][2]).toMatchObject({ error: "unvoiced_tool_result" });
+    expect(dispatch).not.toHaveBeenCalledWith("terminate_call", expect.anything());
+    expect(h.outcomes).toEqual([]);
+    // One follow-up for the batch, requested once both have settled.
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it("a call that ends while an end-call is waiting on its sibling leaves nothing dangling (round 12)", async () => {
+    let answerLookup!: (v: { ok: boolean; output: string }) => void;
+    const lookup = new Promise<{ ok: boolean; output: string }>((r) => (answerLookup = r));
+    const dispatch = vi.fn(async (name: string) =>
+      name === "lookup_patient_appointments" ? lookup : { ok: true, output: '{"success":true}' },
+    );
+    const h = makeBridge({ agent: makeAgent({ dispatch }) });
+    h.newResponse();
+    h.handlers().onToolCall("c-look", "lookup_patient_appointments", {});
+    h.handlers().onToolCall("call-end", "terminate_call", { reason: "completed" });
+    await new Promise((r) => setTimeout(r, 0));
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    answerLookup({ ok: true, output: '{"success":true}' });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.session.sendToolResult.mock.calls.filter((c) => c[0] === "call-end")).toHaveLength(0);
+    expect(dispatch).not.toHaveBeenCalledWith("terminate_call", expect.anything());
+    expect(h.outcomes).toEqual(["caller_hangup"]);
+  });
+
   it("once the agent has spoken since the tool answer, the hangup goes through", async () => {
     const h = makeBridge({ agent: permitting().agent });
     await toolAnswered(h);
