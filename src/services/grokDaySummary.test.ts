@@ -186,13 +186,20 @@ describe("the day table reaches the Observatory", () => {
     expect(read("client/src/pages/CostDashboardPage.tsx")).toMatch(/\/analytics\/grok-usage\?/);
   });
 
-  it("the call page says which kind of number the cost is — reconciled or estimated — and never one for the other", () => {
+  it("the call page says which kind of number the cost is — reconciled, calculated or estimated — keyed on the reconciliation stamp, never on the estimate flag alone", () => {
     const page = read("client/src/pages/CallDetailsPage.tsx");
-    const rec = page.indexOf("log.costIsEstimated === false");
+    const rec = page.indexOf("log.costReconciledAt ?");
+    const calc = page.indexOf("log.costIsEstimated === false");
     const est = page.indexOf("log.costIsEstimated === true");
     expect(rec).toBeGreaterThan(0);
-    expect(est).toBeGreaterThan(rec);
-    expect(page.slice(rec, est)).toMatch(/>reconciled</);
+    expect(calc).toBeGreaterThan(rec);
+    expect(est).toBeGreaterThan(calc);
+    expect(page.slice(rec, calc)).toMatch(/>reconciled</);
+    // `costIsEstimated === false` is what updateCallCostsWithTokens writes for
+    // a token-priced OpenAI call with no reconciliation at all, so it must
+    // never be the reconciled arm (Codex P2, #321 round 10).
+    expect(page.slice(calc, est)).toMatch(/>calculated</);
+    expect(page.slice(calc, est)).not.toMatch(/>reconciled</);
     expect(page.slice(est, est + 400)).toMatch(/>estimated</);
   });
 });

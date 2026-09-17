@@ -379,6 +379,21 @@ to `caller_hangup`; `provider_failure` must not rise.
 calls with no ticket already ended their refusal turn on a question; the one
 that did not was a four-times loop. The 23 are named on the task.
 
+### W11 — The agent hangs up on its own question (task #147, found 08:00 reading the residual "other" bucket).
+
+**`[x]` SHIPPED as v56.** Measured first: PCP calls ended by `terminate_call`
+whose last agent line was a question or "one moment" — 17 · 32 · 38 on
+09-14/15/16, 18 of the 38 with no ticket; the appointment-lookup-then-hangup
+shape with the answer never spoken, 9 a day. The mechanism is in the code, not
+a hypothesis: `record_automated_resolution` returned bare success, the
+disposition made `terminate_call` legal, and nothing asked whether the model had
+SAID anything. The bridge now refuses an end-call tool while a tool answer is
+unvoiced (bounded at three holds), and the tool carries the instruction to speak
+the answer. 8 tests, 7 mutations caught. The number to read after the
+republish: PCP agent-ended calls whose last agent line is a question — target 0;
+and `hangupsHeld` on the `follow_up_summary` rows, which is how often the guard
+fired. The guard: PCP `dead_air` and `max_duration` must not rise.
+
 ## NOT DOING TONIGHT, AND WHY
 
 - **`[-]` The emergency lexicon.** Which phrases count as a surgical emergency is
@@ -394,7 +409,7 @@ that did not was a four-times loop. The 23 are named on the task.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v55, ready for review). Codex has reviewed it EIGHT times: round 1
+   (v39–v56, ready for review). Codex has reviewed it TEN times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
@@ -419,13 +434,18 @@ that did not was a four-times loop. The 23 are named on the task.
    retried and kept for the reaper; and the grading lease was shorter than the
    SDK's own retry window with no owner on the claim — the client is bounded to
    90 s × 2 and the claim carries a token that both the completion and the
-   release must present — all three taken on the commit after `bffeaec`** — every
-   one with a test and a mutation check, every thread resolved. A TENTH pass is
+   release must present — all three taken on `9cbbed0`**, and **round 10
+   (07:52 on `9cbbed0`) two P2s on earlier ships: the call page's "reconciled"
+   badge keyed on the estimate flag, which token-priced OpenAI calls also clear
+   (now keyed on the reconciliation stamp, with a third state, "calculated"),
+   and a recording push to an already-synced row with no retry when it fails
+   (the sync is re-opened) — both taken on the v56 commit** — every one with a
+   test and a mutation check, every thread resolved. An ELEVENTH pass is
    requested on that head.
-   **Read that tenth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   **Read that eleventh pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
 
-2. **Pull and republish.** `/voice/health` must read the v55 marker below.
+2. **Pull and republish.** `/voice/health` must read the v56 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
    — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
    *Build* checks are green; *Type check* is red with the 22 errors that are
@@ -481,13 +501,14 @@ merged or is in PR #321 waiting for you.
 | **v53** (PR #321) | no-ivr's `create_ticket` writes a CERTAIN identity (name + date of birth matched) onto the call row, reading the transport's `callLogId` at write time; the factory-time phone-candidate write is gone | `patient_found` on 0 of 297 substantive no-ivr calls in seven days — the writer read a getter before it was backfilled, and would have written a phone candidate as an identity |
 | **v54** (PR #321) | when a phone carries several people and the caller affirmed a first name, `lookup_patient` narrows to that person, re-resolves them and carries them as CERTAIN — the filing tool inherits the chart date instead of asking | all 26 recognised-caller DOB refusals on 09-16 read `carry = no_entry`: the phone rung found several people and remembered nobody, and the affirmed name never reached the tool. This is W1, measured and fixed |
 | **v55** (PR #321) | the follow-up after a tool no longer waits for a `response.done` that has already passed — the bridge asks the wire whether the carrying response is still open — and every call that owed a follow-up writes a PHI-free `follow_up_summary` row to `call_events` | 9–42 runtime calls a day since 09-10 ended in dead air with a filing refusal answered in milliseconds and the pre-tool filler as the last audible line (15 on 09-16); three controls ruled out a dead follow-up path, a rejected `response.create` and an invisible barge-in. This is W10 — the mechanism is a hypothesis the instrument settles tomorrow. Codex round 9 added the late-batch window (two late tool calls from one response are one follow-up, not two) and made the summary row survive a failed flush |
+| **v56** (PR #321) | an unvoiced tool answer cannot end the call — the bridge holds `terminate_call` while the model has a tool result it has not put into words (three holds, then it lets go), and `record_automated_resolution` tells the model to say the appointment it found | 38 of the 61 PCP calls the agent ended on 09-16 ended on the agent's OWN QUESTION (17 · 32 · 38 over three days), 18 with no ticket; on 9 a day the clinic's appointment lookup succeeded and the answer was never spoken before the hangup. This is W11 |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v55-the-follow-up-does-not-wait-for-a-done-that-passed-20260917
+GET /voice/health   ->   voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:

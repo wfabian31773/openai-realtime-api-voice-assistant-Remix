@@ -340,9 +340,17 @@ import { callEnvironment } from "./callRecord";
  * inside an open response and waited for that response's done before
  * requesting the follow-up. It now asks the wire whether the response is
  * still open, and writes a per-call follow-up summary to call_events.
+ *
+ * v56: an unvoiced tool answer cannot end the call. 38 of the 61 PCP calls
+ * the agent ended by tool on 2026-09-16 ended with the agent's own question
+ * as its last words — on nine the appointment lookup the clinic rang for
+ * succeeded and its answer was never spoken. The bridge now holds an
+ * end-call tool while the model has a tool result it has not put into
+ * words (bounded at HANGUP_HOLD_LIMIT), and record_automated_resolution
+ * tells the model to say what the lookup found.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v55-the-follow-up-does-not-wait-for-a-done-that-passed-20260917";
+  "voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

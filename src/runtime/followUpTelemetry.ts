@@ -27,7 +27,7 @@ export interface FollowUpEvent {
 }
 
 /** Null when the call never owed a follow-up — nothing to say. */
-export function followUpEvent(record: Pick<VoiceCallRecord, "followUps" | "outcome">): FollowUpEvent | null {
+export function followUpEvent(record: Pick<VoiceCallRecord, "followUps" | "outcome" | "hangupsHeld">): FollowUpEvent | null {
   const f = record.followUps;
   if (!f || f.owed === 0) return null;
   const suspicious = f.lastUnanswered || f.toolCallsAfterDone > 0;
@@ -38,6 +38,8 @@ export function followUpEvent(record: Pick<VoiceCallRecord, "followUps" | "outco
       requested: f.requested,
       toolCallsAfterDone: f.toolCallsAfterDone,
       lastUnanswered: f.lastUnanswered,
+      // v56: end-call tool calls refused because a tool answer was never voiced.
+      hangupsHeld: record.hangupsHeld ?? 0,
       outcome: record.outcome,
     },
   };

@@ -1,4 +1,4 @@
-# AFTER-MEASUREMENTS — what the 2026-09-17 republish turns on (v37–v55)
+# AFTER-MEASUREMENTS — what the 2026-09-17 republish turns on (v37–v56)
 
 `docs/BACKEND_HANDOFF.md`'s rule, made runnable: every ship in PR #321 and the
 two merged before it (v37, v38) names a number it must move and a guard it must
@@ -20,7 +20,7 @@ the ticket's (`coalesce(call_start_time, created_at)`), substantive means
 check the Support Center before calling a call unfiled.
 
 **First, confirm the build:** `GET /voice/health` must read
-`voice-runtime-v55-the-follow-up-does-not-wait-for-a-done-that-passed-20260917`. A number
+`voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917`. A number
 taken on an older marker is a before-number.
 
 ---
@@ -430,6 +430,45 @@ buffer kept for the reaper when the insert fails, so a database blip at
 teardown no longer deletes the row on exactly the calls it made unmeasurable;
 the instrument query above is unbiased toward healthy-database minutes only
 from this build.
+
+## v56 — an unvoiced tool answer cannot end the call
+
+**Before (PCP, runtime, `duration >= 30`, ended by `terminate_call` with
+`runtime_outcome = agent_ended`, the agent's LAST line a question or "one
+moment"):** 09-14: 17 of 30 · 09-15: 32 of 57 · 09-16: 38 of 61; no ticket on
+18 of the 38. The lookup-then-hangup shape with the answer never spoken
+(`lookup_patient_appointments > record_automated_resolution > terminate_call`,
+last line a question): 9 · 9 · 9.
+
+```sql
+-- The class, per day. Target 0 on a v56 build.
+WITH calls AS (
+  SELECT c.created_at::date AS day, c.ticket_number, c.runtime_outcome,
+         (SELECT string_agg(e->>'tool', '>' ORDER BY e->>'at')
+            FROM jsonb_array_elements(coalesce(c.tool_timeline->'events','[]'::jsonb)) e) AS tools,
+         (SELECT regexp_replace(l, '^\s*AGENT:\s*', '')
+            FROM unnest(regexp_split_to_array(c.transcript, E'\n')) WITH ORDINALITY AS t(l, i)
+            WHERE l ~ '^\s*AGENT:' ORDER BY i DESC LIMIT 1) AS last_agent
+  FROM call_logs c
+  WHERE c.created_at::date >= '<day>' AND c.duration >= 30
+    AND c.agent_used = 'pcp' AND c.voice_provider = 'grok'
+)
+SELECT day,
+       count(*) FILTER (WHERE tools ~ 'terminate_call$' AND runtime_outcome = 'agent_ended') AS agent_ended,
+       count(*) FILTER (WHERE tools ~ 'terminate_call$' AND runtime_outcome = 'agent_ended'
+                          AND (last_agent ~ '\?\s*(\[interrupted\])?$' OR last_agent ILIKE '%one moment%')) AS hung_up_on_own_question,
+       count(*) FILTER (WHERE tools ~ 'lookup_patient_appointments>record_automated_resolution>terminate_call$'
+                          AND runtime_outcome = 'agent_ended'
+                          AND (last_agent ~ '\?\s*(\[interrupted\])?$' OR last_agent ILIKE '%one moment%')) AS appt_answer_never_spoken,
+       count(*) FILTER (WHERE runtime_outcome IN ('dead_air','max_duration')) AS dead_air_or_max  -- the guard
+FROM calls GROUP BY 1 ORDER BY 1;
+
+-- How often the bridge held a hangup (the guard firing), from the v55 row.
+SELECT at::date AS day, count(*) FILTER (WHERE (data->>'hangupsHeld')::int > 0) AS calls_with_a_held_hangup,
+       sum((data->>'hangupsHeld')::int) AS holds
+FROM call_events WHERE category = 'model' AND message = 'follow_up_summary'
+GROUP BY 1 ORDER BY 1;
+```
 
 ## Also on this build, not a version of its own
 

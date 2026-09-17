@@ -10,6 +10,7 @@ import {
   type CallOutcome,
   type VoiceCallRecord,
   LATE_TOOL_BATCH_GRACE_MS,
+  HANGUP_HOLD_LIMIT,
 } from "./mediaStreamBridge";
 import type { TwilioOutboundFrame } from "./twilioFrames";
 import type { BoundAgent } from "./agentBinding";
@@ -2970,5 +2971,118 @@ describe("VoiceCallBridge — late tool calls are still a batch (Codex P1, #321 
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
     expect(h.timers.fire(LATE_TOOL_BATCH_GRACE_MS)).toBe(false);
     expect(h.session.requestResponse).not.toHaveBeenCalled();
+  });
+});
+
+describe("VoiceCallBridge — a tool answer the agent never voiced cannot end the call (v56)", () => {
+  /** Guards passed on the hangup (its transport step 404s here); every other
+   * tool answers with a success the model owes the caller words for. */
+  function permitting() {
+    const dispatch = vi.fn(async (name: string) =>
+      name === "terminate_call"
+        ? { ok: true, output: JSON.stringify({ success: false, reason: "completed", status: 404 }) }
+        : { ok: true, output: '{"success":true,"ticket_number":"VA-1"}' },
+    );
+    return { agent: makeAgent({ dispatch }), dispatch };
+  }
+  async function terminate(h: ReturnType<typeof makeBridge>) {
+    h.handlers().onToolCall("call-end", "terminate_call", { reason: "completed" });
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  /** One tool answered and its follow-up requested — the model now holds
+   * a result it has said nothing about. */
+  async function toolAnswered(h: ReturnType<typeof makeBridge>) {
+    h.newResponse();
+    h.handlers().onToolCall("c1", "create_ticket", {});
+    await new Promise((r) => setTimeout(r, 0));
+    h.handlers().onResponseDone();
+  }
+  const lastResult = (h: ReturnType<typeof makeBridge>) => {
+    const calls = h.session.sendToolResult.mock.calls;
+    return calls[calls.length - 1]!;
+  };
+
+  it("refuses the hangup while a tool answer has not been put into words, tells the model to speak, and owes it the turn", async () => {
+    const { agent, dispatch } = permitting();
+    const h = makeBridge({ agent });
+    await toolAnswered(h);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    h.newResponse(); // the model's next response: straight to the hangup, no words
+    await terminate(h);
+    const [callId, ok, output] = lastResult(h);
+    expect(callId).toBe("call-end");
+    expect(ok).toBe(false);
+    expect(output).toMatchObject({ error: "unvoiced_tool_result" });
+    expect((output as { fix: string }).fix).toMatch(/tell them what the tool found/i);
+    expect(dispatch).not.toHaveBeenCalledWith("terminate_call", expect.anything());
+    expect(h.outcomes).toEqual([]);
+    expect(h.bridge.lastArmedFinalFallbackMs).toBeNull();
+    h.handlers().onResponseDone();
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(2);
+  });
+
+  it("once the agent has spoken since the tool answer, the hangup goes through", async () => {
+    const h = makeBridge({ agent: permitting().agent });
+    await toolAnswered(h);
+    speakUtterance(h, "Your ticket is VA-1. Goodbye.");
+    await terminate(h);
+    expect(lastResult(h)[2]).not.toMatchObject({ error: "unvoiced_tool_result" });
+    expect(h.timers.fire(h.bridge.lastArmedFinalFallbackMs!)).toBe(true);
+    expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+
+  it("a call with no tool answer at all can be ended — a ghost call", async () => {
+    const h = makeBridge({ agent: permitting().agent });
+    h.newResponse();
+    await terminate(h);
+    expect(lastResult(h)[2]).not.toMatchObject({ error: "unvoiced_tool_result" });
+    expect(h.timers.fire(h.bridge.lastArmedFinalFallbackMs!)).toBe(true);
+    expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+
+  it("an utterance still streaming IS the words — the hangup waits on it instead of refusing", async () => {
+    const h = makeBridge({ agent: permitting().agent });
+    await toolAnswered(h);
+    h.newResponse();
+    h.handlers().onAgentTranscriptDelta("Filed as VA-1. Goodbye.");
+    h.handlers().onAudioDelta(b64(800)); // streaming, no completion yet
+    await terminate(h);
+    expect(lastResult(h)[2]).not.toMatchObject({ error: "unvoiced_tool_result" });
+    h.handlers().onAudioDone("Filed as VA-1. Goodbye.");
+    expect(h.timers.fire(h.bridge.lastArmedFinalFallbackMs!)).toBe(true);
+    expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+
+  it("the hold is bounded — a model that answers every refusal with another silent hangup is let go after HANGUP_HOLD_LIMIT", async () => {
+    const h = makeBridge({ agent: permitting().agent });
+    await toolAnswered(h);
+    for (let i = 0; i < HANGUP_HOLD_LIMIT; i++) {
+      h.newResponse();
+      await terminate(h);
+      expect(lastResult(h)[2]).toMatchObject({ error: "unvoiced_tool_result" });
+      h.handlers().onResponseDone();
+    }
+    h.newResponse();
+    await terminate(h);
+    expect(lastResult(h)[2]).not.toMatchObject({ error: "unvoiced_tool_result" });
+    expect(h.timers.fire(h.bridge.lastArmedFinalFallbackMs!)).toBe(true);
+    expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+
+  it("the record counts the hangups it held, and zero when it held none", async () => {
+    const held: VoiceCallRecord[] = [];
+    const h = makeBridge({ agent: permitting().agent, persistCallRecord: async (r) => void held.push(r) });
+    await toolAnswered(h);
+    h.newResponse();
+    await terminate(h);
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(held[0].hangupsHeld).toBe(1);
+
+    const clean: VoiceCallRecord[] = [];
+    const g = makeBridge({ agent: permitting().agent, persistCallRecord: async (r) => void clean.push(r) });
+    g.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(clean[0].hangupsHeld).toBe(0);
   });
 });

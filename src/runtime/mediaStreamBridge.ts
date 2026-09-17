@@ -167,6 +167,42 @@ export function guardsAllowedTermination(output: Record<string, unknown>): boole
   return error === "missing_api_key" || error === "missing_call_id";
 }
 
+/**
+ * A TOOL ANSWER THE AGENT NEVER VOICED CANNOT END THE CALL (v56, task #147).
+ *
+ * On 2026-09-16, 38 of the 61 PCP calls the agent ended by tool ended with
+ * the agent's own QUESTION as its last words: it asked, the caller answered,
+ * and the model's next act was a tool chain ending in `terminate_call` with
+ * no spoken turn between — on nine of them the appointment lookup the caller
+ * had rung for succeeded and its answer was never said. The tool's guards
+ * cannot see that (they check the disposition, not the words), so the bridge
+ * refuses an end-call tool while the model holds a tool answer it has not put
+ * into words, and the refusal owes a follow-up so the model speaks. An
+ * utterance already streaming counts as the words: its completion arms the
+ * hangup, as it always has.
+ *
+ * Bounded: a model that answers the refusal with another silent hangup is
+ * let go after HANGUP_HOLD_LIMIT holds rather than looped against a refusal
+ * forever — a hangup beats a dead line.
+ */
+export const HANGUP_HOLD_LIMIT = 3;
+
+export function unvoicedToolResultRefusal(name: string): Record<string, unknown> {
+  return {
+    success: false,
+    error: "unvoiced_tool_result",
+    fix:
+      `You called ${name} without saying anything since your last tool result, so the caller is still ` +
+      `waiting on it. Tell them what the tool found or what was filed — read a ticket number back if there ` +
+      `is one — ask if there is anything else, and call ${name} again after they answer.`,
+  };
+}
+
+/** PHI-free; one line per held hangup. */
+export function hangupHeldMarker(name: string, held: number): string {
+  return `[HANGUP HELD] ${name} not dispatched — the model has not spoken since its last tool answer (hold ${held} of ${HANGUP_HOLD_LIMIT}); refused with the instruction to speak first`;
+}
+
 /** μ-law 8kHz mono = 8000 bytes/second = 8 bytes per millisecond. */
 export const MULAW_BYTES_PER_MS = 8;
 
@@ -361,6 +397,9 @@ export interface VoiceCallRecord {
   /** The tool follow-up bookkeeping (v55) — see FollowUpStats. Optional only
    * so older fixtures still type-check; the bridge always sets it. */
   followUps?: FollowUpStats;
+  /** End-call tool calls the bridge refused because the model held a tool
+   * answer it had not voiced (v56, HANGUP_HOLD_LIMIT). */
+  hangupsHeld?: number;
 }
 
 /**
@@ -1107,6 +1146,21 @@ export class VoiceCallBridge {
       this.firstTranscriptAtMs = now;
     }
     this.lastTranscriptAtMs = now;
+    if (source === "agent") {
+      this.agentLineSeq += 1;
+      this.hangupHoldsSinceLastLine = 0;
+    }
+  }
+
+  /** v56: the model holds a tool answer it has not put into words, nothing
+   * is being said right now, and the hold budget for that answer is not
+   * spent. See HANGUP_HOLD_LIMIT. */
+  private hangupWouldSilenceAToolAnswer(): boolean {
+    if (this.unvoicedToolAnswerSeq === null) return false;
+    if (this.unvoicedToolAnswerSeq !== this.agentLineSeq) return false;
+    // An utterance already streaming IS the words; requestHangup waits on it.
+    if (this.current !== null) return false;
+    return this.hangupHoldsSinceLastLine < HANGUP_HOLD_LIMIT;
   }
 
   private handleAudioDone(transcript?: string): void {
@@ -1432,6 +1486,13 @@ export class VoiceCallBridge {
    * done and its batch may still be growing; the grace timer closes it. */
   private lateBatchOpen = false;
   private lateBatchTimer: unknown = null;
+  /** v56 — counts the agent's lines; a tool answer that owed a follow-up
+   * remembers the count it arrived at, and a hangup is refused while the two
+   * are still equal (nothing has been said since). */
+  private agentLineSeq = 0;
+  private unvoicedToolAnswerSeq: number | null = null;
+  private hangupHoldsSinceLastLine = 0;
+  private hangupsHeld = 0;
 
   /** One tool answered. Records what is owed; the request itself fires
    * only when the LAST outstanding tool has settled AND the carrying
@@ -1441,6 +1502,8 @@ export class VoiceCallBridge {
     if (owesFollowUp) {
       this.followUpOwed = true;
       this.followUps.owed += 1;
+      // The model owes the caller words for this answer (v56).
+      this.unvoicedToolAnswerSeq = this.agentLineSeq;
     }
     this.maybeRequestFollowUp();
   }
@@ -1547,6 +1610,24 @@ export class VoiceCallBridge {
        * them filed nothing. The eleventh identical call gets the tenth's
        * answer back instead of a dispatch; see toolCeiling.ts, rule 1.
        */
+      if (this.endCallToolNames.has(name) && this.hangupWouldSilenceAToolAnswer()) {
+        if (this.ended) return;
+        this.hangupHoldsSinceLastLine += 1;
+        this.hangupsHeld += 1;
+        console.warn(hangupHeldMarker(name, this.hangupHoldsSinceLastLine));
+        this.toolEvents.push({
+          name,
+          ok: false,
+          succeeded: false,
+          atMs: Date.now() - this.startedAtMs,
+          error: "unvoiced_tool_result",
+        });
+        this.session.sendToolResult(callId, false, unvoicedToolResultRefusal(name));
+        // A refusal the model must answer with words — the same settle as
+        // any other refusal, so the follow-up is requested.
+        this.toolCallSettled(true);
+        return;
+      }
       const verdict = this.ceiling.begin(name, args);
       if (!verdict.allow) {
         console.warn(ceilingMarker(name, verdict));
@@ -1862,6 +1943,7 @@ export class VoiceCallBridge {
         ...(usageAtTeardown ? { usage: usageAtTeardown } : {}),
         agentTurns: this.agentTurns,
         interruptions: this.interruptions,
+        hangupsHeld: this.hangupsHeld,
         followUps: {
           ...this.followUps,
           lastUnanswered:

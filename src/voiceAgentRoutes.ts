@@ -7718,18 +7718,39 @@ export function setupVoiceAgentRoutes(app: Express): void {
            * the partial push that must not.
            */
           const { ticketingApiClient } = await import('../server/services/ticketingApiClient');
-          const result = await ticketingApiClient.updateTicketCallData({
-            callSid: callLog.callSid || undefined,
-            ticketNumber: callLog.ticketNumber || undefined,
-            recordingUrl: recordingUrl,
-          });
-          if (result.success) {
-            console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}${callLog.callDataSynced ? ' (call already synced)' : ' (the post-call sync carries the rest)'}`);
-          } else {
-            console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
+          let delivered = false;
+          try {
+            const result = await ticketingApiClient.updateTicketCallData({
+              callSid: callLog.callSid || undefined,
+              ticketNumber: callLog.ticketNumber || undefined,
+              recordingUrl: recordingUrl,
+            });
+            delivered = result.success;
+            if (delivered) {
+              console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}${callLog.callDataSynced ? ' (call already synced)' : ' (the post-call sync carries the rest)'}`);
+            } else {
+              console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
+            }
+          } catch (pushErr) {
+            console.error('[RECORDING] ✗ Exception pushing recording URL to ticketing system:', pushErr);
+          }
+          /**
+           * A FAILED PUSH ON A ROW THE SYNC HAS ALREADY FINISHED HAS NO OTHER
+           * DELIVERY (Codex P2, #321 round 10). The sync selects
+           * callDataSynced = false, so once it has finished a call this push
+           * is the only path the URL has, and a transient failure lost it for
+           * good. Re-open the sync: the flag goes back to false (the ONE flag
+           * write on this path, and it only ever clears), the next pass
+           * carries the full payload with the URL now on the row, and marks
+           * the call itself. A row the sync has not finished needs nothing.
+           */
+          const { afterRecordingPush } = await import('./runtime/recordingPushOutcome');
+          if (afterRecordingPush(delivered, callLog.callDataSynced === true) === 'reopen_sync') {
+            await storage.updateCallLog(callLogId, { callDataSynced: false });
+            console.warn(`[RECORDING] the push failed on a call the post-call sync had already finished — re-opened the sync for ${callLogId} so its next pass carries the recording URL`);
           }
         } catch (pushErr) {
-          console.error('[RECORDING] ✗ Exception pushing recording URL to ticketing system:', pushErr);
+          console.error('[RECORDING] ✗ the recording push could not complete:', pushErr);
         }
       };
 

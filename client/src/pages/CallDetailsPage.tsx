@@ -455,8 +455,14 @@ export function CallDetailsPage() {
                   the duration. The Observatory read both as one figure until
                   2026-09-17, which is how a $37.43 allocation onto a 104-second
                   call passed for a fact. */}
-              {log.costIsEstimated === false ? (
+              {log.costReconciledAt ? (
                 <span className="rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide bg-emerald-500/15 text-emerald-300" title="Allocated from the provider's own reported spend for the day">reconciled</span>
+              ) : log.costIsEstimated === false ? (
+                /* Priced from the provider's own token counts for THIS call
+                   (updateCallCostsWithTokens clears the estimate flag) — real
+                   usage, but never checked against the bill, so it is not
+                   "reconciled" (Codex P2, #321 round 10). */
+                <span className="rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide bg-sky-500/15 text-sky-300" title="Priced from the provider's own token counts for this call; not reconciled against the provider's bill">calculated</span>
               ) : log.costIsEstimated === true ? (
                 <span className="rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide bg-zinc-700/60 text-zinc-300" title="A published rate times the duration; not yet reconciled against the provider's bill">estimated</span>
               ) : null}

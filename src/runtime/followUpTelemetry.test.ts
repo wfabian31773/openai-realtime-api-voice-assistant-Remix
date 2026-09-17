@@ -70,7 +70,7 @@ describe("the follow-up summary", () => {
 
   it("carries only counts and the outcome — nothing a caller said", () => {
     const ev = followUpEvent(record({ owed: 1, requested: 1, toolCallsAfterDone: 1, lastUnanswered: true }))!;
-    expect(ev.data).toEqual({ owed: 1, requested: 1, toolCallsAfterDone: 1, lastUnanswered: true, outcome: "dead_air" });
+    expect(ev.data).toEqual({ owed: 1, requested: 1, toolCallsAfterDone: 1, lastUnanswered: true, hangupsHeld: 0, outcome: "dead_air" });
   });
 
   it("emits one call_events row keyed on the call and flushes it, then releases the buffer", async () => {

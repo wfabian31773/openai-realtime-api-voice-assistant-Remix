@@ -41,8 +41,21 @@ describe("pushRecordingToTicketing", () => {
     expect(between).not.toMatch(/\breturn\b/);
   });
 
-  it("never writes callDataSynced — that flag belongs to the full-payload sync", () => {
+  it("never marks the call delivered — that flag belongs to the full-payload sync", () => {
     expect(helper).not.toContain("callDataSynced: true");
-    expect(helper).not.toMatch(/updateCallLog\([^)]*callDataSynced/);
+  });
+
+  it("re-opens the sync ONLY when a push fails on a row the sync already finished — Codex P2, round 10", () => {
+    // The one flag write on this path, and it only ever clears.
+    const writes = [...helper.matchAll(/updateCallLog\([^)]*callDataSynced: (true|false)/g)];
+    expect(writes).toHaveLength(1);
+    expect(writes[0]![1]).toBe("false");
+    const push = helper.indexOf("updateTicketCallData(");
+    const decision = helper.indexOf("afterRecordingPush(delivered, callLog.callDataSynced === true) === 'reopen_sync'");
+    const reopen = helper.indexOf("updateCallLog(callLogId, { callDataSynced: false })");
+    expect(decision).toBeGreaterThan(push);
+    expect(reopen).toBeGreaterThan(decision);
+    // A push that throws is a failed push: `delivered` stays false past the catch.
+    expect(helper).toMatch(/let delivered = false;[\s\S]*?delivered = result\.success;/);
   });
 });
