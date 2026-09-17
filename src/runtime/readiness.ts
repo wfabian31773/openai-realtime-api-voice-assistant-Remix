@@ -311,9 +311,17 @@ import { callEnvironment } from "./callRecord";
  * established (verifiedIdentityFor — the sweep's own reader, which refuses a
  * phone candidate) now rides with the record at teardown, on the insert and
  * the update path alike, never nulled. Stacks on v50.
+ *
+ * v52: the cost write parses. From 8a226a6 (2026-09-04) the per-call cost
+ * UPDATE rendered `$n + $m` for its unreconciled total and Postgres refused it
+ * at PARSE ("operator is not unique: unknown + unknown") — 3,749 times in the
+ * 24h to 2026-09-17 05:40, twilio_cost_cents written on 5–25% of completed
+ * calls against 100% before. The bound values now carry the column's type.
+ * Server-side, no spoken line; the marker dates the build the after-number
+ * (completed calls per day with twilio_cost_cents set) is read against.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v51-the-record-reaches-the-call-row-20260917";
+  "voice-runtime-v52-the-cost-write-parses-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

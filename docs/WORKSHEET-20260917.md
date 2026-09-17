@@ -178,6 +178,22 @@ no phone check at all.** PCP Support was exempted by #273; nothing else was.
 ### W6 — The two backlog items he named at 03:00: clean logging in the Observatory, and the cost.
 **`[x]` BOTH SHIPPED — v44 (logging) and v45 (cost), one PR. 16 mutations, 16 caught.**
 
+**`[x]` AND A THIRD, FOUND AT 05:35 IN THE HUB'S POSTGRES LOGS — v52, the cost write
+was rejected at PARSE for thirteen days.** `operator is not unique: unknown + unknown`,
+3,749 times in 24 hours: the cost-preserving UPDATE from #268 (commit `8a226a6`,
+2026-09-04) rendered its unreconciled total as `$4 + $5`, two untyped parameters,
+which Postgres cannot add. Every per-call cost write carrying both components failed;
+the reconciler's one-sided writes went through, which is why it looked partial.
+`twilio_cost_cents` written on 544/544 completed calls on 09-01 → 104/502 on 09-04 →
+175/808 on 09-16; **4,295 of 5,486 completed calls since 09-04 have no Twilio price**,
+and every cost total on the Observatory since then is provider-only on 78% of calls.
+The 5-minute Twilio-cost sweep fetched each price from Twilio and lost it to the same
+error every cycle — that sweep is the 3,749. Fix: the bound values carry the column's
+type (`typedCents`, `server/preservedCostSet.ts`); red on the live Hub with `PREPARE`
+(two fresh params refused, `::integer` accepted, `WHERE false` executes nothing);
+`preservedCostSet.test.ts` +4, 3 mutations, 3 caught. **The backfill is his call — see
+the 5AM block.**
+
 **Codex round 3 (04:42):** the round-1 recording fix had a race of its own — a call the
 sync had already snapshotted when the URL landed was sent by neither side. The push now
 sends the URL every time and never touches `callDataSynced`; the sync carries it again
@@ -335,14 +351,14 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v51, ready for review). Codex has reviewed it three times: round 1
+   (v39–v52, ready for review). Codex has reviewed it three times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s — every one taken, every thread resolved, each with a test
    and a mutation check. A FOURTH pass was requested on the head that carries v50,
-   v51 and the round-3 fixes.
+   v51, v52 and the round-3 fixes.
    **Read that fourth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
-2. **Pull and republish.** `/voice/health` must read the v51 marker below.
+2. **Pull and republish.** `/voice/health` must read the v52 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
    — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
    *Build* checks are green; *Type check* is red with the 22 errors that are
@@ -394,13 +410,14 @@ merged or is in PR #321 waiting for you.
 | **v49** (PR #321) | the runtime grades its own calls at teardown, the backfill cannot be starved by its own head, and a dead_air ending after a real conversation is `completed` | a third of the fleet read `agent_outcome` NULL at peak on 2026-09-16 (grades lagging 161–203 min); 87 calls from 09-15 stranded behind two empty rows; 58 real conversations on 09-14 recorded `failed` and never graded or synced |
 | **v50** (PR #321) | the second identity miss ends the ask — `lookup_patient` counts misses per call, coaches one shaped re-ask, then says stop and file | 35 runtime calls on 09-16 asked for a date of birth 2+ times, 13 asked 3+, tech's almost all cold callers; 13–16 calls a day missed 3+ times and were never found, 7–10 of them with no ticket |
 | **v51** (PR #321) | a CERTAIN identity the tools established reaches the call row — `patient_found`, `patient_name`, `patient_dob` — never a phone candidate | NULL on 2,471 of 2,471 runtime calls in seven days; the Observatory's identity columns have been dark on every lane since the cutover (task #57's runtime half was done on a runtime that no longer exists) |
+| **v52** (PR #321) | the per-call cost UPDATE types its two bound components, so Postgres stops refusing it at PARSE and `twilio_cost_cents` is written again | rejected 3,749 times in the 24h to 05:40 (`operator is not unique: unknown + unknown`, since `8a226a6` on 09-04); Twilio price on 5–25% of completed calls against 100% before; 4,295 calls since 09-04 carry a provider-only total |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v51-the-record-reaches-the-call-row-20260917
+GET /voice/health   ->   voice-runtime-v52-the-cost-write-parses-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:
@@ -419,6 +436,41 @@ republish.** It is why I could tell you tonight that v37 merged at 18:51 UTC and
 still never served a call.
 
 ---
+
+### The Hub database — three findings at 05:30, two of them ours
+
+**1. The Hub Postgres CRASHED at 05:27–05:30 UTC and came back at 05:30:33** (`database
+system was interrupted; last known up at 05:27:32`, a fresh postmaster and a fresh
+pgbouncer — a platform-level restart, no OOM line, no `terminating` line). Every
+statistics counter reset with it. Not ours to fix; **check the project's compute and
+restart history in the Supabase dashboard.** Beside it, since **2026-09-10 17:00 UTC**
+Supabase's own `postgres_exporter` has been timing out about 80 times an hour (1,938
+in the last 24h) on a 20-second read of `pg_stat_statements` — a query that should take
+milliseconds. That is the platform's metrics collector, and it is a symptom of the
+instance being IO-starved, not a cause we can remove from here.
+
+**2. OURS — the cost write, fixed as v52 (above).** What is NOT fixed by the code:
+**4,295 completed calls since 09-04 have no Twilio price**, and the sweep only looks
+back four hours, so they stay that way until an admin recalculation runs — about 4,300
+Twilio price fetches. Recommendation: run it after close today, in batches; the SET
+clause defends every reconciled row so it cannot touch an invoice. **Your call on
+timing.**
+
+**3. OURS — `lookup_patient` timeouts are BACK (task #68), and the four 5-minute sweeps
+were each seq-scanning `call_logs`.** Timeouts: 0 on every day 09-03..09-08, then 1 · 5 ·
+**55** · 91 · 26 · 39 on 09-09/10/11/14/15/16 — 7–18% of lookups by lane, records on the
+OLD core included (17.6%), worst at the 15:00 opening hour. Mostly transient: of 108
+affected calls since 09-14, 91 found the patient on a later lookup; **17 never did, 9
+of those still filed**. The onset matches the exporter storm (09-10 17:00), not the
+Schedule mirror's 20–97-second INSERT batches (09-11 had none in business hours).
+What we contributed: `ticketingSyncService`'s stale-call reaper, Twilio-cost retry,
+sync and insights sweeps each read all 28,479 pages of `call_logs` every five minutes
+— **11.7–26 seconds each when the cache is cold, in the log** — because the table has
+no index on `status`, `end_time` or the pending flags. Partial indexes were created
+tonight (`CONCURRENTLY`, reversible with `DROP INDEX`, no behaviour change — the
+2026-09-12 PersonID precedent); the list and the before/after plans are in
+`docs/observatory/AFTER-MEASUREMENTS-20260917.md`. After-number for #68: lookup
+timeouts per day, 39 on 09-16, target back to the 0 of 09-03..09-08.
 
 ## THE DECISIONS — TWO OF THREE WERE SETTLED BY EVIDENCE OVERNIGHT
 

@@ -248,6 +248,79 @@ GROUP BY 1,2 ORDER BY 3 DESC;
 -- seven days to 09-17 before: 0 / 0 / 0 on every lane.
 ```
 
+## v52 — the cost write parses
+
+Before-arm (Hub, run 2026-09-17 05:38 UTC). Rows in the log: the Hub's postgres logs,
+`event_message ilike '%operator is not unique%'` — **3,749 in the 24h to 05:40**,
+`parsed.query` = the `update "call_logs" set … total_cost_cents = CASE … ELSE $4 + $5 END`
+statement, `parsed.command_tag` = `PARSE`. Target 0 after deploy.
+
+```sql
+-- the columns the failing statement writes, per day. 09-01/02 are the before-before:
+-- twilio_cents_set = calls. From 09-04 (8a226a6) it collapses; after v52 it must return
+-- to ~calls for NEW rows (the 4h sweep does not reach older ones — see the backfill note).
+SELECT created_at::date AS day, count(*) AS calls,
+       count(cost_calculated_at) AS cost_calculated,
+       count(twilio_cost_cents) AS twilio_cents_set,
+       count(total_cost_cents) AS total_cents_set,
+       count(cost_reconciled_at) AS reconciled
+FROM call_logs
+WHERE created_at >= '2026-09-01' AND duration IS NOT NULL AND duration > 0
+GROUP BY 1 ORDER BY 1;
+-- before: 09-01 544/544 twilio · 09-02 482/482 · 09-04 104/502 · 09-08 43/615 ·
+--         09-14 197/822 · 09-15 51/783 · 09-16 175/808. reconciled counts must NOT move.
+
+-- the backlog the code does not drain (the sweep looks back 4h):
+SELECT count(*) FILTER (WHERE twilio_cost_cents IS NULL) AS twilio_null,
+       count(*) FILTER (WHERE total_cost_cents IS NOT NULL AND twilio_cost_cents IS NULL) AS provider_only_totals
+FROM call_logs WHERE status = 'completed' AND created_at >= '2026-09-04' AND duration > 0;
+-- before: 4,295 · 4,293 of 5,486.
+```
+
+Guard: the cost-preservation trio in CLAUDE.md's cost section (ever_reconciled /
+at_grok_rate / at_openai_rate) — `at_openai_rate` must still read 0.
+
+The red-then-green on the live engine, executing nothing (`WHERE false`):
+
+```sql
+PREPARE p_bad AS UPDATE call_logs SET total_cost_cents =
+  CASE WHEN cost_reconciled_at IS NOT NULL THEN COALESCE(openai_cost_cents, 0) + $1 ELSE $2 + $3 END
+  WHERE false;   -- ERROR 42725: operator is not unique: unknown + unknown
+PREPARE p_good AS UPDATE call_logs SET total_cost_cents =
+  CASE WHEN cost_reconciled_at IS NOT NULL THEN COALESCE(openai_cost_cents, 0) + $1::integer ELSE $2::integer + $3::integer END
+  WHERE false;   -- PREPARE
+```
+
+### Live database objects created 2026-09-17 05:45–05:50 UTC (Hub) — in no branch
+
+Four partial indexes on `call_logs`, each matching one of `ticketingSyncService`'s
+five-minute sweeps, which until now each read every page of the table (28,479
+buffers; 11.7–26 s in the postgres log when the cache was cold). `CONCURRENTLY`, so
+nothing was locked; no behaviour changes; reversal is `DROP INDEX <name>`. Matching
+rows at creation: open-status 0 · twilio-pending 16,856 (the sweep reads only the
+last 4h of them) · sync-pending 208 · insights-pending 655.
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_call_logs_open_status_created
+  ON public.call_logs (created_at) WHERE status IN ('in_progress','initiated','ringing');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_call_logs_twilio_cost_pending
+  ON public.call_logs (end_time) WHERE status = 'completed' AND (twilio_cost_cents IS NULL OR twilio_cost_cents = 0);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_call_logs_sync_pending
+  ON public.call_logs (created_at) WHERE status = 'completed' AND call_data_synced = false;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_call_logs_insights_pending
+  ON public.call_logs (start_time DESC) WHERE status = 'completed' AND twilio_insights_fetched_at IS NULL;
+```
+
+| sweep (EXPLAIN ANALYZE, warm cache) | before | after |
+|---|---|---|
+| stale-call reaper (`status IN (open) AND created_at < now()-15m`) | Seq Scan, 28,479 buffers, 79.9 ms | Index Scan `idx_call_logs_open_status_created`, **1 buffer, 0.055 ms** |
+| Twilio-cost retry (`twilio_cost_cents IS NULL/0 AND end_time >= now()-4h`) | Seq Scan, 28,479 buffers, 61.7 ms | Index Scan `idx_call_logs_twilio_cost_pending`, **9 buffers, 0.106 ms** |
+
+The cold-cache figures in the log (11.7–26 s) are the ones that matter for the
+`lookup_patient` timeouts; the warm-cache before-arm above is what could be measured
+at 05:45 on a database that had restarted fifteen minutes earlier. After-number for
+task #68: `lookup_patient` events with `ms >= 5900` per day — 39 on 09-16.
+
 ## Also on this build, not a version of its own
 
 **`unclassified_call` by provenance (task #138)** — the sweep stamps
