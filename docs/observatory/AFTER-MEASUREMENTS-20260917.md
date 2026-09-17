@@ -341,6 +341,35 @@ GROUP BY 1 ORDER BY 1;
 --         found_without_create_ticket = 0.
 ```
 
+## v54 — the affirmed name picks the person
+
+Before-arm, Hub, 2026-09-16: runtime `date_of_birth` refusals on calls whose transcript
+carries the greeting's question — **26 (optical 8, surgery 10, tech 8), 16 with no ticket on
+the row, all 26 `carry = no_entry`**.
+
+```sql
+-- the refusals, by carry — target: the recognised-caller count near 0
+SELECT c.created_at::date AS day, c.agent_used, coalesce(e->'outcome'->>'carry', '(none)') AS carry,
+       count(DISTINCT c.call_sid) AS calls,
+       count(DISTINCT c.call_sid) FILTER (WHERE c.transcript ILIKE '%am i speaking with%') AS on_recognised_callers
+FROM call_logs c, LATERAL jsonb_array_elements(c.tool_timeline->'events') e
+WHERE c.voice_provider = 'grok' AND c.duration >= 30 AND c.created_at >= '2026-09-16'
+  AND e->>'tool' LIKE 'file\_%\_ticket' AND (e->'outcome'->'missingFields')::text ILIKE '%date_of_birth%'
+GROUP BY 1,2,3 ORDER BY 1,2,4 DESC;
+
+-- the mechanism firing: a phone match that is CERTAIN — impossible before v54 on a
+-- multi-person number. Target: appears on recognised calls.
+SELECT c.created_at::date AS day, c.agent_used, count(DISTINCT c.call_sid) AS certain_phone_matches
+FROM call_logs c, LATERAL jsonb_array_elements(c.tool_timeline->'events') e
+WHERE c.voice_provider = 'grok' AND c.created_at >= '2026-09-16' AND e->>'tool' = 'lookup_patient'
+  AND e->'outcome'->>'matched_by' = 'phone' AND e->'outcome'->>'identity_is_certain' = 'true'
+GROUP BY 1,2 ORDER BY 1,2;
+```
+
+Guard: tickets carrying a date of birth that is not the patient's must stay 0 — read the
+`[TOOLS] lookup_patient: the caller's first name picked one of the N people` console line
+against the ticket's name.
+
 ## Also on this build, not a version of its own
 
 **`unclassified_call` by provenance (task #138)** — the sweep stamps

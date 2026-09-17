@@ -326,9 +326,15 @@ import { callEnvironment } from "./callRecord";
  * calls in seven days, and it would have written the PHONE match, a candidate.
  * create_ticket now writes a CERTAIN identity (name + date of birth matched)
  * at write time. Old core, so the marker dates the build the way v18/v41/v47 do.
+ *
+ * v54: the affirmed name picks the person. All 26 recognised-caller date-of-
+ * birth refusals on 2026-09-16 read carry=no_entry: the phone rung had found
+ * several people on the number and remembered nobody, and the greeting's
+ * affirmed first name never reached lookup_patient. It now narrows the
+ * candidates by that name, re-resolves the one hit and carries it as certain.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v53-the-record-reaches-the-after-hours-row-20260917";
+  "voice-runtime-v54-the-affirmed-name-picks-the-person-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

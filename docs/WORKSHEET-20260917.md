@@ -351,11 +351,11 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v53, ready for review). Codex has reviewed it three times: round 1
+   (v39–v54, ready for review). Codex has reviewed it three times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s — every one taken, every thread resolved, each with a test
    and a mutation check. A FOURTH pass was requested on the head that carries v50,
-   v51, v52, v53 and the round-3 and round-4 fixes.
+   v51, v52, v53, v54 and the round-3, round-4 and round-5 fixes.
    **Read that fourth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
    **Codex round 4 (05:16 and 05:30 on `1b82a86`): three P2s — two taken on `25b023b`
@@ -364,7 +364,7 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
    after hangup: 3 of 1,553 calls). A fifth pass is requested on the head carrying v52,
    v53 and the round-4 fixes.**
 
-2. **Pull and republish.** `/voice/health` must read the v53 marker below.
+2. **Pull and republish.** `/voice/health` must read the v54 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
    — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
    *Build* checks are green; *Type check* is red with the 22 errors that are
@@ -418,13 +418,14 @@ merged or is in PR #321 waiting for you.
 | **v51** (PR #321) | a CERTAIN identity the tools established reaches the call row — `patient_found`, `patient_name`, `patient_dob` — never a phone candidate | NULL on 2,471 of 2,471 runtime calls in seven days; the Observatory's identity columns have been dark on every lane since the cutover (task #57's runtime half was done on a runtime that no longer exists) |
 | **v52** (PR #321) | the per-call cost UPDATE types its two bound components, so Postgres stops refusing it at PARSE and `twilio_cost_cents` is written again | rejected 3,749 times in the 24h to 05:40 (`operator is not unique: unknown + unknown`, since `8a226a6` on 09-04); Twilio price on 5–25% of completed calls against 100% before; 4,295 calls since 09-04 carry a provider-only total |
 | **v53** (PR #321) | no-ivr's `create_ticket` writes a CERTAIN identity (name + date of birth matched) onto the call row, reading the transport's `callLogId` at write time; the factory-time phone-candidate write is gone | `patient_found` on 0 of 297 substantive no-ivr calls in seven days — the writer read a getter before it was backfilled, and would have written a phone candidate as an identity |
+| **v54** (PR #321) | when a phone carries several people and the caller affirmed a first name, `lookup_patient` narrows to that person, re-resolves them and carries them as CERTAIN — the filing tool inherits the chart date instead of asking | all 26 recognised-caller DOB refusals on 09-16 read `carry = no_entry`: the phone rung found several people and remembered nobody, and the affirmed name never reached the tool. This is W1, measured and fixed |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v53-the-record-reaches-the-after-hours-row-20260917
+GET /voice/health   ->   voice-runtime-v54-the-affirmed-name-picks-the-person-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:
@@ -550,6 +551,15 @@ files / 226 tests under `server/` and `client/` — the same failure pointed the
 other way. Only `exclude` is set.
 
 ## W1 `[-]` — I wrote the fix, then reverted it. This is the entry to read.
+
+**UPDATE 07:55 — `[x]` MEASURED AND FIXED AS v54, and it was a different mechanism from the
+one I reverted.** With v25's `carry` instrument live on 09-16: DOB refusals on recognised
+callers 50 (09-14) → 26 (09-16), **all 26 `no_entry`**, 20 of 26 on phone-only lookups,
+0 of 26 with a match followed by a miss — so NOT the `forgetIfSameName` wipe I had
+written against. The phone rung found SEVERAL people on the number, returned the newest
+as a guess, and remembered nobody; the greeting's affirmed first name never reached the
+tool. v54 narrows the candidates by that name and carries the one hit as certain.
+6 tests, 4 mutations caught. The reverted change stays reverted.
 
 `carry = no_entry` on 55 of 61 date-of-birth refusals means `verifiedIdentity`
 held nothing for the call, and on 33 of those `lookup_patient` HAD matched

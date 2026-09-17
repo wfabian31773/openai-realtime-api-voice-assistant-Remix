@@ -246,6 +246,51 @@ registerTool({
       }
     }
 
+    /**
+     * THE AFFIRMED FIRST NAME PICKS ONE PERSON AMONG SEVERAL ON A PHONE — v54.
+     *
+     * Measured 2026-09-16: every one of the 26 recognised-caller date-of-birth
+     * refusals on the runtime lanes read `carry = no_entry`, their lookups had
+     * matched by PHONE with `identity_is_certain: false`, and nothing later
+     * wiped an entry (0 of 26 had a match followed by a miss). That is this
+     * shape: the Schedule phone rung finds SEVERAL people on the number,
+     * returns the most recently seen one with `identity.unique: false`, and
+     * the remember below is skipped because the match is not unique — so the
+     * filing tool finds nothing to inherit and asks for a date of birth the
+     * greeting's own question had already settled. The greeting asked "Am I
+     * speaking with <name>?", the caller said yes, and that affirmed name
+     * never reached this tool.
+     *
+     * RULE ZERO step 2: MATCH by phone, VALIDATE — and the validation is the
+     * name the caller affirmed (v26: 228 affirmed, 13 denied). When the
+     * caller's first name matches exactly ONE of the people on the number,
+     * that person is re-resolved on their own name and date of birth and
+     * carried as CERTAIN. Two people sharing the first name (a father and a
+     * son), or a name matching nobody, leave the match the guess it was.
+     */
+    if (resolved.patientFound && resolved.identity && !resolved.identity.unique && first) {
+      const { nameKey } = await import('./verifiedIdentity');
+      const affirmed = nameKey(first);
+      const hits = resolved.identity.candidates.filter((c) => nameKey(c.firstName) === affirmed);
+      const one = hits.length === 1 ? hits[0] : undefined;
+      if (one?.firstName && one.lastName && one.dateOfBirth) {
+        const picked = await scheduleLookupService.lookupPatient({
+          firstName: one.firstName,
+          lastName: one.lastName,
+          dateOfBirth: one.dateOfBirth,
+          deadlineAt,
+        });
+        if (picked.patientFound && picked.identity?.unique !== false) {
+          // PHI-free: a count of people and the fact that one was picked.
+          console.info(
+            `[TOOLS] lookup_patient: the caller's first name picked one of the ${resolved.identity.candidateCount} people on this number`,
+          );
+          // Matched by phone, confirmed by the caller — not a guess any more.
+          resolved = { ...picked, matchedBy: 'phone', identityUnconfirmed: false };
+        }
+      }
+    }
+
     if (!resolved.patientFound) {
       /**
        * "SEVERAL PEOPLE" IS NOT "NOBODY", and the agent needs the difference.

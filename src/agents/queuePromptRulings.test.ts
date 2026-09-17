@@ -527,10 +527,18 @@ describe('the recognised-caller prompt is measured too', () => {
   // change — these numbers now describe the widest day of the year rather
   // than whichever day the suite ran on. Going UP fails; going down is always
   // welcome and the number should be lowered when it does.
+  //
+  // RAISED ONCE MORE ON 2026-09-17 FOR v54 (+24 tokens per lane): the YES
+  // bullet of the recognised-caller block now tells the model to call
+  // lookup_patient with the affirmed first name, which is what lets a phone
+  // that carries several people resolve to the one who answered — all 26
+  // recognised-caller date-of-birth refusals on 09-16 were that shape. The
+  // ratchet went red, which is the ratchet working; it is raised with the
+  // reason rather than quietly relaxed, as the v29 raise above was.
   for (const [lane, baseline] of [
-    ['tech', 1949],
-    ['optical', 1740],
-    ['records', 2052],
+    ['tech', 1973],
+    ['optical', 1764],
+    ['records', 2076],
   ] as const) {
     it(`${lane}'s recognised prompt does not grow past ${baseline} tokens`, () => {
       expect(warm[lane]).toBeLessThanOrEqual(baseline);
