@@ -10,9 +10,13 @@
  * done, and no sweep would ever look again.
  *
  * So a failed push on an already-synced row RE-OPENS the sync: the flag goes
- * back to false, the next pass carries the full payload again — the same
- * values, idempotent on the app, the URL now on the row — and marks the call
- * itself. A row the sync has not finished needs nothing: the sync is coming.
+ * back to false (and the retry count to zero, or a row that synced on its
+ * third attempt is never selected again — Codex P2, round 11), the next pass
+ * carries the full payload again — the same values, idempotent on the app,
+ * the URL now on the row — and marks the call itself. A row the sync has not
+ * finished needs nothing: the sync is coming — and the sync's own mark-done
+ * refuses a row whose recording landed after its payload was built, so
+ * "coming" holds even against a sweep already in flight (round 11 again).
  */
 export type RecordingPushAftermath = "delivered" | "sync_will_carry" | "reopen_sync";
 

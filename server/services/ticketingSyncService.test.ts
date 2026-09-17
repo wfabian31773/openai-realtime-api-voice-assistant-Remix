@@ -182,3 +182,53 @@ describe('a successful primary push must record itself as delivered', () => {
     }
   });
 });
+
+describe('the mark-done is conditional on the recording the payload carried — Codex P2, #321 round 11', () => {
+  // A recording can land on the row between this batch being selected and
+  // the success write: the callback saves the URL, pushes it directly, and a
+  // failed push reads a pre-push snapshot that still says the sync is coming
+  // — with a payload built before the URL existed. Marking the row done here
+  // would send the URL from neither side. So the success UPDATE matches only
+  // while the row still holds what was sent, and a zero-row result leaves
+  // the call pending, retries untouched, for the next pass to carry.
+  //
+  // Read from the source, as the selection pins above are: the query is a
+  // Drizzle chain against a live `db` import. The statement itself was
+  // PREPAREd against the Hub with the `::text` cast before it shipped —
+  // the v52 lesson, a bare parameter beside NULL has no type to infer.
+  const SRC = readFileSync(join(__dirname, 'ticketingSyncService.ts'), 'utf8');
+  const start = SRC.indexOf('if (response.success) {');
+  const end = SRC.indexOf('console.log(`[TICKETING SYNC] ✓ Successfully synced call', start);
+  const SUCCESS = SRC.slice(start, end);
+
+  it('the success write exists where expected', () => {
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+  });
+
+  it('marks the row done only while it still holds the recording the payload carried', () => {
+    expect(SUCCESS).toMatch(/callDataSynced: true/);
+    expect(SUCCESS).toMatch(/\.where\(\s*and\(\s*eq\(callLogs\.id, call\.id\),\s*sql`\$\{callLogs\.recordingUrl\} IS NOT DISTINCT FROM \$\{call\.recordingUrl \?\? null\}::text`/);
+  });
+
+  it('a write that matched no row leaves the call pending rather than reporting it synced', () => {
+    expect(SUCCESS).toMatch(/\.returning\(\{ id: callLogs\.id \}\)/);
+    const zeroRows = SUCCESS.indexOf('if (marked.length === 0) {');
+    expect(zeroRows).toBeGreaterThan(0);
+    const branch = SUCCESS.slice(zeroRows, SUCCESS.indexOf('}', SUCCESS.indexOf('return {', zeroRows)) + 1);
+    expect(branch).toMatch(/left pending/);
+    expect(branch).not.toMatch(/callDataSynced/); // no second write in the branch
+    expect(branch).toMatch(/return \{/);
+  });
+
+  it('the recording push re-opens the sync WITH its retry count reset, or a row that synced on its third attempt is never selected again', () => {
+    const ROUTES = readFileSync(join(__dirname, '..', '..', 'src', 'voiceAgentRoutes.ts'), 'utf8');
+    const recStart = ROUTES.indexOf('const pushRecordingToTicketing = async');
+    const recEnd = ROUTES.indexOf('console.info(`[RECORDING] Conference ${conferenceSid} recording', recStart);
+    const helper = ROUTES.slice(recStart, recEnd);
+    expect(helper).toMatch(/updateCallLog\(callLogId, \{ callDataSynced: false, ticketingSyncRetries: 0 \}\)/);
+    // The selector this reset exists for.
+    expect(SRC).toMatch(/lt\(callLogs\.ticketingSyncRetries, MAX_RETRIES\)/);
+    expect(SRC).toMatch(/const MAX_RETRIES = 3;/);
+  });
+});

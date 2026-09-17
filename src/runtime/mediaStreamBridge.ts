@@ -962,6 +962,7 @@ export class VoiceCallBridge {
         // Words the caller heard, committed — so the tail is measured from
         // here, the same invariant the barge-in and teardown cuts follow.
         this.noteTranscript("agent");
+        this.noteAgentWords();
       }
       this.current = null;
     }
@@ -1050,6 +1051,7 @@ export class VoiceCallBridge {
     // caller-audible agent words in it (Codex, #243).
     if (this.recordCutLine(`[cut by guardrail: ${guardrail.name}]`)) {
       this.noteTranscript("agent");
+      this.noteAgentWords();
     }
     this.awaitingMark.length = 0;
     this.cancelledEpoch = this.session.getResponseEpoch();
@@ -1146,10 +1148,17 @@ export class VoiceCallBridge {
       this.firstTranscriptAtMs = now;
     }
     this.lastTranscriptAtMs = now;
-    if (source === "agent") {
-      this.agentLineSeq += 1;
-      this.hangupHoldsSinceLastLine = 0;
-    }
+  }
+
+  /** v56: words the caller HEARD — an utterance whose audio started, or a
+   * cut line committed at a barge-in, a guardrail or the teardown. That is
+   * the only thing that voices a tool answer. A response completion that
+   * opened no utterance stamps the clock (above) and is NOT words: counting
+   * it let a silent `response.done` after a tool result unlock the hangup
+   * the answer was still owed (Codex P2, #321 round 11). */
+  private noteAgentWords(): void {
+    this.agentLineSeq += 1;
+    this.hangupHoldsSinceLastLine = 0;
   }
 
   /** v56: the model holds a tool answer it has not put into words, nothing
@@ -1191,6 +1200,7 @@ export class VoiceCallBridge {
     const done = this.current;
     this.current = null;
     if (!done) return;
+    this.noteAgentWords();
     this.agentTurns += 1;
     this.lastCompletedUtteranceBytes = done.bytes;
 
@@ -1408,7 +1418,10 @@ export class VoiceCallBridge {
     // the tail is measured from an older line — or, for a greeting
     // interrupted before anything completed, not at all (Codex review,
     // PR #227 round 13).
-    if (this.recordCutLine("[interrupted]")) this.noteTranscript("agent");
+    if (this.recordCutLine("[interrupted]")) {
+      this.noteTranscript("agent");
+      this.noteAgentWords();
+    }
     this.awaitingMark.length = 0;
     // Everything this response emits from here is stale.
     this.cancelledEpoch = this.session.getResponseEpoch();
@@ -1907,7 +1920,10 @@ export class VoiceCallBridge {
       // the end of the call, so the tail from these words is ~zero —
       // truthful, where measuring from an older line overstates dead air and
       // a caller who hung up mid-greeting got no tail at all.
-      if (this.recordCutLine("[interrupted]")) this.noteTranscript("agent");
+      if (this.recordCutLine("[interrupted]")) {
+      this.noteTranscript("agent");
+      this.noteAgentWords();
+    }
     }
     this.awaitingMark.length = 0;
     // Nothing to flush. The caller's lines were written as they arrived and

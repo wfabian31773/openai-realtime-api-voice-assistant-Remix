@@ -409,7 +409,7 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v56, ready for review). Codex has reviewed it TEN times: round 1
+   (v39–v56, ready for review). Codex has reviewed it ELEVEN times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
@@ -439,10 +439,18 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
    badge keyed on the estimate flag, which token-priced OpenAI calls also clear
    (now keyed on the reconciliation stamp, with a third state, "calculated"),
    and a recording push to an already-synced row with no retry when it fails
-   (the sync is re-opened) — both taken on the v56 commit** — every one with a
-   test and a mutation check, every thread resolved. An ELEVENTH pass is
-   requested on that head.
-   **Read that eleventh pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   (the sync is re-opened) — both taken on the v56 commit**, and **round 11
+   (08:16 on `84aabf5`) three P2s: a response completion that carried no audio
+   counted as the words and unlocked the v56 hangup hold (the line count now
+   advances only on words the caller heard); the round-10 reopen decided on a
+   pre-push snapshot a sweep in flight could make stale (the sync's own
+   mark-done is now conditional on the row still holding the recording the
+   payload carried); and the reopen left the retry count at a value the
+   selector excludes (reset with it — 0 of 5,904 synced rows in 14 days carried
+   it) — all three taken on the round-11 commit** — every one with a test and
+   a mutation check, every thread resolved. A TWELFTH pass is requested on that
+   head.
+   **Read that twelfth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
 
 2. **Pull and republish.** `/voice/health` must read the v56 marker below.

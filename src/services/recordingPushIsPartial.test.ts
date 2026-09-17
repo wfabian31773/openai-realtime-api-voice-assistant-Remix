@@ -52,9 +52,14 @@ describe("pushRecordingToTicketing", () => {
     expect(writes[0]![1]).toBe("false");
     const push = helper.indexOf("updateTicketCallData(");
     const decision = helper.indexOf("afterRecordingPush(delivered, callLog.callDataSynced === true) === 'reopen_sync'");
-    const reopen = helper.indexOf("updateCallLog(callLogId, { callDataSynced: false })");
+    const reopen = helper.indexOf("updateCallLog(callLogId, { callDataSynced: false, ticketingSyncRetries: 0 })");
     expect(decision).toBeGreaterThan(push);
     expect(reopen).toBeGreaterThan(decision);
+    // And the retry count goes with it (Codex P2, round 11): the sync's
+    // selector reads `< MAX_RETRIES` and its success write stores the attempt
+    // number, so a row that synced on its third attempt would otherwise be
+    // re-opened and never selected.
+    expect(helper).not.toMatch(/updateCallLog\(callLogId, \{ callDataSynced: false \}\)/);
     // A push that throws is a failed push: `delivered` stays false past the catch.
     expect(helper).toMatch(/let delivered = false;[\s\S]*?delivered = result\.success;/);
   });

@@ -3021,6 +3021,40 @@ describe("VoiceCallBridge — a tool answer the agent never voiced cannot end th
     expect(h.session.requestResponse).toHaveBeenCalledTimes(2);
   });
 
+  it("a completion that carried no audio is NOT the words — the hangup is still held (Codex P2, round 11)", async () => {
+    // The model's next response ends without ever sending audio: the bridge
+    // sees `onAudioDone` for it (the shape the greeting test models), and the
+    // clock is stamped — but nobody heard anything, so the tool answer is
+    // still unvoiced and `terminate_call` must still be refused.
+    const { agent, dispatch } = permitting();
+    const h = makeBridge({ agent });
+    await toolAnswered(h);
+    h.newResponse();
+    h.handlers().onAudioDone("Filed as VA-1. Goodbye."); // no delta, no bytes
+    h.newResponse();
+    await terminate(h);
+    expect(lastResult(h)[2]).toMatchObject({ error: "unvoiced_tool_result" });
+    expect(dispatch).not.toHaveBeenCalledWith("terminate_call", expect.anything());
+    expect(h.bridge.lastArmedFinalFallbackMs).toBeNull();
+  });
+
+  it("words the caller heard before barging in ARE the words — the interrupted line counts", async () => {
+    // The agent started reading the answer; the caller cut in. What played
+    // was heard, and the cut line is committed — so a hangup after the
+    // caller's interruption is not silencing an unvoiced answer.
+    const h = makeBridge({ agent: permitting().agent });
+    await toolAnswered(h);
+    h.newResponse();
+    h.handlers().onAgentTranscriptDelta("Your ticket is VA-1 and");
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onSpeechStarted(); // barge-in
+    h.newResponse();
+    await terminate(h);
+    expect(lastResult(h)[2]).not.toMatchObject({ error: "unvoiced_tool_result" });
+    expect(h.timers.fire(h.bridge.lastArmedFinalFallbackMs!)).toBe(true);
+    expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+
   it("once the agent has spoken since the tool answer, the hangup goes through", async () => {
     const h = makeBridge({ agent: permitting().agent });
     await toolAnswered(h);

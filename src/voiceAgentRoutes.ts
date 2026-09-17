@@ -7742,12 +7742,23 @@ export function setupVoiceAgentRoutes(app: Express): void {
            * good. Re-open the sync: the flag goes back to false (the ONE flag
            * write on this path, and it only ever clears), the next pass
            * carries the full payload with the URL now on the row, and marks
-           * the call itself. A row the sync has not finished needs nothing.
+           * the call itself. A row the sync has not finished needs nothing —
+           * and that is safe against a sweep already in flight with a stale
+           * payload only because the sync's mark-done is conditional on the
+           * row still holding the recording the payload carried
+           * (`ticketingSyncService.syncCall`, Codex P2 round 11).
+           *
+           * THE RETRY COUNT IS RESET WITH IT (Codex P2, round 11): the sync
+           * selects `ticketingSyncRetries < 3` and its success write stores
+           * the attempt number, so a call that synced on its third attempt
+           * would be re-opened and never selected. 0 of 5,904 synced rows in
+           * the 14 days to 2026-09-17 carried a count of 3 — taken because it
+           * is one field in the write this branch already makes.
            */
           const { afterRecordingPush } = await import('./runtime/recordingPushOutcome');
           if (afterRecordingPush(delivered, callLog.callDataSynced === true) === 'reopen_sync') {
-            await storage.updateCallLog(callLogId, { callDataSynced: false });
-            console.warn(`[RECORDING] the push failed on a call the post-call sync had already finished — re-opened the sync for ${callLogId} so its next pass carries the recording URL`);
+            await storage.updateCallLog(callLogId, { callDataSynced: false, ticketingSyncRetries: 0 });
+            console.warn(`[RECORDING] the push failed on a call the post-call sync had already finished — re-opened the sync for ${callLogId} (retries reset) so its next pass carries the recording URL`);
           }
         } catch (pushErr) {
           console.error('[RECORDING] ✗ the recording push could not complete:', pushErr);

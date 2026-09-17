@@ -188,7 +188,23 @@ export class TicketingSyncService {
       const response = await ticketingApiClient.updateTicketCallData(payload);
 
       if (response.success) {
-        await db
+        /**
+         * MARKED DONE ONLY IF THE ROW STILL HOLDS THE RECORDING THIS PAYLOAD
+         * CARRIED (Codex P2, #321 round 11). A recording can land on the row
+         * between this batch being selected and this write — the callback
+         * saves the URL, pushes it directly, and if THAT push fails it reads
+         * a pre-push snapshot that still says the sync is coming. It was:
+         * with a payload snapshotted before the URL existed. Marking the row
+         * done here would have sent the URL from neither side, for good.
+         * So the mark is conditional on the row's `recording_url` being what
+         * was sent (both null, or the same string); a URL that landed
+         * mid-flight makes this match zero rows, the row stays pending with
+         * its retry count untouched, and the next pass carries it. Typed
+         * explicitly — the v52 lesson: a bare parameter beside NULL has no
+         * type for Postgres to infer, and the statement was PREPAREd against
+         * the live Hub with this cast before it shipped.
+         */
+        const marked = await db
           .update(callLogs)
           .set({
             ticketingSynced: true,
@@ -199,7 +215,23 @@ export class TicketingSyncService {
             ticketNumber: response.ticketNumber || call.ticketNumber,
             ticketingSyncRetries: currentRetries + 1,
           })
-          .where(eq(callLogs.id, call.id));
+          .where(
+            and(
+              eq(callLogs.id, call.id),
+              sql`${callLogs.recordingUrl} IS NOT DISTINCT FROM ${call.recordingUrl ?? null}::text`,
+            ),
+          )
+          .returning({ id: callLogs.id });
+
+        if (marked.length === 0) {
+          console.warn(`[TICKETING SYNC] ○ a recording landed on call ${identifier} while this pass was in flight — the payload did not carry it, so the call is left pending for the next pass`);
+          return {
+            callId: call.id,
+            callSid: call.callSid,
+            ticketNumber: response.ticketNumber || call.ticketNumber,
+            success: true,
+          };
+        }
 
         console.log(`[TICKETING SYNC] ✓ Successfully synced call ${identifier}`);
         

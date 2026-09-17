@@ -143,6 +143,16 @@ above carries both columns (`with_recording`, `with_turns`). Guard: filing
 rate per lane and barely-heard rate must not move. The first console line to
 look for on a call that stays NULL: `[RECORDING] failed to start`.
 
+**Round 11 (08:16 UTC), on the recording push.** Two counters, both console
+lines, neither in SQL: `[TICKETING SYNC] ○ a recording landed on call … left
+pending` (the sync's mark-done matched no row because a URL landed after its
+payload was built — the row goes on the next pass) and `[RECORDING] the push
+failed on a call the post-call sync had already finished` (the round-10
+reopen, now with the retry count reset). The number to watch is the one v44
+already names: runtime tickets in the Support Center that carry a transcript
+and duration but no recording URL — target 0, whichever ordering the callback
+and the sweep landed in.
+
 ## v45 — the Grok day table
 
 Number: rows in `daily_grok_costs` — **0 today**; one per runtime day from the
@@ -469,6 +479,15 @@ SELECT at::date AS day, count(*) FILTER (WHERE (data->>'hangupsHeld')::int > 0) 
 FROM call_events WHERE category = 'model' AND message = 'follow_up_summary'
 GROUP BY 1 ORDER BY 1;
 ```
+
+### Round 11 on this ship (08:16 UTC)
+
+The line count the hold reads advanced on every response completion, audio or
+not, so a silent `response.done` after the tool result unlocked the hold. It
+now advances only on words the caller heard. No new number: the v56 queries
+above measure it, and `hangupsHeld` still counts the guard firing. If the
+class above stays at 09-16 levels on a v56 build while `hangupsHeld` reads 0,
+suspect another door of this shape before suspecting the guard.
 
 ## Also on this build, not a version of its own
 
