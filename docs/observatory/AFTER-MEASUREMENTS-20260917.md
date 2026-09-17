@@ -704,3 +704,23 @@ The claim held ONE 20 s deadline for the whole queue, and a POST alone may take 
 Every waiter started its own bound on ARRIVAL, so a single predecessor that legitimately outlasted it released every waiter at once, and attempts two and three both claimed before attempt one had answered — the third could again send no flag. Codex's figure for a legitimate attempt is exact and was verified in `server/services/ticketingApiClient.ts`: `warmUpIfStale(2, 500)` is a 3 s probe, a 500 ms sleep and a second 3 s probe (the file's own comment: worst case 6.5 s before the POST), then the 15 s POST — about 21.5 s, past the 20 s bound. Two changes: claims on a key are QUEUED (`claimQueues`, a per-key promise chain) and released one at a time — a claim's wait starts only when the claim ahead of it has claimed or given up — and `GATE_SETTLEMENT_WAIT_MS` is 25 s, above the longest legitimate attempt, so a bound crossing is a lost settle and nothing else.
 
 `gateAttempts.test.ts` +3: the floor pinned above 21.5 s; a stuck predecessor releases ONLY the next claim, the one behind it starts its wait then and reads both refusals once both settle (RED on the round-17 code: both released at the bound, the third read 0); a predecessor that never answers releases each waiter one full bound after the one ahead of it. **3 mutations, 3 caught** (`mut31/fixed/`): the queue removed (2 fail); the queue never draining — `claimed()` dropped from the `finally` (6, by timeout); the floor back to 20 s (1). `surgeryUnassignedExit.test.ts` 13/13, typecheck clean, full suite 257 files / 4,729 tests.
+
+### Round 19 on this ship (10:47 UTC) — one P2 on the round-18 queue, taken on `1b6eb33`
+
+With the first of three concurrent attempts STUCK, the queue released the second after one bound (25 s) and then made the third wait a SECOND full bound on the same stuck attempt — 50 s — while `mediaStreamBridge.ts` arms a 45 s tool-dispatch watchdog (`DEFAULT_DEAD_AIR_MS` 30 s + `TOOL_DISPATCH_GRACE_MS` 15 s) and tears the call down first. `abandonInFlight`: when a claim's bound passes with no settle, the attempt it was waiting on is let go of (its pending slot released), so the claims queued behind wait only for what actually answers. A claim's total wait is now one bound for a stuck predecessor plus the real duration of the attempts that answer. A late answer for an abandoned attempt is clamped at zero and can only wake a later claim EARLY with a SMALLER count — a missed flag, never a false one — and on the production path that answer is a client timeout anyway (`makeRequest` aborts the POST at 15 s), which settles unrefused.
+
+**The round-18 test that had the first attempt REFUSE at 26 s encoded a scenario the client cannot produce** (a refusal arrives inside 21.5 s or not at all) and is rewritten to the possible shape: the late answer is a timeout, it wakes the next claim early with count 0, and never authorises a flag. New: the stuck-first case — the second released at the bound and answering at once, the third claiming THEN rather than a bound later (hangs on the round-18 code).
+
+Base rate, Support Center, 30 days of surgery create-ticket POSTs (`processing_time_ms`):
+
+```sql
+SELECT count(*), percentile_disc(0.5) WITHIN GROUP (ORDER BY processing_time_ms) AS p50,
+       percentile_disc(0.95) WITHIN GROUP (ORDER BY processing_time_ms) AS p95, max(processing_time_ms),
+       count(*) FILTER (WHERE processing_time_ms > 10000) AS over_10s, count(*) FILTER (WHERE processing_time_ms > 20000) AS over_20s
+FROM voice_agent_api_logs
+WHERE endpoint = '/api/voice-agent/create-ticket' AND request_body->'callData'->>'agentUsed' = 'surgery'
+  AND created_at >= now() - interval '30 days';
+-- 2,532 POSTs · p50 2,261 ms · p95 5,188 ms · max 14,099 ms · 11 over 10 s · 0 over 20 s
+```
+
+No attempt has come within 10 s of the 25 s bound; the serialised third of a batch waits about 10 s at p95 in practice. **2 mutations** (`mut32/fixed/`): the abandon removed — 2 fail, by timeout; the abandon moved to the START of every wait — an EQUIVALENT mutant (the loop then iterates exactly once and the behaviour is identical), recorded rather than claimed. `surgeryUnassignedExit.test.ts` 13/13, typecheck clean, full suite 257 files / 4,730 tests.
