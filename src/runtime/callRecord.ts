@@ -36,7 +36,7 @@
  */
 
 import type { VoiceCallRecord } from "./mediaStreamBridge";
-import { takeParkedRecording } from "./parkedRecordings";
+import { peekParkedRecording, releaseParkedRecording } from "./parkedRecordings";
 import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
 import { type RuntimeTransferOutcome } from "./transferOutcomeLog";
 
@@ -583,23 +583,62 @@ async function defaultTransferOutcomeUpdate(
     .where(eq(callLogs.callSid, callSid));
 }
 
+/**
+ * The teardown write is retried on a short, bounded backoff. Until #321 round
+ * 4 a single failed upsert — a database blip at hangup, the kind the Hub had
+ * at 05:30 on 2026-09-17 — lost the call's whole row, and with it the parked
+ * recording URL, and nothing ever tried again. Two retries, ~4s in total: a
+ * caller is not waiting on this, and a row that lands a few seconds late is
+ * a row.
+ */
+export const PERSIST_RETRY_BACKOFF_MS: readonly number[] = [1_000, 3_000];
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  backoffMs: readonly number[],
+  sleep: (ms: number) => Promise<void>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt >= backoffMs.length) throw error;
+      await sleep(backoffMs[attempt]);
+    }
+  }
+}
+
+export interface PersistRuntimeCallOptions {
+  /** Test seam: the backoff between attempts. Defaults to PERSIST_RETRY_BACKOFF_MS. */
+  backoffMs?: readonly number[];
+  sleep?: (ms: number) => Promise<void>;
+}
+
 export async function persistRuntimeCall(
   record: VoiceCallRecord,
   identity: RuntimeCallIdentity = {},
   upsert: CallLogUpsert = defaultUpsert,
+  options: PersistRuntimeCallOptions = {},
 ): Promise<boolean> {
   const row = toCallLogRow(record, identity);
+  const backoffMs = options.backoffMs ?? PERSIST_RETRY_BACKOFF_MS;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   // A recording callback that beat this row is parked by CallSid
-  // (parkedRecordings.ts). Take it onto the write, and look once more after
-  // the write so a callback landing between the two cannot fall in the gap.
-  const parkedUrl = takeParkedRecording(record.callSid);
+  // (parkedRecordings.ts). Read it onto the write WITHOUT consuming it, and
+  // look once more after the write so a callback landing between the two
+  // cannot fall in the gap. The entry is released only once the write that
+  // carried it has succeeded: a write that throws leaves the URL parked for
+  // the retry below, or for the reaper's TTL (Codex P2, #321 round 4).
+  const parkedUrl = peekParkedRecording(record.callSid);
   if (parkedUrl) row.recordingUrl = parkedUrl;
   try {
-    await upsert(row, toConflictUpdate(row));
-    const lateUrl = takeParkedRecording(record.callSid);
+    await withRetry(() => upsert(row, toConflictUpdate(row)), backoffMs, sleep);
+    if (parkedUrl) releaseParkedRecording(record.callSid, parkedUrl);
+    const lateUrl = peekParkedRecording(record.callSid);
     if (lateUrl) {
       const withUrl = { ...row, recordingUrl: lateUrl };
-      await upsert(withUrl, toConflictUpdate(withUrl));
+      await withRetry(() => upsert(withUrl, toConflictUpdate(withUrl)), backoffMs, sleep);
+      releaseParkedRecording(record.callSid, lateUrl);
     }
     return true;
   } catch (error) {

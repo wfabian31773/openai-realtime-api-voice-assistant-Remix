@@ -17,7 +17,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   parkRecording,
-  takeParkedRecording,
+  peekParkedRecording,
+  releaseParkedRecording,
   clearParkedRecordings,
   parkedRecordingCount,
   PARKED_RECORDING_TTL_MS,
@@ -66,24 +67,84 @@ function recordingUpsert(onWrite?: (n: number) => void) {
 beforeEach(() => clearParkedRecordings());
 
 describe("the parking store", () => {
-  it("hands a parked URL back exactly once", () => {
+  it("keeps a parked URL until the write that carried it is released — reading does not consume", () => {
     parkRecording(SID, URL_A);
-    expect(takeParkedRecording(SID)).toBe(URL_A);
-    expect(takeParkedRecording(SID)).toBeUndefined();
+    expect(peekParkedRecording(SID)).toBe(URL_A);
+    expect(peekParkedRecording(SID)).toBe(URL_A);
+    releaseParkedRecording(SID, URL_A);
+    expect(peekParkedRecording(SID)).toBeUndefined();
+  });
+
+  it("a release for a URL that was since replaced keeps the newer one", () => {
+    parkRecording(SID, URL_A);
+    parkRecording(SID, URL_B);
+    releaseParkedRecording(SID, URL_A);
+    expect(peekParkedRecording(SID)).toBe(URL_B);
   });
 
   it("forgets a URL nobody took inside the TTL", () => {
     const t0 = 1_000_000;
     parkRecording(SID, URL_A, t0);
-    expect(takeParkedRecording(SID, t0 + PARKED_RECORDING_TTL_MS + 1)).toBeUndefined();
+    expect(peekParkedRecording(SID, t0 + PARKED_RECORDING_TTL_MS + 1)).toBeUndefined();
   });
 
   it("is capped — the oldest entry goes first", () => {
     for (let i = 0; i < PARKED_RECORDING_CAP; i++) parkRecording(`CA${i}`, URL_A, 1_000 + i);
     parkRecording("CAnewest", URL_B, 5_000);
     expect(parkedRecordingCount()).toBe(PARKED_RECORDING_CAP);
-    expect(takeParkedRecording("CA0", 5_000)).toBeUndefined();
-    expect(takeParkedRecording("CAnewest", 5_000)).toBe(URL_B);
+    expect(peekParkedRecording("CA0", 5_000)).toBeUndefined();
+    expect(peekParkedRecording("CAnewest", 5_000)).toBe(URL_B);
+  });
+});
+
+/**
+ * CODEX P2, ROUND 4: the URL was taken off the store BEFORE the upsert, so a
+ * write that threw lost the only copy. It now stays parked until the write
+ * that carried it has succeeded, and the teardown write itself is retried.
+ */
+describe("a parked URL survives a write that fails", () => {
+  const noWait = { backoffMs: [0, 0] as readonly number[], sleep: async () => {} };
+
+  it("stays parked, and the persist reports false, when every attempt throws", async () => {
+    parkRecording(SID, URL_A);
+    let attempts = 0;
+    const upsert = async () => { attempts++; throw new Error("connection reset"); };
+    expect(await persistRuntimeCall(record(), {}, upsert, noWait)).toBe(false);
+    expect(attempts).toBe(3);
+    expect(peekParkedRecording(SID)).toBe(URL_A);
+    expect(parkedRecordingCount()).toBe(1);
+  });
+
+  it("lands on the retry when the first attempt throws", async () => {
+    parkRecording(SID, URL_A);
+    const writes: RuntimeCallLogRow[] = [];
+    let attempts = 0;
+    const upsert = async (row: RuntimeCallLogRow) => {
+      attempts++;
+      if (attempts === 1) throw new Error("connection reset");
+      writes.push({ ...row });
+    };
+    expect(await persistRuntimeCall(record(), {}, upsert, noWait)).toBe(true);
+    expect(writes).toHaveLength(1);
+    expect(writes[0].recordingUrl).toBe(URL_A);
+    expect(parkedRecordingCount()).toBe(0);
+  });
+
+  it("a URL parked during the write stays parked when ITS write fails", async () => {
+    let n = 0;
+    const upsert = async () => {
+      n++;
+      if (n === 1) { parkRecording(SID, URL_B); return; }
+      throw new Error("connection reset");
+    };
+    expect(await persistRuntimeCall(record(), {}, upsert, noWait)).toBe(false);
+    expect(peekParkedRecording(SID)).toBe(URL_B);
+  });
+
+  it("the default backoff is short and bounded", async () => {
+    const { PERSIST_RETRY_BACKOFF_MS } = await import("./callRecord");
+    expect(PERSIST_RETRY_BACKOFF_MS.length).toBeGreaterThanOrEqual(1);
+    expect(PERSIST_RETRY_BACKOFF_MS.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(10_000);
   });
 });
 

@@ -9,9 +9,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const h = vi.hoisted(() => ({ inserted: [] as Array<Record<string, unknown>[]> }));
+const h = vi.hoisted(() => ({ inserted: [] as Array<Record<string, unknown>[]>, failNext: 0 }));
 vi.mock("../../server/db", () => ({
-  db: { insert: () => ({ values: async (rows: Record<string, unknown>[]) => { h.inserted.push(rows); } }) },
+  db: { insert: () => ({ values: async (rows: Record<string, unknown>[]) => {
+    if (h.failNext > 0) { h.failNext--; throw new Error("connection reset"); }
+    h.inserted.push(rows);
+  } }) },
 }));
 
 const { persistRuntimeTurns, runtimeTurnState } = await import("./runtimeTurns");
@@ -26,7 +29,44 @@ const record = (turns: Array<{ role: "caller" | "agent"; text: string; atMs: num
   startedAtMs: T0, endedAtMs: T0 + 60_000,
 }) as any;
 
-beforeEach(() => { h.inserted.length = 0; resetVerifiedIdentities(); });
+beforeEach(() => { h.inserted.length = 0; h.failNext = 0; resetVerifiedIdentities(); });
+
+/**
+ * CODEX P2, ROUND 4: `flushTurns` gives its claim back on failure so a retry
+ * can write the turns, and `recordRuntimeTurns` released the buffer in an
+ * unconditional `finally` on the very next line — a runtime call has no
+ * incremental flush, so one database blip lost its whole per-turn record.
+ */
+describe("a failed flush does not lose the turns", () => {
+  const noWait = { backoffMs: [0, 0] as readonly number[], sleep: async () => {} };
+
+  it("retries, and the rows land on the second attempt", async () => {
+    const { recordRuntimeTurns, getTurns } = await import("../services/turnLog");
+    h.failNext = 1;
+    const n = await recordRuntimeTurns(SID, [{ role: "caller", text: "a", atMs: T0 }], { state: runtimeTurnState(SID) }, noWait);
+    expect(n).toBe(1);
+    expect(h.inserted).toHaveLength(1);
+    expect(getTurns(SID)).toHaveLength(0); // released once durable
+  });
+
+  it("leaves the buffer for the reaper when every attempt fails", async () => {
+    const { recordRuntimeTurns, getTurns, releaseTurns } = await import("../services/turnLog");
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    h.failNext = 99;
+    await recordRuntimeTurns(SID, [{ role: "caller", text: "a", atMs: T0 }], { state: runtimeTurnState(SID) }, noWait);
+    expect(h.inserted).toHaveLength(0);
+    expect(getTurns(SID)).toHaveLength(1); // NOT released
+    expect(err.mock.calls.some((c) => String(c[0]).includes("left for the reaper"))).toBe(true);
+    err.mockRestore();
+    releaseTurns(SID);
+  });
+
+  it("the default backoff is short and bounded", async () => {
+    const { RUNTIME_TURN_FLUSH_BACKOFF_MS } = await import("../services/turnLog");
+    expect(RUNTIME_TURN_FLUSH_BACKOFF_MS.length).toBeGreaterThanOrEqual(1);
+    expect(RUNTIME_TURN_FLUSH_BACKOFF_MS.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(10_000);
+  });
+});
 
 describe("persistRuntimeTurns", () => {
   it("writes one row per line, in order, with each line's OWN time and the gap to the previous", async () => {

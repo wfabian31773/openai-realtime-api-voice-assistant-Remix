@@ -174,6 +174,7 @@ export async function recordRuntimeTurns(
   callSid: string,
   turns: ReadonlyArray<{ role: 'caller' | 'agent'; text: string; atMs: number }>,
   ids: { callLogId?: string; agentSlug?: string; state: TurnState },
+  opts: { backoffMs?: readonly number[]; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<number> {
   if (!callSid || turns.length === 0) return 0;
   for (const t of turns) {
@@ -185,12 +186,38 @@ export async function recordRuntimeTurns(
       at: t.atMs,
     });
   }
+  /**
+   * A failed flush is retried on a short backoff, and the buffer is released
+   * ONLY once every turn is on disk. The first version released it in an
+   * unconditional `finally`, so the claim `flushTurns` gives back on failure
+   * — written so that "the teardown flush retries" — was handed to a buffer
+   * that was deleted on the next line; a runtime call has no incremental
+   * flush, so one database blip lost its whole per-turn record (Codex P2,
+   * #321 round 4). A buffer still unflushed after the last attempt is left
+   * for the 2h reaper below, which flushes once more before it forgets.
+   */
+  const backoff = opts.backoffMs ?? RUNTIME_TURN_FLUSH_BACKOFF_MS;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   try {
-    await flushTurns(callSid);
+    for (let attempt = 0; ; attempt++) {
+      await flushTurns(callSid);
+      if (turnsFullyFlushed(callSid) || attempt >= backoff.length) break;
+      await sleep(backoff[attempt]);
+    }
   } finally {
-    releaseTurns(callSid);
+    if (turnsFullyFlushed(callSid)) releaseTurns(callSid);
+    else console.error(`[TURN-LOG] runtime turns for ${callSid} not durable after ${backoff.length + 1} attempt(s) — buffer left for the reaper`);
   }
   return turns.length;
+}
+
+/** The backoff between runtime flush attempts: three attempts, ~4s in total. */
+export const RUNTIME_TURN_FLUSH_BACKOFF_MS: readonly number[] = [1_000, 3_000];
+
+/** True when nothing is buffered for this call, or everything buffered is on disk. */
+export function turnsFullyFlushed(callId: string): boolean {
+  const b = buffers.get(callId);
+  return !b || b.flushedCount === b.turns.length;
 }
 
 /** Live view, for the call-detail page and for tests. */

@@ -256,10 +256,20 @@ describe("persistRuntimeCall", () => {
     const errors: unknown[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((...a) => void errors.push(a));
     try {
-      const ok = await persistRuntimeCall(record(), {}, async () => {
-        throw new Error("db down");
-      });
+      let attempts = 0;
+      const ok = await persistRuntimeCall(
+        record(),
+        {},
+        async () => {
+          attempts++;
+          throw new Error("db down");
+        },
+        // The teardown write is retried on a bounded backoff (#321 round 4);
+        // the seam skips the real 1s + 3s so this file stays fast.
+        { backoffMs: [0, 0], sleep: async () => {} },
+      );
       expect(ok).toBe(false);
+      expect(attempts).toBe(3);
       // A transcript in an error log is patient data somewhere nobody watches.
       expect(JSON.stringify(errors)).not.toContain("CALLER: Hi");
     } finally {

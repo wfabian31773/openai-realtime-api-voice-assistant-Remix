@@ -47,13 +47,25 @@ export function parkRecording(callSid: string, url: string, now: number = Date.n
   parked.set(callSid, { url, at: now });
 }
 
-/** Removes the entry it returns: a URL is taken onto exactly one write. */
-export function takeParkedRecording(callSid: string, now: number = Date.now()): string | undefined {
+/**
+ * Reads WITHOUT consuming. A URL stays parked until the write that carried it
+ * is known to have succeeded — the first version took it off the store before
+ * the upsert, so a write that threw or timed out lost the only copy (Codex P2,
+ * #321 round 4). The writer calls `releaseParkedRecording` afterwards.
+ */
+export function peekParkedRecording(callSid: string, now: number = Date.now()): string | undefined {
   sweep(now);
+  return parked.get(callSid)?.url;
+}
+
+/**
+ * Forgets the entry ONLY if it still holds the URL that was written. A newer
+ * callback that re-parked a different URL between the peek and the release is
+ * kept for the next writer rather than dropped with the old one.
+ */
+export function releaseParkedRecording(callSid: string, writtenUrl: string): void {
   const entry = parked.get(callSid);
-  if (!entry) return undefined;
-  parked.delete(callSid);
-  return entry.url;
+  if (entry && entry.url === writtenUrl) parked.delete(callSid);
 }
 
 /** Test seams. */
