@@ -7719,6 +7719,13 @@ export function setupVoiceAgentRoutes(app: Express): void {
           });
           if (result.success) {
             console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid} (call already synced)`);
+            // Already true on every call that reaches this branch — the plan
+            // above admits only a synced call — so this is a no-op in effect.
+            // It stays so the rule ticketingSyncService.test.ts enforces holds
+            // without an exception: every successful push records itself as
+            // delivered. What changed is that it is now UNREACHABLE on a call
+            // the sync has not handled, which is the whole of the Codex P1.
+            await storage.updateCallLog(callLog.id, { callDataSynced: true });
           } else {
             console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
           }

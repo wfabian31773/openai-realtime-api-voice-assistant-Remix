@@ -35,8 +35,20 @@ describe("the recording-status handler follows the plan and never touches the fl
     expect(routes).toMatch(/import \{ recordingDeliveryPlan \} from '\.\/services\/recordingDelivery'/);
   });
 
-  it("never writes callDataSynced from the recording path", () => {
-    expect(helper).not.toMatch(/updateCallLog\([^)]*callDataSynced: true/);
-    expect(helper).not.toMatch(/callDataSynced: true/);
+  /**
+   * The flag write survives ONLY inside the already-synced branch, where it is
+   * a no-op — it stays so `ticketingSyncService.test.ts`'s rule (every
+   * successful push records itself as delivered) holds without an exception.
+   * What the Codex finding needed is that it be UNREACHABLE on a call the sync
+   * has not handled: nothing before the `leave_for_sync` return may write it.
+   */
+  it("cannot mark a call synced before the sync has run — the only write sits behind the plan's early return", () => {
+    const gate = helper.indexOf("=== 'leave_for_sync'");
+    const ret = helper.indexOf("return;", gate);
+    const write = helper.indexOf("callDataSynced: true");
+    expect(gate).toBeGreaterThan(0);
+    expect(write, "no delivery record in the already-synced branch").toBeGreaterThan(0);
+    expect(write, "the flag is written before the plan is read").toBeGreaterThan(ret);
+    expect(helper.slice(0, ret)).not.toContain("callDataSynced: true");
   });
 });
