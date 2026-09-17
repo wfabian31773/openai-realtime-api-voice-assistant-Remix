@@ -409,7 +409,7 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v56, ready for review). Codex has reviewed it TWENTY times: round 1
+   (v39–v56, ready for review). Codex has reviewed it TWENTY-ONE times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
@@ -506,9 +506,19 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
    stays under the 45 s watchdog, and the ticketing client's 15 s timeout now
    covers the BODY read (it was cleared at the headers), so no attempt can
    settle after the floor and a late answer is a timeout by construction
-   (3 mutations, 3 caught).** A TWENTY-FIRST pass is requested on that head.
-   **Read that twenty-first pass before merging** — the v27/v28/v31 rows in CLAUDE.md
-   record what happens when a draft is marked ready and merged in the same minute.
+   (3 mutations, 3 caught).** **Round 21 (11:09, on `3f66bc9`): one P2,
+   DECLINED on the number, and the loop stops here.** A stuck first attempt
+   abandoned at 23 s plus a full-length second leaves the third claiming at
+   ~44.5 s against the 45 s watchdog — but that needs a settle that is LOST, not
+   slow, which round 20 made an escaped exception rather than a slow app. On the
+   measured base rate (p50 2.3 s, p95 5.2 s, max 14.1 s, 0 over 20 s) the worst
+   batch of three lands at **42.3 s**, inside the watchdog. **What IS true and is
+   on the thread and in the marker row: v57 serialises attempts that used to go
+   out in parallel**, so a batched triple costs ~sum(POST) rather than ~max(POST)
+   — about 7 s at p95. **No constant closes the hypothetical** (three serialised
+   15 s timeouts IS 45 s), so if you want it closed the route is to take v57 out
+   of this PR and flag on the SECOND refusal instead; the other eighteen ships do
+   not depend on it. Every thread on #321 is answered and resolved.
 
 2. **Pull and republish.** `/voice/health` must read the v57 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279

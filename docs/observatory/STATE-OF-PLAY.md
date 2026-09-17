@@ -1066,7 +1066,7 @@ guesses no tool ever made.
 
 ---
 
-## 12. The night of 2026-09-16/17 — one worksheet, nineteen ships, twenty Codex rounds (written 09-17)
+## 12. The night of 2026-09-16/17 — one worksheet, nineteen ships, twenty-one Codex rounds (written 09-17)
 
 **The mandate** (Wayne, 2026-09-17): *"keep working through the worksheet,
 don't wait on me … knock out as many relevant tasks as possible and have
@@ -1088,9 +1088,10 @@ greenlight; the operator merges.
 **Where it is:** `docs/WORKSHEET-20260917.md` is the driving document and its
 *FOR 5AM* block is the hand-off. **PR #321** carries v39–v57 — nineteen ships,
 each with its row in the marker table — plus the round-by-round record of
-**twenty Codex reviews absorbed** (every finding taken or declined on a
-measurement, every thread answered and resolved) and a twenty-first requested
-on the head. Suite 258 files / 4,732 tests, root and client typecheck clean.
+**twenty-one Codex reviews absorbed** (every finding taken or declined on a
+measurement, every thread answered and resolved) — the twenty-first declined on
+the base rate, with v57's one real cost (it serialises POSTs that used to go out
+in parallel) written into the marker row rather than waved away. Suite 258 files / 4,732 tests, root and client typecheck clean.
 Live Replit was still on v24 when this was written; the deploy marker to look
 for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
 
