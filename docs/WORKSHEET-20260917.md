@@ -409,7 +409,7 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v56, ready for review). Codex has reviewed it FIFTEEN times: round 1
+   (v39–v56, ready for review). Codex has reviewed it SIXTEEN times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
@@ -481,9 +481,15 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
    09-08..09-16 — on every lost call that reached a third POST the attempts
    were 1–100 ms apart, one model response, and a counter noted after each
    refusal read 0 on all three. The ask is now claimed before the POST and
-   settled after it; sequential rules unchanged; 7 mutations, 7 caught. A
-   SIXTEENTH pass is requested on that head.
-   **Read that sixteenth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   settled after it; sequential rules unchanged; 7 mutations, 7 caught.
+   **Round 16 (10:11, on `68a783b`): two P2s, both on those two changes and
+   both taken — the sync still stamped GAVE UP and reported exhaustion from
+   the snapshot (now a CASE in the same statement, read back with RETURNING),
+   and v57's in-flight count could flag the third of a batch whose first two
+   were 503s or another field's refusal (a claim now waits for the attempts
+   ahead of it and reads confirmed refusals only; 6 mutations, 6 caught).** A
+   SEVENTEENTH pass is requested on that head.
+   **Read that seventeenth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
 
 2. **Pull and republish.** `/voice/health` must read the v57 marker below.

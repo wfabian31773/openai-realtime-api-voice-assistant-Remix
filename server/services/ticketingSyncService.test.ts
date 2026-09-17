@@ -262,7 +262,17 @@ describe('a failed pass increments the retry count in the database, never from a
     expect(SRC).not.toMatch(/ticketingSyncRetries: newRetryCount/);
   });
 
-  it('the snapshot still decides the message and the return value, which is all it is for', () => {
-    expect(SRC).toMatch(/const newRetryCount = currentRetries \+ 1;\s*const retriesExhausted = newRetryCount >= MAX_RETRIES;/);
+  it('the error text follows the count actually written — one CASE in the same statement, in both branches (Codex P2, round 16)', () => {
+    const cases = SRC.match(/ticketingSyncError: sql`CASE WHEN COALESCE\(\$\{callLogs\.ticketingSyncRetries\}, 0\) \+ 1 >= \$\{MAX_RETRIES\}::integer THEN \$\{gaveUp\} ELSE \$\{errorMsg\} END`/g) ?? [];
+    expect(cases.length).toBe(2);
+    // No branch decides the text from the snapshot any more.
+    expect(SRC).not.toMatch(/ticketingSyncError: retriesExhausted/);
+  });
+
+  it('exhaustion is read back from the write, never computed from the snapshot before it', () => {
+    const returned = SRC.match(/\.returning\(\{ retries: callLogs\.ticketingSyncRetries \}\);\s*(?:\/\/[^\n]*\n\s*)*const newRetryCount = written\?\.retries \?\? currentRetries \+ 1;\s*const retriesExhausted = newRetryCount >= MAX_RETRIES;/g) ?? [];
+    expect(returned.length).toBe(2);
+    // The old shape — decided before the write — is gone from both branches.
+    expect(SRC).not.toMatch(/const newRetryCount = currentRetries \+ 1;\s*const retriesExhausted = newRetryCount >= MAX_RETRIES;/);
   });
 });

@@ -643,3 +643,20 @@ WHERE created_at >= now() - interval '14 days' AND status = 'completed' GROUP BY
 ## #104 — ten full runs, and what shuffling found instead (10:00 UTC)
 
 Five full `npx vitest run`s in default order: **4,709 passed × 5, 0 failures** — the `costRateConsolidation` guard did not reproduce. Five more with `--sequence.shuffle`: runs 6, 7, 9, 10 failed **1–6 tests each, none of them the guard**. The tests that fail under a shuffled WITHIN-FILE order (they pass in declaration order, which is what CI runs): `locationQueueTicket.test.ts` ("probes before posting the ticket", 4 of 5 runs), `realtimeAdapter.test.ts` ("does not blank a model argument the context has no value for", 3), `lookupJoinsOnPersonId.test.ts` / `lookupJoinBudget.test.ts` ("keeps the identity when the join HANGS", a 5 s timeout — a fake-timer leak between tests; "CAPS the refinement at the remaining budget"), `handoffResumesAfterTicket.test.ts` ("an AUTOMATE resolution is not a durable ticket"; "dials once the ticket has landed"). Module-level state shared between tests in one file — the `pcpDirector`-keyed-on-call-id shape `replay20260914.test.ts` already records. Not fixed tonight: test hygiene, not lane behaviour; recorded on the task with the names.
+
+### Round 16 on this ship (10:11 UTC) — two P2s, both on the round-15 / v57 changes
+
+(1) The sync's failure writes still decided the *GAVE UP* text and `retriesExhausted` from the snapshot, so the row the atomic increment left at 1 would have carried a terminal error string and been reported exhausted. Now a `CASE` in the same statement plus `RETURNING`. Proven on the Hub:
+
+```sql
+PREPARE r16_probe AS
+UPDATE call_logs
+SET ticketing_sync_error = CASE WHEN COALESCE(ticketing_sync_retries, 0) + 1 >= $1::integer THEN $2 ELSE $3 END,
+    ticketing_sync_retries = COALESCE(ticketing_sync_retries, 0) + 1
+WHERE id = $4 AND false
+RETURNING ticketing_sync_retries;
+EXECUTE r16_probe(3, 'GAVE UP after 3 attempts: x', 'x', 1);   -- parses, executes, 0 rows
+DEALLOCATE r16_probe;
+```
+
+(2) v57's first version counted attempts in flight AS refusals, so a concurrent batch whose first two answered 503 (or refused another field) would have flagged its third — a request filed unassigned on an ask the caller never heard. Exposure in the window: 0 — all 88 POSTs on the 46 lost calls were surgeon 400s and 751 of 751 department-2 refusals since 08-25 name the surgeon — but the door was new and mine, so it is closed regardless of the base rate: a claim now WAITS for the attempts ahead of it to settle and reads confirmed refusals only (`claimGateAttemptAfterSettlement`, bounded at 20 s). Serialises a batch through the POST; costs the third attempt the ~100 ms its siblings take.

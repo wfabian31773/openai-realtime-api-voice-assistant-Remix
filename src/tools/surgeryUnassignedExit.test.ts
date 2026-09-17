@@ -271,9 +271,34 @@ describe('a batch that answered with OUTAGES spends nothing once it settles', ()
     await runTool('file_surgery_ticket', NO_SURGEON);
 
     expect(create).toHaveBeenCalledTimes(4);
-    // Nobody read those three payloads, so the caller was never asked: the
-    // fourth attempt reads zero refusals, whatever the batch read mid-flight.
-    expect((create.mock.calls[3][0] as { routingAskExhausted?: boolean }).routingAskExhausted).toBeUndefined();
+    // Nobody read those payloads, so the caller was never asked. Not the
+    // third of the batch either (Codex P2, #321 round 16): it waited for the
+    // two ahead of it and read zero confirmed refusals.
+    for (const c of create.mock.calls) {
+      expect((c[0] as { routingAskExhausted?: boolean }).routingAskExhausted).toBeUndefined();
+    }
+  });
+
+  it('a batch whose first two refused a DIFFERENT field does not flag its third', async () => {
+    const api = await client();
+    let n = 0;
+    const create = vi.spyOn(api, 'createTicket').mockImplementation(async () => {
+      n += 1;
+      return n <= 2
+        ? ({ success: false, statusCode: 400, error: 'Missing required information: office.' } as never)
+        : SURGEON_REFUSAL;
+    });
+
+    await Promise.all([
+      runTool('file_surgery_ticket', NO_SURGEON),
+      runTool('file_surgery_ticket', NO_SURGEON),
+      runTool('file_surgery_ticket', NO_SURGEON),
+    ]);
+
+    expect(create).toHaveBeenCalledTimes(3);
+    for (const c of create.mock.calls) {
+      expect((c[0] as { routingAskExhausted?: boolean }).routingAskExhausted).toBeUndefined();
+    }
   });
 });
 

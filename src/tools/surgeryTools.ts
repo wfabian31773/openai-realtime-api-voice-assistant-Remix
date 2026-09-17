@@ -29,7 +29,7 @@
 import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
-import { claimGateAttempt, settleGateAttempt } from './gateAttempts';
+import { claimGateAttemptAfterSettlement, settleGateAttempt } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 
 /** This tool's own name, for the per-call gate counter. */
@@ -715,18 +715,20 @@ registerTool({
      * never be true. The 36 calls where it DID fire had 8–42 s between POSTs
      * (the model asked in between — the shape the threshold was designed for).
      *
-     * Claiming in ONE synchronous step, at the point where the guards are
-     * final, orders concurrent attempts: the claim returns refusals already
-     * drawn PLUS attempts still in flight, so the third dispatch of a batch
-     * reads 2 whatever the wire does. It is not a different rule — only a
-     * refusal FOR THE SURGEON becomes a counted refusal when the attempt
-     * settles below, so an outage or a refusal for another field still
-     * spends nothing, and attempt 2 still never fires, batched or not
-     * (`surgeryUnassignedExit.test.ts`).
+     * Claiming at the point where the guards are final, AFTER the attempts
+     * ahead of this one have answered, orders concurrent attempts without
+     * presuming anything about them: the third dispatch of a batch reads
+     * what the first two actually drew. Only a refusal FOR THE SURGEON
+     * becomes a counted refusal when an attempt settles below — so a batch
+     * whose first two answered 503, or refused another field, still spends
+     * nothing (Codex P2, #321 round 16), and attempt 2 still never fires,
+     * batched or not (`surgeryUnassignedExit.test.ts`). The wait is bounded
+     * by `GATE_SETTLEMENT_WAIT_MS`; the attempts it waits on are POSTs the
+     * client already bounds.
      */
     const surgeonAskClaimed = filedOnSurgeryQueue && !lookup.providerId;
     const surgeonAskExhausted = surgeonAskClaimed
-      ? claimGateAttempt(callSid, SURGERY_FILE_TOOL, 'surgeon') >= 2
+      ? (await claimGateAttemptAfterSettlement(callSid, SURGERY_FILE_TOOL, 'surgeon')) >= 2
       : false;
     /**
      * DEPLOY MARKER, and a live counter. Prints only when this call has

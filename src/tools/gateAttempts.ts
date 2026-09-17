@@ -107,36 +107,74 @@ export function noteGateRefusal(callSid: string | undefined, tool: string, field
  * (Codex, PR #268 round 15). Anything per-call and boolean belongs here now,
  * where the bounding was already solved.
  */
+/** Waiters parked on a key until no attempt on it is in flight. */
+const settlementWaiters = new Map<string, Array<() => void>>();
+
 /**
- * Claim an attempt BEFORE it is dispatched. Returns how many refusals this
- * field has already drawn PLUS how many attempts are still in flight, then
- * counts this one as in flight. Read-and-claim is one synchronous step, so a
- * batch of concurrent attempts is ORDERED: the third of three reads 2 even
- * though no refusal has returned yet. That is the whole reason it exists —
- * measured 2026-09-17 on surgery, every lost call that reached a third
- * filing attempt had fired its attempts 1–100 ms apart, in one model
- * response, and a counter noted only after each response read 0 on all
- * three (surgeryTools.ts, `surgeonAskExhausted`).
- *
- * Settle it with `settleGateAttempt` once the response is in. Only a refusal
- * for THIS field becomes a counted refusal; an outage, or a refusal for some
- * other field, leaves the count where it was — so for SEQUENTIAL attempts
- * the rules are exactly what `gateRefusalsSoFar` + `noteGateRefusal` gave.
+ * A claim never waits longer than this for the attempts ahead of it. The
+ * attempt it waits on is a ticket POST bounded by the client's own timeout,
+ * and `settleGateAttempt` runs on every path that reaches a response — this
+ * is the floor under a settle that never comes, not a budget anyone should
+ * reach.
  */
-export function claimGateAttempt(callSid: string | undefined, tool: string, field: string): number {
-  if (!isTwilioCallSid(callSid)) return 0;
-  const now = Date.now();
-  sweep(now);
-  const k = key(callSid, tool, field);
-  const prev = attempts.get(k);
-  const fresh = prev && now - prev.at <= TTL_MS ? prev : undefined;
-  const seen = (fresh?.n ?? 0) + (fresh?.pending ?? 0);
-  attempts.delete(k);
-  attempts.set(k, { n: fresh?.n ?? 0, at: now, pending: (fresh?.pending ?? 0) + 1 });
-  return seen;
+export const GATE_SETTLEMENT_WAIT_MS = 20_000;
+
+function wakeSettlementWaiters(k: string): void {
+  const waiting = settlementWaiters.get(k);
+  if (!waiting) return;
+  settlementWaiters.delete(k);
+  for (const wake of waiting) wake();
 }
 
-/** The other half of `claimGateAttempt`: the attempt has answered. */
+/**
+ * Claim an attempt BEFORE it is dispatched — after every attempt ahead of it
+ * on this key has answered. Returns the CONFIRMED refusals on the record at
+ * that moment, then counts this attempt as in flight so the next claimant
+ * waits in turn. Concurrent attempts are therefore ORDERED: the third of a
+ * batch reads what the first two actually drew, not a presumption about them.
+ *
+ * Why the wait rather than counting attempts in flight — measured 2026-09-17
+ * on surgery: every lost call that reached a third filing attempt had fired
+ * its attempts 1–100 ms apart, in one model response, and a counter noted
+ * only after each response read 0 on all three (`surgeonAskExhausted`,
+ * surgeryTools.ts). Counting the in-flight attempts as refusals fixed that
+ * and opened the door Codex named on #321 round 16: a batch whose first two
+ * answered 503, or refused another field, would have flagged its third —
+ * the exit spent on an ask the caller never heard. Waiting closes it: only
+ * a settled refusal for THIS field is ever read.
+ *
+ * Settle with `settleGateAttempt` once the response is in. An outage or a
+ * refusal for another field leaves the count alone, so for SEQUENTIAL
+ * attempts the rules are exactly what `gateRefusalsSoFar` + `noteGateRefusal`
+ * gave.
+ */
+export async function claimGateAttemptAfterSettlement(
+  callSid: string | undefined,
+  tool: string,
+  field: string,
+): Promise<number> {
+  if (!isTwilioCallSid(callSid)) return 0;
+  const k = key(callSid, tool, field);
+  const deadline = Date.now() + GATE_SETTLEMENT_WAIT_MS;
+  while ((attempts.get(k)?.pending ?? 0) > 0 && Date.now() < deadline) {
+    await new Promise<void>((resolve) => {
+      const list = settlementWaiters.get(k) ?? [];
+      list.push(resolve);
+      settlementWaiters.set(k, list);
+      const timer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+      (timer as { unref?: () => void }).unref?.();
+    });
+  }
+  const now = Date.now();
+  sweep(now);
+  const prev = attempts.get(k);
+  const fresh = prev && now - prev.at <= TTL_MS ? prev : undefined;
+  attempts.delete(k);
+  attempts.set(k, { n: fresh?.n ?? 0, at: now, pending: (fresh?.pending ?? 0) + 1 });
+  return fresh?.n ?? 0;
+}
+
+/** The other half of `claimGateAttemptAfterSettlement`: the attempt has answered. */
 export function settleGateAttempt(
   callSid: string | undefined,
   tool: string,
@@ -150,6 +188,7 @@ export function settleGateAttempt(
   const pending = Math.max(0, (prev.pending ?? 0) - 1);
   attempts.delete(k);
   attempts.set(k, { n: prev.n + (refused ? 1 : 0), at: Date.now(), pending });
+  if (pending === 0) wakeSettlementWaiters(k);
 }
 
 const FACT_TOOL = "__fact";
@@ -167,4 +206,5 @@ export function callFactNoted(callSid: string | undefined, fact: string): boolea
 /** Tests only. */
 export function resetGateAttempts(): void {
   attempts.clear();
+  for (const k of [...settlementWaiters.keys()]) wakeSettlementWaiters(k);
 }

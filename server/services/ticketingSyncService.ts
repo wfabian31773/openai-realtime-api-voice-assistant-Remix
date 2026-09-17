@@ -301,15 +301,16 @@ export class TicketingSyncService {
           };
         }
 
-        const newRetryCount = currentRetries + 1;
-        const retriesExhausted = newRetryCount >= MAX_RETRIES;
-
-        await db
+        const gaveUp = `GAVE UP after ${MAX_RETRIES} attempts: ${errorMsg}`;
+        const [written] = await db
           .update(callLogs)
           .set({
-            ticketingSyncError: retriesExhausted
-              ? `GAVE UP after ${MAX_RETRIES} attempts: ${errorMsg}`
-              : errorMsg,
+            // The error text follows the count ACTUALLY WRITTEN (Codex P2, round
+            // 16 on #321): decided in the same statement, against the same
+            // pre-update value — Postgres evaluates every SET against the old
+            // row — so a reset that lands mid-pass cannot leave a row at 1
+            // wearing "GAVE UP". PREPAREd on the live Hub before it shipped.
+            ticketingSyncError: sql`CASE WHEN COALESCE(${callLogs.ticketingSyncRetries}, 0) + 1 >= ${MAX_RETRIES}::integer THEN ${gaveUp} ELSE ${errorMsg} END`,
             // ATOMIC, not the snapshot (Codex P2, round 15 on #321): the grade
             // and recording writers reset this column to 0 to re-open the sync,
             // and a stale `currentRetries + 1` written after that reset put a
@@ -317,7 +318,12 @@ export class TicketingSyncService {
             // in the database, a reset that lands mid-pass leaves the row at 1.
             ticketingSyncRetries: sql`COALESCE(${callLogs.ticketingSyncRetries}, 0) + 1`,
           })
-          .where(eq(callLogs.id, call.id));
+          .where(eq(callLogs.id, call.id))
+          .returning({ retries: callLogs.ticketingSyncRetries });
+        // Exhaustion is a fact about the row, read back from the write — never
+        // from the snapshot this pass started with (round 16).
+        const newRetryCount = written?.retries ?? currentRetries + 1;
+        const retriesExhausted = newRetryCount >= MAX_RETRIES;
 
         if (retriesExhausted) {
           console.warn(`[TICKETING SYNC] ✗ Gave up on call ${identifier} after ${MAX_RETRIES} attempts: ${errorMsg}`);
@@ -336,19 +342,19 @@ export class TicketingSyncService {
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      const newRetryCount = currentRetries + 1;
-      const retriesExhausted = newRetryCount >= MAX_RETRIES;
-      
-      await db
+      const gaveUp = `GAVE UP after ${MAX_RETRIES} attempts: ${errorMsg}`;
+      const [written] = await db
         .update(callLogs)
         .set({
-          ticketingSyncError: retriesExhausted 
-            ? `GAVE UP after ${MAX_RETRIES} attempts: ${errorMsg}`
-            : errorMsg,
+          // Text and count decided together, as in the failure branch above.
+          ticketingSyncError: sql`CASE WHEN COALESCE(${callLogs.ticketingSyncRetries}, 0) + 1 >= ${MAX_RETRIES}::integer THEN ${gaveUp} ELSE ${errorMsg} END`,
           // Atomic for the same reason as the failure branch above.
           ticketingSyncRetries: sql`COALESCE(${callLogs.ticketingSyncRetries}, 0) + 1`,
         })
-        .where(eq(callLogs.id, call.id));
+        .where(eq(callLogs.id, call.id))
+        .returning({ retries: callLogs.ticketingSyncRetries });
+      const newRetryCount = written?.retries ?? currentRetries + 1;
+      const retriesExhausted = newRetryCount >= MAX_RETRIES;
 
       if (retriesExhausted) {
         console.warn(`[TICKETING SYNC] ✗ Gave up on call ${identifier} after ${MAX_RETRIES} attempts: ${errorMsg}`);
