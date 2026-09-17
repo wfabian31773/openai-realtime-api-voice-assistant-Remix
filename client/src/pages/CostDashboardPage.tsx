@@ -50,10 +50,10 @@ interface GrokUsage {
     reconciled: boolean
     refusedReason: string | null
     xaiVoiceDollars: number | null
-    bookedDollars: number
+    bookedDollars: number | null
     estimatedDollars: number | null
-    runtimeCalls: number
-    runtimeMinutes: number
+    runtimeCalls: number | null
+    runtimeMinutes: number | null
     derivedCentsPerMinute: number | null
     ignoredLines: Array<{ description: string; usd: number }>
   }>
@@ -629,10 +629,10 @@ export function CostDashboardPage() {
                   {grokUsage.days.map((d) => (
                     <tr key={d.day} className="border-t border-border">
                       <td className="py-2 pr-3">{d.day}</td>
-                      <td className="py-2 pr-3 text-right">{d.runtimeCalls}</td>
-                      <td className="py-2 pr-3 text-right">{d.runtimeMinutes}</td>
+                      <td className="py-2 pr-3 text-right">{d.runtimeCalls == null ? '—' : d.runtimeCalls}</td>
+                      <td className="py-2 pr-3 text-right">{d.runtimeMinutes == null ? '—' : d.runtimeMinutes}</td>
                       <td className="py-2 pr-3 text-right">{d.xaiVoiceDollars == null ? '—' : `$${d.xaiVoiceDollars.toFixed(2)}`}</td>
-                      <td className="py-2 pr-3 text-right">${d.bookedDollars.toFixed(2)}</td>
+                      <td className="py-2 pr-3 text-right">{d.bookedDollars == null ? '—' : `$${d.bookedDollars.toFixed(2)}`}</td>
                       <td className="py-2 pr-3 text-right" title={`published ${grokUsage.publishedCentsPerMinute}¢/min`}>
                         {d.derivedCentsPerMinute == null ? '—' : d.derivedCentsPerMinute.toFixed(2)}
                       </td>

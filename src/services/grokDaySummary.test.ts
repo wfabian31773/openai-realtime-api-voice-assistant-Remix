@@ -22,16 +22,31 @@ import {
 } from "./grokCostReconciler";
 
 /** A fake pool for the production port: answers the existing-row SELECT from
- *  `existingRow` and records every statement. */
+ *  `existingRow`, records every statement with WHERE it ran (the pool, or a
+ *  checked-out client — the port's decision-and-write transaction), throws
+ *  on the first statement matching `failOn`, and counts releases. */
 const pool = vi.hoisted(() => ({
-  existingRow: null as null | { reconciled: boolean; runtime_calls: number },
-  calls: [] as Array<{ sql: string; params?: unknown[] }>,
-  query: vi.fn(async (sql: string, params?: unknown[]) => {
-    pool.calls.push({ sql, params });
+  existingRow: null as null | { reconciled: boolean; runtime_calls: number | null },
+  calls: [] as Array<{ sql: string; params?: unknown[]; via: "pool" | "client" }>,
+  failOn: null as RegExp | null,
+  released: 0,
+  run: async (via: "pool" | "client", sql: string, params?: unknown[]) => {
+    pool.calls.push({ sql, params, via });
+    if (pool.failOn && pool.failOn.test(sql)) throw new Error(`fake pool refused: ${sql.slice(0, 40)}`);
     return /^\s*SELECT reconciled, runtime_calls/.test(sql) ? { rows: pool.existingRow ? [pool.existingRow] : [] } : { rows: [] };
-  }),
+  },
+  query: vi.fn(async (sql: string, params?: unknown[]) => pool.run("pool", sql, params)),
+  connect: vi.fn(async () => ({
+    query: (sql: string, params?: unknown[]) => pool.run("client", sql, params),
+    release: () => { pool.released += 1; },
+  })),
 }));
-vi.mock("../../server/db", () => ({ pool: { query: (...a: unknown[]) => (pool.query as any)(...a) } }));
+vi.mock("../../server/db", () => ({
+  pool: {
+    query: (...a: unknown[]) => (pool.query as any)(...a),
+    connect: (...a: unknown[]) => (pool.connect as any)(...a),
+  },
+}));
 import type { FetchLike, XaiBillingSetup } from "./xaiBilling";
 
 const SETUP: XaiBillingSetup = {
@@ -110,7 +125,10 @@ describe("the day row", () => {
     expect(p.summaries[0]!.refusedReason).toMatch(/c\/min/);
   });
 
-  it("when xAI cannot be read: a row that says so, with no xAI figure and the estimate as booked", async () => {
+  it("when xAI cannot be read: a row that says so, with no xAI figure — and the calls the day DOES hold, read for the summary alone (Codex P2, round 14)", async () => {
+    // The outcome returns before readDay when xAI fails first. The first
+    // version wrote that as 0 calls / 0 seconds / $0.00 — a measurement the
+    // run never made. The summary now reads the day itself.
     const p = ports([{ callSid: "CA1", durationSeconds: 60, estimatedCents: 8 }]);
     await reconcileGrokCostsForDay("2026-09-05", p, {
       setup: SETUP,
@@ -119,9 +137,26 @@ describe("the day row", () => {
     expect(p.summaries).toHaveLength(1);
     expect(p.summaries[0]!.reconciled).toBe(false);
     expect(p.summaries[0]!.xaiVoiceCents).toBeUndefined();
-    // The day was never read (xAI failed first), so the row cannot count calls it did not see.
-    expect(p.summaries[0]!.runtimeCalls).toBe(0);
+    expect(p.summaries[0]).toMatchObject({ runtimeCalls: 1, runtimeSeconds: 60, bookedCents: 8 });
     expect(p.summaries[0]!.refusedReason).toBeTruthy();
+  });
+
+  it("when xAI cannot be read AND the day cannot be read either: the measurements are UNKNOWN, never zero, and the outcome still names xAI (round 14)", async () => {
+    const p = ports([]);
+    p.readDay = async () => { throw new Error("connection refused"); };
+    const out = await reconcileGrokCostsForDay("2026-09-05", p, {
+      setup: SETUP,
+      fetchImpl: async () => ({ ok: false, status: 500, text: async () => "" }),
+    });
+    // The summary's own read never changes the outcome: xAI was the refusal.
+    expect(out.reconciled).toBe(false);
+    expect(out.reason).not.toMatch(/could not read the day/);
+    expect(p.summaries).toHaveLength(1);
+    const row = p.summaries[0]!;
+    expect(row.runtimeCalls).toBeNull();
+    expect(row.runtimeSeconds).toBeNull();
+    expect(row.bookedCents).toBeNull();
+    expect(row.reconciled).toBe(false);
   });
 
   it("a failed summary write never changes the outcome", async () => {
@@ -180,6 +215,18 @@ describe("the day table reaches the Observatory", () => {
     const body = routes.slice(at, at + 3000);
     expect(body).toMatch(/FROM daily_grok_costs/);
     expect(body).toMatch(/tableExists = false/);
+    // An UNKNOWN day (round 14) reaches the page as null — Number(null) is 0,
+    // which would present a day nobody could read as a measured empty one.
+    expect(body).toMatch(/runtimeCalls: d\.runtime_calls == null \? null/);
+    expect(body).toMatch(/runtimeMinutes: d\.runtime_seconds == null \? null/);
+    expect(body).toMatch(/bookedDollars: d\.booked_cents == null \? null/);
+  });
+
+  it("the cost dashboard shows an unknown day as a dash, never as 0 calls / $0.00 (round 14)", () => {
+    const page = read("client/src/pages/CostDashboardPage.tsx");
+    expect(page).toMatch(/d\.runtimeCalls == null \? '—' : d\.runtimeCalls/);
+    expect(page).toMatch(/d\.runtimeMinutes == null \? '—' : d\.runtimeMinutes/);
+    expect(page).toMatch(/d\.bookedDollars == null \? '—' :/);
   });
 
   it("the cost dashboard asks for it", () => {
@@ -237,24 +284,108 @@ describe("daySummaryWrite", () => {
     // A refusal that DID read the calls is a newer measurement and replaces an older refusal.
     expect(daySummaryWrite({ reconciled: false, runtimeCalls: 239 }, refusal({ runtimeCalls: 240, bookedCents: 3470 }))).toBe("full");
   });
+
+  it("a refusal whose measurements are UNKNOWN counts as one that read no calls (round 14)", () => {
+    const unknown = refusal({ runtimeCalls: null, runtimeSeconds: null, bookedCents: null });
+    expect(daySummaryWrite({ reconciled: false, runtimeCalls: 239 }, unknown)).toBe("attempt_only");
+    expect(daySummaryWrite({ reconciled: true, runtimeCalls: 239 }, unknown)).toBe("attempt_only");
+    // ... and an unknown row on disk is replaced by anything that measured.
+    expect(daySummaryWrite({ reconciled: false, runtimeCalls: null }, refusal({ runtimeCalls: 5, bookedCents: 40 }))).toBe("full");
+    expect(daySummaryWrite({ reconciled: false, runtimeCalls: null }, unknown)).toBe("full");
+    expect(daySummaryWrite(null, unknown)).toBe("full");
+  });
 });
 
 describe("the production port keeps the measured row and records the attempt", () => {
-  beforeEach(() => { pool.calls.length = 0; pool.existingRow = null; });
+  beforeEach(() => { pool.calls.length = 0; pool.existingRow = null; pool.failOn = null; pool.released = 0; });
+  const measured = { day: "2026-09-16", reconciled: true, xaiVoiceCents: 5355, bookedCents: 5355, runtimeCalls: 239, runtimeSeconds: 25116 };
+  const refused = { day: "2026-09-16", reconciled: false, refusedReason: "xai_unreachable", bookedCents: 0, runtimeCalls: 0, runtimeSeconds: 0 };
+  const onClient = () => pool.calls.filter((c) => c.via === "client").map((c) => c.sql);
 
   it("a refusal on a reconciled day writes only last_attempt_*, never the upsert", async () => {
     pool.existingRow = { reconciled: true, runtime_calls: 239 };
-    await databasePorts().writeDaySummary!({ day: "2026-09-16", reconciled: false, refusedReason: "xai_unreachable", bookedCents: 0, runtimeCalls: 0, runtimeSeconds: 0 });
+    await databasePorts().writeDaySummary!(refused);
     const sqls = pool.calls.map((c) => c.sql);
     expect(sqls.some((q) => /INSERT INTO daily_grok_costs/.test(q)), "the upsert ran on a failed attempt").toBe(false);
     const attempt = pool.calls.find((c) => /SET last_attempt_at = NOW\(\), last_attempt_reason = \$2/.test(c.sql));
     expect(attempt?.params).toEqual(["2026-09-16", "xai_unreachable"]);
+    expect(attempt?.via).toBe("client");
   });
 
   it("a first write, or a reconciliation, is the full upsert", async () => {
-    await databasePorts().writeDaySummary!({ day: "2026-09-16", reconciled: true, xaiVoiceCents: 5355, bookedCents: 5355, runtimeCalls: 239, runtimeSeconds: 25116 });
+    await databasePorts().writeDaySummary!(measured);
     expect(pool.calls.some((c) => /INSERT INTO daily_grok_costs/.test(c.sql))).toBe(true);
     // The attempt columns exist on a table created before they did.
     expect(pool.calls.some((c) => /ADD COLUMN IF NOT EXISTS last_attempt_at/.test(c.sql))).toBe(true);
+  });
+
+  /**
+   * THE DECISION AND THE WRITE ARE ONE TRANSACTION UNDER A PER-DAY LOCK —
+   * Codex P1, #321 round 14. The scheduler runs in every process and the
+   * database supports replicas, so a stale read on one runner could decide
+   * `full` while another had just committed `reconciled = true`.
+   */
+  it("takes the day's advisory lock BEFORE reading the row, and commits after the write — all on one client (Codex P1, round 14)", async () => {
+    pool.existingRow = { reconciled: false, runtime_calls: 239 };
+    await databasePorts().writeDaySummary!(measured);
+    const c = onClient();
+    const begin = c.findIndex((q) => q === "BEGIN");
+    const lock = c.findIndex((q) => /pg_advisory_xact_lock\(hashtext\(\$1\)\)/.test(q));
+    const read = c.findIndex((q) => /^\s*SELECT reconciled, runtime_calls/.test(q));
+    const write = c.findIndex((q) => /INSERT INTO daily_grok_costs/.test(q));
+    const commit = c.findIndex((q) => q === "COMMIT");
+    expect(begin, "no transaction").toBeGreaterThanOrEqual(0);
+    expect(lock, "no lock").toBeGreaterThan(begin);
+    expect(read, "the row was read before the lock was held").toBeGreaterThan(lock);
+    expect(write).toBeGreaterThan(read);
+    expect(commit).toBeGreaterThan(write);
+    // The lock is keyed on the DAY, so two days never serialise on each other.
+    const lockCall = pool.calls.find((x) => /pg_advisory_xact_lock/.test(x.sql));
+    expect(lockCall?.params).toEqual(["daily_grok_costs:2026-09-16"]);
+    // The read and the write never run on the pool — a pool query is not in
+    // the transaction that holds the lock.
+    expect(pool.calls.filter((x) => x.via === "pool").map((x) => x.sql).join("\n")).not.toMatch(/SELECT reconciled, runtime_calls|INSERT INTO daily_grok_costs|last_attempt_at = NOW/);
+    expect(pool.released).toBe(1);
+  });
+
+  it("the attempt-only arm commits under the same lock", async () => {
+    pool.existingRow = { reconciled: true, runtime_calls: 239 };
+    await databasePorts().writeDaySummary!(refused);
+    const c = onClient();
+    expect(c.findIndex((q) => /pg_advisory_xact_lock/.test(q))).toBeGreaterThan(c.indexOf("BEGIN"));
+    expect(c.findIndex((q) => /last_attempt_at = NOW/.test(q))).toBeGreaterThan(c.findIndex((q) => /pg_advisory_xact_lock/.test(q)));
+    expect(c[c.length - 1]).toBe("COMMIT");
+    expect(pool.released).toBe(1);
+  });
+
+  it("a write that throws rolls the transaction back, releases the client, and still throws", async () => {
+    pool.failOn = /INSERT INTO daily_grok_costs/;
+    await expect(databasePorts().writeDaySummary!(measured)).rejects.toThrow(/fake pool refused/);
+    const c = onClient();
+    expect(c).toContain("ROLLBACK");
+    expect(c).not.toContain("COMMIT");
+    expect(pool.released).toBe(1);
+  });
+
+  it("the DDL is idempotent and runs outside the lock; the three measurement columns are nullable (round 14)", async () => {
+    await databasePorts().writeDaySummary!(measured);
+    const all = pool.calls.map((c) => c.sql);
+    const create = all.findIndex((q) => /CREATE TABLE IF NOT EXISTS daily_grok_costs/.test(q));
+    const begin = all.indexOf("BEGIN");
+    expect(create).toBeGreaterThanOrEqual(0);
+    expect(create).toBeLessThan(begin);
+    expect(pool.calls[create]!.via).toBe("pool");
+    for (const col of ["booked_cents", "runtime_calls", "runtime_seconds"]) {
+      expect(all.some((q) => new RegExp(`ALTER COLUMN ${col} DROP NOT NULL`).test(q)), `${col} is still NOT NULL — an unknown day would be forced to 0`).toBe(true);
+      expect(all[create]).not.toMatch(new RegExp(`${col} INTEGER NOT NULL`));
+    }
+  });
+
+  it("an UNKNOWN day is written as NULL in all three measurement columns, not as 0", async () => {
+    await databasePorts().writeDaySummary!({ day: "2026-09-16", reconciled: false, refusedReason: "xai_unreachable", bookedCents: null, runtimeCalls: null, runtimeSeconds: null });
+    const insert = pool.calls.find((c) => /INSERT INTO daily_grok_costs/.test(c.sql));
+    expect(insert?.params?.[6]).toBeNull();  // booked_cents
+    expect(insert?.params?.[8]).toBeNull();  // runtime_calls
+    expect(insert?.params?.[9]).toBeNull();  // runtime_seconds
   });
 });

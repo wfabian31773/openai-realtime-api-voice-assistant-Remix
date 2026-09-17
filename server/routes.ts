@@ -2604,10 +2604,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           reconciled: Boolean(d.reconciled),
           refusedReason: d.refused_reason ?? null,
           xaiVoiceDollars: d.xai_voice_cents == null ? null : Number(d.xai_voice_cents) / 100,
-          bookedDollars: Number(d.booked_cents) / 100,
+          // NULL is "the day could not be read" (round 14) — and Number(null)
+          // is 0, which would present that as a measured empty day.
+          bookedDollars: d.booked_cents == null ? null : Number(d.booked_cents) / 100,
           estimatedDollars: d.estimated_cents == null ? null : Number(d.estimated_cents) / 100,
-          runtimeCalls: Number(d.runtime_calls),
-          runtimeMinutes: Math.round(Number(d.runtime_seconds) / 60),
+          runtimeCalls: d.runtime_calls == null ? null : Number(d.runtime_calls),
+          runtimeMinutes: d.runtime_seconds == null ? null : Math.round(Number(d.runtime_seconds) / 60),
           derivedCentsPerMinute: d.derived_cents_per_minute == null ? null : Number(d.derived_cents_per_minute),
           ignoredLines: Array.isArray(d.xai_ignored_lines) ? d.xai_ignored_lines : [],
           updatedAt: d.updated_at,
