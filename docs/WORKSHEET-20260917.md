@@ -467,6 +467,8 @@ an argument.
 
 ## W0 `[x]` — `npm test` could not be trusted, so nothing else could be
 
+**05:00 addendum (task #73):** the root tsconfig never included `client/`, so a type error in the Observatory's pages passed CI unseen. The client typechecks clean today (0 errors), so CI now runs `tsc -p client/tsconfig.json` as a second step — it starts green and can only go red on a real error. And the after-numbers for v37–v49 are now a runnable pack, every query executed tonight against the live databases with its before-value beside it: `docs/observatory/AFTER-MEASUREMENTS-20260917.md`.
+
 No vitest config existed, so a bare run collected the compiled suite under
 `dist/`: **36 files, 113 tests, all failing with ENOENT** on paths that only
 exist in `src/`. The cost was not the red — it was that the red meant nothing.

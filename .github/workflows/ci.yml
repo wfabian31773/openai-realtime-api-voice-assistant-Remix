@@ -54,6 +54,13 @@ jobs:
       - name: Typecheck
         run: npx tsc -p . --noEmit
 
+      # The root tsconfig includes src, server and shared and NOT client, so
+      # a type error in the Observatory's pages passed this gate unseen
+      # (task #73). Measured 2026-09-17: the client typechecks clean, so this
+      # step starts green and stays green only while it does.
+      - name: Typecheck the client
+        run: npx tsc -p client/tsconfig.json --noEmit
+
       # NOTE: deliberately NOT `npm run build`. Building in-tree emits dist/
       # containing compiled COPIES of every test file, which vitest then also
       # collects — the phantom-failure trap recorded in
