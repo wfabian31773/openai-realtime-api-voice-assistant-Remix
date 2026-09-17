@@ -469,7 +469,9 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
    *Build* checks are green; *Type check* is red with the 22 errors that are
    red on `main` too (the latest `main` run, 02:29, concluded failure the same
    way). Marked ready for review at 04:15 so Codex sees it before you do; it
-   needs nothing from the Remix side.
+   needs nothing from the Remix side. **Codex completed its review of `11db848`
+   at 04:11 with no findings** (its summary comment on the PR; no threads) — the
+   greenlight is there.
 
 **ONE QUESTION FOR YOU, with my recommendation (task #138).** `unclassified_call`
 is now the model's default: on 09-16, **57 of 104** PCP Support agent tickets
