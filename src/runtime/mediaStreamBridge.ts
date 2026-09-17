@@ -243,14 +243,21 @@ export const TOOL_DISPATCH_GRACE_MS = 15_000;
 /**
  * A function-call event that arrives AFTER its response's `response.done`
  * has no done ahead of it to say when its batch is complete, so the bridge
- * holds the follow-up for this long after the LAST such event settles; a
- * sibling arriving inside the window joins the batch instead of earning a
- * second follow-up (Codex P1, #321 round 9 — the v55 gate treated every
- * after-done event as a batch of one, so a fast first dispatch could request
- * the model's turn before its sibling's event had been read off the socket).
- * Siblings of one response come back-to-back on the wire; a quarter of a
- * second is a wide margin, against the thirty seconds of silence the late
- * event used to cost.
+ * holds the follow-up for this long after the LAST such event ARRIVES; a
+ * sibling arriving inside the window joins the batch and re-arms it instead
+ * of earning a second follow-up (Codex P1, #321 round 9 — the v55 gate
+ * treated every after-done event as a batch of one, so a fast first dispatch
+ * could request the model's turn before its sibling's event had been read
+ * off the socket). Siblings of one response come back-to-back on the wire;
+ * a quarter of a second is a wide margin, against the thirty seconds of
+ * silence the late event used to cost.
+ *
+ * Measured from the arrival, not the settle (round 13): an end-call in a
+ * late batch WAITS on this window to learn that no unseen sibling is still
+ * on the socket, and a window that was only armed once every dispatch had
+ * settled could never be armed while that end-call was itself pending — the
+ * wait would have been forever. The window is a bound on how long the wire
+ * takes to deliver adjacent events, and that is a fact about arrivals.
  */
 export const LATE_TOOL_BATCH_GRACE_MS = 250;
 
@@ -1175,15 +1182,43 @@ export class VoiceCallBridge {
     return this.hangupHoldsSinceLastLine < HANGUP_HOLD_LIMIT;
   }
 
-  private siblingsSettled(): Promise<void> {
-    if (this.pendingSiblings.size === 0) return Promise.resolve();
+  /**
+   * Whether an end-call may decide yet. Three things say no, and each is a
+   * way an unvoiced answer could still be on its way: a sibling dispatched
+   * and not settled (round 12); the carrying response still open at the
+   * wire, so a sibling's event may not have been read off the socket yet;
+   * or a late batch whose grace window has not elapsed, which is the same
+   * question for a batch the wire has already closed (round 13 — Codex:
+   * `terminate_call` FIRST in a multi-tool response found `pendingSiblings`
+   * empty and walked straight past the wait).
+   */
+  private endCallMustWait(): boolean {
+    return this.pendingSiblings.size > 0 || this.awaitingToolResponseDone || this.lateBatchOpen;
+  }
+
+  private batchSettled(): Promise<void> {
+    if (!this.endCallMustWait()) return Promise.resolve();
     return new Promise((resolve) => this.siblingWaiters.push(resolve));
   }
 
+  /** Called wherever one of the three conditions above may have cleared:
+   * a sibling's `finally`, the response's done, the window's timer, and
+   * teardown (which clears all three so the waiter reads `ended`). */
   private wakeSiblingWaiters(): void {
-    if (this.pendingSiblings.size > 0) return;
+    if (this.endCallMustWait()) return;
     const waiting = this.siblingWaiters.splice(0);
     for (const wake of waiting) wake();
+  }
+
+  /** (Re-)arm the late-batch grace window from now. */
+  private armLateBatchWindow(): void {
+    if (this.lateBatchTimer !== null) this.clearTimer(this.lateBatchTimer);
+    this.lateBatchTimer = this.setTimer(() => {
+      this.lateBatchTimer = null;
+      this.lateBatchOpen = false;
+      this.wakeSiblingWaiters();
+      if (!this.ended) this.maybeRequestFollowUp();
+    }, LATE_TOOL_BATCH_GRACE_MS);
   }
 
   private handleAudioDone(transcript?: string): void {
@@ -1512,7 +1547,8 @@ export class VoiceCallBridge {
    * wire never answered that request. */
   private lastFollowUpEpoch: number | null = null;
   /** True while the last function-call event arrived after its response's
-   * done and its batch may still be growing; the grace timer closes it. */
+   * done and its batch may still be growing; the grace timer, armed at each
+   * late arrival, closes it. */
   private lateBatchOpen = false;
   private lateBatchTimer: unknown = null;
   /** v56 — counts the agent's lines; a tool answer that owed a follow-up
@@ -1524,7 +1560,11 @@ export class VoiceCallBridge {
   private hangupsHeld = 0;
   /** Round 12: the non-end-call dispatches still in flight, by call id, and
    * the end-call dispatches waiting for them to settle. A sibling that has
-   * not answered yet is an answer the model cannot have voiced. */
+   * not answered yet is an answer the model cannot have voiced. Round 13:
+   * the waiters also wait for the BATCH BOUNDARY — the carrying response's
+   * done, or the late-batch window — because an end-call that is the FIRST
+   * event of its batch has no sibling to see yet, and the one that follows
+   * it on the wire is the answer the hangup would silence. */
   private pendingSiblings = new Set<string>();
   private siblingWaiters: Array<() => void> = [];
 
@@ -1551,6 +1591,8 @@ export class VoiceCallBridge {
     if (raw !== undefined) this.usage.add(raw);
     if (this.ended) return;
     this.awaitingToolResponseDone = false;
+    // The boundary an end-call may be waiting on (round 13).
+    this.wakeSiblingWaiters();
     this.maybeRequestFollowUp();
   }
 
@@ -1559,14 +1601,10 @@ export class VoiceCallBridge {
     if (this.awaitingToolResponseDone) return;
     if (this.lateBatchOpen) {
       // No response.done will close this batch — the wire's already passed.
-      // Wait out the grace window instead; every late sibling re-arms it.
-      if (this.lateBatchTimer === null) {
-        this.lateBatchTimer = this.setTimer(() => {
-          this.lateBatchTimer = null;
-          this.lateBatchOpen = false;
-          if (!this.ended) this.maybeRequestFollowUp();
-        }, LATE_TOOL_BATCH_GRACE_MS);
-      }
+      // Wait out the grace window instead; it was armed at the late event's
+      // arrival and every late sibling re-arms it (round 13). Arming it here
+      // too is a backstop only: an open batch with no timer cannot happen.
+      if (this.lateBatchTimer === null) this.armLateBatchWindow();
       return;
     }
     this.followUpOwed = false;
@@ -1600,13 +1638,13 @@ export class VoiceCallBridge {
     if (!carryingResponseOpen) {
       this.followUps.toolCallsAfterDone += 1;
       // A late event opens (or re-opens) a batch the wire cannot close for
-      // us; the grace window in maybeRequestFollowUp closes it, measured
-      // from this — the latest — arrival.
+      // us; the grace window closes it, measured from this — the latest —
+      // arrival. Armed HERE and not only in maybeRequestFollowUp (round 13):
+      // an end-call in this batch waits on the window, and a window that
+      // only the follow-up path could arm is one that path — blocked on the
+      // pending end-call — would never arm.
       this.lateBatchOpen = true;
-      if (this.lateBatchTimer !== null) {
-        this.clearTimer(this.lateBatchTimer);
-        this.lateBatchTimer = null;
-      }
+      this.armLateBatchWindow();
     }
     this.pendingToolCalls += 1;
     const isEndCall = this.endCallToolNames.has(name);
@@ -1636,9 +1674,16 @@ export class VoiceCallBridge {
        * the v56 shape itself, arriving in one batch. So an end-call waits
        * for its siblings first; the wait is bounded by their own dispatch
        * budgets, and teardown wakes it.
+       *
+       * AND FOR THE BATCH BOUNDARY (Codex P2, #321 round 13). When the
+       * hangup's event is the FIRST of its batch, the set is still empty
+       * and the sibling that follows it on the wire has not been read yet.
+       * So the wait is for the carrying response's done (or, for a late
+       * batch, the grace window) as well — bounded by the wire's own
+       * response cycle, or by a quarter of a second.
        */
-      if (isEndCall && this.pendingSiblings.size > 0) {
-        await this.siblingsSettled();
+      if (isEndCall && this.endCallMustWait()) {
+        await this.batchSettled();
         if (this.ended) return;
       }
       /**
@@ -1959,9 +2004,11 @@ export class VoiceCallBridge {
       this.clearTimer(this.lateBatchTimer);
       this.lateBatchTimer = null;
     }
-    // An end-call waiting on a sibling is released; it reads `ended` and
-    // returns.
+    // An end-call waiting on a sibling or on its batch boundary is
+    // released; it reads `ended` and returns.
     this.pendingSiblings.clear();
+    this.awaitingToolResponseDone = false;
+    this.lateBatchOpen = false;
     this.wakeSiblingWaiters();
 
     // A line still mid-delivery when the call ends was partially heard —
