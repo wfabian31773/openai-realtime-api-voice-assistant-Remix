@@ -520,9 +520,9 @@ new build this is answerable from `tool_timeline` rather than argued: how many
 of the refusals behind a matched lookup are the ambiguous branch. The fix
 itself stays reverted until that number exists.
 
-## W2 `[x]` on no-ivr (v41) · `[x]` on the runtime lanes (v50, 05:40)
+## W2 `[x]` on no-ivr (v41) · `[x]` on the runtime lanes (v50, 05:09)
 
-**05:40 — the runtime half is SHIPPED as v50, and my earlier recommendation to
+**05:09 — the runtime half is SHIPPED as v50, and my earlier recommendation to
 wait for the v25–v28 after-arm was wrong for tech.** Measured 2026-09-16: of the
 calls asking for a date of birth 2+ times, tech's 16 were 15 COLD callers and 1
 recognised; surgery's 16 split 8/8. The recognised-caller fixes never reach a
