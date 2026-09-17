@@ -47,7 +47,12 @@ describe("toCallLogRow", () => {
   });
 
   it("records the runtime's own failures as failed calls, and hangups as completed", () => {
-    expect(toCallLogRow(record({ outcome: "dead_air" })).status).toBe("failed");
+    // The fixture's transcript carries a CALLER line: the watchdog ended a
+    // CONVERSATION, which is a completed call by the column's own meaning.
+    expect(toCallLogRow(record({ outcome: "dead_air" })).status).toBe("completed");
+    // Nobody ever spoke: the watchdog ended dead air, and that is failed.
+    expect(toCallLogRow(record({ outcome: "dead_air", transcript: "AGENT: Thanks for calling." })).status).toBe("failed");
+    expect(toCallLogRow(record({ outcome: "dead_air", transcript: "" })).status).toBe("failed");
     expect(toCallLogRow(record({ outcome: "provider_failure" })).status).toBe("failed");
     expect(toCallLogRow(record({ outcome: "caller_hangup" })).status).toBe("completed");
     expect(toCallLogRow(record({ outcome: "agent_ended" })).status).toBe("completed");
@@ -75,7 +80,7 @@ describe("toCallLogRow", () => {
     // column belongs to the agents' telemetry, so the status column carries
     // the distinction instead.
     expect(toCallLogRow(record({ outcome: "max_duration" })).status).toBe("completed");
-    expect(toCallLogRow(record({ outcome: "dead_air" })).status).toBe("failed");
+    expect(toCallLogRow(record({ outcome: "dead_air", transcript: "AGENT: Hello?" })).status).toBe("failed");
   });
 
   it("writes NO identity when the runtime was not told it — never inferred from a tool result", () => {
@@ -146,8 +151,14 @@ describe("toCallLogRow", () => {
     expect(update.duration).toBe(93);
     // Anything another writer owns is not in the update at all.
     expect('toolTimeline' in update).toBe(false);
-    expect('patientName' in update).toBe(false);
     expect('ticketNumber' in update).toBe(false);
+    // Identity the runtime ESTABLISHED is carried (v51) — before that it was
+    // excluded here and 0 of 2,471 runtime rows carried a name. What must
+    // never happen is a null erasing another writer's value, and the row
+    // without identity below proves the omission side.
+    expect(update.patientName).toBe('Test Patient');
+    expect(update.patientFound).toBe(true);
+    expect('patientDob' in update).toBe(false);
   });
 
   it("marks the row as Grok-served, so OpenAI cost estimation skips it", () => {
@@ -232,9 +243,11 @@ describe("persistRuntimeCall", () => {
       Record<string, unknown>,
       Record<string, unknown>,
     ];
-    // The insert carries identity; the conflict update must not.
+    // Both carry the identity the runtime was told (v51 — the normal path is
+    // the conflict update, because the row was opened at call start), and
+    // neither carries another writer's columns.
     expect(row.patientName).toBe("Test Patient");
-    expect("patientName" in update).toBe(false);
+    expect(update.patientName).toBe("Test Patient");
     expect("toolTimeline" in update).toBe(false);
     expect(update.transcript).toBe("CALLER: Hi\nAGENT: Hello");
   });
@@ -243,10 +256,20 @@ describe("persistRuntimeCall", () => {
     const errors: unknown[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((...a) => void errors.push(a));
     try {
-      const ok = await persistRuntimeCall(record(), {}, async () => {
-        throw new Error("db down");
-      });
+      let attempts = 0;
+      const ok = await persistRuntimeCall(
+        record(),
+        {},
+        async () => {
+          attempts++;
+          throw new Error("db down");
+        },
+        // The teardown write is retried on a bounded backoff (#321 round 4);
+        // the seam skips the real 1s + 3s so this file stays fast.
+        { backoffMs: [0, 0], sleep: async () => {} },
+      );
       expect(ok).toBe(false);
+      expect(attempts).toBe(3);
       // A transcript in an error log is patient data somewhere nobody watches.
       expect(JSON.stringify(errors)).not.toContain("CALLER: Hi");
     } finally {
@@ -591,5 +614,27 @@ describe("teardown does not touch transfer_outcome", () => {
     expect(
       "transferOutcome" in (toConflictUpdate(row) as unknown as Record<string, unknown>),
     ).toBe(false);
+  });
+});
+
+/**
+ * THE RECORD REACHES THE CALL ROW (v51). The conflict update — the path every
+ * normally-opened row takes at teardown — used to exclude identity entirely,
+ * so a name the process established never reached a row that already
+ * existed. It now carries identity when present and never nulls it.
+ */
+describe("toConflictUpdate carries an established identity, and never clears one", () => {
+  it("writes name, date of birth and found when the runtime holds a certain identity", () => {
+    const update = toConflictUpdate(
+      toCallLogRow(record(), { patientName: "Zelda Quixote", patientDob: "1958-01-04", patientFound: true }),
+    );
+    expect(update).toMatchObject({ patientName: "Zelda Quixote", patientDob: "1958-01-04", patientFound: true });
+  });
+
+  it("mentions none of the three when nothing was established — unknown never overwrites known", () => {
+    const update = toConflictUpdate(toCallLogRow(record(), {}));
+    expect("patientName" in update).toBe(false);
+    expect("patientDob" in update).toBe(false);
+    expect("patientFound" in update).toBe(false);
   });
 });

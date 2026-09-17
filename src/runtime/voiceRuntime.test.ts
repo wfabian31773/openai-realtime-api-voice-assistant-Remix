@@ -118,6 +118,8 @@ function laneSource(over: Partial<LaneConfig> = {}): LaneSource {
 interface Harness {
   openedRows: Array<Record<string, unknown>>;
   persisted: Array<Record<string, unknown>>;
+  /** The identity handed to persistCall beside each record (v51). */
+  persistedIdentity: Array<unknown>;
   /**
    * Calls the teardown request sweep saw, in order.
    *
@@ -149,6 +151,10 @@ async function harness(
     resolveGreeting?: (slug: string) => Promise<string | null>;
     sweepCall?: (record: unknown) => Promise<unknown>;
     persistCall?: (record: unknown) => Promise<boolean>;
+    persistTurns?: (record: unknown, ids: unknown) => Promise<unknown>;
+    gradeCall?: (record: unknown, ids: unknown) => Promise<unknown>;
+    logFollowUps?: (record: unknown, ids: unknown) => Promise<unknown>;
+    startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
     persistBeforeSweepMs?: number;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
     callRowDeadlineMs?: number;
@@ -162,6 +168,7 @@ async function harness(
   const transports: FakeGrokTransport[] = [];
   const openedRows: Array<Record<string, unknown>> = [];
   const persisted: Array<Record<string, unknown>> = [];
+  const persistedIdentity: Array<unknown> = [];
   const swept: Array<Record<string, unknown>> = [];
   mountVoiceRuntime(app, server, {
     env: over.env ?? ENV,
@@ -186,10 +193,17 @@ async function harness(
         return undefined;
       }),
     persistBeforeSweepMs: over.persistBeforeSweepMs,
+    // Telemetry hooks default to no-ops here: the real ones import twilio
+    // and write call_turns, neither of which a harness call should touch.
+    persistTurns: over.persistTurns ?? (async () => 0),
+    startRecording: over.startRecording ?? (async () => "skipped"),
+    gradeCall: over.gradeCall ?? (async () => "skipped"),
+    logFollowUps: over.logFollowUps ?? (async () => false),
     persistCall:
       over.persistCall ??
-      (async (record) => {
+      (async (record, identity) => {
         persisted.push(record as unknown as Record<string, unknown>);
+        persistedIdentity.push(identity);
         return true;
       }),
     sweepCall:
@@ -208,6 +222,7 @@ async function harness(
   const h: Harness = {
     openedRows,
     persisted,
+    persistedIdentity,
     swept,
     base: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/voice/stream`,
@@ -265,6 +280,7 @@ async function openStream(
   h: Harness,
   callSid: string,
   token: string,
+  host?: string,
 ): Promise<{ ws: WebSocket; frames: Array<Record<string, unknown>> }> {
   const ws = new WebSocket(h.wsUrl);
   clients.push(ws);
@@ -281,7 +297,7 @@ async function openStream(
       start: {
         streamSid: "MZ1",
         callSid,
-        customParameters: { callSid, token },
+        customParameters: { callSid, token, ...(host ? { host } : {}) },
       },
     }),
   );
@@ -291,6 +307,23 @@ async function openStream(
 /** Let the event loop drain — the runtime builds the agent asynchronously. */
 async function settle(times = 8): Promise<void> {
   for (let i = 0; i < times; i += 1) await new Promise((r) => setTimeout(r, 5));
+}
+
+/**
+ * A condition-wait for the one thing `settle` cannot promise: that a stream
+ * the test just opened has REGISTERED its transport. `settle()` is 40ms of
+ * fixed sleep, and `expect(h.transports).toHaveLength(1)` after it has gone
+ * red in CI three times (task #112, last on 2026-09-15 at dd51297) with no
+ * runtime change between the failing and passing runs — the upgrade simply
+ * took longer than 40ms on a loaded runner. Polls at settle's cadence and
+ * gives up loudly rather than sleeping longer for everyone.
+ */
+async function waitFor(cond: () => boolean, what: string, timeoutMs = 2000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > until) throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 describe("one whole call, end to end, offline", () => {
@@ -308,7 +341,7 @@ describe("one whole call, end to end, offline", () => {
 
     // 2. The media stream, with the token the webhook minted.
     const { ws } = await openStream(h, "CA1", tokenFrom(answered.text));
-    await settle();
+    await waitFor(() => h.transports.length === 1, "the transport to register");
     expect(h.transports).toHaveLength(1);
     const grok = h.transports[0];
 
@@ -670,7 +703,7 @@ describe("one whole call, end to end, offline", () => {
     const h = await harness({ stallHandshake: true, providerSetupDeadlineMs: 200 });
     const answered = await post(h, "/voice/optical", { CallSid: "CA11", From: "+1", To: "+2" });
     await openStream(h, "CA11", tokenFrom(answered.text));
-    await settle(2);
+    await waitFor(() => h.transports.length === 1, "the transport to register");
     expect(h.transports).toHaveLength(1);
     expect(h.registry.get("CA11")?.outcome ?? null).toBeNull();
     await new Promise((r) => setTimeout(r, 350));
@@ -1044,9 +1077,11 @@ describe("one whole call, end to end, offline", () => {
     const answered = await post(h, "/voice/optical", { CallSid: "CA6", From: "+1", To: "+2" });
     const token = tokenFrom(answered.text);
     await openStream(h, "CA6", token);
-    await settle();
+    await waitFor(() => h.transports.length === 1, "the first transport to register");
     expect(h.transports).toHaveLength(1);
     await openStream(h, "CA6", token);
+    // A second stream must NOT add one — absence has nothing to wait for, so
+    // this stays a settle: the assertion is that nothing happened.
     await settle();
     expect(h.transports).toHaveLength(1);
   });
@@ -1592,9 +1627,16 @@ describe("the database outranks the code, but not on the copy a lane must say", 
     "All calls are being recorded for quality assurance purposes, how can I help you?";
 
   it("prefers the configured greeting whenever it is complete", () => {
-    expect(chooseGreeting("optical", "Configured optical line.", "Registry.")).toBe(
-      "Configured optical line.",
-    );
+    // "Configured optical line." was the fixture until 2026-09-17. It kept
+    // PASSING after optical gained a recording-disclosure requirement, and
+    // that is the trap: with BOTH strings deficient `chooseGreeting` falls
+    // into its "neither has it" branch, which also returns `configured` — so
+    // the assertion held while testing a different branch entirely. The
+    // fixture now actually satisfies optical's copy, so this tests what its
+    // name says.
+    const COMPLETE_OPTICAL =
+      "Configured optical line. All calls are being recorded for quality assurance purposes.";
+    expect(chooseGreeting("optical", COMPLETE_OPTICAL, "Registry.")).toBe(COMPLETE_OPTICAL);
     expect(chooseGreeting("no-ivr", BUILT_IN, "something else")).toBe(BUILT_IN);
   });
 
@@ -1624,5 +1666,129 @@ describe("the database outranks the code, but not on the copy a lane must say", 
   it("uses the registry string when nothing is configured", () => {
     expect(chooseGreeting("optical", null, "Registry.")).toBe("Registry.");
     expect(chooseGreeting("optical", null, null)).toBe("");
+  });
+});
+
+/**
+ * THE RUNTIME'S TURNS AND RECORDING REACH THE OBSERVATORY.
+ *
+ * Measured 2026-09-17: recording_url NULL and call_turns empty on all 4,564
+ * runtime calls since the cutover, on lanes that open with "all calls are
+ * being recorded". The page fell back to the flat transcript and called it an
+ * instrumentation gap. Both hooks are pinned HERE, at the runtime, because a
+ * unit test on each helper proves the helper works and not that anything
+ * calls it — failure mode 10.
+ */
+describe("the runtime's turns and recording reach the Observatory", () => {
+  /**
+   * THE GRADE, AT TEARDOWN. The old core grades a call when it ends; the
+   * runtime never did, so every runtime call waited on the five-per-cycle
+   * backfill — 161–203 minutes behind at peak on 2026-09-16, which is what
+   * the hourly fleet watch alarmed on (task #139). Pinned here, at the
+   * runtime, after the sweep: the threshold lives in runtimeGrading.ts and
+   * has its own test.
+   */
+  it("hands the call to the grader once, after the sweep, with its row id", async () => {
+    const graded: Array<{ callSid: string; callLogId: unknown; sweptFirst: number }> = [];
+    let sweeps = 0;
+    const h = await harness({
+      sweepCall: async () => {
+        sweeps += 1;
+        return { filed: false, reason: "caller-said-nothing" };
+      },
+      gradeCall: async (record, ids) => {
+        const r = record as { callSid: string };
+        graded.push({ callSid: r.callSid, callLogId: (ids as { callLogId?: string }).callLogId, sweptFirst: sweeps });
+        return "graded";
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA43", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA43", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    ws.close();
+    await settle(8);
+    expect(graded).toHaveLength(1);
+    expect(graded[0]).toMatchObject({ callSid: "CA43", sweptFirst: 1 });
+    // The row id travels with it — whatever the harness's row opener returned.
+    expect("callLogId" in graded[0]).toBe(true);
+  });
+
+  /**
+   * THE RECORD REACHES THE CALL ROW (v51). Measured over seven days:
+   * patient_found / patient_name / patient_dob NULL on 2,471 of 2,471 runtime
+   * calls, because nothing supplied persistRuntimeCall's identity argument.
+   * Pinned at the runtime, with a canonical SID (the store refuses any other)
+   * and a CERTAIN entry — an uncertain one must produce nothing.
+   */
+  it("hands persistCall the CERTAIN identity the tools established for the call, and nothing for an uncertain one", async () => {
+    const { rememberVerifiedIdentity, resetVerifiedIdentities } = await import("../tools/verifiedIdentity");
+    resetVerifiedIdentities();
+    const CERTAIN = "CA0000000000000000000000000000005a";
+    const CANDIDATE = "CA0000000000000000000000000000005b";
+    rememberVerifiedIdentity(CERTAIN, { firstName: "Zelda", lastName: "Quixote", dateOfBirth: "1958-01-04", certain: true });
+    rememberVerifiedIdentity(CANDIDATE, { firstName: "Zed", lastName: "Quixote", certain: false });
+    const h = await harness();
+    for (const sid of [CERTAIN, CANDIDATE]) {
+      const answered = await post(h, "/voice/optical", { CallSid: sid, From: "+1", To: "+2" });
+      const { ws } = await openStream(h, sid, tokenFrom(answered.text));
+      await waitFor(() => h.transports.length >= 1, "the transport to register");
+      ws.close();
+      await settle(8);
+    }
+    expect(h.persistedIdentity).toHaveLength(2);
+    expect(h.persistedIdentity[0]).toEqual({ patientFound: true, patientName: "Zelda Quixote", patientDob: "1958-01-04" });
+    expect(h.persistedIdentity[1]).toEqual({});
+    resetVerifiedIdentities();
+  });
+
+  it("starts a Twilio recording once per call, on the host the webhook was reached on", async () => {
+    const started: Array<[string, string | undefined]> = [];
+    const h = await harness({
+      startRecording: async (sid, host) => {
+        started.push([sid, host]);
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA40", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA40", tokenFrom(answered.text), "runtime.test");
+    await settle(4);
+    expect(started).toEqual([["CA40", "runtime.test"]]);
+    ws.close();
+    await settle(6);
+    expect(started, "a second start on the same call").toHaveLength(1);
+  });
+
+  it("the TwiML carries the host the stream started from", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA42", From: "+1", To: "+2" });
+    expect(answered.text).toMatch(/<Parameter name="host" value="127\.0\.0\.1:\d+"\/>/);
+  });
+
+  it("the persisted record carries timed turns, handed to the turn writer AFTER the sweep", async () => {
+    const handed: Array<{ callSid: string; turns: unknown; sweptFirst: number }> = [];
+    let sweeps = 0;
+    const h = await harness({
+      sweepCall: async () => {
+        sweeps += 1;
+        return { filed: false, reason: "caller-said-nothing" };
+      },
+      persistTurns: async (record) => {
+        const r = record as { callSid: string; turns?: unknown };
+        handed.push({ callSid: r.callSid, turns: r.turns, sweptFirst: sweeps });
+        return 0;
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA41", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA41", tokenFrom(answered.text));
+    await settle(4);
+    ws.close();
+    await settle(8);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA41" });
+    const turns = (h.persisted[0] as { turns?: unknown }).turns;
+    expect(Array.isArray(turns), "the record has no turns array").toBe(true);
+    for (const t of turns as Array<Record<string, unknown>>) {
+      expect(typeof t.atMs).toBe("number");
+      expect(["caller", "agent"]).toContain(t.role);
+    }
+    expect(handed).toEqual([{ callSid: "CA41", turns, sweptFirst: 1 }]);
   });
 });

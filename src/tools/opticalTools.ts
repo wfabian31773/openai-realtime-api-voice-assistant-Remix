@@ -82,7 +82,8 @@ registerTool({
         success: true,
         classified: false,
         department_id: OPTICAL_DEPARTMENT_ID,
-        message:
+        // For the model, not the caller — `message` is what gets spoken.
+        fix:
           'This does not match one of our optical categories. That is fine — file the ' +
           'ticket with a clear description of what they asked for and leave the category ' +
           'off. Do not pick a category that nearly fits.',

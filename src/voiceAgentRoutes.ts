@@ -24,6 +24,8 @@ import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulH
 import { flushAzulTimeline, getAzulTimeline, recordDirectorAction } from './services/toolTimeline';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
+import { recordingStatusTarget } from './services/recordingStatusTarget';
+import { landRecording } from './runtime/parkedRecordings';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
@@ -6282,6 +6284,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision optical. All of our opticians are currently ' +
       'assisting other customers, but I can take a message and they will follow up with you. ' +
+      'All calls are being recorded for quality assurance purposes. ' +
       'How can I help you today?',
   });
 
@@ -6294,7 +6297,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision surgery coordination. All of our coordinators are ' +
       'currently assisting other patients, but I can take a message and they will follow up ' +
-      'with you. How can I help you today?',
+      'with you. All calls are being recorded for quality assurance purposes. ' +
+      'How can I help you today?',
   });
 
   // Point the Clinical Tech Support number's Twilio voice webhook here.
@@ -6305,7 +6309,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision clinical support. All of our technicians are ' +
       'currently assisting other patients, but I can take a message and they will follow ' +
-      'up with you. How can I help you today?',
+      'up with you. All calls are being recorded for quality assurance purposes. ' +
+      'How can I help you today?',
   });
 
   // Point the Medical Records number's Twilio voice webhook here. Until that
@@ -6317,7 +6322,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision medical records. Our records team is currently ' +
       'assisting other patients, but I can take the details and they will follow up with ' +
-      'you. How can I help you today?',
+      'you. All calls are being recorded for quality assurance purposes. ' +
+      'How can I help you today?',
   });
 
   // THE DEMO LINE (+1 626-548-2660). Its own webhook so it can never inherit
@@ -7666,6 +7672,99 @@ export function setupVoiceAgentRoutes(app: Express): void {
       const recordingSid = parsedBody.RecordingSid;
       const conferenceSid = parsedBody.ConferenceSid;
       const recordingStatus = parsedBody.RecordingStatus;
+      const target = recordingStatusTarget(parsedBody);
+
+      /**
+       * Push the recording URL to the ticketing system immediately. The
+       * ticketing sync runs every 5 min and marks calls as synced before the
+       * recording is ready — so once synced, the recording URL is never
+       * re-sent. Shared by the conference branch (old core) and the CallSid
+       * branch (runtime) below.
+       */
+      const pushRecordingToTicketing = async (callLogId: string, recordingUrl: string): Promise<void> => {
+        const { storage } = await import('../server/storage');
+        try {
+          const callLog = await storage.getCallLog(callLogId);
+          if (!callLog) {
+            console.warn(`[RECORDING] ⚠️ Could not fetch call log ${callLogId} for ticketing push`);
+            return;
+          }
+          // Only push if there is something to identify the ticket on the other end
+          if (!callLog.ticketNumber && !callLog.callSid) {
+            console.info(`[RECORDING] No ticketNumber/callSid on call log ${callLogId} — skipping ticketing push`);
+            return;
+          }
+          /**
+           * A PARTIAL PUSH, AND IT NEVER MARKS THE CALL DELIVERED.
+           *
+           * Codex P1 (#321 round 1) and P2 (round 3) — the same fact, twice.
+           * `ticketingSyncService` selects rows with callDataSynced = false and
+           * carries the FULL payload: transcript, duration, outcome, grading,
+           * and recordingUrl off the row. This helper used to push the URL and
+           * then stamp that flag, which told the sync the call was done and
+           * left every runtime ticket with a recording and nothing else. The
+           * round-1 fix let the sync carry the URL and pushed from here only on
+           * a call the sync had already finished — and that opened the round-3
+           * race: a call the sync had already SNAPSHOTTED into its batch when
+           * the callback saved the URL was pushed from neither side, and the
+           * sync's stale payload then marked it done for good.
+           *
+           * So: push the URL here, every time, and never touch the flag. The
+           * sync still runs (the flag is still false), carries the URL again
+           * off the row (the same value — an idempotent update on the app),
+           * and sets the flag itself. Every ordering delivers it.
+           * `ticketingSyncService.test.ts` exempts this ONE site from its
+           * every-push-records-delivery rule for exactly this reason: this is
+           * the partial push that must not.
+           */
+          const { ticketingApiClient } = await import('../server/services/ticketingApiClient');
+          let delivered = false;
+          try {
+            const result = await ticketingApiClient.updateTicketCallData({
+              callSid: callLog.callSid || undefined,
+              ticketNumber: callLog.ticketNumber || undefined,
+              recordingUrl: recordingUrl,
+            });
+            delivered = result.success;
+            if (delivered) {
+              console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}${callLog.callDataSynced ? ' (call already synced)' : ' (the post-call sync carries the rest)'}`);
+            } else {
+              console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
+            }
+          } catch (pushErr) {
+            console.error('[RECORDING] ✗ Exception pushing recording URL to ticketing system:', pushErr);
+          }
+          /**
+           * A FAILED PUSH ON A ROW THE SYNC HAS ALREADY FINISHED HAS NO OTHER
+           * DELIVERY (Codex P2, #321 round 10). The sync selects
+           * callDataSynced = false, so once it has finished a call this push
+           * is the only path the URL has, and a transient failure lost it for
+           * good. Re-open the sync: the flag goes back to false (the ONE flag
+           * write on this path, and it only ever clears), the next pass
+           * carries the full payload with the URL now on the row, and marks
+           * the call itself. A row the sync has not finished needs nothing —
+           * and that is safe against a sweep already in flight with a stale
+           * payload only because the sync's mark-done is conditional on the
+           * row still holding the recording the payload carried
+           * (`ticketingSyncService.syncCall`, Codex P2 round 11).
+           *
+           * THE RETRY COUNT IS RESET WITH IT (Codex P2, round 11): the sync
+           * selects `ticketingSyncRetries < 3` and its success write stores
+           * the attempt number, so a call that synced on its third attempt
+           * would be re-opened and never selected. 0 of 5,904 synced rows in
+           * the 14 days to 2026-09-17 carried a count of 3 — taken because it
+           * is one field in the write this branch already makes.
+           */
+          const { afterRecordingPush } = await import('./runtime/recordingPushOutcome');
+          if (afterRecordingPush(delivered, callLog.callDataSynced === true) === 'reopen_sync') {
+            await storage.updateCallLog(callLogId, { callDataSynced: false, ticketingSyncRetries: 0 });
+            console.warn(`[RECORDING] the push failed on a call the post-call sync had already finished — re-opened the sync for ${callLogId} (retries reset) so its next pass carries the recording URL`);
+          }
+        } catch (pushErr) {
+          console.error('[RECORDING] ✗ the recording push could not complete:', pushErr);
+        }
+      };
+
       
       console.info(`[RECORDING] Conference ${conferenceSid} recording ${recordingStatus}: ${recordingUrl}`);
       
@@ -7712,44 +7811,57 @@ export function setupVoiceAgentRoutes(app: Express): void {
           // The ticketing sync runs every 5 min and marks calls as synced before the
           // recording is ready — so once synced, the recording URL is never re-sent.
           // Fix: push it directly here as soon as Twilio delivers the recording.
-          (async () => {
-            try {
-              const callLog = await storage.getCallLog(callLogId);
-              if (!callLog) {
-                console.warn(`[RECORDING] ⚠️ Could not fetch call log ${callLogId} for ticketing push`);
-                return;
-              }
-              // Only push if there is something to identify the ticket on the other end
-              if (!callLog.ticketNumber && !callLog.callSid) {
-                console.info(`[RECORDING] No ticketNumber/callSid on call log ${callLogId} — skipping ticketing push`);
-                return;
-              }
-              const { ticketingApiClient } = await import('../server/services/ticketingApiClient');
-              const result = await ticketingApiClient.updateTicketCallData({
-                callSid: callLog.callSid || undefined,
-                ticketNumber: callLog.ticketNumber || undefined,
-                recordingUrl: recordingUrl,
-              });
-              if (result.success) {
-                console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}`);
-                // Record the delivery, or the sweeper re-pushes this call five
-                // minutes from now. With a hard .limit(20) per cycle, normal
-                // traffic would saturate the sweeper re-sending calls that
-                // already landed and crowd out the failures it exists to
-                // recover.
-                await storage.updateCallLog(callLog.id, { callDataSynced: true });
-              } else {
-                console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
-              }
-            } catch (pushErr) {
-              console.error('[RECORDING] ✗ Exception pushing recording URL to ticketing system:', pushErr);
-            }
-          })();
+          void pushRecordingToTicketing(callLogId, recordingUrl);
           
           // Clean up mapping
           delete conferenceSidToCallLogId[conferenceSid];
         } else {
           console.warn(`[RECORDING] ⚠️ No call log ID found for conference SID ${conferenceSid}`);
+        }
+      } else if (target?.by === 'call') {
+        /**
+         * A RUNTIME CALL. `<Connect><Stream>` has no conference; the runtime
+         * starts its recording over REST (`src/runtime/callRecording.ts`) and
+         * Twilio posts back with a CallSid. Until 2026-09-17 this handler read
+         * ConferenceSid only, so the runtime lanes — which say "all calls are
+         * being recorded" — had recording_url NULL on 4,564 of 4,564 calls.
+         *
+         * SIGNED, OR NOTHING IS WRITTEN (Codex P1, #321). This route sits
+         * behind the rate limiter only, and a CallSid is not a secret — it is
+         * on every ticket and in every log line — so an unsigned POST with a
+         * valid CallSid and an arbitrary RecordingUrl would overwrite the
+         * call's recording and push the forged URL to the ticket. The check is
+         * the runtime's own `checkTwilioSignature` (HMAC over the URL Twilio
+         * was given plus the form params), fail-closed: no auth token, no
+         * header, or a bad signature all refuse. The conference branch above
+         * is not gated here — that is the old core's pre-existing surface,
+         * keyed on a ConferenceSid, and widening a security check onto a live
+         * path it has never run on is its own change with its own after-number.
+         */
+        const { checkTwilioSignature } = await import('./runtime/voiceWebhook');
+        const signature = checkTwilioSignature(
+          { headers: req.headers as Record<string, string | string[] | undefined>, body: parsedBody, originalUrl: req.originalUrl },
+          process.env,
+        );
+        if (signature !== 'valid') {
+          console.warn(`[RECORDING] ✗ refused an unsigned CallSid recording callback (${signature}) — nothing written`);
+          return res.status(403).send('invalid signature');
+        }
+        const { storage } = await import('../server/storage');
+        // The recording can beat the row (Codex P2, #321): the runtime records
+        // from the stream's first frame, before the row opens. And the lookup
+        // can pass the teardown's own peeks (Codex P2, round 7) — so the URL
+        // is PARKED BEFORE the row is looked up, and released only once a
+        // write has carried it. The ordering is the fix; see landRecording.
+        const landed = await landRecording(target.callSid, recordingUrl, {
+          findRow: (sid) => storage.getCallLogBySid(sid),
+          writeUrl: (id, url) => storage.updateCallLog(id, { recordingUrl: url }),
+          push: (id, url) => void pushRecordingToTicketing(id, url),
+        });
+        if (landed === 'written') {
+          console.info(`[RECORDING] ✓ Saved recording URL to the call log by CallSid`);
+        } else {
+          console.warn(`[RECORDING] ⚠️ No call log yet for CallSid ${target.callSid} — recording URL parked until the row lands`);
         }
       }
       

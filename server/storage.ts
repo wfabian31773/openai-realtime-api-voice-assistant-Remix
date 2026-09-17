@@ -53,6 +53,7 @@ import {
 } from "../shared/schema";
 import { db } from "./db";
 import { eq, asc, desc, and, or, count, gte, lte, lt, inArray, isNull, isNotNull, ilike, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 
 export interface IStorage {
   // User operations (required for Replit Auth)
@@ -130,6 +131,46 @@ export interface IStorage {
     recentCalls: CallLog[];
     recentCallbacks: CallbackQueueItem[];
   }>;
+}
+
+/**
+ * A grading claim that has not turned into a grade within this long is
+ * abandoned — the process died between the claim and the persisted grade —
+ * and may be taken again (Codex P2, #321 round 8). The grade itself takes
+ * seconds; ten minutes cannot double-grade a live one.
+ */
+export const GRADING_CLAIM_LEASE_MS = 10 * 60 * 1000;
+/**
+ * What a claim writes into quality_analysis; overwritten by a real grade.
+ * THE TOKEN IS THE CLAIM'S OWNER (Codex P2, #321 round 9): the lease says
+ * when a claim may be taken over, and nothing about the lease can stop the
+ * worker that lost it from finishing — so a completion and a release must
+ * both carry the token that took the claim, and a worker whose lease expired
+ * can neither write its grade over its successor's nor release its
+ * successor's claim. See ownsGradingClaim.
+ */
+export function gradingClaimMarker(token: string) {
+  return { grading: 'claimed', token } as const;
+}
+
+/**
+ * Ungraded, OR claimed before `staleBefore` and never graded. The second arm
+ * reads the claim marker, not the timestamp alone: a dead-letter stamp and a
+ * short-transcript skip also set graded_at with no grade, and reclaiming
+ * those would re-spend on them every lease.
+ */
+export function gradingClaimable(staleBefore: Date) {
+  return or(
+    isNull(callLogs.gradedAt),
+    and(lt(callLogs.gradedAt, staleBefore), sql`${callLogs.qualityAnalysis}->>'grading' = 'claimed'`),
+  );
+}
+
+/** The row still carries THIS claim — the fence every completion and every
+ * release of a claimed grade goes through. A completed grade overwrites the
+ * marker (token included), so a stale owner's token matches nothing. */
+function ownsGradingClaim(id: string, token: string) {
+  return and(eq(callLogs.id, id), sql`${callLogs.qualityAnalysis}->>'token' = ${token}`);
 }
 
 export class DatabaseStorage implements IStorage {
@@ -673,13 +714,17 @@ export class DatabaseStorage implements IStorage {
     }, `getCallLogByCallSid(${callSid.slice(-8)})`);
   }
 
-  async getCallLogsWithoutGrades(limit: number = 10): Promise<CallLog[]> {
+  async getCallLogsWithoutGrades(limit: number = 10, leaseMs: number = GRADING_CLAIM_LEASE_MS): Promise<CallLog[]> {
     return await db
       .select()
       .from(callLogs)
       .where(
         and(
-          isNull(callLogs.gradedAt),
+          // Ungraded — or claimed for grading longer ago than the lease and
+          // never graded (Codex P2, #321 round 8): a process that died
+          // between the claim and the persisted grade must not leave the
+          // row claimed forever. See gradingClaimable.
+          gradingClaimable(new Date(Date.now() - leaseMs)),
           isNotNull(callLogs.transcript),
           eq(callLogs.status, 'completed')
         )
@@ -695,6 +740,57 @@ export class DatabaseStorage implements IStorage {
    *  that had no loop dimension. This selects graded rows whose
    *  graderVersion predates the current one so the 5-minute sweep can
    *  re-run the (cheap, deterministic) graders against them. */
+  /**
+   * ATOMICALLY CLAIM A CALL FOR GRADING (Codex P2, #321 round 7). `gradedAt`
+   * was stamped only AFTER the LLM answered, so for the seconds between a
+   * completed row landing and its grade landing, the teardown grader and the
+   * five-minute backfill could both select it and both pay for a grade. The
+   * claim is the stamp itself, taken before the LLM is asked, and only where
+   * nobody has taken it: one row back means this caller grades, none means
+   * somebody else already is (or did). Released by the grader on failure.
+   */
+  async claimCallLogForGrading(id: string, leaseMs: number = GRADING_CLAIM_LEASE_MS): Promise<string | null> {
+    const token = randomUUID();
+    const rows = await db
+      .update(callLogs)
+      // THE CLAIM CARRIES A MARKER (round 8): `gradedAt` alone cannot tell a
+      // claim from a completed grade or a dead-letter stamp. A completed
+      // grade overwrites quality_analysis with the analysis; a release nulls
+      // it; the dead-letter and short-transcript stamps never write it. So
+      // only a row that still reads `claimed` past the lease is reclaimable.
+      // AND AN OWNER (round 9): the token the caller must present to finish
+      // or release what it claimed.
+      .set({ gradedAt: new Date(), qualityAnalysis: gradingClaimMarker(token) })
+      .where(and(eq(callLogs.id, id), gradingClaimable(new Date(Date.now() - leaseMs))))
+      .returning({ id: callLogs.id });
+    return rows.length === 1 ? token : null;
+  }
+
+  /** Write the grade ONLY if the row still carries this claim. False means
+   * another worker took the claim over (the lease expired while this one
+   * waited on the API) and this grade must be discarded, not written over
+   * the successor's. */
+  async completeGradingClaim(id: string, token: string, updates: Partial<InsertCallLog>): Promise<boolean> {
+    const rows = await db
+      .update(callLogs)
+      .set(updates)
+      .where(ownsGradingClaim(id, token))
+      .returning({ id: callLogs.id });
+    return rows.length === 1;
+  }
+
+  /** Give a claim back to the queue — but only THIS claim: a stale owner's
+   * late failure must not null out the claim, or the grade, of whoever took
+   * the row over. */
+  async releaseGradingClaim(id: string, token: string): Promise<boolean> {
+    const rows = await db
+      .update(callLogs)
+      .set({ gradedAt: null, qualityAnalysis: null })
+      .where(ownsGradingClaim(id, token))
+      .returning({ id: callLogs.id });
+    return rows.length === 1;
+  }
+
   async getCallLogsWithStaleGraderVersion(currentVersion: number, limit: number = 25): Promise<CallLog[]> {
     return await db
       .select()

@@ -63,7 +63,8 @@ export const recordsAgentConfig = {
   greeting:
     'Thank you for calling Azul Vision medical records. Our records team is currently ' +
     'assisting other patients, but I can take the details and they will follow up with ' +
-    'you. How can I help you today?',
+    'you. All calls are being recorded for quality assurance purposes. ' +
+    'How can I help you today?',
   voice: 'sage',
   language: 'en',
 };

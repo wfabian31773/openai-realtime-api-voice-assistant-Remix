@@ -277,6 +277,28 @@ const MANDATORY_GREETING_COPY: Readonly<
    * be inventing a rule rather than applying one (standing instruction 1).
    */
   pcp: [RECORDING_DISCLOSURE],
+  /**
+   * THE FOUR QUEUE LANES, added 2026-09-17. Same one requirement as pcp, and
+   * for the same reason: they are business-hours professional/patient lines,
+   * so the closed-office notice and the 911 direction belong to no-ivr and are
+   * deliberately NOT required here (standing instruction 1 — applying a rule,
+   * not inventing one).
+   *
+   * MEASURED 2026-09-16: of 667 substantive calls, the 401 on these four
+   * carried no disclosure at all. California is a two-party-consent state and
+   * this is a healthcare practice. Task #79, open since before the cutover.
+   *
+   * Registering them HERE is what makes it stick. `chooseGreeting`
+   * (voiceRuntime.ts:145) and the old core's override both prefer
+   * `agents.welcome_greeting` over the registry literal whenever
+   * `missingMandatoryCopy` returns empty — and with no key here it returned
+   * empty for ANY string, so one database row would have silently reopened the
+   * gap. That is #304's finding on pcp, applied to the lanes it left out.
+   */
+  optical: [RECORDING_DISCLOSURE],
+  surgery: [RECORDING_DISCLOSURE],
+  tech: [RECORDING_DISCLOSURE],
+  records: [RECORDING_DISCLOSURE],
   'no-ivr': [
     // THREE, not two. `noIvrAgent` names them: "the two things this line
     // exists to say: that offices are closed, and that a medical emergency

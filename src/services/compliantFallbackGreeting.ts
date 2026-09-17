@@ -31,6 +31,10 @@
  */
 import { WELCOME_GREETING } from '../agents/afterHoursAgent';
 import { pcpAgentConfig } from '../agents/pcpAgent';
+import { opticalAgentConfig } from '../agents/opticalAgent';
+import { surgeryAgentConfig } from '../agents/surgeryAgent';
+import { techAgentConfig } from '../agents/techAgent';
+import { recordsAgentConfig } from '../agents/recordsAgent';
 
 export const COMPLIANT_FALLBACK_GREETINGS: Readonly<Record<string, string>> = {
   // The after-hours line's registry string: closed-office notice, 911
@@ -40,6 +44,14 @@ export const COMPLIANT_FALLBACK_GREETINGS: Readonly<Record<string, string>> = {
   // requirement on this lane, not no-ivr's three — it is a business-hours
   // professional line.
   pcp: pcpAgentConfig.greeting,
+  // The four queue lanes, 2026-09-17. Each carries the same single
+  // requirement as pcp, and each value is a REFERENCE to the lane's own
+  // registry literal — never a copy, so the fallback cannot drift away from
+  // the greeting it is standing in for.
+  optical: opticalAgentConfig.greeting,
+  surgery: surgeryAgentConfig.greeting,
+  tech: techAgentConfig.greeting,
+  records: recordsAgentConfig.greeting,
 };
 
 /**

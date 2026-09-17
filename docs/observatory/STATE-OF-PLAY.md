@@ -10,7 +10,7 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-09-09 17:40 UTC** (section 11). Earlier: **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-09-17 11:10 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
@@ -1063,3 +1063,190 @@ guesses no tool ever made.
   a number from a fixture while leaving dates), so the precedent is dates stay
   and identifiers go — but it is his rule and it should be his call, not one
   inherited from a file.
+
+---
+
+## 12. The night of 2026-09-16/17 — one worksheet, nineteen ships, twenty-one Codex rounds (written 09-17)
+
+**The mandate** (Wayne, 2026-09-17): *"keep working through the worksheet,
+don't wait on me … knock out as many relevant tasks as possible and have
+everything lined up for me at 5 am."* 5am Pacific is 12:00 UTC. The rulings in
+force all night: "no name, no ticket" STANDS; a mistake is a tool that should
+have been called and was not, a ticket not generated, or a question asked
+several times; *"stop chasing … these less than one percent codex findings"*
+— a Codex finding is measured before it is taken, and a declined one carries
+its number on the thread.
+
+**The method, every time:** the 2026-09-16 corpus (667 substantive calls, every
+one read) → the failure named per call, not per category → a test that goes
+RED without the fix → a mutation check against a scratch copy of the FIXED
+files → a marker row in `CLAUDE.md` with the number it moves and the guard
+beside it → a query in `docs/observatory/AFTER-MEASUREMENTS-20260917.md` that
+was executed against the live databases. Nothing merges without a Codex
+greenlight; the operator merges.
+
+**Where it is:** `docs/WORKSHEET-20260917.md` is the driving document and its
+*FOR 5AM* block is the hand-off. **PR #321** carries v39–v56 — eighteen ships,
+each with its row in the marker table — plus the round-by-round record of
+**twenty-one Codex reviews absorbed** (every finding taken or declined on a
+measurement, every thread answered and resolved). **v57, the surgeon ask, was
+built and then WITHDRAWN on the operator's ruling** — *"if it's only 9 callers,
+I would remove if we are unsure"* — after six consecutive rounds of concurrency
+findings on the machinery, the last of which no constant could close. Its
+measurement stands and is kept; the number v57 is retired rather than reused.
+Suite 258 files / 4,714 tests, root and client typecheck clean.
+Live Replit was still on v24 when this was written; the deploy marker to look
+for is `voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917`.
+
+## What shipped, by the number it moves
+
+- **v39** the four queue lanes disclose the recording (0 of 401 calls did on
+  09-16); **v40** no invented callback number (*"ending in ."*, *"ending in
+  mous"*); **v41** the after-hours line asks for a date of birth once, then
+  files (11 calls asked 3+ times, one 15); **v42** a filed ticket is never
+  spoken as a failure; **v43** a tool stops reading its own rule aloud.
+- **v44/v45 — the operator's explicit ask, the Observatory and the cost:**
+  every runtime call gets a dual-channel recording and timed turns
+  (`recording_url` NULL and `call_turns` empty on all 4,564 runtime calls
+  since the cutover), and `daily_grok_costs` puts xAI's reported voice spend
+  beside what the rows were booked at, one row per day, refusals included.
+  The 2026-09-12 row that allocated $37.43 onto ONE 104-second call was
+  corrected on the Hub.
+- **v46** a success loop is a loop (17 calls since 09-10 looped one tool
+  11–35 times, 16 with no ticket); **v47** a phone match is a candidate — the
+  after-hours line stops reading a phone-matched patient's appointment to
+  whoever is calling (44 of 365 calls in nine days); **v48** the ambiguous
+  lookup is countable; **v49** the runtime grades its own calls at teardown
+  (p90 hangup-to-grade lag was 502–720 minutes at peak) and a real
+  conversation ending in dead air is `completed`, so it is graded and synced.
+- **v50** the second identity miss ends the ask (`LOOKUP_MISS_LIMIT = 2`, a
+  dial); **v51/v53** a CERTAIN identity reaches the call row on the runtime
+  and on no-ivr (`patient_found` was NULL on every substantive call on every
+  lane for seven days); **v54** the affirmed name picks the person among
+  several on a phone (26 DOB refusals on recognised callers on 09-16, all
+  `no_entry`).
+- **Round 12 of the review found a second large gap the same way v52 was
+  found — by measuring instead of assuming:** three quarters of agent-filed
+  tickets (291 of 383 on 09-14, 280 of 368, 296 of 387) carried NO quality
+  score or outcome while every call row had one, because the five-minute
+  sync could snapshot the row before the grade landed and nothing ever
+  re-opened it. The grade's write now re-opens the sync and the sync's
+  mark-done refuses a row whose grade landed mid-flight.
+- **Round 13 closed the last door on the v56 wait:** `terminate_call`
+  emitted FIRST in a multi-tool response found no sibling to wait for. An
+  end-call now waits for its batch boundary — the response's done, or the
+  late-batch window, which is armed at the late event's arrival so a waiting
+  end-call can ever see it — as well as the siblings it has seen.
+- **Round 14 hardened the v45 day table twice:** the preservation decision
+  is now one transaction under a per-day advisory lock (two replicas could
+  otherwise interleave and a failed run overwrite a reconciled row), and a
+  refusal that could not read the day writes UNKNOWN rather than 0 calls /
+  $0.00 — a dash on the dashboard, never a measured empty day.
+- **v52 — the headline finding of the night, read from the Hub's own postgres
+  log:** the per-call cost UPDATE had been refused at PARSE 3,749 times a day
+  since 2026-09-04 (`operator is not unique: unknown + unknown`), so
+  `twilio_cost_cents` was written on 5–25% of calls instead of 100% and 4,295
+  rows carry a provider-only total. Fixed with the column's type on the bound
+  value; the backfill is an admin recalculation and the operator's call.
+- **v55** the follow-up after a fast tool refusal no longer waits for a
+  `response.done` that already passed — the largest lost-request class on the
+  runtime that nothing had a name for (26 · 25 · 42 · 9 · 15 dead-air calls a
+  day since 09-10), with a PHI-free `follow_up_summary` row per call so
+  tomorrow's data says whether the hypothesis was right; **v56** an unvoiced
+  tool answer cannot end the call (38 PCP calls on 09-16 hung up on the
+  agent's own question, nine with a found appointment never spoken).
+- **Round 15 (09:44) made the sync's failure writes atomic:** a snapshotted
+  `retries + 1` could clobber the grade or recording writer's reset to 0 and
+  strand a row at 3; both writes now add one in the database. Measured first
+  (0 rows at 3, 4 at 2 in 14 days) and taken as one expression.
+- **v57 — BUILT AND WITHDRAWN 2026-09-17; the measurement below stands and the
+  code does not ship (task #75's after-number, never taken since 09-02):** 96 surgery calls took the surgeon refusal over
+  09-08..09-16, 46 left no ticket anywhere, the exit fired on 57 calls and on
+  none of the 46. On every lost call that reached a third POST the attempts
+  landed 1–100 ms apart — one model response — so a counter noted after each
+  refusal read 0 on all three. `claimGateAttempt` / `settleGateAttempt`: claimed
+  before the POST (refusals + in-flight), counted only when the app refused for
+  the surgeon. Also read on the way, and CORRECTED at 10:45: the exit files
+  into department 2 and moves nothing — all 55 of its tickets were created
+  there and 37 were then moved BY A PERSON (`department_transferred`, an actor
+  on every one): 19 to Technicians Support, 13 to the HVA Hub, 5 elsewhere.
+  That, not the app, is why dept-2 provider fill held at 100%. Whether the
+  triage is the exit working or the ask being spent on the wrong queue's
+  caller is Wayne's; the first reading ("the app re-routes") was wrong.
+  **Withdrawn because the claim serialises POSTs that used to go out in
+  parallel, and rounds 16 through 21 each found a new interleaving in the
+  machinery holding it up — round 21 being uncloseable by any constant, since
+  three serialised 15 s client timeouts is exactly the 45 s tool watchdog.
+  9 callers over seven business days did not justify it. The next attempt
+  flags on the SECOND refusal, where no batch of three exists and nothing is
+  serialised.** Rounds 17 through 21 below describe machinery that is no longer
+  in the PR; they are kept because the reasoning is what the next attempt has
+  to avoid repeating.
+- **Round 16 (10:11) caught both of the above one step further:** the sync's
+  failure write still stamped *GAVE UP* from the snapshot (now a CASE in the
+  same statement, read back with RETURNING, PREPAREd on the Hub), and v57's
+  in-flight count could flag the third of a batch whose first two were 503s —
+  a claim now waits for the attempts ahead of it and reads confirmed refusals
+  only. Exposure 0 in the window on both; taken because both doors were new.
+- **Round 17 (10:26) caught the wait one step further:** one 20 s deadline
+  for the whole queue, where each predecessor's POST may take 15 s — the
+  third of a slow batch was released at 20 s reading one refusal of two. Now
+  one bounded wait per predecessor, re-armed on each settle (`34d3ecc`; 3
+  mutations, 3 caught). Exposure 0 in the window; taken because the wait is
+  this PR's.
+- **Round 18 (10:38) caught the wait one step further again:** every waiter
+  started its own bound on arrival, so one predecessor past the bound — and
+  the create path can legitimately take ~21.5 s with its warm-up — released
+  all of them together. Claims are now queued and released one at a time,
+  and the floor is 25 s, above the longest legitimate attempt (`8a11864`; 3
+  mutations, 3 caught).
+- **Round 19 (10:47) caught the queue against the bridge:** with a stuck
+  first attempt the third claim waited two bounds — 50 s — and the runtime's
+  45 s tool watchdog tears the call down first. A bound that passes now lets
+  go of the stuck attempt, so a claim's total wait is one bound plus the real
+  duration of what answers (`1b6eb33`). Base rate: 0 of 2,532 surgery POSTs
+  in 30 days over 20 s, max 14.1 s.
+- **Round 20 (10:58) found the real hole under all of that:** the ticketing
+  client cleared its 15 s timer at the HEADERS and read the body unbounded,
+  so a late refusal was possible after all. Fixed at the root (`3f66bc9`):
+  the timer covers the body, an abort mid-body is a timeout and not a
+  bad-body 4xx, and the floor is 23 s so the queue fits under the 45 s
+  watchdog. Real-client test; 3 mutations, 3 caught. **The client half of this
+  STAYS in the PR** — it is a real fleet-wide defect (a hung body read hung a
+  ticket POST forever, on every lane) that the surgeon work merely uncovered.
+  The floor went out with the rest of the claim.
+- **Round 21 (11:09) was declined on the base rate, and then the ship it was
+  about was withdrawn entirely.** A stuck first attempt plus a full-length
+  second leaves the third claiming at ~44.5 s against the 45 s watchdog. That
+  needs a settle that is LOST rather than slow, which round 20 had already
+  turned into an escaped exception; on measured data the worst batch of three
+  lands at 42.3 s. No constant closes it, which is what made the operator's
+  remove-it ruling the right call rather than a seventh round.
+
+**Live database objects, in no branch:** four partial indexes on `call_logs`
+(05:45 UTC, DDL and reversal in the pack) because the four 5-minute sweeps
+each seq-scanned the table; and the corrected 09-12 cost row.
+
+## What this does NOT close
+
+- **None of it is measured in production.** Every row says so and
+  `docs/BACKEND_HANDOFF.md` applies; the after-arm starts with the republish.
+- **The recognised-caller prompt is past three of four token ceilings**
+  (v29 row) — trimming it deletes capability and is the operator's call.
+- **#51's "after the refusal, take the request"** is bounded by "no name, no
+  ticket", which stands; **#138** (`unclassified_call` as the model's default,
+  57 of 104 PCP tickets on 09-16) needs a ruling on the enum.
+- **The Hub's own health** — a platform restart 05:27–05:30 UTC and an
+  exporter timing out ~80 times an hour since 09-10 — is not fixable from
+  this repo.
+
+## Open, and Wayne's to settle
+
+The worksheet's *FOR 5AM* block is the list; the ones that are decisions
+rather than work: the xAI management key pasted into an earlier session's
+transcript **must be rotated**; `LOOKUP_MISS_LIMIT` (2), `HANGUP_HOLD_LIMIT`
+(3) and `RESOLVE_ASK_LIMIT` (2) are judgements, not measurements; the
+4,295-row Twilio price backfill and when to run it; the emergency lexicon
+(*detached retina* firing on a scheduling call); and whether the recognised
+arm is trimmed to the stated ceilings or the ceilings restated for the arm
+that serves most callers.

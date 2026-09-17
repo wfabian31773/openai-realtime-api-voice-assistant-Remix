@@ -30,6 +30,8 @@ import { GROK_COST_CENTS_PER_SECOND } from "./voiceCostRates";
 import {
   fetchDailySpend,
   readXaiBillingConfig as readXaiBillingSetup,
+  type DailySpend,
+  type DailySpendLine,
   type FetchLike,
   type XaiBillingSetup,
 } from "./xaiBilling";
@@ -123,6 +125,135 @@ export interface ReconcilerPorts {
   readDay: (day: string) => Promise<GrokCallRow[]>;
   /** Write the allocated cost back. Must be all-or-nothing. */
   writeCosts: (day: string, costs: Array<{ callSid: string; costCents: number }>) => Promise<number>;
+  /**
+   * The day's record, written on EVERY outcome — reconciled or refused.
+   * Optional so a port built for the allocation alone still satisfies the
+   * type; the production ports always supply it. See GrokDaySummary.
+   */
+  writeDaySummary?: (summary: GrokDaySummary) => Promise<void>;
+}
+
+/**
+ * ONE ROW PER DAY, WHATEVER HAPPENED — `daily_grok_costs`.
+ *
+ * Until 2026-09-17 this reconciler persisted only the per-call allocation.
+ * The day's xAI-reported voice total, the lines it summed, the lines it
+ * ignored, and above all a REFUSAL lived in a console line and nowhere else,
+ * so the operator's own usage export could not be compared against what we
+ * booked without a night of SQL — and 2026-09-12, where $37.43 of team spend
+ * was allocated onto one 104-second call, was invisible until someone read
+ * the row. The OpenAI side has had `daily_openai_costs` for this since it was
+ * written. This is the Grok side of that table.
+ *
+ * `bookedCents` is what the call rows carry after the run: xAI's total when
+ * the day reconciled, the sum of what the rows already held when it did not.
+ * The two can be read side by side against the export's `usd` column.
+ */
+export interface GrokDaySummary {
+  day: string;
+  reconciled: boolean;
+  /** Present exactly when `reconciled` is false. */
+  refusedReason?: string;
+  /** xAI's voice spend for the day, cents — absent when xAI could not be read. */
+  xaiVoiceCents?: number;
+  xaiVoiceLines?: DailySpendLine[];
+  xaiIgnoredLines?: DailySpendLine[];
+  /**
+   * `bookedCents`, `runtimeCalls` and `runtimeSeconds` are NULL — unknown —
+   * when the day was never read: a refusal that came before the read
+   * (xAI unreachable) AND a read that then failed too (Codex P2, #321 round
+   * 14). A zero here says "no calls on this day", which a run that never
+   * looked has no standing to say; the dashboard shows an unknown as a
+   * dash, never as 0 calls / $0.00.
+   */
+  bookedCents: number | null;
+  /** What the estimate said for the rows still estimated before the run. */
+  estimatedCents?: number;
+  runtimeCalls: number | null;
+  runtimeSeconds: number | null;
+  derivedCentsPerMinute?: number | null;
+}
+
+/**
+ * WHAT A LATER, FAILED RUN MAY DO TO A DAY ROW — Codex P1 on #321.
+ *
+ * The scheduler settles the previous UTC day every six hours, so a day is
+ * attempted up to four times. The first version of `writeDaySummary` was an
+ * unconditional upsert, so a run that could not reach xAI or the database
+ * AFTER a successful one would have overwritten `reconciled = true`, the
+ * xAI figure, the booked cost, the call count and the seconds with
+ * false / null / 0 — while the per-call allocation on `call_logs` stayed
+ * intact. The row would then have said the opposite of the rows.
+ *
+ * Two shapes of an attempt cannot be a measurement:
+ *   - a refusal landing on a day already RECONCILED, and
+ *   - a refusal that read NO calls (the database was the thing that failed)
+ *     landing on a day that HAS a measured row.
+ * Both are recorded as an attempt — `last_attempt_at` / `last_attempt_reason`
+ * — and touch nothing else. Everything else (the first write, a refusal
+ * replacing a refusal that did read the calls, a reconciliation replacing
+ * anything) is the full upsert. A refusal whose measurements are UNKNOWN
+ * (NULL — the day could not be read) counts as one that read no calls.
+ *
+ * THIS IS THE ONE COPY OF THE RULE, and the port makes it ATOMIC (Codex P1,
+ * #321 round 14): `src/server.ts` starts the scheduler in every process and
+ * `server/db.ts` supports several replicas, so a failed runner that read the
+ * row BEFORE a concurrent successful runner committed would decide `full`
+ * on a stale read and overwrite `reconciled = true` a moment later. The
+ * port therefore takes a per-day transaction-scoped advisory lock before the
+ * read and holds it through the write — serialising every writer of that
+ * day, on every replica, including two first-writers racing on a day with
+ * no row yet, which a row lock could not cover.
+ */
+export type DaySummaryWrite = "full" | "attempt_only";
+
+export function daySummaryWrite(
+  existing: { reconciled: boolean; runtimeCalls: number | null } | null,
+  incoming: GrokDaySummary,
+): DaySummaryWrite {
+  if (!existing || incoming.reconciled) return "full";
+  if (existing.reconciled) return "attempt_only";
+  const incomingReadNoCalls = incoming.runtimeCalls === null || incoming.runtimeCalls === 0;
+  if (incomingReadNoCalls && (existing.runtimeCalls ?? 0) > 0) return "attempt_only";
+  return "full";
+}
+
+/** What `runReconciliation` learned on the way, for the day summary. */
+interface ReconcileScratch {
+  spend?: DailySpend;
+  calls?: GrokCallRow[];
+}
+
+export function daySummaryFrom(outcome: ReconcileOutcome, scratch: ReconcileScratch): GrokDaySummary {
+  // A day that was never read has UNKNOWN measurements, not zero ones
+  // (Codex P2, #321 round 14): `runReconciliation` returns before `readDay`
+  // when xAI cannot be reached, and `reconcileGrokCostsForDay` then reads the
+  // day for the summary alone — so this arm is reached only when THAT read
+  // failed too, and the honest row says nothing about the calls.
+  const read = scratch.calls !== undefined;
+  const calls = scratch.calls ?? [];
+  const runtimeSeconds = read ? calls.reduce((s, c) => s + (c.durationSeconds || 0), 0) : null;
+  const centsOnRows = read ? calls.reduce((s, c) => s + (c.estimatedCents || 0), 0) : null;
+  return {
+    day: outcome.day,
+    reconciled: outcome.reconciled,
+    ...(outcome.reconciled ? {} : { refusedReason: outcome.reason ?? "refused" }),
+    ...(scratch.spend
+      ? {
+          xaiVoiceCents: Math.round(scratch.spend.totalUsd * 100),
+          xaiVoiceLines: scratch.spend.lines,
+          xaiIgnoredLines: scratch.spend.ignored,
+        }
+      : {}),
+    bookedCents: outcome.reconciled ? (outcome.xaiTotalCents ?? centsOnRows) : centsOnRows,
+    ...(outcome.estimatedTotalCents !== undefined ? { estimatedCents: outcome.estimatedTotalCents } : {}),
+    runtimeCalls: read ? calls.length : null,
+    runtimeSeconds,
+    derivedCentsPerMinute:
+      outcome.derivedCentsPerSecond === undefined || outcome.derivedCentsPerSecond === null
+        ? outcome.derivedCentsPerSecond
+        : outcome.derivedCentsPerSecond * 60,
+  };
 }
 
 /**
@@ -177,7 +308,31 @@ export async function reconcileGrokCostsForDay(
   ports: ReconcilerPorts,
   options: { setup?: XaiBillingSetup; fetchImpl?: FetchLike } = {},
 ): Promise<ReconcileOutcome> {
-  const outcome = await runReconciliation(day, ports, options);
+  const scratch: ReconcileScratch = {};
+  const outcome = await runReconciliation(day, ports, options, scratch);
+  // The day's row is written whatever the outcome — a refusal is the row
+  // that matters most. It never changes the outcome: a failed summary write
+  // is a log line, not a reconciliation failure.
+  if (ports.writeDaySummary) {
+    // A refusal that came BEFORE the read (xAI unreachable) knows nothing
+    // about the calls, and the first version wrote that ignorance as
+    // 0 calls / 0 seconds / $0.00 booked — a measurement the run never made
+    // (Codex P2, #321 round 14). The day is read here for the summary
+    // alone; if that fails too the row carries UNKNOWN (daySummaryFrom), and
+    // neither branch changes the outcome above.
+    if (scratch.calls === undefined) {
+      try {
+        scratch.calls = await ports.readDay(day);
+      } catch (error) {
+        console.warn(`[GROK COST] ${day}: the day could not be read for its summary row either —`, error);
+      }
+    }
+    try {
+      await ports.writeDaySummary(daySummaryFrom(outcome, scratch));
+    } catch (error) {
+      console.warn(`[GROK COST] could not write the day summary for ${day}:`, error);
+    }
+  }
   if (outcome.reconciled) console.info(reconcileMarker(outcome));
   // warn, not info: a refusal means the day was NOT settled and those rows are
   // still priced from a constant. Uniform across every refusal — a weekend
@@ -191,13 +346,16 @@ async function runReconciliation(
   day: string,
   ports: ReconcilerPorts,
   options: { setup?: XaiBillingSetup; fetchImpl?: FetchLike },
+  scratch: ReconcileScratch = {},
 ): Promise<ReconcileOutcome> {
   const spend = await fetchDailySpend(day, { setup: options.setup, fetchImpl: options.fetchImpl });
   if (!spend.ok) return { day, reconciled: false, reason: spend.reason };
+  scratch.spend = spend.value;
 
   let calls: GrokCallRow[];
   try {
     calls = await ports.readDay(day);
+    scratch.calls = calls;
   } catch (error) {
     return {
       day,
@@ -464,6 +622,117 @@ export function databasePorts(): ReconcilerPorts {
         }
         await client.query("COMMIT");
         return updated;
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+
+    async writeDaySummary(summary) {
+      const { pool } = await import("../../server/db");
+      // CREATE TABLE IF NOT EXISTS on first write, like call_events: this
+      // ships as code and the table must exist whether or not anyone
+      // remembered `npm run db:push`. One row per day; a re-run that
+      // MEASURED something overwrites, a failed attempt only says it tried
+      // (daySummaryWrite).
+      // The DDL is idempotent and sits OUTSIDE the lock below: nothing about
+      // it depends on which run gets there first. The three measurement
+      // columns are nullable — NULL is "the day could not be read", which a
+      // NOT NULL column would have forced into a fabricated 0 (round 14).
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS daily_grok_costs (
+          day DATE PRIMARY KEY,
+          reconciled BOOLEAN NOT NULL,
+          refused_reason TEXT,
+          xai_voice_cents INTEGER,
+          xai_voice_lines JSONB,
+          xai_ignored_lines JSONB,
+          booked_cents INTEGER,
+          estimated_cents INTEGER,
+          runtime_calls INTEGER,
+          runtime_seconds INTEGER,
+          derived_cents_per_minute NUMERIC,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          last_attempt_at TIMESTAMPTZ,
+          last_attempt_reason TEXT
+        )`);
+      await pool.query(`ALTER TABLE daily_grok_costs ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ`);
+      await pool.query(`ALTER TABLE daily_grok_costs ADD COLUMN IF NOT EXISTS last_attempt_reason TEXT`);
+      await pool.query(`ALTER TABLE daily_grok_costs ALTER COLUMN booked_cents DROP NOT NULL`);
+      await pool.query(`ALTER TABLE daily_grok_costs ALTER COLUMN runtime_calls DROP NOT NULL`);
+      await pool.query(`ALTER TABLE daily_grok_costs ALTER COLUMN runtime_seconds DROP NOT NULL`);
+      /**
+       * THE DECISION AND THE WRITE ARE ONE TRANSACTION UNDER A PER-DAY LOCK
+       * (Codex P1, #321 round 14). `daySummaryWrite` reads the row and
+       * decides; without the lock a failed runner on one replica could read
+       * "no row yet", a successful runner on another could commit
+       * `reconciled = true`, and the failed runner's full upsert would then
+       * overwrite it — the exact row the round-1 fix exists to keep.
+       * `pg_advisory_xact_lock` is transaction-scoped: released at COMMIT,
+       * at ROLLBACK, and by the server when a connection drops, so a runner
+       * that dies mid-write cannot wedge the day for the next one.
+       */
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`daily_grok_costs:${summary.day}`]);
+        const existing = await client.query(
+          `SELECT reconciled, runtime_calls FROM daily_grok_costs WHERE day = $1::date`,
+          [summary.day],
+        );
+        const row = existing.rows?.[0] as { reconciled: boolean; runtime_calls: number | null } | undefined;
+        const write = daySummaryWrite(
+          row
+            ? { reconciled: Boolean(row.reconciled), runtimeCalls: row.runtime_calls == null ? null : Number(row.runtime_calls) }
+            : null,
+          summary,
+        );
+        if (write === "attempt_only") {
+          await client.query(
+            `UPDATE daily_grok_costs SET last_attempt_at = NOW(), last_attempt_reason = $2 WHERE day = $1::date`,
+            [summary.day, summary.refusedReason ?? "refused"],
+          );
+          await client.query("COMMIT");
+          console.warn(
+            `[GROK COST] ${summary.day}: a later attempt was refused (${summary.refusedReason ?? "refused"}); ` +
+              `the day's measured row is kept and the attempt is recorded on it`,
+          );
+          return;
+        }
+        await client.query(
+          `INSERT INTO daily_grok_costs
+             (day, reconciled, refused_reason, xai_voice_cents, xai_voice_lines, xai_ignored_lines,
+              booked_cents, estimated_cents, runtime_calls, runtime_seconds, derived_cents_per_minute, updated_at)
+           VALUES ($1::date, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11, NOW())
+           ON CONFLICT (day) DO UPDATE SET
+             reconciled = EXCLUDED.reconciled,
+             refused_reason = EXCLUDED.refused_reason,
+             xai_voice_cents = EXCLUDED.xai_voice_cents,
+             xai_voice_lines = EXCLUDED.xai_voice_lines,
+             xai_ignored_lines = EXCLUDED.xai_ignored_lines,
+             booked_cents = EXCLUDED.booked_cents,
+             estimated_cents = EXCLUDED.estimated_cents,
+             runtime_calls = EXCLUDED.runtime_calls,
+             runtime_seconds = EXCLUDED.runtime_seconds,
+             derived_cents_per_minute = EXCLUDED.derived_cents_per_minute,
+             updated_at = NOW()`,
+          [
+            summary.day,
+            summary.reconciled,
+            summary.refusedReason ?? null,
+            summary.xaiVoiceCents ?? null,
+            JSON.stringify(summary.xaiVoiceLines ?? []),
+            JSON.stringify(summary.xaiIgnoredLines ?? []),
+            summary.bookedCents,
+            summary.estimatedCents ?? null,
+            summary.runtimeCalls,
+            summary.runtimeSeconds,
+            summary.derivedCentsPerMinute ?? null,
+          ],
+        );
+        await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK").catch(() => undefined);
         throw error;

@@ -42,6 +42,23 @@ interface OpenAIUsage {
   dateRange: { startDate: string; endDate: string }
 }
 
+interface GrokUsage {
+  tableExists: boolean
+  publishedCentsPerMinute: number
+  days: Array<{
+    day: string
+    reconciled: boolean
+    refusedReason: string | null
+    xaiVoiceDollars: number | null
+    bookedDollars: number | null
+    estimatedDollars: number | null
+    runtimeCalls: number | null
+    runtimeMinutes: number | null
+    derivedCentsPerMinute: number | null
+    ignoredLines: Array<{ description: string; usd: number }>
+  }>
+}
+
 interface CostAnalytics {
   summary: {
     totalCalls: number
@@ -172,6 +189,17 @@ export function CostDashboardPage() {
       const { startDate, endDate } = getOpenAIDateParams()
       const params = new URLSearchParams({ startDate, endDate })
       const { data } = await apiClient.get<OpenAIUsage>(`/analytics/openai-usage?${params}`)
+      return data
+    },
+    retry: 1,
+  })
+
+  const { data: grokUsage } = useQuery({
+    queryKey: ['grok-usage', dateRange],
+    queryFn: async () => {
+      const { startDate, endDate } = getOpenAIDateParams()
+      const params = new URLSearchParams({ startDate, endDate })
+      const { data } = await apiClient.get<GrokUsage>(`/analytics/grok-usage?${params}`)
       return data
     },
     retry: 1,
@@ -559,6 +587,73 @@ export function CostDashboardPage() {
               <Cpu className="mx-auto h-8 w-8 text-muted-foreground" />
               <p className="mt-2">Unable to fetch OpenAI usage</p>
               <p className="text-xs mt-1">Make sure your API key has usage read permissions</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Grok runtime: xAI reported vs booked, per day. Refusals are rows too. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <span>Grok runtime — xAI reported vs booked</span>
+          </CardTitle>
+          <p className="text-xs text-muted-foreground">
+            One row per day from the nightly reconciler. <b>Booked</b> is what the call rows carry: xAI's reported
+            voice spend when the day reconciled, the published-rate estimate when it was refused. A refused day
+            says why — a day whose voice line cannot be attributed to these calls is left estimated on purpose.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {!grokUsage ? (
+            <div className="py-6 text-center text-muted-foreground text-sm">Loading…</div>
+          ) : !grokUsage.tableExists || grokUsage.days.length === 0 ? (
+            <div className="py-6 text-center text-muted-foreground text-sm">
+              No day rows yet — the table is written by the reconciler's first run after this build.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
+                    <th className="py-2 pr-3">Day</th>
+                    <th className="py-2 pr-3 text-right">Calls</th>
+                    <th className="py-2 pr-3 text-right">Minutes</th>
+                    <th className="py-2 pr-3 text-right">xAI voice</th>
+                    <th className="py-2 pr-3 text-right">Booked</th>
+                    <th className="py-2 pr-3 text-right">¢/min</th>
+                    <th className="py-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {grokUsage.days.map((d) => (
+                    <tr key={d.day} className="border-t border-border">
+                      <td className="py-2 pr-3">{d.day}</td>
+                      <td className="py-2 pr-3 text-right">{d.runtimeCalls == null ? '—' : d.runtimeCalls}</td>
+                      <td className="py-2 pr-3 text-right">{d.runtimeMinutes == null ? '—' : d.runtimeMinutes}</td>
+                      <td className="py-2 pr-3 text-right">{d.xaiVoiceDollars == null ? '—' : `$${d.xaiVoiceDollars.toFixed(2)}`}</td>
+                      <td className="py-2 pr-3 text-right">{d.bookedDollars == null ? '—' : `$${d.bookedDollars.toFixed(2)}`}</td>
+                      <td className="py-2 pr-3 text-right" title={`published ${grokUsage.publishedCentsPerMinute}¢/min`}>
+                        {d.derivedCentsPerMinute == null ? '—' : d.derivedCentsPerMinute.toFixed(2)}
+                      </td>
+                      <td className="py-2">
+                        {d.reconciled ? (
+                          <span className="rounded px-1.5 py-0.5 text-[11px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-300">reconciled</span>
+                        ) : (
+                          <span className="rounded px-1.5 py-0.5 text-[11px] bg-amber-500/15 text-amber-600 dark:text-amber-300" title={d.refusedReason ?? ''}>
+                            refused — estimated
+                          </span>
+                        )}
+                        {d.ignoredLines.length > 0 && (
+                          <span className="ml-2 text-[11px] text-muted-foreground" title={d.ignoredLines.map((l) => `${l.description}: $${l.usd.toFixed(2)}`).join('\n')}>
+                            +{d.ignoredLines.length} non-voice line{d.ignoredLines.length === 1 ? '' : 's'}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </CardContent>

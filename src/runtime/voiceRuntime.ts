@@ -259,8 +259,13 @@ function matchedRecord(
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
-import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callRecord";
+import { openRuntimeCall, persistRuntimeCall, type CallLogInsert, type RuntimeCallIdentity } from "./callRecord";
+import { identityForRow } from "./runtimeIdentity";
 import { runRequestSweep } from "./sweepRunner";
+import { persistRuntimeTurns } from "./runtimeTurns";
+import { makeRecordingStarter } from "./callRecording";
+import { gradeRuntimeCall } from "./runtimeGrading";
+import { logRuntimeFollowUps } from "./followUpTelemetry";
 import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
 import {
   handleAfterRedirect,
@@ -386,7 +391,9 @@ export interface VoiceRuntimeOptions {
   /** Opens the call_logs row. Injected for tests. */
   openCallRow?: CallLogInsert;
   /** Persists the finished call. Injected for tests. */
-  persistCall?: (record: VoiceCallRecord) => Promise<boolean>;
+  /** The identity the process established for the caller rides with the
+   * record (runtimeIdentity.ts) — a CERTAIN match only, never a candidate. */
+  persistCall?: (record: VoiceCallRecord, identity?: RuntimeCallIdentity) => Promise<boolean>;
   /**
    * The teardown request sweep. Injected for tests, and settable to a no-op
    * to turn it off without a deploy.
@@ -396,6 +403,28 @@ export interface VoiceRuntimeOptions {
    * requestSweep.ts for why, and sweepRunner.ts for the rules it holds to.
    */
   sweepCall?: (record: VoiceCallRecord) => Promise<unknown>;
+  /**
+   * Writes the call's timed turns to `call_turns` — telemetry, after the row
+   * and after the sweep, never awaited by teardown. Injected for tests.
+   */
+  persistTurns?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
+  /**
+   * Starts a Twilio recording on the answered call — see callRecording.ts.
+   * Fire-and-forget from `startCall`. Injected for tests.
+   */
+  startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
+  /**
+   * Grades the call at teardown — the LLM pass the old core has always run
+   * when a call ends and the runtime never did (runtimeGrading.ts). After
+   * the row and after the sweep, never awaited. Injected for tests.
+   */
+  gradeCall?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
+  /**
+   * Writes the call's tool follow-up summary to `call_events` (v55,
+   * followUpTelemetry.ts) — after the row and after the sweep, never
+   * awaited. Injected for tests.
+   */
+  logFollowUps?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -479,6 +508,10 @@ export function mountVoiceRuntime(
   // boot or in a health check.
   const persistCall = options.persistCall ?? persistRuntimeCall;
   const sweepCall = options.sweepCall ?? runRequestSweep;
+  const persistTurns = options.persistTurns ?? persistRuntimeTurns;
+  const startRecording = options.startRecording ?? makeRecordingStarter(env);
+  const gradeCall = options.gradeCall ?? gradeRuntimeCall;
+  const logFollowUps = options.logFollowUps ?? logRuntimeFollowUps;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -724,7 +757,11 @@ export function mountVoiceRuntime(
           return;
         }
         clearClaimDeadline();
-        void startCall(entry, frame.streamSid);
+        // The public host the webhook was reached on rides in as a stream
+        // parameter, so the recording callback can be named without a second
+        // way of learning it. Absent on older TwiML; the starter falls back
+        // to env.DOMAIN.
+        void startCall(entry, frame.streamSid, params.host);
         return;
       }
 
@@ -762,8 +799,17 @@ export function mountVoiceRuntime(
       }
     };
 
-    async function startCall(entry: CallEntry, streamSid: string): Promise<void> {
+    async function startCall(
+      entry: CallEntry,
+      streamSid: string,
+      recordingHost?: string,
+    ): Promise<void> {
       const startedAtMs = Date.now();
+      // The call is answered once its stream has started, so Twilio will take
+      // a REST recording from here. Never awaited, never on the call's path:
+      // a failure is one console line and the call proceeds unrecorded, as
+      // every runtime call did before 2026-09-17.
+      void startRecording(entry.callSid, recordingHost).catch(() => undefined);
       /** Filled in when the call_logs row lands; read through the metadata
        * getter above for the rest of the call. */
       let callLogId: string | undefined;
@@ -1117,10 +1163,25 @@ export function mountVoiceRuntime(
              * no reason to abandon the caller's request.
              */
             await withinOrNull(
-              persistCall(record),
+              // The record, and who the process established the caller to be
+              // (v51): a certain match only, read from the same store the
+              // teardown sweep reads, so a row carries a name only when the
+              // lookup matched one person and nobody denied it.
+              persistCall(record, identityForRow(record.callSid)),
               options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
             );
             await sweepCall(record).catch(() => undefined);
+            // Telemetry last: the per-turn record lights up the Observatory's
+            // call page but must never delay a caller's request.
+            void persistTurns(record, { callLogId }).catch(() => undefined);
+            // And the grade, which every Observatory surface reads — at
+            // teardown, as the old core does, instead of hours later from the
+            // five-per-cycle backfill (task #139).
+            void gradeCall(record, { callLogId }).catch(() => undefined);
+            // And the follow-up summary (v55, task #146): the one record of
+            // whether the turn a tool result is owed was ever requested and
+            // ever answered, which nothing else persists.
+            void logFollowUps(record, { callLogId }).catch(() => undefined);
           },
         });
         // Connect AFTER the bridge exists: a connection that fails then has

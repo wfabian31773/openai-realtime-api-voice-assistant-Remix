@@ -142,9 +142,12 @@ describe('a database greeting for pcp must carry the disclosure too', () => {
     );
   });
 
-  /** A lane with no entry is still unconstrained — this adds pcp, nothing else. */
+  /** A lane with no entry is still unconstrained. */
   it('leaves the other lanes alone', async () => {
     const { missingMandatoryCopy } = await import('../services/greetingPersonalisation');
-    expect(missingMandatoryCopy('optical', 'anything at all')).toEqual([]);
+    // `optical` was the example until 2026-09-17, when all four queue lanes
+    // gained the disclosure (task #79 — 401 calls a day recorded without one).
+    // The property is unchanged, so the example moved rather than the rule.
+    expect(missingMandatoryCopy('answering-service', 'anything at all')).toEqual([]);
   });
 });

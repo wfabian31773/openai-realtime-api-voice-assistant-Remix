@@ -112,6 +112,15 @@ describe("GrokVoiceSession — what the bridge needs to attribute agent speech",
     expect(session.getResponseEpoch()).toBe(2);
   });
 
+  it("says whether a response is open at the wire — true from created to done (v55)", () => {
+    const { transport, session } = makeSession();
+    expect(session.isResponseActive()).toBe(false);
+    transport.emit({ type: "response.created" } as GrokServerEvent);
+    expect(session.isResponseActive()).toBe(true);
+    transport.emit({ type: "response.done" } as GrokServerEvent);
+    expect(session.isResponseActive()).toBe(false);
+  });
+
   it("hands the completed utterance its spoken text — on this runtime the wire is the only source", () => {
     const onAudioDone = vi.fn();
     const { transport } = makeSession({ onAudioDone });

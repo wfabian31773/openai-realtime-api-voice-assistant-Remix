@@ -1201,7 +1201,24 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       if (!source || !state.completedTools.includes(source)) return refusePcp('authoritative_tool_success_required');
       const response = await submitPcpTicket(buildPayload(metadata, state, 'AUTOMATE', narrative, 'routine', undefined, undefined, missing));
       if (response.success) pcpDirector.recordDisposition(callId, 'AUTOMATE');
-      return response;
+      if (!response.success) return response;
+      /**
+       * SAY THE ANSWER BEFORE THE LINE GOES QUIET (task #147). This tool
+       * returned bare success, terminate_call became legal the instant the
+       * disposition was recorded, and on nine PCP calls a day (09-14..16) the
+       * appointment lookup the clinic had rung for succeeded, this recorded
+       * it as resolved, and the call ended with the agent's own question as
+       * its last words — the answer never spoken. The records tool below
+       * carries the same fix for the same reason; the bridge now also refuses
+       * a hangup while a tool answer is unvoiced (v56), and this is the
+       * instruction that refusal sends the model back to.
+       */
+      return {
+        ...response,
+        guidance:
+          'Recorded. Now tell the caller, in full, what the lookup found — the appointment date, time, office and ' +
+          'provider, or that nothing is scheduled — then ask if there is anything else before ending the call.',
+      };
     },
   });
 

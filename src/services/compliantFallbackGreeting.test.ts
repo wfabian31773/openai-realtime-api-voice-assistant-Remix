@@ -59,7 +59,14 @@ describe('every lane with mandatory copy has a compliant greeting to fall back o
   }
 
   it('a lane with no mandatory copy gets no fallback, which is correct', () => {
-    expect(compliantFallbackGreeting('surgery')).toBeNull();
+    // `surgery` was the example here until 2026-09-17, when all four queue
+    // lanes gained the recording disclosure and it stopped being a lane
+    // without mandatory copy. The assertion is NOT loosened — it is pointed at
+    // a slug that still qualifies, because what it proves is that the table
+    // answers null for a lane it does not cover, and a stale example would
+    // have proved that by accident of the table being incomplete.
+    expect(compliantFallbackGreeting('answering-service')).toBeNull();
+    expect(MANDATED_COPY_LANES).not.toContain('answering-service');
   });
 });
 

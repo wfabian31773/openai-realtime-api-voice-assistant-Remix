@@ -207,8 +207,11 @@ describe('copy a lane must say whatever the database holds', () => {
     // override it (Codex P1, #304). The property this test asserts is
     // unchanged — a lane with no entry is unconstrained — so the example
     // moved rather than the rule.
-    expect(missingMandatoryCopy('optical', 'Thanks for calling!')).toEqual([]);
-    expect(missingMandatoryCopy('surgery', '')).toEqual([]);
+    // AND `optical` / `surgery` USED TO BE THESE EXAMPLES, for the same reason
+    // one step later: all four queue lanes gained the disclosure on
+    // 2026-09-17. The examples move; the rule does not.
+    expect(missingMandatoryCopy('answering-service', 'Thanks for calling!')).toEqual([]);
+    expect(missingMandatoryCopy('azul-scheduling', '')).toEqual([]);
     expect(missingMandatoryCopy(undefined, '')).toEqual([]);
   });
 

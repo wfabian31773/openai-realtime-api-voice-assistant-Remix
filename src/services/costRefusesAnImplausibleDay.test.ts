@@ -221,7 +221,7 @@ describe("a refused day is announced", () => {
     expect(src.match(/console\.warn\(reconcileMarker\(/g) ?? []).toHaveLength(1);
     // And the branches themselves live in a function that cannot return to
     // the caller without passing through it.
-    expect(src).toContain("const outcome = await runReconciliation(day, ports, options);");
+    expect(src).toContain("const outcome = await runReconciliation(day, ports, options, scratch);");
     expect(src).toMatch(/async function runReconciliation\(/);
     // BOTH sites are in the WRAPPER, above the branching function — counting
     // them is not the same as locating them, and a mutation that moved the

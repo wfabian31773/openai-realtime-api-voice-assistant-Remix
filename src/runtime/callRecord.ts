@@ -36,6 +36,7 @@
  */
 
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import { peekParkedRecording, releaseParkedRecording } from "./parkedRecordings";
 import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
 import { type RuntimeTransferOutcome } from "./transferOutcomeLog";
 
@@ -96,6 +97,10 @@ export interface RuntimeCallLogRow {
   patientName?: string;
   patientDob?: string;
   patientFound?: boolean;
+  /** Present ONLY when a recording callback landed before this row existed
+   * and was parked (parkedRecordings.ts). Otherwise the callback writes the
+   * column itself and this write must not touch it. */
+  recordingUrl?: string;
 }
 
 /**
@@ -107,9 +112,11 @@ export interface RuntimeCallLogRow {
  * DURING the call — the agents' own tool telemetry, `stampVerifiedIdentity`,
  * the ticket number — and a blanket `set` overwrites all of it, which is
  * how a green migration produces unclassifiable filing outcomes (Codex
- * review, PR #227). Identity is deliberately excluded even when supplied:
- * refreshing it can only ever replace a value someone better informed
- * already wrote.
+ * review, PR #227). Identity is written when the runtime holds a CERTAIN one and
+ * omitted otherwise, never nulled: it can add a name the row lacks and can
+ * never erase one another writer established (v51 — before it, the update
+ * excluded identity entirely and the runtime's rows carried none, 0 of
+ * 2,471 in the seven days to 2026-09-17).
  */
 export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLogRow> {
   return {
@@ -124,6 +131,13 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
     voiceProvider: row.voiceProvider,
     runtimeOutcome: row.runtimeOutcome,
     ...(row.transferredToHuman ? { transferredToHuman: row.transferredToHuman } : {}),
+    ...(row.recordingUrl ? { recordingUrl: row.recordingUrl } : {}),
+    // Identity, when established — see the note above. Present means the
+    // lookup matched ONE person and nobody denied it; absent means unknown,
+    // and unknown never overwrites known.
+    ...(row.patientFound !== undefined ? { patientFound: row.patientFound } : {}),
+    ...(row.patientName ? { patientName: row.patientName } : {}),
+    ...(row.patientDob ? { patientDob: row.patientDob } : {}),
     ...(row.firstTranscriptDelayMs !== undefined
       ? { firstTranscriptDelayMs: row.firstTranscriptDelayMs }
       : {}),
@@ -162,11 +176,28 @@ export function callEnvironment(env: Record<string, string | undefined>): string
     : "development";
 }
 
-/** A call that never reached a conversation is recorded as failed; every
- * other ending is a call that happened. `dead_air` and `provider_failure`
- * are the two the runtime itself caused. */
-function statusFor(outcome: VoiceCallRecord["outcome"]): "completed" | "failed" {
-  return outcome === "provider_failure" || outcome === "dead_air" ? "failed" : "completed";
+/**
+ * A call that never reached a conversation is recorded as failed; every
+ * other ending is a call that happened.
+ *
+ * `dead_air` used to be failed unconditionally, and that read the WATCHDOG
+ * as the call: it fires after 30s of silence at ANY point, including after a
+ * whole conversation whose caller then walked away. Measured 2026-09-17:
+ * 58 dead_air calls on 2026-09-14 averaging 131s and 5.9 caller lines, 18 on
+ * 09-15 averaging 7.2 — real conversations, all `status = 'failed'`, and
+ * therefore never graded (the backfill selects completed rows) and never
+ * synced to their tickets (`ticketingSyncService` does too). Twilio's own
+ * meaning of the column is the one every other reader assumes: completed is
+ * answered-and-ended, failed is never-connected. So dead_air is failed only
+ * when the caller never spoke; `provider_failure` stays failed regardless.
+ */
+export function statusFor(
+  outcome: VoiceCallRecord["outcome"],
+  transcript: string = "",
+): "completed" | "failed" {
+  if (outcome === "provider_failure") return "failed";
+  if (outcome === "dead_air") return /(^|\n)CALLER: /.test(transcript) ? "completed" : "failed";
+  return "completed";
 }
 
 /** Pure mapping, exported so it can be asserted without a database. */
@@ -186,7 +217,7 @@ export function toCallLogRow(
     to: record.dialedNumber,
     dialedNumber: record.dialedNumber,
     agentUsed: record.slug,
-    status: statusFor(record.outcome),
+    status: statusFor(record.outcome, record.transcript),
     startTime: new Date(record.startedAtMs),
     endTime: new Date(record.endedAtMs),
     duration: durationSeconds,
@@ -552,14 +583,63 @@ async function defaultTransferOutcomeUpdate(
     .where(eq(callLogs.callSid, callSid));
 }
 
+/**
+ * The teardown write is retried on a short, bounded backoff. Until #321 round
+ * 4 a single failed upsert — a database blip at hangup, the kind the Hub had
+ * at 05:30 on 2026-09-17 — lost the call's whole row, and with it the parked
+ * recording URL, and nothing ever tried again. Two retries, ~4s in total: a
+ * caller is not waiting on this, and a row that lands a few seconds late is
+ * a row.
+ */
+export const PERSIST_RETRY_BACKOFF_MS: readonly number[] = [1_000, 3_000];
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  backoffMs: readonly number[],
+  sleep: (ms: number) => Promise<void>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt >= backoffMs.length) throw error;
+      await sleep(backoffMs[attempt]);
+    }
+  }
+}
+
+export interface PersistRuntimeCallOptions {
+  /** Test seam: the backoff between attempts. Defaults to PERSIST_RETRY_BACKOFF_MS. */
+  backoffMs?: readonly number[];
+  sleep?: (ms: number) => Promise<void>;
+}
+
 export async function persistRuntimeCall(
   record: VoiceCallRecord,
   identity: RuntimeCallIdentity = {},
   upsert: CallLogUpsert = defaultUpsert,
+  options: PersistRuntimeCallOptions = {},
 ): Promise<boolean> {
   const row = toCallLogRow(record, identity);
+  const backoffMs = options.backoffMs ?? PERSIST_RETRY_BACKOFF_MS;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  // A recording callback that beat this row is parked by CallSid
+  // (parkedRecordings.ts). Read it onto the write WITHOUT consuming it, and
+  // look once more after the write so a callback landing between the two
+  // cannot fall in the gap. The entry is released only once the write that
+  // carried it has succeeded: a write that throws leaves the URL parked for
+  // the retry below, or for the reaper's TTL (Codex P2, #321 round 4).
+  const parkedUrl = peekParkedRecording(record.callSid);
+  if (parkedUrl) row.recordingUrl = parkedUrl;
   try {
-    await upsert(row, toConflictUpdate(row));
+    await withRetry(() => upsert(row, toConflictUpdate(row)), backoffMs, sleep);
+    if (parkedUrl) releaseParkedRecording(record.callSid, parkedUrl);
+    const lateUrl = peekParkedRecording(record.callSid);
+    if (lateUrl) {
+      const withUrl = { ...row, recordingUrl: lateUrl };
+      await withRetry(() => upsert(withUrl, toConflictUpdate(withUrl)), backoffMs, sleep);
+      releaseParkedRecording(record.callSid, lateUrl);
+    }
     return true;
   } catch (error) {
     // Log the failure rather than the record: a transcript in an error log

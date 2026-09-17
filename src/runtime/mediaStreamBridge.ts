@@ -107,7 +107,7 @@
  */
 
 import type { BoundAgent } from "./agentBinding";
-import { CallTranscriptLog } from "./transcriptLog";
+import { CallTranscriptLog, type TranscriptTurn } from "./transcriptLog";
 import { noteSpokenDob } from "../tools/spokenDob";
 import { CallUsage, usageSummaryMarker, type UsageTotals } from "./tokenUsage";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
@@ -116,6 +116,8 @@ import {
   ceilingRefusal,
   ceilingMarker,
   type CeilingLimits,
+  ceilingReplay,
+  successCeilingRefusal,
 } from "./toolCeiling";
 
 /**
@@ -165,6 +167,42 @@ export function guardsAllowedTermination(output: Record<string, unknown>): boole
   return error === "missing_api_key" || error === "missing_call_id";
 }
 
+/**
+ * A TOOL ANSWER THE AGENT NEVER VOICED CANNOT END THE CALL (v56, task #147).
+ *
+ * On 2026-09-16, 38 of the 61 PCP calls the agent ended by tool ended with
+ * the agent's own QUESTION as its last words: it asked, the caller answered,
+ * and the model's next act was a tool chain ending in `terminate_call` with
+ * no spoken turn between — on nine of them the appointment lookup the caller
+ * had rung for succeeded and its answer was never said. The tool's guards
+ * cannot see that (they check the disposition, not the words), so the bridge
+ * refuses an end-call tool while the model holds a tool answer it has not put
+ * into words, and the refusal owes a follow-up so the model speaks. An
+ * utterance already streaming counts as the words: its completion arms the
+ * hangup, as it always has.
+ *
+ * Bounded: a model that answers the refusal with another silent hangup is
+ * let go after HANGUP_HOLD_LIMIT holds rather than looped against a refusal
+ * forever — a hangup beats a dead line.
+ */
+export const HANGUP_HOLD_LIMIT = 3;
+
+export function unvoicedToolResultRefusal(name: string): Record<string, unknown> {
+  return {
+    success: false,
+    error: "unvoiced_tool_result",
+    fix:
+      `You called ${name} without saying anything since your last tool result, so the caller is still ` +
+      `waiting on it. Tell them what the tool found or what was filed — read a ticket number back if there ` +
+      `is one — ask if there is anything else, and call ${name} again after they answer.`,
+  };
+}
+
+/** PHI-free; one line per held hangup. */
+export function hangupHeldMarker(name: string, held: number): string {
+  return `[HANGUP HELD] ${name} not dispatched — the model has not spoken since its last tool answer (hold ${held} of ${HANGUP_HOLD_LIMIT}); refused with the instruction to speak first`;
+}
+
 /** μ-law 8kHz mono = 8000 bytes/second = 8 bytes per millisecond. */
 export const MULAW_BYTES_PER_MS = 8;
 
@@ -201,6 +239,27 @@ export const DEFAULT_DEAD_AIR_MS = 30_000;
  * plus its settle — a longer bound, still never immunity.
  */
 export const TOOL_DISPATCH_GRACE_MS = 15_000;
+
+/**
+ * A function-call event that arrives AFTER its response's `response.done`
+ * has no done ahead of it to say when its batch is complete, so the bridge
+ * holds the follow-up for this long after the LAST such event ARRIVES; a
+ * sibling arriving inside the window joins the batch and re-arms it instead
+ * of earning a second follow-up (Codex P1, #321 round 9 — the v55 gate
+ * treated every after-done event as a batch of one, so a fast first dispatch
+ * could request the model's turn before its sibling's event had been read
+ * off the socket). Siblings of one response come back-to-back on the wire;
+ * a quarter of a second is a wide margin, against the thirty seconds of
+ * silence the late event used to cost.
+ *
+ * Measured from the arrival, not the settle (round 13): an end-call in a
+ * late batch WAITS on this window to learn that no unseen sibling is still
+ * on the socket, and a window that was only armed once every dispatch had
+ * settled could never be armed while that end-call was itself pending — the
+ * wait would have been forever. The window is a bound on how long the wire
+ * takes to deliver adjacent events, and that is a fact about arrivals.
+ */
+export const LATE_TOOL_BATCH_GRACE_MS = 250;
 
 /** The hangup tools shipped by the Remix agents. Intercepted rather than
  * dispatched — see the TRANSPORT NOTE in the module doc. */
@@ -319,6 +378,10 @@ export interface VoiceCallRecord {
   transferMethod?: "warm" | "blind";
   /** CALLER/AGENT lines in spoken order — '' when nothing was said. */
   transcript: string;
+  /** The same lines with the moment each was first written, for
+   * `call_turns`. Optional only so older fixtures still type-check; the
+   * bridge always sets it. */
+  turns?: TranscriptTurn[];
   toolEvents: ToolEvent[];
   /** Agent utterances that completed. The turn count for telemetry. */
   agentTurns: number;
@@ -338,6 +401,39 @@ export interface VoiceCallRecord {
    * nothing. Undefined leaves the columns NULL on purpose — see CallUsage.
    */
   usage?: UsageTotals;
+  /** The tool follow-up bookkeeping (v55) — see FollowUpStats. Optional only
+   * so older fixtures still type-check; the bridge always sets it. */
+  followUps?: FollowUpStats;
+  /** End-call tool calls the bridge refused because the model held a tool
+   * answer it had not voiced (v56, HANGUP_HOLD_LIMIT). */
+  hangupsHeld?: number;
+}
+
+/**
+ * WHAT HAPPENED TO THE TURN A TOOL RESULT IS OWED (v55, task #146).
+ *
+ * Read from production, 2026-09-10..16: 9–42 runtime calls a DAY ended in
+ * dead air with a filing refusal as the last tool event and the pre-tool
+ * filler as the last audible line — the tool answered in milliseconds and
+ * the model never spoke again. The follow-up path works on most calls (the
+ * ticket readback follows the filler directly 305 times on two days), so it
+ * fails on a SUBSET, and no record could say which link: `call_events` has
+ * no runtime writer, `call_turns` was empty, the console lines are gone.
+ * These four numbers are PHI-free and go to `call_events` at teardown
+ * (followUpTelemetry.ts) so tomorrow's SQL can name the link.
+ */
+export interface FollowUpStats {
+  /** Tools that settled owing the model a turn. */
+  owed: number;
+  /** Follow-up turns actually requested from the wire. */
+  requested: number;
+  /** Function-call events that arrived with NO response open at the wire —
+   * the carrying response's done had already passed. Before v55 each of
+   * these waited forever for a done that was never coming. */
+  toolCallsAfterDone: number;
+  /** True when a follow-up was requested and no response was ever created
+   * after it — the call ended waiting on a turn the wire never started. */
+  lastUnanswered: boolean;
 }
 
 export interface VoiceCallContext {
@@ -369,6 +465,10 @@ export interface BridgeSession {
   speak(text: string, opts?: { interruptible?: boolean }): void;
   close(): void;
   getResponseEpoch(): number;
+  /** Whether a response is open at the wire right now (v55): the follow-up
+   * after a tool waits for the carrying response's done only when that
+   * response is still open when the function-call event arrives. */
+  isResponseActive(): boolean;
   /** Retarget the provider's STT `language_hint` mid-call and tell the model
    * to follow the caller. See the TRANSPORT NOTE — SET_SPOKEN_LANGUAGE. */
   setSpokenLanguage(language: string): void;
@@ -869,6 +969,7 @@ export class VoiceCallBridge {
         // Words the caller heard, committed — so the tail is measured from
         // here, the same invariant the barge-in and teardown cuts follow.
         this.noteTranscript("agent");
+        this.noteAgentWords();
       }
       this.current = null;
     }
@@ -957,6 +1058,7 @@ export class VoiceCallBridge {
     // caller-audible agent words in it (Codex, #243).
     if (this.recordCutLine(`[cut by guardrail: ${guardrail.name}]`)) {
       this.noteTranscript("agent");
+      this.noteAgentWords();
     }
     this.awaitingMark.length = 0;
     this.cancelledEpoch = this.session.getResponseEpoch();
@@ -1055,6 +1157,70 @@ export class VoiceCallBridge {
     this.lastTranscriptAtMs = now;
   }
 
+  /** v56: words the caller HEARD — an utterance whose audio started, or a
+   * cut line committed at a barge-in, a guardrail or the teardown. That is
+   * the only thing that voices a tool answer. A response completion that
+   * opened no utterance stamps the clock (above) and is NOT words: counting
+   * it let a silent `response.done` after a tool result unlock the hangup
+   * the answer was still owed (Codex P2, #321 round 11). */
+  private noteAgentWords(): void {
+    this.agentLineSeq += 1;
+    this.hangupHoldsSinceLastLine = 0;
+  }
+
+  /** v56: the model holds a tool answer it has not put into words, nothing
+   * is being said right now, and the hold budget for that answer is not
+   * spent. See HANGUP_HOLD_LIMIT. */
+  private hangupWouldSilenceAToolAnswer(): boolean {
+    if (this.unvoicedToolAnswerSeq === null) return false;
+    if (this.unvoicedToolAnswerSeq !== this.agentLineSeq) return false;
+    // An utterance already streaming IS the words; requestHangup waits on it.
+    // Streaming means AUDIO: a transcript delta opens `current` before any
+    // byte has reached Twilio, and text nobody has heard is not words
+    // (Codex P2, #321 round 12).
+    if (this.current !== null && this.current.bytes > 0) return false;
+    return this.hangupHoldsSinceLastLine < HANGUP_HOLD_LIMIT;
+  }
+
+  /**
+   * Whether an end-call may decide yet. Three things say no, and each is a
+   * way an unvoiced answer could still be on its way: a sibling dispatched
+   * and not settled (round 12); the carrying response still open at the
+   * wire, so a sibling's event may not have been read off the socket yet;
+   * or a late batch whose grace window has not elapsed, which is the same
+   * question for a batch the wire has already closed (round 13 — Codex:
+   * `terminate_call` FIRST in a multi-tool response found `pendingSiblings`
+   * empty and walked straight past the wait).
+   */
+  private endCallMustWait(): boolean {
+    return this.pendingSiblings.size > 0 || this.awaitingToolResponseDone || this.lateBatchOpen;
+  }
+
+  private batchSettled(): Promise<void> {
+    if (!this.endCallMustWait()) return Promise.resolve();
+    return new Promise((resolve) => this.siblingWaiters.push(resolve));
+  }
+
+  /** Called wherever one of the three conditions above may have cleared:
+   * a sibling's `finally`, the response's done, the window's timer, and
+   * teardown (which clears all three so the waiter reads `ended`). */
+  private wakeSiblingWaiters(): void {
+    if (this.endCallMustWait()) return;
+    const waiting = this.siblingWaiters.splice(0);
+    for (const wake of waiting) wake();
+  }
+
+  /** (Re-)arm the late-batch grace window from now. */
+  private armLateBatchWindow(): void {
+    if (this.lateBatchTimer !== null) this.clearTimer(this.lateBatchTimer);
+    this.lateBatchTimer = this.setTimer(() => {
+      this.lateBatchTimer = null;
+      this.lateBatchOpen = false;
+      this.wakeSiblingWaiters();
+      if (!this.ended) this.maybeRequestFollowUp();
+    }, LATE_TOOL_BATCH_GRACE_MS);
+  }
+
   private handleAudioDone(transcript?: string): void {
     if (this.ended) return;
     const epoch = this.session.getResponseEpoch();
@@ -1083,6 +1249,9 @@ export class VoiceCallBridge {
     const done = this.current;
     this.current = null;
     if (!done) return;
+    // Words the caller heard — so bytes, not text: an utterance whose
+    // transcript arrived and whose audio never did is not them (round 12).
+    if (done.bytes > 0) this.noteAgentWords();
     this.agentTurns += 1;
     this.lastCompletedUtteranceBytes = done.bytes;
 
@@ -1300,7 +1469,10 @@ export class VoiceCallBridge {
     // the tail is measured from an older line — or, for a greeting
     // interrupted before anything completed, not at all (Codex review,
     // PR #227 round 13).
-    if (this.recordCutLine("[interrupted]")) this.noteTranscript("agent");
+    if (this.recordCutLine("[interrupted]")) {
+      this.noteTranscript("agent");
+      this.noteAgentWords();
+    }
     this.awaitingMark.length = 0;
     // Everything this response emits from here is stale.
     this.cancelledEpoch = this.session.getResponseEpoch();
@@ -1368,13 +1540,45 @@ export class VoiceCallBridge {
   private pendingToolCalls = 0;
   private followUpOwed = false;
   private awaitingToolResponseDone = false;
+  /** v55 — see FollowUpStats. */
+  private readonly followUps = { owed: 0, requested: 0, toolCallsAfterDone: 0 };
+  /** The response epoch at the moment the last follow-up was requested; a
+   * created response advances the epoch, so equality at teardown means the
+   * wire never answered that request. */
+  private lastFollowUpEpoch: number | null = null;
+  /** True while the last function-call event arrived after its response's
+   * done and its batch may still be growing; the grace timer, armed at each
+   * late arrival, closes it. */
+  private lateBatchOpen = false;
+  private lateBatchTimer: unknown = null;
+  /** v56 — counts the agent's lines; a tool answer that owed a follow-up
+   * remembers the count it arrived at, and a hangup is refused while the two
+   * are still equal (nothing has been said since). */
+  private agentLineSeq = 0;
+  private unvoicedToolAnswerSeq: number | null = null;
+  private hangupHoldsSinceLastLine = 0;
+  private hangupsHeld = 0;
+  /** Round 12: the non-end-call dispatches still in flight, by call id, and
+   * the end-call dispatches waiting for them to settle. A sibling that has
+   * not answered yet is an answer the model cannot have voiced. Round 13:
+   * the waiters also wait for the BATCH BOUNDARY — the carrying response's
+   * done, or the late-batch window — because an end-call that is the FIRST
+   * event of its batch has no sibling to see yet, and the one that follows
+   * it on the wire is the answer the hangup would silence. */
+  private pendingSiblings = new Set<string>();
+  private siblingWaiters: Array<() => void> = [];
 
   /** One tool answered. Records what is owed; the request itself fires
    * only when the LAST outstanding tool has settled AND the carrying
    * response has finished delivering. */
   private toolCallSettled(owesFollowUp: boolean): void {
     this.pendingToolCalls = Math.max(0, this.pendingToolCalls - 1);
-    if (owesFollowUp) this.followUpOwed = true;
+    if (owesFollowUp) {
+      this.followUpOwed = true;
+      this.followUps.owed += 1;
+      // The model owes the caller words for this answer (v56).
+      this.unvoicedToolAnswerSeq = this.agentLineSeq;
+    }
     this.maybeRequestFollowUp();
   }
 
@@ -1387,16 +1591,28 @@ export class VoiceCallBridge {
     if (raw !== undefined) this.usage.add(raw);
     if (this.ended) return;
     this.awaitingToolResponseDone = false;
+    // The boundary an end-call may be waiting on (round 13).
+    this.wakeSiblingWaiters();
     this.maybeRequestFollowUp();
   }
 
   private maybeRequestFollowUp(): void {
     if (this.pendingToolCalls !== 0 || !this.followUpOwed) return;
     if (this.awaitingToolResponseDone) return;
+    if (this.lateBatchOpen) {
+      // No response.done will close this batch — the wire's already passed.
+      // Wait out the grace window instead; it was armed at the late event's
+      // arrival and every late sibling re-arms it (round 13). Arming it here
+      // too is a backstop only: an open batch with no timer cannot happen.
+      if (this.lateBatchTimer === null) this.armLateBatchWindow();
+      return;
+    }
     this.followUpOwed = false;
     // A termination the guards allowed is already arming the hangup on
     // the goodbye's mark; a follow-up would speak over that gate.
     if (!this.endRequested) {
+      this.followUps.requested += 1;
+      this.lastFollowUpEpoch = this.session.getResponseEpoch();
       this.session.requestResponse();
       // The follow-up is a response owed ANEW: it gets its own window,
       // not whatever remains of the tool's (Codex review, PR #227
@@ -1407,11 +1623,32 @@ export class VoiceCallBridge {
 
   private handleToolCall(callId: string, name: string, args: Record<string, unknown>): void {
     if (this.ended) return;
-    // Function-call events precede their response's `response.done` on the
-    // ordered wire, so at this moment the carrying response is still
-    // delivering — arm the boundary wait for this turn.
-    this.awaitingToolResponseDone = true;
+    // The follow-up waits for the carrying response's `response.done` — but
+    // ONLY if that response is still open at the wire. This used to assume
+    // it always was ("function-call events precede their response's done"),
+    // and a function-call event that arrived AFTER its done then waited
+    // forever for a done that had already passed: no follow-up, silence,
+    // dead air at 30s. That is the shape of 9–42 lost requests a day since
+    // 2026-09-10 (task #146) — a filing refusal answered in milliseconds and
+    // the model never speaking again. The wire is asked instead of assumed
+    // (v55); the count of after-done events goes to call_events so the
+    // assumption can be measured rather than argued.
+    const carryingResponseOpen = this.session.isResponseActive();
+    this.awaitingToolResponseDone = carryingResponseOpen;
+    if (!carryingResponseOpen) {
+      this.followUps.toolCallsAfterDone += 1;
+      // A late event opens (or re-opens) a batch the wire cannot close for
+      // us; the grace window closes it, measured from this — the latest —
+      // arrival. Armed HERE and not only in maybeRequestFollowUp (round 13):
+      // an end-call in this batch waits on the window, and a window that
+      // only the follow-up path could arm is one that path — blocked on the
+      // pending end-call — would never arm.
+      this.lateBatchOpen = true;
+      this.armLateBatchWindow();
+    }
     this.pendingToolCalls += 1;
+    const isEndCall = this.endCallToolNames.has(name);
+    if (!isEndCall) this.pendingSiblings.add(callId);
     // This event IS the model acting on the caller's turn, and the
     // dispatch it starts has a budget of its own — the queue filing tools
     // are allowed up to 30 seconds, the same span as this watchdog. A
@@ -1426,6 +1663,29 @@ export class VoiceCallBridge {
     // The hangup tool goes through this same path: its guards are the
     // agent's, and only its transport step is ours (see the TRANSPORT NOTE).
     void (async () => {
+      try {
+      /**
+       * A SIBLING STILL IN FLIGHT IS AN ANSWER THE MODEL HAS NOT VOICED
+       * (Codex P2, #321 round 12). When one response carries a lookup or a
+       * filing AND the hangup, the hangup's event arrives before the sibling
+       * has settled — `unvoicedToolAnswerSeq` is set only in
+       * `toolCallSettled`, so the v56 guard below would read null and let
+       * the call end before the sibling's result could be spoken. That is
+       * the v56 shape itself, arriving in one batch. So an end-call waits
+       * for its siblings first; the wait is bounded by their own dispatch
+       * budgets, and teardown wakes it.
+       *
+       * AND FOR THE BATCH BOUNDARY (Codex P2, #321 round 13). When the
+       * hangup's event is the FIRST of its batch, the set is still empty
+       * and the sibling that follows it on the wire has not been read yet.
+       * So the wait is for the carrying response's done (or, for a late
+       * batch, the grace window) as well — bounded by the wire's own
+       * response cycle, or by a quarter of a second.
+       */
+      if (isEndCall && this.endCallMustWait()) {
+        await this.batchSettled();
+        if (this.ended) return;
+      }
       /**
        * THE REPEATED-FAILURE CEILING (toolCeiling.ts).
        *
@@ -1441,7 +1701,30 @@ export class VoiceCallBridge {
        * A stopped dispatch is still ANSWERED — with the tool's own last
        * refusal wording — because an unanswered tool call stalls the turn
        * forever, which is worse than the loop.
+       *
+       * AND A SUCCESS LOOP IS A LOOP (2026-09-17): 17 calls since 09-10 had
+       * one tool return the same successful answer 11–35 times and 16 of
+       * them filed nothing. The eleventh identical call gets the tenth's
+       * answer back instead of a dispatch; see toolCeiling.ts, rule 1.
        */
+      if (this.endCallToolNames.has(name) && this.hangupWouldSilenceAToolAnswer()) {
+        if (this.ended) return;
+        this.hangupHoldsSinceLastLine += 1;
+        this.hangupsHeld += 1;
+        console.warn(hangupHeldMarker(name, this.hangupHoldsSinceLastLine));
+        this.toolEvents.push({
+          name,
+          ok: false,
+          succeeded: false,
+          atMs: Date.now() - this.startedAtMs,
+          error: "unvoiced_tool_result",
+        });
+        this.session.sendToolResult(callId, false, unvoicedToolResultRefusal(name));
+        // A refusal the model must answer with words — the same settle as
+        // any other refusal, so the follow-up is requested.
+        this.toolCallSettled(true);
+        return;
+      }
       const verdict = this.ceiling.begin(name, args);
       if (!verdict.allow) {
         console.warn(ceilingMarker(name, verdict));
@@ -1453,11 +1736,31 @@ export class VoiceCallBridge {
           error: `ceiling:${verdict.reason}`,
         });
         if (this.ended) return;
-        this.session.sendToolResult(
-          callId,
-          false,
-          ceilingRefusal(name, verdict.reason, this.ceiling.lastFailureOutput(name)),
-        );
+        /**
+         * WHAT THE MODEL GETS BACK depends on which limit fired. A failure
+         * limit replays the tool's last REFUSAL, which the prompts know how
+         * to speak. The identical-success limit (rule 1, 2026-09-17) replays
+         * the tool's last ANSWER to those exact arguments — nothing false is
+         * sent and the tool's cost is not paid an eleventh time — with `fix`
+         * telling the model the answer has not changed. The per-tool success
+         * limit has no single answer to replay and refuses with the
+         * instruction alone.
+         */
+        if (verdict.reason === "identical-success") {
+          this.session.sendToolResult(
+            callId,
+            true,
+            ceilingReplay(name, verdict.count, this.ceiling.lastSuccessOutput(name, args)),
+          );
+        } else if (verdict.reason === "tool-successes") {
+          this.session.sendToolResult(callId, false, successCeilingRefusal(name, verdict.count));
+        } else {
+          this.session.sendToolResult(
+            callId,
+            false,
+            ceilingRefusal(name, verdict.reason, this.ceiling.lastFailureOutput(name)),
+          );
+        }
         // The agent still owes the caller words, so this settles like any
         // other refusal rather than short-circuiting the follow-up.
         this.toolCallSettled(true);
@@ -1547,6 +1850,15 @@ export class VoiceCallBridge {
       // response finishes — and coalesced above, so it fires once however
       // many tools that response carried.
       this.toolCallSettled(true);
+      } finally {
+        // Whichever way this dispatch ended, an end-call waiting on it may
+        // now decide — after `toolCallSettled` above, so the guard it runs
+        // sees the settled answer.
+        if (!isEndCall) {
+          this.pendingSiblings.delete(callId);
+          this.wakeSiblingWaiters();
+        }
+      }
     })().catch(() => {
       // dispatch() is documented never to throw; if it somehow does, the
       // call still gets an answer rather than a stalled turn — and the
@@ -1688,6 +2000,16 @@ export class VoiceCallBridge {
       this.maxCallTimer = null;
     }
     this.clearDeadAir();
+    if (this.lateBatchTimer !== null) {
+      this.clearTimer(this.lateBatchTimer);
+      this.lateBatchTimer = null;
+    }
+    // An end-call waiting on a sibling or on its batch boundary is
+    // released; it reads `ended` and returns.
+    this.pendingSiblings.clear();
+    this.awaitingToolResponseDone = false;
+    this.lateBatchOpen = false;
+    this.wakeSiblingWaiters();
 
     // A line still mid-delivery when the call ends was partially heard —
     // record it as interrupted; lines that never produced audio the caller
@@ -1697,7 +2019,10 @@ export class VoiceCallBridge {
       // the end of the call, so the tail from these words is ~zero —
       // truthful, where measuring from an older line overstates dead air and
       // a caller who hung up mid-greeting got no tail at all.
-      if (this.recordCutLine("[interrupted]")) this.noteTranscript("agent");
+      if (this.recordCutLine("[interrupted]")) {
+      this.noteTranscript("agent");
+      this.noteAgentWords();
+    }
     }
     this.awaitingMark.length = 0;
     // Nothing to flush. The caller's lines were written as they arrived and
@@ -1728,10 +2053,18 @@ export class VoiceCallBridge {
           ? { transferMethod: this.transferMethod }
           : {}),
         transcript: this.transcriptLog.render(),
+        turns: this.transcriptLog.turns(),
         toolEvents: [...this.toolEvents],
         ...(usageAtTeardown ? { usage: usageAtTeardown } : {}),
         agentTurns: this.agentTurns,
         interruptions: this.interruptions,
+        hangupsHeld: this.hangupsHeld,
+        followUps: {
+          ...this.followUps,
+          lastUnanswered:
+            this.lastFollowUpEpoch !== null &&
+            this.session.getResponseEpoch() === this.lastFollowUpEpoch,
+        },
         startedAtMs: this.startedAtMs,
         endedAtMs: Date.now(),
         // Independently: a greeting-only call has no caller-latency number

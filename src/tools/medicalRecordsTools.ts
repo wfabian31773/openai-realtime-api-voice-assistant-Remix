@@ -77,7 +77,8 @@ registerTool({
       request_reason_id: classification.requestReasonId,
       ...(isCatchAll
         ? {
-            message:
+            // For the model, not the caller — `message` is what gets spoken.
+            fix:
               'Nothing matched, so this is filed as "Other - See Description". That is a ' +
               'real category, not a guess — but it means the description is the only thing ' +
               'the team has. Make sure it says what they actually asked for, and who is ' +

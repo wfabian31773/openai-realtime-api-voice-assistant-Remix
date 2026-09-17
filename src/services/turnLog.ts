@@ -38,8 +38,11 @@ export interface TurnState {
   known: string[];
   /** verify_patient_identity returned verified:true. The authoritative flag. */
   identityVerified: boolean;
-  /** How many identity questions have been asked. The 219 died here. */
-  identityAsks: number;
+  /** How many identity questions have been asked. The 219 died here.
+   *  `null` when the pipeline does not count them per turn — the runtime
+   *  tracks identity in `verifiedIdentity`, not turn by turn — so a row
+   *  never reads 0 to mean "not instrumented". */
+  identityAsks: number | null;
   /** Running intent, as classified. */
   intent?: string | null;
 }
@@ -99,13 +102,29 @@ export function recordTurn(
     callSid?: string;
     callLogId?: string;
     agentSlug?: string;
+    /**
+     * When the turn happened, epoch ms. The old core records each turn as it
+     * arrives and leaves this unset; the runtime records the whole call at
+     * teardown from its transcript log and passes each line's own time, or
+     * every turn of every runtime call would be stamped with the hang-up.
+     */
+    at?: number;
+    /**
+     * The runtime records a whole call at teardown and flushes it ONCE, with
+     * retries, in `recordRuntimeTurns`. On that path the incremental flush
+     * below must not fire: `flushTurns` claims before it awaits, so a
+     * fire-and-forget batch still in flight would make "every turn claimed"
+     * read as "every turn durable", and a batch that then failed would roll
+     * back onto a buffer already released (Codex P2, #321 round 5).
+     */
+    deferFlush?: boolean;
   },
 ): void {
   try {
     if (!callId) return;
     const b = bufferFor(callId, extra);
     if (b.turns.length >= MAX_TURNS) return;
-    const now = Date.now();
+    const now = extra.at ?? Date.now();
     b.turns.push({
       turnIndex: b.turns.length + 1,
       role,
@@ -138,10 +157,85 @@ export function recordTurn(
      * path — flushTurns is already idempotent by count, so the teardown
      * flush writes only what is new.
      */
-    if (b.turns.length - b.flushedCount >= 6) void flushTurns(callId);
+    if (!extra.deferFlush && b.turns.length - b.flushedCount >= 6) void flushTurns(callId);
   } catch (e) {
     console.error('[TURN-LOG] record failed:', e);
   }
+}
+
+/**
+ * THE RUNTIME'S WHOLE CALL, AT TEARDOWN.
+ *
+ * Measured 2026-09-17: `recording_url` and `call_turns` were empty for every
+ * one of the 4,564 runtime calls since the cutover, so the Observatory's call
+ * page fell back to the flat transcript and said "the per-turn record for
+ * this call was lost (instrumentation gap)" on every one of them. The lines
+ * were never lost — the runtime's transcript log had them, with times, and
+ * simply never wrote them here. This is that write: one row per line, each
+ * carrying the moment it was first spoken, so a tool call can be placed
+ * between the two lines it happened between.
+ *
+ * Telemetry only, and it says so by where it runs: AFTER the call_logs row
+ * and AFTER the request sweep, never awaited by teardown. Returns the number
+ * of turns handed to the flush, 0 for a call with nothing said.
+ */
+export async function recordRuntimeTurns(
+  callSid: string,
+  turns: ReadonlyArray<{ role: 'caller' | 'agent'; text: string; atMs: number }>,
+  ids: { callLogId?: string; agentSlug?: string; state: TurnState },
+  opts: { backoffMs?: readonly number[]; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<number> {
+  if (!callSid || turns.length === 0) return 0;
+  for (const t of turns) {
+    recordTurn(callSid, t.role, t.text, {
+      state: ids.state,
+      callSid,
+      callLogId: ids.callLogId,
+      agentSlug: ids.agentSlug,
+      at: t.atMs,
+      // One flush, below, with retries — never a fire-and-forget batch in
+      // flight while `turnsFullyFlushed` is consulted.
+      deferFlush: true,
+    });
+  }
+  /**
+   * A failed flush is retried on a short backoff, and the buffer is released
+   * ONLY once every turn is on disk. The first version released it in an
+   * unconditional `finally`, so the claim `flushTurns` gives back on failure
+   * — written so that "the teardown flush retries" — was handed to a buffer
+   * that was deleted on the next line; a runtime call has no incremental
+   * flush, so one database blip lost its whole per-turn record (Codex P2,
+   * #321 round 4). A buffer still unflushed after the last attempt is left
+   * for the 2h reaper below, which flushes once more before it forgets.
+   */
+  const backoff = opts.backoffMs ?? RUNTIME_TURN_FLUSH_BACKOFF_MS;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  try {
+    for (let attempt = 0; ; attempt++) {
+      await flushTurns(callSid);
+      if (turnsFullyFlushed(callSid) || attempt >= backoff.length) break;
+      await sleep(backoff[attempt]);
+    }
+  } finally {
+    if (turnsFullyFlushed(callSid)) releaseTurns(callSid);
+    else console.error(`[TURN-LOG] runtime turns for ${callSid} not durable after ${backoff.length + 1} attempt(s) — buffer left for the reaper`);
+  }
+  return turns.length;
+}
+
+/** The backoff between runtime flush attempts: three attempts, ~4s in total. */
+export const RUNTIME_TURN_FLUSH_BACKOFF_MS: readonly number[] = [1_000, 3_000];
+
+/**
+ * True when nothing is buffered for this call, or everything buffered has been
+ * claimed by a flush. On the runtime path that is the same as durable, because
+ * `recordRuntimeTurns` records with `deferFlush` and is the ONLY flusher — the
+ * awaited one. It is NOT the same on the old core's incremental path, where a
+ * claimed batch may still be in flight; do not read it there.
+ */
+export function turnsFullyFlushed(callId: string): boolean {
+  const b = buffers.get(callId);
+  return !b || b.flushedCount === b.turns.length;
 }
 
 /** Live view, for the call-detail page and for tests. */

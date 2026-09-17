@@ -146,11 +146,32 @@ describe('a successful primary push must record itself as delivered', () => {
     'utf8',
   );
 
-  it('every updateTicketCallData success branch marks the call delivered', () => {
+  it('every FULL updateTicketCallData success branch marks the call delivered — and the recording push, a partial one, must not', () => {
     const sites = [...ROUTES.matchAll(/updateTicketCallData\(/g)].map((m) => m.index!);
     expect(sites.length, 'expected the three known push sites').toBeGreaterThanOrEqual(3);
 
+    /**
+     * THE ONE EXEMPTION, and it is the rule's own reasoning pointed the other
+     * way. `pushRecordingToTicketing` sends ONLY a recording URL. If it
+     * recorded delivery, the sweeper would never send the transcript,
+     * duration and outcome for any call whose recording landed first — every
+     * runtime call (Codex P1, #321 round 1). Letting the sweeper carry the
+     * URL instead opened a race: a call already snapshotted into the
+     * sweeper's batch when the URL landed was sent by neither side (Codex P2,
+     * round 3). So that site pushes every time and never touches the flag;
+     * the sweeper re-sends the URL once, with the rest, and marks the call.
+     */
+    const recStart = ROUTES.indexOf('const pushRecordingToTicketing = async');
+    const recEnd = ROUTES.indexOf('console.info(`[RECORDING] Conference ${conferenceSid} recording', recStart);
+    expect(recStart, 'the recording push helper is missing').toBeGreaterThan(0);
+    expect(recEnd).toBeGreaterThan(recStart);
+    expect(
+      ROUTES.slice(recStart, recEnd).includes('callDataSynced: true'),
+      'the recording push must never mark the call delivered — it carries the URL alone',
+    ).toBe(false);
+
     for (const idx of sites) {
+      if (idx > recStart && idx < recEnd) continue; // the partial push, asserted above
       // Look at the window following the call — the success branch and its body.
       const window = ROUTES.slice(idx, idx + 2600);
       expect(
@@ -159,5 +180,99 @@ describe('a successful primary push must record itself as delivered', () => {
           `the sweeper will re-push every call it succeeds on`,
       ).toBe(true);
     }
+  });
+});
+
+describe('the mark-done is conditional on the recording the payload carried — Codex P2, #321 round 11', () => {
+  // A recording can land on the row between this batch being selected and
+  // the success write: the callback saves the URL, pushes it directly, and a
+  // failed push reads a pre-push snapshot that still says the sync is coming
+  // — with a payload built before the URL existed. Marking the row done here
+  // would send the URL from neither side. So the success UPDATE matches only
+  // while the row still holds what was sent, and a zero-row result leaves
+  // the call pending, retries untouched, for the next pass to carry.
+  //
+  // Read from the source, as the selection pins above are: the query is a
+  // Drizzle chain against a live `db` import. The statement itself was
+  // PREPAREd against the Hub with the `::text` cast before it shipped —
+  // the v52 lesson, a bare parameter beside NULL has no type to infer.
+  const SRC = readFileSync(join(__dirname, 'ticketingSyncService.ts'), 'utf8');
+  const start = SRC.indexOf('if (response.success) {');
+  const end = SRC.indexOf('console.log(`[TICKETING SYNC] ✓ Successfully synced call', start);
+  const SUCCESS = SRC.slice(start, end);
+
+  it('the success write exists where expected', () => {
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+  });
+
+  it('marks the row done only while it still holds the recording the payload carried', () => {
+    expect(SUCCESS).toMatch(/callDataSynced: true/);
+    expect(SUCCESS).toMatch(/\.where\(\s*and\(\s*eq\(callLogs\.id, call\.id\),\s*sql`\$\{callLogs\.recordingUrl\} IS NOT DISTINCT FROM \$\{call\.recordingUrl \?\? null\}::text`/);
+  });
+
+  it('… and the grade the payload carried — quality score, outcome and sentiment, each typed (Codex P2, round 12)', () => {
+    // The enum columns are cast to text on BOTH sides: an enum has no
+    // equality operator against a text parameter.
+    expect(SUCCESS).toMatch(/sql`\$\{callLogs\.qualityScore\} IS NOT DISTINCT FROM \$\{call\.qualityScore \?\? null\}::integer`/);
+    expect(SUCCESS).toMatch(/sql`\$\{callLogs\.agentOutcome\}::text IS NOT DISTINCT FROM \$\{call\.agentOutcome \?\? null\}::text`/);
+    expect(SUCCESS).toMatch(/sql`\$\{callLogs\.sentiment\}::text IS NOT DISTINCT FROM \$\{call\.sentiment \?\? null\}::text`/);
+    // All four inside the ONE and(): a condition outside it would be a second statement.
+    const where = SUCCESS.slice(SUCCESS.indexOf('.where('), SUCCESS.indexOf('.returning('));
+    expect((where.match(/IS NOT DISTINCT FROM/g) ?? []).length).toBe(4);
+  });
+
+  it('a write that matched no row leaves the call pending rather than reporting it synced', () => {
+    expect(SUCCESS).toMatch(/\.returning\(\{ id: callLogs\.id \}\)/);
+    const zeroRows = SUCCESS.indexOf('if (marked.length === 0) {');
+    expect(zeroRows).toBeGreaterThan(0);
+    const branch = SUCCESS.slice(zeroRows, SUCCESS.indexOf('}', SUCCESS.indexOf('return {', zeroRows)) + 1);
+    expect(branch).toMatch(/left pending/);
+    expect(branch).not.toMatch(/callDataSynced/); // no second write in the branch
+    expect(branch).toMatch(/return \{/);
+  });
+
+  it('the recording push re-opens the sync WITH its retry count reset, or a row that synced on its third attempt is never selected again', () => {
+    const ROUTES = readFileSync(join(__dirname, '..', '..', 'src', 'voiceAgentRoutes.ts'), 'utf8');
+    const recStart = ROUTES.indexOf('const pushRecordingToTicketing = async');
+    const recEnd = ROUTES.indexOf('console.info(`[RECORDING] Conference ${conferenceSid} recording', recStart);
+    const helper = ROUTES.slice(recStart, recEnd);
+    expect(helper).toMatch(/updateCallLog\(callLogId, \{ callDataSynced: false, ticketingSyncRetries: 0 \}\)/);
+    // The selector this reset exists for.
+    expect(SRC).toMatch(/lt\(callLogs\.ticketingSyncRetries, MAX_RETRIES\)/);
+    expect(SRC).toMatch(/const MAX_RETRIES = 3;/);
+  });
+});
+
+describe('a failed pass increments the retry count in the database, never from a snapshot (Codex P2, round 15)', () => {
+  // The grade write (round 12) and the recording push (round 10/11) re-open
+  // the sync by resetting this column to 0. A failure branch that wrote its
+  // snapshotted `currentRetries + 1` AFTER such a reset put the row at 3 —
+  // excluded by `lt(retries, MAX_RETRIES)` — with the new data never sent.
+  // Read from the source, as every other pin in this file is: the writes are
+  // Drizzle chains against a live `db` import.
+  const SRC = readFileSync(join(__dirname, 'ticketingSyncService.ts'), 'utf8');
+
+  it('both failure writes — the refused POST and the thrown one — add one to the stored value', () => {
+    const atomic = SRC.match(/ticketingSyncRetries: sql`COALESCE\(\$\{callLogs\.ticketingSyncRetries\}, 0\) \+ 1`/g) ?? [];
+    expect(atomic.length).toBe(2);
+  });
+
+  it('no failure write stores the snapshot', () => {
+    expect(SRC).not.toMatch(/ticketingSyncRetries: newRetryCount/);
+  });
+
+  it('the error text follows the count actually written — one CASE in the same statement, in both branches (Codex P2, round 16)', () => {
+    const cases = SRC.match(/ticketingSyncError: sql`CASE WHEN COALESCE\(\$\{callLogs\.ticketingSyncRetries\}, 0\) \+ 1 >= \$\{MAX_RETRIES\}::integer THEN \$\{gaveUp\} ELSE \$\{errorMsg\} END`/g) ?? [];
+    expect(cases.length).toBe(2);
+    // No branch decides the text from the snapshot any more.
+    expect(SRC).not.toMatch(/ticketingSyncError: retriesExhausted/);
+  });
+
+  it('exhaustion is read back from the write, never computed from the snapshot before it', () => {
+    const returned = SRC.match(/\.returning\(\{ retries: callLogs\.ticketingSyncRetries \}\);\s*(?:\/\/[^\n]*\n\s*)*const newRetryCount = written\?\.retries \?\? currentRetries \+ 1;\s*const retriesExhausted = newRetryCount >= MAX_RETRIES;/g) ?? [];
+    expect(returned.length).toBe(2);
+    // The old shape — decided before the write — is gone from both branches.
+    expect(SRC).not.toMatch(/const newRetryCount = currentRetries \+ 1;\s*const retriesExhausted = newRetryCount >= MAX_RETRIES;/);
   });
 });

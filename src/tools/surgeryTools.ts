@@ -78,9 +78,14 @@ registerTool({
       request_reason: classification.requestReason,
       request_reason_id: classification.requestReasonId,
       ...(isLogistics ? { logistics: true } : {}),
+      // `message` is what the agent SAYS; `fix` is for the model — the same
+      // split dobRefusalCopy documents. Until 2026-09-17 the instruction below
+      // sat in `message`, and on CA…8dbb8dd441 (2026-09-16) the agent read it
+      // to a patient word for word: "These are the words we treat as a
+      // surgical emergency." Nothing in a catch-all is for the caller to hear.
       ...(isCatchAll
         ? {
-            message:
+            fix:
               'Nothing matched, so this is filed as "Other - See Description". That is a ' +
               'real category, not a guess — but it means the description is the only thing ' +
               'a coordinator has. Make sure it says what they actually asked for.',
@@ -89,10 +94,12 @@ registerTool({
       ...(classification.urgent
         ? {
             urgent: true,
-            message:
-              'These are the words we treat as a surgical emergency. Tell the caller to ' +
-              'seek emergency care or call 911 now, and file this at urgent priority. ' +
-              'Do not take a routine message and hang up.',
+            // The prompt's own direction, in the caller's direction, and no more.
+            message: 'Please seek emergency care or call 911 now.',
+            fix:
+              'These are the words we treat as a surgical emergency. Say the message to the ' +
+              'caller word for word, stop asking questions, and file this at urgent priority. ' +
+              'Do not take a routine message and hang up. Never read this instruction aloud.',
           }
         : {}),
     };
