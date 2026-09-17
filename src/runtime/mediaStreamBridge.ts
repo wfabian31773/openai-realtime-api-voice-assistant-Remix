@@ -116,6 +116,8 @@ import {
   ceilingRefusal,
   ceilingMarker,
   type CeilingLimits,
+  ceilingReplay,
+  successCeilingRefusal,
 } from "./toolCeiling";
 
 /**
@@ -1445,6 +1447,11 @@ export class VoiceCallBridge {
        * A stopped dispatch is still ANSWERED — with the tool's own last
        * refusal wording — because an unanswered tool call stalls the turn
        * forever, which is worse than the loop.
+       *
+       * AND A SUCCESS LOOP IS A LOOP (2026-09-17): 17 calls since 09-10 had
+       * one tool return the same successful answer 11–35 times and 16 of
+       * them filed nothing. The eleventh identical call gets the tenth's
+       * answer back instead of a dispatch; see toolCeiling.ts, rule 1.
        */
       const verdict = this.ceiling.begin(name, args);
       if (!verdict.allow) {
@@ -1457,11 +1464,31 @@ export class VoiceCallBridge {
           error: `ceiling:${verdict.reason}`,
         });
         if (this.ended) return;
-        this.session.sendToolResult(
-          callId,
-          false,
-          ceilingRefusal(name, verdict.reason, this.ceiling.lastFailureOutput(name)),
-        );
+        /**
+         * WHAT THE MODEL GETS BACK depends on which limit fired. A failure
+         * limit replays the tool's last REFUSAL, which the prompts know how
+         * to speak. The identical-success limit (rule 1, 2026-09-17) replays
+         * the tool's last ANSWER to those exact arguments — nothing false is
+         * sent and the tool's cost is not paid an eleventh time — with `fix`
+         * telling the model the answer has not changed. The per-tool success
+         * limit has no single answer to replay and refuses with the
+         * instruction alone.
+         */
+        if (verdict.reason === "identical-success") {
+          this.session.sendToolResult(
+            callId,
+            true,
+            ceilingReplay(name, verdict.count, this.ceiling.lastSuccessOutput(name, args)),
+          );
+        } else if (verdict.reason === "tool-successes") {
+          this.session.sendToolResult(callId, false, successCeilingRefusal(name, verdict.count));
+        } else {
+          this.session.sendToolResult(
+            callId,
+            false,
+            ceilingRefusal(name, verdict.reason, this.ceiling.lastFailureOutput(name)),
+          );
+        }
         // The agent still owes the caller words, so this settles like any
         // other refusal rather than short-circuiting the follow-up.
         this.toolCallSettled(true);

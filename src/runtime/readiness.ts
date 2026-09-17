@@ -253,9 +253,19 @@ import { callEnvironment } from "./callRecord";
  * /api/analytics/grok-usage, shown on the cost dashboard, and the call page
  * says whether a cost is reconciled or estimated. v44 and v45 ship in one
  * PR; only v45 reaches a deployment. Stacks on v44.
+ *
+ * v46: a success loop is a loop. The tool ceiling counted only FAILURES,
+ * and the census of every substantive runtime call since 09-10 found 17
+ * calls where one tool returned the SAME successful answer 11–35 times
+ * (lookup_patient, check_open_tickets, resolve_location), 16 of them with
+ * no ticket, while no call that filed ever passed 9. The eleventh identical
+ * call now gets the tenth's answer back with `fix` instead of a dispatch;
+ * twenty successes of one tool with any arguments refuse with the
+ * instruction alone; and the argument key ignores case and spacing.
+ * Stacks on v45.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v45-timed-turns-recording-and-the-day-table-20260917";
+  "voice-runtime-v46-a-success-loop-is-a-loop-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

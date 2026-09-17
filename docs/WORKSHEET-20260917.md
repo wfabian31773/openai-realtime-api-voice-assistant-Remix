@@ -197,6 +197,28 @@ cost-preservation trio must still read 0 at the OpenAI rate.
 
 ---
 
+### W7 — A success loop is a loop (task #140).
+**`[x]` SHIPPED as v46. 12 new assertions across the ceiling and the bridge; 10 mutations, 10 caught.**
+
+**Measured first, every substantive runtime call since 09-10 (1,945):** the most
+times one tool returned the SAME successful answer on one call is ≤4 on 97.6%,
+5–9 on 30 calls (23 filed — legitimate retries), never 10, and **≥11 on 17
+calls, 16 with no ticket** — `lookup_patient` ×35, `check_open_tickets` ×35,
+`resolve_location` ×35, identical outcome every time. The ceiling counted
+failures only, so it could not see one of them; your ruling that a loop is a
+mistake is what settles the direction.
+
+**Fix:** `identicalSuccesses: 10` — the eleventh identical call is not
+dispatched and the model gets the tenth's answer back with `fix` telling it to
+speak; `perToolSuccesses: 20` as the varied-arguments backstop, refusing with
+the instruction and no spoken line; argument keys ignore case and spacing.
+`record_pcp_intake`'s loops are v33's, untouched.
+**Number:** calls where one tool succeeds 11+ times with the same arguments —
+17 since 09-10, target 0. **Guard:** filing rate per lane must not fall; the
+5–9 band must still file.
+
+---
+
 ## NOT DOING TONIGHT, AND WHY
 
 - **`[-]` The emergency lexicon.** Which phrases count as a surgical emergency is
@@ -238,13 +260,14 @@ merged or is in PR #321 waiting for you.
 | **v43** (PR #321) | the surgery agent stops reading its own emergency rule aloud | *"These are the words we treat as a surgical emergency"* — spoken to a patient |
 | **v44** (PR #321) | every runtime call gets a recording, timed turns, and tool calls placed where they ran on the Observatory's call page | 0 of 4,564 runtime calls had a recording or a turn record; the page you asked for existed and had nothing to show |
 | **v45** (PR #321) | one `daily_grok_costs` row per day — xAI reported vs booked, refusals included — on the cost dashboard, and the call page says reconciled or estimated | 2026-09-12 booked $37.43 onto one 104-second call and nothing recorded that the day was wrong |
+| **v46** (PR #321) | the tool ceiling stops a tool that keeps succeeding with the same arguments — the eleventh identical call gets the tenth's answer back | 17 calls since 09-10 looped one tool 11–35 times, 16 with no ticket; nothing could see them |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v45-timed-turns-recording-and-the-day-table-20260917
+GET /voice/health   ->   voice-runtime-v46-a-success-loop-is-a-loop-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:

@@ -74,7 +74,7 @@ function makeBridge(
     maxCallMs?: number;
     deadAirMs?: number;
     guardrailMode?: "enforce" | "log";
-    toolCeiling?: { identicalFailures?: number; perToolFailures?: number; perCallDispatches?: number };
+    toolCeiling?: { identicalFailures?: number; perToolFailures?: number; identicalSuccesses?: number; perToolSuccesses?: number; perCallDispatches?: number };
     /** A REAL Twilio SID, for the stores that refuse anything else. */
     callSid?: string;
   } = {},
@@ -2425,15 +2425,18 @@ describe("the repeated-failure ceiling", () => {
     expect(events[3]).toMatchObject({ ok: false, error: expect.stringContaining("ceiling:") });
   });
 
-  it("never gets in the way of a tool that works", async () => {
-    // makeAgent's default dispatch succeeds.
+  it("never gets in the way of a tool that works on DIFFERENT questions", async () => {
+    // makeAgent's default dispatch succeeds. Fifteen different requests —
+    // more than any call that filed has ever made of one tool — all run.
+    // (Thirty IDENTICAL ones used to be the fixture here; that is the loop
+    // the success limit below now stops, and no call that filed ever did it.)
     const h = makeBridge();
-    for (let i = 0; i < 30; i += 1) {
-      h.handlers().onToolCall(`c${i}`, "create_ticket", { reason: "refill" });
+    for (let i = 0; i < 15; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "create_ticket", { reason: `refill-${i}` });
       await Promise.resolve();
       await Promise.resolve();
     }
-    expect(h.agent.dispatch).toHaveBeenCalledTimes(30);
+    expect(h.agent.dispatch).toHaveBeenCalledTimes(15);
   });
 
   it("a tool that recovers is not held against the rest of the call", async () => {
@@ -2473,6 +2476,78 @@ describe("the repeated-failure ceiling", () => {
     const events = records[0]?.toolEvents ?? [];
     expect(events).toHaveLength(6);
     expect(events.filter((e) => e.error === "ceiling:identical-args")).toHaveLength(3);
+  });
+
+  /**
+   * A SUCCESS LOOP IS A LOOP. Measured 2026-09-17 over every substantive
+   * runtime call since 09-10: 17 calls returned the SAME successful answer
+   * from one tool 11–35 times running (`lookup_patient`, `check_open_tickets`,
+   * `resolve_location`) and 16 of them ended with no ticket, while no call
+   * that filed ever passed 9. The failure rules above could not see one.
+   */
+  it("the eleventh identical successful call is not dispatched — it gets the tenth's answer back, marked as the ceiling's", async () => {
+    const h = makeBridge();
+    for (let i = 0; i < 12; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "lookup_patient", { first_name: "A", last_name: "B" });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    expect(h.agent.dispatch).toHaveBeenCalledTimes(10);
+    const calls = (h.session.sendToolResult as unknown as {
+      mock: { calls: [string, boolean, Record<string, unknown>][] };
+    }).mock.calls;
+    expect(calls).toHaveLength(12);
+    // The replay IS the tool's last answer — the transport's ok stays true —
+    // plus the ceiling's marking and the instruction to speak, in `fix`.
+    expect(calls[10][1]).toBe(true);
+    expect(calls[10][2]).toMatchObject({ ticket: "VA-51121", ceiling: "identical-success", retryable: false });
+    expect(String(calls[10][2].fix)).toMatch(/has not changed/);
+    expect(String(calls[10][2].fix)).toMatch(/Speak to the caller/);
+    expect(calls[10][2]).not.toHaveProperty("message");
+    expect(calls[11][2]).toMatchObject({ ceiling: "identical-success" });
+  });
+
+  it("a stopped identical success is recorded as a ceiling stop, not a success, and the caller is still owed words", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = makeBridge({ persistCallRecord: async (r) => void records.push(r) });
+    h.newResponse();
+    for (let i = 0; i < 11; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "lookup_patient", { q: 1 });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    h.handlers().onResponseDone();
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    expect(h.agent.dispatch).toHaveBeenCalledTimes(10);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    const events = records[0]?.toolEvents ?? [];
+    expect(events).toHaveLength(11);
+    expect(events[10]).toMatchObject({ ok: false, succeeded: false, error: "ceiling:identical-success" });
+  });
+
+  it("varying one field each time still meets the per-tool success limit — an instruction, no spoken line", async () => {
+    const h = makeBridge();
+    for (let i = 0; i < 25; i += 1) {
+      h.handlers().onToolCall(`c${i}`, "lookup_patient", { last_name: `guess-${i}` });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    expect(h.agent.dispatch).toHaveBeenCalledTimes(20);
+    const calls = (h.session.sendToolResult as unknown as {
+      mock: { calls: [string, boolean, Record<string, unknown>][] };
+    }).mock.calls;
+    expect(calls[20][1]).toBe(false);
+    expect(calls[20][2]).toEqual({
+      success: false,
+      retryable: false,
+      ceiling: "tool-successes",
+      fix: expect.stringMatching(/Speak to the caller/),
+    });
   });
 });
 
