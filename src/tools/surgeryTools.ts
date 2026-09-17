@@ -726,8 +726,10 @@ registerTool({
      * PER PREDECESSOR by `GATE_SETTLEMENT_WAIT_MS` — re-armed on every settle,
      * because one deadline for the whole queue released the third of a batch
      * while its second predecessor was still inside its own 15 s POST (Codex
-     * P2, round 17); the attempts it waits on are POSTs the client already
-     * bounds.
+     * P2, round 17) — and claims are QUEUED, released one at a time, because
+     * a predecessor that outlasted the bound used to release every waiter at
+     * once (Codex P2, round 18). The attempts it waits on are POSTs the
+     * client already bounds, warm-up included, under that floor.
      */
     const surgeonAskClaimed = filedOnSurgeryQueue && !lookup.providerId;
     const surgeonAskExhausted = surgeonAskClaimed

@@ -111,17 +111,32 @@ export function noteGateRefusal(callSid: string | undefined, tool: string, field
 const settlementWaiters = new Map<string, Array<() => void>>();
 
 /**
- * A claim never waits longer than this for ANY ONE attempt ahead of it. The
- * attempt it waits on is a ticket POST bounded by the client's own timeout
- * (15 s), and `settleGateAttempt` runs on every path that reaches a response
- * — this is the floor under a settle that never comes, not a budget anyone
- * should reach. It is PER PREDECESSOR, re-armed by every settle: one deadline
- * for the whole queue released the third of a batch at 20 s while its second
- * predecessor was still inside its own 15 s, so it read one refusal where
- * there were two and the exit did not fire — the lost-third-attempt case
- * this claim exists to close (Codex P2, #321 round 17).
+ * A claim never waits longer than this for ANY ONE attempt ahead of it, and
+ * `settleGateAttempt` runs on every path that reaches a response — this is
+ * the floor under a settle that never comes, not a budget anyone should
+ * reach. It sits ABOVE the longest attempt the production create path can
+ * legitimately take: two 3 s health probes, the 500 ms retry delay and the
+ * 15 s POST come to about 21.5 s (`ticketingApiClient`), so a bound that
+ * passes means a settle was lost and nothing else (Codex, #321 round 18). It
+ * is PER PREDECESSOR, re-armed by every settle: one deadline for the whole
+ * queue released the third of a batch while its second predecessor was still
+ * inside its own POST, so it read one refusal where there were two and the
+ * exit did not fire — the lost-third-attempt case this claim exists to close
+ * (Codex P2, #321 round 17).
  */
-export const GATE_SETTLEMENT_WAIT_MS = 20_000;
+export const GATE_SETTLEMENT_WAIT_MS = 25_000;
+
+/**
+ * Claims on a key are QUEUED and released ONE AT A TIME. Every waiter used to
+ * start its own bound on arrival, so a single predecessor that outlasted the
+ * bound released all of them at once — the second and third of a batch both
+ * claimed before the first had answered, and the third could again send no
+ * flag (Codex P2, #321 round 18). Now a claim waits for the claim ahead of it
+ * to finish claiming (or give up) before its own wait even starts, so a bound
+ * that passes releases exactly one waiter and the one behind it still waits
+ * for what the released one draws.
+ */
+const claimQueues = new Map<string, Promise<void>>();
 
 /**
  * Park until the next settle on this key, or until the bound passes with no
@@ -183,21 +198,36 @@ export async function claimGateAttemptAfterSettlement(
 ): Promise<number> {
   if (!isTwilioCallSid(callSid)) return 0;
   const k = key(callSid, tool, field);
-  // One bounded wait PER attempt ahead of this one — see GATE_SETTLEMENT_WAIT_MS.
-  // A settle that never comes releases the claim; a settle that does re-arms
-  // the bound for the next predecessor, so the wait grows with the queue and
-  // never with the clock.
-  while ((attempts.get(k)?.pending ?? 0) > 0) {
-    const settled = await waitForSettlement(k);
-    if (!settled) break;
+  // Take a place in the queue: this claim's wait starts only once the claim
+  // ahead of it has claimed or given up — see claimQueues.
+  let claimed!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    claimed = resolve;
+  });
+  const ahead = claimQueues.get(k) ?? Promise.resolve();
+  const tail = ahead.then(() => gate);
+  claimQueues.set(k, tail);
+  await ahead;
+  try {
+    // One bounded wait PER attempt ahead of this one — see GATE_SETTLEMENT_WAIT_MS.
+    // A settle that never comes releases the claim; a settle that does re-arms
+    // the bound for the next predecessor, so the wait grows with the queue and
+    // never with the clock.
+    while ((attempts.get(k)?.pending ?? 0) > 0) {
+      const settled = await waitForSettlement(k);
+      if (!settled) break;
+    }
+    const now = Date.now();
+    sweep(now);
+    const prev = attempts.get(k);
+    const fresh = prev && now - prev.at <= TTL_MS ? prev : undefined;
+    attempts.delete(k);
+    attempts.set(k, { n: fresh?.n ?? 0, at: now, pending: (fresh?.pending ?? 0) + 1 });
+    return fresh?.n ?? 0;
+  } finally {
+    claimed();
+    if (claimQueues.get(k) === tail) claimQueues.delete(k);
   }
-  const now = Date.now();
-  sweep(now);
-  const prev = attempts.get(k);
-  const fresh = prev && now - prev.at <= TTL_MS ? prev : undefined;
-  attempts.delete(k);
-  attempts.set(k, { n: fresh?.n ?? 0, at: now, pending: (fresh?.pending ?? 0) + 1 });
-  return fresh?.n ?? 0;
 }
 
 /** The other half of `claimGateAttemptAfterSettlement`: the attempt has answered. */
@@ -232,5 +262,6 @@ export function callFactNoted(callSid: string | undefined, fact: string): boolea
 /** Tests only. */
 export function resetGateAttempts(): void {
   attempts.clear();
+  claimQueues.clear();
   for (const k of [...settlementWaiters.keys()]) wakeSettlementWaiters(k);
 }

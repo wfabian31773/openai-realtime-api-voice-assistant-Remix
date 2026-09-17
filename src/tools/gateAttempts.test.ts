@@ -183,6 +183,68 @@ describe("facts and counts share the map without colliding", () => {
   });
 });
 
+describe('waiters are released one at a time when a predecessor outlasts the bound (2026-09-17, #321 round 18)', () => {
+  const SID = 'CA0123456789abcdef0123456789abcdef';
+  const claim = () => claimGateAttemptAfterSettlement(SID, 't', 'f');
+  /**
+   * What ONE legitimate attempt can take on the production create path: two
+   * 3 s health probes, the 500 ms retry delay, then the 15 s POST
+   * (`ticketingApiClient`). The bound sits above it, so this test drives the
+   * bound with an attempt that is longer still — a stuck one.
+   */
+  const ONE_LONG_ATTEMPT_MS = 21_500;
+
+  it('the floor sits above the longest legitimate attempt, so crossing it means a settle was lost', () => {
+    expect(GATE_SETTLEMENT_WAIT_MS).toBeGreaterThan(ONE_LONG_ATTEMPT_MS);
+  });
+
+  it('a predecessor past the bound releases ONLY the next claim; the one behind it keeps waiting and reads both refusals', async () => {
+    vi.useFakeTimers();
+    try {
+      expect(await claim()).toBe(0);
+      let second: number | undefined;
+      let third: number | undefined;
+      const p2 = claim().then((v) => { second = v; });
+      const p3 = claim().then((v) => { third = v; });
+      await vi.advanceTimersByTimeAsync(GATE_SETTLEMENT_WAIT_MS + 1); // the first attempt is stuck
+      await p2;
+      expect(second).toBe(0); // released by the bound, now in flight beside the first
+      expect(third).toBeUndefined(); // NOT released with it — its own wait began when the second claimed
+      await vi.advanceTimersByTimeAsync(1_000);
+      settleGateAttempt(SID, 't', 'f', true); // the first answers at last, refused
+      await vi.advanceTimersByTimeAsync(1);
+      expect(third).toBeUndefined(); // the second is still in flight
+      settleGateAttempt(SID, 't', 'f', true); // the second answers, refused
+      await p3;
+      expect(third).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('with a predecessor that never answers, each waiter is released a full bound after the one ahead of it — never together', async () => {
+    vi.useFakeTimers();
+    try {
+      await claim();
+      let second: number | undefined;
+      let third: number | undefined;
+      const p2 = claim().then((v) => { second = v; });
+      const p3 = claim().then((v) => { third = v; });
+      await vi.advanceTimersByTimeAsync(GATE_SETTLEMENT_WAIT_MS + 1);
+      await p2;
+      expect(second).toBe(0);
+      expect(third).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(GATE_SETTLEMENT_WAIT_MS - 2);
+      expect(third).toBeUndefined(); // one bound after the SECOND claimed, not after the third arrived
+      await vi.advanceTimersByTimeAsync(3);
+      await p3;
+      expect(third).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('each attempt ahead gets its own bounded wait (2026-09-17, #321 round 17)', () => {
   const SID = 'CA0123456789abcdef0123456789abcdef';
   /** The client's own POST timeout: what ONE slow predecessor can legitimately take. */
