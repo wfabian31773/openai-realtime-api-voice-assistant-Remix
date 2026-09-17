@@ -351,14 +351,20 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v52, ready for review). Codex has reviewed it three times: round 1
+   (v39–v53, ready for review). Codex has reviewed it three times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s — every one taken, every thread resolved, each with a test
    and a mutation check. A FOURTH pass was requested on the head that carries v50,
-   v51, v52 and the round-3 fixes.
+   v51, v52, v53 and the round-3 and round-4 fixes.
    **Read that fourth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
-2. **Pull and republish.** `/voice/health` must read the v52 marker below.
+   **Codex round 4 (05:16 and 05:30 on `1b82a86`): three P2s — two taken on `25b023b`
+   (a parked recording and a turn buffer survive a failed write; the teardown upsert is
+   retried), one declined on the measurement (an identity from a lookup that finishes
+   after hangup: 3 of 1,553 calls). A fifth pass is requested on the head carrying v52,
+   v53 and the round-4 fixes.**
+
+2. **Pull and republish.** `/voice/health` must read the v53 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
    — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
    *Build* checks are green; *Type check* is red with the 22 errors that are
@@ -411,13 +417,14 @@ merged or is in PR #321 waiting for you.
 | **v50** (PR #321) | the second identity miss ends the ask — `lookup_patient` counts misses per call, coaches one shaped re-ask, then says stop and file | 35 runtime calls on 09-16 asked for a date of birth 2+ times, 13 asked 3+, tech's almost all cold callers; 13–16 calls a day missed 3+ times and were never found, 7–10 of them with no ticket |
 | **v51** (PR #321) | a CERTAIN identity the tools established reaches the call row — `patient_found`, `patient_name`, `patient_dob` — never a phone candidate | NULL on 2,471 of 2,471 runtime calls in seven days; the Observatory's identity columns have been dark on every lane since the cutover (task #57's runtime half was done on a runtime that no longer exists) |
 | **v52** (PR #321) | the per-call cost UPDATE types its two bound components, so Postgres stops refusing it at PARSE and `twilio_cost_cents` is written again | rejected 3,749 times in the 24h to 05:40 (`operator is not unique: unknown + unknown`, since `8a226a6` on 09-04); Twilio price on 5–25% of completed calls against 100% before; 4,295 calls since 09-04 carry a provider-only total |
+| **v53** (PR #321) | no-ivr's `create_ticket` writes a CERTAIN identity (name + date of birth matched) onto the call row, reading the transport's `callLogId` at write time; the factory-time phone-candidate write is gone | `patient_found` on 0 of 297 substantive no-ivr calls in seven days — the writer read a getter before it was backfilled, and would have written a phone candidate as an identity |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v52-the-cost-write-parses-20260917
+GET /voice/health   ->   voice-runtime-v53-the-record-reaches-the-after-hours-row-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:

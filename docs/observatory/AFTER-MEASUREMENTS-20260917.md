@@ -1,4 +1,4 @@
-# AFTER-MEASUREMENTS — what the 2026-09-17 republish turns on (v37–v49)
+# AFTER-MEASUREMENTS — what the 2026-09-17 republish turns on (v37–v53)
 
 `docs/BACKEND_HANDOFF.md`'s rule, made runnable: every ship in PR #321 and the
 two merged before it (v37, v38) names a number it must move and a guard it must
@@ -20,8 +20,8 @@ the ticket's (`coalesce(call_start_time, created_at)`), substantive means
 check the Support Center before calling a call unfiled.
 
 **First, confirm the build:** `GET /voice/health` must read
-`voice-runtime-v49-the-fleet-is-graded-at-teardown-20260917`. A number taken
-on an older marker is a before-number.
+`voice-runtime-v53-the-record-reaches-the-after-hours-row-20260917`. A number
+taken on an older marker is a before-number.
 
 ---
 
@@ -320,6 +320,26 @@ The cold-cache figures in the log (11.7–26 s) are the ones that matter for the
 `lookup_patient` timeouts; the warm-cache before-arm above is what could be measured
 at 05:45 on a database that had restarted fifteen minutes earlier. After-number for
 task #68: `lookup_patient` events with `ms >= 5900` per day — 39 on 09-16.
+
+## v53 — the record reaches the after-hours call row
+
+Before-arm, Hub, seven days to 2026-09-17: 297 substantive no-ivr calls, `patient_found`
+on 0, 139 of them called `create_ticket`.
+
+```sql
+SELECT created_at::date AS day,
+       count(*) FILTER (WHERE duration >= 30) AS substantive,
+       count(*) FILTER (WHERE duration >= 30 AND patient_found) AS patient_found,
+       count(*) FILTER (WHERE duration >= 30 AND tool_timeline::text LIKE '%"create_ticket"%') AS called_create_ticket,
+       -- the guard: a name on a row whose call never reached create_ticket is the old
+       -- factory-time (phone-candidate) write coming back — must stay 0
+       count(*) FILTER (WHERE patient_found AND tool_timeline::text NOT LIKE '%"create_ticket"%') AS found_without_create_ticket
+FROM call_logs
+WHERE agent_used = 'no-ivr' AND created_at >= '2026-09-10'
+GROUP BY 1 ORDER BY 1;
+-- target: patient_found ≈ the share of create_ticket calls whose name + DOB matched;
+--         found_without_create_ticket = 0.
+```
 
 ## Also on this build, not a version of its own
 

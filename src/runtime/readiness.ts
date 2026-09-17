@@ -319,9 +319,16 @@ import { callEnvironment } from "./callRecord";
  * calls against 100% before. The bound values now carry the column's type.
  * Server-side, no spoken line; the marker dates the build the after-number
  * (completed calls per day with twilio_cost_cents set) is read against.
+ *
+ * v53: the record reaches the after-hours call row. no-ivr's identity writer
+ * read `metadata.callLogId` once at factory time — a getter the transport
+ * backfills after session.connect() — so it fired on 0 of 297 substantive
+ * calls in seven days, and it would have written the PHONE match, a candidate.
+ * create_ticket now writes a CERTAIN identity (name + date of birth matched)
+ * at write time. Old core, so the marker dates the build the way v18/v41/v47 do.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v52-the-cost-write-parses-20260917";
+  "voice-runtime-v53-the-record-reaches-the-after-hours-row-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

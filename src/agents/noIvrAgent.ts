@@ -907,14 +907,15 @@ export async function createNoIvrAgent(
         hasProvider: !!scheduleContext.lastProviderSeen,
       });
       
-      if (metadata.callLogId) {
-        storage.updateCallLog(metadata.callLogId, {
-          patientFound: true,
-          patientName: scheduleContext.patientName || undefined,
-          lastProviderSeen: scheduleContext.lastProviderSeen || undefined,
-          lastLocationSeen: scheduleContext.lastLocationSeen || undefined,
-        }).catch(err => console.error(`[No-IVR Agent] Failed to update call log:`, err));
-      }
+      // Until v53 the phone match was written to the call row HERE as
+      // patientFound + patientName — a CANDIDATE recorded as an identity
+      // (RULE ZERO step 2; v47 withholds the same match from the prompt) —
+      // and it never once landed anyway: `metadata.callLogId` is a getter the
+      // transport backfills after session.connect(), so at factory time it
+      // read undefined on every call (0 of 297 substantive no-ivr calls with
+      // patient_found in the seven days to 2026-09-17). The row is written
+      // from create_ticket, once a name and a date of birth have confirmed
+      // who this is — see "THE RECORD REACHES THE AFTER-HOURS CALL ROW".
     } else {
       console.log(`[No-IVR Agent] No schedule context for ${phoneRef} (timeout or not found)`);
     }
@@ -1276,6 +1277,35 @@ The ticket will include schedule context (last appointment info) automatically.`
           }
         } catch (lookupError) {
           console.error("[No-IVR Agent] Secondary lookup error:", lookupError);
+        }
+      }
+
+      // THE RECORD REACHES THE AFTER-HOURS CALL ROW — only once it is CERTAIN
+      // (v53). A phone match is a candidate (`phoneMatchIsUnconfirmed`, v47);
+      // a name + date-of-birth match is the identity this lane's Phase 4
+      // collects for every ticket anyway. `metadata.callLogId` is read HERE,
+      // minutes into the call, because it is a getter the transport backfills
+      // after session.connect(); the factory-time read that used to sit beside
+      // the phone lookup saw undefined on every call. Not awaited — the
+      // caller is waiting on the ticket, not on telemetry.
+      if (enrichedContext?.patientFound && !phoneMatchIsUnconfirmed(enrichedContext)) {
+        const liveCallLogId = metadata.callLogId;
+        const confirmedDob = parsedDOB
+          ? parsedDOB.iso || `${parsedDOB.year}-${parsedDOB.month}-${parsedDOB.day}`
+          : undefined;
+        if (liveCallLogId) {
+          void storage.updateCallLog(liveCallLogId, {
+            patientFound: true,
+            patientName: enrichedContext.patientName || undefined,
+            patientDob: confirmedDob,
+            lastProviderSeen: enrichedContext.lastProviderSeen || undefined,
+            lastLocationSeen: enrichedContext.lastLocationSeen || undefined,
+          }).then(
+            () => console.log(`[No-IVR Agent] confirmed identity written to call row ${liveCallLogId}`),
+            (err) => console.error(`[No-IVR Agent] Failed to write the confirmed identity to the call row:`, err),
+          );
+        } else {
+          console.warn(`[No-IVR Agent] identity confirmed but the call row has no id yet — not recorded for ${metadata.callId}`);
         }
       }
 
