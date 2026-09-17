@@ -120,13 +120,23 @@ gets read, not raised blindly.
 ---
 
 ### W4 — Three spoken lines that are false.
-**`[x]` (b) SHIPPED as v40 — 7 assertions, 4 mutations, 4 caught. `[ ]` (a) and (c) remain.**
+**`[x]` (a) SHIPPED as v42 — diagnosed from the timeline, not the note; 7 mutations, 7 caught.
+`[x]` (b) SHIPPED as v40 — 7 assertions, 4 mutations, 4 caught.
+`[x]` the narrated emergency rule (below) SHIPPED as v43 — 5 mutations, 5 caught.
+`[ ]` (c) remains, and it is last.**
 
-**(a) The SUCCESS branch speaks the failure line.** `11e362485f`, no-ivr: the
-ticket filed as VA-60434 and the agent said *"I'm sorry, I'm experiencing a
-technical issue on my end right now."* The caller was 20 minutes late for an
-8:00 appointment. On the other one, `7074e29c0c`, the filing genuinely failed
-and nothing was recovered.
+**(a) The SUCCESS branch speaks the failure line — and it was not the success
+branch.** `11e362485f`, no-ivr: the model fired `create_ticket` TWICE,
+overlapping. Attempt A (9.3s) filed VA-60434; attempt B lost the per-call lock,
+waited a fixed 3s, found no ticket number written back yet, and returned
+"Concurrent ticket creation in progress" 0.4s BEFORE A's success. The handler
+mapped that to the "technical issue… end the call" apology. **`7074e29c0c` is
+the same shape by a different road, and my note on it was WRONG:** the client
+timed out at 15s while the server finished the insert — VA-60429 exists;
+`call_logs.ticket_number` is NULL only because write-back runs on a success the
+client sees. Corrected on disk. Fix: the duplicate now polls for the in-flight
+attempt's number (10s, not 3s); a contention refusal that survives says "wait,
+nothing failed"; a timeout is retried once against the app's idempotency key.
 **(b) An empty value spoken.** *"The number ending in ."* (pcp, three times in
 one call) and *"the number ending in \"mous\""* (no-ivr, `8d536d6646`).
 **(c) A wrong identifier read aloud then corrected** — 7 of 305 calls that spoke
@@ -135,7 +145,9 @@ a number. Lower value than I first said; it is last.
 ---
 
 ### W5 — Ticketing app: the name-only consolidation arm.
-**`[!]` different repo — confirm reachability before promising it**
+**`[x]` BUILT AND PUSHED on the ticketing-app branch (`11db8480`); 25 tests green
+there, type-check unchanged (22 pre-existing errors, identical with the change
+stashed); PR opens when GitHub's rate limit lifts. See decision 2 below.**
 
 13 tickets on 2026-09-16 outside PCP carried two or more unrelated callers.
 The arm doing it matches on **first+last name, same department, 24 hours, with
@@ -157,7 +169,12 @@ no phone check at all.** PCP Support was exempted by #273; nothing else was.
 
 ## FOR 5AM — ONE INSTRUCTION
 
-**Pull and republish. That is it.**
+**Pull and republish. Then merge the ticketing-app branch.**
+
+The ticketing-app half is commit `11db8480` on its `claude/determined-brown-o5qsft`
+branch (the name-only consolidation arm, W5). GitHub's API was rate-limited all
+night, so if no PR exists for that branch when you read this, open one from it —
+the commit message is the PR body.
 
 The deployment is running a build older than v37. Everything below is already
 merged or is in PR #321 waiting for you.
@@ -170,13 +187,16 @@ merged or is in PR #321 waiting for you.
 | **v38** | a tool call is persisted when it finishes, not by a 2h in-memory reaper | PCP's `tool_call_count` was NULL on 90.9% of calls; nothing could be measured |
 | **v39** (PR #321) | the four queue lanes say the call is recorded | **401 calls/day recorded with no disclosure, in a two-party-consent state** |
 | **v40** (PR #321) | no more *"the number ending in ."* or *"ending in \"mous\""* | 6 call sites |
+| **v41** (PR #321) | the after-hours line asks for a date of birth ONCE, then files with it marked unavailable/unmatched | no-ivr asked 3+ times on 11 calls on 2026-09-16, one of them FIFTEEN times |
+| **v42** (PR #321) | a filed ticket is never spoken as a failure — a duplicate attempt waits for the real one, a timeout is retried once | 2 callers on 2026-09-16 told *"technical issue"* while their ticket sat in the queue |
+| **v43** (PR #321) | the surgery agent stops reading its own emergency rule aloud | *"These are the words we treat as a surgical emergency"* — spoken to a patient |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v40-no-invented-callback-number-20260917
+GET /voice/health   ->   voice-runtime-v43-the-tool-does-not-narrate-its-rule-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:
@@ -196,24 +216,33 @@ still never served a call.
 
 ---
 
-## THE THREE DECISIONS I NEED, AND NOTHING ELSE
+## THE DECISIONS — TWO OF THREE WERE SETTLED BY EVIDENCE OVERNIGHT
 
-Each is a yes/no. None of them blocks the republish.
+You said not to wait. Where the evidence answered the question, I did not.
+Only decision 3 is still yours. Nothing here blocks the republish.
 
-**1. The date-of-birth loop on the after-hours line.** `noIvrAgent`'s own
-`create_ticket` refuses a ticket without a complete date of birth, with no
-counter and no escape — it can refuse forever, which is the call that asked
-fifteen times. The queue lanes solved this with "ask once, then file anyway".
-**Do I give no-ivr the same escape?** The risk is that the after-hours ticket
-API may reject a payload with no date of birth, and I would rather ask than
-find out on live overnight traffic.
+**1. The date-of-birth loop on the after-hours line — SETTLED BY THE LOGS,
+SHIPPED as v41.** The worry was that the after-hours ticket API might reject a
+payload with no date of birth. `voice_agent_api_logs`, 14 days: **347 of 347
+accepted no-ivr POSTs carried a `patientDOB`, the B2B path already sends the
+literal `'Unknown'`, and the 10 rejections were for `patientFullName` and
+`surgeon` — never the date.** So no-ivr's `create_ticket` now asks once and
+files with the date marked UNAVAILABLE/UNMATCHED, the queue lanes' 2026-09-04
+escape. Red-then-green on the real agent; 6 mutations, 5 caught, the sixth the
+console marker by design. Nothing was invented: the placeholder is a value the
+API has accepted on every POST.
 
-**2. Ticket consolidation outside PCP.** You exempted PCP Support because a
-clinic switchboard calls many times a day about different patients. Thirteen
-tickets on 2026-09-16 merged unrelated callers on the OTHER departments. One arm
-matches on **first+last name with no phone check at all**, within 24 hours.
-**Do I delete that name-only arm everywhere?** On the patient lanes the
-phone-based arm is usually right and I would leave it alone.
+**2. Ticket consolidation outside PCP — BUILT AND PUSHED to the ticketing-app
+branch (`11db8480`), PR pending GitHub's rate limit.** The name arm has no
+phone in it at all, so it is the same defect on every lane your PCP ruling
+named. Measured first: **30 consolidations in 30 days on the patient lanes
+where the phone did NOT match the parent — tech 12, surgery 11, optical 5,
+records 2** — the name arm alone did them, about 6% of consolidations. Removed
+from all three copies (the live filing path, the preview API, the admin
+collapse) with a test that reads all three so it cannot return in one. **The
+phone arm is untouched.** Cost: a patient ringing back from a different number
+within a day gets a second ticket instead of a note on the first — ten seconds
+for a staffer, against a cross-patient merge that mixes two people's PHI.
 
 **3. The emergency word list.** One surgery call said "detached retina" inside
 an ordinary scheduling question and got a 911 warning. Another described
@@ -339,7 +368,13 @@ overnight lane — is answered above by the API's own logs, and the fix shipped.
 
 ## W3 `[x]` and W4(b) `[x]` — shipped, see PR #321
 
-## W5 `[!]` — ticketing app, different repo, and half of it is a policy question
+## W5 `[x]` — the name-only arm is gone from all three copies in the ticketing app
+
+`lib/services/ticket-consolidation.ts` (live filing), `app/api/tickets/check-duplicate/route.ts`
+(preview) and `lib/services/retroactive-consolidation.ts` (admin collapse) each
+carried it; the admin pair predicate is now `ticketsAreTheSameRequest`, pure and
+tested. `consolidation-matches-on-phone-only.test.ts` reads all three sources.
+The measurement and the cost are under decision 2 above.
 
 ---
 

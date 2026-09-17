@@ -18,6 +18,9 @@ import { recordingExecute } from "../services/toolTimeline";
 // The queue lanes' "ask once, then file anyway" ruling (operator, 2026-09-04),
 // which this lane never reached because it builds create_ticket by hand.
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from "../tools/dobEscape";
+// One retry per call on a ticket-API timeout; keyed on the call SID like every
+// other bounded ask in this repo.
+import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
 import { buildCompactLocationReference } from "../config/azulVisionKnowledge";
 import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
@@ -1301,6 +1304,57 @@ The ticket will include schedule context (last appointment info) automatically.`
           validation_errors: [result.error],
           message: result.message || 'Please collect missing information and try again.',
         };
+      }
+
+      // TWO REFUSALS BELOW ARE NOT FAILURES, AND UNTIL 2026-09-17 BOTH FELL
+      // INTO THE "technical system error… end the call" BRANCH AT THE BOTTOM.
+      //
+      // CA…11e362485f (2026-09-16 14:54): the model fired create_ticket twice,
+      // overlapping. The first attempt filed VA-60434; the second lost the
+      // per-call lock, waited 3s, found no ticket number written back yet, and
+      // came back "Concurrent ticket creation in progress" 0.4s BEFORE the
+      // first returned success. The caller — twenty minutes late for an 8:00
+      // appointment — was told we had a technical issue while her ticket sat
+      // in the queue. A duplicate attempt losing the lock means the OTHER
+      // attempt is in flight; its result is the one to speak.
+      if (result.error === 'Concurrent ticket creation in progress') {
+        console.warn(`[TICKET CREATE] duplicate attempt on ${metadata.callSid} lost the lock — the other attempt's result stands`);
+        return {
+          success: false,
+          error: result.error,
+          message:
+            "Another create_ticket call for this same request is already in progress on this " +
+            "call, and its result is on its way to you. Nothing has failed. Do NOT apologise and " +
+            "do NOT tell the caller there was a problem. Say nothing about it — wait for that " +
+            "other result and read the caller the ticket number it carries. Do not call " +
+            "create_ticket again.",
+        };
+      }
+
+      // CA…7074e29c0c (2026-09-16 03:13): create_ticket hit the 15,000ms
+      // client timeout while the ticketing app finished the insert at the
+      // same instant — VA-60429 exists. A timeout is not a proven failure.
+      // submitSimplifiedTicket sends `idempotencyKey: call-<sid>` and the app
+      // answers a key it has seen with the cached result, so ONE retry cannot
+      // open a second ticket and usually returns the number. Bounded to one
+      // per call; a SECOND timeout is a real outage and falls through to the
+      // apology below.
+      if (/timeout/i.test(result.error ?? '')) {
+        const retriedAlready = gateRefusalsSoFar(metadata.callSid, 'create_ticket', 'api_timeout') > 0;
+        if (!retriedAlready) {
+          noteGateRefusal(metadata.callSid, 'create_ticket', 'api_timeout');
+          console.warn(`[TICKET CREATE] ticket API timed out on ${metadata.callSid} — asking for ONE retry (the app dedupes on this call)`);
+          return {
+            success: false,
+            error: result.error,
+            message:
+              "The ticketing system did not answer in time, but it may still have filed the " +
+              "request. Call create_ticket ONCE more right now with exactly the same details — " +
+              "the system recognises this call and will not open a second ticket. Do not tell " +
+              "the caller anything failed.",
+          };
+        }
+        console.error(`[TICKET CREATE] ticket API timed out TWICE on ${metadata.callSid} — reporting the failure`);
       }
 
       if (result.success && result.ticketNumber) {

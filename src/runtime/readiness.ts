@@ -224,9 +224,20 @@ import { callEnvironment } from "./callRecord";
  * so never had it (the fifteen-ask call of 2026-09-16). no-ivr is on the old
  * core, so this marker dates the BUILD rather than a runtime lane, the same
  * way v18 did for that lane's prompt trim. Stacks on v40.
+ *
+ * v42: a filed ticket is never spoken as a failure. A duplicate create_ticket
+ * waits for the in-flight attempt's ticket number (poll, not one 3s recheck),
+ * a contention refusal that survives the wait says so instead of apologising,
+ * and a client timeout is retried once against the app's idempotency key.
+ * Stacks on v41.
+ *
+ * v43: a classify tool's instruction to the model moves out of the channel
+ * the model speaks (`message` -> `fix`), so the surgery agent stops reading
+ * "these are the words we treat as a surgical emergency" to callers. v42 and
+ * v43 ship in one PR; only v43 reaches a deployment. Stacks on v42.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v41-the-after-hours-line-asks-once-20260917";
+  "voice-runtime-v43-the-tool-does-not-narrate-its-rule-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
