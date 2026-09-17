@@ -512,7 +512,7 @@ merged or is in PR #321 waiting for you.
 | **v46** (PR #321) | the tool ceiling stops a tool that keeps succeeding with the same arguments — the eleventh identical call gets the tenth's answer back | 17 calls since 09-10 looped one tool 11–35 times, 16 with no ticket; nothing could see them |
 | **v47** (PR #321) | the after-hours line stops reading a phone-matched patient's appointment before anyone confirms who is calling | 44 of 365 no-ivr calls in nine days had the date, time, office and doctor read out before any identity question |
 | **v48** (PR #321) | `found` and `candidate_count` reach the tool timeline — an instrument, no behaviour change | the W1 date-of-birth fix was reverted because the ambiguous-lookup branch could not be counted; after a day on this build it can be |
-| **v49** (PR #321) | the runtime grades its own calls at teardown, the backfill cannot be starved by its own head, and a dead_air ending after a real conversation is `completed` | a third of the fleet read `agent_outcome` NULL at peak on 2026-09-16 (grades lagging 161–203 min); 87 calls from 09-15 stranded behind two empty rows; 58 real conversations on 09-14 recorded `failed` and never graded or synced |
+| **v49** (PR #321) | the runtime grades its own calls at teardown, the backfill cannot be starved by its own head, a dead_air ending after a real conversation is `completed` — and (round 12) the grade re-opens the ticket sync, so the quality score, sentiment and outcome reach the ticket | a third of the fleet read `agent_outcome` NULL at peak on 2026-09-16 (grades lagging 161–203 min); 87 calls from 09-15 stranded behind two empty rows; 58 real conversations on 09-14 recorded `failed` and never graded or synced |
 | **v50** (PR #321) | the second identity miss ends the ask — `lookup_patient` counts misses per call, coaches one shaped re-ask, then says stop and file | 35 runtime calls on 09-16 asked for a date of birth 2+ times, 13 asked 3+, tech's almost all cold callers; 13–16 calls a day missed 3+ times and were never found, 7–10 of them with no ticket |
 | **v51** (PR #321) | a CERTAIN identity the tools established reaches the call row — `patient_found`, `patient_name`, `patient_dob` — never a phone candidate | NULL on 2,471 of 2,471 runtime calls in seven days; the Observatory's identity columns have been dark on every lane since the cutover (task #57's runtime half was done on a runtime that no longer exists) |
 | **v52** (PR #321) | the per-call cost UPDATE types its two bound components, so Postgres stops refusing it at PARSE and `twilio_cost_cents` is written again | rejected 3,749 times in the 24h to 05:40 (`operator is not unique: unknown + unknown`, since `8a226a6` on 09-04); Twilio price on 5–25% of completed calls against 100% before; 4,295 calls since 09-04 carry a provider-only total |
@@ -580,6 +580,31 @@ tonight (`CONCURRENTLY`, reversible with `DROP INDEX`, no behaviour change — t
 2026-09-12 PersonID precedent); the list and the before/after plans are in
 `docs/observatory/AFTER-MEASUREMENTS-20260917.md`. After-number for #68: lookup
 timeouts per day, 39 on 09-16, target back to the 0 of 09-03..09-08.
+
+**4. OURS — three quarters of agent-filed tickets carry no grade, and the fix is
+forward-looking (Codex round 12, 08:39).** The teardown grade lands seconds to
+minutes after the row; the five-minute sync snapshots the row first, sends nulls
+for quality score, sentiment and outcome, and marks the call done — and nothing
+ever re-opened it. Support Center, tickets with a synced transcript: **291 of 383
+on 09-14, 280 of 368 on 09-15, 296 of 387 on 09-16 have no `quality_score` and no
+`agent_outcome`** while every one of their call rows on the Hub has both. PR #321
+closes it from the first sync after the republish (the grade's write re-opens the
+sync; the sync refuses to mark a row whose grade landed mid-flight). **What the
+code does NOT do is go back:** the 814 rows since 09-14 that were graded after
+their sync stamp (636 with a ticket number on the row) stay ungraded on the
+ticket until something re-opens them. One statement does it, the sweep drains it
+at 20 rows per five minutes (~3.5 hours), each POST is the same idempotent
+`update-call-data` payload with the grade on it, and it works on the build that
+is live now — the payload reads the grade off the row. **Recommendation: run it
+after the republish, off-peak; your call on timing.**
+
+```sql
+-- Hub. Re-open the sync on every call graded after its sync stamp since 09-14.
+UPDATE call_logs SET call_data_synced = false, ticketing_sync_retries = 0
+WHERE created_at >= '2026-09-14' AND duration >= 30 AND status = 'completed'
+  AND call_data_synced = true AND quality_score IS NOT NULL
+  AND graded_at > ticketing_synced_at;   -- 814 rows at 08:57 UTC
+```
 
 ## THE DECISIONS — TWO OF THREE WERE SETTLED BY EVIDENCE OVERNIGHT
 
