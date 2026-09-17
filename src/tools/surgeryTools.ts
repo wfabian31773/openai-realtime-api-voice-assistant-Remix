@@ -723,8 +723,11 @@ registerTool({
      * whose first two answered 503, or refused another field, still spends
      * nothing (Codex P2, #321 round 16), and attempt 2 still never fires,
      * batched or not (`surgeryUnassignedExit.test.ts`). The wait is bounded
-     * by `GATE_SETTLEMENT_WAIT_MS`; the attempts it waits on are POSTs the
-     * client already bounds.
+     * PER PREDECESSOR by `GATE_SETTLEMENT_WAIT_MS` — re-armed on every settle,
+     * because one deadline for the whole queue released the third of a batch
+     * while its second predecessor was still inside its own 15 s POST (Codex
+     * P2, round 17); the attempts it waits on are POSTs the client already
+     * bounds.
      */
     const surgeonAskClaimed = filedOnSurgeryQueue && !lookup.providerId;
     const surgeonAskExhausted = surgeonAskClaimed

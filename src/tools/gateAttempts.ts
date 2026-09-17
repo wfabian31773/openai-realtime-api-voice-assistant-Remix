@@ -111,13 +111,41 @@ export function noteGateRefusal(callSid: string | undefined, tool: string, field
 const settlementWaiters = new Map<string, Array<() => void>>();
 
 /**
- * A claim never waits longer than this for the attempts ahead of it. The
- * attempt it waits on is a ticket POST bounded by the client's own timeout,
- * and `settleGateAttempt` runs on every path that reaches a response — this
- * is the floor under a settle that never comes, not a budget anyone should
- * reach.
+ * A claim never waits longer than this for ANY ONE attempt ahead of it. The
+ * attempt it waits on is a ticket POST bounded by the client's own timeout
+ * (15 s), and `settleGateAttempt` runs on every path that reaches a response
+ * — this is the floor under a settle that never comes, not a budget anyone
+ * should reach. It is PER PREDECESSOR, re-armed by every settle: one deadline
+ * for the whole queue released the third of a batch at 20 s while its second
+ * predecessor was still inside its own 15 s, so it read one refusal where
+ * there were two and the exit did not fire — the lost-third-attempt case
+ * this claim exists to close (Codex P2, #321 round 17).
  */
 export const GATE_SETTLEMENT_WAIT_MS = 20_000;
+
+/**
+ * Park until the next settle on this key, or until the bound passes with no
+ * settle at all. True means a settle woke us; false means the bound did — the
+ * waiter takes itself off the list on the way out, so a settle that arrives
+ * later wakes nobody who has already gone.
+ */
+function waitForSettlement(k: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const wake = () => {
+      if (timer) clearTimeout(timer);
+      resolve(true);
+    };
+    timer = setTimeout(() => {
+      const left = (settlementWaiters.get(k) ?? []).filter((w) => w !== wake);
+      if (left.length) settlementWaiters.set(k, left);
+      else settlementWaiters.delete(k);
+      resolve(false);
+    }, GATE_SETTLEMENT_WAIT_MS);
+    (timer as { unref?: () => void }).unref?.();
+    settlementWaiters.set(k, [...(settlementWaiters.get(k) ?? []), wake]);
+  });
+}
 
 function wakeSettlementWaiters(k: string): void {
   const waiting = settlementWaiters.get(k);
@@ -155,15 +183,13 @@ export async function claimGateAttemptAfterSettlement(
 ): Promise<number> {
   if (!isTwilioCallSid(callSid)) return 0;
   const k = key(callSid, tool, field);
-  const deadline = Date.now() + GATE_SETTLEMENT_WAIT_MS;
-  while ((attempts.get(k)?.pending ?? 0) > 0 && Date.now() < deadline) {
-    await new Promise<void>((resolve) => {
-      const list = settlementWaiters.get(k) ?? [];
-      list.push(resolve);
-      settlementWaiters.set(k, list);
-      const timer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
-      (timer as { unref?: () => void }).unref?.();
-    });
+  // One bounded wait PER attempt ahead of this one — see GATE_SETTLEMENT_WAIT_MS.
+  // A settle that never comes releases the claim; a settle that does re-arms
+  // the bound for the next predecessor, so the wait grows with the queue and
+  // never with the clock.
+  while ((attempts.get(k)?.pending ?? 0) > 0) {
+    const settled = await waitForSettlement(k);
+    if (!settled) break;
   }
   const now = Date.now();
   sweep(now);

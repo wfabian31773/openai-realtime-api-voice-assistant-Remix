@@ -183,6 +183,73 @@ describe("facts and counts share the map without colliding", () => {
   });
 });
 
+describe('each attempt ahead gets its own bounded wait (2026-09-17, #321 round 17)', () => {
+  const SID = 'CA0123456789abcdef0123456789abcdef';
+  /** The client's own POST timeout: what ONE slow predecessor can legitimately take. */
+  const ONE_SLOW_POST_MS = 15_000;
+  beforeEach(() => resetGateAttempts());
+
+  it('the third of a batch is read after BOTH predecessors, even when together they outlast one bound', async () => {
+    vi.useFakeTimers();
+    try {
+      expect(ONE_SLOW_POST_MS).toBeLessThan(GATE_SETTLEMENT_WAIT_MS);
+      expect(2 * ONE_SLOW_POST_MS).toBeGreaterThan(GATE_SETTLEMENT_WAIT_MS);
+      expect(await claimGateAttemptAfterSettlement(SID, 't', 'f')).toBe(0);
+      let second: number | undefined;
+      let third: number | undefined;
+      const p2 = claimGateAttemptAfterSettlement(SID, 't', 'f').then((v) => { second = v; });
+      const p3 = claimGateAttemptAfterSettlement(SID, 't', 'f').then((v) => { third = v; });
+      await vi.advanceTimersByTimeAsync(ONE_SLOW_POST_MS); // t = 15 s: the first answers, refused
+      settleGateAttempt(SID, 't', 'f', true);
+      await p2;
+      expect(second).toBe(1);
+      await vi.advanceTimersByTimeAsync(ONE_SLOW_POST_MS); // t = 30 s: past a single 20 s deadline
+      expect(third).toBeUndefined(); // still parked on the second, not released with one refusal
+      settleGateAttempt(SID, 't', 'f', true);
+      await p3;
+      expect(third).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the bound runs from the LAST settle: a waiter is released 20 s after its predecessor stopped answering, not 20 s after it arrived', async () => {
+    vi.useFakeTimers();
+    try {
+      await claimGateAttemptAfterSettlement(SID, 't', 'f');
+      const p2 = claimGateAttemptAfterSettlement(SID, 't', 'f');
+      let released = false;
+      const p3 = claimGateAttemptAfterSettlement(SID, 't', 'f').then((v) => { released = true; return v; });
+      await vi.advanceTimersByTimeAsync(ONE_SLOW_POST_MS);
+      settleGateAttempt(SID, 't', 'f', true); // the first answers; the second claims; the third re-arms
+      await p2;
+      await vi.advanceTimersByTimeAsync(GATE_SETTLEMENT_WAIT_MS - 1); // t = 35 s less one — a start-anchored bound passed at 20 s
+      expect(released).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(await p3).toBe(1); // the second never settled: released with the one CONFIRMED refusal
+      expect(released).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a waiter the bound released has left the list: a settle that arrives afterwards wakes nobody and counts normally', async () => {
+    vi.useFakeTimers();
+    try {
+      await claimGateAttemptAfterSettlement(SID, 't', 'f');
+      const p2 = claimGateAttemptAfterSettlement(SID, 't', 'f');
+      await vi.advanceTimersByTimeAsync(GATE_SETTLEMENT_WAIT_MS + 1);
+      expect(await p2).toBe(0); // released by the bound, and now in flight itself (pending 2)
+      settleGateAttempt(SID, 't', 'f', true); // the first, late
+      settleGateAttempt(SID, 't', 'f', true); // the second
+      expect(gateRefusalsSoFar(SID, 't', 'f')).toBe(2);
+      expect(await claimGateAttemptAfterSettlement(SID, 't', 'f')).toBe(2); // nothing pending: answers at once
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('claim after the attempts ahead have settled (2026-09-17, #321 round 16)', () => {
   const SID = 'CA0123456789abcdef0123456789abcdef';
   beforeEach(() => resetGateAttempts());
