@@ -280,7 +280,18 @@ registerTool({
           dateOfBirth: one.dateOfBirth,
           deadlineAt,
         });
-        if (picked.patientFound && picked.identity?.unique !== false) {
+        // Codex P1 on #321 (sixth pass): `lookupPatient` FALLS THROUGH when
+        // the trio misses — to the phone rung (no phone is passed here) and
+        // then to the NAME rung, whose first-name predicate is a three-
+        // character prefix. A stored date that no longer resolves would hand
+        // back a similarly named STRANGER as `matchedBy: 'name'`, and the
+        // line below would have relabelled that person phone-confirmed and
+        // remembered their date for the ticket. Only the trio itself promotes.
+        if (
+          picked.patientFound &&
+          picked.matchedBy === 'name_and_dob' &&
+          picked.identity?.unique !== false
+        ) {
           // PHI-free: a count of people and the fact that one was picked.
           console.info(
             `[TOOLS] lookup_patient: the caller's first name picked one of the ${resolved.identity.candidateCount} people on this number`,

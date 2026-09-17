@@ -1288,7 +1288,16 @@ The ticket will include schedule context (last appointment info) automatically.`
       // after session.connect(); the factory-time read that used to sit beside
       // the phone lookup saw undefined on every call. Not awaited — the
       // caller is waiting on the ticket, not on telemetry.
-      if (enrichedContext?.patientFound && !phoneMatchIsUnconfirmed(enrichedContext)) {
+      // Codex P2 on #321 (sixth pass): a name + date-of-birth query that
+      // matches SEVERAL people still comes back `patientFound: true`, with
+      // `identity.unique: false` and the newest person's rows as the primary
+      // context — writing that would record an arbitrary patient's name as
+      // this caller's identity. One person, or nothing.
+      if (
+        enrichedContext?.patientFound &&
+        !phoneMatchIsUnconfirmed(enrichedContext) &&
+        enrichedContext.identity?.unique !== false
+      ) {
         const liveCallLogId = metadata.callLogId;
         const confirmedDob = parsedDOB
           ? parsedDOB.iso || `${parsedDOB.year}-${parsedDOB.month}-${parsedDOB.day}`

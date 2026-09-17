@@ -113,3 +113,27 @@ describe('the recognised-caller block feeds the tool the affirmed name', () => {
     expect(yes).toMatch(/Call lookup_patient\s+with first_name "Zelda"/);
   });
 });
+
+describe('the promotion needs the trio itself — Codex P1 on #321', () => {
+  it("when the picked person's own trio misses and the NAME rung hands back a similarly named stranger, the guess stands and nothing is remembered", async () => {
+    // `lookupPatient` falls through to the name rung — a three-character
+    // first-name prefix — when the stored date no longer resolves. That
+    // result must never be promoted as the person the caller affirmed.
+    const stranger = {
+      ...zeldaAlone,
+      matchedBy: 'name' as const,
+      patientName: 'Zelma Quixano',
+      identity: {
+        unique: true,
+        candidateCount: 1,
+        candidates: [{ firstName: 'Zelma', lastName: 'Quixano', dateOfBirth: '1959-09-09', appointmentCount: 1 }],
+      },
+      patientData: { firstName: 'Zelma', lastName: 'Quixano', dateOfBirth: '1959-09-09', personId: 'p-zelma' },
+    };
+    lookupSpy.mockImplementation(async (p: Record<string, unknown>) => (byTrio(p) ? stranger : twoOnThePhone()));
+    const out = await lookup({ queue: 'surgery', call_sid: SID, caller_phone: '555-555-0147', first_name: 'Zelda' });
+    expect(out.found).toBe(true);
+    expect(out.identity_is_certain).toBe(false);
+    expect(verifiedIdentityFor(SID)).toBeUndefined();
+  });
+});

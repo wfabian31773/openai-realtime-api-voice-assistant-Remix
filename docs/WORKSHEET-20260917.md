@@ -351,18 +351,19 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v54, ready for review). Codex has reviewed it three times: round 1
+   (v39–v54, ready for review). Codex has reviewed it SIX times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
-   3 (04:42) two P2s — every one taken, every thread resolved, each with a test
-   and a mutation check. A FOURTH pass was requested on the head that carries v50,
-   v51, v52, v53, v54 and the round-3, round-4 and round-5 fixes.
-   **Read that fourth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
+   `25b023b` (a parked recording and a turn buffer survive a failed write; the
+   teardown upsert is retried), one declined on the measurement (an identity from
+   a lookup that finishes after hangup: 3 of 1,553 calls) — round 5 (06:03 on
+   `25b023b`) two P2s taken on `bf0da0f`, and **round 6 (06:31 on `fef236b`) a P1
+   on v54 and a P2 on v53 — both the wrong-patient hazard one rung down from where
+   the guards looked, both taken in the commit that follows `fef236b`** — every one
+   with a test and a mutation check, every thread resolved. A SEVENTH pass is
+   requested on that head.
+   **Read that seventh pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
-   **Codex round 4 (05:16 and 05:30 on `1b82a86`): three P2s — two taken on `25b023b`
-   (a parked recording and a turn buffer survive a failed write; the teardown upsert is
-   retried), one declined on the measurement (an identity from a lookup that finishes
-   after hangup: 3 of 1,553 calls). A fifth pass is requested on the head carrying v52,
-   v53 and the round-4 fixes.**
 
 2. **Pull and republish.** `/voice/health` must read the v54 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279

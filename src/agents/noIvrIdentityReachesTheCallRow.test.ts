@@ -144,3 +144,18 @@ describe('a candidate is not an identity', () => {
     expect(h.updateCallLog).not.toHaveBeenCalled();
   });
 });
+
+describe('several people on the name and date of birth write nothing — Codex P2 on #321', () => {
+  it('a name + date-of-birth lookup that matches SEVERAL people does not write the primary as this caller', async () => {
+    h.lookupByNameAndDOB.mockResolvedValue({
+      ...CONFIRMED,
+      identity: { unique: false, candidateCount: 2, candidates: [] },
+    } as any);
+    const agent = await createNoIvrAgent(async () => {}, META);
+    h.liveCallLogId = 'log-row-c153';
+    const res = await call(agent, 'create_ticket', TICKET);
+    expect(res.success).toBe(true);
+    await new Promise((r) => setTimeout(r, 25));
+    expect(h.updateCallLog).not.toHaveBeenCalled();
+  });
+});
