@@ -134,9 +134,30 @@ export const GATE_SETTLEMENT_WAIT_MS = 25_000;
  * flag (Codex P2, #321 round 18). Now a claim waits for the claim ahead of it
  * to finish claiming (or give up) before its own wait even starts, so a bound
  * that passes releases exactly one waiter and the one behind it still waits
- * for what the released one draws.
+ * for what the released one draws. The total a claim can wait is therefore
+ * one bound for a stuck predecessor plus the REAL duration of the attempts
+ * that answer — never a bound per queued claim (see `abandonInFlight`).
  */
 const claimQueues = new Map<string, Promise<void>>();
+
+/**
+ * The bound passed with no settle: the attempt this claim was waiting on is
+ * let go of, so nobody queued behind waits on it AGAIN. Without this a stuck
+ * first attempt cost every later claim its own full bound — the third of a
+ * batch waited two bounds, 50 s, and the runtime's tool-dispatch watchdog
+ * (`DEFAULT_DEAD_AIR_MS + TOOL_DISPATCH_GRACE_MS` in `mediaStreamBridge`,
+ * 45 s) tore the call down first (Codex P2, #321 round 19). Now a stuck
+ * attempt is waited on ONCE, by the claim directly behind it; the claims
+ * behind that wait only for what actually answers. A settle that arrives
+ * late for the abandoned attempt is clamped at zero, which can only wake a
+ * later claim EARLY — a smaller count, never a false flag.
+ */
+function abandonInFlight(k: string): void {
+  const prev = attempts.get(k);
+  if (!prev) return;
+  attempts.delete(k);
+  attempts.set(k, { ...prev, pending: Math.max(0, (prev.pending ?? 0) - 1) });
+}
 
 /**
  * Park until the next settle on this key, or until the bound passes with no
@@ -155,6 +176,7 @@ function waitForSettlement(k: string): Promise<boolean> {
       const left = (settlementWaiters.get(k) ?? []).filter((w) => w !== wake);
       if (left.length) settlementWaiters.set(k, left);
       else settlementWaiters.delete(k);
+      abandonInFlight(k);
       resolve(false);
     }, GATE_SETTLEMENT_WAIT_MS);
     (timer as { unref?: () => void }).unref?.();

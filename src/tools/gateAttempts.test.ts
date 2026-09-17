@@ -198,25 +198,49 @@ describe('waiters are released one at a time when a predecessor outlasts the bou
     expect(GATE_SETTLEMENT_WAIT_MS).toBeGreaterThan(ONE_LONG_ATTEMPT_MS);
   });
 
-  it('a predecessor past the bound releases ONLY the next claim; the one behind it keeps waiting and reads both refusals', async () => {
+  it('an answer that arrives AFTER the bound is a client timeout, never a refusal: it can wake the next claim early with a SMALLER count, and never authorise a flag', async () => {
     vi.useFakeTimers();
     try {
-      expect(await claim()).toBe(0);
+      await claim(); // outlasts the bound: the client aborts its POST at 15 s, so whatever comes back is a timeout
       let second: number | undefined;
       let third: number | undefined;
       const p2 = claim().then((v) => { second = v; });
       const p3 = claim().then((v) => { third = v; });
-      await vi.advanceTimersByTimeAsync(GATE_SETTLEMENT_WAIT_MS + 1); // the first attempt is stuck
+      await vi.advanceTimersByTimeAsync(GATE_SETTLEMENT_WAIT_MS + 1);
       await p2;
-      expect(second).toBe(0); // released by the bound, now in flight beside the first
-      expect(third).toBeUndefined(); // NOT released with it — its own wait began when the second claimed
+      expect(second).toBe(0); // released by the bound; the stuck first is let go of
+      expect(third).toBeUndefined(); // queued behind the second, which is now in flight
       await vi.advanceTimersByTimeAsync(1_000);
-      settleGateAttempt(SID, 't', 'f', true); // the first answers at last, refused
+      settleGateAttempt(SID, 't', 'f', false); // the first's late answer: a timeout, not a refusal
       await vi.advanceTimersByTimeAsync(1);
-      expect(third).toBeUndefined(); // the second is still in flight
-      settleGateAttempt(SID, 't', 'f', true); // the second answers, refused
       await p3;
-      expect(third).toBe(2);
+      expect(third).toBe(0); // woken early — nothing confirmed, so nothing to flag on
+      settleGateAttempt(SID, 't', 'f', true); // the second answers, refused
+      settleGateAttempt(SID, 't', 'f', true); // the third answers, refused
+      expect(gateRefusalsSoFar(SID, 't', 'f')).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a stuck predecessor is waited on ONCE: the claim the bound releases lets go of it, and the one behind waits only for what actually answers', async () => {
+    vi.useFakeTimers();
+    try {
+      await claim(); // stuck: never settles
+      let second: number | undefined;
+      let third: number | undefined;
+      const p2 = claim().then((v) => { second = v; });
+      const p3 = claim().then((v) => { third = v; });
+      await vi.advanceTimersByTimeAsync(GATE_SETTLEMENT_WAIT_MS + 1); // the second is released by the bound
+      await p2;
+      expect(second).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      settleGateAttempt(SID, 't', 'f', true); // the second answers at once, refused
+      await vi.advanceTimersByTimeAsync(1);
+      await p3; // under a queue that still counts the stuck first, this is a second full bound away
+      expect(third).toBe(1);
+      // one bound for the stuck attempt plus the second's real duration — inside the runtime's 45 s tool watchdog
+      expect(GATE_SETTLEMENT_WAIT_MS + 1_000).toBeLessThan(45_000);
     } finally {
       vi.useRealTimers();
     }
