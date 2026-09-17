@@ -265,14 +265,20 @@ lookup had just succeeded. Different shape.
 
 ---
 
-## FOR 5AM — ONE INSTRUCTION
+## FOR 5AM — THREE STEPS, IN THIS ORDER
 
-**Pull and republish. Then merge ticketing-app PR #279.**
-
-The ticketing-app half is **PR #279 (draft)** —
-https://github.com/wfabian31773/ticketing-app/pull/279 — commit `11db8480` on its
-`claude/determined-brown-o5qsft` branch (the name-only consolidation arm, W5).
-Mark it ready and merge it; it needs nothing from the Remix side.
+1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
+   (v39–v47, ready for review). Codex's first pass (03:35) raised three P1s on the
+   observatory/cost ship; all three are taken and their threads resolved, and a
+   second pass was requested at 04:01 on the head that also carries v46 and v47.
+   **Read that second pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   record what happens when a draft is marked ready and merged in the same minute.
+2. **Pull and republish.** `/voice/health` must read the v47 marker below.
+3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
+   — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
+   *Build* checks are green; *Type check* is red with the 22 errors that are
+   red on `main` too (`lib/intake`, missing optional deps — identical with the
+   change stashed). Mark it ready and merge; it needs nothing from the Remix side.
 
 **One more thing that is yours alone: the xAI management key pasted into an
 earlier session's transcript still has to be rotated.** Console → Settings →
@@ -296,13 +302,14 @@ merged or is in PR #321 waiting for you.
 | **v45** (PR #321) | one `daily_grok_costs` row per day — xAI reported vs booked, refusals included — on the cost dashboard, and the call page says reconciled or estimated | 2026-09-12 booked $37.43 onto one 104-second call and nothing recorded that the day was wrong |
 | **v46** (PR #321) | the tool ceiling stops a tool that keeps succeeding with the same arguments — the eleventh identical call gets the tenth's answer back | 17 calls since 09-10 looped one tool 11–35 times, 16 with no ticket; nothing could see them |
 | **v47** (PR #321) | the after-hours line stops reading a phone-matched patient's appointment before anyone confirms who is calling | 44 of 365 no-ivr calls in nine days had the date, time, office and doctor read out before any identity question |
+| **v48** (PR #321) | `found` and `candidate_count` reach the tool timeline — an instrument, no behaviour change | the W1 date-of-birth fix was reverted because the ambiguous-lookup branch could not be counted; after a day on this build it can be |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v47-a-phone-match-is-a-candidate-20260917
+GET /voice/health   ->   voice-runtime-v48-the-ambiguous-lookup-is-countable-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:
@@ -414,10 +421,12 @@ measure how many of those 33 calls are actually this branch.
 Shipping a safety-relevant change on an unmeasurable population is the exact
 thing this operation is trying to stop doing. Reverted.
 
-**What would settle it:** `toolTimeline`'s outcome allow-list carries
-`matched_by` and `identity_is_certain` but not `candidate_count` or `found`.
-Adding `found` makes the two branches separable, and then this is answerable
-with a day of data rather than an argument.
+**What would settle it — SHIPPED as v48:** `toolTimeline`'s outcome allow-list
+carried `matched_by` and `identity_is_certain` but not `candidate_count` or
+`found`. Both are on it now (1 mutation, 1 caught), so after one day on the
+new build this is answerable from `tool_timeline` rather than argued: how many
+of the refusals behind a matched lookup are the ambiguous branch. The fix
+itself stays reverted until that number exists.
 
 ## W2 `[x]` on no-ivr (v41) · `[~]` on the runtime lanes
 

@@ -57,6 +57,38 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     }
   });
 
+  /**
+   * THE THREE SHAPES OF `identity_is_certain: false` ARE SEPARABLE (CLAUDE.md,
+   * the v28 row): found nobody, found one unconfirmed person, found SEVERAL.
+   * Only the last carries `candidate_count`, and `found` splits the first
+   * from the other two. Without both the 2026-09-16 worksheet could not say
+   * how many of 33 date-of-birth refusals behind a matched lookup came from
+   * the ambiguous branch, and a fix was reverted for want of the number.
+   */
+  it('keeps found and candidate_count on a lookup outcome, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'lookup_patient',
+      { first_name: 'Paula', last_name: 'Kolterman' },
+      JSON.stringify({
+        success: true,
+        found: false,
+        identity_is_certain: false,
+        candidate_count: 3,
+        message: 'Ask for their full name and date of birth',
+        candidates: [{ first_name: 'Paula', last_name: 'Kolterman', date_of_birth: '1952-08-29' }],
+      }),
+      40,
+      { agentSlug: 'optical' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ found: false, identity_is_certain: false, candidate_count: 3 });
+    expect(ev.outcome).not.toHaveProperty('candidates');
+    expect(ev.outcome).not.toHaveProperty('message');
+    expect(JSON.stringify(ev)).not.toContain('1952-08-29');
+  });
+
   it('keeps the diagnostic signal as booleans instead of the caller\'s words', () => {
     const callId = freshCall();
     recordToolEvent(callId, 'create_ticket', TICKET_ARGS, '{}', 1, { agentSlug: 'answering-service' });

@@ -260,6 +260,19 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
      * measurement had to come first.
      */
     'matched_by', 'identity_is_certain',
+    /**
+     * WHETHER THE LOOKUP FOUND ANYBODY, AND HOW MANY — the two fields that
+     * separate the branches `identity_is_certain: false` collapses (CLAUDE.md,
+     * the v28 row). `lookup_patient` answers false in three shapes: found
+     * nobody, found one person nobody has confirmed, and found SEVERAL — and
+     * only the last carries `candidate_count`. With neither key here, the
+     * 2026-09-16 worksheet could not say how many of the 33 date-of-birth
+     * refusals behind a matched lookup were the ambiguous branch (which
+     * deliberately forgets the record) and how many were the no-entry gap,
+     * so a safety-relevant fix was written and reverted for want of a number.
+     * A boolean and a count: no PHI.
+     */
+    'found', 'candidate_count',
     'say', // directive text — kept so the Phase 7 rubric can grade say-verbatim compliance
     /**
      * What a refused PCP gate told the model to do instead (src/pcp/refusals.ts).

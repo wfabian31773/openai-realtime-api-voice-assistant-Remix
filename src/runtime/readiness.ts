@@ -272,9 +272,16 @@ import { callEnvironment } from "./callRecord";
  * back: name, date of birth, then lookup_schedule), and the tool's phone-only
  * path returns a candidate with no details. no-ivr is on the old core, so
  * this marker dates the BUILD, the way v18 and v41 did. Stacks on v46.
+ *
+ * v48: the ambiguous lookup is countable. `tool_timeline` kept `matched_by`
+ * and `identity_is_certain` and dropped `found` and `candidate_count`, so
+ * the three shapes of a false flag (found nobody / one unconfirmed person /
+ * several) were byte-identical in SQL and the W1 date-of-birth fix of
+ * 2026-09-16 was reverted for want of a number. Two PHI-free keys join the
+ * outcome allow-list. An instrument, not a fix. Stacks on v47.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v47-a-phone-match-is-a-candidate-20260917";
+  "voice-runtime-v48-the-ambiguous-lookup-is-countable-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
