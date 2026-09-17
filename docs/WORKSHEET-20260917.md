@@ -125,6 +125,15 @@ gets read, not raised blindly.
 `[x]` the narrated emergency rule (below) SHIPPED as v43 — 5 mutations, 5 caught.
 `[ ]` (c) remains, and it is last.**
 
+**Codex round 2 (04:07) on (a):** the P2 that the timeout/contention directives sit in
+`message` is declined with a control — on this hand-built agent `message` is the
+model-facing channel, and over 30 days / 1,338 substantive no-ivr calls the apology
+branch's instruction text was read aloud 0 times while its quoted line was spoken 37.
+The real half is fixed: the prompt's own rules said `api_timeout → apologise and
+end`, contradicting the tool's *call once more* on the same result; the carve-out now
+sits BEFORE the rule in both places the prompt describes a failed tool, asserted on
+the built prompt by position. 3 mutations, 3 caught.
+
 **(a) The SUCCESS branch speaks the failure line — and it was not the success
 branch.** `11e362485f`, no-ivr: the model fired `create_ticket` TWICE,
 overlapping. Attempt A (9.3s) filed VA-60434; attempt B lost the per-call lock,
@@ -162,6 +171,13 @@ no phone check at all.** PCP Support was exempted by #273; nothing else was.
 
 ### W6 — The two backlog items he named at 03:00: clean logging in the Observatory, and the cost.
 **`[x]` BOTH SHIPPED — v44 (logging) and v45 (cost), one PR. 16 mutations, 16 caught.**
+
+**Codex round 2 (04:07):** a recording callback that lands before the call row exists
+(a setup hangup, or a row open past its 2s deadline) was answered 200 and lost — Twilio
+does not retry a 200. It is now parked by CallSid (`parkedRecordings.ts`) and the
+teardown persist takes it onto the row, before the write and again after it. With
+nothing parked the write never touches `recording_url`. `recordingBeatsTheRow.test.ts`,
+8 tests; 6 mutations, 6 caught.
 
 **Operator, 03:00 UTC, with his xAI usage export and a screenshot of xAI's own
 call log:** *"I also need you to make sure we have clean logging in the
@@ -309,9 +325,13 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
    (v39–v49, ready for review). Codex's first pass (03:35) raised three P1s on the
-   observatory/cost ship; all three are taken and their threads resolved, and a
-   second pass was requested at 04:01 on the head that also carries v46 and v47.
-   **Read that second pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   observatory/cost ship; all three are taken and their threads resolved. Its
+   second pass (04:07) raised two P2s — a recording callback beating its call row
+   (taken: parked, then written at teardown) and the no-ivr prompt contradicting
+   the v42 tool result (taken at the prompt; the `message` split declined with a
+   control) — both resolved, and a third pass was requested on the head that
+   carries v48, v49 and both fixes.
+   **Read that third pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
 2. **Pull and republish.** `/voice/health` must read the v49 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279

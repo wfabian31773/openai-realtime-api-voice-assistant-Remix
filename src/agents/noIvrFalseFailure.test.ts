@@ -71,7 +71,7 @@ vi.mock('../services/callerMemoryService', () => ({
   callerMemoryService: { getCallerMemory: async () => null, buildContextForPrompt: () => '' },
 }));
 
-const { createNoIvrAgent } = await import('./noIvrAgent');
+const { createNoIvrAgent, buildNoIvrSystemPrompt } = await import('./noIvrAgent');
 const { resetGateAttempts } = await import('../tools/gateAttempts');
 
 async function call(agent: any, name: string, args: Record<string, unknown>) {
@@ -186,5 +186,40 @@ describe('what does NOT change', () => {
     const r = await call(await agentFor(freshSid()), 'create_ticket', request);
     expect(r.success).toBe(true);
     expect(r.message).toMatch(/submitted successfully/i);
+  });
+});
+
+/**
+ * THE PROMPT MUST NOT UNDO THE TOOL (Codex P2 on #321, round 2). The tool
+ * answers a first timeout with "call once more" and a lost lock with "wait,
+ * nothing failed" — and TICKET CONFIRMATION RULES said, of api_timeout in as
+ * many words, "apologise and end". Two instructions on one result, and the
+ * prompt's is the older and the broader. The carve-out is stated BEFORE the
+ * technical-error rule (the v29 lesson: a model reading in order meets the
+ * ban before the exception), in both places the prompt describes a failed
+ * tool. Read from the BUILT prompt, so a computed-and-discarded string
+ * cannot hide.
+ */
+describe('the prompt does not tell the model to apologise on a result the tool said was not a failure', () => {
+  const prompt = buildNoIvrSystemPrompt({ callId: 'call-prompt', callSid: freshSid() });
+
+  it('the failed-tool summary names the in-progress and once-more results as not failures', () => {
+    const at = prompt.indexOf('IF tool returns success=false or error:');
+    expect(at, 'no failed-tool summary in the prompt').toBeGreaterThan(0);
+    const summary = prompt.slice(at);
+    const head = summary.slice(0, summary.indexOf('ESCALATION'));
+    expect(head).toMatch(/already in progress/i);
+    expect(head).toMatch(/ONCE more/);
+    expect(head).toMatch(/say nothing about a failure/i);
+  });
+
+  it('the carve-out comes BEFORE the technical-error rule in TICKET CONFIRMATION RULES', () => {
+    const rules = prompt.slice(prompt.indexOf('TICKET CONFIRMATION RULES:'));
+    const carveOut = rules.indexOf('ALREADY IN PROGRESS');
+    const technical = rules.indexOf('TECHNICAL ERROR (system_error, api_timeout');
+    expect(carveOut, 'no carve-out in the rules').toBeGreaterThan(0);
+    expect(technical, 'no technical-error rule').toBeGreaterThan(0);
+    expect(carveOut).toBeLessThan(technical);
+    expect(rules.slice(carveOut, technical)).toMatch(/never speak the technical-issue line/i);
   });
 });

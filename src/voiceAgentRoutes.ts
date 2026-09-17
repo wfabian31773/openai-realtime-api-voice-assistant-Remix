@@ -25,6 +25,7 @@ import { flushAzulTimeline, getAzulTimeline, recordDirectorAction } from './serv
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
 import { recordingStatusTarget } from './services/recordingStatusTarget';
+import { parkRecording } from './runtime/parkedRecordings';
 import { recordingDeliveryPlan } from './services/recordingDelivery';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
@@ -7823,7 +7824,13 @@ export function setupVoiceAgentRoutes(app: Express): void {
           console.info(`[RECORDING] ✓ Saved recording URL to call log ${callLog.id} by CallSid`);
           void pushRecordingToTicketing(callLog.id, recordingUrl);
         } else {
-          console.warn(`[RECORDING] ⚠️ No call log for CallSid ${target.callSid} — recording URL not saved`);
+          // The recording beat the row (Codex P2, #321): the runtime records
+          // from the stream's first frame, before the row opens, so a setup
+          // hangup or a slow row open lands here. Twilio does not retry a
+          // 200, so the URL is parked by CallSid and the teardown persist
+          // (persistRuntimeCall) takes it onto the row it writes.
+          parkRecording(target.callSid, recordingUrl);
+          console.warn(`[RECORDING] ⚠️ No call log yet for CallSid ${target.callSid} — recording URL parked until the row lands`);
         }
       }
       

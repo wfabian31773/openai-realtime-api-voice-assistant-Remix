@@ -36,6 +36,7 @@
  */
 
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import { takeParkedRecording } from "./parkedRecordings";
 import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
 import { type RuntimeTransferOutcome } from "./transferOutcomeLog";
 
@@ -96,6 +97,10 @@ export interface RuntimeCallLogRow {
   patientName?: string;
   patientDob?: string;
   patientFound?: boolean;
+  /** Present ONLY when a recording callback landed before this row existed
+   * and was parked (parkedRecordings.ts). Otherwise the callback writes the
+   * column itself and this write must not touch it. */
+  recordingUrl?: string;
 }
 
 /**
@@ -124,6 +129,7 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
     voiceProvider: row.voiceProvider,
     runtimeOutcome: row.runtimeOutcome,
     ...(row.transferredToHuman ? { transferredToHuman: row.transferredToHuman } : {}),
+    ...(row.recordingUrl ? { recordingUrl: row.recordingUrl } : {}),
     ...(row.firstTranscriptDelayMs !== undefined
       ? { firstTranscriptDelayMs: row.firstTranscriptDelayMs }
       : {}),
@@ -575,8 +581,18 @@ export async function persistRuntimeCall(
   upsert: CallLogUpsert = defaultUpsert,
 ): Promise<boolean> {
   const row = toCallLogRow(record, identity);
+  // A recording callback that beat this row is parked by CallSid
+  // (parkedRecordings.ts). Take it onto the write, and look once more after
+  // the write so a callback landing between the two cannot fall in the gap.
+  const parkedUrl = takeParkedRecording(record.callSid);
+  if (parkedUrl) row.recordingUrl = parkedUrl;
   try {
     await upsert(row, toConflictUpdate(row));
+    const lateUrl = takeParkedRecording(record.callSid);
+    if (lateUrl) {
+      const withUrl = { ...row, recordingUrl: lateUrl };
+      await upsert(withUrl, toConflictUpdate(withUrl));
+    }
     return true;
   } catch (error) {
     // Log the failure rather than the record: a transcript in an error log
