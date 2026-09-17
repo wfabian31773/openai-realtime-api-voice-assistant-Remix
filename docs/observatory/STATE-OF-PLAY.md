@@ -10,7 +10,7 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-09-17 08:45 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-09-17 08:55 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
@@ -1088,9 +1088,9 @@ greenlight; the operator merges.
 **Where it is:** `docs/WORKSHEET-20260917.md` is the driving document and its
 *FOR 5AM* block is the hand-off. **PR #321** carries v39–v56 — eighteen ships,
 each with its row in the marker table — plus the round-by-round record of
-**eleven Codex reviews absorbed** (every finding taken or declined on a
-measurement, every thread answered and resolved) and a twelfth requested on
-the head. Suite 256 files / 4,691 tests, root and client typecheck clean.
+**twelve Codex reviews absorbed** (every finding taken or declined on a
+measurement, every thread answered and resolved) and a thirteenth requested
+on the head. Suite 257 files / 4,698 tests, root and client typecheck clean.
 Live Replit was still on v24 when this was written; the deploy marker to look
 for is `voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917`.
 
@@ -1121,6 +1121,13 @@ for is `voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917`.
   lane for seven days); **v54** the affirmed name picks the person among
   several on a phone (26 DOB refusals on recognised callers on 09-16, all
   `no_entry`).
+- **Round 12 of the review found a second large gap the same way v52 was
+  found — by measuring instead of assuming:** three quarters of agent-filed
+  tickets (291 of 383 on 09-14, 280 of 368, 296 of 387) carried NO quality
+  score or outcome while every call row had one, because the five-minute
+  sync could snapshot the row before the grade landed and nothing ever
+  re-opened it. The grade's write now re-opens the sync and the sync's
+  mark-done refuses a row whose grade landed mid-flight.
 - **v52 — the headline finding of the night, read from the Hub's own postgres
   log:** the per-call cost UPDATE had been refused at PARSE 3,749 times a day
   since 2026-09-04 (`operator is not unique: unknown + unknown`), so
