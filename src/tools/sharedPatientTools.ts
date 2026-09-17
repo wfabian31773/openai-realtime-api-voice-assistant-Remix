@@ -79,6 +79,42 @@ export const LOOKUP_PATIENT_BUDGET_MS = 6000;
  */
 const LOOKUP_BUDGET_MARGIN_MS = 250;
 
+/**
+ * THE SECOND MISS ENDS THE IDENTITY ASK — v50, 2026-09-17.
+ *
+ * Measured over the runtime lanes on 2026-09-16: the agent asked for a date
+ * of birth two or more times on 35 substantive calls (surgery 16, tech 16,
+ * optical 3), three or more on 13, and on tech 15 of the 16 were COLD
+ * callers — nobody pre-context recognised, so v25–v28 (the recognised-caller
+ * fixes) never touch them. The shape is not a filing-tool loop: those calls
+ * hit `file_*_ticket`'s date-of-birth refusal at most once (`dobShape`
+ * always `(none)`, the escape working) but called THIS tool 2.5–6.5 times
+ * each. The model asks, the caller answers, the lookup misses, and this
+ * tool's own miss message told it to ask again — every time, with no count.
+ *
+ * So the count lives here, keyed on the call like every other per-call
+ * budget (gateAttempts). A miss counts only when the lookup CARRIED a name
+ * or a date of birth — the phone-first pass on a cold caller is not an ask
+ * the caller answered. The first identity miss coaches the ONE re-ask RULE
+ * ZERO 2b would shape anyway (spell the surname; month, then day, then
+ * year); the second says stop and file. That is the operator's 2026-09-04
+ * ruling on the filing tool ("ask once, then file anyway") applied one layer
+ * earlier, and v33's `MAX_ASKS_PER_FIELD = 2` on the PCP intake — once to
+ * ask, once in case the first answer was mis-heard.
+ *
+ * THE TRADE, measured before choosing the limit (09-15 / 09-16, ~310 calls
+ * with a lookup per day): ~250 found on the first lookup, 9 / 16 on the
+ * second, 10 / 7 only on the third or later — those are matches a bound can
+ * cost, and a ticket still files for them, unmatched, for staff to match.
+ * Against that, 16 / 13 calls missed three or more times and never found,
+ * and 10 / 7 of THOSE left no ticket at all. A lost request outweighs a
+ * lost match. The limit is the dial; it is a judgement, and it is exported
+ * so the test pins the number the prose quotes.
+ */
+export const LOOKUP_MISS_LIMIT = 2;
+const LOOKUP_TOOL = 'lookup_patient';
+const IDENTITY_MISS = 'identity_miss';
+
 registerTool({
   name: 'lookup_patient',
   layer: 'agent',
@@ -237,12 +273,45 @@ registerTool({
             'not read any history back until they have given both.',
         };
       }
+      // Only an answered ask can miss. The phone-first pass on a cold caller
+      // carries no name and no date, so it neither counts nor coaches.
+      const askedAndMissed = Boolean(first || last || dob);
+      const misses = askedAndMissed
+        ? noteGateRefusal(str(input.call_sid), LOOKUP_TOOL, IDENTITY_MISS)
+        : gateRefusalsSoFar(str(input.call_sid), LOOKUP_TOOL, IDENTITY_MISS);
+      if (misses >= LOOKUP_MISS_LIMIT) {
+        // PHI-free: a count and a SID. The marker line for the after-number.
+        console.info(`[TOOLS] lookup_patient: identity miss #${misses} on ${str(input.call_sid)} — the identity ask is spent, telling the model to file with what it has`);
+        return {
+          success: true,
+          found: false,
+          lookup_misses: misses,
+          message:
+            'No record found under those details. That is fine — I will take the request ' +
+            'as given and the team will match it to the chart.',
+          fix:
+            `This is identity miss number ${misses} on this call. Do NOT ask the caller for ` +
+            'their name or date of birth again, and do not look them up again with different ' +
+            'spellings. Take the request and file it now with the details they gave — the ' +
+            'filing tool does not require a match.',
+        };
+      }
       return {
         success: true,
         found: false,
+        lookup_misses: misses,
         message:
           'No record found. They may be new, or calling from a different number. ' +
           'Ask for their name and date of birth if you have not already.',
+        ...(askedAndMissed
+          ? {
+              fix:
+                'That name and date of birth matched nobody on file. You may ask ONCE more — ' +
+                'have them spell the last name, and give the date of birth as month, then day, ' +
+                'then year — then look them up again. If that also misses, do not ask a third ' +
+                'time: take the request and file it with what they gave.',
+            }
+          : {}),
       };
     }
 

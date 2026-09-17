@@ -60,7 +60,7 @@ files carrying the chart date. Mutation: remove the write → red.
 
 ### W2 — Nothing stops a lane asking the same question over and over.
 **`[x]` THE WORST LANE IS FIXED — v41, `noIvrAgent.ts` + `noIvrDobEscape.test.ts`.
-`[~]` the runtime lanes' SPEECH re-asks are still open (see the W2 section below).**
+`[x]` the runtime lanes' re-asks — v50, `sharedPatientTools.ts` + `theSecondMissEndsTheIdentityAsk.test.ts`; 7 mutations, 7 caught (see the W2 section below).**
 
 **Evidence, 2026-09-16, measured in SQL:** the agent asked for a date of birth
 **2+ times on 73 calls**, 3+ times on 30, and **25 of those left no ticket.**
@@ -125,6 +125,12 @@ gets read, not raised blindly.
 `[x]` the narrated emergency rule (below) SHIPPED as v43 — 5 mutations, 5 caught.
 `[-]` (c) left by your rule on outliers — re-measured 04:48: 2 of 942 calls since 09-14 spoke two different ticket numbers (the earlier 7 of 305 counted callback numbers too). Under one percent either way.**
 
+**Codex round 3 (04:42) on (b):** both ramp sites v40 changed set `CONFIRM_CALLBACK` before
+checking whether the number could be spoken, so with *anonymous* in the ledger the ten
+digits the caller then gave were parsed as a yes/no and dropped. An unspeakable number
+now moves the ramp to `COLLECT_CALLBACK`; three behavioural tests on the real ramp; 2
+mutations, 2 caught.
+
 **Codex round 2 (04:07) on (a):** the P2 that the timeout/contention directives sit in
 `message` is declined with a control — on this hand-built agent `message` is the
 model-facing channel, and over 30 days / 1,338 substantive no-ivr calls the apology
@@ -171,6 +177,11 @@ no phone check at all.** PCP Support was exempted by #273; nothing else was.
 
 ### W6 — The two backlog items he named at 03:00: clean logging in the Observatory, and the cost.
 **`[x]` BOTH SHIPPED — v44 (logging) and v45 (cost), one PR. 16 mutations, 16 caught.**
+
+**Codex round 3 (04:42):** the round-1 recording fix had a race of its own — a call the
+sync had already snapshotted when the URL landed was sent by neither side. The push now
+sends the URL every time and never touches `callDataSynced`; the sync carries it again
+and marks the call. `recordingPushIsPartial.test.ts`; 2 mutations, 2 caught.
 
 **Codex round 2 (04:07):** a recording callback that lands before the call row exists
 (a setup hangup, or a row open past its 2s deadline) was answered 200 and lost — Twilio
@@ -324,16 +335,14 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v49, ready for review). Codex's first pass (03:35) raised three P1s on the
-   observatory/cost ship; all three are taken and their threads resolved. Its
-   second pass (04:07) raised two P2s — a recording callback beating its call row
-   (taken: parked, then written at teardown) and the no-ivr prompt contradicting
-   the v42 tool result (taken at the prompt; the `message` split declined with a
-   control) — both resolved, and a third pass was requested on the head that
-   carries v48, v49 and both fixes.
-   **Read that third pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   (v39–v50, ready for review). Codex has reviewed it three times: round 1
+   (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
+   3 (04:42) two P2s — every one taken, every thread resolved, each with a test
+   and a mutation check. A FOURTH pass was requested on the head that carries v50
+   and the round-3 fixes.
+   **Read that fourth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
-2. **Pull and republish.** `/voice/health` must read the v49 marker below.
+2. **Pull and republish.** `/voice/health` must read the v50 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
    — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
    *Build* checks are green; *Type check* is red with the 22 errors that are
@@ -383,13 +392,14 @@ merged or is in PR #321 waiting for you.
 | **v47** (PR #321) | the after-hours line stops reading a phone-matched patient's appointment before anyone confirms who is calling | 44 of 365 no-ivr calls in nine days had the date, time, office and doctor read out before any identity question |
 | **v48** (PR #321) | `found` and `candidate_count` reach the tool timeline — an instrument, no behaviour change | the W1 date-of-birth fix was reverted because the ambiguous-lookup branch could not be counted; after a day on this build it can be |
 | **v49** (PR #321) | the runtime grades its own calls at teardown, the backfill cannot be starved by its own head, and a dead_air ending after a real conversation is `completed` | a third of the fleet read `agent_outcome` NULL at peak on 2026-09-16 (grades lagging 161–203 min); 87 calls from 09-15 stranded behind two empty rows; 58 real conversations on 09-14 recorded `failed` and never graded or synced |
+| **v50** (PR #321) | the second identity miss ends the ask — `lookup_patient` counts misses per call, coaches one shaped re-ask, then says stop and file | 35 runtime calls on 09-16 asked for a date of birth 2+ times, 13 asked 3+, tech's almost all cold callers; 13–16 calls a day missed 3+ times and were never found, 7–10 of them with no ticket |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v49-the-fleet-is-graded-at-teardown-20260917
+GET /voice/health   ->   voice-runtime-v50-the-second-miss-ends-the-identity-ask-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:
@@ -510,7 +520,24 @@ new build this is answerable from `tool_timeline` rather than argued: how many
 of the refusals behind a matched lookup are the ambiguous branch. The fix
 itself stays reverted until that number exists.
 
-## W2 `[x]` on no-ivr (v41) · `[~]` on the runtime lanes
+## W2 `[x]` on no-ivr (v41) · `[x]` on the runtime lanes (v50, 05:40)
+
+**05:40 — the runtime half is SHIPPED as v50, and my earlier recommendation to
+wait for the v25–v28 after-arm was wrong for tech.** Measured 2026-09-16: of the
+calls asking for a date of birth 2+ times, tech's 16 were 15 COLD callers and 1
+recognised; surgery's 16 split 8/8. The recognised-caller fixes never reach a
+cold caller. And the loop is not the filing tool (refused once at most,
+`dobShape` `(none)`) — it is `lookup_patient`, called 2.5–6.5 times per such call,
+whose own miss message sent the model back to ask every time. v50 counts identity
+misses per call inside that tool: the phone-first pass is free, the first miss
+on a name or date of birth coaches ONE shaped re-ask (spell the surname; month,
+day, year), the second says stop and file. **The trade, measured first:** per
+day ~250 lookups hit first try, 9–16 on the second, 7–10 only on the third or
+later (most of those survive the bound); against 13–16 calls a day that missed
+3+ times and were never found, 7–10 of which left no ticket. A lost request
+outweighs a lost match. `LOOKUP_MISS_LIMIT = 2` is the dial — say the word and it
+is 3. Number: runtime calls asking DOB 3+ times, 13 on 09-16 → 0. Guard: filing
+rate per lane must not fall.
 
 **SHIPPED, 02:20 UTC:** no-ivr's `create_ticket` now calls `decideDobEscape`,
 keyed on the call SID — asks once, then files with `patientDOB: 'Unknown'` and

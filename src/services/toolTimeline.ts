@@ -273,6 +273,13 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
      * A boolean and a count: no PHI.
      */
     'found', 'candidate_count',
+    /**
+     * How many times this call's lookup missed on a name or date of birth the
+     * caller had already given (sharedPatientTools.ts, LOOKUP_MISS_LIMIT). A
+     * count, no PHI: it is what makes "the second miss ended the ask" a
+     * number rather than a console line.
+     */
+    'lookup_misses',
     'say', // directive text — kept so the Phase 7 rubric can grade say-verbatim compliance
     /**
      * What a refused PCP gate told the model to do instead (src/pcp/refusals.ts).

@@ -293,9 +293,19 @@ import { callEnvironment } from "./callRecord";
  * slot, the budget is spent on attempts over a wider window); and a dead_air
  * ending after a real conversation is `completed`, not `failed`, so the 58
  * such calls of 09-14 are graded and synced like any other. Stacks on v48.
+ *
+ * v50: the second miss ends the identity ask. On 2026-09-16 the runtime
+ * lanes asked for a date of birth 2+ times on 35 substantive calls, 3+ on
+ * 13, and on tech 15 of 16 were COLD callers the recognised-caller fixes
+ * never reach. The loop runs through lookup_patient — called 2.5–6.5 times
+ * per such call, its own miss message sending the model back to ask, with
+ * no count. A miss now counts only when the lookup carried a name or a date
+ * of birth; the first coaches the one re-ask in the funnel's shape, the
+ * second (LOOKUP_MISS_LIMIT) says stop and file. `lookup_misses` reaches the
+ * timeline so the after-number is SQL. Stacks on v49.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v49-the-fleet-is-graded-at-teardown-20260917";
+  "voice-runtime-v50-the-second-miss-ends-the-identity-ask-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
