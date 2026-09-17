@@ -1090,7 +1090,7 @@ greenlight; the operator merges.
 each with its row in the marker table — plus the round-by-round record of
 **sixteen Codex reviews absorbed** (every finding taken or declined on a
 measurement, every thread answered and resolved) and a seventeenth requested
-on the head. Suite 257 files / 4,721 tests, root and client typecheck clean.
+on the head. Suite 257 files / 4,723 tests, root and client typecheck clean.
 Live Replit was still on v24 when this was written; the deploy marker to look
 for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
 
