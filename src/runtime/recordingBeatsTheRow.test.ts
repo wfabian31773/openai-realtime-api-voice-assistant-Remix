@@ -19,6 +19,7 @@ import {
   parkRecording,
   peekParkedRecording,
   releaseParkedRecording,
+  landRecording,
   clearParkedRecordings,
   parkedRecordingCount,
   PARKED_RECORDING_TTL_MS,
@@ -197,17 +198,91 @@ describe("the teardown persist takes a parked URL onto the row", () => {
   });
 });
 
-describe("the recording-status handler parks a callback that finds no row", () => {
+describe("the recording-status handler lands every CallSid callback through landRecording", () => {
   const routes = readFileSync(new URL("../voiceAgentRoutes.ts", import.meta.url), "utf8");
 
-  it("the CallSid branch's no-row arm calls parkRecording with the CallSid and the URL", () => {
-    expect(routes).toMatch(/import \{ parkRecording \} from '\.\/runtime\/parkedRecordings'/);
+  it("the CallSid branch hands the callback to landRecording and does not look the row up itself first", () => {
+    expect(routes).toMatch(/import \{ landRecording \} from '\.\/runtime\/parkedRecordings'/);
     const handler = routes.slice(routes.indexOf(`app.post("/api/voice/recording-status"`));
     const branch = handler.indexOf("target?.by === 'call'");
     const body = handler.slice(branch, handler.indexOf("res.status(200).send('OK')", branch));
-    const found = body.indexOf("if (callLog) {");
-    const noRow = body.indexOf("} else {", found);
-    expect(noRow, "the CallSid branch has no no-row arm").toBeGreaterThan(found);
-    expect(body.slice(noRow)).toMatch(/parkRecording\(target\.callSid, recordingUrl\)/);
+    const landing = body.indexOf("landRecording(target.callSid, recordingUrl");
+    expect(landing, "the CallSid branch does not call landRecording").toBeGreaterThan(-1);
+    // A lookup BEFORE the landing is the round-7 race put back: the park must
+    // precede it, and only the lander holds that order.
+    const lookup = body.indexOf("getCallLogBySid(");
+    expect(lookup === -1 || lookup > landing, "the branch looks the row up before parking").toBe(true);
+  });
+});
+
+describe("the callback parks BEFORE it looks — the race with the teardown (Codex P2, round 7)", () => {
+  const deps = (row: { id: string } | undefined, onWrite?: () => void) => {
+    const writes: Array<[string, string]> = [];
+    const pushes: Array<[string, string]> = [];
+    let sawParkedDuringLookup: string | undefined;
+    return {
+      writes,
+      pushes,
+      seen: () => sawParkedDuringLookup,
+      deps: {
+        findRow: async () => {
+          sawParkedDuringLookup = peekParkedRecording(SID);
+          return row;
+        },
+        writeUrl: async (id: string, url: string) => {
+          onWrite?.();
+          writes.push([id, url]);
+        },
+        push: (id: string, url: string) => {
+          pushes.push([id, url]);
+        },
+      },
+    };
+  };
+
+  it("the URL is already parked when the row is looked up", async () => {
+    const d = deps({ id: "row-1" });
+    expect(await landRecording(SID, URL_A, d.deps)).toBe("written");
+    expect(d.seen()).toBe(URL_A);
+    expect(d.writes).toEqual([["row-1", URL_A]]);
+    expect(d.pushes).toEqual([["row-1", URL_A]]);
+    expect(parkedRecordingCount()).toBe(0);
+  });
+
+  it("no row: the URL stays parked for the persist, nothing is written or pushed", async () => {
+    const d = deps(undefined);
+    expect(await landRecording(SID, URL_A, d.deps)).toBe("parked");
+    expect(d.writes).toEqual([]);
+    expect(d.pushes).toEqual([]);
+    expect(peekParkedRecording(SID)).toBe(URL_A);
+  });
+
+  it("the teardown persists and peeks WHILE the lookup is in flight, and the lookup then reports no row — the URL still lands", async () => {
+    const { writes, upsert } = recordingUpsert();
+    const d = {
+      findRow: async () => {
+        // The teardown runs its whole persist — write, then the late peek —
+        // inside the callback's lookup window, and the lookup's snapshot
+        // predates the row.
+        expect(await persistRuntimeCall(record(), {}, upsert)).toBe(true);
+        return undefined;
+      },
+      writeUrl: async () => undefined,
+    };
+    expect(await landRecording(SID, URL_A, d)).toBe("parked");
+    // Parked before the lookup, so the teardown's peek found it and wrote it.
+    expect(writes.some((w) => w.row.recordingUrl === URL_A || w.update.recordingUrl === URL_A)).toBe(true);
+    expect(parkedRecordingCount()).toBe(0);
+  });
+
+  it("a write that throws leaves the URL parked", async () => {
+    const d = {
+      findRow: async () => ({ id: "row-1" }),
+      writeUrl: async () => {
+        throw new Error("db down");
+      },
+    };
+    await expect(landRecording(SID, URL_A, d)).rejects.toThrow("db down");
+    expect(peekParkedRecording(SID)).toBe(URL_A);
   });
 });

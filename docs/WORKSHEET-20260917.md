@@ -357,12 +357,16 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
    teardown upsert is retried), one declined on the measurement (an identity from
    a lookup that finishes after hangup: 3 of 1,553 calls) — round 5 (06:03 on
-   `25b023b`) two P2s taken on `bf0da0f`, and **round 6 (06:31 on `fef236b`) a P1
-   on v54 and a P2 on v53 — both the wrong-patient hazard one rung down from where
-   the guards looked, both taken in the commit that follows `fef236b`** — every one
-   with a test and a mutation check, every thread resolved. A SEVENTH pass is
-   requested on that head.
-   **Read that seventh pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   `25b023b`) two P2s taken on `bf0da0f`, round 6 (06:31 on `fef236b`) a P1 on v54
+   and a P2 on v53 — both the wrong-patient hazard one rung down from where the
+   guards looked, both taken on `0142526` — and **round 7 (06:52 on `0142526`) two
+   P2s: a recording callback that could park its URL AFTER the teardown had already
+   peeked (the callback now parks before it looks), and grading with no atomic claim
+   (the backfill could grade a call the teardown was already grading — the claim is
+   now the `gradedAt` stamp, taken before the LLM is asked), both taken in the
+   commit that follows `0142526`** — every one with a test and a mutation check,
+   every thread resolved. An EIGHTH pass is requested on that head.
+   **Read that eighth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
 
 2. **Pull and republish.** `/voice/health` must read the v54 marker below.

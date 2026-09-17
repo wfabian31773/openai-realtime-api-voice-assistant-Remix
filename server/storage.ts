@@ -695,6 +695,24 @@ export class DatabaseStorage implements IStorage {
    *  that had no loop dimension. This selects graded rows whose
    *  graderVersion predates the current one so the 5-minute sweep can
    *  re-run the (cheap, deterministic) graders against them. */
+  /**
+   * ATOMICALLY CLAIM A CALL FOR GRADING (Codex P2, #321 round 7). `gradedAt`
+   * was stamped only AFTER the LLM answered, so for the seconds between a
+   * completed row landing and its grade landing, the teardown grader and the
+   * five-minute backfill could both select it and both pay for a grade. The
+   * claim is the stamp itself, taken before the LLM is asked, and only where
+   * nobody has taken it: one row back means this caller grades, none means
+   * somebody else already is (or did). Released by the grader on failure.
+   */
+  async claimCallLogForGrading(id: string): Promise<boolean> {
+    const rows = await db
+      .update(callLogs)
+      .set({ gradedAt: new Date() })
+      .where(and(eq(callLogs.id, id), isNull(callLogs.gradedAt)))
+      .returning({ id: callLogs.id });
+    return rows.length === 1;
+  }
+
   async getCallLogsWithStaleGraderVersion(currentVersion: number, limit: number = 25): Promise<CallLog[]> {
     return await db
       .select()

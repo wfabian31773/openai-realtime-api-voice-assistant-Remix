@@ -46,10 +46,14 @@ describe("the old core's recording-status handler takes the CallSid-keyed callba
     const branch = handler.indexOf("target?.by === 'call'");
     expect(branch, "no CallSid branch in the recording-status handler").toBeGreaterThan(0);
     const body = handler.slice(branch, handler.indexOf("res.status(200).send('OK')", branch));
-    expect(body).toMatch(/getCallLogBySid\(target\.callSid\)/);
-    expect(body).toMatch(/updateCallLog\(callLog\.id, \{ recordingUrl \}\)/);
+    // The lookup, the write and the ticket push all go through landRecording
+    // (Codex P2, round 7 — the park has to precede the lookup, and only the
+    // lander holds that order), with storage handed in as its dependencies.
+    expect(body).toMatch(/landRecording\(target\.callSid, recordingUrl, \{/);
+    expect(body).toMatch(/findRow: \(sid\) => storage\.getCallLogBySid\(sid\)/);
+    expect(body).toMatch(/writeUrl: \(id, url\) => storage\.updateCallLog\(id, \{ recordingUrl: url \}\)/);
     // The ticket gets the recording the same way a conference recording's does.
-    expect(body).toMatch(/pushRecordingToTicketing\(callLog\.id, recordingUrl\)/);
+    expect(body).toMatch(/push: \(id, url\) => void pushRecordingToTicketing\(id, url\)/);
   });
 
   /**
@@ -63,8 +67,9 @@ describe("the old core's recording-status handler takes the CallSid-keyed callba
     const branch = handler.indexOf("target?.by === 'call'");
     const body = handler.slice(branch, handler.indexOf("res.status(200).send('OK')", branch));
     const check = body.indexOf("checkTwilioSignature(");
-    const read = body.indexOf("storage.getCallLogBySid(target.callSid)");
+    const read = body.indexOf("landRecording(target.callSid, recordingUrl");
     expect(check, "no signature check in the CallSid branch").toBeGreaterThan(0);
+    expect(read, "no landing in the CallSid branch").toBeGreaterThan(0);
     expect(check).toBeLessThan(read);
     expect(body).toMatch(/if \(signature !== 'valid'\)/);
     expect(body.slice(check, read)).toMatch(/return res\.status\(403\)/);

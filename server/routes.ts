@@ -3186,7 +3186,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const { callGradingService } = await import('../src/services/callGradingService');
       
-      const grading = await callGradingService.gradeCall(callLog.id, callLog.transcript);
+      // A manual regrade means to grade a row that may already be graded, so
+      // it bypasses the once-only claim the automatic paths take.
+      const grading = await callGradingService.gradeCall(callLog.id, callLog.transcript, undefined, { claim: false });
       
       res.json({ 
         success: true, 

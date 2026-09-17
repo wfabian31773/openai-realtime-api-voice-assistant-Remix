@@ -1560,13 +1560,37 @@ export class CallGradingService {
     return results;
   }
 
-  async gradeCall(callLogId: string, transcript: string, agentName?: string): Promise<QualityAnalysis | null> {
+  async gradeCall(
+    callLogId: string,
+    transcript: string,
+    agentName?: string,
+    opts: { claim?: boolean } = {},
+  ): Promise<QualityAnalysis | null> {
     if (!transcript || transcript.trim().length < 50) {
       console.warn(`[GRADING] Transcript too short for call ${callLogId}`);
       return null;
     }
 
+    /**
+     * ONE GRADE PER CALL, CLAIMED BEFORE THE LLM IS ASKED (Codex P2, #321
+     * round 7). Three callers race on a freshly completed row — the old
+     * core's teardown, the runtime's teardown (v49) and the five-minute
+     * backfill — and `gradedAt` used to be stamped only after the answer
+     * came back, so a backfill cycle landing inside that window graded the
+     * call a second time and the last answer overwrote the first. The claim
+     * lives HERE so no caller can forget it; the one caller that means to
+     * grade an already-graded row (the admin regrade button) says so.
+     * A claim that then fails is released below, so the backfill can retry.
+     */
+    let claimed = false;
     try {
+      if (opts.claim !== false) {
+        claimed = await storage.claimCallLogForGrading(callLogId);
+        if (!claimed) {
+          console.info(`[GRADING] ${callLogId} is already claimed or graded — not graded twice`);
+          return null;
+        }
+      }
       const systemPrompt = `You are an expert call quality analyst for a healthcare ophthalmology practice. 
 Analyze the following call transcript between a patient and an AI voice agent.
 
@@ -1617,6 +1641,7 @@ Respond with a JSON object only, no other text:
       const content = response.choices[0]?.message?.content;
       if (!content) {
         console.error(`[GRADING] No response content for call ${callLogId}`);
+        if (claimed) await this.releaseGradingClaim(callLogId);
         return null;
       }
 
@@ -1694,7 +1719,19 @@ Respond with a JSON object only, no other text:
       return analysis;
     } catch (error) {
       console.error(`[GRADING] Error grading call ${callLogId}:`, error);
+      if (claimed) await this.releaseGradingClaim(callLogId);
       return null;
+    }
+  }
+
+  /** A claim whose grade never landed goes back to the queue. Never throws:
+   * a release that fails leaves the row findable the dead-letter way
+   * (gradedAt set, sentiment null), which is the documented recovery shape. */
+  private async releaseGradingClaim(callLogId: string): Promise<void> {
+    try {
+      await storage.updateCallLog(callLogId, { gradedAt: null });
+    } catch (e) {
+      console.warn(`[GRADING] could not release the grading claim on ${callLogId}:`, e);
     }
   }
 

@@ -25,7 +25,7 @@ import { flushAzulTimeline, getAzulTimeline, recordDirectorAction } from './serv
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
 import { recordingStatusTarget } from './services/recordingStatusTarget';
-import { parkRecording } from './runtime/parkedRecordings';
+import { landRecording } from './runtime/parkedRecordings';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
@@ -7816,18 +7816,19 @@ export function setupVoiceAgentRoutes(app: Express): void {
           return res.status(403).send('invalid signature');
         }
         const { storage } = await import('../server/storage');
-        const callLog = await storage.getCallLogBySid(target.callSid);
-        if (callLog) {
-          await storage.updateCallLog(callLog.id, { recordingUrl });
-          console.info(`[RECORDING] ✓ Saved recording URL to call log ${callLog.id} by CallSid`);
-          void pushRecordingToTicketing(callLog.id, recordingUrl);
+        // The recording can beat the row (Codex P2, #321): the runtime records
+        // from the stream's first frame, before the row opens. And the lookup
+        // can pass the teardown's own peeks (Codex P2, round 7) — so the URL
+        // is PARKED BEFORE the row is looked up, and released only once a
+        // write has carried it. The ordering is the fix; see landRecording.
+        const landed = await landRecording(target.callSid, recordingUrl, {
+          findRow: (sid) => storage.getCallLogBySid(sid),
+          writeUrl: (id, url) => storage.updateCallLog(id, { recordingUrl: url }),
+          push: (id, url) => void pushRecordingToTicketing(id, url),
+        });
+        if (landed === 'written') {
+          console.info(`[RECORDING] ✓ Saved recording URL to the call log by CallSid`);
         } else {
-          // The recording beat the row (Codex P2, #321): the runtime records
-          // from the stream's first frame, before the row opens, so a setup
-          // hangup or a slow row open lands here. Twilio does not retry a
-          // 200, so the URL is parked by CallSid and the teardown persist
-          // (persistRuntimeCall) takes it onto the row it writes.
-          parkRecording(target.callSid, recordingUrl);
           console.warn(`[RECORDING] ⚠️ No call log yet for CallSid ${target.callSid} — recording URL parked until the row lands`);
         }
       }

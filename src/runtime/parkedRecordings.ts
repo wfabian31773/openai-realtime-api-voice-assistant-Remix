@@ -75,3 +75,48 @@ export function clearParkedRecordings(): void {
 export function parkedRecordingCount(): number {
   return parked.size;
 }
+
+/** What the recording callback needs from storage — narrowed so the race can
+ * be driven offline with fakes. */
+export interface RecordingLandingDeps {
+  findRow: (callSid: string) => Promise<{ id: string } | null | undefined>;
+  writeUrl: (rowId: string, url: string) => Promise<unknown>;
+  /** Fire-and-forget: the ticket push, once the row holds the URL. */
+  push?: (rowId: string, url: string) => void;
+}
+
+export type RecordingLanding = "written" | "parked";
+
+/**
+ * THE CALLBACK PARKS BEFORE IT LOOKS — Codex P2 on #321, round 7.
+ *
+ * The first version looked the row up and parked only on a miss. That leaves
+ * a window the teardown persist can pass straight through: the callback's
+ * lookup finds no row → the teardown writes the row and runs BOTH of its
+ * peeks (nothing parked yet) → the callback parks. Nothing ever reads that
+ * entry again; the recording expires with it. Twilio was answered 200, so it
+ * does not retry.
+ *
+ * Parking FIRST closes every interleaving with one ordering rule:
+ *   - the row lands before the lookup → this function writes it and releases;
+ *     a teardown peek that ran in between wrote the same URL, idempotently;
+ *   - the row lands after the lookup → the teardown's post-write peek finds
+ *     the entry, because it was parked before the lookup ever ran.
+ * The entry is released only once the write that carried it returned, so a
+ * write that throws leaves the URL for the persist (or the TTL) — the same
+ * rule `persistRuntimeCall` follows on its side.
+ */
+export async function landRecording(
+  callSid: string,
+  url: string,
+  deps: RecordingLandingDeps,
+  now: number = Date.now(),
+): Promise<RecordingLanding> {
+  parkRecording(callSid, url, now);
+  const row = await deps.findRow(callSid);
+  if (!row) return "parked";
+  await deps.writeUrl(row.id, url);
+  releaseParkedRecording(callSid, url);
+  deps.push?.(row.id, url);
+  return "written";
+}
