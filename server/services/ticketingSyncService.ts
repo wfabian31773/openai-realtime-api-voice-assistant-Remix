@@ -310,7 +310,12 @@ export class TicketingSyncService {
             ticketingSyncError: retriesExhausted
               ? `GAVE UP after ${MAX_RETRIES} attempts: ${errorMsg}`
               : errorMsg,
-            ticketingSyncRetries: newRetryCount,
+            // ATOMIC, not the snapshot (Codex P2, round 15 on #321): the grade
+            // and recording writers reset this column to 0 to re-open the sync,
+            // and a stale `currentRetries + 1` written after that reset put a
+            // row at 3 — ineligible — with the new data never sent. Incremented
+            // in the database, a reset that lands mid-pass leaves the row at 1.
+            ticketingSyncRetries: sql`COALESCE(${callLogs.ticketingSyncRetries}, 0) + 1`,
           })
           .where(eq(callLogs.id, call.id));
 
@@ -340,7 +345,8 @@ export class TicketingSyncService {
           ticketingSyncError: retriesExhausted 
             ? `GAVE UP after ${MAX_RETRIES} attempts: ${errorMsg}`
             : errorMsg,
-          ticketingSyncRetries: newRetryCount,
+          // Atomic for the same reason as the failure branch above.
+          ticketingSyncRetries: sql`COALESCE(${callLogs.ticketingSyncRetries}, 0) + 1`,
         })
         .where(eq(callLogs.id, call.id));
 

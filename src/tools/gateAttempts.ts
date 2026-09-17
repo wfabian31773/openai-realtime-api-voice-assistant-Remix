@@ -24,6 +24,8 @@
 interface Attempt {
   n: number;
   at: number;
+  /** Attempts claimed before their response is in — see claimGateAttempt. */
+  pending?: number;
 }
 
 import { isTwilioCallSid } from './callSid';
@@ -87,9 +89,10 @@ export function noteGateRefusal(callSid: string | undefined, tool: string, field
   const now = Date.now();
   sweep(now);
   const k = key(callSid, tool, field);
-  const n = (attempts.get(k)?.n ?? 0) + 1;
+  const prev = attempts.get(k);
+  const n = (prev?.n ?? 0) + 1;
   attempts.delete(k); // re-insert so insertion order tracks recency
-  attempts.set(k, { n, at: now });
+  attempts.set(k, { n, at: now, pending: prev?.pending ?? 0 });
   return n;
 }
 
@@ -104,6 +107,51 @@ export function noteGateRefusal(callSid: string | undefined, tool: string, field
  * (Codex, PR #268 round 15). Anything per-call and boolean belongs here now,
  * where the bounding was already solved.
  */
+/**
+ * Claim an attempt BEFORE it is dispatched. Returns how many refusals this
+ * field has already drawn PLUS how many attempts are still in flight, then
+ * counts this one as in flight. Read-and-claim is one synchronous step, so a
+ * batch of concurrent attempts is ORDERED: the third of three reads 2 even
+ * though no refusal has returned yet. That is the whole reason it exists —
+ * measured 2026-09-17 on surgery, every lost call that reached a third
+ * filing attempt had fired its attempts 1–100 ms apart, in one model
+ * response, and a counter noted only after each response read 0 on all
+ * three (surgeryTools.ts, `surgeonAskExhausted`).
+ *
+ * Settle it with `settleGateAttempt` once the response is in. Only a refusal
+ * for THIS field becomes a counted refusal; an outage, or a refusal for some
+ * other field, leaves the count where it was — so for SEQUENTIAL attempts
+ * the rules are exactly what `gateRefusalsSoFar` + `noteGateRefusal` gave.
+ */
+export function claimGateAttempt(callSid: string | undefined, tool: string, field: string): number {
+  if (!isTwilioCallSid(callSid)) return 0;
+  const now = Date.now();
+  sweep(now);
+  const k = key(callSid, tool, field);
+  const prev = attempts.get(k);
+  const fresh = prev && now - prev.at <= TTL_MS ? prev : undefined;
+  const seen = (fresh?.n ?? 0) + (fresh?.pending ?? 0);
+  attempts.delete(k);
+  attempts.set(k, { n: fresh?.n ?? 0, at: now, pending: (fresh?.pending ?? 0) + 1 });
+  return seen;
+}
+
+/** The other half of `claimGateAttempt`: the attempt has answered. */
+export function settleGateAttempt(
+  callSid: string | undefined,
+  tool: string,
+  field: string,
+  refused: boolean,
+): void {
+  if (!isTwilioCallSid(callSid)) return;
+  const k = key(callSid, tool, field);
+  const prev = attempts.get(k);
+  if (!prev) return;
+  const pending = Math.max(0, (prev.pending ?? 0) - 1);
+  attempts.delete(k);
+  attempts.set(k, { n: prev.n + (refused ? 1 : 0), at: Date.now(), pending });
+}
+
 const FACT_TOOL = "__fact";
 
 /** Record a per-call fact. Ignored, like every write here, for a sentinel. */

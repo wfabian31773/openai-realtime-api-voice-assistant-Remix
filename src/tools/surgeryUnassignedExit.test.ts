@@ -215,6 +215,68 @@ describe('the third attempt says the ask is spent', () => {
   });
 });
 
+describe('a batch of attempts in one response — the shape that lost 9 of 46 calls in seven days (2026-09-17)', () => {
+  // On every lost call that reached a third POST, POSTs 2 and 3 landed 1–100 ms
+  // apart: the model emitted them in ONE response. Noted after the response,
+  // the counter read 0 on all three; claimed before the POST, the third reads 2.
+  it('the third attempt of a CONCURRENT batch carries the flag, and only the third', async () => {
+    const api = await client();
+    let n = 0;
+    const create = vi.spyOn(api, 'createTicket').mockImplementation(async () => {
+      n += 1;
+      return n <= 2 ? SURGEON_REFUSAL : ({ success: true, ticketNumber: 'VA-BATCH-1' } as never);
+    });
+
+    const results = await Promise.all([
+      runTool('file_surgery_ticket', NO_SURGEON),
+      runTool('file_surgery_ticket', NO_SURGEON),
+      runTool('file_surgery_ticket', NO_SURGEON),
+    ]);
+
+    const flagged = create.mock.calls.map((c) => (c[0] as { routingAskExhausted?: boolean }).routingAskExhausted === true);
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(flagged).toEqual([false, false, true]);
+    expect(results.some((r) => (r as { ticket_number?: string }).ticket_number === 'VA-BATCH-1')).toBe(true);
+  });
+
+  it('a concurrent batch of TWO still spends nothing — attempt 2 is where the ask lands, batched or not', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValue(SURGEON_REFUSAL);
+
+    await Promise.all([runTool('file_surgery_ticket', NO_SURGEON), runTool('file_surgery_ticket', NO_SURGEON)]);
+
+    expect(create).toHaveBeenCalledTimes(2);
+    for (const c of create.mock.calls) {
+      expect((c[0] as { routingAskExhausted?: boolean }).routingAskExhausted).toBeUndefined();
+    }
+  });
+});
+
+describe('a batch that answered with OUTAGES spends nothing once it settles', () => {
+  it('the attempt after a concurrent batch of 503s carries no flag — in-flight orders, only a refusal counts', async () => {
+    const api = await client();
+    let n = 0;
+    const create = vi.spyOn(api, 'createTicket').mockImplementation(async () => {
+      n += 1;
+      return n <= 3
+        ? ({ success: false, statusCode: 503, error: 'upstream down' } as never)
+        : SURGEON_REFUSAL;
+    });
+
+    await Promise.all([
+      runTool('file_surgery_ticket', NO_SURGEON),
+      runTool('file_surgery_ticket', NO_SURGEON),
+      runTool('file_surgery_ticket', NO_SURGEON),
+    ]);
+    await runTool('file_surgery_ticket', NO_SURGEON);
+
+    expect(create).toHaveBeenCalledTimes(4);
+    // Nobody read those three payloads, so the caller was never asked: the
+    // fourth attempt reads zero refusals, whatever the batch read mid-flight.
+    expect((create.mock.calls[3][0] as { routingAskExhausted?: boolean }).routingAskExhausted).toBeUndefined();
+  });
+});
+
 describe('the flag never travels where it would do harm', () => {
   it('is absent once a surgeon actually resolved', async () => {
     // The exit says "nobody could route this". A ticket that DID resolve a

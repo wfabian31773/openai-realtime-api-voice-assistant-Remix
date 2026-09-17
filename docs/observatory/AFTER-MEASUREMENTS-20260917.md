@@ -568,3 +568,78 @@ WHERE department_id = 18 AND created_by_id IS NULL AND agent_used IS NOT NULL
 GROUP BY 1 ORDER BY 1;
 -- before: 09-14 0/0 · 09-15 0/18 · 09-16 0/57 (of 104).
 ```
+
+## v57 — the surgeon ask is claimed before the POST (task #75's after-number, taken 2026-09-17 09:45–10:05 UTC)
+
+The exit merged 2026-09-02 (#254 / ticketing-app #206) and its after-number was never taken. Every query below was run today.
+
+**The surgeon gate, Hub, surgery, `duration >= 30`, 09-08..09-16** — 96 calls took a `file_surgery_ticket` refusal naming the surgeon; 76 took two or more; 75 reached a third filing attempt; 50 filed; **46 left no ticket on the row**:
+
+```sql
+WITH per_call AS (
+  SELECT c.call_sid, c.created_at::date AS day, c.ticket_number,
+         bool_or(e->>'tool' = 'file_surgery_ticket' AND (e->'outcome'->'missingFields')::text ILIKE '%surgeon%') AS surgeon_refused,
+         count(*) FILTER (WHERE e->>'tool' = 'file_surgery_ticket') AS filing_attempts,
+         bool_or(e->>'tool' = 'file_surgery_ticket' AND e->'outcome'->>'ticket_number' IS NOT NULL) AS filed_event
+  FROM call_logs c, LATERAL jsonb_array_elements(c.tool_timeline->'events') e
+  WHERE c.agent_used = 'surgery' AND c.duration >= 30 AND c.created_at >= '2026-09-08' AND c.created_at < '2026-09-17'
+  GROUP BY 1,2,3
+)
+SELECT day, count(*) FILTER (WHERE surgeon_refused) AS refused_calls,
+       count(*) FILTER (WHERE surgeon_refused AND filing_attempts >= 3) AS reached_attempt_3,
+       count(*) FILTER (WHERE surgeon_refused AND ticket_number IS NULL AND NOT filed_event) AS refused_no_ticket
+FROM per_call GROUP BY 1 ORDER BY 1;
+-- 09-08: 14 / 9 / 9 · 09-09: 14 / 13 / 7 · 09-10: 15 / 13 / 6 · 09-11: 8 / 7 / 1 · 09-14: 11 / 7 / 6 · 09-15: 19 / 16 / 9 · 09-16: 15 / 10 / 8
+```
+
+**The 46, checked in the Support Center by SID:** 0 have a ticket of any provenance; 88 create-ticket POSTs between them, **88 of 88 HTTP 400 "Missing required information: surgeon"**; 33 with two or more, 9 with three or more; **0 ever carried `routingAskExhausted`**. `routingAskExhausted` is NOT in `toolTimeline`'s `SAFE_ARG_KEYS` (it is a payload field, not a model argument), so the Hub cannot see the flag — the Support Center's `voice_agent_api_logs` can:
+
+```sql
+SELECT created_at::date AS day, count(*) AS posts,
+       count(*) FILTER (WHERE request_body->>'routingAskExhausted' = 'true') AS flagged,
+       count(*) FILTER (WHERE request_body->>'routingAskExhausted' = 'true' AND http_status_code = 200) AS flagged_accepted,
+       count(DISTINCT request_body->'callData'->>'callSid') FILTER (WHERE request_body->>'routingAskExhausted' = 'true') AS flagged_calls
+FROM voice_agent_api_logs
+WHERE endpoint ILIKE '%create-ticket%' AND request_body->'callData'->>'agentUsed' = 'surgery'
+  AND created_at >= '2026-09-08' AND created_at < '2026-09-17'
+GROUP BY 1 ORDER BY 1;
+-- 82 flagged POSTs on 57 calls, 82 of 82 accepted. Where the flagged POST's own ticket landed (join tickets ON ticket_number):
+-- dept 2 Surgery Coordination 18 (15 with provider, 3 unassigned) · dept 3 Technicians Support 19 (17 unassigned)
+-- · dept 9 HVA Hub 13 (12 unassigned) · dept 15/16/4: 5. 5 of the 57 calls have no ticket by SID: 4 answered
+-- `consolidated: true` ("Contact appended to existing open ticket"), 1 a re-stamped SID — the approved consolidation, not a loss.
+```
+
+**The control that named the link** — POST timestamps on the 9 lost calls with three or more POSTs against six calls where the flag fired:
+
+```sql
+-- per call: row_number() and the gap to the previous create-ticket POST, from voice_agent_api_logs.created_at
+-- LOST (no flag ever):   gaps between POSTs 2 and 3 = 0.0 · 0.5 · 0.8 · 0.0 · 0.1 · 0.0 · 0.1 · 0.0 · 0.0 s  (all 400)
+-- CONTROL (flag on 3rd): gaps = 8.2 · 6.6 · 27.1 · 17.2 · 42.5 · 17.5 s                                    (3rd = 200)
+```
+
+The counter was noted only after each response (`noteGateRefusal` at the refusal) and read at the top of the tool; three invocations dispatched in one model response all read 0. Optical, same window: 17 flags sent, 0 calls with two or more office refusals, no flag and a sub-second gap — optical does not have it.
+
+**Department-2 provider fill (the guard), Support Center, agent-filed, canonical SIDs, by the call's day:** 100% on every day 08-25..09-14; 09-15 48/49 (98.0%); 09-16 60/64 (93.8%). The 5 unassigned: 3 the exit's own (flagged), 2 unflagged — one POST carried `providerId` the app did not keep, one had a second POST carrying the surgeon answered from the idempotency cache (the #137 shape: a cached hit does not enrich).
+
+```sql
+SELECT coalesce(call_start_time, created_at)::date AS day, count(*) AS dept2_agent_tickets,
+       count(*) FILTER (WHERE provider_id IS NOT NULL) AS with_provider
+FROM tickets WHERE department_id = 2 AND created_by_id IS NULL AND agent_used IS NOT NULL
+  AND call_sid ~* '^CA[0-9a-f]{32}$' AND coalesce(call_start_time, created_at) >= '2026-08-25'
+GROUP BY 1 ORDER BY 1;
+```
+
+**After-number for v57:** re-run the first two queries. Surgery calls that took the surgeon refusal, reached a third POST and left no ticket — 29 over the seven days, 9 of them batched (POST gap under 1 s) — the batched share should read 0; flagged POSTs per day should rise by about that. Guards: provider fill on department 2 (must not fall), and sequential attempt-2 rescues (the flag must never appear on a call's second POST).
+
+### Round 15 on this ship (09:44 UTC) — the sync's failure writes
+
+```sql
+SELECT ticketing_sync_retries, call_data_synced, count(*) FROM call_logs
+WHERE created_at >= now() - interval '14 days' AND status = 'completed' GROUP BY 1,2 ORDER BY 1,2;
+-- 0/false 78 · 0/true 569 · 1/true 5,327 · 2/true 4 · nothing at 3. The race needs a row on retry 2 whose pass fails
+-- after a grade or recording reset it: latent on this window. Taken as one expression in the write that branch already makes.
+```
+
+## #104 — ten full runs, and what shuffling found instead (10:00 UTC)
+
+Five full `npx vitest run`s in default order: **4,709 passed × 5, 0 failures** — the `costRateConsolidation` guard did not reproduce. Five more with `--sequence.shuffle`: runs 6, 7, 9, 10 failed **1–6 tests each, none of them the guard**. The tests that fail under a shuffled WITHIN-FILE order (they pass in declaration order, which is what CI runs): `locationQueueTicket.test.ts` ("probes before posting the ticket", 4 of 5 runs), `realtimeAdapter.test.ts` ("does not blank a model argument the context has no value for", 3), `lookupJoinsOnPersonId.test.ts` / `lookupJoinBudget.test.ts` ("keeps the identity when the join HANGS", a 5 s timeout — a fake-timer leak between tests; "CAPS the refinement at the remaining budget"), `handoffResumesAfterTicket.test.ts` ("an AUTOMATE resolution is not a durable ticket"; "dials once the ticket has landed"). Module-level state shared between tests in one file — the `pcpDirector`-keyed-on-call-id shape `replay20260914.test.ts` already records. Not fixed tonight: test hygiene, not lane behaviour; recorded on the task with the names.

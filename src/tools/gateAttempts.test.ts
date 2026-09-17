@@ -15,13 +15,7 @@
  * mechanism is pinned first and the fact-store is pinned with it.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
-  gateRefusalsSoFar,
-  noteGateRefusal,
-  noteCallFact,
-  callFactNoted,
-  resetGateAttempts,
-} from "./gateAttempts";
+import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted, resetGateAttempts, claimGateAttempt, settleGateAttempt } from "./gateAttempts";
 
 /** A real Twilio CallSid: CA + 32 hex. Anything else is a sentinel. */
 const sid = (n: number) => `CA${n.toString(16).padStart(32, "0")}`;
@@ -186,5 +180,41 @@ describe("facts and counts share the map without colliding", () => {
     noteCallFact(CALL, "spoke_a_date");
     noteCallFact(CALL, "spoke_a_date");
     expect(callFactNoted(CALL, "spoke_a_date")).toBe(true);
+  });
+});
+
+describe('claim before the POST, settle after the response (2026-09-17)', () => {
+  const SID = 'CA0123456789abcdef0123456789abcdef';
+  beforeEach(() => resetGateAttempts());
+
+  it('three concurrent claims read 0, 1, 2 — the third of a batch sees the two in flight', () => {
+    expect(claimGateAttempt(SID, 't', 'f')).toBe(0);
+    expect(claimGateAttempt(SID, 't', 'f')).toBe(1);
+    expect(claimGateAttempt(SID, 't', 'f')).toBe(2);
+    // Nothing has settled: no refusal is on the record yet.
+    expect(gateRefusalsSoFar(SID, 't', 'f')).toBe(0);
+  });
+
+  it('only a settle that says refused becomes a counted refusal, and settling releases the in-flight slot', () => {
+    claimGateAttempt(SID, 't', 'f');
+    claimGateAttempt(SID, 't', 'f');
+    settleGateAttempt(SID, 't', 'f', false);
+    settleGateAttempt(SID, 't', 'f', true);
+    expect(gateRefusalsSoFar(SID, 't', 'f')).toBe(1);
+    // A fresh sequential claim reads refusals only: the batch has drained.
+    expect(claimGateAttempt(SID, 't', 'f')).toBe(1);
+  });
+
+  it('a sentinel call_sid claims nothing and settles nothing', () => {
+    expect(claimGateAttempt('unknown', 't', 'f')).toBe(0);
+    expect(claimGateAttempt('unknown', 't', 'f')).toBe(0);
+    settleGateAttempt('unknown', 't', 'f', true);
+    expect(gateRefusalsSoFar('unknown', 't', 'f')).toBe(0);
+  });
+
+  it('keys on the call, the tool and the field — a claim on one field is invisible to another', () => {
+    claimGateAttempt(SID, 't', 'f');
+    expect(claimGateAttempt(SID, 't', 'g')).toBe(0);
+    expect(claimGateAttempt('CAfedcba9876543210fedcba9876543210', 't', 'f')).toBe(0);
   });
 });

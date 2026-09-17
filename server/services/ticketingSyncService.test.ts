@@ -243,3 +243,26 @@ describe('the mark-done is conditional on the recording the payload carried — 
     expect(SRC).toMatch(/const MAX_RETRIES = 3;/);
   });
 });
+
+describe('a failed pass increments the retry count in the database, never from a snapshot (Codex P2, round 15)', () => {
+  // The grade write (round 12) and the recording push (round 10/11) re-open
+  // the sync by resetting this column to 0. A failure branch that wrote its
+  // snapshotted `currentRetries + 1` AFTER such a reset put the row at 3 —
+  // excluded by `lt(retries, MAX_RETRIES)` — with the new data never sent.
+  // Read from the source, as every other pin in this file is: the writes are
+  // Drizzle chains against a live `db` import.
+  const SRC = readFileSync(join(__dirname, 'ticketingSyncService.ts'), 'utf8');
+
+  it('both failure writes — the refused POST and the thrown one — add one to the stored value', () => {
+    const atomic = SRC.match(/ticketingSyncRetries: sql`COALESCE\(\$\{callLogs\.ticketingSyncRetries\}, 0\) \+ 1`/g) ?? [];
+    expect(atomic.length).toBe(2);
+  });
+
+  it('no failure write stores the snapshot', () => {
+    expect(SRC).not.toMatch(/ticketingSyncRetries: newRetryCount/);
+  });
+
+  it('the snapshot still decides the message and the return value, which is all it is for', () => {
+    expect(SRC).toMatch(/const newRetryCount = currentRetries \+ 1;\s*const retriesExhausted = newRetryCount >= MAX_RETRIES;/);
+  });
+});

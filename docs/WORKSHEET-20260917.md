@@ -409,7 +409,7 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v56, ready for review). Codex has reviewed it FOURTEEN times: round 1
+   (v39–v56, ready for review). Codex has reviewed it FIFTEEN times: round 1
    (03:35) three P1s on the observatory/cost ship, round 2 (04:07) two P2s, round
    3 (04:42) two P2s, round 4 (05:16/05:30 on `1b82a86`) three P2s — two taken on
    `25b023b` (a parked recording and a turn buffer survive a failed write; the
@@ -470,12 +470,23 @@ fired. The guard: PCP `dead_air` and `max_duration` must not rise.
    failure wrote 0 calls / $0.00 as if measured (the day is now read for the
    summary, and a day nobody could read is NULL — a dash on the dashboard,
    never a zero) — both taken on `3c7d7c5`** — every one with a test and a
-   mutation check, every thread resolved. A FIFTEENTH pass is requested on
-   that head.
-   **Read that fifteenth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
+   mutation check, every thread resolved. **Round 15 (09:44, on `87164da`): one
+   P2 — the post-call sync's two failure writes stored a snapshotted
+   `retries + 1` that could clobber the grade or recording writer's reset to 0
+   and strand the row at 3, ineligible; both now add one in the database.
+   Measured first: 0 rows at 3 and 4 at 2 in 14 days — latent, taken as one
+   expression in the write that branch already makes.** Beside it **v57**,
+   task #75's after-number, finally taken: the surgery unassigned exit fired
+   on 57 calls and on NONE of the 46 lost to the surgeon gate over
+   09-08..09-16 — on every lost call that reached a third POST the attempts
+   were 1–100 ms apart, one model response, and a counter noted after each
+   refusal read 0 on all three. The ask is now claimed before the POST and
+   settled after it; sequential rules unchanged; 7 mutations, 7 caught. A
+   SIXTEENTH pass is requested on that head.
+   **Read that sixteenth pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
 
-2. **Pull and republish.** `/voice/health` must read the v56 marker below.
+2. **Pull and republish.** `/voice/health` must read the v57 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
    — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
    *Build* checks are green; *Type check* is red with the 22 errors that are
@@ -540,7 +551,7 @@ merged or is in PR #321 waiting for you.
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917
+GET /voice/health   ->   voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:

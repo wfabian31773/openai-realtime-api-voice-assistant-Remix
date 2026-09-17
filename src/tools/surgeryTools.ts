@@ -29,7 +29,7 @@
 import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
-import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
+import { claimGateAttempt, settleGateAttempt } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 
 /** This tool's own name, for the per-call gate counter. */
@@ -423,7 +423,9 @@ registerTool({
      * better trade — dept 2 provider fill has been driven from ~98% to 49%
      * once already (docs/BACKEND_HANDOFF.md).
      */
-    const surgeonAskExhausted = gateRefusalsSoFar(callSid, SURGERY_FILE_TOOL, 'surgeon') >= 2;
+    // The counter is read AND claimed in one step immediately before the POST
+    // (`surgeonAskExhausted`, below). Read up here it was one dispatch behind
+    // a batch — see the 2026-09-17 note at the claim.
     const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
     const filedDescription = redirect
@@ -702,6 +704,31 @@ registerTool({
      * A staff-notes field is the second ask in the ticketing change request.
      */
     /**
+     * THE ASK IS CLAIMED HERE, BEFORE THE POST — NOT NOTED AFTER THE REFUSAL.
+     *
+     * Measured 2026-09-17 over 09-08..09-16: 46 surgery calls took the surgeon
+     * refusal and left no ticket anywhere, 29 of them after a THIRD filing
+     * attempt — and on every one of the 9 with three or more POSTs, POSTs 2
+     * and 3 landed 1–100 ms apart. The model emitted them in ONE response, so
+     * all three invocations read the counter before any refusal had returned
+     * to be noted, and a flag that needs "two refusals already noted" could
+     * never be true. The 36 calls where it DID fire had 8–42 s between POSTs
+     * (the model asked in between — the shape the threshold was designed for).
+     *
+     * Claiming in ONE synchronous step, at the point where the guards are
+     * final, orders concurrent attempts: the claim returns refusals already
+     * drawn PLUS attempts still in flight, so the third dispatch of a batch
+     * reads 2 whatever the wire does. It is not a different rule — only a
+     * refusal FOR THE SURGEON becomes a counted refusal when the attempt
+     * settles below, so an outage or a refusal for another field still
+     * spends nothing, and attempt 2 still never fires, batched or not
+     * (`surgeryUnassignedExit.test.ts`).
+     */
+    const surgeonAskClaimed = filedOnSurgeryQueue && !lookup.providerId;
+    const surgeonAskExhausted = surgeonAskClaimed
+      ? claimGateAttempt(callSid, SURGERY_FILE_TOOL, 'surgeon') >= 2
+      : false;
+    /**
      * DEPLOY MARKER, and a live counter. Prints only when this call has
      * already been asked for the surgeon and still has none — the exact
      * population that used to end with no ticket. Absent from the logs, the
@@ -802,19 +829,25 @@ registerTool({
       ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}` } : {}),
     });
 
+    if (surgeonAskClaimed) {
+      // The attempt has answered. A refusal naming the surgeon is the ask
+      // this call has now spent; anything else leaves the count alone.
+      settleGateAttempt(
+        callSid,
+        SURGERY_FILE_TOOL,
+        'surgeon',
+        Boolean(res.terminal && res.missingField === 'surgeon'),
+      );
+    }
+
     if (!res.success || !res.ticketNumber) {
       // The POST failed. createTicketDurable has already put the payload in the
       // outbox if it could; this only decides what the agent says about it.
       //
       // A terminal refusal naming the surgeon is this queue's ASK: the line
-      // below turns it into a question the agent puts to the caller. Count it,
-      // so a second trip through here carries routingAskExhausted and the app
-      // takes the request unassigned instead of refusing it again. Counted
-      // only for the surgeon — a refusal for any other field has not asked
-      // this question and must not spend it.
-      if (res.terminal && res.missingField === 'surgeon') {
-        noteGateRefusal(callSid, SURGERY_FILE_TOOL, 'surgeon');
-      }
+      // below turns it into a question the agent puts to the caller. It was
+      // counted at `settleGateAttempt` above; the attempt itself was claimed
+      // BEFORE the POST, which is what a batch of attempts used to defeat.
       return postFailureToolResult(res, 'file_surgery_ticket');
     }
 

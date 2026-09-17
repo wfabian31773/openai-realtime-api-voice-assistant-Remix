@@ -10,7 +10,7 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-09-17 09:40 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-09-17 10:15 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
@@ -1066,7 +1066,7 @@ guesses no tool ever made.
 
 ---
 
-## 12. The night of 2026-09-16/17 — one worksheet, eighteen ships, fourteen Codex rounds (written 09-17)
+## 12. The night of 2026-09-16/17 — one worksheet, nineteen ships, fifteen Codex rounds (written 09-17)
 
 **The mandate** (Wayne, 2026-09-17): *"keep working through the worksheet,
 don't wait on me … knock out as many relevant tasks as possible and have
@@ -1086,13 +1086,13 @@ was executed against the live databases. Nothing merges without a Codex
 greenlight; the operator merges.
 
 **Where it is:** `docs/WORKSHEET-20260917.md` is the driving document and its
-*FOR 5AM* block is the hand-off. **PR #321** carries v39–v56 — eighteen ships,
+*FOR 5AM* block is the hand-off. **PR #321** carries v39–v57 — nineteen ships,
 each with its row in the marker table — plus the round-by-round record of
-**fourteen Codex reviews absorbed** (every finding taken or declined on a
-measurement, every thread answered and resolved) and a fifteenth requested
-on the head. Suite 257 files / 4,709 tests, root and client typecheck clean.
+**fifteen Codex reviews absorbed** (every finding taken or declined on a
+measurement, every thread answered and resolved) and a sixteenth requested
+on the head. Suite 257 files / 4,718 tests, root and client typecheck clean.
 Live Replit was still on v24 when this was written; the deploy marker to look
-for is `voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917`.
+for is `voice-runtime-v57-the-surgeon-ask-is-claimed-before-the-post-20260917`.
 
 ## What shipped, by the number it moves
 
@@ -1151,6 +1151,20 @@ for is `voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917`.
   tomorrow's data says whether the hypothesis was right; **v56** an unvoiced
   tool answer cannot end the call (38 PCP calls on 09-16 hung up on the
   agent's own question, nine with a found appointment never spoken).
+- **Round 15 (09:44) made the sync's failure writes atomic:** a snapshotted
+  `retries + 1` could clobber the grade or recording writer's reset to 0 and
+  strand a row at 3; both writes now add one in the database. Measured first
+  (0 rows at 3, 4 at 2 in 14 days) and taken as one expression.
+- **v57 — the surgeon ask is claimed before the POST (task #75's after-number,
+  never taken since 09-02):** 96 surgery calls took the surgeon refusal over
+  09-08..09-16, 46 left no ticket anywhere, the exit fired on 57 calls and on
+  none of the 46. On every lost call that reached a third POST the attempts
+  landed 1–100 ms apart — one model response — so a counter noted after each
+  refusal read 0 on all three. `claimGateAttempt` / `settleGateAttempt`: claimed
+  before the POST (refusals + in-flight), counted only when the app refused for
+  the surgeon. Also read on the way: the exit's own tickets land mostly in
+  Technicians Support (19) and the HVA Hub (13), not department 2 — which is
+  why dept-2 provider fill held at 100%; whether those are worked is Wayne's.
 
 **Live database objects, in no branch:** four partial indexes on `call_logs`
 (05:45 UTC, DDL and reversal in the pack) because the four 5-minute sweeps
