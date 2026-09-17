@@ -123,7 +123,7 @@ gets read, not raised blindly.
 **`[x]` (a) SHIPPED as v42 — diagnosed from the timeline, not the note; 7 mutations, 7 caught.
 `[x]` (b) SHIPPED as v40 — 7 assertions, 4 mutations, 4 caught.
 `[x]` the narrated emergency rule (below) SHIPPED as v43 — 5 mutations, 5 caught.
-`[ ]` (c) remains, and it is last.**
+`[-]` (c) left by your rule on outliers — re-measured 04:48: 2 of 942 calls since 09-14 spoke two different ticket numbers (the earlier 7 of 305 counted callback numbers too). Under one percent either way.**
 
 **Codex round 2 (04:07) on (a):** the P2 that the timeout/contention directives sit in
 `message` is declined with a control — on this hand-built agent `message` is the
@@ -340,6 +340,24 @@ CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
    red on `main` too (the latest `main` run, 02:29, concluded failure the same
    way). Marked ready for review at 04:15 so Codex sees it before you do; it
    needs nothing from the Remix side.
+
+**ONE QUESTION FOR YOU, with my recommendation (task #138).** `unclassified_call`
+is now the model's default: on 09-16, **57 of 104** PCP Support agent tickets
+carried it, and — verified in SQL via `pcp_failure_information`, which the sweep
+stamps `call_not_classified` — **all 57 came from the model, zero from the
+sweep.** Your 09-15 ruling ("anything we don't classify we log as a new slug")
+was about the SWEEP; adding the slug to the shared list handed the MODEL an "I
+don't know" option inside its own tool, and it takes it on half the calls.
+Nothing is lost (PCP filing rate 40 → 53 → 51% over the three days), but the
+records and scheduling routes key on the stated purpose, so those calls never
+reach dept 16 or 9, and the slug no longer means "a human must route this".
+**Recommendation: take `unclassified_call` OUT of the model-facing enum and keep
+it for the sweep only.** The landing place already exists — a call the model
+never classifies is filed by the teardown sweep as unclassified with the caller's
+own words (v31). Cost: on those calls the ticket number is not read back
+mid-call. Alternative: leave it and accept that the slug mostly means "the
+model declined". Yes/no is enough; it is a one-line change with a test either
+way, and I will not make it without your answer.
 
 **One more thing that is yours alone: the xAI management key pasted into an
 earlier session's transcript still has to be rotated.** Console → Settings →
