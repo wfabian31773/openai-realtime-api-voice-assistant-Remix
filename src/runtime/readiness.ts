@@ -279,9 +279,23 @@ import { callEnvironment } from "./callRecord";
  * several) were byte-identical in SQL and the W1 date-of-birth fix of
  * 2026-09-16 was reverted for want of a number. Two PHI-free keys join the
  * outcome allow-list. An instrument, not a fix. Stacks on v47.
+ *
+ * v49: the fleet is graded at teardown. The old core has always called the
+ * grader when a call ends; nothing under src/runtime/ imported it, so every
+ * runtime call waited on the five-minute backfill — five rows per cycle,
+ * newest first, 60 an hour against 90–98 substantive calls an hour at peak.
+ * On 2026-09-16 hangup-to-grade averaged 3.5 minutes at 15:00 UTC and
+ * 161–203 minutes from 16:00 to 18:00, and the hourly fleet watch, which
+ * reads agent_outcome, alarmed on a third of the fleet reading NULL. Three
+ * changes: the runtime grades at teardown after the row and the sweep, never
+ * awaited (runtimeGrading.ts); the backfill cannot be starved by its own head
+ * (an empty-transcript row is stamped and leaves, a row in backoff costs no
+ * slot, the budget is spent on attempts over a wider window); and a dead_air
+ * ending after a real conversation is `completed`, not `failed`, so the 58
+ * such calls of 09-14 are graded and synced like any other. Stacks on v48.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v48-the-ambiguous-lookup-is-countable-20260917";
+  "voice-runtime-v49-the-fleet-is-graded-at-teardown-20260917";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

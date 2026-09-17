@@ -1880,28 +1880,53 @@ Respond with a JSON object only, no other text:
   private static readonly MAX_GRADE_ATTEMPTS = 6;
   private static readonly GRADE_BACKOFF_BASE_MS = 30 * 60 * 1000;
 
+  /**
+   * THE QUEUE CANNOT BE STARVED BY ITS OWN HEAD — task #139, 2026-09-17.
+   *
+   * The selection is the newest `limit` ungraded rows. Two things sat at
+   * the head of it and never left: a row whose transcript is the EMPTY
+   * STRING (`IS NOT NULL` admits it, the `if (call.transcript)` below
+   * skipped it, and nothing ever stamped it), and rows in failure backoff,
+   * which `continue`d but still occupied their slot. Five such rows and the
+   * cycle graded nothing, every five minutes, while 87 calls from the day
+   * before sat behind them with grader_results and no outcome. So: the
+   * candidate window is wider than the budget, a row that cannot be graded
+   * is stamped and leaves, a row in backoff costs no slot, and the budget
+   * is spent on ATTEMPTS.
+   */
+  static readonly CANDIDATE_WINDOW_MULTIPLE = 6;
+  /** The pause between attempts so a cycle cannot burst the LLM; tests set it to 0. */
+  static interAttemptMs = 500;
+
   async gradeCallsWithoutGrades(limit: number = 10): Promise<number> {
     try {
-      const ungradedCalls = await storage.getCallLogsWithoutGrades(limit);
+      const ungradedCalls = await storage.getCallLogsWithoutGrades(
+        Math.max(limit * CallGradingService.CANDIDATE_WINDOW_MULTIPLE, 30),
+      );
       let gradedCount = 0;
+      let attempted = 0;
 
       for (const call of ungradedCalls) {
-        if (call.transcript) {
-          // If transcript is definitively too short to grade, mark it processed so it
-          // doesn't get selected on every future cycle (prevents an infinite retry loop).
-          if (call.transcript.trim().length < 50) {
+        if (attempted >= limit) break;
+        {
+          // If transcript is definitively too short to grade — the empty
+          // string included — mark it processed so it doesn't get selected
+          // on every future cycle (prevents an infinite retry loop).
+          if ((call.transcript ?? '').trim().length < 50) {
             await storage.updateCallLog(call.id, { gradedAt: new Date() });
-            console.info(`[GRADING] Skipping ${call.id} — transcript too short (${call.transcript.trim().length} chars), marked as processed`);
+            console.info(`[GRADING] Skipping ${call.id} — transcript too short (${(call.transcript ?? '').trim().length} chars), marked as processed`);
             continue;
           }
           // Failed-grade backoff: don't re-attempt (and re-spend) every
           // 5-minute cycle; transient outages get retried on a widening
-          // schedule instead of burning attempts back-to-back.
+          // schedule instead of burning attempts back-to-back. Costs no
+          // slot — the rows behind it still get their turn.
           const failState = this.failedGradeAttempts.get(call.id);
           if (failState && Date.now() < failState.nextEligibleAt) {
             continue;
           }
-          const result = await this.gradeCall(call.id, call.transcript);
+          attempted += 1;
+          const result = await this.gradeCall(call.id, call.transcript!);
           if (result) {
             gradedCount++;
             this.failedGradeAttempts.delete(call.id);
@@ -1921,11 +1946,11 @@ Respond with a JSON object only, no other text:
               });
             }
           }
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await new Promise(resolve => setTimeout(resolve, CallGradingService.interAttemptMs));
         }
       }
 
-      console.info(`[GRADING] Graded ${gradedCount}/${ungradedCalls.length} calls`);
+      console.info(`[GRADING] Graded ${gradedCount}/${attempted} attempted (${ungradedCalls.length} candidates)`);
       return gradedCount;
     } catch (error) {
       console.error('[GRADING] Error in batch grading:', error);

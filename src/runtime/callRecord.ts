@@ -162,11 +162,28 @@ export function callEnvironment(env: Record<string, string | undefined>): string
     : "development";
 }
 
-/** A call that never reached a conversation is recorded as failed; every
- * other ending is a call that happened. `dead_air` and `provider_failure`
- * are the two the runtime itself caused. */
-function statusFor(outcome: VoiceCallRecord["outcome"]): "completed" | "failed" {
-  return outcome === "provider_failure" || outcome === "dead_air" ? "failed" : "completed";
+/**
+ * A call that never reached a conversation is recorded as failed; every
+ * other ending is a call that happened.
+ *
+ * `dead_air` used to be failed unconditionally, and that read the WATCHDOG
+ * as the call: it fires after 30s of silence at ANY point, including after a
+ * whole conversation whose caller then walked away. Measured 2026-09-17:
+ * 58 dead_air calls on 2026-09-14 averaging 131s and 5.9 caller lines, 18 on
+ * 09-15 averaging 7.2 — real conversations, all `status = 'failed'`, and
+ * therefore never graded (the backfill selects completed rows) and never
+ * synced to their tickets (`ticketingSyncService` does too). Twilio's own
+ * meaning of the column is the one every other reader assumes: completed is
+ * answered-and-ended, failed is never-connected. So dead_air is failed only
+ * when the caller never spoke; `provider_failure` stays failed regardless.
+ */
+export function statusFor(
+  outcome: VoiceCallRecord["outcome"],
+  transcript: string = "",
+): "completed" | "failed" {
+  if (outcome === "provider_failure") return "failed";
+  if (outcome === "dead_air") return /(^|\n)CALLER: /.test(transcript) ? "completed" : "failed";
+  return "completed";
 }
 
 /** Pure mapping, exported so it can be asserted without a database. */
@@ -186,7 +203,7 @@ export function toCallLogRow(
     to: record.dialedNumber,
     dialedNumber: record.dialedNumber,
     agentUsed: record.slug,
-    status: statusFor(record.outcome),
+    status: statusFor(record.outcome, record.transcript),
     startTime: new Date(record.startedAtMs),
     endTime: new Date(record.endedAtMs),
     duration: durationSeconds,

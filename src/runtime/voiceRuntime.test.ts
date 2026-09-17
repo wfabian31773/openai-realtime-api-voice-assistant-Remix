@@ -150,6 +150,7 @@ async function harness(
     sweepCall?: (record: unknown) => Promise<unknown>;
     persistCall?: (record: unknown) => Promise<boolean>;
     persistTurns?: (record: unknown, ids: unknown) => Promise<unknown>;
+    gradeCall?: (record: unknown, ids: unknown) => Promise<unknown>;
     startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
     persistBeforeSweepMs?: number;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
@@ -192,6 +193,7 @@ async function harness(
     // and write call_turns, neither of which a harness call should touch.
     persistTurns: over.persistTurns ?? (async () => 0),
     startRecording: over.startRecording ?? (async () => "skipped"),
+    gradeCall: over.gradeCall ?? (async () => "skipped"),
     persistCall:
       over.persistCall ??
       (async (record) => {
@@ -300,6 +302,23 @@ async function settle(times = 8): Promise<void> {
   for (let i = 0; i < times; i += 1) await new Promise((r) => setTimeout(r, 5));
 }
 
+/**
+ * A condition-wait for the one thing `settle` cannot promise: that a stream
+ * the test just opened has REGISTERED its transport. `settle()` is 40ms of
+ * fixed sleep, and `expect(h.transports).toHaveLength(1)` after it has gone
+ * red in CI three times (task #112, last on 2026-09-15 at dd51297) with no
+ * runtime change between the failing and passing runs — the upgrade simply
+ * took longer than 40ms on a loaded runner. Polls at settle's cadence and
+ * gives up loudly rather than sleeping longer for everyone.
+ */
+async function waitFor(cond: () => boolean, what: string, timeoutMs = 2000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > until) throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 describe("one whole call, end to end, offline", () => {
   it("answers, configures the session with the agent's own prompt and tools, and files a ticket", async () => {
     const h = await harness();
@@ -315,7 +334,7 @@ describe("one whole call, end to end, offline", () => {
 
     // 2. The media stream, with the token the webhook minted.
     const { ws } = await openStream(h, "CA1", tokenFrom(answered.text));
-    await settle();
+    await waitFor(() => h.transports.length === 1, "the transport to register");
     expect(h.transports).toHaveLength(1);
     const grok = h.transports[0];
 
@@ -677,7 +696,7 @@ describe("one whole call, end to end, offline", () => {
     const h = await harness({ stallHandshake: true, providerSetupDeadlineMs: 200 });
     const answered = await post(h, "/voice/optical", { CallSid: "CA11", From: "+1", To: "+2" });
     await openStream(h, "CA11", tokenFrom(answered.text));
-    await settle(2);
+    await waitFor(() => h.transports.length === 1, "the transport to register");
     expect(h.transports).toHaveLength(1);
     expect(h.registry.get("CA11")?.outcome ?? null).toBeNull();
     await new Promise((r) => setTimeout(r, 350));
@@ -1051,9 +1070,11 @@ describe("one whole call, end to end, offline", () => {
     const answered = await post(h, "/voice/optical", { CallSid: "CA6", From: "+1", To: "+2" });
     const token = tokenFrom(answered.text);
     await openStream(h, "CA6", token);
-    await settle();
+    await waitFor(() => h.transports.length === 1, "the first transport to register");
     expect(h.transports).toHaveLength(1);
     await openStream(h, "CA6", token);
+    // A second stream must NOT add one — absence has nothing to wait for, so
+    // this stays a settle: the assertion is that nothing happened.
     await settle();
     expect(h.transports).toHaveLength(1);
   });
@@ -1652,6 +1673,39 @@ describe("the database outranks the code, but not on the copy a lane must say", 
  * calls it — failure mode 10.
  */
 describe("the runtime's turns and recording reach the Observatory", () => {
+  /**
+   * THE GRADE, AT TEARDOWN. The old core grades a call when it ends; the
+   * runtime never did, so every runtime call waited on the five-per-cycle
+   * backfill — 161–203 minutes behind at peak on 2026-09-16, which is what
+   * the hourly fleet watch alarmed on (task #139). Pinned here, at the
+   * runtime, after the sweep: the threshold lives in runtimeGrading.ts and
+   * has its own test.
+   */
+  it("hands the call to the grader once, after the sweep, with its row id", async () => {
+    const graded: Array<{ callSid: string; callLogId: unknown; sweptFirst: number }> = [];
+    let sweeps = 0;
+    const h = await harness({
+      sweepCall: async () => {
+        sweeps += 1;
+        return { filed: false, reason: "caller-said-nothing" };
+      },
+      gradeCall: async (record, ids) => {
+        const r = record as { callSid: string };
+        graded.push({ callSid: r.callSid, callLogId: (ids as { callLogId?: string }).callLogId, sweptFirst: sweeps });
+        return "graded";
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA43", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA43", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    ws.close();
+    await settle(8);
+    expect(graded).toHaveLength(1);
+    expect(graded[0]).toMatchObject({ callSid: "CA43", sweptFirst: 1 });
+    // The row id travels with it — whatever the harness's row opener returned.
+    expect("callLogId" in graded[0]).toBe(true);
+  });
+
   it("starts a Twilio recording once per call, on the host the webhook was reached on", async () => {
     const started: Array<[string, string | undefined]> = [];
     const h = await harness({

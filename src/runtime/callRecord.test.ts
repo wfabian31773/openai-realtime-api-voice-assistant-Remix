@@ -47,7 +47,12 @@ describe("toCallLogRow", () => {
   });
 
   it("records the runtime's own failures as failed calls, and hangups as completed", () => {
-    expect(toCallLogRow(record({ outcome: "dead_air" })).status).toBe("failed");
+    // The fixture's transcript carries a CALLER line: the watchdog ended a
+    // CONVERSATION, which is a completed call by the column's own meaning.
+    expect(toCallLogRow(record({ outcome: "dead_air" })).status).toBe("completed");
+    // Nobody ever spoke: the watchdog ended dead air, and that is failed.
+    expect(toCallLogRow(record({ outcome: "dead_air", transcript: "AGENT: Thanks for calling." })).status).toBe("failed");
+    expect(toCallLogRow(record({ outcome: "dead_air", transcript: "" })).status).toBe("failed");
     expect(toCallLogRow(record({ outcome: "provider_failure" })).status).toBe("failed");
     expect(toCallLogRow(record({ outcome: "caller_hangup" })).status).toBe("completed");
     expect(toCallLogRow(record({ outcome: "agent_ended" })).status).toBe("completed");
@@ -75,7 +80,7 @@ describe("toCallLogRow", () => {
     // column belongs to the agents' telemetry, so the status column carries
     // the distinction instead.
     expect(toCallLogRow(record({ outcome: "max_duration" })).status).toBe("completed");
-    expect(toCallLogRow(record({ outcome: "dead_air" })).status).toBe("failed");
+    expect(toCallLogRow(record({ outcome: "dead_air", transcript: "AGENT: Hello?" })).status).toBe("failed");
   });
 
   it("writes NO identity when the runtime was not told it — never inferred from a tool result", () => {

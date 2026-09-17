@@ -263,6 +263,7 @@ import { openRuntimeCall, persistRuntimeCall, type CallLogInsert } from "./callR
 import { runRequestSweep } from "./sweepRunner";
 import { persistRuntimeTurns } from "./runtimeTurns";
 import { makeRecordingStarter } from "./callRecording";
+import { gradeRuntimeCall } from "./runtimeGrading";
 import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
 import {
   handleAfterRedirect,
@@ -408,6 +409,12 @@ export interface VoiceRuntimeOptions {
    * Fire-and-forget from `startCall`. Injected for tests.
    */
   startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
+  /**
+   * Grades the call at teardown — the LLM pass the old core has always run
+   * when a call ends and the runtime never did (runtimeGrading.ts). After
+   * the row and after the sweep, never awaited. Injected for tests.
+   */
+  gradeCall?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -493,6 +500,7 @@ export function mountVoiceRuntime(
   const sweepCall = options.sweepCall ?? runRequestSweep;
   const persistTurns = options.persistTurns ?? persistRuntimeTurns;
   const startRecording = options.startRecording ?? makeRecordingStarter(env);
+  const gradeCall = options.gradeCall ?? gradeRuntimeCall;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -1151,6 +1159,10 @@ export function mountVoiceRuntime(
             // Telemetry last: the per-turn record lights up the Observatory's
             // call page but must never delay a caller's request.
             void persistTurns(record, { callLogId }).catch(() => undefined);
+            // And the grade, which every Observatory surface reads — at
+            // teardown, as the old core does, instead of hours later from the
+            // five-per-cycle backfill (task #139).
+            void gradeCall(record, { callLogId }).catch(() => undefined);
           },
         });
         // Connect AFTER the bridge exists: a connection that fails then has

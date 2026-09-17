@@ -257,6 +257,42 @@ lookup had just succeeded. Different shape.
 
 ---
 
+### W9 — The grader is missing a third of the fleet, and it is rising daily (task #139).
+**`[x]` SHIPPED as v49. 10 new tests across four files; 8 mutations, 8 caught.
+#112's CI flake fix rides in the same commit.**
+
+**Measured first, 2026-09-16:** the runtime never graded its own calls —
+nothing under `src/runtime/` imported the grader — so every runtime call waited
+on the five-minute backfill, five rows per cycle, newest first: 60 an hour
+against 90–98 substantive calls an hour at peak. Hangup-to-grade averaged 3.5
+minutes at 15:00 UTC and **161–203 minutes from 16:00 to 18:00**; the fleet
+watch reads `agent_outcome` and alarmed on a third of the fleet reading NULL.
+And the queue was starved by its own head: two empty-transcript rows (1-second
+calls) that nothing ever stamped, three rows in backoff still holding their
+slots — five rows, zero attempts per cycle, and **87 calls from 09-15 with
+`grader_results` and no outcome** sitting behind them. Third finding:
+`dead_air` was `status = 'failed'` unconditionally, and the silence watchdog
+fires after a whole conversation too — **58 real conversations on 09-14 (avg
+131s, 5.9 caller lines) and 18 on 09-15** were recorded failed, so never graded
+and never synced to their tickets.
+
+**Fix, three parts:** (1) `runtimeGrading.ts` — the runtime grades at teardown,
+after the row and after the sweep, never awaited, with the old core's own
+>200-character threshold; (2) the backfill reads a window six times its budget,
+stamps an empty transcript so it leaves the queue, lets a row in backoff cost
+no slot, and spends its budget on attempts; (3) `statusFor(outcome, transcript)`
+— dead_air is failed only when no `CALLER:` line exists. A graded call leaves
+the backfill by `gradedAt`, so nothing is graded twice.
+**Number:** runtime calls with `agent_outcome` NULL an hour after hangup — a
+third of the fleet at peak, target ~0; the 87 stranded 09-15 rows should drain
+on the first cycles after the deploy.
+**Guard:** ONE grader call per substantive call; calls with no caller line must
+still read `failed`.
+**#112, same commit:** `voiceRuntime.test.ts`'s three fixed 40ms sleeps (red in
+CI twice) now `waitFor` the condition they were sleeping for, bounded at 2s.
+
+---
+
 ## NOT DOING TONIGHT, AND WHY
 
 - **`[-]` The emergency lexicon.** Which phrases count as a surgical emergency is
@@ -272,12 +308,12 @@ lookup had just succeeded. Different shape.
 ## FOR 5AM — THREE STEPS, IN THIS ORDER
 
 1. **Merge PR #321** — https://github.com/wfabian31773/openai-realtime-api-voice-assistant-Remix/pull/321
-   (v39–v47, ready for review). Codex's first pass (03:35) raised three P1s on the
+   (v39–v49, ready for review). Codex's first pass (03:35) raised three P1s on the
    observatory/cost ship; all three are taken and their threads resolved, and a
    second pass was requested at 04:01 on the head that also carries v46 and v47.
    **Read that second pass before merging** — the v27/v28/v31 rows in CLAUDE.md
    record what happens when a draft is marked ready and merged in the same minute.
-2. **Pull and republish.** `/voice/health` must read the v47 marker below.
+2. **Pull and republish.** `/voice/health` must read the v49 marker below.
 3. **Merge ticketing-app PR #279** — https://github.com/wfabian31773/ticketing-app/pull/279
    — commit `11db8480` (the name-only consolidation arm, W5). Its *Tests* and
    *Build* checks are green; *Type check* is red with the 22 errors that are
@@ -308,13 +344,14 @@ merged or is in PR #321 waiting for you.
 | **v46** (PR #321) | the tool ceiling stops a tool that keeps succeeding with the same arguments — the eleventh identical call gets the tenth's answer back | 17 calls since 09-10 looped one tool 11–35 times, 16 with no ticket; nothing could see them |
 | **v47** (PR #321) | the after-hours line stops reading a phone-matched patient's appointment before anyone confirms who is calling | 44 of 365 no-ivr calls in nine days had the date, time, office and doctor read out before any identity question |
 | **v48** (PR #321) | `found` and `candidate_count` reach the tool timeline — an instrument, no behaviour change | the W1 date-of-birth fix was reverted because the ambiguous-lookup branch could not be counted; after a day on this build it can be |
+| **v49** (PR #321) | the runtime grades its own calls at teardown, the backfill cannot be starved by its own head, and a dead_air ending after a real conversation is `completed` | a third of the fleet read `agent_outcome` NULL at peak on 2026-09-16 (grades lagging 161–203 min); 87 calls from 09-15 stranded behind two empty rows; 58 real conversations on 09-14 recorded `failed` and never graded or synced |
 
 ### How to check the republish actually took, in ten seconds
 
 Do not take my word or yours for it — the marker and the behaviour both say so.
 
 ```
-GET /voice/health   ->   voice-runtime-v48-the-ambiguous-lookup-is-countable-20260917
+GET /voice/health   ->   voice-runtime-v49-the-fleet-is-graded-at-teardown-20260917
 ```
 
 and, from the database, the v37 signature disappearing from live traffic:
