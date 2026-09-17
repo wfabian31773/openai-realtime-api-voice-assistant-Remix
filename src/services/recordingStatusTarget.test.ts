@@ -51,4 +51,23 @@ describe("the old core's recording-status handler takes the CallSid-keyed callba
     // The ticket gets the recording the same way a conference recording's does.
     expect(body).toMatch(/pushRecordingToTicketing\(callLog\.id, recordingUrl\)/);
   });
+
+  /**
+   * SIGNED, OR NOTHING IS WRITTEN (Codex P1, #321). A CallSid is not a secret,
+   * so the branch must check Twilio's signature BEFORE it reads or writes a
+   * row, and refuse on anything but "valid" — the runtime's own fail-closed
+   * check, not a second implementation.
+   */
+  it("the CallSid branch refuses an unsigned callback before it touches a row", () => {
+    const handler = routes.slice(routes.indexOf(`app.post("/api/voice/recording-status"`));
+    const branch = handler.indexOf("target?.by === 'call'");
+    const body = handler.slice(branch, handler.indexOf("res.status(200).send('OK')", branch));
+    const check = body.indexOf("checkTwilioSignature(");
+    const read = body.indexOf("storage.getCallLogBySid(target.callSid)");
+    expect(check, "no signature check in the CallSid branch").toBeGreaterThan(0);
+    expect(check).toBeLessThan(read);
+    expect(body).toMatch(/if \(signature !== 'valid'\)/);
+    expect(body.slice(check, read)).toMatch(/return res\.status\(403\)/);
+    expect(body).toMatch(/import\('\.\/runtime\/voiceWebhook'\)/);
+  });
 });

@@ -166,6 +166,38 @@ export interface GrokDaySummary {
   derivedCentsPerMinute?: number | null;
 }
 
+/**
+ * WHAT A LATER, FAILED RUN MAY DO TO A DAY ROW — Codex P1 on #321.
+ *
+ * The scheduler settles the previous UTC day every six hours, so a day is
+ * attempted up to four times. The first version of `writeDaySummary` was an
+ * unconditional upsert, so a run that could not reach xAI or the database
+ * AFTER a successful one would have overwritten `reconciled = true`, the
+ * xAI figure, the booked cost, the call count and the seconds with
+ * false / null / 0 — while the per-call allocation on `call_logs` stayed
+ * intact. The row would then have said the opposite of the rows.
+ *
+ * Two shapes of an attempt cannot be a measurement:
+ *   - a refusal landing on a day already RECONCILED, and
+ *   - a refusal that read NO calls (the database was the thing that failed)
+ *     landing on a day that HAS a measured row.
+ * Both are recorded as an attempt — `last_attempt_at` / `last_attempt_reason`
+ * — and touch nothing else. Everything else (the first write, a refusal
+ * replacing a refusal that did read the calls, a reconciliation replacing
+ * anything) is the full upsert.
+ */
+export type DaySummaryWrite = "full" | "attempt_only";
+
+export function daySummaryWrite(
+  existing: { reconciled: boolean; runtimeCalls: number } | null,
+  incoming: GrokDaySummary,
+): DaySummaryWrite {
+  if (!existing || incoming.reconciled) return "full";
+  if (existing.reconciled) return "attempt_only";
+  if (incoming.runtimeCalls === 0 && existing.runtimeCalls > 0) return "attempt_only";
+  return "full";
+}
+
 /** What `runReconciliation` learned on the way, for the day summary. */
 interface ReconcileScratch {
   spend?: DailySpend;
@@ -563,7 +595,9 @@ export function databasePorts(): ReconcilerPorts {
       const { pool } = await import("../../server/db");
       // CREATE TABLE IF NOT EXISTS on first write, like call_events: this
       // ships as code and the table must exist whether or not anyone
-      // remembered `npm run db:push`. One row per day; a re-run overwrites.
+      // remembered `npm run db:push`. One row per day; a re-run that
+      // MEASURED something overwrites, a failed attempt only says it tried
+      // (daySummaryWrite).
       await pool.query(`
         CREATE TABLE IF NOT EXISTS daily_grok_costs (
           day DATE PRIMARY KEY,
@@ -577,8 +611,32 @@ export function databasePorts(): ReconcilerPorts {
           runtime_calls INTEGER NOT NULL,
           runtime_seconds INTEGER NOT NULL,
           derived_cents_per_minute NUMERIC,
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          last_attempt_at TIMESTAMPTZ,
+          last_attempt_reason TEXT
         )`);
+      await pool.query(`ALTER TABLE daily_grok_costs ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ`);
+      await pool.query(`ALTER TABLE daily_grok_costs ADD COLUMN IF NOT EXISTS last_attempt_reason TEXT`);
+      const existing = await pool.query(
+        `SELECT reconciled, runtime_calls FROM daily_grok_costs WHERE day = $1::date`,
+        [summary.day],
+      );
+      const row = existing.rows?.[0] as { reconciled: boolean; runtime_calls: number } | undefined;
+      const write = daySummaryWrite(
+        row ? { reconciled: Boolean(row.reconciled), runtimeCalls: Number(row.runtime_calls) } : null,
+        summary,
+      );
+      if (write === "attempt_only") {
+        await pool.query(
+          `UPDATE daily_grok_costs SET last_attempt_at = NOW(), last_attempt_reason = $2 WHERE day = $1::date`,
+          [summary.day, summary.refusedReason ?? "refused"],
+        );
+        console.warn(
+          `[GROK COST] ${summary.day}: a later attempt was refused (${summary.refusedReason ?? "refused"}); ` +
+            `the day's measured row is kept and the attempt is recorded on it`,
+        );
+        return;
+      }
       await pool.query(
         `INSERT INTO daily_grok_costs
            (day, reconciled, refused_reason, xai_voice_cents, xai_voice_lines, xai_ignored_lines,

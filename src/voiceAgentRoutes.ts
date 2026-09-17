@@ -25,6 +25,7 @@ import { flushAzulTimeline, getAzulTimeline, recordDirectorAction } from './serv
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
 import { recordingStatusTarget } from './services/recordingStatusTarget';
+import { recordingDeliveryPlan } from './services/recordingDelivery';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
@@ -7693,6 +7694,23 @@ export function setupVoiceAgentRoutes(app: Express): void {
             console.info(`[RECORDING] No ticketNumber/callSid on call log ${callLogId} — skipping ticketing push`);
             return;
           }
+          /**
+           * WHO CARRIES THE URL (Codex P1, #321; recordingDelivery.ts). The
+           * post-call sync selects rows with callDataSynced = false and its
+           * payload already carries recordingUrl off the row, so before the
+           * sync has run the row is enough and the sync delivers it — once.
+           * This helper used to push AND stamp the synced flag, which
+           * told the sync the call was done and left the ticket with a
+           * recording and no transcript, duration or outcome whenever the
+           * callback beat the five-minute sweep — the common case on the
+           * runtime, where the recording completes at hangup. Only a call the
+           * sync has already finished with is pushed from here, and the flag
+           * is never written from here again.
+           */
+          if (recordingDeliveryPlan(callLog) === 'leave_for_sync') {
+            console.info(`[RECORDING] recording URL saved on call log ${callLogId}; the post-call sync will carry it to the ticket`);
+            return;
+          }
           const { ticketingApiClient } = await import('../server/services/ticketingApiClient');
           const result = await ticketingApiClient.updateTicketCallData({
             callSid: callLog.callSid || undefined,
@@ -7700,13 +7718,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
             recordingUrl: recordingUrl,
           });
           if (result.success) {
-            console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}`);
-            // Record the delivery, or the sweeper re-pushes this call five
-            // minutes from now. With a hard .limit(20) per cycle, normal
-            // traffic would saturate the sweeper re-sending calls that
-            // already landed and crowd out the failures it exists to
-            // recover.
-            await storage.updateCallLog(callLog.id, { callDataSynced: true });
+            console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid} (call already synced)`);
           } else {
             console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
           }
@@ -7775,7 +7787,28 @@ export function setupVoiceAgentRoutes(app: Express): void {
          * Twilio posts back with a CallSid. Until 2026-09-17 this handler read
          * ConferenceSid only, so the runtime lanes — which say "all calls are
          * being recorded" — had recording_url NULL on 4,564 of 4,564 calls.
+         *
+         * SIGNED, OR NOTHING IS WRITTEN (Codex P1, #321). This route sits
+         * behind the rate limiter only, and a CallSid is not a secret — it is
+         * on every ticket and in every log line — so an unsigned POST with a
+         * valid CallSid and an arbitrary RecordingUrl would overwrite the
+         * call's recording and push the forged URL to the ticket. The check is
+         * the runtime's own `checkTwilioSignature` (HMAC over the URL Twilio
+         * was given plus the form params), fail-closed: no auth token, no
+         * header, or a bad signature all refuse. The conference branch above
+         * is not gated here — that is the old core's pre-existing surface,
+         * keyed on a ConferenceSid, and widening a security check onto a live
+         * path it has never run on is its own change with its own after-number.
          */
+        const { checkTwilioSignature } = await import('./runtime/voiceWebhook');
+        const signature = checkTwilioSignature(
+          { headers: req.headers as Record<string, string | string[] | undefined>, body: parsedBody, originalUrl: req.originalUrl },
+          process.env,
+        );
+        if (signature !== 'valid') {
+          console.warn(`[RECORDING] ✗ refused an unsigned CallSid recording callback (${signature}) — nothing written`);
+          return res.status(403).send('invalid signature');
+        }
         const { storage } = await import('../server/storage');
         const callLog = await storage.getCallLogBySid(target.callSid);
         if (callLog) {

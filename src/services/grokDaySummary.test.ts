@@ -14,10 +14,24 @@ import { readFileSync } from "node:fs";
 import {
   reconcileGrokCostsForDay,
   daySummaryFrom,
+  daySummaryWrite,
+  databasePorts,
   type ReconcilerPorts,
   type GrokCallRow,
   type GrokDaySummary,
 } from "./grokCostReconciler";
+
+/** A fake pool for the production port: answers the existing-row SELECT from
+ *  `existingRow` and records every statement. */
+const pool = vi.hoisted(() => ({
+  existingRow: null as null | { reconciled: boolean; runtime_calls: number },
+  calls: [] as Array<{ sql: string; params?: unknown[] }>,
+  query: vi.fn(async (sql: string, params?: unknown[]) => {
+    pool.calls.push({ sql, params });
+    return /^\s*SELECT reconciled, runtime_calls/.test(sql) ? { rows: pool.existingRow ? [pool.existingRow] : [] } : { rows: [] };
+  }),
+}));
+vi.mock("../../server/db", () => ({ pool: { query: (...a: unknown[]) => (pool.query as any)(...a) } }));
 import type { FetchLike, XaiBillingSetup } from "./xaiBilling";
 
 const SETUP: XaiBillingSetup = {
@@ -180,5 +194,60 @@ describe("the day table reaches the Observatory", () => {
     expect(est).toBeGreaterThan(rec);
     expect(page.slice(rec, est)).toMatch(/>reconciled</);
     expect(page.slice(est, est + 400)).toMatch(/>estimated</);
+  });
+});
+
+/**
+ * A FAILED RERUN NEVER OVERWRITES A MEASURED ROW — Codex P1 on #321. The
+ * scheduler attempts each day up to four times; a later run that cannot reach
+ * xAI or the database must not turn a reconciled row into false / null / 0.
+ */
+describe("daySummaryWrite", () => {
+  const measured = (over: Partial<GrokDaySummary> = {}): GrokDaySummary => ({
+    day: "2026-09-16", reconciled: true, xaiVoiceCents: 5355, bookedCents: 5355, runtimeCalls: 239, runtimeSeconds: 25116, ...over,
+  });
+  const refusal = (over: Partial<GrokDaySummary> = {}): GrokDaySummary => ({
+    day: "2026-09-16", reconciled: false, refusedReason: "xai_unreachable", bookedCents: 0, runtimeCalls: 0, runtimeSeconds: 0, ...over,
+  });
+
+  it("the first write of a day is always full, whatever it says", () => {
+    expect(daySummaryWrite(null, measured())).toBe("full");
+    expect(daySummaryWrite(null, refusal())).toBe("full");
+  });
+
+  it("a reconciliation always replaces what is there", () => {
+    expect(daySummaryWrite({ reconciled: false, runtimeCalls: 239 }, measured())).toBe("full");
+    expect(daySummaryWrite({ reconciled: true, runtimeCalls: 239 }, measured())).toBe("full");
+  });
+
+  it("a refusal landing on a reconciled day is an attempt, not a measurement", () => {
+    expect(daySummaryWrite({ reconciled: true, runtimeCalls: 239 }, refusal())).toBe("attempt_only");
+    expect(daySummaryWrite({ reconciled: true, runtimeCalls: 239 }, refusal({ runtimeCalls: 239, bookedCents: 3466 }))).toBe("attempt_only");
+  });
+
+  it("a refusal that read no calls does not erase a refusal that did", () => {
+    expect(daySummaryWrite({ reconciled: false, runtimeCalls: 239 }, refusal())).toBe("attempt_only");
+    // A refusal that DID read the calls is a newer measurement and replaces an older refusal.
+    expect(daySummaryWrite({ reconciled: false, runtimeCalls: 239 }, refusal({ runtimeCalls: 240, bookedCents: 3470 }))).toBe("full");
+  });
+});
+
+describe("the production port keeps the measured row and records the attempt", () => {
+  beforeEach(() => { pool.calls.length = 0; pool.existingRow = null; });
+
+  it("a refusal on a reconciled day writes only last_attempt_*, never the upsert", async () => {
+    pool.existingRow = { reconciled: true, runtime_calls: 239 };
+    await databasePorts().writeDaySummary!({ day: "2026-09-16", reconciled: false, refusedReason: "xai_unreachable", bookedCents: 0, runtimeCalls: 0, runtimeSeconds: 0 });
+    const sqls = pool.calls.map((c) => c.sql);
+    expect(sqls.some((q) => /INSERT INTO daily_grok_costs/.test(q)), "the upsert ran on a failed attempt").toBe(false);
+    const attempt = pool.calls.find((c) => /SET last_attempt_at = NOW\(\), last_attempt_reason = \$2/.test(c.sql));
+    expect(attempt?.params).toEqual(["2026-09-16", "xai_unreachable"]);
+  });
+
+  it("a first write, or a reconciliation, is the full upsert", async () => {
+    await databasePorts().writeDaySummary!({ day: "2026-09-16", reconciled: true, xaiVoiceCents: 5355, bookedCents: 5355, runtimeCalls: 239, runtimeSeconds: 25116 });
+    expect(pool.calls.some((c) => /INSERT INTO daily_grok_costs/.test(c.sql))).toBe(true);
+    // The attempt columns exist on a table created before they did.
+    expect(pool.calls.some((c) => /ADD COLUMN IF NOT EXISTS last_attempt_at/.test(c.sql))).toBe(true);
   });
 });

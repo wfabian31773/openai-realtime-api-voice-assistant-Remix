@@ -194,6 +194,11 @@ dashboard as "xAI reported vs booked", and the call page's cost badge says
 `daily_grok_costs` — 0, target one per day from the first nightly run.
 **Guards:** filing rate per lane and barely-heard rate must not move; the
 cost-preservation trio must still read 0 at the OpenAI rate.
+**Codex round 1 (03:35 UTC), three P1s, all real, all taken and mutation-checked
+(7/7):** the recording push no longer marks the call synced (it would have
+starved every runtime ticket of its transcript and duration); the CallSid
+recording callback now requires Twilio's signature; a failed rerun of the cost
+reconciler can no longer overwrite a measured day row.
 
 ---
 
