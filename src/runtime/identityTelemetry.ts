@@ -31,7 +31,8 @@
  *
  *   storeSize 0                     nothing in the store at teardown at all
  *   hasEntry AND NOT entryCertain   the entry survives, its certainty does not
- *   entryCertain AND NOT identityHeld the read answered and the hand-over lost it
+ *   entryCertain AND NOT identityHeld an INVARIANT BREACH, not a diagnosis —
+ *                                   unreachable today, see below
  *   rowWrite failed / unconfirmed   the identity was held and the UPSERT did
  *                                   not (or may not have) landed it
  *
@@ -100,9 +101,9 @@ export interface IdentityEvent {
 }
 
 /**
- * WARN names the shapes that are defects rather than absences: a certain entry
- * that did not reach the row (v51 failing outright), and an identity the
- * process HELD whose row write then failed or could not be confirmed.
+ * WARN names the shapes that are defects rather than absences: an identity the
+ * process HELD whose row write then failed or could not be confirmed, and the
+ * invariant breach below.
  * Everything else — including an empty store on a call whose lookup found
  * nobody — is the honest absence this row exists to count.
  *
@@ -132,6 +133,23 @@ export function identityEvent(
   const reachedRow = identityHeld && persisted === true;
   const writeLost = identityHeld && persisted === false;
   const writeUnconfirmed = identityHeld && persisted === null;
+  /**
+   * AN INVARIANT TRIPWIRE, AND UNREACHABLE BY CONSTRUCTION TODAY — Codex P2,
+   * #322 round 3, and it is recorded rather than dressed up as a diagnosis.
+   *
+   * `identityForRow` calls `verifiedIdentityFor` and sets `patientFound: true`
+   * for ANY value it returns, and that accessor answers only for a live CERTAIN
+   * entry; `identityStoreProbe` then re-reads the same map on the next
+   * synchronous line, with no await between them and a 30-minute TTL. So
+   * `entryCertain` implies `identityHeld`, and this arm cannot fire in
+   * production. It is NOT evidence of a read-to-hand-over failure, and the
+   * earlier doc claiming it was is corrected above.
+   *
+   * It stays because it costs nothing and it is the one thing that would notice
+   * the coupling being broken later — `identityForRow` made async, a condition
+   * added between the two reads, the accessor loosened. A non-zero count means
+   * THAT, and the verdict is named so nobody reads it as v51 dropping a record.
+   */
   const certainLost = probe.entryCertain && !identityHeld;
   return {
     level: certainLost || writeLost || writeUnconfirmed ? "warn" : "info",
@@ -156,7 +174,7 @@ export function identityEvent(
           : writeUnconfirmed
             ? "row_write_unconfirmed"
             : certainLost
-              ? "certain_but_dropped"
+              ? "certain_but_not_held"
               : probe.hasEntry
                 ? "entry_not_certain"
                 : !probe.sidCanonical
@@ -173,7 +191,15 @@ export async function logRuntimeIdentity(
   /** What `persistRuntimeCall` answered — see identityEvent. */
   persisted: boolean | null,
   ids: { callLogId?: string } = {},
-  opts: { backoffMs?: readonly number[]; sleep?: (ms: number) => Promise<void> } = {},
+  opts: {
+    backoffMs?: readonly number[];
+    sleep?: (ms: number) => Promise<void>;
+    /**
+     * The other `call_events` writer for this call, awaited BEFORE flushing so
+     * the two never release the same buffer concurrently — see the call site.
+     */
+    after?: Promise<unknown>;
+  } = {},
 ): Promise<boolean> {
   const ev = identityEvent(identity, probe, persisted);
   // Lazy, like every database-touching import on the runtime: callEventLog
@@ -181,11 +207,33 @@ export async function logRuntimeIdentity(
   const { emitCallEvent, flushCallEvents, releaseCallEvents } = await import(
     "../services/callEventLog"
   );
+  /**
+   * EMITTED BEFORE ANYTHING IS AWAITED (Codex P1, #322 round 3).
+   *
+   * `flushCallEvents` is UNBOUNDED — it awaits `db.execute` with no timeout —
+   * so a wedged pool leaves the predecessor's flush pending forever. Emitting
+   * after that wait would mean the row is never buffered at all, and the 2h
+   * reaper cannot recover what was never emitted: the same wedged pool that
+   * produces `row_write_unconfirmed` would silently suppress the diagnostic
+   * row explaining it. That is the serialisation of round 2 turning into a
+   * worse defect than the race it fixed.
+   *
+   * Emitting first makes the row REAPABLE whatever happens next: the stuck
+   * predecessor claimed only its own slice, so the reaper's later flush picks
+   * this event up.
+   */
   emitCallEvent(record.callSid, ev.level, "tool", IDENTITY_EVENT, ev.data, {
     callSid: record.callSid,
     callLogId: ids.callLogId,
     agentSlug: record.slug,
   });
+  /**
+   * DELIBERATELY UNBOUNDED, and that is safe only because of the emit above.
+   * Bounding it would let this flush release a buffer whose slice the
+   * predecessor has already claimed but not yet written — recreating the round
+   * 2 loss in the one case that matters.
+   */
+  if (opts.after) await opts.after.catch(() => undefined);
   const backoff = opts.backoffMs ?? PERSIST_RETRY_BACKOFF_MS;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let durable = false;

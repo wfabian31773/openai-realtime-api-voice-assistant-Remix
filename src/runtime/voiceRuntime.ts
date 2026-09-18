@@ -438,6 +438,7 @@ export interface VoiceRuntimeOptions {
     probe: ReturnType<typeof identityStoreProbe>,
     persisted: boolean | null,
     ids: { callLogId?: string },
+    opts?: { after?: Promise<unknown> },
   ) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
@@ -1231,12 +1232,22 @@ export function mountVoiceRuntime(
              * rather than awaited: teardown still holds for neither of them,
              * and telemetry must never delay a caller's request.
              */
-            void logFollowUps(record, { callLogId })
-              .catch(() => undefined)
-              // And why identity did or did not land (task #148): an
-              // instrument, never a gate — it changes nothing a caller hears.
-              .then(() => logIdentity(record, identity, identityProbe, persisted, { callLogId }))
-              .catch(() => undefined);
+            const followUpsWritten = logFollowUps(record, { callLogId }).catch(() => undefined);
+            /**
+             * AND WHY IDENTITY DID OR DID NOT LAND (task #148): an instrument,
+             * never a gate — it changes nothing a caller hears.
+             *
+             * Started IMMEDIATELY rather than chained off the line above
+             * (Codex P1, #322 round 3). It emits its row first and waits for
+             * `followUpsWritten` only before FLUSHING, so the two never release
+             * the same per-SID buffer at once — while a wedged pool, which
+             * leaves the unbounded flush above pending for ever, can no longer
+             * stop the identity row being buffered. The 2h reaper recovers what
+             * is emitted; it cannot recover what was never emitted at all.
+             */
+            void logIdentity(record, identity, identityProbe, persisted, { callLogId }, {
+              after: followUpsWritten,
+            }).catch(() => undefined);
           },
         });
         // Connect AFTER the bridge exists: a connection that fails then has

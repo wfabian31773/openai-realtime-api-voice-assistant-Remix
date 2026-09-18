@@ -119,9 +119,19 @@ describe("the verdict names which of the four happened", () => {
    * The 2026-09-17 shape, if the store turns out to be holding the entry: a
    * certain match that did not reach the row is v51 failing outright.
    */
-  it("certain_but_dropped, and WARNS, when a certain entry did not reach the row", () => {
+  /**
+   * AN INVARIANT TRIPWIRE, AND UNREACHABLE IN PRODUCTION — Codex P2, #322
+   * round 3. `identityForRow` sets `patientFound: true` for any value
+   * `verifiedIdentityFor` returns, that accessor answers only for a live
+   * CERTAIN entry, and the probe re-reads the same map on the next synchronous
+   * line — so `entryCertain` implies `identityHeld` and this arm cannot fire
+   * today. The arguments below are deliberately CONTRADICTORY, which is the
+   * only way to reach it, and that is the point: it exists to notice the
+   * coupling being broken later, not to diagnose a live failure.
+   */
+  it("certain_but_not_held, and WARNS, on the invariant breach (contradictory by construction)", () => {
     const ev = identityEvent(NOTHING, probe({ size: 1, certainEntries: 1, hasEntry: true, entryCertain: true }), true);
-    expect(ev.data.verdict).toBe("certain_but_dropped");
+    expect(ev.data.verdict).toBe("certain_but_not_held");
     expect(ev.level).toBe("warn");
   });
 
@@ -191,7 +201,7 @@ describe("what the row may carry", () => {
         "reached_row",
         "row_write_failed",
         "row_write_unconfirmed",
-        "certain_but_dropped",
+        "certain_but_not_held",
         "entry_not_certain",
         "sid_not_canonical",
         "no_entry",
@@ -209,11 +219,15 @@ describe("what the row may carry", () => {
   });
 
   /**
-   * And every verdict the code can produce must be in that closed set — a
-   * verdict added later without being enumerated would otherwise slip past the
-   * guard above on the one fixture it happens not to hit.
+   * Every verdict the code CAN produce must be in that closed set — a verdict
+   * added later without being enumerated would otherwise slip past the guard
+   * above on the one fixture it happens not to hit.
+   *
+   * "Reachable" here means reachable from these ARGUMENTS, not reachable in
+   * production: `certain_but_not_held` needs a contradictory pair and cannot
+   * occur through the real wiring (see above).
    */
-  it("every reachable verdict is one of the enumerated values", () => {
+  it("every verdict these arguments can produce is one of the enumerated values", () => {
     const seen = new Set<string>();
     for (const persisted of [true, false, null]) {
       for (const p of [
@@ -228,7 +242,7 @@ describe("what the row may carry", () => {
       }
     }
     expect([...seen].sort()).toEqual([
-      "certain_but_dropped",
+      "certain_but_not_held",
       "entry_not_certain",
       "no_entry",
       "reached_row",
@@ -246,6 +260,55 @@ describe("what the row may carry", () => {
     expect(category).toBe("tool");
     expect(message).toBe(IDENTITY_EVENT);
     expect(level).toBe("info");
+  });
+});
+
+/**
+ * THE PREDECESSOR MUST NOT BE ABLE TO SUPPRESS THE ROW — Codex P1, #322 round 3,
+ * and a regression round 2's own fix introduced.
+ *
+ * `flushCallEvents` is unbounded (it awaits `db.execute` with no timeout), so a
+ * wedged pool leaves the follow-up writer's flush pending for ever. Chained
+ * naively, that meant the identity row was never EMITTED — and the 2h reaper
+ * cannot recover what was never buffered, so the very pool failure that
+ * produces `row_write_unconfirmed` would have hidden the row explaining it.
+ */
+describe("a stuck predecessor", () => {
+  it("cannot stop the row being emitted — the reaper needs it buffered", async () => {
+    const never = new Promise<void>(() => {});
+    let done = false;
+    void logRuntimeIdentity(record(), NOTHING, probe(), null, {}, { after: never }).then(
+      () => (done = true),
+    );
+    // Let every already-resolved microtask (the lazy import) settle.
+    await new Promise((r) => setTimeout(r, 5));
+    expect(log.emitted, "the row must be buffered before the wait").toHaveLength(1);
+    // And it must NOT have flushed or released while the predecessor hangs —
+    // that is the round-2 race this ordering exists to keep closed.
+    expect(log.flushed).toEqual([]);
+    expect(log.released).toEqual([]);
+    expect(done).toBe(false);
+  });
+
+  it("flushes only once the predecessor has settled", async () => {
+    let release: (() => void) | undefined;
+    const after = new Promise<void>((r) => (release = r));
+    const run = logRuntimeIdentity(record(), NOTHING, probe(), true, {}, { after });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(log.flushed).toEqual([]);
+    release!();
+    expect(await run).toBe(true);
+    expect(log.flushed).toEqual([SID]);
+    expect(log.released).toEqual([SID]);
+  });
+
+  it("a predecessor that REJECTS still lets the row flush", async () => {
+    expect(
+      await logRuntimeIdentity(record(), NOTHING, probe(), true, {}, {
+        after: Promise.reject(new Error("the other writer failed")),
+      }),
+    ).toBe(true);
+    expect(log.released).toEqual([SID]);
   });
 });
 
@@ -318,7 +381,7 @@ describe("the runtime's teardown", () => {
   });
 
   it("hands the identity, the probe AND the upsert's answer to the log", () => {
-    expect(src).toContain("logIdentity(record, identity, identityProbe, persisted, { callLogId })");
+    expect(src).toContain("logIdentity(record, identity, identityProbe, persisted, { callLogId }");
   });
 
   /**
@@ -336,22 +399,18 @@ describe("the runtime's teardown", () => {
    * the winner's release makes the loser's retry report durable having written
    * nothing (Codex P2, #322). Chained, never overlapping.
    */
-  it("runs the two call_events writers one after the other, not at once", () => {
-    const at = src.indexOf("logFollowUps(record, { callLogId })");
-    expect(at).toBeGreaterThan(-1);
-    const thenAt = src.indexOf(".then(() => logIdentity(", at);
-    expect(thenAt, "the identity writer is not chained to the follow-up writer").toBeGreaterThan(at);
-    /**
-     * ONE EXPRESSION, NOT TWO STATEMENTS THAT HAPPEN TO SIT TOGETHER. The
-     * first version of this assertion only checked the `.then` appeared
-     * within 400 characters, so re-splitting them into
-     * `void logFollowUps(...); void Promise.resolve().then(() => logIdentity(...))`
-     * — the exact defect Codex reported — sailed through it. Nothing between
-     * the two may terminate the statement.
-     */
-    const between = src.slice(at + "logFollowUps(record, { callLogId })".length, thenAt);
-    expect(between.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")).not.toContain(";");
-    // And the identity writer is never ALSO started on its own.
+  /**
+   * The two writers must not FLUSH concurrently (round 2's race) and the
+   * predecessor must not be able to stop the identity row being EMITTED
+   * (round 3's regression). Both are satisfied by handing the predecessor's
+   * promise over as `after` rather than chaining `.then` off it.
+   */
+  it("hands the follow-up writer over as `after` instead of chaining onto it", () => {
+    expect(src).toContain("const followUpsWritten = logFollowUps(record, { callLogId })");
+    expect(src).toContain("after: followUpsWritten");
+    // The round-3 defect: identity started only once the predecessor resolved.
+    expect(src).not.toMatch(/\.then\(\(\) => logIdentity\(/);
+    // And the identity writer is never ALSO started a second time.
     expect(src.match(/logIdentity\(record, identity, identityProbe/g) ?? []).toHaveLength(1);
   });
 
@@ -359,8 +418,8 @@ describe("the runtime's teardown", () => {
     expect(src).toContain("options.logIdentity ?? logRuntimeIdentity");
   });
 
-  it("never awaits the chain — telemetry must not hold teardown", () => {
-    const at = src.indexOf("logFollowUps(record, { callLogId })");
+  it("never awaits the identity writer — telemetry must not hold teardown", () => {
+    const at = src.indexOf("logIdentity(record, identity, identityProbe");
     expect(src.slice(Math.max(0, at - 40), at)).toContain("void ");
   });
 });
