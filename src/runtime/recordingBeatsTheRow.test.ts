@@ -13,7 +13,7 @@
  * gap. The wiring is read from source (failure mode 10): a store that works
  * proves nothing about whether the handler parks into it.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   parkRecording,
@@ -131,15 +131,54 @@ describe("a parked URL survives a write that fails", () => {
     expect(parkedRecordingCount()).toBe(0);
   });
 
-  it("a URL parked during the write stays parked when ITS write fails", async () => {
-    let n = 0;
-    const upsert = async () => {
-      n++;
-      if (n === 1) { parkRecording(SID, URL_B); return; }
-      throw new Error("connection reset");
-    };
-    expect(await persistRuntimeCall(record(), {}, upsert, noWait)).toBe(false);
-    expect(peekParkedRecording(SID)).toBe(URL_B);
+  /**
+   * REWRITTEN, NOT LOOSENED — Codex P2, #322 round 5. This asserted `false`
+   * here, which is the defect written down: the ROW landed on the first upsert
+   * and only the late recording URL did not, and the one consumer of that
+   * boolean is v58's identity telemetry, which turns it into
+   * `row_write_failed` — the write-stage measurement corrupted by exactly the
+   * intermittent failure it exists to diagnose. The property this test is
+   * really for is that the URL stays parked; that is unchanged and still
+   * asserted.
+   */
+  it("a URL parked during the write stays parked when ITS write fails, and the ROW still reports true", async () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a) => void errors.push(a.join(" ")));
+    try {
+      let n = 0;
+      const upsert = async () => {
+        n++;
+        if (n === 1) { parkRecording(SID, URL_B); return; }
+        throw new Error("connection reset");
+      };
+      expect(await persistRuntimeCall(record(), {}, upsert, noWait)).toBe(true);
+      expect(peekParkedRecording(SID)).toBe(URL_B);
+      // And it says which of the two writes failed, because "the row did not
+      // land" is the alarming one and this is not it.
+      expect(errors.join(" ")).toContain("late recording URL did not");
+      expect(errors.join(" ")).not.toContain("call_logs write failed");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  /**
+   * The control on the sentence above: when the ROW itself never lands, the
+   * answer is still false and the log still says so. A fix that reported the
+   * primary write by always returning true would pass the test above and fail
+   * this one.
+   */
+  it("still reports false, with the row's own log line, when the FIRST write never lands", async () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a) => void errors.push(a.join(" ")));
+    try {
+      const upsert = async () => { throw new Error("connection reset"); };
+      expect(await persistRuntimeCall(record(), {}, upsert, noWait)).toBe(false);
+      expect(errors.join(" ")).toContain("call_logs write failed");
+      expect(errors.join(" ")).not.toContain("late recording URL did not");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("the default backoff is short and bounded", async () => {
