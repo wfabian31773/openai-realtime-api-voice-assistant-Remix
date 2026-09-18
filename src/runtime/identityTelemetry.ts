@@ -31,7 +31,9 @@
  *
  *   storeSize 0                     nothing in the store at teardown at all
  *   hasEntry AND NOT entryCertain   the entry survives, its certainty does not
- *   entryCertain AND NOT reachedRow the read answered and the write dropped it
+ *   entryCertain AND NOT identityHeld the read answered and the hand-over lost it
+ *   rowWrite failed / unconfirmed   the identity was held and the UPSERT did
+ *                                   not (or may not have) landed it
  *
  * **`storeSize` DOES NOT SAY THIS CALL'S WRITE USED THE WRONG SID, AND THE
  * FIRST VERSION OF THIS FILE CLAIMED IT DID** (Codex P1, #322). `verified` is
@@ -52,9 +54,16 @@
  *   JOIN call_events e ON e.call_sid = c.call_sid
  *    AND e.category = 'tool' AND e.message = 'identity_summary'
  *   WHERE e.data->>'verdict' = 'no_entry'
- *     AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.tool_timeline->'events') t
- *                 WHERE t->>'tool' = 'lookup_patient'
- *                   AND t->'outcome'->>'identity_is_certain' = 'true');
+ *     AND (SELECT t->'outcome'->>'identity_is_certain'
+ *          FROM jsonb_array_elements(c.tool_timeline->'events') t
+ *          WHERE t->>'tool' = 'lookup_patient'
+ *          ORDER BY t->>'at' DESC LIMIT 1) = 'true';
+ *
+ * **IT READS THE CALL'S LAST LOOKUP, NOT ANY LOOKUP** (Codex P2, #322). An
+ * `EXISTS` over every event counts a call that matched certainly and THEN came
+ * back ambiguous on the same name — where `forgetIfSameName` deliberately
+ * deletes the entry, so `no_entry` is the CORRECT answer and not a mismatch at
+ * all. Taking the final outcome excludes exactly that downgrade.
  *
  * AN INSTRUMENT, NOT A FIX. It changes nothing a caller hears and nothing that
  * reaches a ticket. It is deliberately the v47/v48 move — make it countable
@@ -91,23 +100,41 @@ export interface IdentityEvent {
 }
 
 /**
- * WARN names the ONE shape that is a defect rather than an absence: a certain
- * entry that did not reach the row, which is v51 failing outright. Everything
- * else — including an empty store on a call whose lookup found nobody — is the
- * honest absence this row exists to count.
+ * WARN names the shapes that are defects rather than absences: a certain entry
+ * that did not reach the row (v51 failing outright), and an identity the
+ * process HELD whose row write then failed or could not be confirmed.
+ * Everything else — including an empty store on a call whose lookup found
+ * nobody — is the honest absence this row exists to count.
  *
  * There is deliberately no `key_mismatch` verdict; see the note above. A store
  * holding other calls' entries is the NORMAL state of a process-wide map, not
  * evidence about this call.
+ *
+ * **`reached_row` IS EARNED BY THE WRITE, NOT BY THE READ** (Codex P1, #322).
+ * The first version derived it from `identity.patientFound` alone, so when
+ * `persistRuntimeCall` exhausted its retries — or `withinOrNull` timed out —
+ * the verdict said the identity was written while `call_logs.patient_found`
+ * stayed unset. That is the write-stage failure this telemetry exists to
+ * isolate, hidden by the telemetry. `persisted` now carries the upsert's own
+ * answer, and the three cases are kept apart rather than flattened:
+ *
+ *   true   the upsert reported success
+ *   false  it failed after its retries — the row has no name
+ *   null   the deadline won; the write is still running and MAY land, so this
+ *          is unconfirmed and never reported as either outcome
  */
 export function identityEvent(
   identity: RuntimeCallIdentity,
   probe: IdentityStoreProbe,
+  persisted: boolean | null,
 ): IdentityEvent {
-  const reachedRow = identity.patientFound === true;
-  const certainLost = probe.entryCertain && !reachedRow;
+  const identityHeld = identity.patientFound === true;
+  const reachedRow = identityHeld && persisted === true;
+  const writeLost = identityHeld && persisted === false;
+  const writeUnconfirmed = identityHeld && persisted === null;
+  const certainLost = probe.entryCertain && !identityHeld;
   return {
-    level: certainLost ? "warn" : "info",
+    level: certainLost || writeLost || writeUnconfirmed ? "warn" : "info",
     data: {
       storeSize: probe.size,
       certainEntries: probe.certainEntries,
@@ -116,17 +143,25 @@ export function identityEvent(
       entryCertain: probe.entryCertain,
       entryHasDob: probe.entryHasDob,
       reachedRow,
-      // Which of the four the row is an instance of, so the common case is one
-      // GROUP BY rather than four booleans a reader has to combine correctly.
+      /** The identity the read produced, whatever the write then did with it. */
+      identityHeld,
+      /** The upsert's own answer: ok / failed / unconfirmed (the deadline won). */
+      rowWrite: persisted === true ? "ok" : persisted === false ? "failed" : "unconfirmed",
+      // Which one the row is an instance of, so the common case is one GROUP BY
+      // rather than several booleans a reader has to combine correctly.
       verdict: reachedRow
         ? "reached_row"
-        : certainLost
-          ? "certain_but_dropped"
-          : probe.hasEntry
-            ? "entry_not_certain"
-            : !probe.sidCanonical
-              ? "sid_not_canonical"
-              : "no_entry",
+        : writeLost
+          ? "row_write_failed"
+          : writeUnconfirmed
+            ? "row_write_unconfirmed"
+            : certainLost
+              ? "certain_but_dropped"
+              : probe.hasEntry
+                ? "entry_not_certain"
+                : !probe.sidCanonical
+                  ? "sid_not_canonical"
+                  : "no_entry",
     },
   };
 }
@@ -135,10 +170,12 @@ export async function logRuntimeIdentity(
   record: VoiceCallRecord,
   identity: RuntimeCallIdentity,
   probe: IdentityStoreProbe,
+  /** What `persistRuntimeCall` answered — see identityEvent. */
+  persisted: boolean | null,
   ids: { callLogId?: string } = {},
   opts: { backoffMs?: readonly number[]; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<boolean> {
-  const ev = identityEvent(identity, probe);
+  const ev = identityEvent(identity, probe, persisted);
   // Lazy, like every database-touching import on the runtime: callEventLog
   // pulls in server/db, which validates DATABASE_URL at load.
   const { emitCallEvent, flushCallEvents, releaseCallEvents } = await import(

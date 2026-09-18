@@ -73,11 +73,46 @@ beforeEach(() => {
 });
 
 describe("the verdict names which of the four happened", () => {
-  it("reached_row when the identity was written", () => {
-    const ev = identityEvent(REACHED, probe({ size: 1, certainEntries: 1, hasEntry: true, entryCertain: true }));
+  it("reached_row when the identity was held AND the upsert reported success", () => {
+    const ev = identityEvent(REACHED, probe({ size: 1, certainEntries: 1, hasEntry: true, entryCertain: true }), true);
     expect(ev.data.verdict).toBe("reached_row");
     expect(ev.data.reachedRow).toBe(true);
+    expect(ev.data.rowWrite).toBe("ok");
     expect(ev.level).toBe("info");
+  });
+
+  /**
+   * THE FALSE "IT WORKED" — Codex P1, #322. The first version read
+   * `identity.patientFound` alone, so a write that failed after its retries
+   * still reported `reached_row` while `call_logs.patient_found` stayed unset:
+   * the write-stage failure this telemetry exists to isolate, hidden by it.
+   */
+  it("row_write_failed, and WARNS, when the identity was held and the upsert failed", () => {
+    const ev = identityEvent(REACHED, probe({ size: 1, certainEntries: 1, hasEntry: true, entryCertain: true }), false);
+    expect(ev.data.verdict).toBe("row_write_failed");
+    expect(ev.data.reachedRow).toBe(false);
+    expect(ev.data.identityHeld).toBe(true);
+    expect(ev.data.rowWrite).toBe("failed");
+    expect(ev.level).toBe("warn");
+  });
+
+  /**
+   * `withinOrNull` answers null when its deadline wins, and the write KEEPS
+   * RUNNING — so this is neither success nor failure and is never reported as
+   * either. Kept apart rather than flattened into one of them.
+   */
+  it("row_write_unconfirmed, and WARNS, when the deadline won and the write may still land", () => {
+    const ev = identityEvent(REACHED, probe({ size: 1, certainEntries: 1, hasEntry: true, entryCertain: true }), null);
+    expect(ev.data.verdict).toBe("row_write_unconfirmed");
+    expect(ev.data.reachedRow).toBe(false);
+    expect(ev.data.rowWrite).toBe("unconfirmed");
+    expect(ev.level).toBe("warn");
+  });
+
+  it("a call with NO identity is never blamed on the write, whatever it answered", () => {
+    for (const persisted of [true, false, null]) {
+      expect(identityEvent(NOTHING, probe(), persisted).data.verdict).toBe("no_entry");
+    }
   });
 
   /**
@@ -85,7 +120,7 @@ describe("the verdict names which of the four happened", () => {
    * certain match that did not reach the row is v51 failing outright.
    */
   it("certain_but_dropped, and WARNS, when a certain entry did not reach the row", () => {
-    const ev = identityEvent(NOTHING, probe({ size: 1, certainEntries: 1, hasEntry: true, entryCertain: true }));
+    const ev = identityEvent(NOTHING, probe({ size: 1, certainEntries: 1, hasEntry: true, entryCertain: true }), true);
     expect(ev.data.verdict).toBe("certain_but_dropped");
     expect(ev.level).toBe("warn");
   });
@@ -99,7 +134,7 @@ describe("the verdict names which of the four happened", () => {
    * call and filled the warn bucket with them.
    */
   it("a store full of OTHER calls' entries is still no_entry, and does NOT warn", () => {
-    const ev = identityEvent(NOTHING, probe({ size: 4, certainEntries: 2, hasEntry: false }));
+    const ev = identityEvent(NOTHING, probe({ size: 4, certainEntries: 2, hasEntry: false }), true);
     expect(ev.data.verdict).toBe("no_entry");
     expect(ev.level).toBe("info");
   });
@@ -110,47 +145,101 @@ describe("the verdict names which of the four happened", () => {
       probe({ size: 1, hasEntry: true, entryCertain: true }),
       probe(),
     ]) {
-      expect(String(identityEvent(NOTHING, p).data.verdict)).not.toContain("mismatch");
+      expect(String(identityEvent(NOTHING, p, true).data.verdict)).not.toContain("mismatch");
     }
   });
 
   it("entry_not_certain when the entry survives and its certainty does not", () => {
-    const ev = identityEvent(NOTHING, probe({ size: 1, hasEntry: true, entryCertain: false }));
+    const ev = identityEvent(NOTHING, probe({ size: 1, hasEntry: true, entryCertain: false }), true);
     expect(ev.data.verdict).toBe("entry_not_certain");
     expect(ev.level).toBe("info");
   });
 
   it("no_entry when the store is empty — the honest absence, not a defect", () => {
-    const ev = identityEvent(NOTHING, probe());
+    const ev = identityEvent(NOTHING, probe(), true);
     expect(ev.data.verdict).toBe("no_entry");
     expect(ev.level).toBe("info");
   });
 
   it("sid_not_canonical when the key could never have had an entry", () => {
-    const ev = identityEvent(NOTHING, probe({ sidCanonical: false }));
+    const ev = identityEvent(NOTHING, probe({ sidCanonical: false }), true);
     expect(ev.data.verdict).toBe("sid_not_canonical");
   });
 
   it("a non-canonical SID is named as such, whatever else the store holds", () => {
-    expect(identityEvent(NOTHING, probe({ size: 3, sidCanonical: false })).data.verdict).toBe("sid_not_canonical");
+    expect(identityEvent(NOTHING, probe({ size: 3, sidCanonical: false }), true).data.verdict).toBe("sid_not_canonical");
   });
 });
 
 describe("what the row may carry", () => {
   it("is counts and booleans only — no name, no date, no key", () => {
-    const ev = identityEvent(REACHED, probe({ size: 1, certainEntries: 1, hasEntry: true, entryCertain: true, entryHasDob: true }));
+    const ev = identityEvent(REACHED, probe({ size: 1, certainEntries: 1, hasEntry: true, entryCertain: true, entryHasDob: true }), true);
     const serialised = JSON.stringify(ev.data);
     for (const leak of ["Q E", "Quill", "1959", SID, "+1555"]) {
       expect(serialised).not.toContain(leak);
     }
+    /**
+     * STRINGS ARE ALLOWED ONLY FROM A CLOSED SET, BY NAME AND BY VALUE. The
+     * guard used to say "counts and booleans, plus `verdict`", and adding
+     * `rowWrite` made it go red — correctly, because a new string field is
+     * exactly how a name would get in. Rather than loosen it to permit strings,
+     * both the KEY and the VALUE are enumerated: a patient's name cannot be a
+     * member of either list.
+     */
+    const ENUMS: Record<string, readonly string[]> = {
+      verdict: [
+        "reached_row",
+        "row_write_failed",
+        "row_write_unconfirmed",
+        "certain_but_dropped",
+        "entry_not_certain",
+        "sid_not_canonical",
+        "no_entry",
+      ],
+      rowWrite: ["ok", "failed", "unconfirmed"],
+    };
     for (const [k, v] of Object.entries(ev.data)) {
-      if (k === "verdict") continue;
+      if (typeof v === "string") {
+        expect(Object.keys(ENUMS), `${k} is a string field and is not enumerated`).toContain(k);
+        expect(ENUMS[k], `${k} carries a value outside its closed set`).toContain(v);
+        continue;
+      }
       expect(["number", "boolean"], `${k} must be a count or a boolean`).toContain(typeof v);
     }
   });
 
+  /**
+   * And every verdict the code can produce must be in that closed set — a
+   * verdict added later without being enumerated would otherwise slip past the
+   * guard above on the one fixture it happens not to hit.
+   */
+  it("every reachable verdict is one of the enumerated values", () => {
+    const seen = new Set<string>();
+    for (const persisted of [true, false, null]) {
+      for (const p of [
+        probe({ size: 1, hasEntry: true, entryCertain: true }),
+        probe({ size: 1, hasEntry: true, entryCertain: false }),
+        probe({ sidCanonical: false }),
+        probe(),
+      ]) {
+        for (const id of [REACHED, NOTHING]) {
+          seen.add(String(identityEvent(id, p, persisted).data.verdict));
+        }
+      }
+    }
+    expect([...seen].sort()).toEqual([
+      "certain_but_dropped",
+      "entry_not_certain",
+      "no_entry",
+      "reached_row",
+      "row_write_failed",
+      "row_write_unconfirmed",
+      "sid_not_canonical",
+    ]);
+  });
+
   it("writes one row for EVERY call — an empty store is the finding, not a reason to skip", async () => {
-    await logRuntimeIdentity(record(), NOTHING, probe(), { callLogId: "row-1" });
+    await logRuntimeIdentity(record(), NOTHING, probe(), true, { callLogId: "row-1" });
     expect(log.emitted).toHaveLength(1);
     const [sid, level, category, message] = log.emitted[0];
     expect(sid).toBe(SID);
@@ -162,13 +251,13 @@ describe("what the row may carry", () => {
 
 describe("durability, the rule round 9 of #321 established", () => {
   it("releases the buffer only once the flush has landed", async () => {
-    expect(await logRuntimeIdentity(record(), NOTHING, probe(), {}, { backoffMs: [], sleep: async () => {} })).toBe(true);
+    expect(await logRuntimeIdentity(record(), NOTHING, probe(), true, {}, { backoffMs: [], sleep: async () => {} })).toBe(true);
     expect(log.released).toEqual([SID]);
   });
 
   it("keeps the buffer for the reaper when every attempt fails", async () => {
     log.flushOk.push(false, false, false);
-    const durable = await logRuntimeIdentity(record(), NOTHING, probe(), {}, { backoffMs: [1, 1], sleep: async () => {} });
+    const durable = await logRuntimeIdentity(record(), NOTHING, probe(), true, {}, { backoffMs: [1, 1], sleep: async () => {} });
     expect(durable).toBe(false);
     // Three attempts (one plus two backoffs) and NOT released — a database
     // blip must not delete the only copy of the measurement it made necessary.
@@ -178,7 +267,7 @@ describe("durability, the rule round 9 of #321 established", () => {
 
   it("retries and releases when a later attempt lands", async () => {
     log.flushOk.push(false);
-    expect(await logRuntimeIdentity(record(), NOTHING, probe(), {}, { backoffMs: [1], sleep: async () => {} })).toBe(true);
+    expect(await logRuntimeIdentity(record(), NOTHING, probe(), true, {}, { backoffMs: [1], sleep: async () => {} })).toBe(true);
     expect(log.released).toEqual([SID]);
   });
 });
@@ -188,6 +277,34 @@ describe("durability, the rule round 9 of #321 established", () => {
  * nothing about the runtime calling it — and because the probe must be taken
  * at the same moment as the read it describes.
  */
+/**
+ * THE DOCUMENTED JOIN IS LOAD-BEARING, SO IT IS PINNED.
+ *
+ * Removing the `key_mismatch` verdict was only sound because the join replaces
+ * it, so the query in the header is part of the deliverable rather than a
+ * comment. Reverting it to `EXISTS` over EVERY lookup failed no test until this
+ * existed — and that form overcounts, because a call that matched certainly and
+ * then came back ambiguous on the same name has its entry deliberately deleted
+ * by `forgetIfSameName`, making `no_entry` correct rather than a mismatch
+ * (Codex P2, #322).
+ */
+describe("the mismatch query documented in the header", () => {
+  const mod = readFileSync(new URL("./identityTelemetry.ts", import.meta.url), "utf8");
+
+  it("reads the call's FINAL lookup, not any lookup", () => {
+    expect(mod).toContain("ORDER BY t->>'at' DESC LIMIT 1");
+    expect(mod).toContain("identity_summary");
+  });
+
+  it("does not use an EXISTS over every lookup event", () => {
+    expect(mod).not.toMatch(/EXISTS\s*\(SELECT 1 FROM jsonb_array_elements/);
+  });
+
+  it("says WHY the final outcome is the one that counts", () => {
+    expect(mod).toContain("forgetIfSameName");
+  });
+});
+
 describe("the runtime's teardown", () => {
   const src = readFileSync(new URL("./voiceRuntime.ts", import.meta.url), "utf8");
 
@@ -200,8 +317,17 @@ describe("the runtime's teardown", () => {
     expect(writeAt).toBeGreaterThan(probeAt);
   });
 
-  it("hands both to the identity log, with the row id", () => {
-    expect(src).toContain("logIdentity(record, identity, identityProbe, { callLogId })");
+  it("hands the identity, the probe AND the upsert's answer to the log", () => {
+    expect(src).toContain("logIdentity(record, identity, identityProbe, persisted, { callLogId })");
+  });
+
+  /**
+   * The upsert's answer must be CAPTURED, not discarded — without it
+   * `reached_row` is a claim about the read wearing the write's clothes
+   * (Codex P1, #322).
+   */
+  it("keeps the result of the row write instead of discarding it", () => {
+    expect(src).toContain("const persisted = await withinOrNull(");
   });
 
   /**

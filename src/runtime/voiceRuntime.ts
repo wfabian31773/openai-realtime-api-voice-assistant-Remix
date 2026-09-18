@@ -436,6 +436,7 @@ export interface VoiceRuntimeOptions {
     record: VoiceCallRecord,
     identity: RuntimeCallIdentity,
     probe: ReturnType<typeof identityStoreProbe>,
+    persisted: boolean | null,
     ids: { callLogId?: string },
   ) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
@@ -1190,7 +1191,15 @@ export function mountVoiceRuntime(
             // facts with no way to tell them apart.
             const identity = identityForRow(record.callSid);
             const identityProbe = identityStoreProbe(record.callSid);
-            await withinOrNull(
+            /**
+             * THE UPSERT'S OWN ANSWER IS KEPT (Codex P1, #322). `persistCall`
+             * reports whether the row landed and `withinOrNull` answers null
+             * when the deadline wins — and this discarded both, so the
+             * identity telemetry called a failed write `reached_row` while
+             * `call_logs.patient_found` stayed unset. Three distinct facts:
+             * true landed, false failed after its retries, null still running.
+             */
+            const persisted = await withinOrNull(
               persistCall(record, identity),
               options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
             );
@@ -1226,7 +1235,7 @@ export function mountVoiceRuntime(
               .catch(() => undefined)
               // And why identity did or did not land (task #148): an
               // instrument, never a gate — it changes nothing a caller hears.
-              .then(() => logIdentity(record, identity, identityProbe, { callLogId }))
+              .then(() => logIdentity(record, identity, identityProbe, persisted, { callLogId }))
               .catch(() => undefined);
           },
         });
