@@ -2299,7 +2299,7 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v56 IS THE
+**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v58 IS THE
 NEWEST, AND v57 WAS WITHDRAWN — see THE SURGEON CLAIM below the table.** v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-request
 floor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
 (#301), v22 the question format (#303), v23 the recording disclosure (#304),
