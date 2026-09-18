@@ -1231,6 +1231,12 @@ export function mountVoiceRuntime(
              * race did not exist; adding the second is what opened it. Chained
              * rather than awaited: teardown still holds for neither of them,
              * and telemetry must never delay a caller's request.
+             *
+             * THE ROOT FIX IS IN `releaseCallEvents` (Codex P1, #322 round 4),
+             * which no longer deletes events nobody has written — a
+             * predecessor that SUCCEEDS used to take the identity row with it,
+             * which the chaining alone did not prevent. The order below is now
+             * an INSERT saved, not the safety property.
              */
             const followUpsWritten = logFollowUps(record, { callLogId }).catch(() => undefined);
             /**

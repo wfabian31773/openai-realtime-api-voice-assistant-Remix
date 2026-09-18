@@ -218,9 +218,19 @@ export async function logRuntimeIdentity(
    * row explaining it. That is the serialisation of round 2 turning into a
    * worse defect than the race it fixed.
    *
-   * Emitting first makes the row REAPABLE whatever happens next: the stuck
-   * predecessor claimed only its own slice, so the reaper's later flush picks
-   * this event up.
+   * Emitting first makes the row reachable whatever happens next: the stuck
+   * predecessor claimed only its own slice, so a later flush — this writer's
+   * own, or the reaper's — picks this event up.
+   *
+   * **THAT REASONING ONLY EVER COVERED A PREDECESSOR THAT FAILS** (Codex P1,
+   * #322 round 4). A predecessor that SUCCEEDS released the buffer, and
+   * `releaseCallEvents` deleted it whole — this row included, before any flush
+   * or reaper could see it, while `flushCallEvents` answered TRUE below for a
+   * call it could no longer find. That is the common case, not an edge: every
+   * runtime call that owed a follow-up. The root fix is in
+   * `releaseCallEvents`, which now keeps a buffer holding events nobody has
+   * written; `src/runtime/bothTeardownRowsLand.test.ts` drives both writers
+   * over the real module and goes red without it.
    */
   emitCallEvent(record.callSid, ev.level, "tool", IDENTITY_EVENT, ev.data, {
     callSid: record.callSid,
@@ -232,6 +242,11 @@ export async function logRuntimeIdentity(
    * Bounding it would let this flush release a buffer whose slice the
    * predecessor has already claimed but not yet written — recreating the round
    * 2 loss in the one case that matters.
+   *
+   * Since round 4 this ordering is defence in depth rather than the only thing
+   * standing between the row and a delete: `releaseCallEvents` no longer drops
+   * unwritten events, so the two writers are safe in either order. It is kept
+   * because serialised they usually cost one INSERT rather than two.
    */
   if (opts.after) await opts.after.catch(() => undefined);
   const backoff = opts.backoffMs ?? PERSIST_RETRY_BACKOFF_MS;
