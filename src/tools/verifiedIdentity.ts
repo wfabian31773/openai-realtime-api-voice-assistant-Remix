@@ -451,6 +451,74 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
   };
 }
 
+/**
+ * WHAT THE STORE LOOKED LIKE WHEN A READER ASKED — PHI-FREE, task #148.
+ *
+ * `verifiedIdentityFor` answers with a name or with `undefined`, and that
+ * single `undefined` is four different facts: nothing was ever written, the
+ * entry expired, the entry is here but not certain, or the entry is under a
+ * DIFFERENT KEY than the one being read. v51 reads it at teardown and wrote
+ * identity onto `patient_found` for 0 of 633 calls on 2026-09-17 while 209 of
+ * those calls ran a `lookup_patient` reporting `identity_is_certain: true` —
+ * and seven candidate causes were ruled out from outside without reaching the
+ * eighth, because that `undefined` is indistinguishable in every log we have.
+ *
+ * `size` and `certainEntries` are what make the decisive split readable:
+ *
+ *   size 0                     nothing is in the store at teardown at all
+ *   size > 0 && !hasEntry      entries exist under OTHER keys — the write and
+ *                              the read disagree about this call's SID
+ *   hasEntry && !entryCertain  the entry survives and its certainty does not
+ *
+ * COUNTS AND BOOLEANS ONLY. No name, no date of birth, no office, no phone,
+ * and never a key — a CallSid is not a patient, but the point of this is that
+ * it goes in a table, and a map key here is one call's identifier beside
+ * another's. The columns answer "which of the four happened", nothing more.
+ *
+ * A PURE READ. It does NOT call `sweep()`, because a diagnostic that evicts
+ * entries changes the thing it is measuring; expired entries are skipped in
+ * the count instead, so `size` is live entries as a reader would find them.
+ */
+export interface IdentityStoreProbe {
+  /** Live (unexpired) entries in the whole store at this instant. */
+  size: number;
+  /** Live entries whose match was CERTAIN — the only ones `verifiedIdentityFor` answers for. */
+  certainEntries: number;
+  /** Did the key pass `isTwilioCallSid`? A sentinel is refused on the write, so it can never have one. */
+  sidCanonical: boolean;
+  /** Was there a live entry under THIS key? */
+  hasEntry: boolean;
+  /** Was that entry certain? */
+  entryCertain: boolean;
+  /** Did it carry a date of birth? Separates v51's silence from v26's. */
+  entryHasDob: boolean;
+}
+
+export function identityStoreProbe(callSid: string | undefined): IdentityStoreProbe {
+  const now = Date.now();
+  const live = (e: Entry) => now - e.at <= TTL_MS;
+  let size = 0;
+  let certainEntries = 0;
+  for (const e of verified.values()) {
+    if (!live(e)) continue;
+    size += 1;
+    if (e.certain) certainEntries += 1;
+  }
+  const sidCanonical = isTwilioCallSid(callSid);
+  // Read under the same guard the readers use: a non-canonical key is never
+  // looked up, so reporting an entry for one would invent a lookup nobody does.
+  const entry = sidCanonical ? verified.get(callSid as string) : undefined;
+  const found = entry && live(entry) ? entry : undefined;
+  return {
+    size,
+    certainEntries,
+    sidCanonical,
+    hasEntry: Boolean(found),
+    entryCertain: Boolean(found?.certain),
+    entryHasDob: Boolean(found?.dateOfBirth),
+  };
+}
+
 /** Tests only. */
 export function resetVerifiedIdentities(): void {
   verified.clear();
