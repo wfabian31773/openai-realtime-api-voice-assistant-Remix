@@ -167,16 +167,46 @@ describe('what the probe must not do', () => {
     lookupSpy.mockImplementation(async () => oneOnThePhone);
     await runTool('lookup_patient', { queue: 'surgery', call_sid: SID, caller_phone: '555-555-0199' });
 
+    const before = Date.now();
     const probe = identityStoreProbe(SID);
-    const serialised = JSON.stringify(probe);
+    const after = Date.now();
+
+    /**
+     * `at` is excluded from the substring scan and pinned as a CLOCK READING
+     * instead. A 13-digit epoch can contain any four digits by coincidence, so
+     * scanning it for a birth year is a test that fails on a Tuesday; asserting
+     * it is the moment of the read is both stronger and stable.
+     */
+    const { at, ...rest } = probe;
+    expect(at).toBeGreaterThanOrEqual(before);
+    expect(at).toBeLessThanOrEqual(after);
+
+    const serialised = JSON.stringify(rest);
     for (const leak of ['Quill', 'Everard', '1959', '0199', 'p-quill', SID]) {
       expect(serialised).not.toContain(leak);
     }
     // Only these keys, so a later field cannot smuggle a name in unnoticed.
     expect(Object.keys(probe).sort()).toEqual(
-      ['certainEntries', 'entryCertain', 'entryHasDob', 'hasEntry', 'sidCanonical', 'size'],
+      ['at', 'certainEntries', 'entryCertain', 'entryHasDob', 'hasEntry', 'sidCanonical', 'size'],
     );
     for (const v of Object.values(probe)) expect(['number', 'boolean']).toContain(typeof v);
+  });
+
+  /**
+   * The read moment is what bounds the mismatch JOIN in `identityTelemetry.ts`
+   * to lookups the probe could have SEEN — a `lookup_patient` settling after
+   * hangup writes a certain result to `tool_timeline` regardless, and without
+   * this the join files that call as a SID disagreement (Codex P2, #322 round
+   * 5). It must be the instant of THIS read, not of the process or the entry.
+   */
+  it('reports the instant it read the store, not the entry it found', async () => {
+    lookupSpy.mockImplementation(async () => oneOnThePhone);
+    await runTool('lookup_patient', { queue: 'surgery', call_sid: SID, caller_phone: '555-555-0199' });
+
+    const first = identityStoreProbe(SID).at;
+    await new Promise((r) => setTimeout(r, 5));
+    const second = identityStoreProbe(SID).at;
+    expect(second).toBeGreaterThan(first);
   });
 
   it('is a PURE READ — probing does not evict the entry it just reported', async () => {

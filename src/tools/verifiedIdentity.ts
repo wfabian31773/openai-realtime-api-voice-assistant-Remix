@@ -492,6 +492,20 @@ export interface IdentityStoreProbe {
   entryCertain: boolean;
   /** Did it carry a date of birth? Separates v51's silence from v26's. */
   entryHasDob: boolean;
+  /**
+   * WHEN the store was read, epoch ms — because everything above is a fact
+   * about one instant and the questions asked of it are not.
+   *
+   * A `lookup_patient` still in flight at hangup settles AFTER this read and
+   * writes its certain result to `tool_timeline` anyway, so a call can
+   * honestly read `no_entry` here and carry a certain lookup there. Without
+   * this field the mismatch JOIN in `identityTelemetry.ts` counts that call as
+   * the write and the read disagreeing about the SID, which is the one
+   * hypothesis the join exists to test (Codex P2, #322 round 5). A number
+   * rather than a string so the PHI guard's "counts and booleans only" holds
+   * unchanged.
+   */
+  at: number;
 }
 
 export function identityStoreProbe(callSid: string | undefined): IdentityStoreProbe {
@@ -516,6 +530,8 @@ export function identityStoreProbe(callSid: string | undefined): IdentityStorePr
     hasEntry: Boolean(found),
     entryCertain: Boolean(found?.certain),
     entryHasDob: Boolean(found?.dateOfBirth),
+    // The same `now` the liveness test used: one instant, reported once.
+    at: now,
   };
 }
 

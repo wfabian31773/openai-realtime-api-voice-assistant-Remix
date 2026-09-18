@@ -59,6 +59,7 @@ const probe = (over: Partial<IdentityStoreProbe> = {}): IdentityStoreProbe => ({
   hasEntry: false,
   entryCertain: false,
   entryHasDob: false,
+  at: Date.parse("2026-09-18T00:00:00.000Z"),
   ...over,
 });
 const REACHED: RuntimeCallIdentity = { patientFound: true, patientName: "Q E" };
@@ -208,14 +209,47 @@ describe("what the row may carry", () => {
       ],
       rowWrite: ["ok", "failed", "unconfirmed"],
     };
+    /**
+     * One string field has no closed set: `probedAt` is a clock reading. It is
+     * pinned by SHAPE instead — a strict ISO-8601 instant, which no name, date
+     * of birth or phone number can be mistaken for. The guard is not loosened
+     * to "any string": a field is either in a closed set or in this table.
+     */
+    const SHAPES: Record<string, RegExp> = {
+      probedAt: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    };
     for (const [k, v] of Object.entries(ev.data)) {
       if (typeof v === "string") {
+        if (SHAPES[k]) {
+          expect(v, `${k} is not the shape its entry pins`).toMatch(SHAPES[k]);
+          continue;
+        }
         expect(Object.keys(ENUMS), `${k} is a string field and is not enumerated`).toContain(k);
         expect(ENUMS[k], `${k} carries a value outside its closed set`).toContain(v);
         continue;
       }
       expect(["number", "boolean"], `${k} must be a count or a boolean`).toContain(typeof v);
     }
+  });
+
+  /**
+   * THE MISMATCH JOIN IS BOUNDED BY THE PROBE'S OWN CLOCK — Codex P2, #322
+   * round 5. `teardown` starts the persist without awaiting a `lookup_patient`
+   * still in flight, so that dispatch can settle after the store was read and
+   * write a certain result to `tool_timeline` anyway. The probe honestly reports
+   * `no_entry`; unbounded, the documented join files that call as the write and
+   * the read disagreeing about the SID — the one hypothesis it exists to test.
+   */
+  it("carries the instant the store was read, and the documented join uses it", () => {
+    const at = Date.parse("2026-09-18T11:22:33.444Z");
+    const ev = identityEvent({}, probe({ at }), true);
+    expect(ev.data.probedAt).toBe("2026-09-18T11:22:33.444Z");
+
+    const src = readFileSync(new URL("./identityTelemetry.ts", import.meta.url), "utf8");
+    const join = src.slice(src.indexOf("SELECT count(*) FROM call_logs c"));
+    expect(join).toContain("probedAt");
+    // The bound is on the LOOKUP's own time, not on anything else.
+    expect(join).toMatch(/\(t->>'at'\)::timestamptz <= \(e\.data->>'probedAt'\)::timestamptz/);
   });
 
   /**

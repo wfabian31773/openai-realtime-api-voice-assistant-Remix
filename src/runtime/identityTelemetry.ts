@@ -58,6 +58,8 @@
  *     AND (SELECT t->'outcome'->>'identity_is_certain'
  *          FROM jsonb_array_elements(c.tool_timeline->'events') t
  *          WHERE t->>'tool' = 'lookup_patient'
+ *            -- Only lookups the probe could have SEEN. See below.
+ *            AND (t->>'at')::timestamptz <= (e.data->>'probedAt')::timestamptz
  *          ORDER BY t->>'at' DESC LIMIT 1) = 'true';
  *
  * **IT READS THE CALL'S LAST LOOKUP, NOT ANY LOOKUP** (Codex P2, #322). An
@@ -65,6 +67,22 @@
  * back ambiguous on the same name — where `forgetIfSameName` deliberately
  * deletes the entry, so `no_entry` is the CORRECT answer and not a mismatch at
  * all. Taking the final outcome excludes exactly that downgrade.
+ *
+ * **AND ONLY THE LOOKUPS THE PROBE COULD HAVE SEEN** (Codex P2, #322 round 5).
+ * `teardown` starts the persist without awaiting a `lookup_patient` still in
+ * flight, so that dispatch can settle AFTER the store was read and write its
+ * certain result to `tool_timeline` regardless. The probe then honestly reports
+ * `no_entry` while the timeline's final lookup reads certain — and unbounded,
+ * this JOIN files that call as the write and the read disagreeing about the
+ * SID, which is the single hypothesis it exists to test. `probedAt` is the
+ * instant `identityStoreProbe` read the map, and the clause above keeps the
+ * join to evidence that existed by then.
+ *
+ * It is a small population and it is the wrong one to be wrong about: over the
+ * seven days to 2026-09-17, 3 of 1,553 runtime calls had ANY lookup event after
+ * `end_time`, 1 of them CERTAIN (recorded on task #57, where the behaviour
+ * itself was declined as sub-1%). A handful of false mismatches would be
+ * pointing the eighth-cause hunt at a door that is not open.
  *
  * AN INSTRUMENT, NOT A FIX. It changes nothing a caller hears and nothing that
  * reaches a ticket. It is deliberately the v47/v48 move — make it countable
@@ -160,6 +178,14 @@ export function identityEvent(
       hasEntry: probe.hasEntry,
       entryCertain: probe.entryCertain,
       entryHasDob: probe.entryHasDob,
+      /**
+       * WHEN the store was read, so the mismatch JOIN above can exclude a
+       * `lookup_patient` that settled after it. ISO rather than epoch ms
+       * because the value it is compared against — `tool_timeline`'s `at` — is
+       * ISO, and a join that has to convert one side invites getting the
+       * conversion wrong in a query nobody runs twice.
+       */
+      probedAt: new Date(probe.at).toISOString(),
       reachedRow,
       /** The identity the read produced, whatever the write then did with it. */
       identityHeld,

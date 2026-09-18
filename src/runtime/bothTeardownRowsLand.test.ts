@@ -61,6 +61,8 @@ const PROBE = {
   hasEntry: true,
   entryCertain: true,
   entryHasDob: true,
+  // The instant the store was read — what bounds the mismatch join.
+  at: Date.parse("2026-09-18T11:00:00.000Z"),
 };
 
 beforeEach(() => {
