@@ -30,10 +30,31 @@
  *   GROUP BY 1, 2, 3, 4 ORDER BY 5 DESC;
  *
  *   storeSize 0                     nothing in the store at teardown at all
- *   storeSize > 0 AND NOT hasEntry  entries under OTHER keys — the write and
- *                                   the read disagree about this call's SID
  *   hasEntry AND NOT entryCertain   the entry survives, its certainty does not
  *   entryCertain AND NOT reachedRow the read answered and the write dropped it
+ *
+ * **`storeSize` DOES NOT SAY THIS CALL'S WRITE USED THE WRONG SID, AND THE
+ * FIRST VERSION OF THIS FILE CLAIMED IT DID** (Codex P1, #322). `verified` is
+ * process-wide with a 30-minute TTL and nothing deletes an entry at teardown,
+ * so on a busy lane there are always OTHER calls' entries in it: `size > 0 &&
+ * !hasEntry` would be true for essentially every call that legitimately has
+ * no identity, and the warn bucket would fill with them. The counts stay
+ * because they say whether the store is working AT ALL — `size` flat at 0
+ * across a whole busy day is itself a finding — but no per-call verdict and
+ * no warning is built on them.
+ *
+ * **The SID-disagreement question is answered by a JOIN instead**, and better,
+ * because `tool_timeline` is written through a different path than the store's
+ * key: a call whose `lookup_patient` reported `identity_is_certain: true` and
+ * whose `identity_summary` reads `no_entry` is the mismatch.
+ *
+ *   SELECT count(*) FROM call_logs c
+ *   JOIN call_events e ON e.call_sid = c.call_sid
+ *    AND e.category = 'tool' AND e.message = 'identity_summary'
+ *   WHERE e.data->>'verdict' = 'no_entry'
+ *     AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.tool_timeline->'events') t
+ *                 WHERE t->>'tool' = 'lookup_patient'
+ *                   AND t->'outcome'->>'identity_is_certain' = 'true');
  *
  * AN INSTRUMENT, NOT A FIX. It changes nothing a caller hears and nothing that
  * reaches a ticket. It is deliberately the v47/v48 move — make it countable
@@ -70,23 +91,23 @@ export interface IdentityEvent {
 }
 
 /**
- * WARN names the two shapes that are defects rather than absences.
+ * WARN names the ONE shape that is a defect rather than an absence: a certain
+ * entry that did not reach the row, which is v51 failing outright. Everything
+ * else — including an empty store on a call whose lookup found nobody — is the
+ * honest absence this row exists to count.
  *
- * A certain entry that did not reach the row is v51 failing outright. Entries
- * present under other keys while this call has none is the write and the read
- * disagreeing about the SID — the hypothesis the 2026-09-17 measurement could
- * not test. Everything else, including an empty store on a call whose lookup
- * found nobody, is the honest absence this row exists to count.
+ * There is deliberately no `key_mismatch` verdict; see the note above. A store
+ * holding other calls' entries is the NORMAL state of a process-wide map, not
+ * evidence about this call.
  */
 export function identityEvent(
   identity: RuntimeCallIdentity,
   probe: IdentityStoreProbe,
 ): IdentityEvent {
   const reachedRow = identity.patientFound === true;
-  const keyMismatch = probe.size > 0 && !probe.hasEntry && probe.sidCanonical;
   const certainLost = probe.entryCertain && !reachedRow;
   return {
-    level: certainLost || keyMismatch ? "warn" : "info",
+    level: certainLost ? "warn" : "info",
     data: {
       storeSize: probe.size,
       certainEntries: probe.certainEntries,
@@ -101,13 +122,11 @@ export function identityEvent(
         ? "reached_row"
         : certainLost
           ? "certain_but_dropped"
-          : keyMismatch
-            ? "key_mismatch"
-            : probe.hasEntry
-              ? "entry_not_certain"
-              : !probe.sidCanonical
-                ? "sid_not_canonical"
-                : "no_entry",
+          : probe.hasEntry
+            ? "entry_not_certain"
+            : !probe.sidCanonical
+              ? "sid_not_canonical"
+              : "no_entry",
     },
   };
 }

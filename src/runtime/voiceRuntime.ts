@@ -1205,12 +1205,29 @@ export function mountVoiceRuntime(
             // And the follow-up summary (v55, task #146): the one record of
             // whether the turn a tool result is owed was ever requested and
             // ever answered, which nothing else persists.
-            void logFollowUps(record, { callLogId }).catch(() => undefined);
-            // And why identity did or did not land (task #148): an instrument,
-            // never a gate — it changes nothing a caller hears.
-            void logIdentity(record, identity, identityProbe, { callLogId }).catch(
-              () => undefined,
-            );
+            /**
+             * THE TWO `call_events` WRITERS RUN ONE AFTER THE OTHER, NOT AT
+             * ONCE (Codex P2, #322).
+             *
+             * Both flush and release the SAME per-SID buffer, and
+             * `flushCallEvents` returns TRUE when it finds no buffer (there is
+             * nothing left to write). So concurrently: one writer's flush
+             * lands and `releaseCallEvents` deletes the whole buffer; the
+             * other's flush failed and is in backoff; its retry then finds
+             * nothing, reports durable, and its row is gone for good — on
+             * exactly the calls a database blip had made worth measuring.
+             *
+             * Before task #148 there was ONE teardown event writer, so the
+             * race did not exist; adding the second is what opened it. Chained
+             * rather than awaited: teardown still holds for neither of them,
+             * and telemetry must never delay a caller's request.
+             */
+            void logFollowUps(record, { callLogId })
+              .catch(() => undefined)
+              // And why identity did or did not land (task #148): an
+              // instrument, never a gate — it changes nothing a caller hears.
+              .then(() => logIdentity(record, identity, identityProbe, { callLogId }))
+              .catch(() => undefined);
           },
         });
         // Connect AFTER the bridge exists: a connection that fails then has

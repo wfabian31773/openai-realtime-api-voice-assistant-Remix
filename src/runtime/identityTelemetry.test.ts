@@ -91,13 +91,27 @@ describe("the verdict names which of the four happened", () => {
   });
 
   /**
-   * The hypothesis the production data could not test: entries exist, under
-   * other keys. That is the write and the read disagreeing about this SID.
+   * THE FALSE POSITIVE THIS FILE ORIGINALLY ASSERTED AS A FEATURE — Codex P1,
+   * #322. `verified` is process-wide with a 30-minute TTL and nothing deletes
+   * an entry at teardown, so a store holding OTHER calls' entries is the
+   * normal state of a busy lane, not evidence about this call. A verdict of
+   * `key_mismatch` here would have fired on essentially every unidentified
+   * call and filled the warn bucket with them.
    */
-  it("key_mismatch, and WARNS, when the store holds entries but none for this call", () => {
+  it("a store full of OTHER calls' entries is still no_entry, and does NOT warn", () => {
     const ev = identityEvent(NOTHING, probe({ size: 4, certainEntries: 2, hasEntry: false }));
-    expect(ev.data.verdict).toBe("key_mismatch");
-    expect(ev.level).toBe("warn");
+    expect(ev.data.verdict).toBe("no_entry");
+    expect(ev.level).toBe("info");
+  });
+
+  it("no verdict anywhere claims a key mismatch — the store cannot establish one", () => {
+    for (const p of [
+      probe({ size: 9, certainEntries: 9, hasEntry: false }),
+      probe({ size: 1, hasEntry: true, entryCertain: true }),
+      probe(),
+    ]) {
+      expect(String(identityEvent(NOTHING, p).data.verdict)).not.toContain("mismatch");
+    }
   });
 
   it("entry_not_certain when the entry survives and its certainty does not", () => {
@@ -117,12 +131,7 @@ describe("the verdict names which of the four happened", () => {
     expect(ev.data.verdict).toBe("sid_not_canonical");
   });
 
-  /**
-   * An empty store on THIS call while other calls hold entries is still
-   * no_entry, not key_mismatch, when the SID was never usable — otherwise the
-   * warn bucket fills with calls whose key was junk.
-   */
-  it("a non-canonical SID never reads as a key mismatch", () => {
+  it("a non-canonical SID is named as such, whatever else the store holds", () => {
     expect(identityEvent(NOTHING, probe({ size: 3, sidCanonical: false })).data.verdict).toBe("sid_not_canonical");
   });
 });
@@ -195,12 +204,37 @@ describe("the runtime's teardown", () => {
     expect(src).toContain("logIdentity(record, identity, identityProbe, { callLogId })");
   });
 
+  /**
+   * Both event writers flush and release the SAME per-SID buffer, and
+   * `flushCallEvents` answers TRUE when it finds none — so run concurrently,
+   * the winner's release makes the loser's retry report durable having written
+   * nothing (Codex P2, #322). Chained, never overlapping.
+   */
+  it("runs the two call_events writers one after the other, not at once", () => {
+    const at = src.indexOf("logFollowUps(record, { callLogId })");
+    expect(at).toBeGreaterThan(-1);
+    const thenAt = src.indexOf(".then(() => logIdentity(", at);
+    expect(thenAt, "the identity writer is not chained to the follow-up writer").toBeGreaterThan(at);
+    /**
+     * ONE EXPRESSION, NOT TWO STATEMENTS THAT HAPPEN TO SIT TOGETHER. The
+     * first version of this assertion only checked the `.then` appeared
+     * within 400 characters, so re-splitting them into
+     * `void logFollowUps(...); void Promise.resolve().then(() => logIdentity(...))`
+     * — the exact defect Codex reported — sailed through it. Nothing between
+     * the two may terminate the statement.
+     */
+    const between = src.slice(at + "logFollowUps(record, { callLogId })".length, thenAt);
+    expect(between.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")).not.toContain(";");
+    // And the identity writer is never ALSO started on its own.
+    expect(src.match(/logIdentity\(record, identity, identityProbe/g) ?? []).toHaveLength(1);
+  });
+
   it("defaults the seam to the real writer", () => {
     expect(src).toContain("options.logIdentity ?? logRuntimeIdentity");
   });
 
-  it("never awaits it — telemetry must not hold teardown", () => {
-    const at = src.indexOf("logIdentity(record, identity, identityProbe");
+  it("never awaits the chain — telemetry must not hold teardown", () => {
+    const at = src.indexOf("logFollowUps(record, { callLogId })");
     expect(src.slice(Math.max(0, at - 40), at)).toContain("void ");
   });
 });
