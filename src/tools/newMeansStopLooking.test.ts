@@ -591,6 +591,19 @@ describe("Codex round 2 — three more P1s, all the same wrong direction", () =>
       expect(readPatientStatus([ES, 'CALLER: No soy nuevo.'])).toBe('existing');
     });
 
+    it('a negated-new answer that ALSO contains a new cue is still existing', () => {
+      /**
+       * Added because demoting NEGATED_NEW one layer survived every other case:
+       * the layers above it all happen to agree on them. This is a turn where
+       * they DISAGREE — "not my first time" carries a negated-new claim AND the
+       * `first time` new cue — and it is an entirely ordinary way to answer the
+       * question, so the ordering has to be load-bearing rather than incidental.
+       */
+      expect(
+        readPatientStatus([EN, "CALLER: I'm not new, this is not my first time."]),
+      ).toBe('existing');
+    });
+
     it('but a bare "No soy paciente" is still NEW', () => {
       // The prefix is only an existing claim when "nuevo" follows it.
       expect(readPatientStatus([ES, 'CALLER: No soy paciente.'])).toBe('new');
