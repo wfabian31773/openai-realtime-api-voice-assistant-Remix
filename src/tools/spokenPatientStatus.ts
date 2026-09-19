@@ -97,8 +97,8 @@ function fold(text: string): string {
   return text
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .replace(/[‘’ʼ]/g, "'")
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u2018\u2019\u02bc]/g, "'")
     .replace(/[^a-z0-9'\s.?!]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
