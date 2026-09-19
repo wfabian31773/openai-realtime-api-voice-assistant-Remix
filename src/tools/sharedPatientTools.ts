@@ -30,6 +30,7 @@
  */
 import { registerTool, missing, type MissingFields, type ToolResult } from './registry';
 import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
+import type { PatientStatus } from './spokenPatientStatus';
 
 /** Which queue is asking. Injected as call context, never a model argument. */
 export type ToolQueue = 'optical' | 'surgery';
@@ -153,6 +154,28 @@ registerTool({
       first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'And may I please have your first name?' },
       last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'May I please have your last name?' },
       date_of_birth: { type: 'string', description: 'Any spoken format — "March 17th 1973", "03/17/1973".', askAs: 'And may I please have your date of birth, starting with the month, then the day, then the year?' },
+      /**
+       * RULE ZERO 2a, and this field is the OVERRIDE rather than the primary.
+       *
+       * The primary is the transcript (`spokenPatientStatus.ts`), because the
+       * model does not send arguments it is not forced to send — `dobShape`
+       * read `(none)` on 75 of 75 date-of-birth refusals on 2026-09-08. A gate
+       * that depended on this field arriving would fire on almost nothing.
+       *
+       * What it is FOR: the way back. A caller who answers "new" and then says
+       * "actually, I was in last spring" needs their record looked for, and the
+       * suppression's own `fix` tells the model to send `existing` here to get
+       * it. Send it when the CALLER has said which they are — not as a guess.
+       */
+      patient_status: {
+        type: 'string',
+        enum: ['new', 'existing'],
+        description:
+          'Only when the caller has told you: "new" if this is their first contact with us, ' +
+          '"existing" if they have been seen here before. Sending "existing" lifts a suppression ' +
+          'an earlier "new" put in place.',
+        askAs: 'Are you a new patient or an existing patient?',
+      },
     },
   },
   handler: async (input): Promise<ToolResult> => {
@@ -183,6 +206,70 @@ registerTool({
     const first = str(input.first_name);
     const last = str(input.last_name);
     const dob = str(input.date_of_birth);
+
+    /**
+     * RULE ZERO 2a — A CALLER WHO SAID THEY ARE NEW IS NOT LOOKED UP.
+     *
+     * Operator ruling, 2026-09-19: "new should hard suppress lookup patient."
+     * RULE ZERO 2a has said the same since it was written — "NEW means STOP
+     * LOOKING: no lookup, no appointment search, and never tell them we have
+     * no record of them" — and until this build only the prompt obeyed it.
+     * #293 appended the question and gated nothing, and said so.
+     *
+     * WHY IT SITS HERE, above every rung and above the argument check: the
+     * point is not to look and miss quietly, it is not to look. A suppression
+     * below the rungs would still spend the 6s budget, would still walk the
+     * appointment book for somebody who has never been here, and — the part
+     * that actually costs a caller — would still reach the miss messages,
+     * which send the model back to ask for a name and a date of birth again.
+     *
+     * RULE 1 OUTRANKS IT, and this is the guard on Wayne's own stated failure
+     * mode: an existing patient who answers "new". If the process has already
+     * established WHO IS CALLING, a spoken "new" cannot unknow them.
+     * `verifiedIdentityFor` is the right reader for that because it refuses an
+     * UNCERTAIN match by design — so a phone candidate does not count, which is
+     * standing instruction 6, while a confirmed identity does. In the ordinary
+     * sequence this fires: the model looks up the injected caller phone before
+     * the question is ever asked, so a caller the person base vouches for is
+     * already locked in by the time they could answer "new".
+     *
+     * IT SUPPRESSES THIS TOOL AND NOTHING ELSE. `file_*_ticket` still files,
+     * `resolve_location` still routes optical by office, `check_open_tickets`
+     * still answers. A new patient's ticket carries no match, which is correct
+     * and expected rather than a gap.
+     */
+    const { patientStatusFor, noteStatusOverride } = await import('./spokenPatientStatus');
+    const { verifiedIdentityFor } = await import('./verifiedIdentity');
+    const statedStatus = str(input.patient_status) as PatientStatus | '';
+    if (statedStatus === 'new' || statedStatus === 'existing') {
+      noteStatusOverride(str(input.call_sid), statedStatus);
+    }
+    const status = patientStatusFor(str(input.call_sid));
+    if (status === 'new' && !verifiedIdentityFor(str(input.call_sid))) {
+      // PHI-free: a SID and the branch. The marker line for the after-number.
+      console.info(
+        `[TOOLS] lookup_patient: not dispatched on ${str(input.call_sid)} — the caller said they are a NEW patient (RULE ZERO 2a)`,
+      );
+      return {
+        success: true,
+        found: false,
+        /**
+         * NO `message`. There is nothing here for the caller to hear, and v43
+         * is what happens when a tool's instruction to the model sits in the
+         * channel the model speaks: the surgery agent read its own emergency
+         * rule out loud — "These are the words we treat as a surgical
+         * emergency." A catch-all has nothing to say.
+         */
+        suppressed: 'caller_said_new',
+        fix:
+          'This caller told you they are a NEW patient, so there is no record to find and none ' +
+          'will be. Do NOT look them up, do not ask for a date of birth in order to find them, ' +
+          'and never tell them we have no record of them — a miss here is expected, not a ' +
+          'failure. Collect what the request itself needs and file it. If the caller tells you ' +
+          'they HAVE been seen here before, call this tool again with patient_status "existing" ' +
+          'and it will look them up.',
+      };
+    }
 
     // Either a phone, or the full name+DOB trio. Half a trio is not a lookup.
     if (!phone && !(first && last && dob)) {

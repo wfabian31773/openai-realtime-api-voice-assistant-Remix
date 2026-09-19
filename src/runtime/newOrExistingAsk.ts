@@ -41,12 +41,23 @@
  * recognition block would repeat that mistake exactly, and putting it
  * unconditionally would break Rule 2a's own carve-out.
  *
- * WHAT THIS DELIBERATELY DOES NOT DO: it does not GATE anything. A caller who
- * says "new" is not prevented in code from being looked up. Wayne's rule says
- * the answer tells us we do not need to look; whether a spoken "new" should
- * hard-suppress `lookup_patient` is a behaviour change with a real failure
- * mode — an existing patient who answers "new" would lose their record — and
- * he has not been asked. Prompt guidance now; the gate is his call.
+ * IT NOW GATES, AND THAT IS THE OPERATOR'S ANSWER TO THE QUESTION THIS FILE
+ * USED TO LEAVE OPEN. The paragraph here said "it does not GATE anything ... the
+ * gate is his call". Asked, 2026-09-19: **"new should hard suppress lookup
+ * patient."** So `lookup_patient` refuses to dispatch for a caller who said
+ * they are new — `spokenPatientStatus.ts` reads the answer out of the record
+ * and `sharedPatientTools.ts` is where it bites.
+ *
+ * THE FAILURE MODE IS STILL REAL AND IS NOW GUARDED RATHER THAN MERELY NOTED:
+ * an existing patient who answers "new" would lose their record, on lanes where
+ * 63% of found-nobody callers turn out to be in `patients_master`. Two things
+ * hold it. Rule 1 OUTRANKS the answer — a caller whose identity the process has
+ * already established is never suppressed, and in the ordinary sequence the
+ * model has already looked up the injected caller phone before this question is
+ * asked. And the suppression is reversible: `lookup_patient` takes
+ * `patient_status: 'existing'`, its own refusal tells the model to send it, and
+ * the reader takes the LATEST answer so an agent who asks again gets the
+ * corrected one. There is no latch to get stuck in.
  */
 
 /**
@@ -68,7 +79,8 @@ export const NEW_OR_EXISTING_ASK =
   'existing patient?" NEW means STOP LOOKING: no lookup, no appointment ' +
   'search, and never tell them we have no record of them — there is none to ' +
   'find and that is expected, not a failure. EXISTING means find them, and ' +
-  'keep going until you do.';
+  'keep going until you do. Pass their answer to lookup_patient as ' +
+  'patient_status.';
 
 /**
  * Append the ask, unless this caller has already been recognised or this lane
