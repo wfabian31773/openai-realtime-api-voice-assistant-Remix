@@ -202,6 +202,46 @@ describe('a model may omit what it does not have', () => {
       'strict forces every property into required — the exact cause of the outage',
     ).toBe(false);
   });
+
+  it('never sends house metadata to the model — Codex round 7', async () => {
+    /**
+     * `askAs` is the sentence `validateInput` speaks when a REQUIRED field is
+     * absent: a contract between the tool and the agent's mouth, not part of the
+     * JSON Schema. `parameters` used to spread `input_schema` whole, so every
+     * `askAs` in the library travelled to the model as documentation on the field.
+     *
+     * The case that found it: `lookup_patient.patient_status` carries "Are you a
+     * new patient or an existing patient?", and that reached the RECORDS model,
+     * which round 5 deliberately stopped asking it because its caller is a proxy
+     * on 42% of calls.
+     *
+     * ASSERTED ON THE BUILT TOOL, not on `stripInternalKeys`. The first version of
+     * this called the helper directly and a mutation that reverted the adapter's
+     * call site survived it — failure mode 10 in the test written to cite failure
+     * mode 10.
+     */
+    await import('./sharedPatientTools');
+    const { realtimeToolsFor } = await import('./realtimeAdapter');
+    const built = realtimeToolsFor(['lookup_patient'], {})[0] as unknown as {
+      parameters: { properties: Record<string, Record<string, unknown>> };
+    };
+
+    for (const [field, def] of Object.entries(built.parameters.properties)) {
+      expect(def.askAs, `${field} still carries askAs to the model`).toBeUndefined();
+    }
+
+    // The library keeps it — the leak was the transport's, and every field in
+    // sharedPatientTools has one by house convention.
+    const { getTool } = await import('./registry');
+    const source = getTool('lookup_patient')!.input_schema.properties.patient_status as
+      Record<string, unknown>;
+    expect(source.askAs).toBe('Are you a new patient or an existing patient?');
+
+    // And nothing else about the field is lost on the way out.
+    const sent = built.parameters.properties.patient_status;
+    expect(sent.enum).toEqual(['existing']);
+    expect(String(sent.description)).toMatch(/never send this to report that somebody is new/i);
+  });
 });
 
 

@@ -1429,15 +1429,11 @@ describe('Codex round 7 — only a lane that ASKS may read the answer', () => {
       Record<string, unknown>;
     expect(field.askAs).toBe('Are you a new patient or an existing patient?');
 
+    // THE HELPER ONLY. That the ADAPTER calls it is asserted on the BUILT tool in
+    // `realtimeAdapter.test.ts` — a mutation reverting the call site survived this
+    // assertion, which is failure mode 10 inside the round that cited it.
     const { stripInternalKeys } = await import('./realtimeAdapter');
     const sent = stripInternalKeys(getTool('lookup_patient')!.input_schema);
-    const sentField = (sent.properties as Record<string, Record<string, unknown>>).patient_status;
-    expect(sentField.askAs).toBeUndefined();
-    // Nothing else about the field moves — the model still gets its description.
-    expect(sentField.enum).toEqual(['existing']);
-    expect(String(sentField.description)).toMatch(/never send this to report that somebody is new/i);
-
-    // And it is every field, not just this one — the leak was the transport's.
     for (const props of Object.values(sent.properties as Record<string, unknown>)) {
       expect((props as Record<string, unknown>).askAs).toBeUndefined();
     }
