@@ -540,6 +540,19 @@ describe("Codex round 2 — three more P1s, all the same wrong direction", () =>
       ).toBeUndefined();
     });
 
+    it('guard 1 earns its place: an EXPLICIT new answer with no prior context', () => {
+      /**
+       * Added because the mutation removing guard 1 survived on the cases above
+       * — guard 2 covered every one of them. This is the case guard 2 CANNOT
+       * cover, because the answer is an explicit cue rather than a bare word:
+       * without the prior-context requirement this opens a window and
+       * suppresses a caller nobody ever asked about their patient status.
+       */
+      expect(
+        readPatientStatus(['AGENT: Is the frame new or existing?', "CALLER: I'm new here."]),
+      ).toBeUndefined();
+    });
+
     it('and a bare WORD does not answer a re-ask window', () => {
       // Guard 2, independent of guard 1: even after a qualified window, the
       // bare "New." an unrelated alternation draws is not an answer.
