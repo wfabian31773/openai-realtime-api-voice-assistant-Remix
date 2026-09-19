@@ -458,8 +458,17 @@ describe("Codex's three P1s on this PR — all reproduced, all fixed", () => {
     });
 
     it('accents survive the fold, or Spanish would be unreadable', () => {
-      // The character class keeps only a-z0-9 and three marks, so without
-      // decomposing first every accented letter became a SPACE.
+      /**
+       * THE ACCENT HAS TO CARRY THE MEANING or this assertion cannot see the
+       * fold, and the first version could not: it hinged on "existente", which
+       * has no accent, so removing the fold changed nothing and the mutation
+       * SURVIVED. These two turn on an accented word — "había" and "número" —
+       * which without decomposing first become "hab a" and "n mero", matching
+       * no cue at all.
+       */
+      expect(readPatientStatus([ES, 'CALLER: Ya había venido antes.'])).toBe('existing');
+      // And the object form, where losing the accent would read as an ANSWER.
+      expect(readPatientStatus([ES, 'CALLER: Necesito un número nuevo.'])).toBeUndefined();
       expect(readPatientStatus([ES, 'CALLER: Sí, soy paciente existente.'])).toBe('existing');
     });
 
