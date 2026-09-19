@@ -811,6 +811,26 @@ describe('Codex round 3 — three more P1s, and the reader is SMALLER, not patch
       ).toBe('existing');
     });
 
+    it('THE EXPIRY EARNS ITS PLACE: a later pair answered with an EXPLICIT cue', () => {
+      /**
+       * Added because the mutation removing the expiry SURVIVED the case above
+       * — "I'm new to progressives" reads nothing at all now that the prose
+       * cue is gone, so guard 2 covered it and the expiry did no work anybody
+       * could see. This is the case guard 2 CANNOT cover: an explicit denial is
+       * read whatever the window KIND, so without the expiry the later pair
+       * opens a re-ask window and overwrites a real existing answer with `new`.
+       *
+       * The same shape as round 2's "guard 1 earns its place", one round on.
+       */
+      expect(
+        readPatientStatus([
+          EN, 'CALLER: Existing.',
+          'AGENT: What can we help with?', 'CALLER: I need to pick up my order.',
+          'AGENT: Are the glasses new or existing?', "CALLER: I'm not an existing patient.",
+        ]),
+      ).toBe('existing');
+    });
+
     it('a re-ask still survives an agent line that opens no window', () => {
       // No caller turn in between, so the exchange has not been left.
       expect(
@@ -858,6 +878,37 @@ describe('Codex round 3 — three more P1s, and the reader is SMALLER, not patch
       expect(readPatientStatus([EN, "CALLER: I'm new here."])).toBeUndefined();
       expect(readPatientStatus([ES, 'CALLER: Necesito lentes nuevos.'])).toBeUndefined();
       expect(readPatientStatus([ES, 'CALLER: Necesito un número nuevo.'])).toBeUndefined();
+    });
+  });
+
+  describe('AMBIGUITY MUST NOT SUPPRESS — the layer order is load-bearing', () => {
+    /**
+     * Added because the mutation moving the existing prose BELOW the denial
+     * list survived every case in the file: `withoutDenials` already separates
+     * the two for the strippable phrases, so the ORDER only matters for a
+     * denial that is not one of them — `not an existing patient`, and its
+     * Spanish shape.
+     *
+     * A turn carrying BOTH a direct denial and an existing claim is a caller
+     * contradicting themselves, and the cost asymmetry decides it: reading
+     * `existing` wastes one tool call, reading `new` loses the record of
+     * somebody who has one. Ambiguity resolves toward LOOKING THEM UP.
+     */
+    it('a denial beside an existing claim resolves toward looking them up', () => {
+      expect(
+        readPatientStatus([EN, "CALLER: I'm not an existing patient. I saw Dr. Ruiz last year."]),
+      ).toBe('existing');
+    });
+
+    it('the Spanish shape too', () => {
+      expect(
+        readPatientStatus([ES, 'CALLER: No soy paciente existente. Ya soy paciente de la clinica.']),
+      ).toBe('existing');
+    });
+
+    it('while the denial ALONE is still new', () => {
+      expect(readPatientStatus([EN, "CALLER: I'm not an existing patient."])).toBe('new');
+      expect(readPatientStatus([ES, 'CALLER: No soy paciente existente.'])).toBe('new');
     });
   });
 
