@@ -13,17 +13,31 @@ import { withNewOrExistingAsk, NEW_OR_EXISTING_ASK } from "./newOrExistingAsk";
 const PROMPT = "You answer the optical line at Azul Vision.";
 
 describe("withNewOrExistingAsk", () => {
-  it("asks on every patient queue lane when nobody was recognised", () => {
-    for (const slug of ["optical", "surgery", "tech", "records"]) {
+  it("asks on every PATIENT queue lane when nobody was recognised", () => {
+    for (const slug of ["optical", "surgery", "tech"]) {
       expect(withNewOrExistingAsk(PROMPT, slug, false)).toBe(PROMPT + NEW_OR_EXISTING_ASK);
     }
+  });
+
+  it("and NOT on records, where the caller is routinely not the patient", () => {
+    /**
+     * Codex round 5's second P1, measured before it was taken: over records,
+     * 2026-09-10..18, 87 of 206 substantive calls (42%) carry a proxy cue —
+     * attorney, health plan, "on behalf of", "for my mother", conservator,
+     * "calling from <organisation>" — against 20 with a self cue.
+     *
+     * The question asks about the CALLER, so a proxy's "New." describes them
+     * while the gate would read it as the patient whose chart they want, and
+     * suppress THAT patient's lookup. Records keeps the behaviour it has today.
+     */
+    expect(withNewOrExistingAsk(PROMPT, "records", false)).toBe(PROMPT);
   });
 
   it("STANDS DOWN for a recognised caller — Rule 2a's own carve-out", () => {
     // "A caller recognised from their phone number is an existing patient by
     // definition — asking anyway tells them we do not know who they are while
     // we are looking at their chart."
-    for (const slug of ["optical", "surgery", "tech", "records"]) {
+    for (const slug of ["optical", "surgery", "tech"]) {
       expect(withNewOrExistingAsk(PROMPT, slug, true)).toBe(PROMPT);
     }
   });

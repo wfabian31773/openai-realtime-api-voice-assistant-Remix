@@ -450,11 +450,33 @@ const EXPLICIT_EXISTING = /\b(existing|existente)\b/;
  * whole family of things a noun list had to enumerate: "I need new glasses",
  * "I'm new to progressives", "Necesito un número nuevo".
  */
-function sentences(turn: string): string[] {
+/**
+ * Split a turn into sentences, KEEPING whether each one was a QUESTION.
+ *
+ * Codex round 5's P1: the old split discarded the terminator, so *"New? I don't
+ * think so."* handed `ANSWER_IS_NEW` the segment `new` and the caller who had
+ * just QUESTIONED the option was read as answering it. A caller who echoes an
+ * option back — "New?" — is asking what we mean, not telling us.
+ *
+ * The lookbehind keeps the terminator attached to the segment it ends, which is
+ * the only reason the interrogative is still knowable here.
+ */
+interface Segment {
+  text: string;
+  interrogative: boolean;
+}
+
+function sentences(turn: string): Segment[] {
   return turn
-    .split(/[.?!]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+    .split(/(?<=[.?!])/)
+    .map((raw) => {
+      const trimmed = raw.trim();
+      return {
+        text: trimmed.replace(/[.?!]+$/, '').trim(),
+        interrogative: /\?[.?!]*$/.test(trimmed),
+      };
+    })
+    .filter((seg) => seg.text.length > 0);
 }
 
 const LEAD_EN = String.raw`(?:(?:uh|um|er|ah|oh|well|so|yeah|yes|yep|yup|okay|ok|sure)\s+)*`;
@@ -466,10 +488,30 @@ const ANSWER_IS_NEW: readonly RegExp[] = [
   new RegExp(`^${LEAD_ES}(?:(?:soy|es)\\s+)?(?:un[oa]?\\s+)?(?:paciente\\s+)?nuev[oa]$`),
 ];
 
+/**
+ * ANY negation in the turn refuses the answer — Codex round 5, the second half.
+ *
+ * The interrogative rule alone does not close *"New. I don't think so."*, and
+ * chasing rejection phrases would be a cue list, which is what the twelve
+ * earlier P1s came out of. So the rule is mechanical and whole-turn: a caller
+ * who says the answer AND negates something in the same breath is not answering
+ * cleanly, and this gate only ever acts on a clean answer.
+ *
+ * WHAT IT COSTS, stated: *"New. I've never been there before."* now goes
+ * UNCLASSIFIED, because it carries "never". That case was supported from round 3
+ * until now. Nothing is suppressed on it — the lookup runs, `LOOKUP_MISS_LIMIT`
+ * bounds the asks, the ticket files — and the alternative is a list of rejection
+ * phrases that the next round finds the gap in.
+ */
+const TURN_CARRIES_A_NEGATION = new RegExp(`\\b${NEG}\\b`);
+
 function answerSentenceIsNew(turns: readonly string[]): boolean {
-  return turns.some((turn) =>
-    sentences(turn).some((s) => ANSWER_IS_NEW.some((re) => re.test(s))),
-  );
+  return turns.some((turn) => {
+    if (TURN_CARRIES_A_NEGATION.test(turn)) return false;
+    return sentences(turn).some(
+      (seg) => !seg.interrogative && ANSWER_IS_NEW.some((re) => re.test(seg.text)),
+    );
+  });
 }
 
 /**

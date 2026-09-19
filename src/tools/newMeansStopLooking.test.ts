@@ -895,7 +895,8 @@ describe('Codex round 3 — three more P1s, and the reader is SMALLER, not patch
     it('the answer is a SENTENCE, which is what replaced both noun lists', () => {
       // "New." leading a longer turn still reads; "new" buried in a clause
       // does not — so no list has to enumerate `glasses`.
-      expect(readPatientStatus([EN, "CALLER: New. I've never been there before."])).toBe('new');
+      // "New. I've never been there before." read `new` from round 3 until
+      // round 5, which refuses ANY turn carrying a negation — see that block.
       expect(readPatientStatus([EN, 'CALLER: I need new glasses.'])).toBeUndefined();
       expect(readPatientStatus([EN, "CALLER: I'm new here."])).toBeUndefined();
       expect(readPatientStatus([ES, 'CALLER: Necesito lentes nuevos.'])).toBeUndefined();
@@ -1067,7 +1068,6 @@ describe('Codex round 4 — `new` now comes from ONE route', () => {
       expect(readPatientStatus([EN, 'CALLER: New.'])).toBe('new');
       expect(readPatientStatus([EN, 'CALLER: Uh, new.'])).toBe('new');
       expect(readPatientStatus([EN, "CALLER: I'm a new patient."])).toBe('new');
-      expect(readPatientStatus([EN, "CALLER: New. I've never been there before."])).toBe('new');
       expect(readPatientStatus([ES, 'CALLER: Nuevo.'])).toBe('new');
       expect(readPatientStatus([ES, 'CALLER: Soy nueva.'])).toBe('new');
     });
@@ -1077,6 +1077,69 @@ describe('Codex round 4 — `new` now comes from ONE route', () => {
       expect(readPatientStatus([EN, 'CALLER: Not a new patient.'])).toBe('existing');
       expect(readPatientStatus([EN, 'CALLER: Existing.'])).toBe('existing');
       expect(readPatientStatus([ES, 'CALLER: Ya soy paciente.'])).toBe('existing');
+    });
+  });
+});
+
+describe('Codex round 5 — the answer must be DECLARATIVE and uncontradicted', () => {
+  /**
+   * Round 4 left one route to `new`: a sentence that IS the answer. Round 5
+   * found it defeated two ways, both inside that route rather than in prose.
+   *
+   * Two mechanical rules, neither a cue list — which matters, because a list of
+   * rejection phrases is exactly what the twelve earlier P1s came out of.
+   */
+  const EN = 'AGENT: Are you a new patient or an existing patient?';
+  const ES = 'AGENT: ¿Es usted paciente nuevo o paciente existente?';
+
+  describe('R5-A — an echoed option is a question, not an answer', () => {
+    /**
+     * The old splitter discarded the terminator, so "New? I don't think so."
+     * handed the reader the segment `new` and the caller who QUESTIONED the
+     * option was read as answering it.
+     */
+    it('an interrogative echo does not suppress the lookup', () => {
+      expect(readPatientStatus([EN, "CALLER: New? I don't think so."])).not.toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: New?'])).not.toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: New patient?'])).not.toBe('new');
+    });
+
+    it('while the declarative answer still reads', () => {
+      expect(readPatientStatus([EN, 'CALLER: New.'])).toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: New'])).toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: New patient.'])).toBe('new');
+      expect(readPatientStatus([ES, 'CALLER: Nuevo.'])).toBe('new');
+    });
+  });
+
+  describe('R5-B — any negation in the turn refuses the answer', () => {
+    it('the answer plus a rejection is not a clean answer', () => {
+      for (const said of [
+        "New. I don't think so.",
+        'New, no, sorry.',
+        "New. I'm not sure actually.",
+      ]) expect(readPatientStatus([EN, `CALLER: ${said}`])).not.toBe('new');
+    });
+
+    it('THE ACCEPTED COST, stated rather than hidden', () => {
+      // Supported from round 3 until round 5. Unclassified now: nothing is
+      // suppressed, the lookup runs, LOOKUP_MISS_LIMIT bounds the asks.
+      expect(readPatientStatus([EN, "CALLER: New. I've never been there before."])).toBeUndefined();
+    });
+
+    it('and a clean answer with harmless filler still reads', () => {
+      expect(readPatientStatus([EN, 'CALLER: Uh, new.'])).toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: Yes, new patient.'])).toBe('new');
+      expect(readPatientStatus([ES, 'CALLER: Soy nueva.'])).toBe('new');
+    });
+  });
+
+  describe('the cheap direction is deliberately untouched', () => {
+    it('an interrogative or negated turn may still read EXISTING', () => {
+      // A wrong `existing` costs one lookup, so `EXPLICIT_EXISTING` keeps its
+      // contains read and neither round-5 rule is applied to it.
+      expect(readPatientStatus([EN, 'CALLER: Existing?'])).toBe('existing');
+      expect(readPatientStatus([EN, 'CALLER: Not a new patient.'])).toBe('existing');
     });
   });
 });

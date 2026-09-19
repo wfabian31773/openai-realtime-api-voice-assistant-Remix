@@ -71,7 +71,31 @@
  * loud. no-ivr and answering-service are excluded for the same reason: they
  * are not single-purpose patient queues.
  */
-const LANES_THAT_ASK = new Set(['optical', 'surgery', 'tech', 'records']);
+/**
+ * RECORDS IS DELIBERATELY NOT HERE — Codex round 5's second P1, and it is
+ * MEASURED rather than argued.
+ *
+ * The question asks about the CALLER ("are YOU a new patient or an existing
+ * patient?"), and on this lane the caller is routinely not the patient:
+ * `recordsAgent.ts` handles attorneys, health plans, doctors' offices and
+ * relatives, and warns in as many words that the caller may not be the patient.
+ * So a proxy answering "New." describes THEMSELVES while the gate reads it as
+ * the patient whose chart they are asking for — and suppresses that patient's
+ * lookup. A category error, wrong even once.
+ *
+ * MEASURED over records, 2026-09-10..18, 206 substantive calls: **87 (42%)
+ * carry a proxy cue** (attorney, law office, health plan, "on behalf of", "for
+ * my mother/father", conservator, guardian, "calling from <organisation>")
+ * against 20 carrying a self cue. That is not an outlier, it is close to the
+ * modal caller, so the ask is removed from this lane rather than guarded.
+ *
+ * WHAT IT COSTS: records loses RULE ZERO 2a entirely — no ask, no suppression,
+ * the lane behaves exactly as it does today. Asking about the TARGET PATIENT
+ * after establishing who is requesting is the other half of Codex's remedy and
+ * is a new question on a live intake, which is the operator's call rather than
+ * a review's.
+ */
+const LANES_THAT_ASK = new Set(['optical', 'surgery', 'tech']);
 
 export const NEW_OR_EXISTING_ASK =
   ' Before you try to identify anybody — before lookup_patient, before asking ' +
