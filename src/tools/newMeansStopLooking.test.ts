@@ -1262,6 +1262,18 @@ describe('Codex round 6 — the answer is the WHOLE of what they said, and `new`
       expect(readPatientStatus([ES, 'CALLER: Hola. Nuevo.'])).toBe('new');
     });
 
+    it('and the ANSWER may sit in an earlier turn than the filler', () => {
+      /**
+       * THE CASE THAT CATCHES A LAST-TURN READ, added because a mutation found
+       * the gap: every other case here puts the answer in the final caller turn,
+       * so a reader that looked only at that turn passed all of them. Here the
+       * answer is in the FIRST turn and the last is filler, which only a read of
+       * the whole window gets right.
+       */
+      expect(readPatientStatus([EN, 'CALLER: New.', 'CALLER: Thank you.'])).toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: New patient.', 'CALLER: Okay.'])).toBe('new');
+    });
+
     it('NO NEGATOR IS FILLER — the one property that list must keep', () => {
       // FILLER_ONLY expands acceptance, so a negator smuggled into it would make
       // "New." / "No." read as a clean answer. Every alternative of NEG, alone in
