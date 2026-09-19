@@ -84,6 +84,11 @@ import { isTwilioCallSid } from './callSid';
  * order?" OPENED a window across two sentences and read the next caller turn
  * as an answer. `spokenDob.ts` splits on sentences for the same reason.
  *
+ * ACCENTS ARE FOLDED, NOT STRIPPED TO SPACES. The character class keeps only
+ * `a-z0-9'\s.?!`, so without decomposing first every accented letter became a
+ * SPACE and "sí" read as "s" — which would make Spanish unreadable rather than
+ * merely unsupported. `nameKey` already treats an accent as the same person.
+ *
  * Every cue below is word-based, so keeping three marks changes none of them:
  * "new glasses." still reads as an object, and so does "new, glasses", because
  * a comma is still folded to a space.
@@ -91,6 +96,8 @@ import { isTwilioCallSid } from './callSid';
 function fold(text: string): string {
   return text
     .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
     .replace(/[‘’ʼ]/g, "'")
     .replace(/[^a-z0-9'\s.?!]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -106,35 +113,131 @@ function agentLine(line: string): string | null {
 }
 
 /**
+ * The patient-status question, in the languages these lanes actually speak.
+ *
+ * ENGLISH AND SPANISH, and the second is Codex P1 on this PR rather than a
+ * nice-to-have. Every queue lane tells the model to translate its questions and
+ * continue in the caller's language, so a Spanish exchange — "¿paciente nuevo o
+ * paciente existente?" / "nuevo" — opened no window at all and the gate simply
+ * did not exist for that caller. **Measured over the four runtime queue lanes,
+ * 2026-09-12..18, 1,843 substantive calls: 199 caller sides carry a Spanish cue
+ * — 10.8%, tech 60, surgery 71, optical 68.** One caller in nine is not an
+ * outlier, which is why this is supported rather than noted.
+ *
+ * WHAT IS NOT COVERED, stated rather than implied: every other language. The
+ * runtime can switch to any of them mid-call (proven live on a Turkish caller,
+ * 2026-09-03) and this reader opens no window for them, so nothing is
+ * suppressed and the call behaves exactly as it does today. That is the
+ * fail-safe direction, and it is the same call `dobParts.ts` makes about
+ * Turkish for the same field. Guessing at a translation inside a gate that
+ * REFUSES TO LOOK FOR A RECORD is worse than not firing.
+ *
+ * THE NOUN MUST BE THERE — Codex P1, this PR. Without it any same-sentence
+ * new/existing pair opened a window, so *"Do you need a new prescription or
+ * refill an existing one?"* answered with a bare "New." read as a NEW PATIENT
+ * and suppressed the lookup. That is the wrong direction: an existing patient
+ * who wants a new prescription, whose record we then refuse to look for. It is
+ * the hazard the 94%-wrong measurement below describes, arriving through the
+ * AGENT's line rather than the caller's — and the object test cannot catch it,
+ * because the noun is in the question while the caller said one word.
+ *
+ * Measured over the same 1,843 calls: the agent offered a new/existing
+ * alternation on exactly ONE, and that one was NOT about patient status. A low
+ * base rate today because the question is not asked yet, and the narrowing is
+ * free: the prompt says "new patient or an existing patient".
+ *
+ * Spanish puts the adjective after the noun, so the patterns are written per
+ * language rather than translated word for word.
+ */
+const STATUS_QUESTION: readonly RegExp[] = [
+  // English: the noun bound to one side of the alternation.
+  /\bnew\s+patient\b[^.?!]{0,30}\bor\b[^.?!]{0,25}\bexisting\b/,
+  /\bnew\b[^.?!]{0,20}\bor\b[^.?!]{0,25}\bexisting\s+patient\b/,
+  /\bexisting\s+patient\b[^.?!]{0,30}\bor\b[^.?!]{0,25}\bnew\b/,
+  /\bexisting\b[^.?!]{0,20}\bor\b[^.?!]{0,25}\bnew\s+patient\b/,
+  // Spanish.
+  /\bpaciente\s+nuev[oa]\b[^.?!]{0,30}\bo\b[^.?!]{0,25}\bexistente\b/,
+  /\bnuev[oa]\b[^.?!]{0,20}\bo\b[^.?!]{0,25}\bpaciente\s+existente\b/,
+  /\bpaciente\s+existente\b[^.?!]{0,30}\bo\b[^.?!]{0,25}\bnuev[oa]\b/,
+  /**
+   * THE BARE RE-ASK — "Sorry, new or existing?" — and it is here because
+   * narrowing the window for that P1 took it away, which broke the
+   * REVERSIBILITY this whole gate leans on. A model re-asking after a muddled
+   * answer shortens the question, and if that opens no window the caller's
+   * CORRECTION never lands.
+   *
+   * SAFE ONLY BECAUSE THE ALTERNATION MUST END THE CLAUSE. Nothing but
+   * punctuation may follow, so the noun that made the P1 dangerous cannot be
+   * there:
+   *   "new or existing?"                       -> a window (nothing follows)
+   *   "a new or existing FRAME?"               -> no window (a noun follows)
+   *   "a new prescription or an existing one?" -> no window (a noun intervenes)
+   * Both halves matter. Requiring only that the pair be BARE would still admit
+   * "new or existing frame", where the shared noun sits after the pair.
+   */
+  /\bnew\s+or\s+(an?\s+)?existing\s*[.?!]*$/,
+  /\bexisting\s+or\s+(an?\s+)?new\s*[.?!]*$/,
+  /\bnuev[oa]\s+o\s+existente\s*[.?!]*$/,
+  /\bexistente\s+o\s+nuev[oa]\s*[.?!]*$/,
+];
+
+/**
  * Does this agent line ASK the new-or-existing question?
  *
- * The ALTERNATION is required, and that is the discriminator — the same
- * mention-is-not-an-ask rule `spokenDob` had to be corrected into (Codex P1b on
- * PR #275: "I have your date of birth, thank you" opened a window because it
- * merely named the subject). "I have you as a new patient, thank you" names the
- * subject too, and it is not a question.
+ * The ALTERNATION is required, which is the mention-is-not-an-ask rule
+ * `spokenDob` had to be corrected into (Codex P1b on PR #275: "I have your date
+ * of birth, thank you" opened a window because it merely named the subject).
+ * "I have you as a new patient, thank you" names the subject too, and it is not
+ * a question. `STATUS_QUESTION` carries the rest of the reasoning.
  */
 function opensStatusWindow(agent: string): boolean {
-  // "new patient or an existing patient", "new or existing patient",
-  // "existing patient or a new patient" — either order, with or without the
-  // repeated noun, and tolerant of the articles in between.
-  return (
-    /\bnew\b[^.?!]{0,30}\bor\b[^.?!]{0,20}\bexisting\b/.test(agent) ||
-    /\bexisting\b[^.?!]{0,30}\bor\b[^.?!]{0,20}\bnew\b/.test(agent)
-  );
+  return STATUS_QUESTION.some((re) => re.test(agent));
 }
 
 /**
- * A noun after "new" means the caller is describing a THING, not themselves.
+ * A noun with "new" means the caller is describing a THING, not themselves.
  *
  * "I need new glasses", "a new prescription", "my new insurance card" — these
- * are 16 of tech's 36 and 3 of optical's 7. `patient` is deliberately absent
- * from this list: "new patient" IS the answer.
+ * are 16 of tech's 36 and 3 of optical's 7. `patient` is deliberately absent:
+ * "new patient" IS the answer.
+ *
+ * SPANISH PUTS THE ADJECTIVE AFTER THE NOUN, so the same idea needs the mirror
+ * order — "lentes nuevos", not "nuevos lentes". Translating the English pattern
+ * word for word would have matched nothing and read it as an answer.
  */
 const NEW_TAKES_AN_OBJECT =
   /\bnew\s+(glasses|frames?|lenses?|lens|prescriptions?|pairs?|insurances?|cards?|numbers?|phones?|addresses|address|doctors?|providers?|contacts?|appointments?|referrals?|jobs?|plans?|ones?)\b/;
 
-/** Said they have been here before. Checked FIRST — see `readStatus`. */
+const NEW_TAKES_AN_OBJECT_ES =
+  /\b(lentes|gafas|anteojos|receta|recetas|seguro|numero|tarjeta|cita|citas|direccion|marcos|armazon)\s+nuev[oa]s?\b/;
+
+/**
+ * SAID THEY ARE NOT AN EXISTING PATIENT — checked BEFORE everything else.
+ *
+ * Codex P1, this PR, and a real inversion: `EXISTING_CUES` carries a broad
+ * `\b(been|was)\s+(a\s+)?patient\b`, so **"I've never been a patient" matched it
+ * and read as EXISTING** — the lookup then ran and produced the very "no record
+ * found" this gate exists to suppress. The specific negation has to be read
+ * before the broad claim it negates.
+ *
+ * The mirror case stays intact and is tested both ways: "not a new patient" is
+ * EXISTING, and nothing here matches it — `not a patient` cannot span the word
+ * "new" that sits between, and `not an existing` does not appear in it.
+ */
+const NOT_AN_EXISTING_PATIENT = [
+  /\bnever\s+(been|was|come|came|visited)\b/,
+  /\bnot\s+an?\s+existing\b/,
+  /\bnot\s+a\s+patient\b/,
+  /\b(haven't|have\s+not|hadn't|had\s+not)\s+been\b/,
+  /\bfirst\s+time\b/,
+  // Spanish.
+  /\bprimera\s+vez\b/,
+  /\bnunca\b/,
+  /\bno\s+soy\s+paciente\b/,
+  /\bno\s+he\s+(venido|estado|ido)\b/,
+];
+
+/** Said they have been here before. */
 const EXISTING_CUES = [
   /\bexisting\b/,
   /\bnot\s+(a\s+)?new\b/,
@@ -145,31 +248,47 @@ const EXISTING_CUES = [
   /\bi\s+(have|had)\s+an?\s+(appointment|surgery|exam)\b/,
   /\bi\s+(see|saw)\s+(dr|doctor)\b/,
   /\blast\s+(year|month|week|time)\s+i\b/,
+  // Spanish.
+  /\bexistente\b/,
+  /\bya\s+soy\s+paciente\b/,
+  /\bya\s+(he|habia)\s+(venido|estado|ido)\b/,
+  /\bsoy\s+paciente\s+(de|del|aqui)\b/,
 ];
 
 /** Said this is their first contact. */
 const NEW_CUES = [
   /\bnew\s+patient\b/,
-  /\bfirst\s+time\b/,
-  /\bnever\s+been\b/,
-  /\bnot\s+a\s+patient\b/,
   /\bi'?m\s+new\b/,
   /\bi\s+am\s+new\b/,
+  // Spanish.
+  /\bpaciente\s+nuev[oa]\b/,
+  /\bsoy\s+nuev[oa]\b/,
 ];
+
 
 export type PatientStatus = 'new' | 'existing';
 
 /**
  * Read one window's caller turns.
  *
- * ORDER IS LOAD-BEARING. Existing is checked before new because every existing
- * cue that contains the word "new" is a NEGATION of it — "not a new patient",
- * "I'm not new" — and a new-first reader would classify those backwards, which
- * is the direction that loses a real patient's record.
+ * ORDER IS LOAD-BEARING IN BOTH DIRECTIONS, and it took a Codex P1 to get the
+ * second one right.
+ *
+ * Existing is checked before the general new cues, because every existing cue
+ * containing the word "new" is a NEGATION of it — "not a new patient", "I'm not
+ * new" — and a new-first reader classifies those backwards, which loses a real
+ * patient's record.
+ *
+ * But the NEGATION OF EXISTING must come before existing, for the mirror
+ * reason: "I've never been a patient" contains "been a patient". Specific
+ * negations first, then the broad claims they negate, then the bare word.
  */
 function readWindow(turns: readonly string[]): PatientStatus | undefined {
   const said = turns.join(' ');
   if (!said) return undefined;
+  // The specific negation of "existing" comes FIRST — see
+  // NOT_AN_EXISTING_PATIENT for the inversion this ordering fixes.
+  if (NOT_AN_EXISTING_PATIENT.some((re) => re.test(said))) return 'new';
   if (EXISTING_CUES.some((re) => re.test(said))) return 'existing';
   if (NEW_CUES.some((re) => re.test(said))) return 'new';
   /**
@@ -178,6 +297,7 @@ function readWindow(turns: readonly string[]): PatientStatus | undefined {
    * question, from reading as the answer.
    */
   if (/\bnew\b/.test(said) && !NEW_TAKES_AN_OBJECT.test(said)) return 'new';
+  if (/\bnuev[oa]s?\b/.test(said) && !NEW_TAKES_AN_OBJECT_ES.test(said)) return 'new';
   return undefined;
 }
 

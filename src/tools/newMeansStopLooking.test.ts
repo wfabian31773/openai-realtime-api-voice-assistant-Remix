@@ -338,3 +338,161 @@ describe('THE WIRING — the bridge is what posts the record', () => {
     expect(readPatientStatus([`AGENT: ${asked}`, 'CALLER: New.'])).toBe('new');
   });
 });
+
+describe("Codex's three P1s on this PR — all reproduced, all fixed", () => {
+  /**
+   * All three were on a door this PR's own change opened, so all three were
+   * taken regardless of base rate. Each was reproduced against the real reader
+   * BEFORE being fixed, and each assertion below failed on `b483d7c`.
+   */
+
+  const EN = 'AGENT: Are you a new patient or an existing patient?';
+  const ES = 'AGENT: ¿Es usted paciente nuevo o paciente existente?';
+
+  describe('P1-A — a negated existing claim is NEW, not existing', () => {
+    /**
+     * `EXISTING_CUES` carries a broad `(been|was) (a )?patient`, so "I've never
+     * been a patient" matched it and read as EXISTING. The lookup then ran and
+     * produced the very "no record found" this gate exists to suppress.
+     */
+    it('"I\'ve never been a patient" is new', () => {
+      expect(readPatientStatus([EN, "CALLER: I've never been a patient."])).toBe('new');
+    });
+
+    it('"I have not been a patient here" is new', () => {
+      expect(readPatientStatus([EN, 'CALLER: I have not been a patient here.'])).toBe('new');
+    });
+
+    it('"I\'m not an existing patient" is new', () => {
+      expect(readPatientStatus([EN, "CALLER: I'm not an existing patient."])).toBe('new');
+    });
+
+    it('and the MIRROR still holds — a negated NEW is existing', () => {
+      // The specific negation runs first, so this is the case that could have
+      // been broken by fixing the one above. Both directions, both pinned.
+      expect(readPatientStatus([EN, 'CALLER: Not a new patient.'])).toBe('existing');
+      expect(readPatientStatus([EN, "CALLER: I'm not new."])).toBe('existing');
+    });
+
+    it('a plain existing claim is untouched', () => {
+      expect(readPatientStatus([EN, "CALLER: I've been a patient there for years."])).toBe('existing');
+    });
+  });
+
+  describe('P1-B — only a PATIENT-status question opens a window', () => {
+    /**
+     * The window matched any same-sentence new/existing alternation, so an
+     * optical or tech agent asking about a PRESCRIPTION opened one. A caller
+     * answering the offered choice with a bare "New." then read as a new
+     * PATIENT and had their lookup suppressed — the wrong direction, and the
+     * object test cannot catch it because the noun is in the agent's question
+     * while the caller said one word.
+     */
+    it('a prescription alternation opens NO window — the noun is between the pair', () => {
+      expect(
+        readPatientStatus([
+          'AGENT: Do you need a new prescription or refill an existing one?',
+          'CALLER: New.',
+        ]),
+      ).toBeUndefined();
+    });
+
+    it('nor does one whose shared noun follows the pair', () => {
+      // This is the case a bare-alternation rule alone would have admitted.
+      expect(
+        readPatientStatus(['AGENT: Would you like a new or existing frame?', 'CALLER: New.']),
+      ).toBeUndefined();
+    });
+
+    it('the question the prompt actually instructs still opens one, both forms', () => {
+      expect(readPatientStatus([EN, 'CALLER: New.'])).toBe('new');
+      expect(
+        readPatientStatus(['AGENT: Are you a new or existing patient?', 'CALLER: New.']),
+      ).toBe('new');
+    });
+
+    it('and the BARE RE-ASK still opens one, which is what reversibility needs', () => {
+      /**
+       * Narrowing the window for P1-B took this away and broke the correction
+       * path — the property v59 leans on. It is admitted again, but only when
+       * the alternation ENDS the clause, so the noun that made P1-B dangerous
+       * cannot be there.
+       */
+      expect(
+        readPatientStatus([
+          EN, 'CALLER: New.',
+          'AGENT: Sorry — new or existing?', 'CALLER: Existing, I came in last year.',
+        ]),
+      ).toBe('existing');
+    });
+  });
+
+  describe('P1-C — Spanish, because it is 10.8% of these callers', () => {
+    /**
+     * Every lane tells the model to translate its questions and continue in the
+     * caller's language, so a Spanish exchange opened no window and the gate did
+     * not exist for that caller. Measured over the four runtime queue lanes,
+     * 2026-09-12..18, 1,843 substantive calls: 199 caller sides carry a Spanish
+     * cue (tech 60, surgery 71, optical 68).
+     *
+     * EVERY OTHER LANGUAGE IS STILL UNCOVERED and that is deliberate — no window
+     * opens, nothing is suppressed, the call behaves as it does today. The
+     * fail-safe direction, and the same call `dobParts.ts` makes about Turkish.
+     */
+    it('the Spanish question opens a window and a Spanish answer is read', () => {
+      expect(readPatientStatus([ES, 'CALLER: Nuevo.'])).toBe('new');
+      expect(readPatientStatus([ES, 'CALLER: Soy nueva.'])).toBe('new');
+      expect(readPatientStatus([ES, 'CALLER: Existente.'])).toBe('existing');
+      expect(readPatientStatus([ES, 'CALLER: Ya soy paciente.'])).toBe('existing');
+    });
+
+    it('"primera vez" and "nunca he venido" are new', () => {
+      expect(readPatientStatus([ES, 'CALLER: Es mi primera vez.'])).toBe('new');
+      expect(readPatientStatus([ES, 'CALLER: Nunca he venido.'])).toBe('new');
+    });
+
+    it('the Spanish object form is not an answer — the adjective follows the noun', () => {
+      // "lentes nuevos", not "nuevos lentes". Translating the English pattern
+      // word for word would have matched nothing and read this as "new".
+      expect(readPatientStatus([ES, 'CALLER: Necesito lentes nuevos.'])).toBeUndefined();
+    });
+
+    it('accents survive the fold, or Spanish would be unreadable', () => {
+      // The character class keeps only a-z0-9 and three marks, so without
+      // decomposing first every accented letter became a SPACE.
+      expect(readPatientStatus([ES, 'CALLER: Sí, soy paciente existente.'])).toBe('existing');
+    });
+
+    it('an unsupported language opens no window, and suppresses nothing', () => {
+      expect(
+        readPatientStatus(['AGENT: Yeni hasta mısınız yoksa mevcut hasta mı?', 'CALLER: Yeni.']),
+      ).toBeUndefined();
+    });
+  });
+
+  describe('the gate itself still behaves, end to end, in both languages', () => {
+    it('a Spanish "nuevo" suppresses the lookup through runTool', async () => {
+      notePatientStatus(SID, [ES, 'CALLER: Nuevo.']);
+      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      expect(lookupSpy).not.toHaveBeenCalled();
+      expect(out.suppressed).toBe('caller_said_new');
+    });
+
+    it('a caller who never was a patient suppresses it too', async () => {
+      notePatientStatus(SID, [EN, "CALLER: I've never been a patient."]);
+      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      expect(lookupSpy).not.toHaveBeenCalled();
+      expect(out.suppressed).toBe('caller_said_new');
+    });
+
+    it('a prescription question does NOT suppress it', async () => {
+      notePatientStatus(SID, [
+        'AGENT: Do you need a new prescription or refill an existing one?',
+        'CALLER: New.',
+      ]);
+      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      expect(lookupSpy).toHaveBeenCalledTimes(1);
+      expect(out.suppressed).toBeUndefined();
+    });
+  });
+});
