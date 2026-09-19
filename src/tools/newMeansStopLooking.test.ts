@@ -284,16 +284,26 @@ describe('the window rule — measured, not assumed', () => {
   it('the answers callers actually give to this question', () => {
     expect(readPatientStatus([ASK, "CALLER: I'm a new patient."])).toBe('new');
     expect(readPatientStatus([ASK, 'CALLER: New.'])).toBe('new');
-    expect(readPatientStatus([ASK, "CALLER: I've never been a patient."])).toBe('new');
     expect(readPatientStatus([ASK, "CALLER: I've been seen there before."])).toBe('existing');
+    // "I've never been a patient." used to read `new` here. Codex round 4 is why
+    // it no longer does — the denial route is deleted; see that block below.
     expect(readPatientStatus([ASK, 'CALLER: Existing patient.'])).toBe('existing');
     // "First time calling." and "I've never been there." used to read `new`
     // here. Codex round 3 is why they no longer do — see that block below.
   });
 
-  it('a reading that finds nothing overwrites nothing', () => {
-    notePatientStatus(SID, [ASK, 'CALLER: New.']);
-    notePatientStatus(SID, ['AGENT: Anything else?', 'CALLER: No thank you.']);
+  it('a later turn that says nothing does not lose the answer', () => {
+    /**
+     * REWRITTEN for Codex round 4. The old version posted a SHORTER record on
+     * the second call, which the bridge never does — it always posts
+     * `transcriptLog.lines` in full — so it asserted a call pattern that cannot
+     * happen, and it would now pass only because of the bug round 4 found. The
+     * whole record still carries the answering window, so the answer survives;
+     * what does NOT survive is a window whose text has CHANGED (the R4-B block).
+     */
+    const record = [ASK, 'CALLER: New.'];
+    notePatientStatus(SID, record);
+    notePatientStatus(SID, [...record, 'AGENT: Anything else?', 'CALLER: No thank you.']);
     expect(patientStatusFor(SID)).toBe('new');
   });
 });
@@ -357,16 +367,21 @@ describe("Codex's three P1s on this PR — all reproduced, all fixed", () => {
      * been a patient" matched it and read as EXISTING. The lookup then ran and
      * produced the very "no record found" this gate exists to suppress.
      */
-    it('"I\'ve never been a patient" is new', () => {
-      expect(readPatientStatus([EN, "CALLER: I've never been a patient."])).toBe('new');
+    it('a denial of patient history is UNCLASSIFIED — round 4 deleted that route', () => {
+      // These read `new` from round 1 until round 4, which found the family
+      // admitted a location qualifier ("…at this office"). Unclassified now:
+      // nothing suppressed, the lookup runs, v50 bounds the asks.
+      expect(readPatientStatus([EN, "CALLER: I've never been a patient."])).toBeUndefined();
+      expect(readPatientStatus([EN, 'CALLER: I have not been a patient here.'])).toBeUndefined();
+      expect(readPatientStatus([EN, "CALLER: I'm not an existing patient."])).toBeUndefined();
     });
 
-    it('"I have not been a patient here" is new', () => {
-      expect(readPatientStatus([EN, 'CALLER: I have not been a patient here.'])).toBe('new');
-    });
-
-    it('"I\'m not an existing patient" is new', () => {
-      expect(readPatientStatus([EN, "CALLER: I'm not an existing patient."])).toBe('new');
+    it("and round 1's POINT survives: a denial never reads as an existing CLAIM", () => {
+      // This is what `withoutDenials` is still for. `(been|was) (a )?patient`
+      // matches inside "I've never been a patient", and reading that as
+      // `existing` is the defect round 1 filed.
+      expect(readPatientStatus([EN, "CALLER: I've never been a patient."])).not.toBe('existing');
+      expect(readPatientStatus([EN, 'CALLER: I have never been seen there.'])).not.toBe('existing');
     });
 
     it('and the MIRROR still holds — a negated NEW is existing', () => {
@@ -376,7 +391,7 @@ describe("Codex's three P1s on this PR — all reproduced, all fixed", () => {
       expect(readPatientStatus([EN, "CALLER: I'm not new."])).toBe('existing');
     });
 
-    it('a plain existing claim is untouched', () => {
+    it('a plain existing claim is untouched — the cheap direction keeps its prose', () => {
       expect(readPatientStatus([EN, "CALLER: I've been a patient there for years."])).toBe('existing');
     });
   });
@@ -448,12 +463,11 @@ describe("Codex's three P1s on this PR — all reproduced, all fixed", () => {
       expect(readPatientStatus([ES, 'CALLER: Ya soy paciente.'])).toBe('existing');
     });
 
-    it('a Spanish denial of PATIENT history is new', () => {
-      // "Es mi primera vez" and "Nunca he venido" used to read `new` here.
-      // Round 3 deleted both — a first time CALLING and a place are not
-      // patient history. The denial that IS about patient history survives.
-      expect(readPatientStatus([ES, 'CALLER: Nunca he sido paciente.'])).toBe('new');
-      expect(readPatientStatus([ES, 'CALLER: No soy paciente existente.'])).toBe('new');
+    it('a Spanish denial is UNCLASSIFIED too, and never reads as existing', () => {
+      // Round 3 deleted the place and first-time cues; round 4 deleted the
+      // patient-history denial itself. Both directions pinned.
+      expect(readPatientStatus([ES, 'CALLER: Nunca he sido paciente.'])).toBeUndefined();
+      expect(readPatientStatus([ES, 'CALLER: No soy paciente existente.'])).toBeUndefined();
     });
 
     it('the Spanish object form is not an answer — the adjective follows the noun', () => {
@@ -492,11 +506,13 @@ describe("Codex's three P1s on this PR — all reproduced, all fixed", () => {
       expect(out.suppressed).toBe('caller_said_new');
     });
 
-    it('a caller who never was a patient suppresses it too', async () => {
+    it('a caller who never was a patient is now LOOKED UP, not suppressed', async () => {
+      // Round 4: the denial route is gone, so this call behaves as it did before
+      // the gate existed. The accepted cost, asserted through runTool.
       notePatientStatus(SID, [EN, "CALLER: I've never been a patient."]);
       const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
-      expect(lookupSpy).not.toHaveBeenCalled();
-      expect(out.suppressed).toBe('caller_said_new');
+      expect(lookupSpy).toHaveBeenCalledTimes(1);
+      expect(out.suppressed).toBeUndefined();
     });
 
     it('a prescription question does NOT suppress it', async () => {
@@ -545,7 +561,7 @@ describe("Codex round 2 — three more P1s, all the same wrong direction", () =>
       ).toBeUndefined();
     });
 
-    it('guard 1 earns its place: an EXPLICIT new answer with no prior context', () => {
+    it('guard 1 earns its place: a window must not open on an unrelated pair', () => {
       /**
        * Added because the mutation removing guard 1 survived on the cases above
        * — guard 2 covered every one of them. This is the case guard 2 CANNOT
@@ -553,16 +569,19 @@ describe("Codex round 2 — three more P1s, all the same wrong direction", () =>
        * without the prior-context requirement this opens a window and
        * suppresses a caller nobody ever asked about their patient status.
        */
-      // REWRITTEN for Codex round 3: this case used to turn on "I'm new here",
-      // which was an explicit NEW_CUES entry. Round 3 deleted that cue, so the
-      // case stopped discriminating guard 1 — guard 2 covered it too, and the
-      // mutation would have survived again. An explicit DENIAL is still read
-      // regardless of window kind, so it is the case guard 2 cannot cover.
+      /**
+       * REWRITTEN TWICE, and the second time is the honest part. Round 3 keyed
+       * this on an explicit DENIAL, and round 4 deleted that route — so guard 1
+       * no longer has any EXPENSIVE-direction job at all: with one `new` route,
+       * qualified-only, guard 2 already makes a re-ask window unable to produce
+       * `new` under any answer.
+       *
+       * What guard 1 still does is stop an unrelated alternation setting a status
+       * at all. That is the cheap direction, it is worth two lines, and saying so
+       * beats a test that looks like it proves more than it does.
+       */
       expect(
-        readPatientStatus([
-          'AGENT: Is the frame new or existing?',
-          "CALLER: I'm not an existing patient.",
-        ]),
+        readPatientStatus(['AGENT: Is the frame new or existing?', 'CALLER: Existing.']),
       ).toBeUndefined();
     });
 
@@ -617,9 +636,10 @@ describe("Codex round 2 — three more P1s, all the same wrong direction", () =>
       ).toBe('existing');
     });
 
-    it('but a bare "No soy paciente" is still NEW', () => {
-      // The prefix is only an existing claim when "nuevo" follows it.
-      expect(readPatientStatus([ES, 'CALLER: No soy paciente.'])).toBe('new');
+    it('and a bare "No soy paciente" is unclassified, never existing', () => {
+      // Round 4 deleted the denial route; what still matters is that the prefix
+      // does not read as an existing CLAIM.
+      expect(readPatientStatus([ES, 'CALLER: No soy paciente.'])).toBeUndefined();
     });
   });
 
@@ -645,17 +665,17 @@ describe("Codex round 2 — three more P1s, all the same wrong direction", () =>
       ).toBe('existing');
     });
 
-    it('and the negation STILL wins when it governs the claim', () => {
+    it('a governed existing claim is not an existing claim', () => {
       // The case a whole-turn "explicit beats negation" rule would break. Both
       // sentences contain "existing" and a negator; only one is an existing
       // claim.
-      expect(readPatientStatus([EN, "CALLER: I'm not an existing patient."])).toBe('new');
-      expect(readPatientStatus([ES, 'CALLER: No soy paciente existente.'])).toBe('new');
+      expect(readPatientStatus([EN, "CALLER: I'm not an existing patient."])).not.toBe('existing');
+      expect(readPatientStatus([ES, 'CALLER: No soy paciente existente.'])).not.toBe('existing');
     });
 
-    it('a genuine never-been-a-patient is still new', () => {
-      expect(readPatientStatus([EN, "CALLER: I've never been a patient."])).toBe('new');
-      expect(readPatientStatus([EN, "CALLER: I have never been seen there."])).toBe('new');
+    it('a genuine never-been-a-patient is unclassified after round 4', () => {
+      expect(readPatientStatus([EN, "CALLER: I've never been a patient."])).toBeUndefined();
+      expect(readPatientStatus([EN, 'CALLER: I have never been seen there.'])).toBeUndefined();
     });
   });
 
@@ -737,19 +757,21 @@ describe('Codex round 3 — three more P1s, and the reader is SMALLER, not patch
       expect(readPatientStatus([ES, 'CALLER: Nunca he venido.'])).toBeUndefined();
     });
 
-    it('a denial of PATIENT history still answers new, in both languages', () => {
-      expect(readPatientStatus([EN, "CALLER: I've never been a patient."])).toBe('new');
-      expect(readPatientStatus([EN, 'CALLER: I have never been seen there.'])).toBe('new');
-      expect(readPatientStatus([EN, "CALLER: I'm not an existing patient."])).toBe('new');
-      expect(readPatientStatus([ES, 'CALLER: Nunca he sido paciente.'])).toBe('new');
-      expect(readPatientStatus([ES, 'CALLER: No soy paciente.'])).toBe('new');
+    it('the denial route answered new until round 4 deleted it', () => {
+      for (const said of [
+        "I've never been a patient.",
+        'I have never been seen there.',
+        "I'm not an existing patient.",
+      ]) expect(readPatientStatus([EN, `CALLER: ${said}`])).toBeUndefined();
+      expect(readPatientStatus([ES, 'CALLER: Nunca he sido paciente.'])).toBeUndefined();
+      expect(readPatientStatus([ES, 'CALLER: No soy paciente.'])).toBeUndefined();
     });
 
     it('and a denial does not read as the existing CLAIM buried inside it', () => {
       // Round 1's P1-A, and the reason the denial phrases are stripped out of
       // the text the existing prose reads: `been a patient` matches inside
       // "I've never been a patient".
-      expect(readPatientStatus([EN, "CALLER: I've never been a patient here."])).toBe('new');
+      expect(readPatientStatus([EN, "CALLER: I've never been a patient here."])).toBeUndefined();
       // While a genuine existing claim in the same shape still lands.
       expect(readPatientStatus([EN, "CALLER: I've been a patient there for years."])).toBe('existing');
     });
@@ -770,8 +792,10 @@ describe('Codex round 3 — three more P1s, and the reader is SMALLER, not patch
       expect(readPatientStatus([EN, "CALLER: I'm not exactly a new patient."])).toBe('existing');
     });
 
-    it('and the mirror: a hedged negation of EXISTING is new', () => {
-      expect(readPatientStatus([EN, "CALLER: I'm not really an existing patient."])).toBe('new');
+    it('and the mirror: a hedged negation of EXISTING is not an existing claim', () => {
+      // Read `new` until round 4 deleted the denial route; the hedge still has
+      // to stop it reading `existing`, which is what this pins.
+      expect(readPatientStatus([EN, "CALLER: I'm not really an existing patient."])).not.toBe('existing');
     });
 
     it('the Spanish hedge too', () => {
@@ -858,10 +882,8 @@ describe('Codex round 3 — three more P1s, and the reader is SMALLER, not patch
       }
     });
 
-    it('and the three routes that DO answer new still do', () => {
-      // 1. a denial of patient history, 2. an explicit new-patient claim,
-      // 3. a SENTENCE that is the answer.
-      expect(readPatientStatus([EN, 'CALLER: I have not been a patient here.'])).toBe('new');
+    it('and the ONE route that answers new still does', () => {
+      // Round 4 left exactly one: a SENTENCE that is the answer.
       expect(readPatientStatus([EN, "CALLER: I'm a new patient."])).toBe('new');
       expect(readPatientStatus([EN, 'CALLER: New.'])).toBe('new');
       expect(readPatientStatus([EN, 'CALLER: Uh, new.'])).toBe('new');
@@ -906,9 +928,9 @@ describe('Codex round 3 — three more P1s, and the reader is SMALLER, not patch
       ).toBe('existing');
     });
 
-    it('while the denial ALONE is still new', () => {
-      expect(readPatientStatus([EN, "CALLER: I'm not an existing patient."])).toBe('new');
-      expect(readPatientStatus([ES, 'CALLER: No soy paciente existente.'])).toBe('new');
+    it('while the denial ALONE is unclassified, and still not existing', () => {
+      expect(readPatientStatus([EN, "CALLER: I'm not an existing patient."])).toBeUndefined();
+      expect(readPatientStatus([ES, 'CALLER: No soy paciente existente.'])).toBeUndefined();
     });
   });
 
@@ -927,11 +949,134 @@ describe('Codex round 3 — three more P1s, and the reader is SMALLER, not patch
       expect(out.suppressed).toBeUndefined();
     });
 
-    it('and a caller who denies ever being a patient still suppresses it', async () => {
-      notePatientStatus(SID, [EN, "CALLER: I've never been a patient."]);
+    it('and the ANSWER SENTENCE is what suppresses it, through runTool', async () => {
+      notePatientStatus(SID, [EN, "CALLER: I'm a new patient."]);
       const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
       expect(lookupSpy).not.toHaveBeenCalled();
       expect(out.suppressed).toBe('caller_said_new');
+    });
+  });
+});
+
+describe('Codex round 4 — `new` now comes from ONE route', () => {
+  /**
+   * TWELVE P1s in one reader across four rounds, and round 4 found one in TWO
+   * of the three routes round 3 left. Both the same shape yet again, and both
+   * in the expensive direction.
+   *
+   * So the route that has NEVER produced a finding in four rounds is now the
+   * only one: a SENTENCE THAT IS THE ANSWER, in a qualified window. That is a
+   * deletion rather than another guard, and it closes both findings by
+   * construction — there is no prose left for a qualifier or a subordinate
+   * clause to defeat.
+   */
+  const EN = 'AGENT: Are you a new patient or an existing patient?';
+  const ES = 'AGENT: ¿Es usted paciente nuevo o paciente existente?';
+
+  describe('R4-A — a denial with a LOCATION qualifier', () => {
+    /**
+     * Round 3 deleted the place-based cues by NAME (`never been here`) and left
+     * the qualifier that can follow the ones it kept. `si_locations` holds 105
+     * offices, so a patient of another one says these and means the opposite.
+     */
+    it('an office-qualified denial does not suppress the lookup', () => {
+      for (const said of [
+        "I've never been seen at this office.",
+        'I am not a patient at this location.',
+        "I've never been a patient at your Covina office.",
+      ]) expect(readPatientStatus([EN, `CALLER: ${said}`])).not.toBe('new');
+    });
+  });
+
+  describe('R4-B — a CONTAINS read cannot see a negation in the clause around it', () => {
+    it('an uncertain or clause-negated new claim does not suppress the lookup', () => {
+      for (const said of [
+        "I don't think I'm a new patient.",
+        "I don't believe I'm a new patient.",
+        "I'm not sure if I'm a new patient.",
+      ]) expect(readPatientStatus([EN, `CALLER: ${said}`])).not.toBe('new');
+    });
+
+    it('while the caller who simply says it is still read', () => {
+      expect(readPatientStatus([EN, "CALLER: I'm a new patient."])).toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: New patient.'])).toBe('new');
+    });
+  });
+
+  describe('R4-C — a transcript revision clears the stored verdict', () => {
+    /**
+     * `CallTranscriptLog.callerCompleted` REPLACES a caller line in place when
+     * Grok re-emits the same item, so "New." can become "I need new glasses."
+     * The read went to undefined and the store kept `new`, suppressing an
+     * existing caller on words no longer in the transcript — and this module's
+     * own docstring claimed the opposite was already true.
+     *
+     * DELETING IS SAFE BECAUSE THE LOG NEVER DROPS A LINE: `transcriptLog.ts`
+     * only pushes or replaces in place, with no cap and no eviction, so an
+     * answer given in an earlier window is still found on every later post.
+     */
+    it('a revision that removes the answer removes the suppression', () => {
+      notePatientStatus(SID, [EN, 'CALLER: New.']);
+      expect(patientStatusFor(SID)).toBe('new');
+      notePatientStatus(SID, [EN, 'CALLER: I need new glasses.']);
+      expect(patientStatusFor(SID)).toBeUndefined();
+    });
+
+    it('and the lookup runs again afterwards, through runTool', async () => {
+      notePatientStatus(SID, [EN, 'CALLER: New.']);
+      notePatientStatus(SID, [EN, 'CALLER: I need new glasses.']);
+      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      expect(lookupSpy).toHaveBeenCalledTimes(1);
+      expect(out.suppressed).toBeUndefined();
+    });
+
+    it('an EARLIER window survives a later turn that says nothing', () => {
+      // The whole record is re-read, so this is not a revision — it is growth.
+      const record = [EN, 'CALLER: New.', 'AGENT: And your name?', 'CALLER: It is on the card.'];
+      notePatientStatus(SID, record);
+      expect(patientStatusFor(SID)).toBe('new');
+    });
+
+    it('and the model\'s OVERRIDE is not touched by any of it', async () => {
+      notePatientStatus(SID, [EN, 'CALLER: New.']);
+      await lookup({
+        queue: 'optical', call_sid: SID, caller_phone: '555-555-0101', patient_status: 'existing',
+      });
+      notePatientStatus(SID, [EN, 'CALLER: New.']);
+      expect(patientStatusFor(SID)).toBe('existing');
+    });
+  });
+
+  describe('THE INVARIANT — one route, and prose can only answer existing', () => {
+    it('no prose answers new, in either language', () => {
+      for (const said of [
+        "I've never been a patient.",
+        "I'm not an existing patient.",
+        "I've never been seen at this office.",
+        "I don't think I'm a new patient.",
+        'First time calling.',
+        "I'm new to progressives.",
+        'I need a new doctor.',
+      ]) expect(readPatientStatus([EN, `CALLER: ${said}`])).not.toBe('new');
+      for (const said of ['Nunca he sido paciente.', 'No soy paciente existente.']) {
+        expect(readPatientStatus([ES, `CALLER: ${said}`])).not.toBe('new');
+      }
+    });
+
+    it('and the answer sentence is the only thing that does', () => {
+      expect(readPatientStatus([EN, 'CALLER: New.'])).toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: Uh, new.'])).toBe('new');
+      expect(readPatientStatus([EN, "CALLER: I'm a new patient."])).toBe('new');
+      expect(readPatientStatus([EN, "CALLER: New. I've never been there before."])).toBe('new');
+      expect(readPatientStatus([ES, 'CALLER: Nuevo.'])).toBe('new');
+      expect(readPatientStatus([ES, 'CALLER: Soy nueva.'])).toBe('new');
+    });
+
+    it('prose still answers EXISTING, which is the cheap direction', () => {
+      expect(readPatientStatus([EN, "CALLER: I've been a patient there for years."])).toBe('existing');
+      expect(readPatientStatus([EN, 'CALLER: Not a new patient.'])).toBe('existing');
+      expect(readPatientStatus([EN, 'CALLER: Existing.'])).toBe('existing');
+      expect(readPatientStatus([ES, 'CALLER: Ya soy paciente.'])).toBe('existing');
     });
   });
 });

@@ -238,13 +238,40 @@ function opensStatusWindow(agent: string, seenQualified: boolean): WindowKind | 
  *    lists, subsumed by the sentence test below. "I need new glasses" is not
  *    the answer sentence, so no list has to enumerate `glasses`.
  *
- * WHAT `new` CAN STILL COME FROM, and it is three things:
+ * ── ROUND 4 TOOK IT FURTHER: `new` NOW COMES FROM ONE ROUTE ────────────────
  *
- *  1. An explicit DENIAL OF PATIENT HISTORY — "I've never been a patient",
- *     "I'm not an existing patient", "no soy paciente".
- *  2. An explicit NEW PATIENT claim, ungoverned by a negation.
- *  3. A SENTENCE THAT IS THE ANSWER — "New.", "I'm a new patient.", "Nuevo." —
- *     in a window the patient question itself opened.
+ * Round 3 left three routes to `new` and round 4 found a P1 in TWO of them —
+ * the twelfth P1 in this one reader across four rounds, and both the same shape
+ * again:
+ *
+ *  - the DENIAL family admitted a LOCATION QUALIFIER after the cue. "I've never
+ *    been seen at this office" and "I am not a patient at this location" both
+ *    read `new`. Round 3 deleted the place-based cues by NAME and left the
+ *    qualifier that can follow the ones it kept — my own criterion, applied to
+ *    half the problem.
+ *  - the explicit NEW PATIENT claim is a CONTAINS test, so a negation in a
+ *    surrounding clause never reached it: "I don't think I'm a new patient",
+ *    "I'm not sure if I'm a new patient".
+ *
+ * **THE ROUTE THAT HAS NEVER PRODUCED A P1 IN FOUR ROUNDS IS THE SENTENCE
+ * TEST**, so it is now the only one. `new` is returned when, and only when, a
+ * SENTENCE IN THE CALLER'S TURN *IS* THE ANSWER — "New.", "Uh, new.", "I'm a
+ * new patient.", "Nuevo." — inside a window the patient question itself opened.
+ *
+ * That is a DELETION, not another guard, and it closes both findings by
+ * construction: there is no prose left for a qualifier or a subordinate clause
+ * to defeat. It is also the shape RULE ZERO 2c asks for — we shape the question
+ * so the answer arrives in the form the field needs, and then we read that form
+ * and nothing else.
+ *
+ * WHAT IT COSTS, and this is the whole of it: "I've never been a patient." and
+ * "I'm not an existing patient." are no longer read as new-patient answers, and
+ * a caller can no longer CORRECT themselves TO `new` in a bare re-ask window
+ * (correcting to `existing` still works). Every one of those goes UNCLASSIFIED:
+ * nothing is suppressed, the lookup runs, `LOOKUP_MISS_LIMIT` (v50) bounds the
+ * asks, the ticket files. The asymmetry is the whole argument — a false
+ * `existing` costs one tool call, a false `new` costs the record of somebody who
+ * has one.
  *
  * THE COST IS COVERAGE, STATED RATHER THAN BURIED. A caller who answers "First
  * time calling." or "I've never been there." is now UNCLASSIFIED: the lookup
@@ -294,37 +321,19 @@ const NEGATED_NEW: readonly RegExp[] = [
 ];
 
 /**
- * SAID THEY HAVE NO HISTORY AS A PATIENT — the only prose that may answer
- * `new`, and every entry is about being a PATIENT rather than about a place.
- *
- * `not a patient` and `never been a patient` survive round 3 because they are
- * claims about patient history that a caller cannot make accidentally while
- * talking about glasses or an office. The place-based and calling-based cues
- * that used to sit beside them are gone; the block comment above says why each
- * one went.
- */
-const DENIES_PATIENT_HISTORY: readonly RegExp[] = [
-  /\bnever\s+(been|was)\s+(an?\s+)?patient\b/,
-  /\bnever\s+been\s+seen\b/,
-  /\b(haven't|have\s+not|hadn't|had\s+not|hasn't|has\s+not)\s+been\s+(an?\s+)?patient\b/,
-  /\bnot\s+a\s+patient\b/,
-  negatedBefore('existing'),
-  // Spanish.
-  /\bnunca\s+he\s+sido\s+paciente\b/,
-  /\bno\s+soy\s+paciente\s*[.?!]*$/,
-  /\bno\s+(soy|es|era|fui)\s+(un[oa]?\s+)?(paciente\s+)?existente\b/,
-];
-
-/**
  * A DENIAL IS NOT A CLAIM, so its own words are removed before the existing
  * prose below is read.
  *
- * This is round 1's P1-A, and it is why the denial list cannot simply be read
- * after the existing prose: `(been|was)\s+(a\s+)?patient` matches inside "I've
+ * This is round 1's P1-A: `(been|was)\s+(a\s+)?patient` matches inside "I've
  * never been a patient", so that turn read as EXISTING and the lookup produced
  * the very "no record found" this gate exists to suppress. Strip what the
  * denial governs, then ask what is left — the same device as `ungoverned`,
  * pointed at the other direction.
+ *
+ * IT OUTLIVED THE FAMILY THAT USED TO ANSWER `new` WITH IT, and deliberately.
+ * Round 4 stopped a denial answering `new`; it must still stop one answering
+ * `existing`, because that is a claim the caller did not make. A stripped turn
+ * with nothing left simply goes unclassified, which is the fail-safe direction.
  */
 const DENIAL_PHRASES: readonly RegExp[] = [
   /\bnever\s+(been|was)\s+(an?\s+)?patient\b/g,
@@ -416,8 +425,15 @@ function ungoverned(said: string, word: RegExp): boolean {
   return word.test(stripped);
 }
 
+/**
+ * Read through `ungoverned`, and the ONLY explicit claim left in the reader.
+ *
+ * There is no `EXPLICIT_NEW` any more: a CONTAINS test for "new patient" is
+ * what round 4's second P1 defeated with "I don't think I'm a new patient", and
+ * the sentence test covers every case it was there for. `existing` keeps its
+ * contains read because the failure direction is one wasted lookup.
+ */
 const EXPLICIT_EXISTING = /\b(existing|existente)\b/;
-const EXPLICIT_NEW = /\b(new\s+patient|paciente\s+nuev[oa])\b/;
 
 /**
  * THE ANSWER IS A SENTENCE, NOT A SUBSTRING — and this replaces both noun
@@ -459,27 +475,32 @@ function answerSentenceIsNew(turns: readonly string[]): boolean {
 /**
  * Read one window's caller turns.
  *
- * THE INVARIANT, and it is what makes a fourth round of this shape impossible
- * in the expensive direction: **`new` is only ever returned by a denial of
- * patient history, an ungoverned "new patient", or a sentence that IS the
- * answer.** No prose infers `new`. Prose may only infer `existing`, whose
+ * THE INVARIANT, and round 4 is why it is this narrow: **`new` is returned by
+ * ONE route — a SENTENCE THAT IS THE ANSWER, in a QUALIFIED window. Nothing
+ * else in this reader can produce it.** Prose may only infer `existing`, whose
  * failure costs one tool call.
  *
- * ORDER IS LOAD-BEARING AT EVERY STEP, and each step cost a Codex P1:
+ * Twelve P1s across four rounds were all the same shape — a broad read of prose
+ * answering `new`, with a negation, a qualifier or a subordinate clause in front
+ * of it making that answer false. Each round removed a route rather than adding
+ * a guard; this is the last one standing, and it is the only one that never
+ * produced a finding.
+ *
+ * ORDER IS STILL LOAD-BEARING IN THE THREE `existing` LAYERS:
  *
  *  1. **A NEGATED NEW CLAIM FIRST** (round 1 English, round 2 Spanish, round 3
  *     hedges). Every one of those contains the word "new".
- *  2. **AN EXPLICIT EXISTING CLAIM, ungoverned** (round 2). *"Existing, but
- *     I've never been to this office"* is existing; *"I'm not an existing
- *     patient"* is not.
- *  3. **EXISTING PROSE, with the denials stripped out of it** (round 1 needs
- *     the stripping, round 3 needs this layer to sit here). *"I've never been
- *     here, but I'm already a patient downtown"* is existing.
- *  4. **A DENIAL OF PATIENT HISTORY** -> new.
- *  5. **AN EXPLICIT NEW PATIENT CLAIM, ungoverned** -> new.
- *  6. **A SENTENCE THAT IS THE ANSWER** -> new, and only in a QUALIFIED window:
+ *  2. **AN EXPLICIT EXISTING CLAIM, ungoverned** (round 2). *"Existing, but I've
+ *     never been to this office"* is existing; *"I'm not an existing patient"*
+ *     is not — and is now UNCLASSIFIED rather than `new`.
+ *  3. **EXISTING PROSE, with the denials stripped out of it** (round 1 needs the
+ *     stripping, round 3 needs this layer here). *"I've never been here, but I'm
+ *     already a patient downtown"* is existing.
+ *  4. **A SENTENCE THAT IS THE ANSWER** -> new, and only in a QUALIFIED window:
  *     a bare "New." is what an unrelated alternation draws, so a re-ask window
- *     refuses one (round 2's guard 2).
+ *     refuses one (round 2's guard 2). With this the only `new` route, that
+ *     guard now means a caller cannot correct themselves TO `new` — which is the
+ *     cheap direction to lose, and correcting to `existing` still works.
  */
 function readWindow(turns: readonly string[], kind: WindowKind): PatientStatus | undefined {
   const said = turns.join(' ');
@@ -488,8 +509,6 @@ function readWindow(turns: readonly string[], kind: WindowKind): PatientStatus |
   if (ungoverned(said, EXPLICIT_EXISTING)) return 'existing';
   const claim = withoutDenials(said);
   if (EXISTING_CUES.some((re) => re.test(claim))) return 'existing';
-  if (DENIES_PATIENT_HISTORY.some((re) => re.test(said))) return 'new';
-  if (ungoverned(said, EXPLICIT_NEW)) return 'new';
   if (kind !== 'qualified') return undefined;
   if (answerSentenceIsNew(turns)) return 'new';
   return undefined;
@@ -594,12 +613,25 @@ function sweepOverrides(now: number): void {
  * The WHOLE record every time, for the reason `noteSpokenDob` gives: a caller
  * turn is REPLACED in place as its cumulative transcript is re-emitted, so
  * posting one line would store their first partial words instead of their
- * final ones. Re-reading the record is also what makes a later correction
- * land — the answer is recomputed from scratch on every post, so this store
- * never holds a verdict the transcript has stopped supporting.
+ * final ones.
  *
- * A read that finds no answer OVERWRITES NOTHING, so a caller who answers and
- * then talks for two minutes keeps their answer.
+ * A RECOMPUTATION THAT FINDS NO ANSWER DELETES THE STORED ONE — Codex round 4's
+ * third P1, and this function's own docstring used to claim the opposite while
+ * the code did the opposite of that: it said "this store never holds a verdict
+ * the transcript has stopped supporting" and then returned early, keeping one.
+ *
+ * `CallTranscriptLog.callerCompleted` REPLACES a caller line in place when Grok
+ * re-emits the same item (`this.lines[open.index] = ...`), so "New." can become
+ * "I need new glasses." — the read correctly goes to undefined and the store
+ * used to keep `new`, suppressing an existing caller's lookup on words no longer
+ * in the transcript.
+ *
+ * DELETING IS SAFE BECAUSE THE LOG NEVER DROPS A LINE — checked, not assumed:
+ * `transcriptLog.ts` only ever pushes or replaces in place, with no cap and no
+ * eviction, so the whole record is re-read on every post and an answer given in
+ * an earlier window is still found. The only way a later read comes back empty
+ * is that the transcript stopped saying it, which is exactly when the verdict
+ * should go. The model's OVERRIDE is in its own map and is untouched by this.
  *
  * A SENTINEL IS NOT A CALL. `spokenDob.ts` and `verifiedIdentity.ts` both state
  * this rule and this is the third: a model with no injected value supplies
@@ -610,20 +642,13 @@ function sweepOverrides(now: number): void {
 export function notePatientStatus(callSid: string | undefined, lines: readonly string[]): void {
   if (!isTwilioCallSid(callSid)) return;
   const read = readPatientStatus(lines);
-  if (!read) return;
   const now = Date.now();
   sweep(now);
-  heard.delete(callSid); // re-insert so insertion order tracks recency
-  heard.set(callSid, { status: read, at: now });
+  heard.delete(callSid);
+  if (!read) return;
+  heard.set(callSid, { status: read, at: now }); // re-inserted, so order tracks recency
 }
 
-/**
- * What this call's caller said they were, or undefined.
- *
- * Validated on the READ as well as the write, for the reason `spokenDobFor`
- * gives: not because a sentinel could be in the map, since the write refuses
- * one, but so the guard survives someone later relaxing the write.
- */
 export function patientStatusFor(callSid: string | undefined): PatientStatus | undefined {
   if (!isTwilioCallSid(callSid)) return undefined;
   const now = Date.now();
