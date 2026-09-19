@@ -181,6 +181,26 @@ describe('the override, and why it needs its own store', () => {
 
 describe('the window rule — measured, not assumed', () => {
   /**
+   * TWO MUTATIONS SURVIVE HERE BY EQUIVALENCE, and they are recorded rather
+   * than papered over, because the next reader will try the same two.
+   *
+   * The window is defended TWICE and either guard alone is sufficient:
+   * `close()` resets `turns` at every agent line, and the push is also gated on
+   * `open`. So removing one changes no behaviour and kills no test; removing
+   * BOTH is caught, by "a caller line OUTSIDE the window is not swept into it".
+   * That is the property being tested, and it is tested — what the single
+   * mutations reveal is redundancy in the implementation, not a hole in the
+   * suite. Neither guard is being removed: the cost is two lines and the thing
+   * they protect is a suppression that refuses to look for a real record.
+   *
+   * A THIRD survives for a different and also deliberate reason — the sentinel
+   * guard on `notePatientStatus`. `patientStatusFor` carries its own copy, so
+   * relaxing the write is invisible through the public API. That is exactly
+   * what `spokenDob.ts` says its matching pair is for ("so the guard survives
+   * someone later relaxing the write"), and it means the write guard cannot be
+   * observed by any test that goes through the reader. Left as is, stated here.
+   */
+  /**
    * Over the four runtime queue lanes, 2026-09-15..18, 1,238 substantive calls
    * with a caller line: "new" appears anywhere in 53 of them and only 3 of
    * those contain "new patient". A windowless reader would be wrong on ~94% of
@@ -209,6 +229,38 @@ describe('the window rule — measured, not assumed', () => {
   it('a negated new reads as EXISTING, which is the direction that matters', () => {
     expect(readPatientStatus([ASK, 'CALLER: No, not a new patient.'])).toBe('existing');
     expect(readPatientStatus([ASK, "CALLER: I'm not new, I was there last year."])).toBe('existing');
+  });
+
+  it('a caller line OUTSIDE the window is not swept into it', () => {
+    /**
+     * Added because a mutation survived: making every caller line count
+     * regardless of the window failed nothing, since the cases above all have
+     * their stray "new" BEFORE any window opens and an unopened window is never
+     * read. This is the case that discriminates — a real one, a patient who
+     * mentions a past visit early and then answers the question — and it must
+     * read the ANSWER, not the earlier sentence.
+     */
+    expect(
+      readPatientStatus([
+        'AGENT: How can I help?',
+        'CALLER: I had an appointment last week and I need to change it.',
+        ASK,
+        'CALLER: New.',
+      ]),
+    ).toBe('new');
+  });
+
+  it('and the window closes at the next agent line, not at the next window', () => {
+    // The mirror of the above: an answer given INSIDE a window is not overruled
+    // by what the caller says after the agent has moved on.
+    expect(
+      readPatientStatus([
+        ASK,
+        'CALLER: New.',
+        'AGENT: And what can we do for you?',
+        'CALLER: I had an appointment last week and I need to change it.',
+      ]),
+    ).toBe('new');
   });
 
   it('the LATEST window wins, so a corrected answer lands', () => {
