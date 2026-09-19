@@ -205,18 +205,14 @@ describe('caller ID says who OWNS the number, not who is calling', () => {
     expect(String(out.identity_warning)).not.toMatch(/different people on file/);
   });
 
-  it('caches NO date of birth from a caller-ID-only hit, so nothing can auto-fill it', async () => {
+  it('DOES cache the chart date from a unique caller-ID-only hit — the name guard is the confirmation', async () => {
     /**
-     * Codex P1 on 1d775a4, and it refuted a claim I had just made on the PR:
-     * that an unconfirmed match no longer auto-fills a date of birth. It did.
-     * `certain` went false, but the DOB was still cached, and `verifiedDobFor`
-     * returns `entry.dateOfBirth` WITHOUT reading `entry.certain` — so a caller
-     * who supplies the matched name and withholds their birthday gets the
-     * mirror's one written onto the ticket.
+     * v26. The strip at the person-base write was Bug A: it erased a date
+     * v11 had already stored, then `verifiedDobFor` had nothing to inherit.
+     * A unique hit that returned a date stores that date. `certain` stays
+     * false. Filing still requires the ticket name to match.
      *
-     * This drives the REAL store rather than a spy on it: the whole defect was
-     * that the value survived one hop further than I thought, and a spy on the
-     * writer would have agreed with me.
+     * Do not "fix" this back to undefined. That is the wipe.
      */
     const { resetVerifiedIdentities, verifiedDobFor } = await import('./verifiedIdentity');
     resetVerifiedIdentities();
@@ -231,8 +227,8 @@ describe('caller ID says who OWNS the number, not who is calling', () => {
 
     expect(
       verifiedDobFor(SID, 'Testcaller', 'Mirror'),
-      'an unconfirmed caller-ID hit must leave nothing for a filing tool to auto-fill',
-    ).toBeUndefined();
+      'a unique person-base hit that held a date must leave it for inherit',
+    ).toBe('1950-01-01');
   });
 
   it('DOES cache the date of birth when the caller confirmed who they are', async () => {

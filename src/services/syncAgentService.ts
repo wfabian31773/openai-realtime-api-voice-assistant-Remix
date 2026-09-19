@@ -59,6 +59,37 @@ export interface SyncAgentTicketParams {
   callData?: CallDataParams | null;
 }
 
+/**
+ * HOW LONG A DUPLICATE ATTEMPT WAITS FOR THE IN-FLIGHT ONE TO WRITE ITS TICKET
+ * NUMBER BACK.
+ *
+ * This was a single fixed 3-second wait and one recheck. On CA…11e362485f
+ * (2026-09-16 14:54, no-ivr) that was shorter than the attempt it was waiting
+ * for: the first create_ticket took 9.3s to file VA-60434 and write the number
+ * back, so the duplicate rechecked at ~3.4s, found nothing, and answered
+ * "Concurrent ticket creation in progress" — which the after-hours agent spoke
+ * to the caller as a technical failure 0.4s before the real success arrived.
+ *
+ * Ten seconds outlasts a typical POST and sits inside the ticketing client's
+ * 15s timeout, so in the common case the duplicate returns the SAME ticket
+ * number and nothing false is said. If the in-flight attempt is still running
+ * at the deadline, the refusal stands and the agent-side copy says "another
+ * attempt is in progress" rather than "technical issue".
+ */
+export const CONTENTION_WAIT_MS = 10_000;
+const CONTENTION_POLL_MS = 1_000;
+
+/** Polls call_logs for the ticket number the in-flight attempt writes on success. */
+async function waitForTicketWrittenBack(callSid: string): Promise<string | undefined> {
+  const deadline = Date.now() + CONTENTION_WAIT_MS;
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, CONTENTION_POLL_MS));
+    const log = await storage.getCallLogBySid(callSid);
+    if (log?.ticketNumber) return log.ticketNumber;
+    if (Date.now() >= deadline) return undefined;
+  }
+}
+
 export interface SyncAgentResponse {
   success: boolean;
   ticketNumber?: string;
@@ -674,23 +705,24 @@ export class SyncAgentService {
             console.info(`[SYNC AGENT] No call log for ${callSid} - proceeding without lock (no race condition)`);
             // Fall through to ticket creation - no log means no race condition
           } else {
-            // Call log exists but we couldn't get lock - another process is working on it
-            console.info(`[SYNC AGENT] ⚠️  Another process is creating ticket - waiting 3s...`);
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            
-            const recheckLog = await storage.getCallLogBySid(callSid);
-            if (recheckLog?.ticketNumber) {
-              console.info(`[SYNC AGENT] ✓ Ticket was created by another process: ${recheckLog.ticketNumber}`);
+            // Call log exists but we could not get the lock — another attempt on
+            // this same call is in flight. Wait for ITS write-back, polling, so
+            // the duplicate returns the same ticket number instead of a refusal
+            // the agent would speak as a failure. See CONTENTION_WAIT_MS.
+            console.info(`[SYNC AGENT] ⚠️  Another attempt is filing this call - waiting up to ${CONTENTION_WAIT_MS / 1000}s for its ticket number...`);
+            const writtenBack = await waitForTicketWrittenBack(callSid);
+            if (writtenBack) {
+              console.info(`[SYNC AGENT] ✓ Ticket was created by the other attempt: ${writtenBack}`);
               return {
                 success: true,
-                ticketNumber: recheckLog.ticketNumber,
-                message: recheckLog.ticketNumber,
+                ticketNumber: writtenBack,
+                message: writtenBack,
               };
             }
-            
-            // Another process has the lock but no ticket yet - abort to prevent duplicate
+
+            // Still nothing after the wait - abort to prevent a duplicate.
             // The external API has idempotencyKey as backup, but local lock is primary defense
-            console.warn(`[SYNC AGENT] ⚠️  Lock not obtained and no ticket found after wait - aborting to prevent duplicate`);
+            console.warn(`[SYNC AGENT] ⚠️  Lock not obtained and no ticket written back after ${CONTENTION_WAIT_MS / 1000}s - aborting to prevent duplicate`);
             return {
               success: false,
               error: 'Concurrent ticket creation in progress',

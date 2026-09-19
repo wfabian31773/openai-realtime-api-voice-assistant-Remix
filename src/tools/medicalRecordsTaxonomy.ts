@@ -222,6 +222,43 @@ export const RECORDS_REASON_IDS = new Set([
   RECORDS_CATCHALL.requestReasonId,
 ]);
 
+/**
+ * DOES THIS TEXT ASK FOR A RECORD AT ALL? — Codex P1, #297.
+ *
+ * `classifyRecords` answers "which KIND of records request is this", and it is
+ * not a safe test of WHETHER one was made. Its buckets carry bare
+ * organisation words so that an already-known records request lands in the
+ * right reason: `TO_ANOTHER_PROVIDER_CUES` holds "primary care", "referring
+ * provider" and "another office"; `LEGAL_AND_INSURANCE_CUES` holds "legal".
+ * Read as an intent test it fires on ordinary professional traffic — "the
+ * primary care office is checking the status of an outside referral" is an
+ * `outside_referral_status` call and matches "primary care".
+ *
+ * That mattered the moment the professional route began keying on it: such a
+ * caller would be asked where to send records they never mentioned, and their
+ * referral question would file to Medical Records instead of PCP Support.
+ * Misrouting ordinary traffic into a records queue is a bigger loss than the
+ * one the route exists to fix — the department-2 shape `docs/BACKEND_HANDOFF.md`
+ * exists to prevent.
+ *
+ * So intent is a SEPARATE, narrower question: does the caller name a record,
+ * a chart, or a clinical document? Deliberately conservative — a request this
+ * misses stays in PCP Support, which is exactly where it goes today, while a
+ * false positive moves a call that was never about records.
+ */
+export function mentionsRecordsIntent(text: string): boolean {
+  const t = fold(text);
+  if (!t.trim()) return false;
+  return [
+    'records', 'record request', 'request for record', 'medical record',
+    'the record', 'my record', 'her record', 'his record', 'their record',
+    'patient record', 'record retrieval', 'chart', 'medical report',
+    'progress note', 'operative report', 'consult note', 'consultation note',
+    'visit note', 'office note', 'exam record', 'copy of the record',
+    'expediente', 'historial', 'registros', 'informe medico', 'reporte medico',
+  ].some((cue) => t.includes(fold(cue)));
+}
+
 /** The pair whose cues the caller's words match, or null. */
 export function classifyRecords(text: string): RecordsClassification | null {
   // "power of attorney" contains "attorney", and the legal bucket matches the
@@ -420,8 +457,99 @@ const PATHWAYS: Record<RequesterType, CapDetermination['pathway']> = {
  * they are on the clock too — a daughter with power of attorney asking for
  * her mother's chart is the same right being exercised.
  */
+const REQUESTER_TYPES = new Set<RequesterType>([
+  'patient', 'personal_representative', 'provider', 'health_plan', 'legal', 'other',
+]);
+
+/**
+ * A HEALTHCARE ORGANISATION TYPE, WHICH IS THE ONE SIGNAL THAT IS NOT PROSE.
+ *
+ * Operator ruling, 2026-09-14: a records request from any professional caller
+ * — provider, health plan, attorney — files to Medical Records OFF the clock.
+ * Measured before it: of 41 live PCP records tickets sitting in department 18,
+ * 16 came from a provider organisation, 6 from a medical assistant or a
+ * referral coordinator, and 6 from a health plan. Literal "peer-to-peer"
+ * appears in 2, which is why this reads the CALLER, not the phrase.
+ *
+ * PCP already collects `callerFacilityType` as an enum the model picks from a
+ * closed list, so this is a lookup rather than a classification — no cue list,
+ * no wording to drift. It is consulted BEFORE the prose classifier for exactly
+ * that reason.
+ *
+ * `pharmaceutical_representative` is deliberately absent and must stay absent.
+ * A pharma rep has no treatment relationship to the patient, so their asking
+ * for a chart is not a records request to be routed — it is something a person
+ * should look at. Returning null here leaves it in PCP Support, which is where
+ * the operator's rule about entities does NOT reach.
+ */
+export function requesterTypeForFacility(
+  facility: string | null | undefined,
+): RequesterType | null {
+  switch (String(facility ?? '').trim()) {
+    case 'pcp_office':
+    case 'referring_provider':
+    case 'ipa_medical_group':
+    case 'hospital_medical_facility':
+    case 'pharmacy':
+      return 'provider';
+    case 'health_plan':
+      return 'health_plan';
+    // Returned, but the caller treats it as WEAK — see the note there. There is
+    // no attorney value in this enum, so a law firm completing intake picks
+    // this one, and letting it win outright would file them `third_party_other`
+    // instead of `third_party_legal` (Codex P2, #297).
+    case 'other_healthcare_organization':
+      return 'other';
+    default:
+      return null;
+  }
+}
+
+/** Do patient and personal_representative both stand on the clock? Operator, 2026-09-13. */
+function onClockFor(t: RequesterType): boolean {
+  return t === 'patient' || t === 'personal_representative';
+}
+
+/**
+ * A STATED requester type beats the text classifier — but never off the clock.
+ *
+ * Operator ruling, 2026-09-13: *"on the clock, personal rep stands in for the
+ * patient, any records going back to the patient are on the clock."*
+ *
+ * WHY A STATED TYPE IS NEEDED AT ALL. `classifyRequester` reads prose, which is
+ * the only thing a caller-facing lane has. A lane that already KNOWS — PCP holds
+ * `callerIsThePatient` and `statedRelationship` on its director — has to render
+ * that knowledge as a sentence and hope the classifier reads it back the same
+ * way. It did not: PCP's attempt produced "…calling on the patient's behalf",
+ * which matches SPEAKING_FOR_ANOTHER and resolves to `other`, taking a family
+ * member OFF a clock that applies to them. This is the seam that removes the
+ * round trip.
+ *
+ * WHY IT CANNOT MOVE A REQUEST OFF THE CLOCK. The two errors are not symmetric
+ * and the whole file turns on that: wrongly ON costs a self-imposed deadline,
+ * wrongly OFF is a CAP violation on the exact obligation the CAP polices. So a
+ * stated type is honoured in every direction except the one that would drop a
+ * request the prose had already put on the clock — there the prose wins and the
+ * reason is recorded. A model that mislabels a patient as a health plan cannot
+ * silently stop a statutory deadline.
+ *
+ * An unrecognised string is ignored rather than defaulted, because defaulting is
+ * how all 470 rows ended up saying `patient`.
+ */
+export function resolveRequesterType(
+  stated: string | null | undefined,
+  classified: RequesterType | null,
+): RequesterType {
+  const fromProse = classified ?? 'other';
+  const t = String(stated ?? '').trim().toLowerCase() as RequesterType;
+  if (!REQUESTER_TYPES.has(t)) return fromProse;
+  // The one direction a stated value may not take it.
+  if (onClockFor(fromProse) && !onClockFor(t)) return fromProse;
+  return t;
+}
+
 export function determineCapClock(requesterType: RequesterType): CapDetermination {
-  const onClock = requesterType === 'patient' || requesterType === 'personal_representative';
+  const onClock = onClockFor(requesterType);
   return {
     requesterType,
     onClock,

@@ -16,7 +16,13 @@ vi.mock('../../server/db', () => ({
     update: () => ({
       set: (payload: any) => {
         updates.push({ payload });
-        return { where: async () => undefined };
+        /**
+         * `.returning()` is what the flush now reads to learn whether the
+         * UPDATE touched a row — a write that matched nothing is no longer
+         * marked flushed, so the mock has to model the real driver here or
+         * every flush in this file reads as "the call row does not exist yet".
+         */
+        return { where: () => ({ returning: async () => [{ id: 'row-1' }] }) };
       },
     }),
     select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),

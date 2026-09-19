@@ -209,6 +209,51 @@ association is recoverable from that side.
 
 This is also the answer to a question that was open for most of 2026-09-03:
 when a later caller lands on an earlier caller's ticket and the ticket's call
-fields change, that is **this** path — the `check_open_tickets` dedupe — and
-not the `update-call-data` retry sweep in #71/#77. Do not re-investigate it as
-a write-back bug.
+fields change, that is **this** path and not the `update-call-data` retry sweep
+in #71/#77. Do not re-investigate it as a write-back bug.
+
+**THE MECHANISM WAS NAMED WRONG HERE UNTIL 2026-09-15, and the name is the part
+somebody will grep for.** This paragraph used to call it *"the
+`check_open_tickets` dedupe"*. It is not. `check_open_tickets`
+(`sharedPatientTools.ts:714`) calls `SyncAgentService.checkOpenTickets` and
+returns the numbers to the model — **it writes nothing, and it does not have to
+run at all** for a ticket's call fields to change. Traced end to end on
+2026-09-15:
+
+1. **`consolidateIfDuplicate`** (`lib/services/ticket-consolidation.ts`, called
+   from `create-ticket`) matches the new contact against an open ticket in the
+   same department — **phone on the last 7 digits within 48h, OR first+last
+   name within 24h** — appends a `ticket_contact_entries` row, and answers
+   `{ consolidated: true, ticketNumber: <the existing ticket> }`. That is where
+   the agent gets the number it reads back, and it is why the same number
+   reaching two calls is usually one caller ringing twice rather than a defect.
+2. **`update-call-data`** (`app/api/voice-agent/update-call-data/route.ts:217`)
+   looks the ticket up **by `ticketNumber` first**, then assigns `callSid`,
+   `callStartTime`, `callEndTime`, `callDurationSeconds`, `transcript`,
+   `recordingUrl`, `qualityScore`, `patientSentiment` and `agentOutcome` onto
+   the ticket row. `ticketingSyncService.syncCall`
+   (`server/services/ticketingSyncService.ts:170`) sends the call's
+   `ticketNumber` whenever its row has one — which the write-back has already
+   set on a consolidated callback — and on those calls the lookup goes by
+   NUMBER and the row is re-stamped.
+
+   **THE `ticket_contact_entries` FALLBACK IS STILL REACHABLE, and an earlier
+   version of this entry said it was "never reached"** (Codex P2, #315).
+   `runSync` selects on `or(isNotNull(ticketNumber), isNotNull(callSid))`
+   (`:112-115`) and `syncCall` serialises a missing number as
+   `ticketNumber: undefined` (`:171-174`), so a call carrying only a SID
+   reaches the endpoint with no number, matches by `callSid`, and lands on its
+   contact entry — which is the correct target. Saying otherwise would
+   misdirect anyone investigating exactly those unsynced calls. The accurate
+   statement is narrower: **a call whose row already holds a ticket number
+   bypasses the fallback**, and that is the consolidation case.
+
+The ruling above still stands over all of it. What is NOT covered by the ruling
+is the **name-only** arm of rule 1: two different patients with the same common
+name, same department, inside 24 hours, merge onto one ticket with no phone
+check. Unmeasured as of 2026-09-15. Count it before raising it, and the call is
+Wayne's.
+
+Full write-up, including the day it was mistaken for the model repeating a
+ticket number to five strangers: CLAUDE.md, "THE SAME TICKET NUMBER READ TO TWO
+CALLERS".

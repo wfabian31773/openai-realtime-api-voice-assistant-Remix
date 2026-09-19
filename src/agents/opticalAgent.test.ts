@@ -178,6 +178,8 @@ describe('what it tells the caller about themselves', () => {
     const p = buildOpticalPrompt({});
     expect(p).toMatch(/identity_is_certain is false/);
     expect(p).toMatch(/do not read their history\s*\n?\s*back/i);
+    expect(p).toContain('ask as above');
+    expect(p).toContain('CALL lookup_patient AGAIN');
   });
 
   it('is told never to emit markdown, because it is spoken aloud', () => {
@@ -218,10 +220,73 @@ describe('caller recognition — credibility, not cosmetics', () => {
     expect(matched).toMatch(/NEVER open with "can I get your name and date of birth"/i);
   });
 
-  it('still treats the match as a hint, not as verification', () => {
-    expect(matched).toMatch(/A first name is not verification/i);
-    expect(matched).toMatch(/still collect the date of birth/i);
-    expect(matched).toMatch(/matched the WRONG person/i);
+  /**
+   * THIS ASSERTION WAS REVERSED ON 2026-09-15, ON THE OPERATOR'S APPROVAL, AND
+   * THE OLD FORM IS KEPT HERE SO THE REVERSAL IS READABLE.
+   *
+   * It used to demand "A first name is not verification ... still collect the
+   * date of birth". The INTENT was RULE ZERO step 2 — validate a phone match
+   * before trusting it — and the implementation inverted the outcome: the
+   * caller's spoken surname went to `verifiedDobFor`'s name guard, which reads
+   * ANY textual difference as the wrong person. A confirmation mechanism
+   * became a rejection mechanism, and the patient lost a date of birth the
+   * process was already holding.
+   *
+   * Measured on the 30 certain-phone date-of-birth refusals of 2026-09-14
+   * (`src/tools/dobNameMismatch.test.ts`, the corpus): 24 were greeted by
+   * name, 19 of those were asked for their last name anyway, and 27 of 30
+   * were asked for both a name and a date of birth.
+   *
+   * THE VALIDATION DID NOT GO AWAY — it moved to the answer the greeting's own
+   * question already collects. Over the same period 228 callers affirmed it
+   * and 13 denied it, so it discriminates. A denial still discards the match
+   * entirely, which is the half that was always right and is asserted below.
+   */
+  it('takes the greeting\u2019s own answer as the validation, and drops the match on a denial', () => {
+    expect(matched).toMatch(/If they said YES, the identity step is DONE/i);
+    expect(matched).toMatch(/Do not ask for their last name/i);
+    expect(matched).toMatch(/matched the WRONG\s+person/i);
+    expect(matched).toMatch(/ignore this block from then on/i);
+  });
+
+  /**
+   * CURSOR SECOND-PASS ON #310. The block and the ask script agreed; How a
+   * call runs still said identity_is_certain false means collect last name
+   * and date of birth. After #292 that flag is also a unique phone hit.
+   */
+  it('does not tell a recognised caller that a false flag means re-collect last name and DOB', () => {
+    expect(matched).toMatch(/Do not collect their last name/);
+    // Whitespace-tolerant across the wrap only; the phrase is unchanged.
+    expect(matched).toMatch(/do not\s+collect their date\s+of\s+birth/);
+    expect(matched).not.toContain('Collect their last name and date of birth');
+    // Denial still has the words — the ask script keeps them.
+    expect(matched).toContain('May I please have your last name?');
+  });
+
+  /**
+   * CODEX P1 ON #311, ROUND 2, ASSERTED ON THE BUILT PROMPT.
+   *
+   * This block used to assert the prompt says false is "NOT more than one
+   * person". That claim is FALSE unconditionally: on the found:true path with
+   * identityUnconfirmed false, false means exactly more than one person, the
+   * warning says so, and the record returned is "only the most recently seen
+   * of them". Asserting the withdrawn claim would pin the bug.
+   *
+   * The conditional property is what belongs here, and on the BUILT prompt
+   * rather than only on the helper — a helper-only test stayed green while
+   * `How a call runs` carried the contradiction, which is how #310 shipped
+   * with it.
+   */
+  it('routes an ambiguous lookup to the ask and only the unconfirmed one to the record', () => {
+    expect(matched).toMatch(/Several or different people on file/);
+    expect(matched).toMatch(/means ASK/);
+    expect(matched).toMatch(/ONLY "nobody has confirmed the caller\s+is that person"/);
+    expect(matched).not.toMatch(/that is NOT\s+more than one person/);
+    expect(matched).not.toMatch(/false does NOT mean more than one person/);
+    const several = matched.search(/Several or different people on file/);
+    const ban = matched.search(/Do not collect their last name/);
+    expect(several).toBeGreaterThan(-1);
+    expect(several).toBeLessThan(ban);
   });
 
   it('says nothing about recognition when the number matches nobody', () => {

@@ -40,6 +40,11 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
 import '../tools/opticalTools';
 import '../tools/languageTools';
+import {
+  identityAskScript,
+  identityCertainMeaning,
+  recognisedCallerBlock,
+} from '../runtime/recognisedCallerBlock';
 
 export interface OpticalAgentMetadata {
   callId?: string;
@@ -75,6 +80,7 @@ export const opticalAgentConfig = {
   greeting:
     'Thank you for calling Azul Vision optical. All of our opticians are currently ' +
     'assisting other patients, but I can take a message and they will follow up with you. ' +
+    'All calls are being recorded for quality assurance purposes. ' +
     'How can I help you today?',
   voice: 'sage',
   language: 'en',
@@ -111,25 +117,9 @@ export function buildOpticalPrompt(metadata: OpticalAgentMetadata): string {
   // block asserts "this number matches one person on file", and saying that
   // when it is false would name the wrong patient out loud.
   const pc = metadata.precontext;
-  const recognitionSection =
-    pc?.matched && pc.firstName
-      ? `
-### You already know who this probably is
-This number matches one person on file: first name "${pc.firstName}".
-
-- Your greeting has already played. Do NOT greet again. Go straight to
-  confirming: "Am I speaking with ${pc.firstName}?"
-- NEVER open with "can I get your name and date of birth" when you have a
-  match. Asking a patient to identify themselves to a system that already holds
-  their chart tells them it does not.
-- A first name is not verification. Ask for the last name in their own words,
-  and still collect the date of birth. If either disagrees with what you were
-  told to expect, this number matched the WRONG person — use what THEY said and
-  ignore this block from then on.
-- Do not say we recognised their number, and do not speak a last name first.
-- Disclose nothing from anyone's record on the strength of this match.
-`
-      : '';
+  const recognitionSection = recognisedCallerBlock(pc);
+  const askScript = identityAskScript(pc);
+  const certainMeaning = identityCertainMeaning(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -188,23 +178,12 @@ If they want to book, change or cancel an appointment, take the request in their
 own words and file it — the tool routes it to our scheduling hub. Do not attempt
 to schedule anything yourself, and do not tell them to call another number.
 
-### Lead the ask — one at a time, in this shape
-  "May I please have your last name?"
-  "And may I please have your date of birth, starting with the month,
-   then the day, then the year?"
-Never both in one breath, never a bare "date of birth" — say the order every
-time. Asked open, people answer in any shape, and the shape is what loses it.
+${askScript}
 
 ### How a call runs
 1. Find them. Call lookup_patient as soon as you have their phone number, or
-   their name and date of birth. If it says identity_is_certain is false, the
-   number matches more than one person — collect their last name and date of
-   birth, then CALL lookup_patient AGAIN with first name, last name and date of
-   birth together. That almost always resolves it to one person, and it is the
-   whole point of asking.
-   Never tell the caller how many records matched. That is our problem, not
-   theirs. Do not read their history back to them until you are certain who
-   they are.
+   their name and date of birth. ${certainMeaning}
+   Do not read their history back to them until you are certain who they are.
 2. Find their office. This is the one thing a ticket cannot be filed without:
    there is one optician per office, and the request is assigned by location.
    lookup_patient returns usual_clinic — confirm it rather than assuming

@@ -59,6 +59,20 @@ export interface PreservedCostSet {
   rejectedTwilio: boolean;
 }
 
+/**
+ * A BOUND PARAMETER CARRIES NO TYPE OF ITS OWN. node-postgres sends every
+ * value as text and the server infers the type from context: `col + $n`
+ * infers from the column, `$n + $m` has nothing to infer from, and Postgres
+ * refuses the whole statement at PARSE — "operator is not unique: unknown +
+ * unknown". The unreconciled branch below rendered exactly `$n + $m` whenever
+ * a caller supplied BOTH components, which is the ordinary per-call cost
+ * write, so from 8a226a6 (2026-09-04) every such UPDATE was rejected: 3,749
+ * refusals in the 24h to 2026-09-17 05:40 UTC, and twilio_cost_cents written
+ * on 5–25% of completed calls against 100% before. The cast is the type the
+ * column already has; the value stays a bound parameter.
+ */
+const typedCents = (cents: number): SQL => sql`${cents}::integer`;
+
 export function buildPreservedCostSet(
   updates: Record<string, unknown>,
 ): PreservedCostSet {
@@ -91,13 +105,13 @@ export function buildPreservedCostSet(
   const twilioForTotal: SQL =
     twilio.value === null
       ? sql`COALESCE(${callLogs.twilioCostCents}, 0)`
-      : sql`${twilio.value}`;
+      : typedCents(twilio.value);
 
   /** The provider cost an UNRECONCILED total is built from. */
   const providerForTotal: SQL =
     openaiCostCents === undefined
       ? sql`COALESCE(${callLogs.openaiCostCents}, 0)`
-      : sql`${openaiCostCents}`;
+      : typedCents(openaiCostCents);
 
   return {
     touchesCost: true,

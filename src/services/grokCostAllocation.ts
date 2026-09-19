@@ -124,6 +124,70 @@ export function allocateDailyCost(calls: CallToPrice[], totalCents: number): All
 }
 
 /**
+ * HOW FAR THE DERIVED RATE MAY RUN AHEAD OF THE ASSUMED ONE BEFORE THE DAY IS
+ * REFUSED — and this exists because the allocation booked a 104-second call
+ * at $37.43 and flagged it as settled truth.
+ *
+ * `CAb04962a559c013987d12958542b2b02c`, optical, Saturday 2026-09-12, 104
+ * seconds. At the published rate that call costs 14 cents. xAI reported
+ * $37.43 of voice spend for that day, `call_logs` held exactly ONE grok call
+ * — the queue lanes are essentially silent at the weekend (CLAUDE.md records
+ * 0-1 queue calls on every Saturday and Sunday measured) — and largest
+ * remainder correctly handed the whole day to it. `cost_is_estimated` went
+ * FALSE. 267x the published rate, wearing an authoritative badge, and it is
+ * 21.7% of optical's entire reconciled cost in the Observatory's per-lane
+ * report (`server/routes.ts:2259`, `:2300`).
+ *
+ * THE MODULE ALREADY COMPUTED THE PROOF AND ONLY PRINTED IT.
+ * `rateDriftMarker` turns the same `derivedCentsPerSecond` into a console
+ * line — 36.0 c/s against an assumed 0.1333 — and nothing read it. That is
+ * the tool ceiling's failure exactly: the one trace a fault leaves is a
+ * console line no query can reach. So the number now DECIDES rather than
+ * narrates.
+ *
+ * THIS IS THE SAME PRINCIPLE THE TWO GUARDS ABOVE IT ALREADY STATE, one step
+ * further: "an inconsistency between the bill and the durations is a
+ * reconciliation FAILURE, not a result". A day with no billable seconds is
+ * refused; a day with 104 of them against a full day's charge is the same
+ * inconsistency with a denominator that happens to be non-zero.
+ *
+ * THREE IS A JUDGEMENT, NOT A MEASUREMENT, and here is what it has to clear.
+ * Derived rate over xAI-reported spend and OUR minutes, every reconciled day:
+ *
+ *   09-03 12.8 c/min · 09-04 9.8 · 09-08 10.1 · 09-09 9.8 · 09-10 11.3
+ *   09-11 11.5 · 09-14 8.9 · 09-15 8.2        (published: 8.0)
+ *
+ * The widest legitimate day is 1.6x. Three leaves real headroom for a rate
+ * change or an uncounted component while still refusing 267x by a wide
+ * margin. Raise it if a legitimate day is ever refused — and the refusal is
+ * loud and leaves the rows honest, so that costs a day's precision, never a
+ * day's data.
+ *
+ * ONLY THE UPPER BOUND, DELIBERATELY. Under-booking is visible immediately
+ * against our own per-call estimate and errs toward "estimated", which is
+ * the honest flag; 2026-09-15 came in 1% BELOW our estimate and is a
+ * perfectly good day. Over-booking is the direction that poisons a report
+ * while claiming to be authoritative.
+ */
+export const RATE_SANITY_MULTIPLE = 3;
+
+/**
+ * Is this day's derived rate too far above the assumed one to write?
+ *
+ * Returns false when there is nothing to judge — a null derived rate is the
+ * no-seconds case, which the caller already refuses on its own terms.
+ */
+export function impliedRateIsImplausible(
+  derivedCentsPerSecond: number | null,
+  assumedCentsPerSecond: number,
+  multiple: number = RATE_SANITY_MULTIPLE,
+): boolean {
+  if (derivedCentsPerSecond === null || !Number.isFinite(derivedCentsPerSecond)) return false;
+  if (!Number.isFinite(assumedCentsPerSecond) || assumedCentsPerSecond <= 0) return false;
+  return derivedCentsPerSecond > assumedCentsPerSecond * multiple;
+}
+
+/**
  * What the derived rate says about the rate we assume.
  *
  * Prints only when a reconciliation runs, so it is a live counter of how far

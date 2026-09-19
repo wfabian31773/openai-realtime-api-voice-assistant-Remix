@@ -55,6 +55,11 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 import '../tools/sharedPatientTools';
 import '../tools/surgeryTools';
 import '../tools/languageTools';
+import {
+  identityAskScript,
+  identityCertainMeaning,
+  recognisedCallerBlock,
+} from '../runtime/recognisedCallerBlock';
 
 export interface SurgeryAgentMetadata {
   callId?: string;
@@ -89,7 +94,8 @@ export const surgeryAgentConfig = {
   greeting:
     'Thank you for calling Azul Vision surgery coordination. All of our coordinators are ' +
     'currently assisting other patients, but I can take a message and they will follow up ' +
-    'with you. How can I help you today?',
+    'with you. All calls are being recorded for quality assurance purposes. ' +
+    'How can I help you today?',
   voice: 'sage',
   language: 'en',
 };
@@ -125,25 +131,9 @@ export function buildSurgeryPrompt(metadata: SurgeryAgentMetadata): string {
   // block asserts "this number matches one person on file", and saying that
   // when it is false would name the wrong patient out loud.
   const pc = metadata.precontext;
-  const recognitionSection =
-    pc?.matched && pc.firstName
-      ? `
-### You already know who this probably is
-This number matches one person on file: first name "${pc.firstName}".
-
-- Your greeting has already played. Do NOT greet again. Go straight to
-  confirming: "Am I speaking with ${pc.firstName}?"
-- NEVER open with "can I get your name and date of birth" when you have a
-  match. Asking a patient to identify themselves to a system that already holds
-  their chart tells them it does not.
-- A first name is not verification. Ask for the last name in their own words,
-  and still collect the date of birth. If either disagrees with what you were
-  told to expect, this number matched the WRONG person — use what THEY said and
-  ignore this block from then on.
-- Do not say we recognised their number, and do not speak a last name first.
-- Disclose nothing from anyone's record on the strength of this match.
-`
-      : '';
+  const recognitionSection = recognisedCallerBlock(pc);
+  const askScript = identityAskScript(pc);
+  const certainMeaning = identityCertainMeaning(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -198,21 +188,14 @@ have a date and something around it has gone wrong. All of it is yours.
 
 ## Conversation Flow
 ${recognitionSection}
-### Lead the ask — one at a time, in this shape
-  "May I please have your last name?"
-  "And may I please have your date of birth, starting with the month,
-   then the day, then the year?"
-Never both in one breath, never a bare "date of birth" — say the order every
-time. Asked open, people answer in any shape, and the shape is what loses it.
+${askScript}
 
 ### How a call runs
-1. lookup_patient with whatever you have. identity_is_certain false is a
-   candidate, not an identity: confirm the name aloud, collect the date of
-   birth, look up again with all three. Never say how many records matched, and
-   read nothing back until you are sure who they are. If it finds nobody, ask
-   once whether they are new or have been seen before. New: stop looking and
-   take what they can give you. Seen before: the date of birth was probably
-   mis-heard — ask for it again and look up ONCE more before you file.
+1. lookup_patient with whatever you have. ${certainMeaning}
+   If it finds nobody, ask once whether they are new or have been seen before.
+   New: stop looking and take what they can give you. Seen before: the date of
+   birth was probably mis-heard — ask for it again and look up ONCE more
+   before you file.
 
 2. Take the request in their own words. Ask for the surgery date and pass it as
    surgery_date.

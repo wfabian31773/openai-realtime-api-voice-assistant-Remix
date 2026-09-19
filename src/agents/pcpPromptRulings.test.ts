@@ -150,14 +150,30 @@ const PCP_RULINGS: readonly Ruling[] = [
   /* ── the transfer, which is the entire point of this lane ────────────── */
   {
     /**
-     * The handoff files the request BEFORE dialling. 57 PCP handoffs in the 90
-     * days to 2026-08-13 produced 11 connections — so the request surviving a
-     * failed dial is not a nicety, it is the common case.
+     * THE ORIGINAL RULING: the handoff files the request BEFORE dialling. 57
+     * PCP handoffs in the 90 days to 2026-08-13 produced 11 connections — so
+     * the request surviving a failed dial is not a nicety, it is the common
+     * case.
+     *
+     * NARROWED BY THE OPERATOR ON 2026-09-13, and narrowed is the word. A
+     * caller who is offered the queue and says yes is now transferred with NO
+     * ticket at all: *"We Will Not create tickets for anyone that chooses to
+     * be transferred. if they drop off, their record is lost. Their choice."*
+     * So the prompt can no longer state "it files before dialling" flatly —
+     * on one path it is false, and a prompt that says it would have the agent
+     * telling a caller their request is recorded when it is not.
+     *
+     * WHAT THE RULING WAS FOR SURVIVES INTACT, which is why this entry is
+     * restated rather than deleted: the 11-of-57 number is about a dial that
+     * does not connect, and on that path the request IS still recorded — the
+     * accepted transfer files its fallback the moment the queue fails to
+     * answer, and every other path files before dialling exactly as before.
+     * That is the sentence the prompt must carry, so that is what is asserted.
      */
-    source: '90 days to 2026-08-13 — 57 handoffs, 11 connected: file BEFORE dialling',
+    source: 'the request survives a dial that does not connect (11 of 57 did connect)',
     requires: [
       ['handoff_to_pcp'],
-      ['before dialling', 'before dialing', 'nothing is lost'],
+      ['request is recorded', 'nothing is lost', 'before dialling'],
     ],
   },
   {
@@ -328,10 +344,27 @@ describe('a caller who asks to be put through', () => {
     expect(flat).toMatch(/never weigh a transfer against taking the request/i);
   });
 
-  it('is told the filing already happened, so asking first buys nothing', () => {
-    // The reason has to be in the prompt or the instruction reads as arbitrary
-    // and loses to the intake script, which has a reason on every line.
-    expect(flat).toMatch(/files before dialling/i);
+  /**
+   * REPLACES "is told the filing already happened, so asking first buys
+   * nothing", which asserted `/files before dialling/`. The operator's
+   * 2026-09-13 ruling made that false on the accepted-transfer path, and a
+   * prompt line the code contradicts is worse than no line: it is the source
+   * of a promise the agent cannot keep, which is this lane's oldest defect.
+   *
+   * The instruction still needs a reason or it loses to the intake script,
+   * which has a reason on every line. The reason is now the caller's, not
+   * ours: the choice is theirs to make and we cannot make it for them. So
+   * what the prompt owes the model is the MEANING of each answer, and that is
+   * what these assert.
+   */
+  it('is told what each answer means, so it cannot invent a third outcome', () => {
+    expect(flat).toMatch(/callerAcceptedQueue/);
+    expect(flat, 'a yes means no ticket').toMatch(/yes means the queue, no ticket/i);
+    expect(flat, 'a no means no transfer').toMatch(/no means no transfer on this call/i);
+  });
+
+  it('is told never to guess the answer, because a guessed yes loses the request', () => {
+    expect(flat).toMatch(/never guess it/i);
   });
 });
 
@@ -427,8 +460,43 @@ describe('what the prompt costs', () => {
    * thing today — that it does not grow while nobody is looking. Lowering it
    * is the point of the trim, and how far is Wayne's call, not this file's.
    */
+  /**
+   * RAISED 2,300 -> 2,400 ON 2026-09-13, and the number it bought is named
+   * here so the next reader can judge whether it was worth it.
+   *
+   * The queue choice adds a required interaction, not prose: a new tool
+   * parameter, and what each of its three answers means. Compressed as far as
+   * it goes it costs ~88 tokens, landing the prompt at ~2,348. Nothing else
+   * was allowed to grow — every other section is still pinned by the ruling
+   * coverage above.
+   *
+   * A ceiling raised whenever it is inconvenient is not a ceiling, so the
+   * point of writing the cause down is that the NEXT raise has to name its
+   * own. This still asserts the only thing it ever asserted: the prompt does
+   * not grow while nobody is looking. pcp has never been trimmed and remains
+   * the largest of the eight; how far it should come down is Wayne's call,
+   * not this file's.
+   */
+  /**
+   * RAISED 2,400 -> 2,420 ON 2026-09-16, naming its own cause as the note
+   * above requires.
+   *
+   * v37 stops the interview asking for a title and an email in front of the
+   * filing, and the model has to be told that the questions continue AFTER it
+   * files or it simply never asks them. That is four lines, ~54 tokens,
+   * landing the prompt at ~2,402. It was 96 tokens on the first draft and was
+   * cut in half before this number was touched.
+   *
+   * WHAT IT BUYS: on 2026-09-16, 25 substantive PCP calls were asked for an
+   * email, 18 ended on that question, and 10 left no ticket of any
+   * provenance. Twenty tokens against ten lost requests a day.
+   *
+   * Nothing else was allowed to grow — every other section is still pinned by
+   * the ruling coverage above, and this still asserts the only thing it ever
+   * asserted: the prompt does not grow while nobody is looking.
+   */
   it('does not grow beyond where it stands today', () => {
-    expect(Math.round(pcp.length / 4)).toBeLessThan(2300);
+    expect(Math.round(pcp.length / 4)).toBeLessThan(2420);
   });
 
   it('carries no war story — those belong in code comments', () => {

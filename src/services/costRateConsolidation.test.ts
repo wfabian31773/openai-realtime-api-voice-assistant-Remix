@@ -29,7 +29,7 @@ describe('step 3 — one duration rate, everywhere', () => {
    * The 19c/min path ran on every inbound call, and on five more numbers after
    * the Twilio callbacks were wired up on 08-15.
    */
-  const files = ['../voiceAgentRoutes.ts', '../../server/routes.ts'];
+  const files = ['../voiceAgentRoutes.ts', './twilioStatusCallback.ts', '../../server/routes.ts'];
 
   it('no file computes a duration cost from its own literal rate', () => {
     for (const f of files) {
@@ -50,9 +50,17 @@ describe('step 3 — one duration rate, everywhere', () => {
     // OpenAI rate themselves. The repo-wide scan in voiceCostRates.test.ts
     // enforces the absence of raw multiplications; this pins the presence
     // of the decision.
-    for (const f of files) {
+    //
+    // The hangup StatusCallback used to price inline in voiceAgentRoutes.
+    // That is the 15003 path: it now lives in twilioStatusCallback.ts so
+    // a throw has a test, and the route file must not grow a second copy.
+    for (const f of ['./twilioStatusCallback.ts', '../../server/routes.ts']) {
       expect(read(f), `${f} must price through priceVoiceCall`).toMatch(/priceVoiceCall\(\{/);
     }
+    expect(
+      read('../voiceAgentRoutes.ts'),
+      'voiceAgentRoutes must not price a hangup itself — that is twilioStatusCallback.ts',
+    ).not.toMatch(/priceVoiceCall\(\{/);
   });
 
   it('the status callback no longer stamps a duration guess as authoritative', () => {
@@ -62,8 +70,8 @@ describe('step 3 — one duration rate, everywhere', () => {
      * was derived. The flag meant nothing, which is why it could not be used to
      * find the very rows this investigation was about.
      */
-    const src = read('../voiceAgentRoutes.ts');
-    expect(src).toMatch(/updateData\.costIsEstimated = !hasTokenDerivedCost/);
+    const src = read('./twilioStatusCallback.ts');
+    expect(src).toMatch(/update\.costIsEstimated = !hasTokenDerivedCost/);
     // Authoritative is whatever priceVoiceCall SAYS it is, not a re-derived
     // null check that could drift from the decision.
     expect(src).toMatch(/hasTokenDerivedCost =\s*\n?\s*pricing\.basis === "openai_tokens"/);
@@ -105,6 +113,7 @@ describe('step 3 — one duration rate, everywhere', () => {
    */
   const pricingFiles = [
     '../voiceAgentRoutes.ts',
+    './twilioStatusCallback.ts',
     '../../server/routes.ts',
     './callCostService.ts',
   ];

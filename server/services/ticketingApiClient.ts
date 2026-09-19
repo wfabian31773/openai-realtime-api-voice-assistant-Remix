@@ -567,15 +567,25 @@ export class TicketingApiClient {
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
-      
-      clearTimeout(timeoutId);
 
+      // The timer stays armed until the BODY has been read. It used to be
+      // cleared here, the moment the headers arrived, and `response.json()`
+      // below then waited without any bound — so a server that sent its
+      // status promptly and its body slowly could hold a filing tool open
+      // past every budget built on the 15 s: the gate-attempt claim's floor
+      // (`gateAttempts.ts`) rests on a refusal arriving inside this timeout
+      // or not at all, and the runtime's 45 s tool watchdog rests on the tool
+      // returning at all (Codex, #321 round 20).
       console.info(`[TICKETING API] Response status: ${response.status} ${response.statusText}`);
 
       let data: any;
       try {
         data = await response.json();
       } catch (parseError) {
+        // A body the timer cut off is a TIMEOUT, not a bad body: it carries
+        // no status downstream, so it is captured and retried like any other
+        // request that never got an answer — not read as a refusal.
+        if (parseError instanceof Error && parseError.name === 'AbortError') throw parseError;
         console.error(`[TICKETING API] ✗ Failed to parse JSON response:`, parseError);
         /**
          * THE STATUS SURVIVES A BODY WE COULD NOT READ.
@@ -598,6 +608,7 @@ export class TicketingApiClient {
         parseFailure.statusCode = response.status;
         throw parseFailure;
       }
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         // A 404 "no ticket found" is deterministic and expected for calls

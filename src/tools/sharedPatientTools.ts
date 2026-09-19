@@ -79,6 +79,42 @@ export const LOOKUP_PATIENT_BUDGET_MS = 6000;
  */
 const LOOKUP_BUDGET_MARGIN_MS = 250;
 
+/**
+ * THE SECOND MISS ENDS THE IDENTITY ASK — v50, 2026-09-17.
+ *
+ * Measured over the runtime lanes on 2026-09-16: the agent asked for a date
+ * of birth two or more times on 35 substantive calls (surgery 16, tech 16,
+ * optical 3), three or more on 13, and on tech 15 of the 16 were COLD
+ * callers — nobody pre-context recognised, so v25–v28 (the recognised-caller
+ * fixes) never touch them. The shape is not a filing-tool loop: those calls
+ * hit `file_*_ticket`'s date-of-birth refusal at most once (`dobShape`
+ * always `(none)`, the escape working) but called THIS tool 2.5–6.5 times
+ * each. The model asks, the caller answers, the lookup misses, and this
+ * tool's own miss message told it to ask again — every time, with no count.
+ *
+ * So the count lives here, keyed on the call like every other per-call
+ * budget (gateAttempts). A miss counts only when the lookup CARRIED a name
+ * or a date of birth — the phone-first pass on a cold caller is not an ask
+ * the caller answered. The first identity miss coaches the ONE re-ask RULE
+ * ZERO 2b would shape anyway (spell the surname; month, then day, then
+ * year); the second says stop and file. That is the operator's 2026-09-04
+ * ruling on the filing tool ("ask once, then file anyway") applied one layer
+ * earlier, and v33's `MAX_ASKS_PER_FIELD = 2` on the PCP intake — once to
+ * ask, once in case the first answer was mis-heard.
+ *
+ * THE TRADE, measured before choosing the limit (09-15 / 09-16, ~310 calls
+ * with a lookup per day): ~250 found on the first lookup, 9 / 16 on the
+ * second, 10 / 7 only on the third or later — those are matches a bound can
+ * cost, and a ticket still files for them, unmatched, for staff to match.
+ * Against that, 16 / 13 calls missed three or more times and never found,
+ * and 10 / 7 of THOSE left no ticket at all. A lost request outweighs a
+ * lost match. The limit is the dial; it is a judgement, and it is exported
+ * so the test pins the number the prose quotes.
+ */
+export const LOOKUP_MISS_LIMIT = 2;
+const LOOKUP_TOOL = 'lookup_patient';
+const IDENTITY_MISS = 'identity_miss';
+
 registerTool({
   name: 'lookup_patient',
   layer: 'agent',
@@ -210,6 +246,62 @@ registerTool({
       }
     }
 
+    /**
+     * THE AFFIRMED FIRST NAME PICKS ONE PERSON AMONG SEVERAL ON A PHONE — v54.
+     *
+     * Measured 2026-09-16: every one of the 26 recognised-caller date-of-birth
+     * refusals on the runtime lanes read `carry = no_entry`, their lookups had
+     * matched by PHONE with `identity_is_certain: false`, and nothing later
+     * wiped an entry (0 of 26 had a match followed by a miss). That is this
+     * shape: the Schedule phone rung finds SEVERAL people on the number,
+     * returns the most recently seen one with `identity.unique: false`, and
+     * the remember below is skipped because the match is not unique — so the
+     * filing tool finds nothing to inherit and asks for a date of birth the
+     * greeting's own question had already settled. The greeting asked "Am I
+     * speaking with <name>?", the caller said yes, and that affirmed name
+     * never reached this tool.
+     *
+     * RULE ZERO step 2: MATCH by phone, VALIDATE — and the validation is the
+     * name the caller affirmed (v26: 228 affirmed, 13 denied). When the
+     * caller's first name matches exactly ONE of the people on the number,
+     * that person is re-resolved on their own name and date of birth and
+     * carried as CERTAIN. Two people sharing the first name (a father and a
+     * son), or a name matching nobody, leave the match the guess it was.
+     */
+    if (resolved.patientFound && resolved.identity && !resolved.identity.unique && first) {
+      const { nameKey } = await import('./verifiedIdentity');
+      const affirmed = nameKey(first);
+      const hits = resolved.identity.candidates.filter((c) => nameKey(c.firstName) === affirmed);
+      const one = hits.length === 1 ? hits[0] : undefined;
+      if (one?.firstName && one.lastName && one.dateOfBirth) {
+        const picked = await scheduleLookupService.lookupPatient({
+          firstName: one.firstName,
+          lastName: one.lastName,
+          dateOfBirth: one.dateOfBirth,
+          deadlineAt,
+        });
+        // Codex P1 on #321 (sixth pass): `lookupPatient` FALLS THROUGH when
+        // the trio misses — to the phone rung (no phone is passed here) and
+        // then to the NAME rung, whose first-name predicate is a three-
+        // character prefix. A stored date that no longer resolves would hand
+        // back a similarly named STRANGER as `matchedBy: 'name'`, and the
+        // line below would have relabelled that person phone-confirmed and
+        // remembered their date for the ticket. Only the trio itself promotes.
+        if (
+          picked.patientFound &&
+          picked.matchedBy === 'name_and_dob' &&
+          picked.identity?.unique !== false
+        ) {
+          // PHI-free: a count of people and the fact that one was picked.
+          console.info(
+            `[TOOLS] lookup_patient: the caller's first name picked one of the ${resolved.identity.candidateCount} people on this number`,
+          );
+          // Matched by phone, confirmed by the caller — not a guess any more.
+          resolved = { ...picked, matchedBy: 'phone', identityUnconfirmed: false };
+        }
+      }
+    }
+
     if (!resolved.patientFound) {
       /**
        * "SEVERAL PEOPLE" IS NOT "NOBODY", and the agent needs the difference.
@@ -237,12 +329,45 @@ registerTool({
             'not read any history back until they have given both.',
         };
       }
+      // Only an answered ask can miss. The phone-first pass on a cold caller
+      // carries no name and no date, so it neither counts nor coaches.
+      const askedAndMissed = Boolean(first || last || dob);
+      const misses = askedAndMissed
+        ? noteGateRefusal(str(input.call_sid), LOOKUP_TOOL, IDENTITY_MISS)
+        : gateRefusalsSoFar(str(input.call_sid), LOOKUP_TOOL, IDENTITY_MISS);
+      if (misses >= LOOKUP_MISS_LIMIT) {
+        // PHI-free: a count and a SID. The marker line for the after-number.
+        console.info(`[TOOLS] lookup_patient: identity miss #${misses} on ${str(input.call_sid)} — the identity ask is spent, telling the model to file with what it has`);
+        return {
+          success: true,
+          found: false,
+          lookup_misses: misses,
+          message:
+            'No record found under those details. That is fine — I will take the request ' +
+            'as given and the team will match it to the chart.',
+          fix:
+            `This is identity miss number ${misses} on this call. Do NOT ask the caller for ` +
+            'their name or date of birth again, and do not look them up again with different ' +
+            'spellings. Take the request and file it now with the details they gave — the ' +
+            'filing tool does not require a match.',
+        };
+      }
       return {
         success: true,
         found: false,
+        lookup_misses: misses,
         message:
           'No record found. They may be new, or calling from a different number. ' +
           'Ask for their name and date of birth if you have not already.',
+        ...(askedAndMissed
+          ? {
+              fix:
+                'That name and date of birth matched nobody on file. You may ask ONCE more — ' +
+                'have them spell the last name, and give the date of birth as month, then day, ' +
+                'then year — then look them up again. If that also misses, do not ask a third ' +
+                'time: take the request and file it with what they gave.',
+            }
+          : {}),
       };
     }
 
@@ -316,12 +441,12 @@ registerTool({
      * it was treated. I widened `matchedBy: 'phone'` and left the comment
      * above it standing.
      *
-     * COST OF BEING WRONG THE OTHER WAY: an unconfirmed match no longer
-     * auto-fills a date of birth through `rememberVerifiedIdentity`. That
-     * removes nothing that existed before this PR — the mirror phone rung is
-     * itself new, so these calls previously reached `emptyContext()` and
-     * filled nothing. It declines to add an unsafe shortcut; it does not take
-     * a working one away.
+     * THE DATE STILL GOES INTO THE MAP. v11 already wrote the chart date
+     * from pre-context; stripping it here was Bug A (24 calls on 2026-09-14)
+     * — an empty person-base write overwrote a full one. The name guard on
+     * `verifiedDobFor` IS the confirmation (a caller who says "no, that's my
+     * father" is not filed under that name). We do not invent a date, and we
+     * do not promote `certain: false` to `true`.
      */
     const certain =
       uniqueMatch &&
@@ -339,10 +464,10 @@ registerTool({
      * refused for a date of birth in fourteen days, 23 of them for a patient
      * this tool had already identified.
      *
-     * Only a CERTAIN match is remembered, and it is only ever read back for
-     * the same name — see verifiedIdentity.ts. An uncertain match still has to
-     * be confirmed out loud, which is the rule the identity_warning above
-     * exists to enforce.
+     * A unique match is remembered, including an unconfirmed caller-ID hit.
+     * It is only ever read back for the same name — see verifiedIdentity.ts.
+     * `certain` stays false until something else confirms; the name guard
+     * is what lets a filing tool inherit the chart date.
      */
     /**
      * DELIBERATELY `uniqueMatch`, NOT `certain` — do not "tidy" this to the
@@ -374,31 +499,19 @@ registerTool({
         // What makes the downgrade guard provable rather than name-based.
         personId: resolved.patientData?.personId,
         /**
-         * NO DATE OF BIRTH FROM A CALLER-ID-ONLY MATCH. Codex P1 on 1d775a4,
-         * answering a challenge I put to it — and my claim was FALSE. I said
-         * an unconfirmed match "no longer auto-fills a date of birth". It
-         * did: `certain` went false, but the DOB was still cached, and
-         * `verifiedDobFor` returns `entry.dateOfBirth` WITHOUT reading
-         * `entry.certain`. So a caller who then gives the matched name and
-         * withholds their birthday gets the mirror's one auto-filled onto the
-         * ticket, which is exactly the confirmation this change exists to
-         * require.
+         * THE CHART DATE, WHEN THE UNIQUE HIT HAD ONE. Until v26 this
+         * stripped `dateOfBirth` on `identityUnconfirmed` (the person-base
+         * phone rung). That write then replaced the v11 pre-context entry
+         * and erased a date the process already held — Bug A.
          *
-         * WHY THE WRITE AND NOT THE READ. `verifiedIdentity.ts` records a
-         * deliberate decision to leave `verifiedDobFor` unnarrowed: it answers
-         * a different question, has its own name guard, and narrowing it is a
-         * ticket-path change that BACKEND_HANDOFF says needs a before/after
-         * number. That reasoning was made when uncertain entries could only
-         * come from a name-only hit. This PR adds a far larger uncertain
-         * population — every caller-ID match — so the hole is mine to close,
-         * and closing it at MY write leaves every pre-existing caller of that
-         * reader behaving exactly as it does today. No measurement is owed for
-         * behaviour that has not changed.
-         *
-         * The entry is still stored: `certain: false` is what the ambiguity
-         * consumers read, and dropping the entry would break them.
+         * The name guard on `verifiedDobFor` is the confirmation. Storing a
+         * date the unique hit actually returned is not inventing one. We
+         * still do not set `certain: true` here. A non-unique match never
+         * reaches this branch.
          */
-        ...(resolved.identityUnconfirmed ? {} : { dateOfBirth: resolved.patientData?.dateOfBirth }),
+        ...(resolved.patientData?.dateOfBirth
+          ? { dateOfBirth: resolved.patientData.dateOfBirth }
+          : {}),
         /**
          * The office this queue routes on, carried rather than only spoken.
          *

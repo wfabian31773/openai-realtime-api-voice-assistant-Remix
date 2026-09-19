@@ -30,7 +30,7 @@
  *
  * NO HANDOFF. Operator ruling 2026-08-12: only PCP and Scheduling transfer.
  */
-import { registerTool, missing, type ToolResult } from './registry';
+import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
@@ -77,7 +77,8 @@ registerTool({
       request_reason_id: classification.requestReasonId,
       ...(isCatchAll
         ? {
-            message:
+            // For the model, not the caller — `message` is what gets spoken.
+            fix:
               'Nothing matched, so this is filed as "Other - See Description". That is a ' +
               'real category, not a guess — but it means the description is the only thing ' +
               'the team has. Make sure it says what they actually asked for, and who is ' +
@@ -134,6 +135,43 @@ registerTool({
           'is one. This decides whether a statutory records clock applies, so it cannot ' +
           'be guessed or left out.',
         askAs: 'And just so I route this correctly — are you the patient yourself, or calling on someone\'s behalf?',
+      },
+      /**
+       * THE SAME ANSWER, STATED RATHER THAN INFERRED — added 2026-09-13.
+       *
+       * `requester` is prose and `classifyRequester` reads it. That works when
+       * a caller introduces themselves, and it is the ONLY input a caller-facing
+       * lane can offer. It does not work for a lane that already KNOWS: PCP
+       * holds `callerIsThePatient` and `statedRelationship` on its director,
+       * and its one attempt to express that knowledge as prose produced
+       * "…calling on the patient's behalf", which matched SPEAKING_FOR_ANOTHER
+       * and resolved to `other` — a family member taken OFF a clock that
+       * applies to them. Round-tripping a known fact through a text classifier
+       * is what broke; this is the field that stops it.
+       *
+       * NEVER LETS A REQUEST OFF THE CLOCK. See `resolveRequesterType`: a
+       * stated type is trusted except where it would move a request the prose
+       * puts ON the clock to one that is off it. That asymmetry is the
+       * taxonomy's own — being wrongly on costs a self-imposed deadline, being
+       * wrongly off is a CAP violation on the obligation the CAP polices.
+       */
+      requester_type: {
+        type: 'string',
+        description:
+          'OPTIONAL, and only when you actually know rather than infer: patient | ' +
+          'personal_representative | provider | health_plan | legal | other. Send it when the ' +
+          'caller has told you plainly who they are. Leave it out and it is read from `requester`.',
+      },
+      /**
+       * THE ASK IS SPENT — file with the gap rather than refuse. See the gate
+       * in the handler for why, and for why it is opt-in. Operator, 2026-09-13.
+       */
+      on_clock_ask_exhausted: {
+        type: 'boolean',
+        description:
+          'Only for a lane that cannot ask for a delivery destination or date range. Files the ' +
+          'case with the gap recorded on it instead of refusing. Do not set this to skip a question ' +
+          'you are able to ask.',
       },
       deliver_to: {
         type: 'string',
@@ -205,7 +243,7 @@ registerTool({
     }
 
     const { MEDICAL_RECORDS_DEPARTMENT_ID, recordsReasonById, classifyRecordsRequest,
-            classifyRequester, determineCapClock } = await import('./medicalRecordsTaxonomy');
+            classifyRequester, determineCapClock, resolveRequesterType } = await import('./medicalRecordsTaxonomy');
 
     // WHO IS ASKING IS HARD-REQUIRED ON THIS QUEUE, the way LOCATION is on
     // Optical — and for a stronger reason than assignment.
@@ -225,7 +263,7 @@ registerTool({
         'And just so I route this correctly — are you the patient yourself, or calling on someone\'s behalf?',
       );
     }
-    const requesterType = classifyRequester(requesterRaw) ?? 'other';
+    const requesterType = resolveRequesterType(str(input.requester_type), classifyRequester(requesterRaw));
     const cap = determineCapClock(requesterType);
 
     // ON THE CLOCK MEANS THE FIELDS ARE NOT OPTIONAL.
@@ -245,11 +283,47 @@ registerTool({
     // The gate is on PRESENCE, not content. "All of it" and "I'm not sure" are
     // both valid answers; the agent asks once, the caller says something, it
     // files. What is not acceptable is silence in a column the CAP report reads.
+    const askExhausted = input.on_clock_ask_exhausted === true;
     if (cap.onClock) {
       const gaps: string[] = [];
       if (!str(input.deliver_to)) gaps.push('deliver_to');
       if (!str(input.date_range)) gaps.push('date_range');
-      if (gaps.length) {
+      /**
+       * THE UNASSIGNED EXIT, FOR A RECORDS CASE. Operator ruling, 2026-09-13,
+       * choosing this over adding the question to the PCP lane.
+       *
+       * The gate below is his own (2026-08-13, *"can we hard gate the records
+       * to require the appropriate fields"*) and it is right for a lane that
+       * can ask: an `mr_cases` row with no destination starts a statutory clock
+       * nobody can work. But PCP has never collected a date range, so applied
+       * there the gate does not produce an answer — it produces a REFUSAL, and
+       * the request stays in department 18 where Medical Records never sees it.
+       * Measured: 54 PCP records tickets in department 18 against 2 in
+       * department 16, both of those predating the route that was supposed to
+       * fix it.
+       *
+       * So a caller that has nothing left to ask sets this flag and the request
+       * lands in department 16 with the gap written on it, rather than not
+       * landing at all. Exactly the shape of optical's `routingAskExhausted`
+       * (#288): take the request unassigned and let a human triage it, because
+       * a row a clerk can chase beats a row in the wrong queue.
+       *
+       * OPT-IN, so the records lane is untouched. That lane CAN ask and does,
+       * and its gate still refuses — nothing here relaxes it. Only a caller
+       * that says it has exhausted the ask gets the exit.
+       *
+       * AND IT FIRES ON THE FIRST INVOCATION, not the second. That is the whole
+       * lesson of `decideDobEscape` and of #291's Codex P1: an escape reachable
+       * only on a retry is unreachable on these lanes, where 42 of 75 refusals
+       * were the LAST tool event of their call. An escape that needs the model
+       * to come back is not an escape.
+       */
+      if (gaps.length && askExhausted) {
+        console.warn(
+          `[RECORDS] on-clock fields not captured (${gaps.join(', ')}) and the ask is spent — ` +
+            'filing to Medical Records with the gap recorded rather than refusing',
+        );
+      } else if (gaps.length) {
         return missing(
           gaps,
           gaps.length === 2
@@ -278,8 +352,40 @@ registerTool({
       `${cap.note}`,
       `\n\n${description}`,
       `\n\nRequested by: ${requesterRaw} [${requesterType}]`,
-      deliverTo ? `\nSend to: ${deliverTo}` : '',
-      dateRange ? `\nDates needed: ${dateRange}` : '',
+      /**
+       * A GAP SAYS SO, IN THE PLACE THE ANSWER WOULD HAVE BEEN.
+       *
+       * These two lines used to vanish when empty, which is fine when the gate
+       * guarantees they are filled — and is exactly wrong once the on-clock
+       * exit above can file without them. A missing line reads as "not
+       * applicable"; a clerk chasing nothing is how a case sits until the
+       * statutory clock runs out.
+       *
+       * A MISSING DESTINATION SAYS SO WHETHER OR NOT THE CLOCK APPLIES, and
+       * that is a change from the first version of this line — which read
+       * "only spelled out when the clock applies, because that is when
+       * somebody has to act on the absence."
+       *
+       * True while the only off-clock cases came from the records lane, which
+       * asks. It stopped being true on 2026-09-14, when professional records
+       * requests began reaching this queue from PCP: those are off the clock
+       * by definition, PCP can run out of asks, and nobody can send a chart
+       * anywhere without knowing where. An empty line reads as "not
+       * applicable" and the case sits.
+       *
+       * The DATE RANGE below is deliberately still keyed on the clock. A plan
+       * or a clinic usually wants one specific encounter, so a chase line for
+       * a range nobody needs is noise on a ticket rather than a gap in it.
+       *
+       * Same wording as `ticketDeliveryNote`, so a staffer sees one phrase
+       * whichever path filed the case.
+       */
+      deliverTo
+        ? `\nSend to: ${deliverTo}`
+        : '\nSend to: NOT CAPTURED — confirm with the requester before sending anything.',
+      dateRange
+        ? `\nDates needed: ${dateRange}`
+        : cap.onClock ? '\nDates needed: NOT CAPTURED — confirm the range with the requester.' : '',
     ].join('');
 
     // Free text becomes the body of a patient-facing SMS on the other side. One
@@ -379,17 +485,8 @@ registerTool({
          * the model "ask the caller again" when it simply omitted the argument
          * is what built the loop.
          */
-        return missing(
-          ['date_of_birth'],
-          'I did not catch that — may I please have the date of birth, starting with the month, then the day, then the year?',
-          dob
-            ? 'The date_of_birth you sent could not be read as a date. Say the message to the caller, '
-              + 'then call this tool again with exactly what they say next.'
-            : 'You did not send the date_of_birth argument at all — that, not the caller, is why this '
-              + 'was refused. If they have ALREADY given you a date of birth, call this tool again '
-              + 'right now with date_of_birth set to what they said, and do NOT ask them again. Only '
-              + 'say the message if they have not given it yet.',
-        );
+        const copy = dobRefusalCopy(dob);
+        return refuseDob(callSid, first, last, copy.message, copy.fix);
       }
       dobStatus = escape.status;
       console.info(dobEscapeMarker('file_records_ticket', dobStatus, callSid));

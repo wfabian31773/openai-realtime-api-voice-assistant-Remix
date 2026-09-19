@@ -71,8 +71,27 @@ export interface DeliveryAsk {
  * else — which is the whole point of asking the purpose rather than the
  * caller type.
  */
-export function isRecordsRequest(state: PcpConversationState): boolean {
-  return state.callPurpose === 'patient_medical_records_request';
+export function isRecordsRequest(
+  state: PcpConversationState,
+  /**
+   * THE PURPOSE SLUG IS NOT THE ONLY WAY A CALL IS A RECORDS REQUEST — added
+   * 2026-09-14 with the professional route.
+   *
+   * A clinic ringing for a chart is classified `peer_to_peer`, or
+   * `service_inquiry`, or whatever else fits the call; only a PATIENT records
+   * request gets the records slug, because the records tool sets that slug
+   * itself. So the slug test below sees none of the professional traffic, and
+   * without this flag a professional records request would be routed to
+   * Medical Records having never been asked where to send anything — an
+   * `mr_cases` row with no destination, which is the exact shape the
+   * 2026-08-13 hard gate exists to prevent.
+   *
+   * Off by default, so every existing caller is unchanged. The professional
+   * path passes the narrative classifier's own verdict.
+   */
+  treatAsRecords = false,
+): boolean {
+  return treatAsRecords || state.callPurpose === 'patient_medical_records_request';
 }
 
 /**
@@ -81,8 +100,12 @@ export function isRecordsRequest(state: PcpConversationState): boolean {
  * Two fields, in order, and never both at once — one question per turn is
  * the discipline the whole intake follows.
  */
-export function deliveryAskFor(state: PcpConversationState): DeliveryAsk | null {
-  if (!isRecordsRequest(state)) return null;
+export function deliveryAskFor(
+  state: PcpConversationState,
+  /** See `isRecordsRequest` — off by default, so no existing caller changes. */
+  treatAsRecords = false,
+): DeliveryAsk | null {
+  if (!isRecordsRequest(state, treatAsRecords)) return null;
   if (!state.recordsDeliveryMethod) {
     return {
       field: 'recordsDeliveryMethod',

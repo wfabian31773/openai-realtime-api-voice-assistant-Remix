@@ -1436,11 +1436,39 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
   };
 }
 
+/**
+ * THE GRADING REQUEST IS BOUNDED, AND THE BOUND FITS INSIDE THE CLAIM LEASE.
+ * The SDK's defaults — a ten-minute timeout per attempt and two retries —
+ * let one legitimate grade outlive the ten-minute lease during an API
+ * outage, so the backfill could take the row over while a live worker was
+ * still grading it (Codex P2, #321 round 9). Ninety seconds is many times a
+ * typical grade; one retry covers a dropped connection; and
+ * gradingIsClaimedOnce.test.ts proves the whole lifecycle is shorter than
+ * GRADING_CLAIM_LEASE_MS, so a claim cannot be reclaimed from under a
+ * request that is still allowed to finish. The token fence on the claim is
+ * the backstop for anything this bound does not cover.
+ */
+export const GRADING_REQUEST_TIMEOUT_MS = 90_000;
+export const GRADING_REQUEST_RETRIES = 1;
+/** The SDK's longest backoff between retries. */
+export const OPENAI_SDK_MAX_RETRY_BACKOFF_MS = 8_000;
+/** The longest a single gradeCall may legitimately wait on the API. */
+export function gradingRequestLifecycleMs(): number {
+  return (
+    (GRADING_REQUEST_RETRIES + 1) * GRADING_REQUEST_TIMEOUT_MS +
+    GRADING_REQUEST_RETRIES * OPENAI_SDK_MAX_RETRY_BACKOFF_MS
+  );
+}
+
 export class CallGradingService {
   private openaiClient: OpenAI;
 
   constructor() {
-    this.openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    this.openaiClient = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      timeout: GRADING_REQUEST_TIMEOUT_MS,
+      maxRetries: GRADING_REQUEST_RETRIES,
+    });
   }
 
   runDeterministicGraders(input: DeterministicGraderInput): GraderResult[] {
@@ -1560,13 +1588,37 @@ export class CallGradingService {
     return results;
   }
 
-  async gradeCall(callLogId: string, transcript: string, agentName?: string): Promise<QualityAnalysis | null> {
+  async gradeCall(
+    callLogId: string,
+    transcript: string,
+    agentName?: string,
+    opts: { claim?: boolean } = {},
+  ): Promise<QualityAnalysis | null> {
     if (!transcript || transcript.trim().length < 50) {
       console.warn(`[GRADING] Transcript too short for call ${callLogId}`);
       return null;
     }
 
+    /**
+     * ONE GRADE PER CALL, CLAIMED BEFORE THE LLM IS ASKED (Codex P2, #321
+     * round 7). Three callers race on a freshly completed row — the old
+     * core's teardown, the runtime's teardown (v49) and the five-minute
+     * backfill — and `gradedAt` used to be stamped only after the answer
+     * came back, so a backfill cycle landing inside that window graded the
+     * call a second time and the last answer overwrote the first. The claim
+     * lives HERE so no caller can forget it; the one caller that means to
+     * grade an already-graded row (the admin regrade button) says so.
+     * A claim that then fails is released below, so the backfill can retry.
+     */
+    let claimToken: string | null = null;
     try {
+      if (opts.claim !== false) {
+        claimToken = await storage.claimCallLogForGrading(callLogId);
+        if (!claimToken) {
+          console.info(`[GRADING] ${callLogId} is already claimed or graded — not graded twice`);
+          return null;
+        }
+      }
       const systemPrompt = `You are an expert call quality analyst for a healthcare ophthalmology practice. 
 Analyze the following call transcript between a patient and an AI voice agent.
 
@@ -1617,6 +1669,7 @@ Respond with a JSON object only, no other text:
       const content = response.choices[0]?.message?.content;
       if (!content) {
         console.error(`[GRADING] No response content for call ${callLogId}`);
+        if (claimToken) await this.releaseGradingClaim(callLogId, claimToken);
         return null;
       }
 
@@ -1666,7 +1719,7 @@ Respond with a JSON object only, no other text:
         console.warn(`[GRADING] could not price the grade for ${callLogId}:`, e);
       }
 
-      await storage.updateCallLog(callLogId, {
+      const graded: Parameters<typeof storage.updateCallLog>[1] = {
         sentiment: analysis.sentiment,
         agentOutcome: analysis.agentOutcome,
         qualityScore: analysis.qualityScore,
@@ -1679,7 +1732,41 @@ Respond with a JSON object only, no other text:
           patientConcerns: analysis.patientConcerns,
         },
         gradedAt: new Date(),
-      });
+        /**
+         * THE GRADE RE-OPENS THE TICKET SYNC (Codex P2, #321 round 12).
+         * `ticketingSyncService` carries qualityScore, sentiment and
+         * agentOutcome to the ticket, selects `callDataSynced = false`, and
+         * on a call that ended shortly before its five-minute sweep it
+         * snapshots the row BEFORE this grade lands, sends nulls, and marks
+         * the call done for good. Measured 2026-09-17 in the Support Center:
+         * 291 of 383 agent-filed tickets on 09-14, 280 of 368 on 09-15 and
+         * 296 of 387 on 09-16 carried a transcript and NO quality score or
+         * outcome while every one of their call rows had one. So the grade
+         * clears the flag (a no-op on a row the sweep has not reached) and
+         * the retry count (or a row that synced on its third attempt is
+         * never selected again); the next pass carries the grade,
+         * idempotent on the app. The sweep's own mark-done refuses a row
+         * whose grade landed mid-flight, so this holds under every ordering.
+         */
+        callDataSynced: false,
+        ticketingSyncRetries: 0,
+      };
+      if (claimToken) {
+        /**
+         * FENCED ON THE CLAIM'S TOKEN (Codex P2, #321 round 9). The lease
+         * says when a claim may be TAKEN OVER; it cannot stop the worker that
+         * lost it from finishing. A grade landing after its claim was
+         * reclaimed is discarded rather than written over the successor's —
+         * and the same token guards the release in the catch below.
+         */
+        const stillOurs = await storage.completeGradingClaim(callLogId, claimToken, graded);
+        if (!stillOurs) {
+          console.warn(`[GRADING] ${callLogId}: the claim was taken over before this grade landed — discarding it`);
+          return null;
+        }
+      } else {
+        await storage.updateCallLog(callLogId, graded);
+      }
 
       console.info(`[GRADING] Call ${callLogId} graded: ${analysis.sentiment}, ${analysis.qualityScore}/5 stars, ${analysis.agentOutcome}`);
 
@@ -1694,7 +1781,21 @@ Respond with a JSON object only, no other text:
       return analysis;
     } catch (error) {
       console.error(`[GRADING] Error grading call ${callLogId}:`, error);
+      if (claimToken) await this.releaseGradingClaim(callLogId, claimToken);
       return null;
+    }
+  }
+
+  /** A claim whose grade never landed goes back to the queue. Never throws:
+   * a release that fails leaves the row findable the dead-letter way
+   * (gradedAt set, sentiment null), which is the documented recovery shape. */
+  private async releaseGradingClaim(callLogId: string, token: string): Promise<void> {
+    try {
+      // Only THIS claim: a release that no longer owns the row is a no-op,
+      // never a null written over the successor's claim or grade.
+      await storage.releaseGradingClaim(callLogId, token);
+    } catch (e) {
+      console.warn(`[GRADING] could not release the grading claim on ${callLogId}:`, e);
     }
   }
 
@@ -1880,28 +1981,53 @@ Respond with a JSON object only, no other text:
   private static readonly MAX_GRADE_ATTEMPTS = 6;
   private static readonly GRADE_BACKOFF_BASE_MS = 30 * 60 * 1000;
 
+  /**
+   * THE QUEUE CANNOT BE STARVED BY ITS OWN HEAD — task #139, 2026-09-17.
+   *
+   * The selection is the newest `limit` ungraded rows. Two things sat at
+   * the head of it and never left: a row whose transcript is the EMPTY
+   * STRING (`IS NOT NULL` admits it, the `if (call.transcript)` below
+   * skipped it, and nothing ever stamped it), and rows in failure backoff,
+   * which `continue`d but still occupied their slot. Five such rows and the
+   * cycle graded nothing, every five minutes, while 87 calls from the day
+   * before sat behind them with grader_results and no outcome. So: the
+   * candidate window is wider than the budget, a row that cannot be graded
+   * is stamped and leaves, a row in backoff costs no slot, and the budget
+   * is spent on ATTEMPTS.
+   */
+  static readonly CANDIDATE_WINDOW_MULTIPLE = 6;
+  /** The pause between attempts so a cycle cannot burst the LLM; tests set it to 0. */
+  static interAttemptMs = 500;
+
   async gradeCallsWithoutGrades(limit: number = 10): Promise<number> {
     try {
-      const ungradedCalls = await storage.getCallLogsWithoutGrades(limit);
+      const ungradedCalls = await storage.getCallLogsWithoutGrades(
+        Math.max(limit * CallGradingService.CANDIDATE_WINDOW_MULTIPLE, 30),
+      );
       let gradedCount = 0;
+      let attempted = 0;
 
       for (const call of ungradedCalls) {
-        if (call.transcript) {
-          // If transcript is definitively too short to grade, mark it processed so it
-          // doesn't get selected on every future cycle (prevents an infinite retry loop).
-          if (call.transcript.trim().length < 50) {
+        if (attempted >= limit) break;
+        {
+          // If transcript is definitively too short to grade — the empty
+          // string included — mark it processed so it doesn't get selected
+          // on every future cycle (prevents an infinite retry loop).
+          if ((call.transcript ?? '').trim().length < 50) {
             await storage.updateCallLog(call.id, { gradedAt: new Date() });
-            console.info(`[GRADING] Skipping ${call.id} — transcript too short (${call.transcript.trim().length} chars), marked as processed`);
+            console.info(`[GRADING] Skipping ${call.id} — transcript too short (${(call.transcript ?? '').trim().length} chars), marked as processed`);
             continue;
           }
           // Failed-grade backoff: don't re-attempt (and re-spend) every
           // 5-minute cycle; transient outages get retried on a widening
-          // schedule instead of burning attempts back-to-back.
+          // schedule instead of burning attempts back-to-back. Costs no
+          // slot — the rows behind it still get their turn.
           const failState = this.failedGradeAttempts.get(call.id);
           if (failState && Date.now() < failState.nextEligibleAt) {
             continue;
           }
-          const result = await this.gradeCall(call.id, call.transcript);
+          attempted += 1;
+          const result = await this.gradeCall(call.id, call.transcript!);
           if (result) {
             gradedCount++;
             this.failedGradeAttempts.delete(call.id);
@@ -1921,11 +2047,11 @@ Respond with a JSON object only, no other text:
               });
             }
           }
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await new Promise(resolve => setTimeout(resolve, CallGradingService.interAttemptMs));
         }
       }
 
-      console.info(`[GRADING] Graded ${gradedCount}/${ungradedCalls.length} calls`);
+      console.info(`[GRADING] Graded ${gradedCount}/${attempted} attempted (${ungradedCalls.length} candidates)`);
       return gradedCount;
     } catch (error) {
       console.error('[GRADING] Error in batch grading:', error);

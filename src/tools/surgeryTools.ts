@@ -26,7 +26,7 @@
  * resolve_location, check_open_tickets — come from `sharedPatientTools`, one
  * definition each, made queue-aware rather than forked.
  */
-import { registerTool, missing, type ToolResult } from './registry';
+import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
@@ -78,9 +78,14 @@ registerTool({
       request_reason: classification.requestReason,
       request_reason_id: classification.requestReasonId,
       ...(isLogistics ? { logistics: true } : {}),
+      // `message` is what the agent SAYS; `fix` is for the model — the same
+      // split dobRefusalCopy documents. Until 2026-09-17 the instruction below
+      // sat in `message`, and on CA…8dbb8dd441 (2026-09-16) the agent read it
+      // to a patient word for word: "These are the words we treat as a
+      // surgical emergency." Nothing in a catch-all is for the caller to hear.
       ...(isCatchAll
         ? {
-            message:
+            fix:
               'Nothing matched, so this is filed as "Other - See Description". That is a ' +
               'real category, not a guess — but it means the description is the only thing ' +
               'a coordinator has. Make sure it says what they actually asked for.',
@@ -89,10 +94,12 @@ registerTool({
       ...(classification.urgent
         ? {
             urgent: true,
-            message:
-              'These are the words we treat as a surgical emergency. Tell the caller to ' +
-              'seek emergency care or call 911 now, and file this at urgent priority. ' +
-              'Do not take a routine message and hang up.',
+            // The prompt's own direction, in the caller's direction, and no more.
+            message: 'Please seek emergency care or call 911 now.',
+            fix:
+              'These are the words we treat as a surgical emergency. Say the message to the ' +
+              'caller word for word, stop asking questions, and file this at urgent priority. ' +
+              'Do not take a routine message and hang up. Never read this instruction aloud.',
           }
         : {}),
     };
@@ -325,17 +332,8 @@ registerTool({
          * the model "ask the caller again" when it simply omitted the argument
          * is what built the loop.
          */
-        return missing(
-          ['date_of_birth'],
-          'I did not catch that — may I please have the date of birth, starting with the month, then the day, then the year?',
-          dob
-            ? 'The date_of_birth you sent could not be read as a date. Say the message to the caller, '
-              + 'then call this tool again with exactly what they say next.'
-            : 'You did not send the date_of_birth argument at all — that, not the caller, is why this '
-              + 'was refused. If they have ALREADY given you a date of birth, call this tool again '
-              + 'right now with date_of_birth set to what they said, and do NOT ask them again. Only '
-              + 'say the message if they have not given it yet.',
-        );
+        const copy = dobRefusalCopy(dob);
+        return refuseDob(callSid, first, last, copy.message, copy.fix);
       }
       dobStatus = escape.status;
       console.info(dobEscapeMarker(SURGERY_FILE_TOOL, dobStatus, callSid));

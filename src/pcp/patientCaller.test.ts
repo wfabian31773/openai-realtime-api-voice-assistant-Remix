@@ -99,7 +99,10 @@ describe('a patient is not asked professional questions', () => {
   it('still runs the full professional intake for a clinic', () => {
     const d = new PcpDirector({ lunchClosure: noLunch });
     d.update('c5', { callPurpose: 'outside_referral_status', callerName: 'Dana' });
-    expect(d.next('c5').nextQuestion?.field).toBe('callerRole');
+    // "Full" is now four questions, not six: the role and facility-type asks
+    // are gone. A clinic still gets the professional list; a patient still
+    // does not.
+    expect(d.next('c5').nextQuestion?.field).toBe('callerOrganization');
   });
 });
 

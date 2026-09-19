@@ -82,7 +82,7 @@ export function transferModeFor(
  * the transfer — see WarmTransferDeps for why the mark precedes the
  * redirect (Codex, PR #230 round 2). */
 export interface TransferLifecycleHooks {
-  onCallerRedirectStarting?: () => void;
+  onCallerRedirectStarting?: (method: "warm" | "blind") => void;
   onCallerRedirectFailed?: () => void;
   /** The attempt is starting: the dial plus the briefing-and-keypress
    * wait legitimately runs up to `expectedWaitMs` (the accept window),
@@ -546,6 +546,12 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                 ...(details?.briefingGaps ? { briefingGaps: details.briefingGaps } : {}),
                 ...(details?.askedBeforeDial !== undefined
                   ? { askedBeforeDial: details.askedBeforeDial }
+                  : {}),
+                // Snapshotted for the same reason as the two above: the side
+                // channel is deleted in `attempt`'s finally, and the dial
+                // result arrives on a later HTTP request with no closure left.
+                ...(details?.onBlindDialSettled
+                  ? { onSettled: details.onBlindDialSettled }
                   : {}),
               });
             }

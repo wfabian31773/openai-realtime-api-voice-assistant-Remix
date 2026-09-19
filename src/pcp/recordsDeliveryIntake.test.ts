@@ -38,8 +38,30 @@ vi.mock('../../server/db', () => ({ db: {} }));
 
 const ticketing = vi.hoisted(() => ({
   createPcpTicket: vi.fn(async () => ({ success: true, ticketNumber: 'PCP-57918' })),
+  /**
+   * THE RECORDS LIBRARY FILES THROUGH `createTicket`, NOT `createPcpTicket`.
+   *
+   * Added 2026-09-13 with the routing change. Before it, this mock carried
+   * only `createPcpTicket` because `handle_patient_medical_records_request`
+   * never reached Medical Records — it filed a plain PCP ticket, which is the
+   * defect. With the route live the tool calls `file_records_ticket`, which
+   * calls `createTicket`; an absent mock made the tool THROW and the SDK
+   * returned a plain-text error the harness could not parse. A fixture gap,
+   * not a source defect — but it is the reason two tests below now read a
+   * different sink.
+   */
+  createTicket: vi.fn(async () => ({ success: true, ticketNumber: 'VA-58001' })),
 }));
-vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient: ticketing }));
+vi.mock('../../server/services/ticketingApiClient', () => ({
+  ticketingApiClient: ticketing,
+  /**
+   * `medicalRecordsTools` destructures this alongside the client. Absent from
+   * the mock it throws inside the tool, and the SDK hands back a plain-text
+   * error the harness cannot parse — which reads as a source defect and is not
+   * one. Only reachable here since the records route went live.
+   */
+  lookupWasUnavailable: () => false,
+}));
 
 const { createPcpAgent } = await import('../agents/pcpAgent');
 const { pcpDirector } = await import('./director');
@@ -77,6 +99,8 @@ const INTAKE_AS_ON_THE_CALL = {
 beforeEach(() => {
   ticketing.createPcpTicket.mockClear();
   ticketing.createPcpTicket.mockResolvedValue({ success: true, ticketNumber: 'PCP-57918' });
+  ticketing.createTicket.mockClear();
+  ticketing.createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-58001' });
 });
 
 describe('a records request asks where the records go', () => {
@@ -133,11 +157,20 @@ describe('the caller is told what happened before the line goes quiet', () => {
     });
 
     expect(filed.success).toBe(true);
-    expect(filed.ticketNumber).toBe('PCP-57918');
+    /**
+     * A MEDICAL RECORDS NUMBER NOW, NOT A PCP ONE — operator, 2026-09-13:
+     * "a medical records request should file a ticket with medical records,
+     * not pcp." This assertion previously read PCP-57918 and that was the
+     * defect, not the contract: 54 of these landed in department 18 where the
+     * records team never saw them.
+     */
+    expect(filed.ticketNumber).toBe('VA-58001');
+    expect(filed.routed_to).toBe('Medical Records');
+    expect(ticketing.createPcpTicket, 'it must not also file a PCP ticket').not.toHaveBeenCalled();
     // The 12:21 defect: the tool returned bare success, so nothing told the
     // agent to speak and it ended the call mid-breath.
     expect(filed.message, 'the tool must tell the agent what to say').toBeTruthy();
-    expect(filed.message).toContain('PCP-57918');
+    expect(filed.message).toContain('VA-58001');
   });
 
   it('carries the delivery instruction onto the ticket', async () => {
@@ -149,10 +182,54 @@ describe('the caller is told what happened before the line goes quiet', () => {
     });
     await call(agent, 'handle_patient_medical_records_request', { narrative: 'Records request.' });
 
-    const payload = (ticketing.createPcpTicket.mock.calls as any[])[0][0];
+    // Reads `createTicket` because the case now files to Medical Records. The
+    // assertion is unchanged in substance: whichever queue holds it, a staffer
+    // cannot send records without knowing where they go.
+    const payload = (ticketing.createTicket.mock.calls as any[])[0][0];
     const blob = JSON.stringify(payload);
     expect(blob, 'a staffer cannot send records without knowing where').toMatch(/fax/i);
     expect(blob).toContain('9095550199');
+  });
+
+  /**
+   * THE OPERATOR'S CHOICE B, 2026-09-13, and the reason it is not a relaxation.
+   *
+   * PCP has never collected a date range, and the library hard-gates one on an
+   * on-clock request. Rather than add a question to this lane, the request
+   * files with the gap written on the ticket — the shape of optical's
+   * unassigned exit (#288): a row a clerk can chase beats a row in the wrong
+   * queue. What must NOT happen is the gap going out silently, because an
+   * absent line reads as "not applicable" and nobody chases it.
+   *
+   * AND THE CALLER HERE IS THE PATIENT, not the clinic of the 12:21 call —
+   * changed 2026-09-14 with Codex's P1 on #296. The gate this exits only
+   * applies ON the clock, and a provider request is not on it; the clinic
+   * fixture reached this branch solely because every professional caller was
+   * being filed as the patient's personal representative, which is the defect
+   * that P1 removed. Proving an on-clock exit with an off-clock caller is
+   * testing the bug, so the fixture moves to a caller the clock really
+   * covers.
+   */
+  it('files without a date range and says so on the ticket', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', {
+      callPurpose: 'patient_medical_records_request',
+      callerName: 'A B',
+      callerIsThePatient: true,
+      patientFirstName: 'A',
+      patientLastName: 'B',
+      patientDob: '1973-03-17',
+      recordsDeliveryMethod: 'fax',
+      recordsDeliveryDestination: '9095550199',
+    });
+
+    const filed = await call(agent, 'handle_patient_medical_records_request', {
+      narrative: 'I need a copy of my records, to be faxed.',
+    });
+
+    expect(filed.success, 'the request must land, not be refused for a field this lane cannot ask').toBe(true);
+    const blob = JSON.stringify((ticketing.createTicket.mock.calls as any[])[0][0]);
+    expect(blob, 'the clerk has to see that the range is missing').toMatch(/Dates needed: NOT CAPTURED/i);
   });
 });
 

@@ -178,6 +178,93 @@ Contributing causes, in order of confidence:
    `1953-02-22` on file; `Ramon Ronquillo` `1955-08-24` against `1955-08-31`.
 3. **Only 2 of those 30 patients have any physician on record at all.**
 
+### Two live ticket-path losses, with their before-numbers (measured 2026-09-10)
+
+Both are recorded here because §0's rule applies to them: **neither may be
+changed without the production number, before and after.** Both before-numbers
+are stated so a later change has something to be measured against.
+
+**1. The date-of-birth gate.** A filing tool refuses for a missing
+`date_of_birth`, and the call ends with no ticket.
+
+| grok, optical+surgery+tech, calls >=30s | 2026-09-08 | 2026-09-09 |
+|---|---|---|
+| substantive | 410 | 360 |
+| refused for `date_of_birth` | 75 (18.3%) | 60 (16.7%) |
+| of those, filed nothing | **52** | **37** |
+| of those, the model sent no argument at all (`dobShape` = `(none)`) | **75 of 75** | **60 of 60** |
+
+It is not the largest no-ticket bucket. Over all five queue lanes, calls
+>=30s, every no-ticket call scored into exactly one bucket: **caller
+transcribed 0–1 times 77 (09-08) / 68 (09-09)**, the date-of-birth gate 52 /
+37, no tool event at all 14 / 14, other 36 / 37 — 179 and 156 in total against
+446 and 392 substantive. Barely-heard is larger on both days; the gate is the
+largest bucket a change to OUR code can reach.
+
+The old core on the same measure ran 3.2%–8.4% (08-27..09-02) and **1.6% on
+2026-09-03 before the cutover, against 12.4% on grok the same day** — a
+same-day A/B on the same lanes.
+
+**THE "NOT IN `main`" CLAUSE HERE WAS TRUE WHEN WRITTEN AND IS NOT NOW.** The
+two fixes it named (`dc33d6e`, `1f4d842`) merged as #280/#281 on 2026-09-10 and
+are live from marker `…-20260911` onward. Every figure above remains a BEFORE
+number — that is what it was taken for — but a reader must not conclude from
+this paragraph that the fix is still unshipped. The after-control is unchanged:
+the `[DOB] refused a date of birth in the shape (none)` count falling. **It has
+not been taken.**
+
+**THE NEXT QUESTION `dobShape` CANNOT ANSWER.** On 2026-09-14, `dobShape`
+was `(none)` on 93 of 93 recorded refusals — the model sent nothing, same as
+09-08. 51 of 94 refusals were on callers already addressed from their record.
+PR #307 splits those: Bug A (24) the person-base rung erases a date
+pre-context stored; Bug B (32) a certain appointment-book match stored the
+date and the read still refused. Nothing persisted could tell those apart.
+Marker `voice-runtime-v26-chart-dob-inherit-20260915` is the **fix**:
+stop-erase (empty must not overwrite a full chart DOB) plus inherit-on-file
+when the ticket name matches the stored name. The v25 `carry` enum
+(`fired` / `no_entry` / `entry_without_dob` / `name_mismatch` /
+`bad_call_sid`) rides along. **Do not read a change in the refusal rate
+on a v25-only build as inherit — that build is instrument-only (#308,
+folded into the v26 PR). The after-arm starts at v26.**
+
+```sql
+-- One day of traffic, once v26 is live. Canonical SIDs, CALL's day.
+SELECT e->'outcome'->>'carry' AS carry, count(*)
+FROM call_logs c, LATERAL jsonb_array_elements(c.tool_timeline->'events') e
+WHERE c.voice_provider = 'grok'
+  AND c.created_at::date = '<day>'
+  AND e->>'tool' LIKE 'file_%_ticket'
+  AND e->'outcome'->'missingFields' ? 'date_of_birth'
+GROUP BY 1
+ORDER BY 2 DESC;
+```
+
+`name_mismatch` dominating is Bug B at the read guard. `entry_without_dob`
+dominating is Bug A (or an empty chart) wider than 24. `no_entry` is never
+stored. `bad_call_sid` is a sentinel. `fired` on a refusal is a date that
+was in the map and still withheld (unparseable stored value, or a wiring
+bug). `dobShape` on the same event still answers whether the model sent it.
+
+**2. The success-loop.** A filing tool refuses for a missing field and the
+model answers by re-running a LOOKUP tool that keeps returning success,
+instead of asking the caller. Nine calls had struck the per-call tool ceiling
+(`tool_call_count >= 40`) between 2026-09-03 and 2026-09-09; **none of the
+nine filed a ticket.** Six are optical refused for `["location"]`, one is
+surgery refused for `["surgeon"]` re-running `lookup_patient` 35 times, one is
+pcp, one predates the ceiling. It is recurring, not historical.
+
+**RE-MEASURED 2026-09-14: SIXTEEN, still zero tickets.** `above 1 ·
+at_the_cap 15` over 2,423 grok calls, the band between 23 and 40 still empty.
+So it kept accruing at roughly two a day straight through — nine was a
+snapshot, not a total, and quoting it today would understate the loss by
+seven. #282 (`resolve_location` refusing a wrong-kind office, and the office
+ask bounded at two) merged 2026-09-10 and its after-number has still not been
+taken; these 16 span both sides of that merge and are NOT an after-arm.
+
+Because the surgery case reaches the same loop through a different tool and a
+different field, **a fix scoped to `opticalTools.ts` will not close it.**
+Before-number: **nine strikes, zero tickets, as of 2026-09-09.**
+
 ### Duplicate filings
 
 Real and unfixed. The four queue tools (`opticalTools`, `surgeryTools`, `techTools`,

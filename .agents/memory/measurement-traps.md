@@ -350,6 +350,18 @@ parser.
 would clear it. If not, the refusal is a loop and the model needs to be told
 what IT did wrong, not what to say.** That is what `MissingFields.fix` is for.
 
+**Replicated on two full days, 2026-09-08 and 2026-09-09** — `dobShape` reads
+`(none)` on **75 of 75** refusals and then on **60 of 60**, across surgery,
+tech and optical. 135 of 135. The reason it is recorded here rather than only
+in the day's write-up: a finding taken from one day is a candidate, and the
+cheapest way to promote it is to run the identical query on the next day the
+lane ran. It cost one query and it turned "the model omitted the argument on
+the calls I looked at" into "the model does not send this argument."
+
+And the corollary that survives the replication: **the gate is not the whole
+loss, but it is the biggest measurable slice of it** — 53 of the day's
+unfiled calls on 09-08, 37 on 09-09.
+
 ---
 
 ## A cost that is a constant times a duration is not a measurement
@@ -415,3 +427,99 @@ SELECT voice_provider, count(*) AS calls, count(agent_id) AS with_agent_id
 
 If `with_agent_id` is not `calls`, every per-agent report is under-counting
 by the difference and none of them will say so.
+
+
+---
+
+## A threshold that the thing it watches can never cross (2026-09-10)
+
+The runaway-loop check read
+
+```sql
+WHERE voice_provider = 'grok' AND tool_call_count > 40
+```
+
+against a ceiling that refuses at `dispatches >= perCallDispatches`. So a
+loop the ceiling STOPS lands on exactly 40 and can never exceed it. The check
+could see only calls from BEFORE the ceiling shipped: it proved the fix had
+landed, and in the same moment became permanently blind to the fix doing its
+job.
+
+Measured 2026-09-10 on the same table: `> 40` returns **1** row, `>= 40`
+returns **9**. The old form missed eight of the nine, including all three that
+happened the previous day.
+
+**Two things generalise.**
+
+1. **A boundary check has to be read against the code that enforces the
+   boundary, not against the number in the code.** `40` matched. `>` did not.
+   The number is the part people diff; the comparator is the part that
+   silently decides whether the query has any reachable population at all.
+2. **An empty result from a check that CANNOT return rows looks exactly like a
+   healthy system**, and it looks healthier the longer it runs. This is the
+   `agent_id` failure again (an absent row and a quiet lane look identical)
+   with the absence manufactured by the query rather than by the writer.
+
+The control is one line and it should be run whenever a check is written
+against a cap: **ask the query for the distribution, not the exceedances.**
+
+```sql
+SELECT count(*) FILTER (WHERE tool_call_count > 40)             AS above,
+       count(*) FILTER (WHERE tool_call_count = 40)             AS at_the_cap,
+       count(*) FILTER (WHERE tool_call_count BETWEEN 25 AND 39) AS just_below,
+       max(tool_call_count) FILTER (WHERE tool_call_count < 40)  AS highest_clean
+FROM call_logs WHERE voice_provider = 'grok';
+```
+
+On 2026-09-10 that returns `above 1 · at_the_cap 8 · just_below 0 ·
+highest_clean 23`. The **empty band between 23 and 40** is what proves 40 is a
+strike and never drift — and it is visible only because the query asked for
+the shape instead of asking whether a threshold was crossed.
+
+**RE-MEASURED 2026-09-14, and the drift is the point of re-measuring:**
+`above 1 · at_the_cap 15 · just_below 0 · highest_clean 23`, over 2,423 grok
+calls. So the population went 8 → 15 at the cap in four days while the shape
+held exactly: the band between 23 and 40 is still empty, and **none of the 16
+filed a ticket.** Roughly two lost requests a day, unchanged. This note was
+written with 8 and would have been quoted as 8 indefinitely — the lesson it
+teaches about comparators does not expire, but every number beside it does.
+`tool_call_count` is also NULL on 834 of the 2,423, so the floor here is
+unknown rather than zero.
+
+`ceilingDocCheck.test.ts` keeps the documented 40 in step with
+`DEFAULT_CEILING_LIMITS.perCallDispatches`. It cannot check the comparator,
+which is the half that was actually wrong.
+
+---
+
+## "The agent did something impossible" — check the caller first
+
+2026-09-15. I reported that the PCP agent had read one ticket number to five
+different people, and named it the day's most important finding. It had not.
+Every one of those pairs was **the same phone number ringing back**, and the
+ticketing app had consolidated the callback onto the caller's own open ticket
+and handed the agent that ticket's number to read out. The agent said what the
+API told it.
+
+**The control that killed it was one column: is it the same caller?** I had run
+the SQL three different ways and it agreed with itself every time, because
+every query I wrote took the finding for granted and asked only how big it was.
+The tickets were real, the SIDs were real, the numbers were spoken on two calls
+— all true, and the conclusion still wrong.
+
+This is the fourth time the transcript `VA-#####` proxy has caught a caller
+chasing an existing request and been read as a filing (CLAUDE.md records the
+first three, on 2026-09-03). **It is written down and I still walked into it.**
+
+The general form, and the reason this is in this file rather than in a ticket:
+
+- A finding of the shape *"the system did something it could not have done"* is
+  far more often a missing control than a real defect. Before reporting it,
+  name the boring explanation and go disprove that instead.
+- If the boring explanation is "it is the same person / the same record / the
+  same call", the column that settles it is usually one join away.
+- Re-running the same query with a bigger denominator is not a control. It
+  measures the size of a thing you have not yet established exists.
+
+Root cause and the ruling that governs it: CLAUDE.md, "THE SAME TICKET NUMBER
+READ TO TWO CALLERS", and `.agents/memory/ticketing-api-contract.md`.

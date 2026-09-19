@@ -273,6 +273,47 @@ function check(prompt: string, rulings: readonly Ruling[], label: string) {
   });
 }
 
+/**
+ * THE CLOCK IS PINNED, AND IT IS PINNED TO THE WIDEST RENDERING THERE IS.
+ *
+ * Every queue prompt embeds `getPacificTimeContext()`, and that block is
+ * VARIABLE WIDTH: the weekday appears twice, the month once, the date is one
+ * or two digits, and `timeStr` appears twice. So the measured length of a
+ * prompt depends on the day the suite happens to run.
+ *
+ * THIS IS NOT HYPOTHETICAL. The recognised-arm ratchets below were pinned on
+ * 2026-09-15, a Tuesday, and on Wednesday 2026-09-16 all three failed by
+ * EXACTLY ONE TOKEN — "Wednesday" is one character longer than "Tuesday",
+ * twice over. The slack guard failed the same morning by exactly one
+ * character. Nothing in any prompt had changed. Reproduced on a pristine
+ * checkout before touching anything, which is the only way to tell the
+ * calendar from the diff (CLAUDE.md's v32 row records the same lesson from
+ * `schedulingReachesTheHub.test.ts`).
+ *
+ * The comment above the slack guard already warned that "'Wednesday' instead
+ * of 'Saturday' would have failed this suite on the calendar rather than on
+ * the diff" — and then the v29 ratchets were added without that protection.
+ * A guard whose warning is written down and not applied is how this happens.
+ *
+ * Swept every hour of a year against the real formatter: the widest the block
+ * ever renders is 111 characters, at a Wednesday in September with a
+ * two-digit date and a two-digit twelve-hour clock —
+ *
+ *   Current Pacific Coast Time: Wednesday, September 16, 2026 at 12:59 AM
+ *   Today is Wednesday.
+ *   The time is 12:59 AM.
+ *
+ * Pinning THERE rather than at an arbitrary instant makes every number below
+ * both reproducible AND worst-case: a prompt that fits here fits on every day
+ * of the year. September is inside PDT (UTC-7), so 12:59 AM Pacific is 07:59
+ * UTC.
+ *
+ * Set at module scope on purpose — the prompts on the next lines are built
+ * when this module is evaluated, so a `beforeAll` would run far too late.
+ */
+vi.useFakeTimers({ shouldAdvanceTime: true });
+vi.setSystemTime(new Date('2026-09-16T07:59:00.000Z'));
+
 const surgery = buildSurgeryPrompt({ callerPhone: '+17605551234' });
 const tech = buildTechPrompt({ callerPhone: '+17605551234' });
 /**
@@ -349,15 +390,36 @@ describe('the trim actually happened', () => {
    * This test asserts the SLACK rather than the length, so a future prompt
    * that eats it fails here with the reason attached.
    */
+  /**
+   * THE PIN ITSELF, ASSERTED.
+   *
+   * Every length below is only worst-case while the fake clock is actually in
+   * effect. Drop the `vi.setSystemTime` at the top of this file and the
+   * ratchets keep passing on most days — they measure a SMALLER prompt — and
+   * then fail on the one day of the week nobody is looking. That is the exact
+   * failure this pin exists to remove, so the pin gets its own assertion
+   * rather than being trusted.
+   */
+  it('is measuring the widest clock, not whatever day the suite ran on', () => {
+    expect(tech).toContain('Wednesday, September 16, 2026 at 12:59 AM');
+    expect(tech).toContain('Today is Wednesday.');
+    expect(tech).toContain('The time is 12:59 AM.');
+  });
+
   it('tech keeps enough slack that the clock cannot fail the ceiling', () => {
     // Math.round(len / 4) reaches 1600 at 6398, so 6398 is the first failing
     // length — NOT 1600 * 4, which this used and which was two characters
     // optimistic about the room left.
     const boundary = 6398;
     const slack = boundary - tech.length;
-    // The widest weekday, a two-digit date and a two-digit hour rendered
-    // twice come to well under 20 characters of swing.
-    expect(slack, `tech has only ${slack} characters of slack`).toBeGreaterThan(20);
+    // GREATER THAN ZERO, not greater than 20, and that is STRONGER rather
+    // than weaker. The 20 was a cushion for clock swing, guessed at. The
+    // clock is now pinned to its widest rendering of the year (see the top of
+    // this file), so there is no swing left to absorb: a prompt that fits
+    // here fits on every day of the year, and the cushion has moved from a
+    // guess into the fixture. Whoever eats the remaining room should buy tech
+    // room, not raise the number.
+    expect(slack, `tech has only ${slack} characters of slack at the widest clock`).toBeGreaterThan(0);
   });
 
   /**
@@ -397,6 +459,101 @@ describe('the trim actually happened', () => {
 
   it('records stays under 1,750 prompt tokens', () => {
     expect(Math.round(records.length / 4)).toBeLessThan(1750);
+  });
+});
+
+/**
+ * THE CEILINGS ABOVE MEASURE THE PROMPT NOBODY IS RECOGNISED ON.
+ *
+ * Every constant above is built with `{ callerPhone }` and no `precontext`,
+ * so `pc` is undefined and `recognisedCallerBlock` / `identityAskScript` /
+ * `identityCertainMeaning` all emit their COLD arm. The recognised arm is
+ * strictly larger — it adds the whole recognition block — and until this
+ * block existed nothing measured it at all.
+ *
+ * Measured 2026-09-15, the recognised arm costs a uniform +342 tokens, and
+ * THREE OF FOUR LANES ARE ALREADY PAST THE OPERATOR'S CEILING ON IT:
+ *
+ *   lane      ceiling   cold   recognised   over by
+ *   surgery      1800   1298         1652   -- inside
+ *   tech         1600   1594         1948        348
+ *   optical      1500   1385         1739        239
+ *   records      1750   1697         2051        301
+ *
+ * THOSE THREE NUMBERS WERE RAISED ONCE, DELIBERATELY, AND THIS IS THE RECORD
+ * OF IT. They were first pinned at 1936 / 1727 / 2040. Codex's round-2 P1 on
+ * #311 showed the recognised arm keyed its exception on a `candidate_count`
+ * field that two of the three ambiguous lookup shapes do not carry, so a
+ * genuinely ambiguous match read as a single one. Correcting it to key on the
+ * tool's warning cost ~12 tokens per lane. The ratchet went red, which is the
+ * ratchet working; it is raised here with the reason rather than quietly
+ * relaxed. Correctness over twelve tokens, on an arm already 200-350 over.
+ *
+ * THIS IS NOT A v29 REGRESSION. The block was inline in all four agents long
+ * before it moved into the runtime; v27 and v28 each added to that arm, and
+ * v29 adds ~10 tokens more, but the bulk predates all three. What is new is
+ * that anybody can see it.
+ *
+ * WHY IT MATTERS MORE THAN THE NUMBER LOOKS: tasks #88 and #110 exist to make
+ * pre-context recognise MOST callers (135 of 170 are on file). Succeeding
+ * there moves nearly every call onto the arm that busts the ceiling — so the
+ * better pre-context gets, the more often we serve the oversized prompt.
+ *
+ * THESE ARE RATCHETS, NOT CEILINGS, AND THAT IS DELIBERATE. Lowering the
+ * recognised arm to the operator's stated numbers means deleting capability
+ * from it, which is his call under standing instruction 1 and a
+ * `docs/BACKEND_HANDOFF.md` change — not something a test should decide. So
+ * today's measured values are pinned: they may not GROW without somebody
+ * justifying it, which is what the ceiling block above says it exists for.
+ * Surgery is the exception and keeps its real ceiling, because it still fits.
+ */
+describe('the recognised-caller prompt is measured too', () => {
+  const PC = { matched: true, firstName: 'Casey' } as const;
+  const meta = { callerPhone: '+17605551234', precontext: PC } as never;
+  const warm = {
+    surgery: Math.round(buildSurgeryPrompt(meta).length / 4),
+    tech: Math.round(buildTechPrompt(meta).length / 4),
+    optical: Math.round(buildOpticalPrompt(meta).length / 4),
+    records: Math.round(buildRecordsPrompt(meta).length / 4),
+  };
+
+  it('surgery still fits its real ceiling when the caller is recognised', () => {
+    expect(warm.surgery).toBeLessThan(1800);
+  });
+
+  // Ratchets at the WORST-CASE clock, re-measured 2026-09-16 under the pin at
+  // the top of this file. Each is exactly one token above the 2026-09-15
+  // value it replaces, and that one token is the weekday, not a prompt
+  // change — these numbers now describe the widest day of the year rather
+  // than whichever day the suite ran on. Going UP fails; going down is always
+  // welcome and the number should be lowered when it does.
+  //
+  // RAISED ONCE MORE ON 2026-09-17 FOR v54 (+24 tokens per lane): the YES
+  // bullet of the recognised-caller block now tells the model to call
+  // lookup_patient with the affirmed first name, which is what lets a phone
+  // that carries several people resolve to the one who answered — all 26
+  // recognised-caller date-of-birth refusals on 09-16 were that shape. The
+  // ratchet went red, which is the ratchet working; it is raised with the
+  // reason rather than quietly relaxed, as the v29 raise above was.
+  for (const [lane, baseline] of [
+    ['tech', 1973],
+    ['optical', 1764],
+    ['records', 2076],
+  ] as const) {
+    it(`${lane}'s recognised prompt does not grow past ${baseline} tokens`, () => {
+      expect(warm[lane]).toBeLessThanOrEqual(baseline);
+    });
+  }
+
+  it('the recognised arm is measurably larger than the cold one on every lane', () => {
+    // The guard above this one is worthless if `precontext` stops reaching
+    // the block — the warm build would silently equal the cold build and
+    // every ratchet would pass while measuring nothing. This is the check
+    // that the arm under test is actually the recognised one.
+    expect(warm.surgery).toBeGreaterThan(Math.round(surgery.length / 4));
+    expect(warm.tech).toBeGreaterThan(Math.round(tech.length / 4));
+    expect(warm.optical).toBeGreaterThan(Math.round(optical.length / 4));
+    expect(warm.records).toBeGreaterThan(Math.round(records.length / 4));
   });
 
   it('neither prompt carries a war story — those belong in code comments', () => {

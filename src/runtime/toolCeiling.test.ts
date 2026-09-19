@@ -5,6 +5,8 @@ import {
   stableKey,
   ceilingMessage,
   ceilingRefusal,
+  ceilingReplay,
+  successCeilingRefusal,
   ceilingMarker,
 } from "./toolCeiling";
 
@@ -89,7 +91,7 @@ describe("the production loop this exists to stop", () => {
     expect(verdict).toEqual({
       allow: false,
       reason: "identical-args",
-      failures: DEFAULT_CEILING_LIMITS.identicalFailures,
+      count: DEFAULT_CEILING_LIMITS.identicalFailures,
     });
   });
 
@@ -118,11 +120,15 @@ describe("the production loop this exists to stop", () => {
 });
 
 describe("only failures count, and a success resets", () => {
-  it("never refuses a tool that keeps succeeding", () => {
+  it("never refuses a tool that keeps succeeding on DIFFERENT questions", () => {
+    // Thirty IDENTICAL successes used to be the fixture here. No call that
+    // filed has ever made one tool answer the same question more than nine
+    // times; the ones that did filed nothing — see the success-loop block.
     const ceiling = new ToolCallCeiling();
-    for (let i = 0; i < 30; i += 1) {
-      expect(ceiling.begin("lookup_patient", ARGS).allow).toBe(true);
-      ceiling.settle("lookup_patient", ARGS, true, { success: true });
+    for (let i = 0; i < 15; i += 1) {
+      const args = { ...ARGS, last_name: `B${i}` };
+      expect(ceiling.begin("lookup_patient", args).allow).toBe(true);
+      ceiling.settle("lookup_patient", args, true, { success: true });
     }
   });
 
@@ -143,6 +149,115 @@ describe("only failures count, and a success resets", () => {
     expect(ceiling.begin("resolve_location", ARGS).allow).toBe(false);
     attempt(ceiling, "resolve_location", { office: "Downey" }, true, { success: true });
     expect(ceiling.begin("resolve_location", ARGS).allow).toBe(true);
+  });
+});
+
+describe("an identical-success run is a loop too", () => {
+  /**
+   * Measured 2026-09-17 over 1,945 substantive runtime calls since 09-10:
+   * no call that filed had one tool succeed with the same arguments more
+   * than 9 times; 17 calls had one succeed 11–35 times and 16 filed nothing.
+   * CA01d27da3b5aefc6dcd5feb83b8ff0be5 (surgery, lookup_patient ×35, 602s),
+   * CAbc5f299f63bfb36102246ba9a6fd33c2 (surgery, check_open_tickets ×35),
+   * CAebcb3ffe096d0bf024139cc416797a89 (optical, resolve_location ×35) —
+   * each returning the same outcome every time.
+   */
+  const OK = { success: true, found: true, matched_by: "phone" };
+
+  it("allows ten identical successes and stops the eleventh", () => {
+    const ceiling = new ToolCallCeiling();
+    let dispatched = 0;
+    for (let i = 0; i < 35; i += 1) {
+      if (!ceiling.begin("lookup_patient", ARGS).allow) break;
+      ceiling.settle("lookup_patient", ARGS, true, OK);
+      dispatched += 1;
+    }
+    expect(dispatched).toBe(DEFAULT_CEILING_LIMITS.identicalSuccesses);
+    expect(ceiling.begin("lookup_patient", ARGS)).toEqual({
+      allow: false,
+      reason: "identical-success",
+      count: DEFAULT_CEILING_LIMITS.identicalSuccesses,
+    });
+  });
+
+  it("the limit sits above every call that filed (max 9) and below every loop (min 11)", () => {
+    expect(DEFAULT_CEILING_LIMITS.identicalSuccesses).toBe(10);
+    expect(DEFAULT_CEILING_LIMITS.perToolSuccesses).toBeGreaterThan(DEFAULT_CEILING_LIMITS.identicalSuccesses);
+    expect(DEFAULT_CEILING_LIMITS.perToolSuccesses).toBeLessThan(DEFAULT_CEILING_LIMITS.perCallDispatches);
+  });
+
+  it("the stopped call is answered with the tool's own last answer to those arguments, plus the instruction", () => {
+    const ceiling = new ToolCallCeiling();
+    for (let i = 0; i < 10; i += 1) attempt(ceiling, "lookup_patient", ARGS, true, { ...OK, seen: i });
+    const replay = ceilingReplay("lookup_patient", 10, ceiling.lastSuccessOutput("lookup_patient", ARGS));
+    expect(replay).toMatchObject({
+      success: true,
+      found: true,
+      matched_by: "phone",
+      seen: 9,
+      ceiling: "identical-success",
+      retryable: false,
+    });
+    expect(replay.fix).toMatch(/has not changed/);
+    expect(replay.fix).toMatch(/Speak to the caller/);
+    // The instruction lives in `fix`, never in the channel the agent speaks.
+    expect(replay).not.toHaveProperty("message");
+  });
+
+  it("the replay is the answer to THOSE arguments, not the tool's most recent answer to anything", () => {
+    const ceiling = new ToolCallCeiling();
+    attempt(ceiling, "lookup_patient", ARGS, true, { success: true, who: "first" });
+    attempt(ceiling, "lookup_patient", { ...ARGS, last_name: "Other" }, true, { success: true, who: "second" });
+    expect(ceiling.lastSuccessOutput("lookup_patient", ARGS)).toEqual({ success: true, who: "first" });
+  });
+
+  it("a failure in between does not reset the count — the eleventh identical answer is still the same answer", () => {
+    const ceiling = new ToolCallCeiling();
+    for (let i = 0; i < 9; i += 1) attempt(ceiling, "lookup_patient", ARGS, true, OK);
+    attempt(ceiling, "lookup_patient", ARGS, false, { success: false, error: "timed out" });
+    attempt(ceiling, "lookup_patient", ARGS, true, OK);
+    expect(ceiling.begin("lookup_patient", ARGS).allow).toBe(false);
+  });
+
+  it("different arguments are a different question, up to the per-tool limit", () => {
+    const ceiling = new ToolCallCeiling();
+    let dispatched = 0;
+    for (let i = 0; i < 50; i += 1) {
+      const args = { ...ARGS, last_name: `guess-${i}` };
+      if (!ceiling.begin("lookup_patient", args).allow) break;
+      ceiling.settle("lookup_patient", args, true, OK);
+      dispatched += 1;
+    }
+    expect(dispatched).toBe(DEFAULT_CEILING_LIMITS.perToolSuccesses);
+    expect(ceiling.begin("lookup_patient", { ...ARGS, last_name: "new" })).toEqual({
+      allow: false,
+      reason: "tool-successes",
+      count: DEFAULT_CEILING_LIMITS.perToolSuccesses,
+    });
+    const refusal = successCeilingRefusal("lookup_patient", 20);
+    expect(refusal).toEqual({
+      success: false,
+      retryable: false,
+      ceiling: "tool-successes",
+      fix: expect.stringMatching(/Speak to the caller/),
+    });
+    expect(refusal).not.toHaveProperty("message");
+  });
+
+  it("a replay of a non-object answer is wrapped, never thrown away", () => {
+    expect(ceilingReplay("t", 10, "plain text")).toMatchObject({ result: "plain text", ceiling: "identical-success" });
+    expect(ceilingReplay("t", 10, undefined)).toMatchObject({ result: null });
+  });
+});
+
+describe("the key ignores case and spacing, because neither is a correction", () => {
+  it("treats Downey, downey and ' Downey ' as one argument shape", () => {
+    expect(stableKey({ office: "Downey" })).toBe(stableKey({ office: " downey " }));
+    expect(stableKey({ office: "Downtown  LA" })).toBe(stableKey({ office: "downtown la" }));
+  });
+
+  it("still separates different words", () => {
+    expect(stableKey({ office: "Downey" })).not.toBe(stableKey({ office: "Downtown LA" }));
   });
 });
 
@@ -167,7 +282,7 @@ describe("different arguments are a different attempt", () => {
     expect(ceiling.begin("resolve_location", { office: "new" })).toEqual({
       allow: false,
       reason: "same-tool",
-      failures: DEFAULT_CEILING_LIMITS.perToolFailures,
+      count: DEFAULT_CEILING_LIMITS.perToolFailures,
     });
   });
 });
@@ -241,14 +356,20 @@ describe("no arguments are ever logged", () => {
   });
 
   it("names each reason distinctly", () => {
-    expect(ceilingMarker("t", { allow: false, reason: "identical-args", failures: 3 })).toContain(
+    expect(ceilingMarker("t", { allow: false, reason: "identical-args", count: 3 })).toContain(
       "same arguments",
     );
-    expect(ceilingMarker("t", { allow: false, reason: "same-tool", failures: 6 })).toContain(
+    expect(ceilingMarker("t", { allow: false, reason: "same-tool", count: 6 })).toContain(
       "6 consecutive failures",
     );
-    expect(ceilingMarker("t", { allow: false, reason: "call-total", failures: 40 })).toContain(
+    expect(ceilingMarker("t", { allow: false, reason: "call-total", count: 40 })).toContain(
       "40 tool dispatches",
+    );
+    expect(ceilingMarker("t", { allow: false, reason: "identical-success", count: 10 })).toContain(
+      "10 identical successful calls",
+    );
+    expect(ceilingMarker("t", { allow: false, reason: "tool-successes", count: 20 })).toContain(
+      "20 successful calls",
     );
   });
 });
@@ -268,7 +389,7 @@ describe("in-flight dispatches count", () => {
     expect(ceiling.begin("file_optical_ticket", ARGS)).toEqual({
       allow: false,
       reason: "identical-args",
-      failures: 3,
+      count: 3,
     });
   });
 
@@ -298,7 +419,7 @@ describe("in-flight dispatches count", () => {
     expect(ceiling.begin("t", { i: 4 })).toEqual({
       allow: false,
       reason: "call-total",
-      failures: 3,
+      count: 3,
     });
   });
 
@@ -314,7 +435,7 @@ describe("in-flight dispatches count", () => {
     expect(ceiling.begin("resolve_location", { office: "another" })).toEqual({
       allow: false,
       reason: "same-tool",
-      failures: DEFAULT_CEILING_LIMITS.perToolFailures,
+      count: DEFAULT_CEILING_LIMITS.perToolFailures,
     });
   });
 

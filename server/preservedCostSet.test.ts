@@ -157,3 +157,50 @@ describe('columns that are not cost', () => {
     expect(sql.slice(at, at + 40)).not.toContain('CASE');
   });
 });
+
+describe('the statement PARSES — a bound parameter carries no type of its own', () => {
+  /**
+   * 2026-09-17. node-postgres sends every parameter as untyped text and the
+   * server infers from context. `col + $n` infers from the column; `$n + $m`
+   * has nothing to infer from and is refused at PARSE: "operator is not
+   * unique: unknown + unknown". The unreconciled branch rendered exactly that
+   * whenever a caller supplied BOTH components — the ordinary per-call cost
+   * write — so from 8a226a6 (2026-09-04) it was rejected on every such call:
+   * 3,749 refusals in the 24h to 05:40 UTC, twilio_cost_cents written on
+   * 5–25% of completed calls against 100% before. Every assertion above this
+   * block stayed green the whole time: none of them could see a type.
+   */
+  const bareSum = /\$\d+\s*\+\s*\$\d+/;
+  const typedSum = /\$\d+::integer\s*\+\s*\$\d+::integer/;
+
+  it('casts BOTH incoming components when both are supplied', () => {
+    const { sql } = render({ openaiCostCents: 25, twilioCostCents: 7, totalCostCents: 32 });
+    const total = totalClause(sql);
+    expect(total).toMatch(typedSum);
+    expect(total).not.toMatch(bareSum);
+  });
+
+  it('casts the one incoming component beside a stored column too', () => {
+    const a = totalClause(render({ openaiCostCents: 25, totalCostCents: 25 }).sql);
+    expect(a).toMatch(/\$\d+::integer \+ COALESCE\("call_logs"\."twilio_cost_cents", 0\)/);
+    const b = totalClause(render({ twilioCostCents: 7, totalCostCents: 7 }).sql);
+    expect(b).toMatch(/COALESCE\("call_logs"\."openai_cost_cents", 0\) \+ \$\d+::integer/);
+  });
+
+  it('no `+` anywhere in the SET adds two untyped parameters', () => {
+    for (const updates of [
+      { openaiCostCents: 25, twilioCostCents: 7, totalCostCents: 32 },
+      { openaiCostCents: 25, twilioCostCents: 0, totalCostCents: 25 },
+      { openaiCostCents: 25, twilioCostCents: 7, totalCostCents: 32, costIsEstimated: false },
+    ]) {
+      expect(render(updates).sql).not.toMatch(bareSum);
+    }
+  });
+
+  it('the cast types the parameter; the value is still bound, never inlined', () => {
+    const { sql, params } = render({ openaiCostCents: 25, twilioCostCents: 7, totalCostCents: 32 });
+    expect(totalClause(sql)).not.toContain('25');
+    expect(params).toContain(25);
+    expect(params).toContain(7);
+  });
+});

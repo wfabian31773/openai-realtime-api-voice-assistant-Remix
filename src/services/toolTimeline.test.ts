@@ -57,6 +57,38 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     }
   });
 
+  /**
+   * THE THREE SHAPES OF `identity_is_certain: false` ARE SEPARABLE (CLAUDE.md,
+   * the v28 row): found nobody, found one unconfirmed person, found SEVERAL.
+   * Only the last carries `candidate_count`, and `found` splits the first
+   * from the other two. Without both the 2026-09-16 worksheet could not say
+   * how many of 33 date-of-birth refusals behind a matched lookup came from
+   * the ambiguous branch, and a fix was reverted for want of the number.
+   */
+  it('keeps found and candidate_count on a lookup outcome, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'lookup_patient',
+      { first_name: 'Paula', last_name: 'Kolterman' },
+      JSON.stringify({
+        success: true,
+        found: false,
+        identity_is_certain: false,
+        candidate_count: 3,
+        message: 'Ask for their full name and date of birth',
+        candidates: [{ first_name: 'Paula', last_name: 'Kolterman', date_of_birth: '1952-08-29' }],
+      }),
+      40,
+      { agentSlug: 'optical' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ found: false, identity_is_certain: false, candidate_count: 3 });
+    expect(ev.outcome).not.toHaveProperty('candidates');
+    expect(ev.outcome).not.toHaveProperty('message');
+    expect(JSON.stringify(ev)).not.toContain('1952-08-29');
+  });
+
   it('keeps the diagnostic signal as booleans instead of the caller\'s words', () => {
     const callId = freshCall();
     recordToolEvent(callId, 'create_ticket', TICKET_ARGS, '{}', 1, { agentSlug: 'answering-service' });
@@ -141,6 +173,45 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
       { agentSlug: 'answering-service' },
     );
     expect(getAzulTimeline(callId)![0].outcome.missingFields).toEqual(['surgeon name']);
+  });
+
+  /**
+   * WHY inherit failed, without the birthday. The five arms are the
+   * diagnosis in PR #307. A string that is not one of them is dropped —
+   * the allow-list is the safety mechanism, same as every other outcome key.
+   */
+  it('records carry on a date-of-birth refusal, and never a date', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId, 'file_surgery_ticket', TICKET_ARGS,
+      JSON.stringify({
+        success: false,
+        missingFields: ['date_of_birth'],
+        carry: 'name_mismatch',
+        dateOfBirth: '03/17/1973',
+        firstName: 'Wayne',
+      }),
+      5,
+      { agentSlug: 'surgery' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome.carry).toBe('name_mismatch');
+    expect(ev.outcome.missingFields).toEqual(['date_of_birth']);
+    const blob = JSON.stringify(ev);
+    expect(blob).not.toContain('03/17/1973');
+    expect(blob).not.toContain('Wayne');
+  });
+
+  it('drops a carry value that is not one of the five arms', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId, 'file_tech_ticket', TICKET_ARGS,
+      JSON.stringify({ success: false, missingFields: ['date_of_birth'], carry: 'Wayne Fabian 03/17/1973' }),
+      1,
+      { agentSlug: 'tech' },
+    );
+    expect(getAzulTimeline(callId)![0].outcome).not.toHaveProperty('carry');
+    expect(JSON.stringify(getAzulTimeline(callId))).not.toContain('Wayne');
   });
 });
 

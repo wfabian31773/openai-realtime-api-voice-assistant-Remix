@@ -27,6 +27,7 @@
  * that if the two are not already collapsed into one word here.
  */
 import { BLIND_TRANSFER_NO_ANSWER } from "./blindTransfer";
+import type { BlindDialSettlement } from "../services/escalationStore";
 import {
   blindTransferVoice,
   buildDialCompletedTwiml,
@@ -50,6 +51,12 @@ export interface PendingBlindDial {
   redirectedAtMs: number;
   briefingGaps?: string[];
   askedBeforeDial?: boolean;
+  /**
+   * Registered by the lane before the redirect; see `EscalationDetails`.
+   * Called AFTER the outcome is recorded, never before — the measurement is
+   * this handler's first job and must not be skipped by a throwing lane.
+   */
+  onSettled?: (settlement: BlindDialSettlement) => void | Promise<void>;
 }
 
 export interface DialResultDeps {
@@ -75,8 +82,18 @@ export interface DialResultDeps {
  * cannot reach an `action` callback, but it is mapped rather than dropped so a
  * Twilio change adds a row instead of silently becoming `failed`.
  */
+/**
+ * The return type is `BlindDialSettlement["outcome"]`, NOT the whole
+ * `RuntimeTransferOutcome` union, and that is deliberate: the switch below can
+ * only produce three of its seven values, and `accepted` / `handed_to_queue` /
+ * `declined` must never be reachable from here — `accepted` in particular is
+ * reserved for the warm path's keypress (Rosa, 2026-09-08). Narrowing it means
+ * a fourth case added to the switch fails to compile until somebody decides
+ * what the lane callback should do with it, instead of widening silently. It
+ * is still assignable to the wider union `deps.record` takes.
+ */
 export function classifyDialStatus(status: string): {
-  outcome: RuntimeTransferOutcome["outcome"];
+  outcome: BlindDialSettlement["outcome"];
   connected: boolean;
 } {
   switch (status.trim().toLowerCase()) {
@@ -153,6 +170,29 @@ export function handleBlindDialResult(
       `[runtime-xfer] blind dial for ${callerCallSid} ended ${dialStatus || "(no status)"} ` +
         `after ${talked}s bridged`,
     );
+    /**
+     * TELL THE LANE, AFTER THE RECORD IS WRITTEN.
+     *
+     * Ordering is the whole safety property: `deps.record` above is the
+     * measurement, and a lane callback that throws must not be able to cost
+     * us it. Not awaited, and its rejection is swallowed into a log line, for
+     * the same reason `writeOutcome` is not awaited — this runs on the path
+     * returning TwiML to Twilio, and a slow ticket POST must not sit between
+     * a caller and the words below.
+     */
+    if (pending.onSettled) {
+      const settlement: BlindDialSettlement = {
+        outcome,
+        status: dialStatus ? dialStatus.toUpperCase() : "NO_DIAL_STATUS",
+        connected,
+        ...(connected ? { talkSeconds: talked } : {}),
+        ringSeconds: Math.max(0, elapsedSeconds - talked),
+        dialedNumber: pending.destination,
+      };
+      void (async () => pending.onSettled!(settlement))().catch((err) =>
+        log(`[runtime-xfer] dial-result callback failed for ${callerCallSid}: ${String(err)}`),
+      );
+    }
   } else {
     // No memory of this dial — a redeploy mid-call, or a callback for a leg
     // this process never redirected. The caller still deserves the right TwiML,

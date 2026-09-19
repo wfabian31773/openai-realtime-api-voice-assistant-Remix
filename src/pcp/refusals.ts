@@ -110,12 +110,79 @@ export const PCP_REFUSALS: Record<string, RefusalCopy> = {
       'Never tell a caller that a handoff or transfer is "unavailable", "not available for this purpose", or blocked.',
   },
 
-  /** Transfer refused AND the fallback filing failed. The only genuinely bad one. */
+  /**
+   * Transfer refused AND the fallback filing failed. The only genuinely bad one
+   * — and for two months it was the only one that told the caller it had gone
+   * well.
+   *
+   * THE COPY CLAIMED THE RECORD THAT THIS BRANCH IS DEFINED BY NOT HAVING.
+   * It read "I've taken this down and I'm making sure it reaches the right
+   * team", which is its sibling's line, and the sibling is the one reached when
+   * `fallback.success` is TRUE. Here it is false by construction.
+   *
+   * 2026-09-14, the PCP line's first full day: 17 callers heard that sentence
+   * and no ticket of any provenance carries their call SID. Every one of them
+   * had said one thing — "speak to a representative" — and every one of their
+   * POSTs is in `voice_agent_api_logs` as HTTP 400 ["Validation failed"],
+   * because the ticketing app's slug list was one entry short of the agent's
+   * (`patient_caller`; ticketing-app #267, since deployed).
+   *
+   * That cause is closed. This sentence is why it cost us seventeen requests
+   * instead of being visible the first time it happened: a caller who is told
+   * their request is filed does not call back, and a staffer never sees a
+   * ticket to work. The next filing failure will have a different cause —
+   * a timeout, an outage, a schema that drifts again — and it must not be
+   * silent.
+   *
+   * WHAT IT SAYS NOW, and why each part is load-bearing:
+   *   - it does NOT say the request is recorded, because it is not;
+   *   - it does NOT mention a system, an error or a retry (#265 and the
+   *     CA1de3229a rule that produced this whole module);
+   *   - it ASKS FOR THE CALLBACK NUMBER, which is standing instruction 12 and
+   *     is also the one field that makes the teardown floor useful.
+   * The commitment it does make — that someone will call back — is kept by
+   * `sweepPcpUnfiledCall`, which now files for a caller who asked for a person
+   * and did not get one even when they never gave a name.
+   */
   handoff_not_eligible: {
-    say: "I've taken this down and I'm making sure it reaches the right team.",
+    say: "I'm not able to put you through from this line, but I do want the right team to call you back. Is this the best number to reach you on?",
     guidance:
-      'Say the line above, then call create_pcp_task again to get the request on record. ' +
-      'Do not mention a system problem and do not promise a transfer.',
+      'The filing did NOT go through — do not tell the caller it did, and do not mention a system, an error or a retry. ' +
+      'Say the line above, take the number they give you with record_pcp_intake, then call create_pcp_task again to get the request on record. ' +
+      'Do not promise a transfer.',
+  },
+
+  /**
+   * THE SAME BRANCH, FOR A CALLER WHOSE NUMBER WE DO NOT HAVE.
+   *
+   * "Is this the best number to reach you on?" presupposes a number (Codex P2,
+   * #300). It is right for the common case — `pcpAgent.ts:510` seeds
+   * `callbackNumber` from caller ID on every call whose ANI is E.164, and
+   * confirming beats asking. It is wrong when there is nothing to confirm: a
+   * withheld or blocked caller ID arrives as a non-E.164 string, the seeding
+   * regex correctly rejects it, and the caller is then asked to confirm a
+   * number nobody holds. An answer of "yes" to that question produces a
+   * request that cannot be called back, which is the one outcome this whole
+   * branch exists to prevent.
+   *
+   * THE FORK IS THE HOUSE PATTERN, not a new one. `knowledgeBase.ts:283`
+   * already writes it — "I have your callback number as ending in ####. Is
+   * that correct?" against "What is the best number to reach you?" — and this
+   * refusal's own sibling pair is already selected by a ternary at the call
+   * site. So this is a second key, chosen there, rather than logic inside the
+   * copy table.
+   *
+   * Everything else is deliberately identical to the sibling: it refuses the
+   * transfer plainly, it does NOT claim the record, and it asks for the
+   * callback number (standing instruction 12).
+   */
+  handoff_not_eligible_no_callback: {
+    say: "I'm not able to put you through from this line, but I do want the right team to call you back. What's the best number to reach you on?",
+    guidance:
+      'The filing did NOT go through — do not tell the caller it did, and do not mention a system, an error or a retry. ' +
+      'We have no callback number for this caller, so ASK for one rather than confirming one. ' +
+      'Say the line above, take the number they give you with record_pcp_intake, then call create_pcp_task again to get the request on record. ' +
+      'Do not promise a transfer.',
   },
 
   /**
@@ -182,6 +249,49 @@ export const PCP_REFUSALS: Record<string, RefusalCopy> = {
       'Ask it ONCE. If they will not answer, or answer only part of it, call handoff_to_pcp again anyway — the ' +
       'transfer goes ahead either way and the person who picks up can ask. Do NOT return to the intake questions, ' +
       'do not ask for the patient, and do not ask a second time in different words.',
+  },
+
+  /**
+   * THE WARNING BECAME A QUESTION. Operator ruling, 2026-09-13.
+   *
+   * Rosa's 09-08 design put the wait warning in the TwiML, which plays AFTER
+   * the redirect has already begun and the Media Stream is gone — so the
+   * caller heard it with no way to answer. It was an announcement. This is the
+   * same content asked as a question, in the agent's own turn, before anything
+   * is filed or dialled.
+   *
+   * The `say` line is supplied by the call site from `QUEUE_CHOICE_WARNING`
+   * so the wording lives in one place next to the ruling that produced it.
+   *
+   * WHAT THE GUIDANCE MUST NOT DO is let the model answer on the caller's
+   * behalf. Only a spoken yes goes to the queue; the tool treats a missing
+   * answer as "not established" and keeps today's behaviour, which files.
+   */
+  queue_choice: {
+    guidance:
+      'NOT AN ERROR — say nothing about a system, a problem, or a requirement. The caller asked for a person and ' +
+      'they are entitled to one; this is the choice we owe them first. Say the line above, then call handoff_to_pcp ' +
+      'again with callerAcceptedQueue set to what they actually said: true if they want to be connected, false if ' +
+      'they would rather you took it here. Do NOT guess, do not leave it out because they were vague, and do not ' +
+      'ask twice — if they will not choose, call handoff_to_pcp again without the field and it will be handled.',
+  },
+
+  /**
+   * They heard the warning and chose to have it taken here. No dial.
+   *
+   * Deliberately does NOT file a ticket at this point. "If they want to
+   * continue, we create a ticket with all the information needed" — filing
+   * from here would file it with whatever we happen to hold, which is the
+   * 27-second ticket of CA7a5f2bfa all over again. The model goes back to the
+   * intake and `create_pcp_task` applies its own readiness rules, with
+   * `sweepPcpUnfiledCall` behind it if the caller drops.
+   */
+  queue_choice_declined: {
+    guidance:
+      'NOT AN ERROR — say nothing about a system or a problem, and do not mention the transfer again. The caller ' +
+      'chose to have you take the request rather than hold for the queue, so there will be no transfer on this ' +
+      'call. Thank them, collect what is still missing for the request, and file it with create_pcp_task. Do NOT ' +
+      'call handoff_to_pcp again unless the caller themselves asks to be connected after all.',
   },
 
   handoff_no_answer: {

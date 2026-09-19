@@ -201,7 +201,11 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       request_description: 'I have a question about my bill',
     })) as Record<string, unknown>;
     expect(r.classified).toBe(false);
-    expect(String(r.message)).toMatch(/Do not pick a category/i);
+    // In `fix`, not `message`: `message` is what the agent SAYS, and on
+    // 2026-09-16 the surgery agent read its classify tool's instruction to a
+    // patient word for word. A catch-all has nothing for the caller to hear.
+    expect(String(r.fix)).toMatch(/Do not pick a category/i);
+    expect(r.message).toBeUndefined();
   });
 
   it('will not file a ticket that nobody will be assigned', async () => {

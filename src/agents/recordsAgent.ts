@@ -35,6 +35,11 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 import '../tools/sharedPatientTools';
 import '../tools/medicalRecordsTools';
 import '../tools/languageTools';
+import {
+  identityAskScript,
+  identityCertainMeaning,
+  recognisedCallerBlock,
+} from '../runtime/recognisedCallerBlock';
 
 export interface RecordsAgentMetadata {
   callId?: string;
@@ -58,7 +63,8 @@ export const recordsAgentConfig = {
   greeting:
     'Thank you for calling Azul Vision medical records. Our records team is currently ' +
     'assisting other patients, but I can take the details and they will follow up with ' +
-    'you. How can I help you today?',
+    'you. All calls are being recorded for quality assurance purposes. ' +
+    'How can I help you today?',
   voice: 'sage',
   language: 'en',
 };
@@ -91,27 +97,9 @@ export function buildRecordsPrompt(metadata: RecordsAgentMetadata): string {
   const phone = metadata.callerPhone || '';
 
   const pc = metadata.precontext;
-  const recognitionSection =
-    pc?.matched && pc.firstName
-      ? `
-### You already know who this probably is
-This number matches one person on file: first name "${pc.firstName}".
-
-- Your greeting has already asked "Am I speaking with ${pc.firstName}?". Do NOT
-  greet again and do NOT ask it twice. Take their answer and move on.
-- NEVER open with "can I get your name and date of birth" when you have a
-  match. Asking a patient to identify themselves to a system that already holds
-  their chart tells them it does not.
-- A first name is not verification. Ask for the last name in their own words,
-  and still collect the date of birth. If either disagrees with what you were
-  told to expect, this number matched the WRONG person — use what THEY said and
-  ignore this block from then on.
-- Do not say we recognised their number, and do not speak a last name first.
-- Disclose nothing from anyone's record on the strength of this match.
-- The caller may not be the patient. If they are calling from a doctor's office,
-  a health plan or a law office, this block is about the NUMBER, not about them.
-`
-      : '';
+  const recognitionSection = recognisedCallerBlock(pc);
+  const askScript = identityAskScript(pc);
+  const certainMeaning = identityCertainMeaning(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -187,18 +175,11 @@ said. Ask once. Never interrogate, and never turn a caller away over a detail
 they genuinely cannot supply: say so in their words and file it. When somebody
 else is asking, these are worth getting but the tool will not block on them.
 
-### Lead the ask — one at a time, in this shape
-  "May I please have your last name?"
-  "And may I please have your date of birth, starting with the month,
-   then the day, then the year?"
-Never both in one breath, never a bare "date of birth" — say the order every
-time. Asked open, people answer in any shape, and the shape is what loses it.
+${askScript}
 
 ### How a call runs
 1. Find the patient. Call lookup_patient as soon as you have a phone number, or
-   the last name and date of birth. identity_is_certain false means the number
-   matches more than one person — ask as above, then CALL lookup_patient AGAIN
-   with all three. Never tell the caller how many records matched.
+   the last name and date of birth. ${certainMeaning}
    The caller may not be the patient: take the PATIENT's name and date of birth
    for the record, and the CALLER's details separately.
 2. Get the request in their words. Then WHO IS ASKING — the tool will not file

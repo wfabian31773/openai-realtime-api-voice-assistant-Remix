@@ -96,9 +96,51 @@ function refinementVerdict(prev: string, next: string): "extend" | "revise" | "k
   return "append";
 }
 
+export type TranscriptRole = "caller" | "agent";
+
+/**
+ * One line of the call with WHEN it was written.
+ *
+ * The flat transcript has never carried time, so the Observatory's call page
+ * could not place a tool call between the two lines it happened between, and
+ * "the per-turn record for this call was lost" was what every runtime call
+ * showed. Old-core calls write `call_turns` as they go; the runtime writes
+ * its turns at teardown from this, so each line keeps the moment it was
+ * FIRST written — a caller line refined in place keeps the time the caller
+ * started speaking, not the time the last re-emission landed.
+ */
+export interface TranscriptTurn {
+  role: TranscriptRole;
+  /** The words, without the `CALLER: ` / `AGENT: ` prefix. */
+  text: string;
+  /** Epoch ms when the line was first written. */
+  atMs: number;
+}
+
 export class CallTranscriptLog {
   /** Ordered lines of the call: `CALLER: …` / `AGENT: …`. */
   readonly lines: string[] = [];
+  /** Parallel to `lines`: when each line was FIRST written. A rewrite in
+   * place keeps it. */
+  private readonly atMs: number[] = [];
+  /** Parallel to `lines`. */
+  private readonly roles: TranscriptRole[] = [];
+
+  private push(role: TranscriptRole, line: string): number {
+    this.lines.push(line);
+    this.atMs.push(Date.now());
+    this.roles.push(role);
+    return this.lines.length - 1;
+  }
+
+  /** The call as timed turns, for `call_turns`. Same order as `lines`. */
+  turns(): TranscriptTurn[] {
+    return this.lines.map((line, i) => ({
+      role: this.roles[i]!,
+      text: line.replace(/^(?:CALLER|AGENT): /, ""),
+      atMs: this.atMs[i]!,
+    }));
+  }
 
   private openCallerLine: {
     index: number;
@@ -163,7 +205,7 @@ export class CallTranscriptLog {
         boundaryCrossed: false,
         agentDelivered: false,
       };
-      this.lines.push(`CALLER: ${text}`);
+      this.push("caller", `CALLER: ${text}`);
     }
     // 'keep': a shorter re-emission — the fuller line stays as-is.
   }
@@ -179,7 +221,7 @@ export class CallTranscriptLog {
    * the provider moved on: the open caller turn closes. */
   agentLine(text: string): void {
     this.openCallerLine = null;
-    this.lines.push(`AGENT: ${text}`);
+    this.push("agent", `AGENT: ${text}`);
   }
 
   /**
@@ -203,8 +245,7 @@ export class CallTranscriptLog {
    *
    * Returns the index of the line written, which only `amendAgentLine` needs. */
   openingLine(text: string): number {
-    this.lines.push(`AGENT: ${text}`);
-    return this.lines.length - 1;
+    return this.push("agent", `AGENT: ${text}`);
   }
 
   /** Rewrite an agent line already in the record, and close the caller turn.

@@ -12,7 +12,7 @@
  * why routing by queue makes the prompt small — nothing here has to decide
  * whether the call is optical.
  */
-import { registerTool, missing, type ToolResult } from './registry';
+import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
 // lookup_patient, resolve_location and check_open_tickets are registered by the
 // shared module. Importing it here is what puts them in the registry for this
 // queue — the same three definitions Surgery uses, not copies of them.
@@ -82,7 +82,8 @@ registerTool({
         success: true,
         classified: false,
         department_id: OPTICAL_DEPARTMENT_ID,
-        message:
+        // For the model, not the caller — `message` is what gets spoken.
+        fix:
           'This does not match one of our optical categories. That is fine — file the ' +
           'ticket with a clear description of what they asked for and leave the category ' +
           'off. Do not pick a category that nearly fits.',
@@ -447,17 +448,8 @@ registerTool({
          * the model "ask the caller again" when it simply omitted the argument
          * is what built the loop.
          */
-        return missing(
-          ['date_of_birth'],
-          'I did not catch that — may I please have the date of birth, starting with the month, then the day, then the year?',
-          dob
-            ? 'The date_of_birth you sent could not be read as a date. Say the message to the caller, '
-              + 'then call this tool again with exactly what they say next.'
-            : 'You did not send the date_of_birth argument at all — that, not the caller, is why this '
-              + 'was refused. If they have ALREADY given you a date of birth, call this tool again '
-              + 'right now with date_of_birth set to what they said, and do NOT ask them again. Only '
-              + 'say the message if they have not given it yet.',
-        );
+        const copy = dobRefusalCopy(dob);
+        return refuseDob(callSid, first, last, copy.message, copy.fix);
       }
       dobStatus = escape.status;
       console.info(dobEscapeMarker(OPTICAL_FILE_TOOL, dobStatus, callSid));

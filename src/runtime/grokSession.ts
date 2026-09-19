@@ -357,6 +357,15 @@ export class GrokVoiceSession {
   }
 
   /** Which response cycle the provider is on (see responseEpoch). */
+  /** Whether a response is open at the wire RIGHT NOW — true from
+   * `response.created` to its `response.done`. The bridge asks this when a
+   * function-call event arrives, because the follow-up it will owe must wait
+   * for the carrying response's done ONLY if that done has not already
+   * passed (v55). */
+  isResponseActive(): boolean {
+    return this.wireResponseActive;
+  }
+
   getResponseEpoch(): number {
     return this.responseEpoch;
   }
