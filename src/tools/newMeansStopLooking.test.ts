@@ -26,11 +26,12 @@ vi.mock('../services/consoleDirectory', () => ({
   lookupLocation: async () => null,
 }));
 
-const { runTool } = await import('./registry');
+const { runTool, getTool } = await import('./registry');
 await import('./sharedPatientTools');
 const { resetGateAttempts } = await import('./gateAttempts');
 const {
   notePatientStatus,
+  noteStatusOverride,
   patientStatusFor,
   readPatientStatus,
   resetPatientStatuses,
@@ -170,12 +171,24 @@ describe('the override, and why it needs its own store', () => {
     expect(out.suppressed).toBeUndefined();
   });
 
-  it('patient_status new suppresses on its own, with no transcript at all', async () => {
+  /**
+   * WITHDRAWN AT ROUND 6, and rewritten rather than deleted because the claim it
+   * used to make is the defect.
+   *
+   * This asserted that `patient_status: 'new'` suppressed the lookup on its own,
+   * with no transcript behind it — which is a suppression on the MODEL's word.
+   * Codex round 6 found what that costs: on records, where a proxy is the caller
+   * on 42% of calls, a `new` describing the CALLER suppressed the lookup for the
+   * PATIENT whose chart they rang about (P1-A), and once stored it beat every
+   * later transcript read for the rest of the call (P1-D). `existing` is now the
+   * only override there is. The round-6 block has the full argument.
+   */
+  it('patient_status new suppresses NOTHING — only the transcript can', async () => {
     const out = await lookup({
       queue: 'optical', call_sid: SID, caller_phone: '555-555-0101', patient_status: 'new',
     });
-    expect(lookupSpy).not.toHaveBeenCalled();
-    expect(out.suppressed).toBe('caller_said_new');
+    expect(lookupSpy).toHaveBeenCalledTimes(1);
+    expect(out.suppressed).toBeUndefined();
   });
 });
 
@@ -1112,7 +1125,16 @@ describe('Codex round 5 — the answer must be DECLARATIVE and uncontradicted', 
     });
   });
 
-  describe('R5-B — any negation in the turn refuses the answer', () => {
+  describe('R5-B — the answer plus a rejection is not a clean answer', () => {
+    /**
+     * REWRITTEN AT ROUND 6, not loosened. Round 5 called this rule "any
+     * negation in the turn" and implemented it as a closed negator list tested
+     * per TURN; round 6 found both halves wrong (R6-B, R6-C) and replaced the
+     * rule with "the answer must be the whole of what they said in the window".
+     * Every case below still refuses, for the better reason — the rejection is a
+     * second substantive segment — so the assertions stand and the NAME was the
+     * only thing making a claim the code no longer makes.
+     */
     it('the answer plus a rejection is not a clean answer', () => {
       for (const said of [
         "New. I don't think so.",
@@ -1140,6 +1162,174 @@ describe('Codex round 5 — the answer must be DECLARATIVE and uncontradicted', 
       // contains read and neither round-5 rule is applied to it.
       expect(readPatientStatus([EN, 'CALLER: Existing?'])).toBe('existing');
       expect(readPatientStatus([EN, 'CALLER: Not a new patient.'])).toBe('existing');
+    });
+  });
+});
+
+describe('Codex round 6 — the answer is the WHOLE of what they said, and `new` is not an override', () => {
+  /**
+   * Four P1s, all reproduced against the real reader before anything changed,
+   * all in the expensive direction — a caller who did NOT claim to be new whose
+   * record we then refuse to look for. Two of them are inside round 5's own
+   * guard; two are on the model's override, which no longer accepts `new` at
+   * all. That single narrowing closes both, and is smaller than the lane
+   * plumbing either finding suggested.
+   */
+  const EN = 'AGENT: Are you a new patient or an existing patient?';
+  const ES = 'AGENT: ¿Es usted paciente nuevo o paciente existente?';
+
+  describe('R6-B — the negator list was short, so it is GONE from this route', () => {
+    /**
+     * `NEG` carries no modals, so every one of these read `new`. Adding `can't`
+     * and `cannot` would be the thirteenth entry on a list that can always be
+     * one short — the shape of all twelve earlier P1s — so the list is removed
+     * from the `new` path instead: a rejection is a second substantive segment
+     * and that is all the reader has to notice.
+     *
+     * These are BEHAVIOURAL, deliberately: they name no list, so they keep
+     * biting however the rule is written.
+     */
+    it('a rejection the old list could not see still refuses', () => {
+      for (const said of [
+        "New. That can't be right.",
+        'New. I cannot be.',
+        "New. That couldn't be right.",
+        'New. Nope.',
+        'New. Nah.',
+        'New. Wrong.',
+        'New. Neither.',
+        'New. Scratch that.',
+      ]) expect(readPatientStatus([EN, `CALLER: ${said}`])).not.toBe('new');
+    });
+
+    it('and every alternative the old list DID carry still refuses', () => {
+      // Not a claim about the list — a claim that removing it cost nothing.
+      for (const said of [
+        'New. Not really.',
+        'New. Never mind.',
+        'New. No.',
+        "New. It isn't.",
+        "New. I don't think so.",
+      ]) expect(readPatientStatus([EN, `CALLER: ${said}`])).not.toBe('new');
+    });
+  });
+
+  describe('R6-C — the window is not a turn', () => {
+    /**
+     * A window holds every caller turn until the next agent line, and round 5
+     * tested its negation per turn — so the same words that correctly read
+     * nothing in ONE turn read `new` when the caller paused between them. My own
+     * docstring said "whole-turn" while the unit being read was the window.
+     */
+    it('a rejection in a LATER caller turn of the same window refuses', () => {
+      expect(readPatientStatus([EN, 'CALLER: New.', "CALLER: I don't think so."])).not.toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: New.', "CALLER: That can't be right."])).not.toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: New.', 'CALLER: Sorry, existing.'])).not.toBe('new');
+    });
+
+    it('and the same words in one turn refuse too — the two agree now', () => {
+      expect(readPatientStatus([EN, "CALLER: New. I don't think so."])).not.toBe('new');
+    });
+
+    it('a NEW WINDOW is still read on its own, not against the old one', () => {
+      // The agent asking again closes the window; the latest one wins, which is
+      // the reversibility this gate leans on.
+      const record = [
+        EN, 'CALLER: New.', "CALLER: I don't think so.",
+        EN, 'CALLER: New.',
+      ];
+      expect(readPatientStatus(record)).toBe('new');
+    });
+  });
+
+  describe('exactly one substantive segment — the rule, and what it costs', () => {
+    it('THE ACCEPTED COST: an answer with anything added goes unclassified', () => {
+      // Safe direction on every one: nothing suppressed, the lookup runs,
+      // LOOKUP_MISS_LIMIT bounds the asks, the ticket files. Whether to buy this
+      // coverage back is the operator's dial and cannot be measured until the
+      // question is asked in production.
+      for (const said of [
+        'New. This is my first visit.',
+        'New. I need an appointment.',
+        'New. My wife is a patient here.',
+      ]) expect(readPatientStatus([EN, `CALLER: ${said}`])).toBeUndefined();
+    });
+
+    it('pure filler does not count as a second thing', () => {
+      expect(readPatientStatus([EN, 'CALLER: New. Thanks.'])).toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: Hello? New.'])).toBe('new');
+      expect(readPatientStatus([EN, 'CALLER: Hello?', 'CALLER: New.'])).toBe('new');
+      expect(readPatientStatus([ES, 'CALLER: Hola. Nuevo.'])).toBe('new');
+    });
+
+    it('NO NEGATOR IS FILLER — the one property that list must keep', () => {
+      // FILLER_ONLY expands acceptance, so a negator smuggled into it would make
+      // "New." / "No." read as a clean answer. Every alternative of NEG, alone in
+      // its own segment, must refuse.
+      for (const negator of [
+        'not', 'never', 'no', "isn't", "aren't", "wasn't", "ain't", "don't", 'dont',
+      ]) {
+        expect(readPatientStatus([EN, 'CALLER: New.', `CALLER: ${negator}.`])).not.toBe('new');
+      }
+    });
+
+    it('the clean answers all still read, in both languages', () => {
+      for (const said of ['New.', 'New', 'Uh, new.', "I'm a new patient.", 'New patient.']) {
+        expect(readPatientStatus([EN, `CALLER: ${said}`])).toBe('new');
+      }
+      for (const said of ['Nuevo.', 'Soy paciente nuevo.', 'Soy nueva.']) {
+        expect(readPatientStatus([ES, `CALLER: ${said}`])).toBe('new');
+      }
+    });
+  });
+
+  describe('R6-A + R6-D — `existing` is the only override there is', () => {
+    /**
+     * R6-A: `patient_status` was offered to every lane, so a RECORDS agent —
+     * whose caller is a proxy on 42% of calls (2026-09-10..18, 87 of 206) —
+     * could send `new` describing the CALLER and suppress the lookup for the
+     * PATIENT whose chart they rang about. Round 5 took the QUESTION off that
+     * lane and left this door open beside it.
+     *
+     * R6-D: a stored `new` then beat every later transcript read for the rest of
+     * the call, so a caller correcting themselves could not get out — the escape
+     * hatch this store exists to BE, locked from the inside.
+     *
+     * Both close by narrowing: the store holds a timestamp, `existing` is the
+     * only value, and a `new` the model asserts changes nothing anywhere.
+     */
+    it('a model-asserted `new` suppresses NOTHING, on any lane', async () => {
+      const out = await lookup({
+        queue: 'optical',
+        call_sid: SID,
+        caller_phone: '555-555-0101',
+        patient_status: 'new',
+      });
+      expect(out.suppressed).toBeUndefined();
+      expect(lookupSpy).toHaveBeenCalledTimes(1);
+      expect(patientStatusFor(SID)).toBeUndefined();
+    });
+
+    it('and it cannot outlive a transcript that says existing', () => {
+      // The pre-round-6 store would answer `new` here for the whole TTL.
+      noteStatusOverride(SID, 'new' as 'existing');
+      notePatientStatus(SID, [EN, 'CALLER: Existing.']);
+      expect(patientStatusFor(SID)).toBe('existing');
+    });
+
+    it('while the `existing` override stays sticky — the cheap direction', () => {
+      // Sticky is right here and indefensible the other way round: a needless
+      // lookup costs one tool call, a needless suppression costs a record.
+      noteStatusOverride(SID, 'existing');
+      notePatientStatus(SID, [EN, 'CALLER: New.']);
+      expect(patientStatusFor(SID)).toBe('existing');
+    });
+
+    it('the schema offers the model one value and says not to report `new`', () => {
+      const def = getTool('lookup_patient')!;
+      const field = def.input_schema.properties.patient_status as Record<string, unknown>;
+      expect(field.enum).toEqual(['existing']);
+      expect(String(field.description)).toMatch(/never send this to report that somebody is new/i);
     });
   });
 });

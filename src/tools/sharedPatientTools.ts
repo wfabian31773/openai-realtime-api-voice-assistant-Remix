@@ -30,7 +30,6 @@
  */
 import { registerTool, missing, type MissingFields, type ToolResult } from './registry';
 import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
-import type { PatientStatus } from './spokenPatientStatus';
 
 /** Which queue is asking. Injected as call context, never a model argument. */
 export type ToolQueue = 'optical' | 'surgery';
@@ -167,13 +166,24 @@ registerTool({
        * suppression's own `fix` tells the model to send `existing` here to get
        * it. Send it when the CALLER has said which they are — not as a guess.
        */
+      /**
+       * `existing` IS THE ONLY VALUE — Codex round 6, P1-A and P1-D.
+       *
+       * This field is the WAY BACK and nothing else. It used to accept `new`
+       * too, which gave the model a way to suppress a lookup on its own word:
+       * on records — where 42% of callers are a proxy for the patient — a `new`
+       * describing the CALLER suppressed the lookup for the PATIENT whose chart
+       * they rang about, and once stored it beat every later transcript read for
+       * the rest of the call. Sending `new` never bought anything the transcript
+       * did not already say. `noteStatusOverride` has the full argument.
+       */
       patient_status: {
         type: 'string',
-        enum: ['new', 'existing'],
+        enum: ['existing'],
         description:
-          'Only when the caller has told you: "new" if this is their first contact with us, ' +
-          '"existing" if they have been seen here before. Sending "existing" lifts a suppression ' +
-          'an earlier "new" put in place.',
+          'Send "existing" ONLY when the caller has told you they have been seen here before. ' +
+          'It lifts a suppression an earlier "new" put in place. There is no other value: ' +
+          'never send this to report that somebody is new.',
         askAs: 'Are you a new patient or an existing patient?',
       },
     },
@@ -240,9 +250,11 @@ registerTool({
      */
     const { patientStatusFor, noteStatusOverride } = await import('./spokenPatientStatus');
     const { verifiedIdentityFor } = await import('./verifiedIdentity');
-    const statedStatus = str(input.patient_status) as PatientStatus | '';
-    if (statedStatus === 'new' || statedStatus === 'existing') {
-      noteStatusOverride(str(input.call_sid), statedStatus);
+    // Only the way back is honoured. A model that sends `new` against the
+    // schema's single value changes nothing — the store cannot hold it and this
+    // branch does not fire. See `noteStatusOverride`.
+    if (str(input.patient_status) === 'existing') {
+      noteStatusOverride(str(input.call_sid), 'existing');
     }
     const status = patientStatusFor(str(input.call_sid));
     if (status === 'new' && !verifiedIdentityFor(str(input.call_sid))) {

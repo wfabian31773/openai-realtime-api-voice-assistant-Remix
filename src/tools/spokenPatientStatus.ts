@@ -489,29 +489,64 @@ const ANSWER_IS_NEW: readonly RegExp[] = [
 ];
 
 /**
- * ANY negation in the turn refuses the answer — Codex round 5, the second half.
+ * PURE ACKNOWLEDGEMENT — a segment that carries no status content at all.
  *
- * The interrogative rule alone does not close *"New. I don't think so."*, and
- * chasing rejection phrases would be a cue list, which is what the twelve
- * earlier P1s came out of. So the rule is mechanical and whole-turn: a caller
- * who says the answer AND negates something in the same breath is not answering
- * cleanly, and this gate only ever acts on a clean answer.
- *
- * WHAT IT COSTS, stated: *"New. I've never been there before."* now goes
- * UNCLASSIFIED, because it carries "never". That case was supported from round 3
- * until now. Nothing is suppressed on it — the lookup runs, `LOOKUP_MISS_LIMIT`
- * bounds the asks, the ticket files — and the alternative is a list of rejection
- * phrases that the next round finds the gap in.
+ * NOT A NEGATOR AMONG THEM, and that is the one property this list has to keep:
+ * it EXPANDS acceptance, so a negator smuggled in here would make
+ * *"New."* / *"No."* read as a clean answer. `noNegatorIsFiller` in
+ * `newMeansStopLooking.test.ts` walks `NEG`'s own alternatives against it and
+ * goes red if one ever appears.
  */
-const TURN_CARRIES_A_NEGATION = new RegExp(`\\b${NEG}\\b`);
+const FILLER_WORD = String.raw`(?:uh|um|er|ah|oh|well|so|yeah|yes|yep|yup|okay|ok|sure|right|thanks|thank\s+you|please|hello|hi|hey|eh|este|pues|bueno|sip|hola|gracias)`;
+const FILLER_ONLY = new RegExp(`^(?:${FILLER_WORD})(?:[,\\s]+(?:${FILLER_WORD}))*$`);
 
+/**
+ * THE ANSWER MUST BE THE WHOLE OF WHAT THEY SAID IN THE WINDOW — Codex round 6,
+ * P1-B and P1-C together, and it retires the negator list from this route.
+ *
+ * Round 5 asked "does the turn contain a negation?", which was wrong twice over
+ * and Codex found both halves:
+ *
+ *  - **P1-B, the list was short.** `NEG` carries no modals, so *"New. That
+ *    can't be right."*, *"New. I cannot be."*, *"New. That couldn't be right."*
+ *    and *"New. Nope."* all read `new` — four rejections, four suppressed
+ *    records. Adding `can't` and `cannot` is the thirteenth entry on a list that
+ *    can always be one short, which is the shape of every P1 this reader has
+ *    produced. **So the list is not extended, it is removed from this path.**
+ *  - **P1-C, the scope was one turn.** A window holds every caller turn until
+ *    the next agent line, and the negation was tested per turn, so
+ *    `CALLER: New.` followed by `CALLER: I don't think so.` read `new` while the
+ *    same words in ONE turn correctly read nothing. My own docstring said
+ *    "whole-turn" and the window is not a turn.
+ *
+ * THE RULE THAT REPLACES BOTH: a caller answering a funnel question says the
+ * answer and nothing else. So the window's caller side must contain exactly ONE
+ * substantive segment, and that segment must BE the answer. A rejection, a
+ * correction, a qualifier or a second sentence of any kind is a second segment
+ * and refuses it — with no enumeration of what rejection sounds like, which is
+ * the whole point (RULE ZERO 2c: read the shape the question produces, and
+ * nothing else).
+ *
+ * WHAT IT COSTS, stated rather than buried: a caller who answers AND adds
+ * something in the same window — *"New, and I need an appointment."* as two
+ * sentences, *"New. This is my first visit."* — goes UNCLASSIFIED. So does
+ * round 5's *"New. I've never been there before."*, which that round had
+ * already withdrawn. Every one of those is the SAFE direction: nothing is
+ * suppressed, the lookup runs, `LOOKUP_MISS_LIMIT` bounds the asks and the
+ * ticket files. Whether to buy that coverage back is the operator's dial and it
+ * cannot be measured yet, because the question is not asked in production.
+ *
+ * The cheap direction is untouched: the three `existing` layers still read
+ * prose, still use `NEG`, and their failure costs one wasted tool call.
+ */
 function answerSentenceIsNew(turns: readonly string[]): boolean {
-  return turns.some((turn) => {
-    if (TURN_CARRIES_A_NEGATION.test(turn)) return false;
-    return sentences(turn).some(
-      (seg) => !seg.interrogative && ANSWER_IS_NEW.some((re) => re.test(seg.text)),
-    );
-  });
+  const substantive = turns
+    .flatMap((turn) => sentences(turn))
+    .filter((seg) => !FILLER_ONLY.test(seg.text));
+  if (substantive.length !== 1) return false;
+  const [only] = substantive;
+  if (only.interrogative) return false;
+  return ANSWER_IS_NEW.some((re) => re.test(only.text));
 }
 
 /**
@@ -616,8 +651,12 @@ const heard = new Map<string, Entry>();
  * The model's overrides, kept apart from the transcript's reading. Declared
  * here beside `heard` rather than next to its writer, so neither store can be
  * referenced before it exists. `noteStatusOverride` says why they are two.
+ *
+ * IT HOLDS A TIMESTAMP AND NOT A STATUS — Codex round 6, P1-A and P1-D. The
+ * only override there is means `existing`, so there is nowhere in this map to
+ * put a `new` the model asserted. See `noteStatusOverride`.
  */
-const overridden = new Map<string, Entry>();
+const overridden = new Map<string, { at: number }>();
 
 /** Longer than any call, short enough that the map cannot become a leak. */
 const TTL_MS = 30 * 60_000;
@@ -694,10 +733,11 @@ export function notePatientStatus(callSid: string | undefined, lines: readonly s
 export function patientStatusFor(callSid: string | undefined): PatientStatus | undefined {
   if (!isTwilioCallSid(callSid)) return undefined;
   const now = Date.now();
-  // The model's override wins, and it is the only thing that can. See
-  // `noteStatusOverride` for why it cannot live in the same map.
+  // The model's override wins, and it is the only thing that can. It is always
+  // `existing` — see `noteStatusOverride` for why, and for why it cannot live
+  // in the same map.
   const override = overridden.get(callSid);
-  if (override && now - override.at <= TTL_MS) return override.status;
+  if (override && now - override.at <= TTL_MS) return 'existing';
   const entry = heard.get(callSid);
   if (!entry) return undefined;
   if (now - entry.at > TTL_MS) return undefined;
@@ -719,13 +759,38 @@ export function patientStatusFor(callSid: string | undefined): PatientStatus | u
  * the two directions do not cost the same: a lookup that misses costs one tool
  * call, while a suppression that should not have happened loses a record on the
  * lanes where 63% of found-nobody callers are in `patients_master`.
+ *
+ * AND `existing` IS THE ONLY THING IT CAN SAY — Codex round 6, two P1s closed by
+ * one narrowing, and the sentence above is the argument for it. Sticky is right
+ * for the CHEAP direction and indefensible for the expensive one, and round 5
+ * left the parameter open to both:
+ *
+ *  - **P1-A.** `lookup_patient` offered `patient_status` to every lane, so a
+ *    records agent — whose caller is an attorney, a health plan or a relative on
+ *    42% of calls — could send `new` describing the CALLER and suppress the
+ *    lookup for the PATIENT whose chart they rang about. Round 5 took the
+ *    QUESTION off that lane and left this door open beside it. Keying the gate
+ *    on the lane would need a lane the tool does not have (`ToolQueue` is
+ *    `optical | surgery`, and tech — which does ask — injects none), so the
+ *    narrowing is better than the plumbing.
+ *  - **P1-D.** A `new` override was sticky for the whole TTL and beat every
+ *    later transcript read, so a caller who corrected themselves to existing
+ *    could not get out: the escape hatch this store exists to BE, locked from
+ *    the inside.
+ *
+ * Nothing is lost, because a `new` override never bought anything. The
+ * transcript already says `new` when the caller said it, and when they did not,
+ * a model asserting it is the unverified suppression this gate must never make.
+ * The suppression's own `fix` has only ever named `existing`.
  */
-export function noteStatusOverride(callSid: string | undefined, status: PatientStatus): void {
+export function noteStatusOverride(callSid: string | undefined, status: 'existing'): void {
   if (!isTwilioCallSid(callSid)) return;
+  // Belt for the type's braces: a JavaScript caller cannot smuggle `new` in.
+  if (status !== 'existing') return;
   const now = Date.now();
   sweepOverrides(now);
   overridden.delete(callSid);
-  overridden.set(callSid, { status, at: now });
+  overridden.set(callSid, { at: now });
 }
 
 /** Tests only. */
