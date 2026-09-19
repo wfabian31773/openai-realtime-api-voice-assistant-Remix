@@ -505,3 +505,137 @@ describe("Codex's three P1s on this PR — all reproduced, all fixed", () => {
     });
   });
 });
+
+describe("Codex round 2 — three more P1s, all the same wrong direction", () => {
+  /**
+   * Every one of the five cases below returned `new` for a caller who is an
+   * EXISTING patient, so every one suppressed a real record's lookup. That is
+   * the only direction on this gate that costs anybody anything, and it is why
+   * all three were taken without weighing a base rate.
+   */
+  const EN = 'AGENT: Are you a new patient or an existing patient?';
+  const ES = 'AGENT: ¿Es usted paciente nuevo o paciente existente?';
+
+  describe('R2-A — a bare pair with a noun BEFORE it is not a re-ask', () => {
+    /**
+     * Round 1 admitted the bare re-ask clause-finally, which closed the noun
+     * AFTER the pair and left the noun BEFORE it wide open.
+     */
+    it('"Is the prescription new or existing?" opens no window', () => {
+      expect(
+        readPatientStatus(['AGENT: Is the prescription new or existing?', 'CALLER: New.']),
+      ).toBeUndefined();
+    });
+
+    it('nor does it when the question is longer', () => {
+      expect(
+        readPatientStatus(['AGENT: Do you need the prescription new or existing?', 'CALLER: New.']),
+      ).toBeUndefined();
+    });
+
+    it('a bare pair cannot START a status conversation, only continue one', () => {
+      // Guard 1: no qualified window has opened, so this is not a re-ask.
+      expect(
+        readPatientStatus(['AGENT: Sorry — new or existing?', 'CALLER: New.']),
+      ).toBeUndefined();
+    });
+
+    it('and a bare WORD does not answer a re-ask window', () => {
+      // Guard 2, independent of guard 1: even after a qualified window, the
+      // bare "New." an unrelated alternation draws is not an answer.
+      expect(
+        readPatientStatus([
+          EN, 'CALLER: Existing.',
+          'AGENT: Is the prescription new or existing?', 'CALLER: New.',
+        ]),
+      ).toBe('existing');
+    });
+
+    it('while a real correction in a re-ask window still lands', () => {
+      expect(
+        readPatientStatus([
+          EN, 'CALLER: New.',
+          'AGENT: Sorry — new or existing?', 'CALLER: Existing, I came in last year.',
+        ]),
+      ).toBe('existing');
+    });
+  });
+
+  describe('R2-B — a Spanish negated-new answer is EXISTING', () => {
+    /**
+     * `no soy paciente` had been written as a bare prefix in the
+     * negated-EXISTING list, so it matched "no soy paciente NUEVO" and returned
+     * "new" — the exact inversion the English cues were careful about, in the
+     * other language.
+     */
+    it('"No soy paciente nuevo; soy paciente existente" is existing', () => {
+      expect(
+        readPatientStatus([ES, 'CALLER: No soy paciente nuevo; soy paciente existente.']),
+      ).toBe('existing');
+    });
+
+    it('"No soy nuevo" is existing', () => {
+      expect(readPatientStatus([ES, 'CALLER: No soy nuevo.'])).toBe('existing');
+    });
+
+    it('but a bare "No soy paciente" is still NEW', () => {
+      // The prefix is only an existing claim when "nuevo" follows it.
+      expect(readPatientStatus([ES, 'CALLER: No soy paciente.'])).toBe('new');
+    });
+  });
+
+  describe('R2-C — an explicit claim beats a qualifying clause', () => {
+    /**
+     * The broad `never been` cue outranked the caller's own direct answer, so a
+     * patient saying "Existing, but I've never been to THIS office" was
+     * classified new. The governance rule decides it: the negation does not
+     * govern "existing" there, so the claim stands.
+     */
+    it('"Existing, but I\'ve never been to this office" is existing', () => {
+      expect(
+        readPatientStatus([EN, "CALLER: Existing, but I've never been to this office."]),
+      ).toBe('existing');
+    });
+
+    it('the Spanish shape too', () => {
+      expect(
+        readPatientStatus([
+          ES,
+          'CALLER: Soy paciente existente, pero nunca he ido a esta oficina.',
+        ]),
+      ).toBe('existing');
+    });
+
+    it('and the negation STILL wins when it governs the claim', () => {
+      // The case a whole-turn "explicit beats negation" rule would break. Both
+      // sentences contain "existing" and a negator; only one is an existing
+      // claim.
+      expect(readPatientStatus([EN, "CALLER: I'm not an existing patient."])).toBe('new');
+      expect(readPatientStatus([ES, 'CALLER: No soy paciente existente.'])).toBe('new');
+    });
+
+    it('a genuine never-been-a-patient is still new', () => {
+      expect(readPatientStatus([EN, "CALLER: I've never been a patient."])).toBe('new');
+      expect(readPatientStatus([EN, "CALLER: I have never been seen there."])).toBe('new');
+    });
+  });
+
+  describe('through runTool — the gate follows the reader', () => {
+    it('the qualified Spanish existing caller is looked up', async () => {
+      notePatientStatus(SID, [ES, 'CALLER: No soy paciente nuevo; soy paciente existente.']);
+      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      expect(lookupSpy).toHaveBeenCalledTimes(1);
+      expect(out.suppressed).toBeUndefined();
+    });
+
+    it('the qualified-then-unrelated-alternation caller is looked up', async () => {
+      notePatientStatus(SID, [
+        EN, 'CALLER: Existing.',
+        'AGENT: Is the prescription new or existing?', 'CALLER: New.',
+      ]);
+      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      expect(lookupSpy).toHaveBeenCalledTimes(1);
+      expect(out.suppressed).toBeUndefined();
+    });
+  });
+});

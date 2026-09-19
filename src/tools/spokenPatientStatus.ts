@@ -159,22 +159,33 @@ const STATUS_QUESTION: readonly RegExp[] = [
   /\bpaciente\s+nuev[oa]\b[^.?!]{0,30}\bo\b[^.?!]{0,25}\bexistente\b/,
   /\bnuev[oa]\b[^.?!]{0,20}\bo\b[^.?!]{0,25}\bpaciente\s+existente\b/,
   /\bpaciente\s+existente\b[^.?!]{0,30}\bo\b[^.?!]{0,25}\bnuev[oa]\b/,
-  /**
-   * THE BARE RE-ASK — "Sorry, new or existing?" — and it is here because
-   * narrowing the window for that P1 took it away, which broke the
-   * REVERSIBILITY this whole gate leans on. A model re-asking after a muddled
-   * answer shortens the question, and if that opens no window the caller's
-   * CORRECTION never lands.
-   *
-   * SAFE ONLY BECAUSE THE ALTERNATION MUST END THE CLAUSE. Nothing but
-   * punctuation may follow, so the noun that made the P1 dangerous cannot be
-   * there:
-   *   "new or existing?"                       -> a window (nothing follows)
-   *   "a new or existing FRAME?"               -> no window (a noun follows)
-   *   "a new prescription or an existing one?" -> no window (a noun intervenes)
-   * Both halves matter. Requiring only that the pair be BARE would still admit
-   * "new or existing frame", where the shared noun sits after the pair.
-   */
+];
+
+/**
+ * THE BARE RE-ASK — "Sorry, new or existing?" — and it is a SEPARATE, WEAKER
+ * window rather than another entry above, which is Codex round 2's P1.
+ *
+ * Round 1 narrowed the window to alternations naming the patient, and that
+ * killed the bare re-ask — the correction path this gate's reversibility leans
+ * on. Admitting it back as a clause-final pattern reopened the hole from the
+ * OTHER side: nothing was required BEFORE the pair, so *"Is the prescription
+ * new or existing?"* still opened a window and a bare "New." still suppressed a
+ * real patient's lookup.
+ *
+ * So a bare pair is a re-ask only under TWO conditions, and they are
+ * independent rather than belt-and-braces theatre — each closes cases the other
+ * does not:
+ *
+ *  1. **A QUALIFIED window must already have opened on this call.** A bare pair
+ *     cannot START a status conversation; it can only continue one. That is
+ *     what makes it a re-ask rather than a guess.
+ *  2. **A bare WORD does not answer it.** Inside a re-ask window only an
+ *     EXPLICIT cue counts, so "New." — which is what an unrelated alternation
+ *     draws — reads as no answer at all, while "Existing, I came in last year"
+ *     still lands. This is the one that closes the noun-before-the-pair case
+ *     even when condition 1 happens to be satisfied.
+ */
+const BARE_REASK: readonly RegExp[] = [
   /\bnew\s+or\s+(an?\s+)?existing\s*[.?!]*$/,
   /\bexisting\s+or\s+(an?\s+)?new\s*[.?!]*$/,
   /\bnuev[oa]\s+o\s+existente\s*[.?!]*$/,
@@ -190,8 +201,13 @@ const STATUS_QUESTION: readonly RegExp[] = [
  * "I have you as a new patient, thank you" names the subject too, and it is not
  * a question. `STATUS_QUESTION` carries the rest of the reasoning.
  */
-function opensStatusWindow(agent: string): boolean {
-  return STATUS_QUESTION.some((re) => re.test(agent));
+type WindowKind = 'qualified' | 'reask';
+
+function opensStatusWindow(agent: string, seenQualified: boolean): WindowKind | null {
+  if (STATUS_QUESTION.some((re) => re.test(agent))) return 'qualified';
+  // A bare pair continues a status conversation; it cannot start one.
+  if (seenQualified && BARE_REASK.some((re) => re.test(agent))) return 'reask';
+  return null;
 }
 
 /**
@@ -225,22 +241,43 @@ const NEW_TAKES_AN_OBJECT_ES =
  * "new" that sits between, and `not an existing` does not appear in it.
  */
 const NOT_AN_EXISTING_PATIENT = [
-  /\bnever\s+(been|was|come|came|visited)\b/,
+  /\bnever\s+(been|was)\s+(an?\s+)?patient\b/,
+  /\bnever\s+been\s+seen\b/,
   /\bnot\s+an?\s+existing\b/,
   /\bnot\s+a\s+patient\b/,
-  /\b(haven't|have\s+not|hadn't|had\s+not)\s+been\b/,
+  /\b(haven't|have\s+not|hadn't|had\s+not)\s+been\s+(an?\s+)?patient\b/,
   /\bfirst\s+time\b/,
-  // Spanish.
+  /\bnever\s+been\s+(there|here)\b/,
+  // Spanish. `no soy paciente` is deliberately NOT here as a bare prefix — see
+  // NEGATED_NEW, because "no soy paciente NUEVO" is an EXISTING caller.
   /\bprimera\s+vez\b/,
-  /\bnunca\b/,
-  /\bno\s+soy\s+paciente\b/,
-  /\bno\s+he\s+(venido|estado|ido)\b/,
+  /\bnunca\s+he\s+(venido|estado|sido)\s*(paciente)?\s*[.?!]*$/,
+  /\bnunca\s+he\s+sido\s+paciente\b/,
+  /\bno\s+soy\s+paciente\s*[.?!]*$/,
+  // Denied being an EXISTING patient, with the Spanish verb in between.
+  /\bno\s+(soy|es|era|fui)\s+(un[oa]?\s+)?(paciente\s+)?existente\b/,
+];
+
+/**
+ * SAID THEY ARE NOT A *NEW* PATIENT — which means they are EXISTING, and this
+ * list is read before everything else.
+ *
+ * Every entry contains the word "new", so any reader that reaches for "new"
+ * earlier gets these backwards. Round 1 caught the English half; Codex round 2
+ * caught the Spanish, where `no soy paciente` had been written as a bare prefix
+ * in the negated-EXISTING list and so answered "new" to *"No soy paciente
+ * nuevo; soy paciente existente"* — an existing caller, suppressed.
+ */
+const NEGATED_NEW = [
+  /\bnot\s+(an?\s+)?new\b/,
+  /\bno\s+soy\s+paciente\s+nuev[oa]\b/,
+  /\bno\s+es\s+paciente\s+nuev[oa]\b/,
+  /\bno\s+soy\s+nuev[oa]\b/,
 ];
 
 /** Said they have been here before. */
 const EXISTING_CUES = [
   /\bexisting\b/,
-  /\bnot\s+(a\s+)?new\b/,
   /\bi'?m\s+(an?\s+)?(current|established|returning|old)\b/,
   /\bi'?ve\s+been\s+(there|here|seen|coming|going)\b/,
   /\bi\s+(am|'m)\s+already\s+a\s+patient\b/,
@@ -269,33 +306,83 @@ const NEW_CUES = [
 export type PatientStatus = 'new' | 'existing';
 
 /**
+ * STRIP THE OCCURRENCES A NEGATION GOVERNS, so what is left is a real claim.
+ *
+ * This is the governance rule this repo already paid for once. The grader's
+ * `connect you` check was written THREE times because a narrative-wide negation
+ * suppressed the affirmative half of "I can't transfer you, BUT I can connect
+ * you with the team"; the rule that finally held is that a negation refuses a
+ * phrase only when it GOVERNS it. Codex round 2 is the same lesson on this
+ * field, arriving from the other side:
+ *
+ *   "I'm not an existing patient."                  -> the negation GOVERNS
+ *                                                      "existing", so it is not
+ *                                                      an existing claim
+ *   "Existing, but I've never been to this office." -> it does not, so it IS
+ *
+ * A whole-turn test cannot separate those; both contain "existing" and a
+ * negator. Stripping the governed occurrences and asking what remains can.
+ */
+function ungoverned(said: string, word: RegExp): boolean {
+  const stripped = said
+    // English: the negator sits directly in front of the word.
+    .replace(/\b(not|never|no|isn't|aren't|wasn't)\s+(an?\s+)?(new|existing)\b/g, ' ')
+    /**
+     * SPANISH PUTS THE VERB IN BETWEEN — "no SOY PACIENTE existente" — so the
+     * English shape cannot reach the word it governs. This was caught by the
+     * round-2 test failing on its own Spanish case, not by review: the English
+     * assertion passed and the Spanish one returned "existing" for a caller
+     * who had just denied being an existing patient.
+     */
+    .replace(
+      /\bno\s+(soy|es|era|fui|somos|son)\s+(un[oa]?\s+)?(paciente\s+)?(nuev[oa]s?|existente)\b/g,
+      ' ',
+    )
+    .replace(/\b(no|nunca)\s+(un[oa]?\s+)?(nuev[oa]s?|existente)\b/g, ' ');
+  return word.test(stripped);
+}
+
+const EXPLICIT_EXISTING = /\b(existing|existente)\b/;
+const EXPLICIT_NEW = /\b(new\s+patient|paciente\s+nuev[oa])\b/;
+
+/**
  * Read one window's caller turns.
  *
- * ORDER IS LOAD-BEARING IN BOTH DIRECTIONS, and it took a Codex P1 to get the
- * second one right.
+ * ORDER IS LOAD-BEARING IN THREE PLACES NOW, and each one cost a Codex P1.
  *
- * Existing is checked before the general new cues, because every existing cue
- * containing the word "new" is a NEGATION of it — "not a new patient", "I'm not
- * new" — and a new-first reader classifies those backwards, which loses a real
- * patient's record.
+ *  1. **A NEGATED NEW CLAIM FIRST.** "Not a new patient", "I'm not new", "no soy
+ *     paciente nuevo" are all EXISTING, and every one of them contains the word
+ *     "new", so anything that reads "new" earlier gets them backwards. Round 2
+ *     found the Spanish half of this: `no soy paciente` matched the
+ *     negated-EXISTING list and returned "new" for a caller who had just said
+ *     *"No soy paciente nuevo; soy paciente existente"*.
+ *  2. **AN EXPLICIT EXISTING CLAIM BEATS A QUALIFYING CLAUSE.** Round 2 again:
+ *     *"Existing, but I've never been to this office"* hit the broad `never
+ *     been` cue and returned "new", suppressing a real patient. The direct
+ *     answer to the question outranks a remark about one office — but only when
+ *     no negation governs it, which is what `ungoverned` decides.
+ *  3. **A NEGATED EXISTING CLAIM BEFORE THE BROAD EXISTING PROSE.** Round 1:
+ *     "I've never been a patient" contains "been a patient".
  *
- * But the NEGATION OF EXISTING must come before existing, for the mirror
- * reason: "I've never been a patient" contains "been a patient". Specific
- * negations first, then the broad claims they negate, then the bare word.
+ * Then the explicit new claim, then the prose either way, and the BARE WORD
+ * last and only in a qualified window — a bare "new" is what an unrelated
+ * alternation draws, so a re-ask window does not accept one.
  */
-function readWindow(turns: readonly string[]): PatientStatus | undefined {
+function readWindow(turns: readonly string[], kind: WindowKind): PatientStatus | undefined {
   const said = turns.join(' ');
   if (!said) return undefined;
-  // The specific negation of "existing" comes FIRST — see
-  // NOT_AN_EXISTING_PATIENT for the inversion this ordering fixes.
+  if (NEGATED_NEW.some((re) => re.test(said))) return 'existing';
+  if (ungoverned(said, EXPLICIT_EXISTING)) return 'existing';
   if (NOT_AN_EXISTING_PATIENT.some((re) => re.test(said))) return 'new';
+  if (ungoverned(said, EXPLICIT_NEW)) return 'new';
   if (EXISTING_CUES.some((re) => re.test(said))) return 'existing';
   if (NEW_CUES.some((re) => re.test(said))) return 'new';
   /**
-   * A bare "new" is an answer only when it is not describing something. The
-   * object test is what keeps "I need new glasses", said in answer to the
-   * question, from reading as the answer.
+   * A bare word is an answer only when it is not describing something, and only
+   * in a window the patient question itself opened. `kind === 'reask'` is the
+   * weaker window (see BARE_REASK) and deliberately refuses bare words.
    */
+  if (kind !== 'qualified') return undefined;
   if (/\bnew\b/.test(said) && !NEW_TAKES_AN_OBJECT.test(said)) return 'new';
   if (/\bnuev[oa]s?\b/.test(said) && !NEW_TAKES_AN_OBJECT_ES.test(said)) return 'new';
   return undefined;
@@ -308,28 +395,33 @@ function readWindow(turns: readonly string[]): PatientStatus | undefined {
  * themselves gets the corrected answer, and a mis-heard first answer is not
  * permanent. A window whose turns say nothing either way is skipped rather than
  * clearing the earlier answer — silence is not a correction.
+ *
+ * `seenQualified` is why this cannot be a pure per-line function: a bare pair is
+ * a re-ask only AFTER the patient question has been asked once on this call.
  */
 export function readPatientStatus(lines: readonly string[]): PatientStatus | undefined {
   let answer: PatientStatus | undefined;
-  let open = false;
+  let kind: WindowKind | null = null;
+  let seenQualified = false;
   let turns: string[] = [];
   const close = () => {
-    if (open) {
-      const read = readWindow(turns);
+    if (kind) {
+      const read = readWindow(turns, kind);
       if (read) answer = read;
     }
-    open = false;
+    kind = null;
     turns = [];
   };
   for (const line of lines) {
     const agent = agentLine(line);
     if (agent !== null) {
       close();
-      if (opensStatusWindow(agent)) open = true;
+      kind = opensStatusWindow(agent, seenQualified);
+      if (kind === 'qualified') seenQualified = true;
       continue;
     }
     const caller = callerLine(line);
-    if (caller !== null && open) turns.push(caller);
+    if (caller !== null && kind) turns.push(caller);
   }
   close();
   return answer;
