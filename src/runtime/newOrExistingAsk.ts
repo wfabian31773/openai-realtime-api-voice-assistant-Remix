@@ -95,7 +95,19 @@
  * is a new question on a live intake, which is the operator's call rather than
  * a review's.
  */
-const LANES_THAT_ASK = new Set(['optical', 'surgery', 'tech']);
+/**
+ * The lanes that ask the question — and therefore the ONLY lanes whose
+ * transcript may be read for its answer.
+ *
+ * EXPORTED FOR `sharedPatientTools.ts`, Codex round 7's second P1: the reader
+ * was lane-blind, so a window opened by a records agent improvising the question
+ * let a PROXY's "New." — describing themselves — suppress the lookup for the
+ * PATIENT whose chart they rang about. Round 5 took the ask off that lane and
+ * round 6 took `new` off the override; the READER still read every lane. One
+ * table, imported by both, because two copies of a lane list is the
+ * `explicitAsk.ts` drift that cost the operator his own transfer.
+ */
+export const LANES_THAT_ASK: ReadonlySet<string> = new Set(['optical', 'surgery', 'tech']);
 
 export const NEW_OR_EXISTING_ASK =
   ' Before you try to identify anybody — before lookup_patient, before asking ' +

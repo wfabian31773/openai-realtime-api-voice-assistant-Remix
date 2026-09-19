@@ -278,6 +278,9 @@ export async function createTechAgent(
         */
         call_sid: metadata.callSid,
         caller_phone: metadata.callerPhone,
+        /** Which lane is asking. Only a lane in `LANES_THAT_ASK` may have the
+         * caller's new-or-existing answer read back to it — Codex round 7. */
+        lane: 'tech',
         dialed_number: metadata.dialedNumber,
       },
       {

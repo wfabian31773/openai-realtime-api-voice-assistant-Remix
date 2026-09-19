@@ -281,6 +281,9 @@ export async function createOpticalAgent(
       */
       call_sid: metadata.callSid,
       caller_phone: metadata.callerPhone,
+      /** Which lane is asking. Only a lane in `LANES_THAT_ASK` may have the
+       * caller's new-or-existing answer read back to it — Codex round 7. */
+      lane: 'optical',
       dialed_number: metadata.dialedNumber,
       // The three shared patient tools serve both queues now. This is what
       // tells them a surgery centre is the WRONG kind of place for this call —

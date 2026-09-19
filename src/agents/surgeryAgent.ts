@@ -300,6 +300,9 @@ export async function createSurgeryAgent(
       */
       call_sid: metadata.callSid,
       caller_phone: metadata.callerPhone,
+      /** Which lane is asking. Only a lane in `LANES_THAT_ASK` may have the
+       * caller's new-or-existing answer read back to it — Codex round 7. */
+      lane: 'surgery',
       dialed_number: metadata.dialedNumber,
       // Tells the shared patient tools that a surgery centre is a CORRECT place
       // for this call. Injected as context, so it is not a schema field and the

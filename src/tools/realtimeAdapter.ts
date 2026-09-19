@@ -12,7 +12,7 @@
  * platform calls over HTTP are the same code path.
  */
 import { tool } from '@openai/agents/realtime';
-import { getTool, runTool } from './registry';
+import { getTool, runTool, type ToolDefinition } from './registry';
 import { recordingExecute } from '../services/toolTimeline';
 
 /**
@@ -30,6 +30,44 @@ export interface ToolTelemetry {
   readonly callLogId?: string;
   /** The queue, so a call's tools can be attributed to the line that took it. */
   agentSlug: string;
+}
+
+/**
+ * House metadata that must never reach the model — Codex round 7, P1-B's other
+ * half.
+ *
+ * `askAs` is the sentence `validateInput` speaks when a REQUIRED field is
+ * absent; it is a contract between the tool and the agent's mouth, not part of
+ * the JSON Schema. `parameters` used to spread `input_schema` whole, so every
+ * `askAs` in the library travelled to the model as an extra property on the
+ * field — documentation it can read and act on.
+ *
+ * THE CASE THAT FOUND IT: `lookup_patient.patient_status` carries
+ * *"Are you a new patient or an existing patient?"*, and that question reached
+ * the RECORDS model, which round 5 deliberately stopped asking it because its
+ * caller is a proxy on 42% of calls. A records agent nudged into asking it opens
+ * a status window in which a proxy's "New." — describing themselves — suppresses
+ * the lookup for the PATIENT whose chart they rang about.
+ *
+ * Stripped HERE rather than at that one field, because the house convention is
+ * that every field HAS an `askAs` (`sharedPatientTools.test.ts`) — so the field
+ * was right and the transport was wrong, and fixing the transport closes the
+ * leak for every tool at once. Only the properties are rewritten; nothing else
+ * about the schema moves.
+ */
+const INTERNAL_PROPERTY_KEYS = ['askAs'] as const;
+
+export function stripInternalKeys(
+  schema: ToolDefinition['input_schema'],
+): ToolDefinition['input_schema'] {
+  const properties = Object.fromEntries(
+    Object.entries(schema.properties ?? {}).map(([field, def]) => {
+      const kept = { ...(def as Record<string, unknown>) };
+      for (const k of INTERNAL_PROPERTY_KEYS) delete kept[k];
+      return [field, kept];
+    }),
+  );
+  return { ...schema, properties } as ToolDefinition['input_schema'];
 }
 
 /**
@@ -115,7 +153,7 @@ export function realtimeToolsFor(
       // instead of hearing that the system is broken. That refusal contract is
       // the whole point of the library and it was unreachable.
       parameters: {
-        ...def.input_schema,
+        ...stripInternalKeys(def.input_schema),
         // Strict-adjacent hygiene, independent of the strict flag: never let a
         // model invent a field the handler will silently ignore.
         additionalProperties: false,

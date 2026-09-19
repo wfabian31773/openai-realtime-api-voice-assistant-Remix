@@ -62,7 +62,7 @@ beforeEach(() => {
 describe('the gate: a caller who said NEW is not looked up', () => {
   it('does not dispatch, and says so in the channel only the model reads', async () => {
     notePatientStatus(SID, [ASK, 'CALLER: New.']);
-    const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+    const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
 
     expect(lookupSpy).not.toHaveBeenCalled();
     expect(out.found).toBe(false);
@@ -76,7 +76,7 @@ describe('the gate: a caller who said NEW is not looked up', () => {
 
   it('the refusal carries the way back, so the suppression is not a dead end', async () => {
     notePatientStatus(SID, [ASK, 'CALLER: New.']);
-    const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+    const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
     expect(String(out.fix)).toMatch(/patient_status "existing"/);
   });
 
@@ -94,7 +94,7 @@ describe('the gate: a caller who said NEW is not looked up', () => {
     recordToolEvent(
       callId,
       'lookup_patient',
-      { queue: 'optical' },
+      { queue: 'optical', lane: 'optical' },
       JSON.stringify({ success: true, found: false, suppressed: 'caller_said_new' }),
       4,
       { agentSlug: 'optical' },
@@ -105,20 +105,20 @@ describe('the gate: a caller who said NEW is not looked up', () => {
 
   it('a caller who said EXISTING is looked up exactly as before', async () => {
     notePatientStatus(SID, [ASK, 'CALLER: Existing.']);
-    const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+    const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
     expect(lookupSpy).toHaveBeenCalledTimes(1);
     expect(out.suppressed).toBeUndefined();
   });
 
   it('a caller who was never asked is looked up exactly as before', async () => {
-    const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+    const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
     expect(lookupSpy).toHaveBeenCalledTimes(1);
     expect(out.suppressed).toBeUndefined();
   });
 
   it('suppression is per call — one caller saying new does not gate the next', async () => {
     notePatientStatus(SID, [ASK, 'CALLER: New.']);
-    const out = await lookup({ queue: 'optical', call_sid: OTHER, caller_phone: '555-555-0102' });
+    const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: OTHER, caller_phone: '555-555-0102' });
     expect(lookupSpy).toHaveBeenCalledTimes(1);
     expect(out.suppressed).toBeUndefined();
   });
@@ -126,7 +126,7 @@ describe('the gate: a caller who said NEW is not looked up', () => {
   it('a sentinel call_sid is not a call: it neither stores nor suppresses', async () => {
     notePatientStatus('unknown', [ASK, 'CALLER: New.']);
     expect(patientStatusFor('unknown')).toBeUndefined();
-    const out = await lookup({ queue: 'optical', call_sid: 'unknown', caller_phone: '555-555-0103' });
+    const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: 'unknown', caller_phone: '555-555-0103' });
     expect(out.suppressed).toBeUndefined();
   });
 });
@@ -140,7 +140,7 @@ describe('RULE 1 OUTRANKS THE ANSWER — the operator-named failure mode', () =>
       firstName: 'Zelda', lastName: 'Quixote', dateOfBirth: '1958-01-04', certain: true,
     } as never);
     notePatientStatus(SID, [ASK, 'CALLER: New.']);
-    const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+    const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
     expect(lookupSpy).toHaveBeenCalledTimes(1);
     expect(out.suppressed).toBeUndefined();
   });
@@ -150,7 +150,7 @@ describe('the override, and why it needs its own store', () => {
   it('patient_status existing lifts the suppression and the lookup runs', async () => {
     notePatientStatus(SID, [ASK, 'CALLER: New.']);
     const out = await lookup({
-      queue: 'optical', call_sid: SID, caller_phone: '555-555-0101', patient_status: 'existing',
+      queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101', patient_status: 'existing',
     });
     expect(lookupSpy).toHaveBeenCalledTimes(1);
     expect(out.suppressed).toBeUndefined();
@@ -159,14 +159,14 @@ describe('the override, and why it needs its own store', () => {
   it('SURVIVES the next caller turn — the bug the two stores exist to prevent', async () => {
     notePatientStatus(SID, [ASK, 'CALLER: New.']);
     await lookup({
-      queue: 'optical', call_sid: SID, caller_phone: '555-555-0101', patient_status: 'existing',
+      queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101', patient_status: 'existing',
     });
     // The first version wrote the override into the same map the bridge
     // recomputes from the transcript, whose latest window still says "new" —
     // so the escape hatch closed again one caller turn after the model used it.
     notePatientStatus(SID, [ASK, 'CALLER: New.', 'AGENT: And your last name?', 'CALLER: Quixote.']);
     lookupSpy.mockClear();
-    const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+    const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
     expect(lookupSpy).toHaveBeenCalledTimes(1);
     expect(out.suppressed).toBeUndefined();
   });
@@ -185,7 +185,7 @@ describe('the override, and why it needs its own store', () => {
    */
   it('patient_status new suppresses NOTHING — only the transcript can', async () => {
     const out = await lookup({
-      queue: 'optical', call_sid: SID, caller_phone: '555-555-0101', patient_status: 'new',
+      queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101', patient_status: 'new',
     });
     expect(lookupSpy).toHaveBeenCalledTimes(1);
     expect(out.suppressed).toBeUndefined();
@@ -514,7 +514,7 @@ describe("Codex's three P1s on this PR — all reproduced, all fixed", () => {
   describe('the gate itself still behaves, end to end, in both languages', () => {
     it('a Spanish "nuevo" suppresses the lookup through runTool', async () => {
       notePatientStatus(SID, [ES, 'CALLER: Nuevo.']);
-      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
       expect(lookupSpy).not.toHaveBeenCalled();
       expect(out.suppressed).toBe('caller_said_new');
     });
@@ -523,7 +523,7 @@ describe("Codex's three P1s on this PR — all reproduced, all fixed", () => {
       // Round 4: the denial route is gone, so this call behaves as it did before
       // the gate existed. The accepted cost, asserted through runTool.
       notePatientStatus(SID, [EN, "CALLER: I've never been a patient."]);
-      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
       expect(lookupSpy).toHaveBeenCalledTimes(1);
       expect(out.suppressed).toBeUndefined();
     });
@@ -533,7 +533,7 @@ describe("Codex's three P1s on this PR — all reproduced, all fixed", () => {
         'AGENT: Do you need a new prescription or refill an existing one?',
         'CALLER: New.',
       ]);
-      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
       expect(lookupSpy).toHaveBeenCalledTimes(1);
       expect(out.suppressed).toBeUndefined();
     });
@@ -695,7 +695,7 @@ describe("Codex round 2 — three more P1s, all the same wrong direction", () =>
   describe('through runTool — the gate follows the reader', () => {
     it('the qualified Spanish existing caller is looked up', async () => {
       notePatientStatus(SID, [ES, 'CALLER: No soy paciente nuevo; soy paciente existente.']);
-      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
       expect(lookupSpy).toHaveBeenCalledTimes(1);
       expect(out.suppressed).toBeUndefined();
     });
@@ -705,7 +705,7 @@ describe("Codex round 2 — three more P1s, all the same wrong direction", () =>
         EN, 'CALLER: Existing.',
         'AGENT: Is the prescription new or existing?', 'CALLER: New.',
       ]);
-      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
       expect(lookupSpy).toHaveBeenCalledTimes(1);
       expect(out.suppressed).toBeUndefined();
     });
@@ -951,21 +951,21 @@ describe('Codex round 3 — three more P1s, and the reader is SMALLER, not patch
   describe('through runTool — the gate follows the smaller reader', () => {
     it('a hedged-negation caller is looked up', async () => {
       notePatientStatus(SID, [EN, "CALLER: I'm not really a new patient."]);
-      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
       expect(lookupSpy).toHaveBeenCalledTimes(1);
       expect(out.suppressed).toBeUndefined();
     });
 
     it('a first-time-calling caller is looked up rather than suppressed', async () => {
       notePatientStatus(SID, [EN, 'CALLER: First time calling.']);
-      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
       expect(lookupSpy).toHaveBeenCalledTimes(1);
       expect(out.suppressed).toBeUndefined();
     });
 
     it('and the ANSWER SENTENCE is what suppresses it, through runTool', async () => {
       notePatientStatus(SID, [EN, "CALLER: I'm a new patient."]);
-      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
       expect(lookupSpy).not.toHaveBeenCalled();
       expect(out.suppressed).toBe('caller_said_new');
     });
@@ -1039,7 +1039,7 @@ describe('Codex round 4 — `new` now comes from ONE route', () => {
     it('and the lookup runs again afterwards, through runTool', async () => {
       notePatientStatus(SID, [EN, 'CALLER: New.']);
       notePatientStatus(SID, [EN, 'CALLER: I need new glasses.']);
-      const out = await lookup({ queue: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
+      const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
       expect(lookupSpy).toHaveBeenCalledTimes(1);
       expect(out.suppressed).toBeUndefined();
     });
@@ -1054,7 +1054,7 @@ describe('Codex round 4 — `new` now comes from ONE route', () => {
     it('and the model\'s OVERRIDE is not touched by any of it', async () => {
       notePatientStatus(SID, [EN, 'CALLER: New.']);
       await lookup({
-        queue: 'optical', call_sid: SID, caller_phone: '555-555-0101', patient_status: 'existing',
+        queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101', patient_status: 'existing',
       });
       notePatientStatus(SID, [EN, 'CALLER: New.']);
       expect(patientStatusFor(SID)).toBe('existing');
@@ -1312,7 +1312,7 @@ describe('Codex round 6 — the answer is the WHOLE of what they said, and `new`
      */
     it('a model-asserted `new` suppresses NOTHING, on any lane', async () => {
       const out = await lookup({
-        queue: 'optical',
+        queue: 'optical', lane: 'optical',
         call_sid: SID,
         caller_phone: '555-555-0101',
         patient_status: 'new',
@@ -1343,5 +1343,103 @@ describe('Codex round 6 — the answer is the WHOLE of what they said, and `new`
       expect(field.enum).toEqual(['existing']);
       expect(String(field.description)).toMatch(/never send this to report that somebody is new/i);
     });
+  });
+});
+
+describe('Codex round 7 — only a lane that ASKS may read the answer', () => {
+  /**
+   * Round 5 took the question off records. Round 6 took `new` off the override.
+   * The transcript READER still read every lane, which is the door this closes —
+   * and the `askAs` that could nudge a records model into asking the question is
+   * gone with it, because `realtimeAdapter` sends the whole `input_schema` to the
+   * model (`parameters: { ...def.input_schema }`).
+   *
+   * The failure it prevents is a CATEGORY error, not a mis-read: on records the
+   * caller is a proxy on 42% of calls (2026-09-10..18, 87 of 206), so their
+   * "New." describes THEMSELVES while the gate would read it as the patient
+   * whose chart they rang about — and suppress that patient's lookup.
+   */
+  const EN = 'AGENT: Are you a new patient or an existing patient?';
+  const WINDOW = [EN, 'CALLER: New.'];
+
+  it('the three asking lanes suppress, exactly as before', async () => {
+    for (const lane of ['optical', 'surgery', 'tech']) {
+      resetPatientStatuses(); resetGateAttempts(); lookupSpy.mockClear();
+      notePatientStatus(SID, WINDOW);
+      const out = await lookup({ queue: 'optical', lane, call_sid: SID, caller_phone: '555-555-0101' });
+      expect(out.suppressed, lane).toBe('caller_said_new');
+      expect(lookupSpy, lane).not.toHaveBeenCalled();
+    }
+  });
+
+  it('RECORDS does not, even with a full qualified window on the call', async () => {
+    notePatientStatus(SID, WINDOW);
+    // The reader still finds it — this is the LANE refusing to act on it, not the
+    // window failing to open.
+    expect(patientStatusFor(SID)).toBe('new');
+    const out = await lookup({ lane: 'records', call_sid: SID, caller_phone: '555-555-0101' });
+    expect(out.suppressed).toBeUndefined();
+    expect(lookupSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('and NO lane does not either — the HTTP surface, pcp, no-ivr, answering-service', async () => {
+    /**
+     * The absent-lane default fails in the CHEAP direction: the lookup runs, and
+     * a miss on a genuinely new patient is expected (RULE ZERO 2a). It does mean
+     * a lane that forgets to inject its name has an inert gate, which is what the
+     * source pins below exist for.
+     */
+    notePatientStatus(SID, WINDOW);
+    const out = await lookup({ call_sid: SID, caller_phone: '555-555-0101' });
+    expect(out.suppressed).toBeUndefined();
+    expect(lookupSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('every asking agent injects its own lane — read from the SOURCE', async () => {
+    // Failure mode 10: the three assertions above prove the gate reads a lane,
+    // not that any agent supplies one. A lane that stops injecting it has an
+    // inert gate and no helper test can see that.
+    const { readFileSync } = await import('node:fs');
+    for (const [file, lane] of [
+      ['src/agents/opticalAgent.ts', 'optical'],
+      ['src/agents/surgeryAgent.ts', 'surgery'],
+      ['src/agents/techAgent.ts', 'tech'],
+    ] as const) {
+      expect(readFileSync(file, 'utf8'), file).toContain(`lane: '${lane}',`);
+    }
+  });
+
+  it('and the lane table is ONE table, shared with the runtime that asks', async () => {
+    const { LANES_THAT_ASK } = await import('../runtime/newOrExistingAsk');
+    expect([...LANES_THAT_ASK].sort()).toEqual(['optical', 'surgery', 'tech']);
+    expect(LANES_THAT_ASK.has('records')).toBe(false);
+  });
+
+  it('the question no longer reaches the model, and the house rule still holds', async () => {
+    /**
+     * Codex was right that `askAs` reached the model — `parameters` spread the
+     * whole `input_schema` — and WRONG about where to fix it: every field in this
+     * file carries an `askAs` by house convention (`sharedPatientTools.test.ts`:
+     * "a tool asking for something hands the agent the sentence to say"), so
+     * deleting this one traded a leak for a hole in that contract. The full suite
+     * caught exactly that. `stripInternalKeys` fixes the TRANSPORT instead, for
+     * every tool and field at once.
+     */
+    const field = getTool('lookup_patient')!.input_schema.properties.patient_status as
+      Record<string, unknown>;
+    expect(field.askAs).toBe('Are you a new patient or an existing patient?');
+
+    const { stripInternalKeys } = await import('./realtimeAdapter');
+    const sent = stripInternalKeys(getTool('lookup_patient')!.input_schema);
+    const sentField = (sent.properties as Record<string, Record<string, unknown>>).patient_status;
+    expect(sentField.askAs).toBeUndefined();
+    // Nothing else about the field moves — the model still gets its description.
+    expect(sentField.enum).toEqual(['existing']);
+    expect(String(sentField.description)).toMatch(/never send this to report that somebody is new/i);
+
+    // And it is every field, not just this one — the leak was the transport's.
+    for (const props of Object.values(sent.properties as Record<string, unknown>)) {
+      expect((props as Record<string, unknown>).askAs).toBeUndefined();
+    }
   });
 });

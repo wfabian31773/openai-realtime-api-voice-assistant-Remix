@@ -184,6 +184,17 @@ registerTool({
           'Send "existing" ONLY when the caller has told you they have been seen here before. ' +
           'It lifts a suppression an earlier "new" put in place. There is no other value: ' +
           'never send this to report that somebody is new.',
+        /**
+         * The `askAs` stays and the LEAK was the adapter's — Codex round 7.
+         * Codex was right that this question reached every lane's model,
+         * records included, where round 5 deliberately removed it: the adapter
+         * spread the whole `input_schema` into `parameters`. But `askAs` is a
+         * house convention every field in this file keeps (`sharedPatientTools.test.ts`
+         * — "a tool asking for something hands the agent the sentence to say"),
+         * so deleting it here would have traded one leak for a hole in that
+         * contract. `stripInternalKeys` in `realtimeAdapter.ts` is the fix, and it
+         * closes the same leak for every tool and every field at once.
+         */
         askAs: 'Are you a new patient or an existing patient?',
       },
     },
@@ -250,13 +261,39 @@ registerTool({
      */
     const { patientStatusFor, noteStatusOverride } = await import('./spokenPatientStatus');
     const { verifiedIdentityFor } = await import('./verifiedIdentity');
+    const { LANES_THAT_ASK } = await import('../runtime/newOrExistingAsk');
     // Only the way back is honoured. A model that sends `new` against the
     // schema's single value changes nothing — the store cannot hold it and this
     // branch does not fire. See `noteStatusOverride`.
     if (str(input.patient_status) === 'existing') {
       noteStatusOverride(str(input.call_sid), 'existing');
     }
-    const status = patientStatusFor(str(input.call_sid));
+    /**
+     * ONLY A LANE THAT ASKS MAY READ THE ANSWER — Codex round 7, P1-B, and it is
+     * the hinge I told round 6 was unavailable. It was: `ToolQueue` is
+     * `optical | surgery` and tech injects none. So this takes its own injected
+     * `lane`, the same shape as `queue` — not a schema field, merged UNDER the
+     * model's arguments, so the model can neither set it nor be asked for it.
+     *
+     * WHY IT IS NEEDED AFTER ROUND 5 AND 6. Round 5 took the QUESTION off
+     * records, whose caller is a proxy on 42% of calls, and round 6 took `new`
+     * off the override — but the transcript READER still read every lane, so a
+     * records agent improvising the question (or nudged into it by the `askAs`
+     * this round also removed) opened a window in which a proxy's "New." —
+     * describing THEMSELVES — suppressed the lookup for the PATIENT whose chart
+     * they rang about. A category error, and wrong even once.
+     *
+     * AN ABSENT LANE DOES NOT SUPPRESS, deliberately: the HTTP surface, pcp,
+     * no-ivr and answering-service all reach this tool and none of them asks.
+     * That default fails in the CHEAP direction — the lookup runs, and a miss on
+     * a genuinely new patient is expected (RULE ZERO 2a) — but it does mean a
+     * lane that forgets to inject its own name has an inert gate, so
+     * `newMeansStopLooking.test.ts` reads each asking agent's source and goes
+     * red if one drops it (failure mode 10: a helper test proves the helper).
+     */
+    const lane = str(input.lane);
+    const laneMayRead = LANES_THAT_ASK.has(lane);
+    const status = laneMayRead ? patientStatusFor(str(input.call_sid)) : undefined;
     if (status === 'new' && !verifiedIdentityFor(str(input.call_sid))) {
       // PHI-free: a SID and the branch. The marker line for the after-number.
       console.info(
