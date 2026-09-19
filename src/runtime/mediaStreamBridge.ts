@@ -109,6 +109,7 @@
 import type { BoundAgent } from "./agentBinding";
 import { CallTranscriptLog, type TranscriptTurn } from "./transcriptLog";
 import { noteSpokenDob } from "../tools/spokenDob";
+import { notePatientStatus } from "../tools/spokenPatientStatus";
 import { CallUsage, usageSummaryMarker, type UsageTotals } from "./tokenUsage";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
 import {
@@ -769,6 +770,15 @@ export class VoiceCallBridge {
          * the entry — a wrong birthday filed is worse than a missing one.
          */
         noteSpokenDob(this.deps.context.callSid, this.transcriptLog.lines);
+        /**
+         * RULE ZERO 2a, through the same seam and for the same reason: the
+         * caller's answer to "are you a new patient or an existing patient?"
+         * decides whether `lookup_patient` looks at all (operator ruling,
+         * 2026-09-19), and only this class can see what they said. The whole
+         * record every time, so a later correction lands — see
+         * spokenPatientStatus.ts for the window rule and why it is not a sweep.
+         */
+        notePatientStatus(this.deps.context.callSid, this.transcriptLog.lines);
       },
       onError: (err) => this.handleSessionFailure(err),
       onClosed: () => this.handleSessionClosed(),

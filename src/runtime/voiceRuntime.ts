@@ -267,6 +267,7 @@ import { makeRecordingStarter } from "./callRecording";
 import { gradeRuntimeCall } from "./runtimeGrading";
 import { logRuntimeFollowUps } from "./followUpTelemetry";
 import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
+import { withNewOrExistingAsk } from "./newOrExistingAsk";
 import {
   handleAfterRedirect,
   handleVoiceWebhook,
@@ -1102,7 +1103,23 @@ export function mountVoiceRuntime(
               transport,
               buildSessionConfig(
                 lane.voice,
-                withGreetingAlreadyPlayed(lane.agent.instructions, spokenGreeting),
+                /**
+                 * RULE ZERO, both halves, composed at the one seam that knows
+                 * whether Rule 1 fired.
+                 *
+                 * Order is deliberate but not load-bearing — both append, and
+                 * neither reads the other's text. What IS load-bearing is that
+                 * the new-or-existing ask sees `precontextMatched`, so it
+                 * stands down for a caller the person base has already vouched
+                 * for. Rule 2a: asking a recognised patient to classify
+                 * themselves tells them we do not know who they are while we
+                 * are looking at their chart.
+                 */
+                withNewOrExistingAsk(
+                  withGreetingAlreadyPlayed(lane.agent.instructions, spokenGreeting),
+                  entry.slug,
+                  precontextMatched(precontext),
+                ),
                 lane.agent.tools,
                 laneKeyterms(entry.slug),
               ),

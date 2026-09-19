@@ -56,9 +56,17 @@ describe("CLAUDE.md's marker table survived the merge", () => {
   /**
    * The sentence that says which version is newest. Five copies of it is how
    * this whole class of defect announced itself the first time.
+   *
+   * THE COUNT OF HOLES IS NOT PINNED, deliberately. It read "A HOLE" while v13
+   * was the only skipped number; v57's withdrawal made it two, and retiring a
+   * third would make it three. Pinning the numeral turned a legitimate edit
+   * into a red test and told the reader nothing — the property this guard is
+   * for is that there is exactly ONE such sentence, not how many holes it
+   * reports. The stem is still required, so deleting the sentence is caught.
    */
   it('says which version is newest exactly once', () => {
-    const openings = CLAUDE_MD.match(/AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE/g) ?? [];
+    const openings =
+      CLAUDE_MD.match(/AND THE SEQUENCE HAS [A-Z]+ HOLES? IN IT ON PURPOSE/g) ?? [];
     expect(openings).toHaveLength(1);
   });
 

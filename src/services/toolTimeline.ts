@@ -280,6 +280,16 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
      * number rather than a console line.
      */
     'lookup_misses',
+    /**
+     * WHY THE LOOKUP DID NOT RUN — RULE ZERO 2a's gate (operator ruling,
+     * 2026-09-19). One string from a closed set, no PHI. It is here from the
+     * start deliberately: v48 exists because `found` and `candidate_count`
+     * were NOT on this list, so "how often is `identity_is_certain: false`
+     * actually ambiguous?" answered 0 on every lane and that zero was the
+     * instrument rather than the fleet. A gate nobody can count is a gate
+     * nobody can tune, and this one has a dial the operator will want.
+     */
+    'suppressed',
     'say', // directive text — kept so the Phase 7 rubric can grade say-verbatim compliance
     /**
      * What a refused PCP gate told the model to do instead (src/pcp/refusals.ts).
