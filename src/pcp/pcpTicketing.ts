@@ -1,3 +1,4 @@
+import { PCP_HANDOFF_NOT_ATTEMPTED_REASONS } from './handoffNotAttempted';
 import { z } from 'zod';
 import { PCP_CALL_PURPOSE_SLUGS, PCP_DISPOSITIONS, assertPcpDisposition } from './policy';
 import { PCP_FACILITY_TYPES } from './director';
@@ -103,6 +104,16 @@ export const PcpTicketPayloadSchema = z.object({
     failureReason: optionalText(1000),
     fallbackTicketStatus: optionalText(80),
   }).optional(),
+  /**
+   * WHY NO DIAL WENT OUT. Declared here and set from `buildPayload`; the model
+   * never supplies it. `src/pcp/handoffNotAttempted.ts` is the whole rule, and
+   * the reason it exists.
+   *
+   * THIS SIDE MUST NOT BE STRICTER THAN THE APP'S, and the enum is REFERENCED
+   * rather than retyped so it cannot drift from the one
+   * `pcpPolicyTablesAgree.test.ts` reconciles against.
+   */
+  handoffNotAttemptedReason: z.enum(PCP_HANDOFF_NOT_ATTEMPTED_REASONS).optional(),
   failureInformation: optionalText(2000),
 }).strict();
 

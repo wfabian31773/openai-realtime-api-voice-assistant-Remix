@@ -96,6 +96,31 @@ export interface PcpConversationState {
    */
   callerChoseTheQueue?: boolean;
   /**
+   * WHY NO DIAL WENT OUT — two latches, read by ONE consumer: the
+   * `handoffNotAttemptedReason` the ticket carries. See
+   * `src/pcp/handoffNotAttempted.ts` for the whole rule.
+   *
+   * SERVER-OWNED, and that is the point of putting them here rather than in a
+   * tool argument. The v17 P1 is the worked example: a guard that read
+   * `create_pcp_task`'s `disposition` was reading a MODEL argument with
+   * `.default('CREATE_TASK')`, so the model could satisfy it by accident. The
+   * model can neither set nor clear either of these.
+   *
+   * TRUE LATCHES, unlike `callerChoseTheQueue` above, which is reversible
+   * because it is set before a dial and withdrawn when the dial fails. These
+   * two record something that HAPPENED on the call, and a call on which the
+   * caller declined the queue does not stop being one.
+   */
+  callerDeclinedTheQueue?: boolean;
+  /**
+   * `handoff_to_pcp` ran and the director refused it as ineligible — so the
+   * agent asked to dial and was told it could not. Distinct from
+   * `callerDeclinedTheQueue` (the caller said no) and from never asking at all,
+   * and it is latched rather than recomputed because the ticket may be filed
+   * several turns later by `create_pcp_task`, on state that has moved.
+   */
+  handoffRefusedAsIneligible?: boolean;
+  /**
    * THE CALLER IS THE PATIENT, and it stays true once established.
    *
    * `callPurpose` is not safe to read for this. The records tool reclassifies
@@ -667,6 +692,16 @@ export class PcpDirector {
    */
   setCallerChoseTheQueue(callId: string, chose: boolean): void {
     this.get(callId).callerChoseTheQueue = chose;
+  }
+
+  /** Record that the caller, having been warned, chose a ticket over the queue. */
+  markCallerDeclinedTheQueue(callId: string): void {
+    this.get(callId).callerDeclinedTheQueue = true;
+  }
+
+  /** Record that a handoff was asked for in code and refused as ineligible. */
+  markHandoffRefusedAsIneligible(callId: string): void {
+    this.get(callId).handoffRefusedAsIneligible = true;
   }
 
   clear(callId: string): void {

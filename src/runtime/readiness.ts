@@ -349,8 +349,20 @@ import { callEnvironment } from "./callRecord";
  * words (bounded at HANGUP_HOLD_LIMIT), and record_automated_resolution
  * tells the model to say what the lookup found.
  */
+/**
+ * v60 — WHY NO DIAL WENT OUT IS ON THE TICKET, so an ordinary task on a
+ * handoff-default purpose stops being an HTTP 500 the model retries. Measured
+ * 2026-09-19 in `voice_agent_api_logs`: 7 calls, 41 refused POSTs, worst storm
+ * 8 on one call, 2026-09-15..18 — and 4 of the 7 never attempted a handoff at
+ * all. `handoffNotAttemptedReason` is read from the policy table and two
+ * server-owned director latches, never from a model argument.
+ *
+ * v57 IS RETIRED (the withdrawn surgeon claim), v58 is claimed by #322 and v59
+ * by #293 — both OPEN branches, so this is a SIBLING of both and contains
+ * neither. v60 > v59 numerically and says nothing about containment.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917";
+  "voice-runtime-v60-the-ticket-says-why-nobody-was-dialled-20260921";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
