@@ -261,6 +261,8 @@ import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert, type RuntimeCallIdentity } from "./callRecord";
 import { identityForRow } from "./runtimeIdentity";
+import { identityStoreProbe } from "../tools/verifiedIdentity";
+import { logRuntimeIdentity } from "./identityTelemetry";
 import { runRequestSweep } from "./sweepRunner";
 import { persistRuntimeTurns } from "./runtimeTurns";
 import { makeRecordingStarter } from "./callRecording";
@@ -425,6 +427,19 @@ export interface VoiceRuntimeOptions {
    * awaited. Injected for tests.
    */
   logFollowUps?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
+  /**
+   * Why the record did or did not reach the call row (task #148,
+   * identityTelemetry.ts) — one PHI-free row per call, beside the follow-up
+   * summary and under the same rules. Injected for tests.
+   */
+  logIdentity?: (
+    record: VoiceCallRecord,
+    identity: RuntimeCallIdentity,
+    probe: ReturnType<typeof identityStoreProbe>,
+    persisted: boolean | null,
+    ids: { callLogId?: string },
+    opts?: { after?: Promise<unknown> },
+  ) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -512,6 +527,7 @@ export function mountVoiceRuntime(
   const startRecording = options.startRecording ?? makeRecordingStarter(env);
   const gradeCall = options.gradeCall ?? gradeRuntimeCall;
   const logFollowUps = options.logFollowUps ?? logRuntimeFollowUps;
+  const logIdentity = options.logIdentity ?? logRuntimeIdentity;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -1162,12 +1178,30 @@ export function mountVoiceRuntime(
              * the sweep reads nothing from it, so a slow or failed write is
              * no reason to abandon the caller's request.
              */
-            await withinOrNull(
-              // The record, and who the process established the caller to be
-              // (v51): a certain match only, read from the same store the
-              // teardown sweep reads, so a row carries a name only when the
-              // lookup matched one person and nobody denied it.
-              persistCall(record, identityForRow(record.callSid)),
+            // Who the process established the caller to be (v51): a certain
+            // match only, read from the same store the teardown sweep reads, so
+            // a row carries a name only when the lookup matched one person and
+            // nobody denied it.
+            //
+            // AND WHAT THE STORE LOOKED LIKE AT THAT INSTANT (task #148). Taken
+            // here, next to the read and BEFORE the write, because the probe's
+            // whole job is to describe what this read saw — taken later it
+            // would describe a different moment and answer a question nobody
+            // asked. v51 wrote identity on 0 of 633 calls on 2026-09-17 while
+            // 209 of them had a certain lookup, and `{}` is four different
+            // facts with no way to tell them apart.
+            const identity = identityForRow(record.callSid);
+            const identityProbe = identityStoreProbe(record.callSid);
+            /**
+             * THE UPSERT'S OWN ANSWER IS KEPT (Codex P1, #322). `persistCall`
+             * reports whether the row landed and `withinOrNull` answers null
+             * when the deadline wins — and this discarded both, so the
+             * identity telemetry called a failed write `reached_row` while
+             * `call_logs.patient_found` stayed unset. Three distinct facts:
+             * true landed, false failed after its retries, null still running.
+             */
+            const persisted = await withinOrNull(
+              persistCall(record, identity),
               options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
             );
             await sweepCall(record).catch(() => undefined);
@@ -1181,7 +1215,45 @@ export function mountVoiceRuntime(
             // And the follow-up summary (v55, task #146): the one record of
             // whether the turn a tool result is owed was ever requested and
             // ever answered, which nothing else persists.
-            void logFollowUps(record, { callLogId }).catch(() => undefined);
+            /**
+             * THE TWO `call_events` WRITERS RUN ONE AFTER THE OTHER, NOT AT
+             * ONCE (Codex P2, #322).
+             *
+             * Both flush and release the SAME per-SID buffer, and
+             * `flushCallEvents` returns TRUE when it finds no buffer (there is
+             * nothing left to write). So concurrently: one writer's flush
+             * lands and `releaseCallEvents` deletes the whole buffer; the
+             * other's flush failed and is in backoff; its retry then finds
+             * nothing, reports durable, and its row is gone for good — on
+             * exactly the calls a database blip had made worth measuring.
+             *
+             * Before task #148 there was ONE teardown event writer, so the
+             * race did not exist; adding the second is what opened it. Chained
+             * rather than awaited: teardown still holds for neither of them,
+             * and telemetry must never delay a caller's request.
+             *
+             * THE ROOT FIX IS IN `releaseCallEvents` (Codex P1, #322 round 4),
+             * which no longer deletes events nobody has written — a
+             * predecessor that SUCCEEDS used to take the identity row with it,
+             * which the chaining alone did not prevent. The order below is now
+             * an INSERT saved, not the safety property.
+             */
+            const followUpsWritten = logFollowUps(record, { callLogId }).catch(() => undefined);
+            /**
+             * AND WHY IDENTITY DID OR DID NOT LAND (task #148): an instrument,
+             * never a gate — it changes nothing a caller hears.
+             *
+             * Started IMMEDIATELY rather than chained off the line above
+             * (Codex P1, #322 round 3). It emits its row first and waits for
+             * `followUpsWritten` only before FLUSHING, so the two never release
+             * the same per-SID buffer at once — while a wedged pool, which
+             * leaves the unbounded flush above pending for ever, can no longer
+             * stop the identity row being buffered. The 2h reaper recovers what
+             * is emitted; it cannot recover what was never emitted at all.
+             */
+            void logIdentity(record, identity, identityProbe, persisted, { callLogId }, {
+              after: followUpsWritten,
+            }).catch(() => undefined);
           },
         });
         // Connect AFTER the bridge exists: a connection that fails then has

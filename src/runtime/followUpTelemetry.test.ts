@@ -131,11 +131,21 @@ describe("the runtime writes it at teardown, after the row and the sweep", () =>
     expect(src).toMatch(/const logFollowUps = options\.logFollowUps \?\? logRuntimeFollowUps;/);
   });
 
+  /**
+   * REWRITTEN, NOT LOOSENED, for task #148. The call is no longer `void`-ed
+   * directly: its promise is captured and handed to the identity writer as
+   * `after`, so the two `call_events` writers cannot release the same per-SID
+   * buffer at once (Codex P2, #322 round 2). The PROPERTY is unchanged and is
+   * what is asserted — called after the grade, and never awaited.
+   */
   it("calls it after the grade, never awaited", () => {
     const grade = src.indexOf("void gradeCall(record, { callLogId })");
-    const follow = src.indexOf("void logFollowUps(record, { callLogId })");
+    const follow = src.indexOf("logFollowUps(record, { callLogId })");
     expect(grade).toBeGreaterThan(0);
     expect(follow).toBeGreaterThan(grade);
     expect(src.slice(grade, follow)).not.toMatch(/\breturn\b/);
+    // Never awaited: teardown must not wait on telemetry.
+    expect(src.slice(Math.max(0, follow - 60), follow)).not.toMatch(/\bawait\s*$/);
+    expect(src).not.toMatch(/await logFollowUps\(/);
   });
 });
