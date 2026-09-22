@@ -299,8 +299,47 @@ export async function flushCallEvents(callIdOrSid: string): Promise<boolean> {
   }
 }
 
+/**
+ * Forget a finished call's buffer — but NEVER the events nobody has written.
+ *
+ * THIS DELETED UNFLUSHED EVENTS, AND THE SECOND TEARDOWN WRITER MADE THAT A
+ * SILENT LOSS ON THE COMMON CASE (Codex P1, #322 round 4). `buffers.delete`
+ * took the WHOLE per-SID buffer, including events appended after the caller's
+ * own flush had already claimed its slice — and `flushCallEvents` answers TRUE
+ * for a call it cannot find, because from its side nothing is left unflushed.
+ * So on every runtime call that owed a follow-up: the follow-up writer flushed
+ * its own row, released the buffer, and took the `identity_summary` row that
+ * had been emitted a microtask later with it; the identity writer's own flush
+ * then found no buffer, reported durable, and the row was gone for good.
+ *
+ * Round 3's reply to that race said the reaper would recover the event, which
+ * is true only of the predecessor that FAILS — a predecessor that SUCCEEDS
+ * deleted the entry before any reaper could see it.
+ *
+ * A buffer with unwritten events is therefore kept: the next flush writes
+ * them, and failing that the 2h reaper flushes once more before it forgets.
+ * Indices are deliberately NOT trimmed — a flush in flight rolls `flushedCount`
+ * back to the index it claimed from, and re-basing the array here would point
+ * that rollback at the wrong events.
+ *
+ * ONE NARROWER CASE IS NOT CLOSED AND IS NOT THIS PR'S: a release that races a
+ * flush already IN FLIGHT sees `events.length === flushedCount` (the claim is
+ * taken before the await) and deletes the buffer, so a rollback on that
+ * statement's failure lands on an object no longer in the map. It is
+ * unreachable on the runtime — a runtime call emits two events, both at
+ * teardown, and `INCREMENTAL_FLUSH_AT` is 25, so nothing else is ever flushing
+ * — and on the old core it predates both teardown writers. Closing it needs an
+ * in-flight count on the buffer, which is a change to every flush path.
+ */
 export function releaseCallEvents(callId: string | undefined): void {
   if (!callId) return;
+  const b = buffers.get(callId);
+  if (b && b.events.length > b.flushedCount) {
+    // The latency marks are the call's and the call is over; the events are
+    // the only thing that must outlive it.
+    clocks.delete(callId);
+    return;
+  }
   buffers.delete(callId);
   clocks.delete(callId);
 }
