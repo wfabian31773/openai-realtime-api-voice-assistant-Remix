@@ -572,6 +572,9 @@ function buildPayload(
       callerDeclinedTheQueue: state.callerDeclinedTheQueue,
       handoffRefusedAsIneligible: state.handoffRefusedAsIneligible,
       callerRequestedHuman: state.callerRequestedHuman,
+      // From the block on THIS payload, so one record cannot contradict itself
+      // about whether a dial went out. See handoffNotAttempted.ts.
+      handoffDialAttempted: handoff?.attempted === true,
     }),
     urgency,
     verificationStatus: state.verificationStatus,

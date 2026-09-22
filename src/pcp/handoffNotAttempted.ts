@@ -54,6 +54,43 @@ import type { PcpCallPurposeSlug, PcpDisposition } from './policy';
  * `retryable: false` instead of a storm. The request is not lost either way:
  * `sweepPcpUnfiledCall` admits a caller whose explicit ask went unhonoured
  * (v19), which is exactly this population.
+ *
+ * AND A DIAL THAT WENT OUT IS NEVER AN ABSENCE TO EXPLAIN — Codex P2, #323,
+ * taken before this field ever wrote a row.
+ *
+ * `CREATE_TASK` does NOT mean nobody was dialled. The v30 dial settlement
+ * re-files a rung-out transfer as exactly that: `pcp_handoff_status` NO_ANSWER,
+ * `pcp_disposition` CREATE_TASK, `pcp_fallback_ticket_status` OPEN, with
+ * `attempted` true on the handoff block. Without the guard above, the two
+ * latches would then answer a question the record has already answered the
+ * other way, and the ticket would say the dial never happened beside a block
+ * saying it rang out. A staffer reading `caller_declined_queue` owes no
+ * callback; one reading NO_ANSWER owes one. That contradiction is the whole
+ * thing Rosa's 2026-09-08 design exists to prevent.
+ *
+ * MEASURED BEFORE TAKING IT, Support Center, PCP agent-filed tickets since
+ * 2026-09-08:
+ *
+ *   194 tickets carry `pcp_handoff_attempted` — 193 DIALING/HAND_OFF and
+ *     1 already in the settled shape (NO_ANSWER / CREATE_TASK / OPEN)
+ *   0 of the 194 were dialled without `pcp_handoff_requested`
+ *
+ * So the settlement path that creates the hazard IS live, and the arm Codex
+ * names first — the director's complete-intake auto-transfer with no ask — has
+ * not fired in two weeks. The one settled ticket carries an explicit request,
+ * which the `callerRequestedHuman` line below already suppresses. What is NOT
+ * measurable from `tickets` is Codex's second path, which needs no auto-
+ * transfer at all: a caller who declines the queue and then asks anyway latches
+ * `callerDeclinedTheQueue`, and a later failed dial lands on line 1 of the
+ * ladder rather than reaching the request check.
+ *
+ * TAKEN ON COST RATHER THAN FREQUENCY, and that is the operator's own test
+ * ("forget about that 1.2%" was about a rare finding whose remedy was six
+ * rounds of concurrency work). This one is a single guard that can only ever
+ * SUPPRESS a reason, never invent one, on a field no deployment has written
+ * yet — so there is no before-arm to protect and no row to migrate. Choosing
+ * the shape now is free; changing it later is a migration of meaning on a
+ * durable record.
  */
 export const PCP_HANDOFF_NOT_ATTEMPTED_REASONS = [
   'caller_declined_queue',
@@ -87,6 +124,13 @@ export type HandoffNotAttemptedFacts = {
   handoffRefusedAsIneligible?: boolean;
   /** `pcpDirector` latch: the caller explicitly asked to speak to a person. */
   callerRequestedHuman?: boolean;
+  /**
+   * Whether THIS PAYLOAD'S OWN handoff block records a dial having gone out.
+   *
+   * Read from the block travelling on the same payload, not re-derived, so the
+   * two halves of one record cannot disagree about whether anybody was dialled.
+   */
+  handoffDialAttempted?: boolean;
 };
 
 /**
@@ -100,6 +144,9 @@ export function handoffNotAttemptedReason(
 ): PcpHandoffNotAttemptedReason | undefined {
   if (facts.purposeDefaultDisposition !== 'HAND_OFF') return undefined;
   if (facts.disposition !== 'CREATE_TASK') return undefined;
+  // A DIAL WENT OUT, so there is no absence to explain. Ahead of the latches
+  // deliberately: it is the LATCHES that speak wrongly here, not the default.
+  if (facts.handoffDialAttempted) return undefined;
   if (facts.callerDeclinedTheQueue) return 'caller_declined_queue';
   if (facts.handoffRefusedAsIneligible) return 'not_eligible';
   if (facts.callerRequestedHuman) return undefined;

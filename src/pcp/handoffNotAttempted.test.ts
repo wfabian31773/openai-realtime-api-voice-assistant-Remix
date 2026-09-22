@@ -105,6 +105,69 @@ describe('the reason a handoff was not attempted', () => {
   it('sends NOTHING when the caller asked and nothing stopped the dial', () => {
     expect(handoffNotAttemptedReason(facts({ callerRequestedHuman: true }))).toBeUndefined();
   });
+
+  /**
+   * A DIAL THAT WENT OUT IS NOT AN ABSENCE TO EXPLAIN — Codex P2, #323.
+   *
+   * `CREATE_TASK` does not mean nobody was dialled: the v30 dial settlement
+   * re-files a rung-out transfer as NO_ANSWER / CREATE_TASK / OPEN with
+   * `attempted` true on the handoff block. A latch answering here would put
+   * "nobody was dialled, because X" on a record whose other half says a dial
+   * rang out — and a staffer reading the latch owes no callback while one
+   * reading NO_ANSWER owes one.
+   */
+  it('sends NOTHING once a dial has gone out, whatever the latches say', () => {
+    expect(handoffNotAttemptedReason(facts({ handoffDialAttempted: true }))).toBeUndefined();
+    expect(handoffNotAttemptedReason(facts({
+      handoffDialAttempted: true,
+      callerDeclinedTheQueue: true,
+    }))).toBeUndefined();
+    expect(handoffNotAttemptedReason(facts({
+      handoffDialAttempted: true,
+      handoffRefusedAsIneligible: true,
+    }))).toBeUndefined();
+    expect(handoffNotAttemptedReason(facts({
+      handoffDialAttempted: true,
+      callerDeclinedTheQueue: true,
+      handoffRefusedAsIneligible: true,
+      callerRequestedHuman: true,
+    }))).toBeUndefined();
+  });
+
+  /**
+   * THE SETTLED SHAPE, as one production ticket already carries it: the caller
+   * declined the queue, asked anyway later, the dial rang out, and the
+   * settlement re-filed the request as a task. The decline latch is still set
+   * and must not speak.
+   */
+  it('stays silent on the exact shape a settled no-answer dial produces', () => {
+    expect(handoffNotAttemptedReason({
+      purposeDefaultDisposition: 'HAND_OFF',
+      disposition: 'CREATE_TASK',
+      callerDeclinedTheQueue: true,
+      callerRequestedHuman: true,
+      handoffDialAttempted: true,
+    })).toBeUndefined();
+  });
+
+  /**
+   * THE CONTROL, and it is what stops the guard being widened into silence.
+   * With no dial attempted the ladder must answer exactly as it did before —
+   * otherwise the field this whole change exists to send would go empty and
+   * the app's guard would refuse every one of these tickets again.
+   */
+  it('still answers normally when no dial was attempted', () => {
+    expect(handoffNotAttemptedReason(facts({ handoffDialAttempted: false })))
+      .toBe('not_requested');
+    expect(handoffNotAttemptedReason(facts({
+      handoffDialAttempted: false,
+      callerDeclinedTheQueue: true,
+    }))).toBe('caller_declined_queue');
+    expect(handoffNotAttemptedReason(facts({
+      handoffDialAttempted: undefined,
+      handoffRefusedAsIneligible: true,
+    }))).toBe('not_eligible');
+  });
 });
 
 describe('reading the purpose default without throwing', () => {
@@ -224,6 +287,9 @@ describe('the agent is wired to all of it', () => {
     expect(payload).toMatch(/callerDeclinedTheQueue:\s*state\.callerDeclinedTheQueue/);
     expect(payload).toMatch(/handoffRefusedAsIneligible:\s*state\.handoffRefusedAsIneligible/);
     expect(payload).toMatch(/callerRequestedHuman:\s*state\.callerRequestedHuman/);
+    // From the block on THIS payload, not re-derived: one record must not
+    // contradict itself about whether anybody was dialled (Codex P2, #323).
+    expect(payload).toMatch(/handoffDialAttempted:\s*handoff\?\.attempted === true/);
   });
 
   it('latches not_eligible BEFORE the fallback payload is built', () => {
