@@ -264,6 +264,7 @@ import { identityForRow } from "./runtimeIdentity";
 import { identityStoreProbe } from "../tools/verifiedIdentity";
 import { logRuntimeIdentity } from "./identityTelemetry";
 import { runRequestSweep } from "./sweepRunner";
+import { runPcpFloor } from "./pcpFloor";
 import { persistRuntimeTurns } from "./runtimeTurns";
 import { makeRecordingStarter } from "./callRecording";
 import { gradeRuntimeCall } from "./runtimeGrading";
@@ -406,6 +407,15 @@ export interface VoiceRuntimeOptions {
    */
   sweepCall?: (record: VoiceCallRecord) => Promise<unknown>;
   /**
+   * The PCP lost-request floor — see pcpFloor.ts. A no-op on every other lane.
+   *
+   * Separate from `sweepCall` because the two file through different endpoints
+   * with different payloads, and the generic sweep declines `pcp` by design
+   * (`DEPARTMENT_BY_SLUG`), so they cannot double-file. Injected for tests, and
+   * settable to a no-op to turn the floor off without a deploy.
+   */
+  sweepPcpFloor?: (record: VoiceCallRecord) => Promise<unknown>;
+  /**
    * Writes the call's timed turns to `call_turns` — telemetry, after the row
    * and after the sweep, never awaited by teardown. Injected for tests.
    */
@@ -523,6 +533,7 @@ export function mountVoiceRuntime(
   // boot or in a health check.
   const persistCall = options.persistCall ?? persistRuntimeCall;
   const sweepCall = options.sweepCall ?? runRequestSweep;
+  const sweepPcpFloor = options.sweepPcpFloor ?? runPcpFloor;
   const persistTurns = options.persistTurns ?? persistRuntimeTurns;
   const startRecording = options.startRecording ?? makeRecordingStarter(env);
   const gradeCall = options.gradeCall ?? gradeRuntimeCall;
@@ -1217,6 +1228,27 @@ export function mountVoiceRuntime(
               options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
             );
             await sweepCall(record).catch(() => undefined);
+            /**
+             * AND THE PCP FLOOR, which the sweep above declines by design.
+             *
+             * `decideSweep` returns `not-a-queue-lane` for pcp at its first
+             * line, so before this the lane had no teardown filer on this
+             * runtime at all: `sweepPcpUnfiledCall` was wired only into the old
+             * core's SIP teardown and PCP moved here on 2026-09-04. 38 calls on
+             * 2026-09-22 ran the intake, filed nothing, and carry no ticket of
+             * any provenance; 24-53/day over six business days. See pcpFloor.ts
+             * and docs/observatory/W2-CORPUS-20260922.md.
+             *
+             * AWAITED, like the sweep above and unlike the telemetry below,
+             * because it files a caller's request rather than describing it —
+             * and bounded inside `runPcpFloor` so a wedged ticketing app cannot
+             * hold teardown. It also frees the lane's per-call state: the
+             * sweep's `finally` is the only caller of `pcpDirector.clear` that
+             * this runtime ever reaches, since `terminate_call`'s success branch
+             * needs an `ok` from OpenAI's SIP hangup endpoint and got 400 on 94
+             * of 94 PCP calls on 2026-09-22.
+             */
+            await sweepPcpFloor(record).catch(() => undefined);
             // Telemetry last: the per-turn record lights up the Observatory's
             // call page but must never delay a caller's request.
             void persistTurns(record, { callLogId }).catch(() => undefined);

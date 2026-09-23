@@ -129,6 +129,7 @@ interface Harness {
    * happened to look sweepable.
    */
   swept: Array<Record<string, unknown>>;
+  pcpSwept: Array<Record<string, unknown>>;
   base: string;
   wsUrl: string;
   registry: CallSessionRegistry;
@@ -150,6 +151,7 @@ async function harness(
     fetchPrecontext?: (phone: string) => Promise<unknown>;
     resolveGreeting?: (slug: string) => Promise<string | null>;
     sweepCall?: (record: unknown) => Promise<unknown>;
+    sweepPcpFloor?: (record: unknown) => Promise<unknown>;
     persistCall?: (record: unknown) => Promise<boolean>;
     persistTurns?: (record: unknown, ids: unknown) => Promise<unknown>;
     gradeCall?: (record: unknown, ids: unknown) => Promise<unknown>;
@@ -170,6 +172,7 @@ async function harness(
   const persisted: Array<Record<string, unknown>> = [];
   const persistedIdentity: Array<unknown> = [];
   const swept: Array<Record<string, unknown>> = [];
+  const pcpSwept: Array<Record<string, unknown>> = [];
   mountVoiceRuntime(app, server, {
     env: over.env ?? ENV,
     // Short so the deadline test does not wait on a production-length one.
@@ -206,6 +209,17 @@ async function harness(
         persistedIdentity.push(identity);
         return true;
       }),
+    sweepPcpFloor:
+      over.sweepPcpFloor ??
+      (async (record) => {
+        // The floor files a request, so like sweepCall it must run AFTER the
+        // durable record — asserted, not assumed.
+        pcpSwept.push({
+          ...(record as unknown as Record<string, unknown>),
+          persistedFirst: persisted.length,
+        });
+        return undefined;
+      }),
     sweepCall:
       over.sweepCall ??
       (async (record) => {
@@ -224,6 +238,7 @@ async function harness(
     persisted,
     persistedIdentity,
     swept,
+    pcpSwept,
     base: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/voice/stream`,
     registry,
@@ -843,6 +858,44 @@ describe("one whole call, end to end, offline", () => {
     expect(h.swept[0]).toMatchObject({ callSid: "CA-sweep" });
     // The record was already in before the sweep saw the call.
     expect(h.swept[0]!.persistedFirst).toBe(1);
+  });
+
+  /**
+   * AND THE PCP FLOOR RUNS TOO, AFTER THE RECORD.
+   *
+   * This is the wiring, and the wiring is the whole defect: the floor itself
+   * has been built and tested since v18/v30/v31 and had never once run,
+   * because its only caller was the OLD CORE's SIP teardown and PCP moved to
+   * this runtime on 2026-09-04. A filer nobody calls files nothing — 38 calls
+   * on 2026-09-22 ran the intake, filed nothing and carry no ticket of any
+   * provenance. What pcpFloor.test.ts owns is what the floor DOES; what this
+   * owns is that teardown calls it at all, which is what was missing.
+   */
+  it("runs the PCP floor on a finished call, after the call_logs row", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-floor", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-floor", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.pcpSwept).toHaveLength(1);
+    expect(h.pcpSwept[0]).toMatchObject({ callSid: "CA-floor", slug: "optical" });
+    // The durable record landed before the floor saw the call, exactly as for
+    // the generic sweep: the row is the evidence every measurement rests on.
+    expect(h.pcpSwept[0]!.persistedFirst).toBe(1);
+  });
+
+  it("finishes teardown even when the PCP floor rejects", async () => {
+    // Same property as the sweep beside it: the floor files a ticket over the
+    // network, and a ticketing outage must not cost the call its record.
+    const h = await harness({ sweepPcpFloor: async () => { throw new Error("floor boom"); } });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-floor-boom", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-floor-boom", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.persisted).toHaveLength(1);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA-floor-boom" });
   });
 
   it("finishes teardown even when the sweep rejects", async () => {
