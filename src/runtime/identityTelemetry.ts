@@ -146,6 +146,19 @@ export function identityEvent(
   identity: RuntimeCallIdentity,
   probe: IdentityStoreProbe,
   persisted: boolean | null,
+  /**
+   * WHAT THE PRE-CONTEXT WRITE DID, when there was one: `stored` | `merged` |
+   * `refused_sid` | `refused_name`, and absent when pre-context vouched for
+   * nobody so no write was attempted.
+   *
+   * This is the other half of the fork `storeSize: 0` cannot split. All three
+   * of `rememberVerifiedIdentity`'s early returns leave the map empty, so an
+   * empty store beside an ABSENT verdict says the write was never reached and
+   * beside a refusal says which guard turned it away. The lookup tool reports
+   * its own write on `tool_timeline.identity_write`; this is the runtime's.
+   * See docs/observatory/SPEC-20260923.md.
+   */
+  precontextWrite?: string,
 ): IdentityEvent {
   const identityHeld = identity.patientFound === true;
   const reachedRow = identityHeld && persisted === true;
@@ -172,6 +185,7 @@ export function identityEvent(
   return {
     level: certainLost || writeLost || writeUnconfirmed ? "warn" : "info",
     data: {
+      ...(precontextWrite ? { precontextWrite } : {}),
       storeSize: probe.size,
       certainEntries: probe.certainEntries,
       sidCanonical: probe.sidCanonical,
@@ -220,6 +234,8 @@ export async function logRuntimeIdentity(
   opts: {
     backoffMs?: readonly number[];
     sleep?: (ms: number) => Promise<void>;
+    /** Forwarded to `identityEvent` — see its own parameter. */
+    precontextWrite?: string;
     /**
      * The other `call_events` writer for this call, awaited BEFORE flushing so
      * the two never release the same buffer concurrently — see the call site.
@@ -227,7 +243,7 @@ export async function logRuntimeIdentity(
     after?: Promise<unknown>;
   } = {},
 ): Promise<boolean> {
-  const ev = identityEvent(identity, probe, persisted);
+  const ev = identityEvent(identity, probe, persisted, opts.precontextWrite);
   // Lazy, like every database-touching import on the runtime: callEventLog
   // pulls in server/db, which validates DATABASE_URL at load.
   const { emitCallEvent, flushCallEvents, releaseCallEvents } = await import(
