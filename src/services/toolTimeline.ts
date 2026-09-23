@@ -280,6 +280,19 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
      * number rather than a console line.
      */
     'lookup_misses',
+    /**
+     * WHAT THE IDENTITY CARRY-FORWARD WRITE DID: `stored` | `merged` |
+     * `refused_sid` | `refused_name`, absent when the branch was not reached.
+     *
+     * A fixed word from a closed set, never caller data — the same class of
+     * value as `matched_by` above it. It is here because the v58 store probe
+     * cannot distinguish a refused write from one that never happened: all
+     * three of `rememberVerifiedIdentity`'s early returns leave the map empty,
+     * so `storeSize: 0` was the only thing 623 consecutive calls could say
+     * (docs/observatory/SPEC-20260923.md). Without this key the question
+     * stays unanswerable from SQL, which is the v28/v48 mistake.
+     */
+    'identity_write',
     'say', // directive text — kept so the Phase 7 rubric can grade say-verbatim compliance
     /**
      * What a refused PCP gate told the model to do instead (src/pcp/refusals.ts).

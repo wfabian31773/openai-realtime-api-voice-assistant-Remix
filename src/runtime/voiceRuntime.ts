@@ -438,7 +438,7 @@ export interface VoiceRuntimeOptions {
     probe: ReturnType<typeof identityStoreProbe>,
     persisted: boolean | null,
     ids: { callLogId?: string },
-    opts?: { after?: Promise<unknown> },
+    opts?: { after?: Promise<unknown>; precontextWrite?: string },
   ) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
@@ -829,6 +829,15 @@ export function mountVoiceRuntime(
       /** Filled in when the call_logs row lands; read through the metadata
        * getter above for the rest of the call. */
       let callLogId: string | undefined;
+      /**
+       * WHAT THE PRE-CONTEXT CARRY-FORWARD WRITE DID, or undefined when
+       * pre-context vouched for nobody and there was nothing to write.
+       *
+       * Declared here, beside `callLogId`, because the teardown reads it and
+       * the write happens sixty lines below. Every early return leaves it
+       * undefined, which is the honest value: nothing was attempted.
+       */
+      let precontextWrite: string | undefined;
       const context = {
         callSid: entry.callSid,
         streamSid,
@@ -912,7 +921,10 @@ export function mountVoiceRuntime(
         const record = matchedRecord(precontext);
         if (record) {
           const { rememberVerifiedIdentity } = await import("../tools/verifiedIdentity");
-          rememberVerifiedIdentity(entry.callSid, { ...record, certain: false });
+          precontextWrite = rememberVerifiedIdentity(entry.callSid, {
+            ...record,
+            certain: false,
+          });
         }
         const lane = await resolveLane(
           entry.slug,
@@ -1253,6 +1265,7 @@ export function mountVoiceRuntime(
              */
             void logIdentity(record, identity, identityProbe, persisted, { callLogId }, {
               after: followUpsWritten,
+              precontextWrite,
             }).catch(() => undefined);
           },
         });

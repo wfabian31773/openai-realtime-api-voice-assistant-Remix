@@ -350,7 +350,7 @@ import { callEnvironment } from "./callRecord";
  * tells the model to say what the lookup found.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v58-why-the-record-did-not-reach-the-row-20260918";
+  "voice-runtime-v61-the-identity-write-says-why-20260923";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
