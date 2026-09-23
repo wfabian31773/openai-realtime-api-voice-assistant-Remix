@@ -2301,11 +2301,19 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 before and brought it in, so v12 contains both.
 
 **AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v61 IS THE
-NEWEST, v58 IS WHAT `main` CARRIES, AND v57 WAS WITHDRAWN — see THE SURGEON
-CLAIM below the table.** NEWEST IS NOT THE SAME AS CONTAINED, and here they
-come apart: v59 (#293), v60 (#323) and v61 (#324) are three SIBLINGS off the
-v58 on `main`, each containing v58 and none containing another, so 61 > 60
-says nothing whatever about containment. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-request
+NEWEST, v61 IS ALSO WHAT `main` CARRIES SINCE #324 MERGED 2026-09-23, AND v57
+WAS WITHDRAWN — see THE SURGEON CLAIM below the table.** This line read
+`v58 IS WHAT main CARRIES` until that merge, and leaving it would have armed
+the exact trap this table exists to disarm: a reader would have believed a
+deployment on v58 was current. **NEWEST IS NOT THE SAME AS CONTAINED**, and
+v59/v60 are now the case that proves it: v59 (#293) and v60 (#323) both
+branched off the v58 that `main` used to carry, so each is a sibling of v61
+and **BOTH NOW SIT BELOW `main`**. Either one landing as-is would send
+`/voice/health` BACKWARDS from v61, which reads as a failed pull rather than a
+new build. **So both must merge `main` and re-bump above v61 before they
+land** — that was true of #293 alone until 2026-09-23 and is now true of #323
+too. A higher number still says nothing about containment: 61 > 60 did not
+mean v61 contained v60, and it did not. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-request
 floor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
 (#301), v22 the question format (#303), v23 the recording disclosure (#304),
 v24 the answerable queue choice (#306). Distinct numbers were assigned UP FRONT
@@ -2441,13 +2449,14 @@ never read v57; **v58 is that next ship and it is the CURRENT marker** — the
 identity probe, an instrument and no behaviour change (see the v56 row below
 for what it measures).
 
-**v61 (#324) IS THE CURRENT MARKER, AND 59 AND 60 ARE SKIPPED RATHER THAN
-TAKEN.** v59 is claimed by the open #293 and v60 by the open #323, and two
-branches carrying one version make two builds indistinguishable at
-`/voice/health` — the single thing this constant exists to prevent. So the
-identity-write instrument took the next free number rather than colliding.
-Containment is stated once, in the sequence sentence above; see the v56 row
-for what v61 measures.
+**v61 (#324) IS THE CURRENT MARKER AND IS NOW ON `main` (merged 2026-09-23,
+`7de4dd7`), AND 59 AND 60 WERE SKIPPED RATHER THAN TAKEN.** v59 is claimed by
+the still-open #293 and v60 by the still-open #323, and two branches carrying
+one version make two builds indistinguishable at `/voice/health` — the single
+thing this constant exists to prevent. So the identity-write instrument took
+the next free number rather than colliding, and the next ship takes **v62**,
+not v59 or v60, however long those two stay open. Containment is stated once,
+in the sequence sentence above; see the v56 row for what v61 measures.
 
 **AND THE TWO FIXES BELOW ARE v58'S, NOT v61'S** — they rode in with the
 identity probe on #322 and are recorded here because the surgeon claim was
