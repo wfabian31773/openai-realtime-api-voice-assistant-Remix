@@ -2300,8 +2300,12 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v58 IS THE
-NEWEST, AND v57 WAS WITHDRAWN — see THE SURGEON CLAIM below the table.** v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-request
+**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v61 IS THE
+NEWEST, v58 IS WHAT `main` CARRIES, AND v57 WAS WITHDRAWN — see THE SURGEON
+CLAIM below the table.** NEWEST IS NOT THE SAME AS CONTAINED, and here they
+come apart: v59 (#293), v60 (#323) and v61 (#324) are three SIBLINGS off the
+v58 on `main`, each containing v58 and none containing another, so 61 > 60
+says nothing whatever about containment. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-request
 floor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
 (#301), v22 the question format (#303), v23 the recording disclosure (#304),
 v24 the answerable queue choice (#306). Distinct numbers were assigned UP FRONT
@@ -2437,13 +2441,18 @@ never read v57; **v58 is that next ship and it is the CURRENT marker** — the
 identity probe, an instrument and no behaviour change (see the v56 row below
 for what it measures).
 
-**v61 IS THE CURRENT MARKER, AND 59 AND 60 ARE SKIPPED RATHER THAN TAKEN.**
-v59 is claimed by the open #293 and v60 by the open #323, and two branches
-carrying one version make two builds indistinguishable at `/voice/health` —
-the single thing this constant exists to prevent. So the identity-write
-instrument took the next free number. **v61 contains v58 and contains NEITHER
-v59 NOR v60**; it is a SIBLING of both, and 61 > 60 says nothing whatever
-about containment. See the v58 row for what v61 does. **Two fixes that rode in with it STAY
+**v61 (#324) IS THE CURRENT MARKER, AND 59 AND 60 ARE SKIPPED RATHER THAN
+TAKEN.** v59 is claimed by the open #293 and v60 by the open #323, and two
+branches carrying one version make two builds indistinguishable at
+`/voice/health` — the single thing this constant exists to prevent. So the
+identity-write instrument took the next free number rather than colliding.
+Containment is stated once, in the sequence sentence above; see the v56 row
+for what v61 measures.
+
+**AND THE TWO FIXES BELOW ARE v58'S, NOT v61'S** — they rode in with the
+identity probe on #322 and are recorded here because the surgeon claim was
+withdrawn out of the same PR, not because they belong to a later marker.
+**Two fixes that rode in with it STAY
 in the PR and are nothing to do with the surgeon claim:** Codex round 15, where
 the post-call sync's failure writes add one to the retry count IN THE DATABASE
 instead of storing a snapshot that could clobber the grade or recording
