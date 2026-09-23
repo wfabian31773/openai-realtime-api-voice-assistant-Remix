@@ -89,6 +89,36 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     expect(JSON.stringify(ev)).not.toContain('1952-08-29');
   });
 
+  /**
+   * AND WHAT THE CARRY-FORWARD WRITE DID (W1, docs/observatory/SPEC-20260923.md).
+   *
+   * All three of `rememberVerifiedIdentity`'s early returns leave the store
+   * EMPTY, so `identityStoreProbe` reporting `storeSize: 0` cannot tell a
+   * refused write from one that never ran — 623 consecutive calls on 09-22 read
+   * exactly that. Without this key the question stays unanswerable from SQL,
+   * which is the v28/v48 mistake one more time.
+   */
+  it('keeps identity_write on a lookup outcome, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'lookup_patient',
+      { first_name: 'Paula', last_name: 'Kolterman' },
+      JSON.stringify({
+        success: true,
+        found: true,
+        identity_is_certain: true,
+        identity_write: 'refused_sid',
+        patient_name: 'Paula Kolterman',
+      }),
+      40,
+      { agentSlug: 'optical' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ identity_write: 'refused_sid' });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
   it('keeps the diagnostic signal as booleans instead of the caller\'s words', () => {
     const callId = freshCall();
     recordToolEvent(callId, 'create_ticket', TICKET_ARGS, '{}', 1, { agentSlug: 'answering-service' });
