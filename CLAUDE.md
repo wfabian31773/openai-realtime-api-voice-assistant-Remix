@@ -1171,6 +1171,18 @@ GROUP BY 1 ORDER BY 2 DESC;
 It fell 16.1 → 9.7 across the tech cutover while the callers actually said
 MORE. Count `CALLER:` lines in the transcript instead.
 
+**AND `call_logs.interruption_count` IS THE SAME TRAP IN A SECOND COLUMN — it
+is NOT comparable across the pipelines.** Measured 2026-09-23 over 09-17..09-22,
+substantive queue calls: on the RUNTIME the column averages 0.61 against 0.73
+transcript `[interrupted]` marks and **never once exceeds the marks** on 2,268
+calls (under-counting them on 261); on the OLD CORE the column averages 1.59
+while the transcript carries **0.00 marks on 109 of 109** — that pipeline never
+writes the marker at all, so nothing validates its column. The old core's
+1.86-3.32 against the runtime's 0.71-1.13 is therefore an instrument difference
+of unknown size and NOT a behaviour comparison. Within one pipeline it is
+usable; across the cutover it is not. **Count `[interrupted]` marks in the
+transcript when the question is whether interruptions moved.**
+
 ---
 
 ## THE SAME TICKET NUMBER READ TO TWO CALLERS — answered 2026-09-15
@@ -1751,9 +1763,9 @@ field, that patient's answer would have been refused.
 
 ### The other large bucket: the caller is never heard
 
-77 of the 191 (0 or 1 `CALLER:` lines). Some are hangups and wrong numbers;
-**the split has not been established.** Barely-heard rate (`duration >= 30`,
-<= 1 caller line), by lane:
+77 of the 191 (0 or 1 `CALLER:` lines). Some are hangups and wrong numbers.
+**THE SPLIT IS NOW MEASURED, WITH A FLOOR — see the ring-back control below.**
+Barely-heard rate (`duration >= 30`, <= 1 caller line), by lane:
 
 | lane | 09-02 old core | 09-03 old core | 09-03 grok | 09-04 grok | 09-08 grok |
 |---|---|---|---|---|---|
@@ -1761,8 +1773,44 @@ field, that patient's answer would have been refused.
 | surgery | 13.0% (92) | 13.0% (46) | 37.2% (43) | 27.5% (80) | 21.6% (134) |
 | tech | 10.4% (163) | 9.3% (75) | 30.1% (83) | 19.7% (183) | 16.4% (183) |
 
-Dropping `RUNTIME_VAD_THRESHOLD` to 0.6 moved surgery and tech a long way.
-Neither is back to its old-core rate, and **optical has gone the other way.**
+**RE-MEASURED 2026-09-23 OVER THE WHOLE PERIOD — that is W3, and the full
+working is `docs/observatory/W3-BARELY-HEARD-20260923.md`. Do not quote a day
+from the table above as current.** The single-day columns are small-n; these
+are the aggregates, and they are split into THREE arms because v39's recording
+disclosure went live 2026-09-17 and lengthens the greeting the caller talks
+over — an "after" window that runs to today folds the threshold and the
+greeting together:
+
+| lane | 0.85 (09-03) | 0.6, short greeting (09-04..16) | 0.6 + disclosure (09-17..22) |
+|---|---|---|---|
+| optical | 11.7% (60) | 16.7% (646) | **18.9% (349)** |
+| surgery | **37.2% (43)** | **16.6% (844)** | **14.6% (424)** |
+| tech | **30.1% (83)** | **16.4% (1,470)** | **13.8% (643)** |
+
+**Dropping to 0.6 halved surgery and tech and did not fix optical.** Caller
+lines per call rose with it (surgery 3.8 -> 5.8, tech 4.8 -> 6.1), so the
+caller is heard more rather than merely counted more. **Optical rose on the
+threshold change and rose again on the disclosure**, and against its own
+old-core 8.5% it has more than doubled; it is the only lane where 0.6 did not
+work, and WHY is not established — greeting length is ruled out, because
+optical's is the SHORTEST of the three (190/251 median chars) and its rate is
+the worst.
+
+**AND THE SECOND ARM PASSED, which is the part that was feared:** interruptions
+per call FELL when the threshold dropped (optical 1.42 -> 0.90, surgery 1.28 ->
+1.01, tech 1.14 -> 0.89 transcript `[interrupted]` marks), so the more
+sensitive VAD did not buy fewer missed callers with an agent that stops for a
+cough. The disclosure then put some back (tech to 1.13/call, 0.51/min against
+0.52 at 0.85). **Read those off the TRANSCRIPT, never the column** — see the
+`interruption_count` trap above.
+
+**The old-core control moved too, and it is the honest caveat:** `records` is
+still on the old core so the threshold cannot touch it, and its rate ran 10.7%
+-> 3.0% -> 19.1% -> 14.4% -> 11.9% across the same five windows. A lane the
+dial cannot reach swings 16 points on n = 28-146. The threshold is still the
+leading explanation for surgery and tech — the move is bigger than records'
+whole range, on twenty times the sample — but it is NOT proven against that
+control.
 
 **DO NOT ALARM ON ONE HOUR OF THIS.** Surgery's hourly barely-heard rate on
 2026-09-08 ran 16.7 · 14.3 · 42.9 · 31.6 · 36.4 · 5.9 · 31.6 · 7.7 · 0.0
@@ -1782,9 +1830,35 @@ share of substantive calls with ZERO caller lines, every day:
 On 2026-09-09 those 10 calls averaged 95s (33–246s) with 1.4 `AGENT:` lines
 and `agent_outcome = 'inconclusive'` on all 10. **Whether these are dead air
 (robocalls, wrong numbers, abandoned legs) or real callers we never heard is
-NOT established** — the shape is consistent with both, and `RUNTIME_VAD_THRESHOLD`
-does not apply to this pipeline. The control that would settle it: whether the
-same number rings back within 24h and IS heard on the later call.
+NOT established for no-ivr in 2026-09-09's terms** — the shape is consistent
+with both, and `RUNTIME_VAD_THRESHOLD` does not apply to this pipeline.
+
+**THE CONTROL NAMED HERE HAS NOW BEEN RUN, 2026-09-23, AND IT DISCRIMINATES.**
+Of each lane's barely-heard calls over 09-10..09-22, the share whose number
+rang back within 24 hours and WAS heard on the later call — searched across
+EVERY lane, so an overnight caller who tries again in business hours counts:
+
+| lane | barely-heard | rang back and was heard | share |
+|---|---|---|---|
+| tech | 232 | 78 | **33.6%** |
+| surgery | 127 | 40 | **31.5%** |
+| optical | 131 | 35 | **26.7%** |
+| **no-ivr** | 142 | 13 | **9.2%** |
+
+**On the queue lanes at least one barely-heard call in four is a real person
+who had to ring again; on the after-hours line it is one in eleven.** So
+no-ivr's population really does look mostly like dead air, which is what this
+paragraph suspected, and the queue lanes' does not. Restricting the ring-back
+to the same lane barely moves no-ivr (7.7% against 9.2%), so the gap is not an
+artefact of the widening.
+
+**It is a FLOOR on real callers, not a share.** A caller who gave up entirely,
+rang back after 24 hours, or rang from another number is invisible to it, and
+that residue is unresolved in the worse direction. Beside it: **13 of 490**
+queue-lane barely-heard calls filed a ticket, while **114 of the 140** whose
+caller rang back onto the same lane and was heard DID file — so a barely-heard
+call is a lost request or a patient made to ring twice, and only persistence
+recovers it.
 
 ---
 
