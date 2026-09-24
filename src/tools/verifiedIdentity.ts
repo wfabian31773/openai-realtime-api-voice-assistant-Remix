@@ -173,10 +173,35 @@ function sweep(now: number): void {
  * A call with no usable SID keeps the old behaviour: nothing is remembered,
  * and the agent asks for the date of birth out loud.
  */
+/**
+ * WHAT A WRITE DID, because until now it did all four of these in silence.
+ *
+ * `rememberVerifiedIdentity` returns early on three conditions — a SID that is
+ * not a real Twilio Call SID, an absent first name, an absent last name — and
+ * every one of them leaves the map EMPTY. So `identityStoreProbe` reporting
+ * `storeSize: 0` / `no_entry` cannot tell a refused write from a write that
+ * never happened, and on 2026-09-22 all 623 probed calls read exactly that
+ * while 210 of them ran a `lookup_patient` reporting `identity_is_certain:
+ * true` (docs/observatory/SPEC-20260923.md).
+ *
+ * THIS ALSO CORRECTS THIS MODULE'S OWN DESIGN NOTE. The probe's docstring says
+ * a write/read SID disagreement shows up as `storeSize > 0` with `hasEntry`
+ * false — the `key_mismatch` arm. That is false for the case that matters: a
+ * non-canonical write SID is refused HERE, nothing is stored, and the map stays
+ * empty. `key_mismatch` can only fire when the write SID is canonical AND
+ * different, so the arm cannot see the shape it was built for.
+ *
+ * The verdict is RETURNED rather than accumulated in a second store, because
+ * both call sites already sit somewhere countable: the lookup tool puts it on
+ * its own recorded outcome (`identity_write`, allow-listed in toolTimeline) and
+ * the runtime puts it on the `identity_summary` row. No new map, no second TTL.
+ */
+export type RememberOutcome = 'stored' | 'merged' | 'refused_sid' | 'refused_name';
+
 export function rememberVerifiedIdentity(
   callSid: string | undefined,
   identity: Partial<VerifiedIdentity>,
-): void {
+): RememberOutcome {
   // Absent means NOT certain. A caller that forgets to say so must not get
   // the benefit of the doubt on a field this one is about.
   const certain = identity.certain === true;
@@ -197,7 +222,25 @@ export function rememberVerifiedIdentity(
   // A NAME IS ENOUGH TO REMEMBER. The date of birth is a bonus that the
   // filing tools carry forward; its absence is not a reason to forget who
   // the caller is.
-  if (!isTwilioCallSid(callSid) || !firstName || !lastName) return;
+  /**
+   * THE SAME TWO RULES, SAID OUT LOUD. The conditions are unchanged — this
+   * splits one silent `return` into two that name themselves. A CallSid is not
+   * a patient, so the offending value is printed; a name never is, so the name
+   * branch reports only which half was missing.
+   */
+  if (!isTwilioCallSid(callSid)) {
+    console.info(
+      `[IDENTITY] remember REFUSED: not a Twilio CallSid — "${String(callSid).slice(0, 40)}"`,
+    );
+    return 'refused_sid';
+  }
+  if (!firstName || !lastName) {
+    console.info(
+      '[IDENTITY] remember REFUSED: the record gave no ' +
+        (!firstName && !lastName ? 'first or last name' : !firstName ? 'first name' : 'last name'),
+    );
+    return 'refused_name';
+  }
   const now = Date.now();
   sweep(now);
 
@@ -249,7 +292,7 @@ export function rememberVerifiedIdentity(
         certain: existingFresh.certain || certain,
         at: now,
       });
-      return;
+      return 'merged';
     }
   }
 
@@ -263,6 +306,7 @@ export function rememberVerifiedIdentity(
     certain,
     at: now,
   });
+  return 'stored';
 }
 
 /**
@@ -448,6 +492,103 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
     lastName: entry.lastName,
     ...(entry.dateOfBirth ? { dateOfBirth: entry.dateOfBirth } : {}),
     certain: true,
+  };
+}
+
+/**
+ * WHAT THE STORE LOOKED LIKE WHEN A READER ASKED — PHI-FREE, task #148.
+ *
+ * `verifiedIdentityFor` answers with a name or with `undefined`, and that
+ * single `undefined` is four different facts: nothing was ever written, the
+ * entry expired, the entry is here but not certain, or the entry is under a
+ * DIFFERENT KEY than the one being read. v51 reads it at teardown and wrote
+ * identity onto `patient_found` for 0 of 633 calls on 2026-09-17 while 209 of
+ * those calls ran a `lookup_patient` reporting `identity_is_certain: true` —
+ * and seven candidate causes were ruled out from outside without reaching the
+ * eighth, because that `undefined` is indistinguishable in every log we have.
+ *
+ * `size` and `certainEntries` are what make the decisive split readable:
+ *
+ *   size 0                     nothing is in the store at teardown at all
+ *   size > 0 && !hasEntry      entries exist under OTHER keys — the write and
+ *                              the read disagree about this call's SID
+ *   hasEntry && !entryCertain  the entry survives and its certainty does not
+ *
+ * **AND THE SECOND ARM CANNOT SEE THE CASE IT WAS BUILT FOR — corrected
+ * 2026-09-23, v61.** A write whose SID is not canonical is refused by
+ * `rememberVerifiedIdentity` and stores NOTHING, so the map stays empty and the
+ * probe reports the FIRST arm. `size > 0 && !hasEntry` therefore only ever
+ * means the write SID was canonical AND different, which the recording control
+ * rules out (`startRecording(entry.callSid, …)` produced a Twilio recording on
+ * 681 of 682 calls on 2026-09-22, and Twilio refuses a SID that is not a real
+ * call). So arm 1 covers three distinct facts, not one, and that is why the
+ * verdict now comes from the WRITE instead: `rememberVerifiedIdentity` returns
+ * `stored` | `merged` | `refused_sid` | `refused_name`, the lookup tool puts it
+ * on `tool_timeline.identity_write` and the runtime on the `identity_summary`
+ * row as `precontextWrite`. See docs/observatory/SPEC-20260923.md.
+ *
+ * COUNTS AND BOOLEANS ONLY. No name, no date of birth, no office, no phone,
+ * and never a key — a CallSid is not a patient, but the point of this is that
+ * it goes in a table, and a map key here is one call's identifier beside
+ * another's. The columns answer "which of the four happened", nothing more.
+ *
+ * A PURE READ. It does NOT call `sweep()`, because a diagnostic that evicts
+ * entries changes the thing it is measuring; expired entries are skipped in
+ * the count instead, so `size` is live entries as a reader would find them.
+ */
+export interface IdentityStoreProbe {
+  /** Live (unexpired) entries in the whole store at this instant. */
+  size: number;
+  /** Live entries whose match was CERTAIN — the only ones `verifiedIdentityFor` answers for. */
+  certainEntries: number;
+  /** Did the key pass `isTwilioCallSid`? A sentinel is refused on the write, so it can never have one. */
+  sidCanonical: boolean;
+  /** Was there a live entry under THIS key? */
+  hasEntry: boolean;
+  /** Was that entry certain? */
+  entryCertain: boolean;
+  /** Did it carry a date of birth? Separates v51's silence from v26's. */
+  entryHasDob: boolean;
+  /**
+   * WHEN the store was read, epoch ms — because everything above is a fact
+   * about one instant and the questions asked of it are not.
+   *
+   * A `lookup_patient` still in flight at hangup settles AFTER this read and
+   * writes its certain result to `tool_timeline` anyway, so a call can
+   * honestly read `no_entry` here and carry a certain lookup there. Without
+   * this field the mismatch JOIN in `identityTelemetry.ts` counts that call as
+   * the write and the read disagreeing about the SID, which is the one
+   * hypothesis the join exists to test (Codex P2, #322 round 5). A number
+   * rather than a string so the PHI guard's "counts and booleans only" holds
+   * unchanged.
+   */
+  at: number;
+}
+
+export function identityStoreProbe(callSid: string | undefined): IdentityStoreProbe {
+  const now = Date.now();
+  const live = (e: Entry) => now - e.at <= TTL_MS;
+  let size = 0;
+  let certainEntries = 0;
+  for (const e of verified.values()) {
+    if (!live(e)) continue;
+    size += 1;
+    if (e.certain) certainEntries += 1;
+  }
+  const sidCanonical = isTwilioCallSid(callSid);
+  // Read under the same guard the readers use: a non-canonical key is never
+  // looked up, so reporting an entry for one would invent a lookup nobody does.
+  const entry = sidCanonical ? verified.get(callSid as string) : undefined;
+  const found = entry && live(entry) ? entry : undefined;
+  return {
+    size,
+    certainEntries,
+    sidCanonical,
+    hasEntry: Boolean(found),
+    entryCertain: Boolean(found?.certain),
+    entryHasDob: Boolean(found?.dateOfBirth),
+    // The same `now` the liveness test used: one instant, reported once.
+    at: now,
   };
 }
 

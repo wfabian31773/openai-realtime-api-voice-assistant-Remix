@@ -20,6 +20,32 @@ export interface PcpConversationState {
   callerFacilityType?: PcpFacilityType;
   callbackNumber?: string;
   /**
+   * TRUE while `callbackNumber` is only the inbound caller ID, and nobody has
+   * said it is a line that answers.
+   *
+   * Traced 2026-09-24 from a referral coordinator's own complaint. Her office's
+   * calls all filed; on one of them a staffer tried the number on the ticket
+   * and resolved it "Processed callback but line is unavailable. Closing the
+   * ticket as little to no information provided." The number was her ANI — an
+   * out-of-state area code on a Southern California referral office, i.e. a trunk
+   * identifier and not a desk. Nobody asked her for a number on any of eight
+   * calls (`asked_callback` false on all eight), because the seed above makes
+   * the field read ANSWERED and the intake then skips it silently.
+   *
+   * `record_pcp_intake` clears this the moment the caller states a number, so
+   * a stated value is never labelled unverified.
+   *
+   * WHAT THIS DELIBERATELY DOES NOT DO: add a question. v37 measured 18 of 25
+   * PCP calls ENDING on a pre-filing question with 10 leaving NO ticket of any
+   * provenance, and the teardown sweep did not catch them — so a new pre-filing
+   * ask is the one change here that could cost more requests than it saves.
+   * Whether to CONFIRM the number, and before or after the ticket, is an open
+   * question for the operator; this flag is what makes either answer
+   * measurable and is useful on its own, because the staffer who hit an
+   * unreachable number was never told it was unverified.
+   */
+  callbackFromCallerIdOnly?: boolean;
+  /**
    * HOW THIS CALLER WANTS THE ANSWER BACK — the operator's fifth field, and
    * the one that makes his fourth redundant.
    *
@@ -95,6 +121,31 @@ export interface PcpConversationState {
    * transfer never happened is owed the ticket after all.
    */
   callerChoseTheQueue?: boolean;
+  /**
+   * WHY NO DIAL WENT OUT — two latches, read by ONE consumer: the
+   * `handoffNotAttemptedReason` the ticket carries. See
+   * `src/pcp/handoffNotAttempted.ts` for the whole rule.
+   *
+   * SERVER-OWNED, and that is the point of putting them here rather than in a
+   * tool argument. The v17 P1 is the worked example: a guard that read
+   * `create_pcp_task`'s `disposition` was reading a MODEL argument with
+   * `.default('CREATE_TASK')`, so the model could satisfy it by accident. The
+   * model can neither set nor clear either of these.
+   *
+   * TRUE LATCHES, unlike `callerChoseTheQueue` above, which is reversible
+   * because it is set before a dial and withdrawn when the dial fails. These
+   * two record something that HAPPENED on the call, and a call on which the
+   * caller declined the queue does not stop being one.
+   */
+  callerDeclinedTheQueue?: boolean;
+  /**
+   * `handoff_to_pcp` ran and the director refused it as ineligible — so the
+   * agent asked to dial and was told it could not. Distinct from
+   * `callerDeclinedTheQueue` (the caller said no) and from never asking at all,
+   * and it is latched rather than recomputed because the ticket may be filed
+   * several turns later by `create_pcp_task`, on state that has moved.
+   */
+  handoffRefusedAsIneligible?: boolean;
   /**
    * THE CALLER IS THE PATIENT, and it stays true once established.
    *
@@ -667,6 +718,16 @@ export class PcpDirector {
    */
   setCallerChoseTheQueue(callId: string, chose: boolean): void {
     this.get(callId).callerChoseTheQueue = chose;
+  }
+
+  /** Record that the caller, having been warned, chose a ticket over the queue. */
+  markCallerDeclinedTheQueue(callId: string): void {
+    this.get(callId).callerDeclinedTheQueue = true;
+  }
+
+  /** Record that a handoff was asked for in code and refused as ineligible. */
+  markHandoffRefusedAsIneligible(callId: string): void {
+    this.get(callId).handoffRefusedAsIneligible = true;
   }
 
   clear(callId: string): void {

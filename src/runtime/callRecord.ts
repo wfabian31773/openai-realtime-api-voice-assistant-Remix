@@ -190,13 +190,22 @@ export function callEnvironment(env: Record<string, string | undefined>): string
  * meaning of the column is the one every other reader assumes: completed is
  * answered-and-ended, failed is never-connected. So dead_air is failed only
  * when the caller never spoke; `provider_failure` stays failed regardless.
+ *
+ * `caller_silent` (v65) takes the SAME rule rather than a flat `failed`, for
+ * exactly the reason dead_air stopped taking one: the ladder resets when a
+ * caller is heard, so it can also end a call that HELD a conversation and
+ * then went quiet, and that call must still be graded and synced to its
+ * ticket. A silent line from the first second reads failed, which is what it
+ * is.
  */
 export function statusFor(
   outcome: VoiceCallRecord["outcome"],
   transcript: string = "",
 ): "completed" | "failed" {
   if (outcome === "provider_failure") return "failed";
-  if (outcome === "dead_air") return /(^|\n)CALLER: /.test(transcript) ? "completed" : "failed";
+  if (outcome === "dead_air" || outcome === "caller_silent") {
+    return /(^|\n)CALLER: /.test(transcript) ? "completed" : "failed";
+  }
   return "completed";
 }
 
@@ -631,8 +640,24 @@ export async function persistRuntimeCall(
   // the retry below, or for the reaper's TTL (Codex P2, #321 round 4).
   const parkedUrl = peekParkedRecording(record.callSid);
   if (parkedUrl) row.recordingUrl = parkedUrl;
+  /**
+   * THE ANSWER IS ABOUT THE ROW, NOT ABOUT THE SECOND WRITE (Codex P2, #322
+   * round 5). There are two upserts here: the call row, and a top-up carrying a
+   * recording URL that landed between the two peeks. Both used to share one
+   * try/catch and one `false`, so a blip on the SECOND one reported the whole
+   * operation failed — and the one consumer of this boolean is v58's identity
+   * telemetry, which turns it into `row_write_failed`: the write-stage
+   * measurement corrupted during exactly the intermittent database failures it
+   * exists to diagnose, on a call whose identity DID reach `call_logs`.
+   *
+   * So the primary write's outcome is tracked on its own. The top-up keeps its
+   * retries and, on failure, keeps the URL parked for the reaper's TTL exactly
+   * as before (#321 round 4) — it just no longer speaks for the row.
+   */
+  let rowWritten = false;
   try {
     await withRetry(() => upsert(row, toConflictUpdate(row)), backoffMs, sleep);
+    rowWritten = true;
     if (parkedUrl) releaseParkedRecording(record.callSid, parkedUrl);
     const lateUrl = peekParkedRecording(record.callSid);
     if (lateUrl) {
@@ -643,11 +668,18 @@ export async function persistRuntimeCall(
     return true;
   } catch (error) {
     // Log the failure rather than the record: a transcript in an error log
-    // is patient data in a place nobody is watching.
-    console.error(
-      `[voice-runtime] call_logs write failed for ${record.callSid}:`,
-      error instanceof Error ? error.message : String(error),
-    );
-    return false;
+    // is patient data in a place nobody is watching. Two lines, because "the
+    // row did not land" and "the row landed without its recording URL" are
+    // different facts and the first one is the alarming one.
+    const why = error instanceof Error ? error.message : String(error);
+    if (rowWritten) {
+      console.error(
+        `[voice-runtime] call_logs row landed for ${record.callSid} but the late recording URL did not (still parked):`,
+        why,
+      );
+    } else {
+      console.error(`[voice-runtime] call_logs write failed for ${record.callSid}:`, why);
+    }
+    return rowWritten;
   }
 }

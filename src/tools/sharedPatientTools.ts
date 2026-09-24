@@ -627,9 +627,19 @@ registerTool({
      * nobody can measure. That is why `matched_by` joins the recorded outcome
      * below rather than being fixed blind here.
      */
+    /**
+     * WHAT THE WRITE DID, carried onto this tool's own recorded outcome.
+     *
+     * Undefined when the branch was not taken at all, which is itself the
+     * answer to one of the two questions the v58 probe could not separate: a
+     * `storeSize: 0` row beside `identity_write: undefined` says the write was
+     * never reached, and beside `refused_sid` / `refused_name` it says which
+     * guard turned it away. See docs/observatory/SPEC-20260923.md.
+     */
+    let identityWrite: string | undefined;
     if (uniqueMatch) {
       const { rememberVerifiedIdentity } = await import('./verifiedIdentity');
-      rememberVerifiedIdentity(str(input.call_sid), {
+      identityWrite = rememberVerifiedIdentity(str(input.call_sid), {
         firstName: resolved.patientData?.firstName,
         lastName: resolved.patientData?.lastName,
         // What makes the downgrade guard provable rather than name-based.
@@ -704,6 +714,10 @@ registerTool({
       patient_name: resolved.patientName,
       matched_by: resolved.matchedBy,
       identity_is_certain: certain,
+      // The verdict of the carry-forward write, allow-listed in toolTimeline so
+      // it is SQL rather than a console line. A fixed word from a closed set,
+      // never caller data.
+      ...(identityWrite ? { identity_write: identityWrite } : {}),
       ...(certain
         ? {}
         : {

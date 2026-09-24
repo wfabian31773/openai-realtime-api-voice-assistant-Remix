@@ -261,11 +261,16 @@ import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert, type RuntimeCallIdentity } from "./callRecord";
 import { identityForRow } from "./runtimeIdentity";
+import { identityStoreProbe } from "../tools/verifiedIdentity";
+import { logRuntimeIdentity } from "./identityTelemetry";
 import { runRequestSweep } from "./sweepRunner";
+import { runPcpFloor } from "./pcpFloor";
 import { persistRuntimeTurns } from "./runtimeTurns";
 import { makeRecordingStarter } from "./callRecording";
 import { gradeRuntimeCall } from "./runtimeGrading";
 import { logRuntimeFollowUps } from "./followUpTelemetry";
+import { logCallerAudio } from "./callerAudioTelemetry";
+import { CallerAudioMeter, type CallerAudioCounts } from "./callerAudioEnergy";
 import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
 import { withNewOrExistingAsk } from "./newOrExistingAsk";
 import {
@@ -405,6 +410,15 @@ export interface VoiceRuntimeOptions {
    */
   sweepCall?: (record: VoiceCallRecord) => Promise<unknown>;
   /**
+   * The PCP lost-request floor — see pcpFloor.ts. A no-op on every other lane.
+   *
+   * Separate from `sweepCall` because the two file through different endpoints
+   * with different payloads, and the generic sweep declines `pcp` by design
+   * (`DEPARTMENT_BY_SLUG`), so they cannot double-file. Injected for tests, and
+   * settable to a no-op to turn the floor off without a deploy.
+   */
+  sweepPcpFloor?: (record: VoiceCallRecord) => Promise<unknown>;
+  /**
    * Writes the call's timed turns to `call_turns` — telemetry, after the row
    * and after the sweep, never awaited by teardown. Injected for tests.
    */
@@ -426,6 +440,30 @@ export interface VoiceRuntimeOptions {
    * awaited. Injected for tests.
    */
   logFollowUps?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
+  /**
+   * Why the record did or did not reach the call row (task #148,
+   * identityTelemetry.ts) — one PHI-free row per call, beside the follow-up
+   * summary and under the same rules. Injected for tests.
+   */
+  logIdentity?: (
+    record: VoiceCallRecord,
+    identity: RuntimeCallIdentity,
+    probe: ReturnType<typeof identityStoreProbe>,
+    persisted: boolean | null,
+    ids: { callLogId?: string },
+    opts?: { after?: Promise<unknown>; precontextWrite?: string },
+  ) => Promise<unknown>;
+  /**
+   * Whether the caller's audio ever reached us (v64, callerAudioTelemetry.ts)
+   * — one PHI-free row per call, on EVERY exit that writes a `call_logs` row
+   * and not only the bridge's teardown. Injected for tests.
+   */
+  logCallerAudio?: (
+    call: { callSid: string; outcome: string },
+    counts: CallerAudioCounts | undefined,
+    ids: { callLogId?: string },
+    opts?: { after?: Promise<unknown> },
+  ) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -509,10 +547,13 @@ export function mountVoiceRuntime(
   // boot or in a health check.
   const persistCall = options.persistCall ?? persistRuntimeCall;
   const sweepCall = options.sweepCall ?? runRequestSweep;
+  const sweepPcpFloor = options.sweepPcpFloor ?? runPcpFloor;
   const persistTurns = options.persistTurns ?? persistRuntimeTurns;
   const startRecording = options.startRecording ?? makeRecordingStarter(env);
   const gradeCall = options.gradeCall ?? gradeRuntimeCall;
   const logFollowUps = options.logFollowUps ?? logRuntimeFollowUps;
+  const logIdentity = options.logIdentity ?? logRuntimeIdentity;
+  const logAudio = options.logCallerAudio ?? logCallerAudio;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -709,6 +750,13 @@ export function mountVoiceRuntime(
     let bridge: VoiceCallBridge | null = null;
     let starting = false;
     /**
+     * A valid `start` frame CLAIMED this socket: the callSid and token checked
+     * out. Distinct from `starting`, which is set before the claim is tested
+     * and stays true on a refused one — so it cannot gate work that must never
+     * run for an unauthenticated client.
+     */
+    let claimed = false;
+    /**
      * Twilio is gone. Set by the close and error handlers, which cannot
      * report to a bridge that does not exist yet: building the agent is
      * asynchronous, and a caller who hangs up during it would otherwise be
@@ -727,6 +775,22 @@ export function mountVoiceRuntime(
      * is worth less than fresh, and oldest goes first.
      */
     const pendingFrames: TwilioInboundFrame[] = [];
+    /**
+     * WHAT TWILIO DELIVERED FROM THE CALLER, counted at the socket.
+     *
+     * At the SOCKET and not in the bridge, for two reasons that are the whole
+     * point of the instrument (Codex P2, #327). The queue above drops its
+     * OLDEST frame past the cap, so a caller who spoke during a slow start
+     * and went quiet afterwards would be counted as a line nobody spoke into
+     * — audio that reached this server, reported as its opposite, by the
+     * measure built to separate those two. And three exits below write a
+     * `call_logs` row without ever building a bridge; they are part of the
+     * no-audio population, and from here they have counts to write.
+     *
+     * One stream per socket (the `start` handler refuses a second), so this
+     * is per call.
+     */
+    const callerAudio = new CallerAudioMeter();
 
     const twilioSocket = {
       sendFrame: (frame: TwilioOutboundFrame) => {
@@ -757,6 +821,7 @@ export function mountVoiceRuntime(
           twilioSocket.close();
           return;
         }
+        claimed = true;
         clearClaimDeadline();
         // The public host the webhook was reached on rides in as a stream
         // parameter, so the recording callback can be named without a second
@@ -765,6 +830,22 @@ export function mountVoiceRuntime(
         void startCall(entry, frame.streamSid, params.host);
         return;
       }
+
+      // COUNTED HERE: after the claim, before every branch below that can drop
+      // a frame — the hold that discards its oldest, and the bridge that may
+      // not exist yet. Two integers and one pass over 160 bytes, and the audio
+      // is handed on unchanged further down, so nothing here can delay it.
+      //
+      // BEHIND `claimed` FOR TWO REASONS (Codex P2, #327 round 2). Until a
+      // valid `start` arrives this socket is unauthenticated for up to the
+      // claim deadline, and the parser accepts a payload up to the 64 KiB
+      // message limit with no rate limit behind it — so metering ahead of the
+      // claim let an anonymous client spend the shared event loop on scans.
+      // And those frames are not this call's anyway: the call's identity
+      // arrives IN the `start` frame, and a socket that never claims writes no
+      // row at all, so counting them could only ever inflate `frames` with
+      // audio that belongs to no measurement.
+      if (frame.event === "media" && claimed) callerAudio.note(frame.media.payload);
 
       if (!bridge) {
         if (starting) {
@@ -814,6 +895,15 @@ export function mountVoiceRuntime(
       /** Filled in when the call_logs row lands; read through the metadata
        * getter above for the rest of the call. */
       let callLogId: string | undefined;
+      /**
+       * WHAT THE PRE-CONTEXT CARRY-FORWARD WRITE DID, or undefined when
+       * pre-context vouched for nobody and there was nothing to write.
+       *
+       * Declared here, beside `callLogId`, because the teardown reads it and
+       * the write happens sixty lines below. Every early return leaves it
+       * undefined, which is the honest value: nothing was attempted.
+       */
+      let precontextWrite: string | undefined;
       const context = {
         callSid: entry.callSid,
         streamSid,
@@ -897,7 +987,10 @@ export function mountVoiceRuntime(
         const record = matchedRecord(precontext);
         if (record) {
           const { rememberVerifiedIdentity } = await import("../tools/verifiedIdentity");
-          rememberVerifiedIdentity(entry.callSid, { ...record, certain: false });
+          precontextWrite = rememberVerifiedIdentity(entry.callSid, {
+            ...record,
+            certain: false,
+          });
         }
         const lane = await resolveLane(
           entry.slug,
@@ -978,6 +1071,15 @@ export function mountVoiceRuntime(
             startedAtMs,
             endedAtMs: Date.now(),
           }).catch(() => undefined);
+          // And what the caller's audio did, on an exit that never built a
+          // bridge (Codex P2, #327). Part of the no-audio population, so the
+          // row goes here too or the instrument's claim of one per call is
+          // false on exactly the calls it was built to size.
+          void logAudio(
+            { callSid: entry.callSid, outcome: "provider_failure" },
+            callerAudio.counts(),
+            { callLogId },
+          ).catch(() => undefined);
           twilioSocket.close();
           return;
         }
@@ -1047,6 +1149,15 @@ export function mountVoiceRuntime(
           }).catch(() => {
             // Losing the record must never break the hangup path.
           });
+          // And what the caller's audio did, on an exit that never built a
+          // bridge (Codex P2, #327). Part of the no-audio population, so the
+          // row goes here too or the instrument's claim of one per call is
+          // false on exactly the calls it was built to size.
+          void logAudio(
+            { callSid: entry.callSid, outcome: "caller_hangup" },
+            callerAudio.counts(),
+            { callLogId },
+          ).catch(() => undefined);
           return;
         }
         if (lane.agent.skipped.length > 0) {
@@ -1179,15 +1290,54 @@ export function mountVoiceRuntime(
              * the sweep reads nothing from it, so a slow or failed write is
              * no reason to abandon the caller's request.
              */
-            await withinOrNull(
-              // The record, and who the process established the caller to be
-              // (v51): a certain match only, read from the same store the
-              // teardown sweep reads, so a row carries a name only when the
-              // lookup matched one person and nobody denied it.
-              persistCall(record, identityForRow(record.callSid)),
+            // Who the process established the caller to be (v51): a certain
+            // match only, read from the same store the teardown sweep reads, so
+            // a row carries a name only when the lookup matched one person and
+            // nobody denied it.
+            //
+            // AND WHAT THE STORE LOOKED LIKE AT THAT INSTANT (task #148). Taken
+            // here, next to the read and BEFORE the write, because the probe's
+            // whole job is to describe what this read saw — taken later it
+            // would describe a different moment and answer a question nobody
+            // asked. v51 wrote identity on 0 of 633 calls on 2026-09-17 while
+            // 209 of them had a certain lookup, and `{}` is four different
+            // facts with no way to tell them apart.
+            const identity = identityForRow(record.callSid);
+            const identityProbe = identityStoreProbe(record.callSid);
+            /**
+             * THE UPSERT'S OWN ANSWER IS KEPT (Codex P1, #322). `persistCall`
+             * reports whether the row landed and `withinOrNull` answers null
+             * when the deadline wins — and this discarded both, so the
+             * identity telemetry called a failed write `reached_row` while
+             * `call_logs.patient_found` stayed unset. Three distinct facts:
+             * true landed, false failed after its retries, null still running.
+             */
+            const persisted = await withinOrNull(
+              persistCall(record, identity),
               options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
             );
             await sweepCall(record).catch(() => undefined);
+            /**
+             * AND THE PCP FLOOR, which the sweep above declines by design.
+             *
+             * `decideSweep` returns `not-a-queue-lane` for pcp at its first
+             * line, so before this the lane had no teardown filer on this
+             * runtime at all: `sweepPcpUnfiledCall` was wired only into the old
+             * core's SIP teardown and PCP moved here on 2026-09-04. 38 calls on
+             * 2026-09-22 ran the intake, filed nothing, and carry no ticket of
+             * any provenance; 24-53/day over six business days. See pcpFloor.ts
+             * and docs/observatory/W2-CORPUS-20260922.md.
+             *
+             * AWAITED, like the sweep above and unlike the telemetry below,
+             * because it files a caller's request rather than describing it —
+             * and bounded inside `runPcpFloor` so a wedged ticketing app cannot
+             * hold teardown. It also frees the lane's per-call state: the
+             * sweep's `finally` is the only caller of `pcpDirector.clear` that
+             * this runtime ever reaches, since `terminate_call`'s success branch
+             * needs an `ok` from OpenAI's SIP hangup endpoint and got 400 on 94
+             * of 94 PCP calls on 2026-09-22.
+             */
+            await sweepPcpFloor(record).catch(() => undefined);
             // Telemetry last: the per-turn record lights up the Observatory's
             // call page but must never delay a caller's request.
             void persistTurns(record, { callLogId }).catch(() => undefined);
@@ -1198,7 +1348,55 @@ export function mountVoiceRuntime(
             // And the follow-up summary (v55, task #146): the one record of
             // whether the turn a tool result is owed was ever requested and
             // ever answered, which nothing else persists.
-            void logFollowUps(record, { callLogId }).catch(() => undefined);
+            /**
+             * THE TWO `call_events` WRITERS RUN ONE AFTER THE OTHER, NOT AT
+             * ONCE (Codex P2, #322).
+             *
+             * Both flush and release the SAME per-SID buffer, and
+             * `flushCallEvents` returns TRUE when it finds no buffer (there is
+             * nothing left to write). So concurrently: one writer's flush
+             * lands and `releaseCallEvents` deletes the whole buffer; the
+             * other's flush failed and is in backoff; its retry then finds
+             * nothing, reports durable, and its row is gone for good — on
+             * exactly the calls a database blip had made worth measuring.
+             *
+             * Before task #148 there was ONE teardown event writer, so the
+             * race did not exist; adding the second is what opened it. Chained
+             * rather than awaited: teardown still holds for neither of them,
+             * and telemetry must never delay a caller's request.
+             *
+             * THE ROOT FIX IS IN `releaseCallEvents` (Codex P1, #322 round 4),
+             * which no longer deletes events nobody has written — a
+             * predecessor that SUCCEEDS used to take the identity row with it,
+             * which the chaining alone did not prevent. The order below is now
+             * an INSERT saved, not the safety property.
+             */
+            const followUpsWritten = logFollowUps(record, { callLogId }).catch(() => undefined);
+            /**
+             * AND WHY IDENTITY DID OR DID NOT LAND (task #148): an instrument,
+             * never a gate — it changes nothing a caller hears.
+             *
+             * Started IMMEDIATELY rather than chained off the line above
+             * (Codex P1, #322 round 3). It emits its row first and waits for
+             * `followUpsWritten` only before FLUSHING, so the two never release
+             * the same per-SID buffer at once — while a wedged pool, which
+             * leaves the unbounded flush above pending for ever, can no longer
+             * stop the identity row being buffered. The 2h reaper recovers what
+             * is emitted; it cannot recover what was never emitted at all.
+             */
+            const identityWritten = logIdentity(record, identity, identityProbe, persisted, { callLogId }, {
+              after: followUpsWritten,
+              precontextWrite,
+            }).catch(() => undefined);
+            /**
+             * AND WHETHER THE CALLER'S AUDIO EVER REACHED US — the optical
+             * barely-heard instrument. Same discipline as the two above: emits
+             * its row immediately, waits on its predecessor only before
+             * flushing, never awaited by teardown, and changes nothing a caller
+             * hears. `callerAudioEnergy.ts` carries the measurement.
+             */
+            void logAudio(record, callerAudio.counts(), { callLogId }, { after: identityWritten })
+              .catch(() => undefined);
           },
         });
         // Connect AFTER the bridge exists: a connection that fails then has
@@ -1256,6 +1454,15 @@ export function mountVoiceRuntime(
             startedAtMs,
             endedAtMs: Date.now(),
           }).catch(() => undefined);
+          // And what the caller's audio did, on an exit that never built a
+          // bridge (Codex P2, #327). Part of the no-audio population, so the
+          // row goes here too or the instrument's claim of one per call is
+          // false on exactly the calls it was built to size.
+          void logAudio(
+            { callSid: entry.callSid, outcome: "provider_failure" },
+            callerAudio.counts(),
+            { callLogId },
+          ).catch(() => undefined);
           twilioSocket.close();
         }
       } finally {

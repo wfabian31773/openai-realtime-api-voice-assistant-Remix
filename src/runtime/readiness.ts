@@ -348,6 +348,67 @@ import { callEnvironment } from "./callRecord";
  * end-call tool while the model has a tool result it has not put into
  * words (bounded at HANGUP_HOLD_LIMIT), and record_automated_resolution
  * tells the model to say what the lookup found.
+ *
+ * v67: the callback number says where it came from. Traced from a referral
+ * coordinator's emailed complaint that her requests file and nobody calls
+ * back. `asked_callback` is FALSE on every one of her office's calls —
+ * pcpAgent seeds callbackNumber from caller ID and the intake then skips a
+ * field that already reads answered, so a staffer rang her ANI and closed
+ * the ticket "line is unavailable". The state now records whether the
+ * number is caller ID only, record_pcp_intake clears that the moment the
+ * caller states one, and the ticket tells the staffer which it is holding.
+ * No question is added: v37 measured 18 of 25 PCP calls ending ON a
+ * pre-filing question with 10 leaving no ticket at all.
+ */
+/**
+ * v62 — WHY NO DIAL WENT OUT IS ON THE TICKET, so an ordinary task on a
+ * handoff-default purpose stops being an HTTP 500 the model retries. Measured
+ * 2026-09-19 in `voice_agent_api_logs`: 7 calls, 41 refused POSTs, worst storm
+ * 8 on one call, 2026-09-15..18 — and 4 of the 7 never attempted a handoff at
+ * all. `handoffNotAttemptedReason` is read from the policy table and two
+ * server-owned director latches, never from a model argument.
+ *
+ * v57 IS RETIRED (the withdrawn surgeon claim), v58 is claimed by #322 and v59
+ * by #293 — both OPEN branches, so this is a SIBLING of both and contains
+ * neither. v62 > v59 numerically and says nothing about containment.
+ *
+ * v68: THE SILENCE LADDER. Nothing in the runtime ever spoke to a caller it
+ * could not hear. `handleResponseDone` clears the dead-air watchdog when the
+ * greeting completes and nothing re-arms it until the caller speaks, so a
+ * caller who never speaks is never detected: 278 zero-caller-line runtime
+ * calls over 09-17..23 ended `caller_hangup` at 74s average, and four sat
+ * open to the 602-second ceiling. The agent now says "I'm sorry, I cannot
+ * hear you. Are you still there?" after 12s of silence and ends the call on
+ * the third strike — the operator's own wording and his own bound.
+ *
+ * v64: the caller's audio is COUNTED. `handleTwilioFrame`'s media case was
+ * `session.appendAudio(payload)` and nothing else, so nothing anywhere could
+ * say whether a caller's audio ever reached us — which is why optical's
+ * barely-heard rate survived three attempts. An instrument, not a fix: two
+ * integers per inbound frame and one PHI-free `call_events` row per call, no
+ * gate, no tool, no spoken line. See `callerAudioEnergy.ts`.
+ *
+ * v69 — THE PCP LOST-REQUEST FLOOR IS WIRED INTO THIS RUNTIME'S TEARDOWN.
+ * `sweepPcpUnfiledCall` had three ships of work behind it (v18, v30, v31) and
+ * had never once run: its only caller was the OLD CORE's SIP teardown, and PCP
+ * moved to this runtime on 2026-09-04. The generic sweep declines the lane by
+ * table, so PCP had no teardown filer at all on the pipeline serving it. Read
+ * from production rather than inferred: across ALL of `voice_agent_api_logs`,
+ * 0 POSTs have ever carried `caller_hung_up_before_completion` or
+ * `call_not_classified`, the two literals only that function writes.
+ *
+ * WHY 69, AND WHY IT HAS MOVED THREE TIMES AND NOW STAYS PUT. This branch held
+ * v61 below the v58 `main`, took v66 when `main` reached v62, KEPT v66 when
+ * #327 moved `main` to v64 — a marker only reads as a failed pull when it is
+ * BELOW `main`, and 66 > 64 — took v69 when #326 moved `main` to v67 and 66
+ * fell below it, and KEEPS v69 now that #328 has merged and `main` reads v68,
+ * because 69 > 68. It is the last of the four siblings off the v62 `main`, so
+ * `main` now CONTAINS the other three: v64 (#327), v67 (#326) and v68 (#328).
+ * v65 and v66 are RETIRED rather than reused, along with v57, v60 and v63, and
+ * a build must never read any of the five; v59 is still claimed by the open
+ * #293, which branched off v10 and must merge and re-bump above whatever `main`
+ * carries when it lands. A higher number says nothing about containment — this
+ * one contains v68 because `main` was merged into it, not because 69 > 68.
  */
 /**
  * v59, 2026-09-19: A CALLER WHO SAYS "NEW" IS NOT LOOKED UP — and it takes v59
@@ -370,7 +431,7 @@ import { callEnvironment } from "./callRecord";
  * running. A build without it looks identical until you read a transcript.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v59-new-or-existing-gates-the-lookup-20260919";
+  "voice-runtime-v70-new-or-existing-gates-the-lookup-20260924";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

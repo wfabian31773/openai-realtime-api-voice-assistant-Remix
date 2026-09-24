@@ -120,6 +120,8 @@ interface Harness {
   persisted: Array<Record<string, unknown>>;
   /** The identity handed to persistCall beside each record (v51). */
   persistedIdentity: Array<unknown>;
+  /** Every caller-audio row the runtime wrote, in order (v64). */
+  audioRows: Array<{ callSid: string; outcome: string; counts: unknown }>;
   /**
    * Calls the teardown request sweep saw, in order.
    *
@@ -129,6 +131,7 @@ interface Harness {
    * happened to look sweepable.
    */
   swept: Array<Record<string, unknown>>;
+  pcpSwept: Array<Record<string, unknown>>;
   base: string;
   wsUrl: string;
   registry: CallSessionRegistry;
@@ -150,10 +153,12 @@ async function harness(
     fetchPrecontext?: (phone: string) => Promise<unknown>;
     resolveGreeting?: (slug: string) => Promise<string | null>;
     sweepCall?: (record: unknown) => Promise<unknown>;
+    sweepPcpFloor?: (record: unknown) => Promise<unknown>;
     persistCall?: (record: unknown) => Promise<boolean>;
     persistTurns?: (record: unknown, ids: unknown) => Promise<unknown>;
     gradeCall?: (record: unknown, ids: unknown) => Promise<unknown>;
     logFollowUps?: (record: unknown, ids: unknown) => Promise<unknown>;
+    logCallerAudio?: (call: unknown, counts: unknown, ids: unknown) => Promise<unknown>;
     startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
     persistBeforeSweepMs?: number;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
@@ -169,7 +174,9 @@ async function harness(
   const openedRows: Array<Record<string, unknown>> = [];
   const persisted: Array<Record<string, unknown>> = [];
   const persistedIdentity: Array<unknown> = [];
+  const audioRows: Array<{ callSid: string; outcome: string; counts: unknown }> = [];
   const swept: Array<Record<string, unknown>> = [];
+  const pcpSwept: Array<Record<string, unknown>> = [];
   mountVoiceRuntime(app, server, {
     env: over.env ?? ENV,
     // Short so the deadline test does not wait on a production-length one.
@@ -199,12 +206,33 @@ async function harness(
     startRecording: over.startRecording ?? (async () => "skipped"),
     gradeCall: over.gradeCall ?? (async () => "skipped"),
     logFollowUps: over.logFollowUps ?? (async () => false),
+    logCallerAudio:
+      (over.logCallerAudio as never) ??
+      (async (call, counts) => {
+        audioRows.push({
+          callSid: (call as { callSid: string }).callSid,
+          outcome: (call as { outcome: string }).outcome,
+          counts,
+        });
+        return true;
+      }),
     persistCall:
       over.persistCall ??
       (async (record, identity) => {
         persisted.push(record as unknown as Record<string, unknown>);
         persistedIdentity.push(identity);
         return true;
+      }),
+    sweepPcpFloor:
+      over.sweepPcpFloor ??
+      (async (record) => {
+        // The floor files a request, so like sweepCall it must run AFTER the
+        // durable record — asserted, not assumed.
+        pcpSwept.push({
+          ...(record as unknown as Record<string, unknown>),
+          persistedFirst: persisted.length,
+        });
+        return undefined;
       }),
     sweepCall:
       over.sweepCall ??
@@ -223,7 +251,9 @@ async function harness(
     openedRows,
     persisted,
     persistedIdentity,
+    audioRows,
     swept,
+    pcpSwept,
     base: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/voice/stream`,
     registry,
@@ -843,6 +873,44 @@ describe("one whole call, end to end, offline", () => {
     expect(h.swept[0]).toMatchObject({ callSid: "CA-sweep" });
     // The record was already in before the sweep saw the call.
     expect(h.swept[0]!.persistedFirst).toBe(1);
+  });
+
+  /**
+   * AND THE PCP FLOOR RUNS TOO, AFTER THE RECORD.
+   *
+   * This is the wiring, and the wiring is the whole defect: the floor itself
+   * has been built and tested since v18/v30/v31 and had never once run,
+   * because its only caller was the OLD CORE's SIP teardown and PCP moved to
+   * this runtime on 2026-09-04. A filer nobody calls files nothing — 38 calls
+   * on 2026-09-22 ran the intake, filed nothing and carry no ticket of any
+   * provenance. What pcpFloor.test.ts owns is what the floor DOES; what this
+   * owns is that teardown calls it at all, which is what was missing.
+   */
+  it("runs the PCP floor on a finished call, after the call_logs row", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-floor", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-floor", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.pcpSwept).toHaveLength(1);
+    expect(h.pcpSwept[0]).toMatchObject({ callSid: "CA-floor", slug: "optical" });
+    // The durable record landed before the floor saw the call, exactly as for
+    // the generic sweep: the row is the evidence every measurement rests on.
+    expect(h.pcpSwept[0]!.persistedFirst).toBe(1);
+  });
+
+  it("finishes teardown even when the PCP floor rejects", async () => {
+    // Same property as the sweep beside it: the floor files a ticket over the
+    // network, and a ticketing outage must not cost the call its record.
+    const h = await harness({ sweepPcpFloor: async () => { throw new Error("floor boom"); } });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-floor-boom", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-floor-boom", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.persisted).toHaveLength(1);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA-floor-boom" });
   });
 
   it("finishes teardown even when the sweep rejects", async () => {
@@ -1887,5 +1955,159 @@ describe("the runtime's turns and recording reach the Observatory", () => {
       expect(["caller", "agent"]).toContain(t.role);
     }
     expect(handed).toEqual([{ callSid: "CA41", turns, sweptFirst: 1 }]);
+  });
+});
+
+/**
+ * WHETHER THE CALLER'S AUDIO EVER REACHED US, on every exit that writes a row.
+ *
+ * `callerAudioEnergy.ts` carries the measurement (optical's 13.6% zero-caller-
+ * line rate against surgery's 7.7% and tech's 8.3%) and the μ-law arithmetic
+ * has its own unit tests. What is driven HERE is the wiring, at the real
+ * runtime, because two Codex P2s on #327 were both about wiring and neither
+ * would have been caught by a helper test: the counting sat in the bridge,
+ * which never sees the frames the pre-bridge hold discards, and three exits
+ * that persist a `call_logs` row without ever building a bridge wrote no row
+ * at all — while being part of the no-audio population the instrument exists
+ * to size.
+ */
+describe("the caller-audio summary, on every exit", () => {
+  /** 160 μ-law bytes at the loudest sample there is: exponent 7, voiced. */
+  const LOUD = Buffer.from(new Uint8Array(160).fill(0x00)).toString("base64");
+  /** μ-law digital silence. Exponent 0 by construction, never voiced. */
+  const QUIET = Buffer.from(new Uint8Array(160).fill(0xff)).toString("base64");
+  const media = (payload: string) =>
+    JSON.stringify({ event: "media", media: { payload } });
+
+  it("counts audio that arrived BEFORE the bridge existed, including the frames the hold discarded", async () => {
+    // THE EXACT DEFECT (Codex P2, #327). `PRE_BRIDGE_FRAME_CAP` is 500 and
+    // drops its OLDEST frame, so the loud one below never reaches the bridge:
+    // a bridge-side meter would report `silent_line` — a caller who spoke,
+    // recorded as a line nobody spoke into, by the one measure built to tell
+    // those apart. The socket counts all 501.
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: (async () => {
+          await blocked;
+          return { instructions: "You are the optical queue agent.", tools: [] };
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({ laneSource: slow });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-audio1", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-audio1", tokenFrom(answered.text));
+    await settle(2);
+    ws.send(media(LOUD));
+    for (let i = 0; i < 500; i += 1) ws.send(media(QUIET));
+    await settle(6);
+    release();
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    ws.close();
+    await settle(8);
+
+    const row = h.audioRows.find((r) => r.callSid === "CA-audio1");
+    expect(row).toBeDefined();
+    expect(row?.counts).toEqual({ frames: 501, voiced: 1 });
+    await h.close();
+  });
+
+  it("writes a row when the lane resolves to NOTHING — no bridge is ever built", async () => {
+    const noLane: LaneSource = { getAgentConfig: () => undefined };
+    const h = await harness({ laneSource: noLane });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-audio2", From: "+1", To: "+2" });
+    await openStream(h, "CA-audio2", tokenFrom(answered.text));
+    await settle(8);
+
+    // The `call_logs` row is written on this path and always has been; before
+    // #327 the caller-audio row was not, so the population with the LEAST
+    // audio was the one population with no measurement of it.
+    expect(h.persisted.find((r) => r.callSid === "CA-audio2")?.outcome).toBe("provider_failure");
+    expect(h.audioRows.find((r) => r.callSid === "CA-audio2")).toMatchObject({
+      outcome: "provider_failure",
+    });
+    await h.close();
+  });
+
+  it("writes a row for a caller who hung up while the agent was being built, carrying what they said", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = await harness({
+      callRowDeadlineMs: 40,
+      openCallRow: async () => {
+        await blocked;
+        return "late-row";
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-audio3", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-audio3", tokenFrom(answered.text));
+    await settle(2);
+    // Spoken while the row was being opened — before any bridge exists.
+    ws.send(media(LOUD));
+    ws.send(media(LOUD));
+    await settle(4);
+    ws.close();
+    await settle(6);
+    release();
+    await settle(8);
+
+    expect(h.persisted.find((r) => r.callSid === "CA-audio3")?.outcome).toBe("caller_hangup");
+    const row = h.audioRows.find((r) => r.callSid === "CA-audio3");
+    expect(row?.outcome).toBe("caller_hangup");
+    // Not merely present: this caller WAS speaking, and the row says so.
+    expect(row?.counts).toEqual({ frames: 2, voiced: 2 });
+    await h.close();
+  });
+
+  it("writes a row when setup fails before the bridge exists", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failing: LaneSource = {
+        getAgentConfig: () => ({
+          id: "optical",
+          enabled: true,
+          agentType: "inbound",
+          factory: (async () => {
+            throw new Error("agent tree exploded");
+          }) as unknown as LaneConfig["factory"],
+        }),
+      };
+      const h = await harness({ laneSource: failing });
+      const answered = await post(h, "/voice/optical", { CallSid: "CA-audio4", From: "+1", To: "+2" });
+      await openStream(h, "CA-audio4", tokenFrom(answered.text));
+      await settle(8);
+
+      expect(h.persisted.find((r) => r.callSid === "CA-audio4")?.outcome).toBe("provider_failure");
+      expect(h.audioRows.find((r) => r.callSid === "CA-audio4")).toMatchObject({
+        outcome: "provider_failure",
+      });
+      await h.close();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("writes exactly ONE row per call on the ordinary teardown path", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-audio5", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-audio5", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    ws.send(media(QUIET));
+    await settle(4);
+    ws.close();
+    await settle(8);
+
+    const rows = h.audioRows.filter((r) => r.callSid === "CA-audio5");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].counts).toEqual({ frames: 1, voiced: 0 });
+    await h.close();
   });
 });
