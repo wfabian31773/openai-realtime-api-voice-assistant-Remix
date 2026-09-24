@@ -1229,8 +1229,7 @@ export class VoiceCallBridge {
       this.finalFallbackTimer = null;
     }
     this.session.cancelResponse();
-    this.sendFrame({ event: "clear", streamSid: this.deps.context.streamSid });
-    this.assistantAudioPlaying = false;
+    this.discardBufferedAudio();
     // The replacement turn. Content decided here, phrasing left to the
     // model — the case speakNatural exists for. The rule's own policyHint
     // is the instruction, so each guardrail corrects in its own terms.
@@ -1689,8 +1688,7 @@ export class VoiceCallBridge {
       this.finalFallbackTimer = null;
     }
     this.session.cancelResponse();
-    this.sendFrame({ event: "clear", streamSid: this.deps.context.streamSid });
-    this.assistantAudioPlaying = false;
+    this.discardBufferedAudio();
   }
 
   private handleCallerSpeechStopped(): void {
@@ -2089,6 +2087,31 @@ export class VoiceCallBridge {
    */
   private unplayedAudioMs(): number {
     return Math.ceil(this.unechoedAudioBytes / MULAW_BYTES_PER_MS);
+  }
+
+  /**
+   * Tell Twilio to drop everything it has buffered, and forget it.
+   *
+   * ONE PLACE, because it is one fact with three consequences and the two
+   * callers (a barge-in, a guardrail trip) had identical copies of it. A
+   * `clear` that reset the accumulator at one site and not the other is the
+   * drift this repo has already paid for elsewhere.
+   *
+   * THE ACCUMULATOR RESET IS NOT TIDINESS (Codex P2, #328 round 4). No mark is
+   * emitted for discarded audio, and `unechoedAudioBytes` is otherwise cleared
+   * only when the NEWEST mark echoes — so a caller who keeps interrupting never
+   * lets one echo and every cleared turn stayed counted. The caller's silence
+   * window then grows without limit and the ladder stops firing at all, which
+   * defeats the protection it exists to provide. An earlier version of this
+   * change claimed the over-estimate was "bounded to one agent turn"; it was
+   * bounded to one turn that actually finished playing, which is not the same
+   * thing and is not what a persistent interrupter produces.
+   */
+  private discardBufferedAudio(): void {
+    this.sendFrame({ event: "clear", streamSid: this.deps.context.streamSid });
+    // Twilio dropped it, so none of it can still be reaching the caller.
+    this.unechoedAudioBytes = 0;
+    this.assistantAudioPlaying = false;
   }
 
   private armDeadAir(cause: DeadAirCause, extraMs = 0): void {

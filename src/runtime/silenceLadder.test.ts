@@ -62,13 +62,18 @@ const WINDOW = 12_000;
 const AGENT_WINDOW = 30_000;
 
 async function ladder(
-  over: { silenceStrikeLimit?: number; greeting?: string } = {},
+  over: {
+    silenceStrikeLimit?: number;
+    greeting?: string;
+    guardrails?: unknown[];
+  } = {},
 ) {
   const { VoiceCallBridge } = await import("./mediaStreamBridge");
   const timers = makeTimers();
   const outcomes: string[] = [];
   const records: VoiceCallRecord[] = [];
   const marks: string[] = [];
+  let clears = 0;
   let epoch = 0;
   const session = {
     appendAudio: vi.fn(),
@@ -100,12 +105,13 @@ async function ladder(
       tools: [],
       skipped: [],
       dispatch: async () => ({ ok: true, output: {} }),
-      guardrails: [],
+      guardrails: over.guardrails ?? [],
     } as never,
     greeting: over.greeting,
     twilio: {
       sendFrame: (f: { event: string; mark?: { name: string } }) => {
         if (f.event === "mark" && f.mark) marks.push(f.mark.name);
+        if (f.event === "clear") clears += 1;
       },
       close: () => undefined,
     },
@@ -156,6 +162,7 @@ async function ladder(
     outcomes,
     records,
     marks,
+    clears: () => clears,
     speak,
     generate,
     echoMark,
@@ -221,6 +228,66 @@ describe("the clock after the agent has finished and nothing is owed", () => {
     expect(h.session.speak).not.toHaveBeenCalled();
   });
 
+  it("forgets audio a barge-in told Twilio to DISCARD, across repeated turns", async () => {
+    // CODEX P2, ROUND 4, and it withdraws a claim I made in round 3. I wrote
+    // that the over-estimate after a `clear` was "bounded to one agent turn".
+    // It is not: the accumulator resets only when the NEWEST mark echoes, and a
+    // caller who keeps interrupting never lets one echo — so every cleared turn
+    // stays counted. The silence window then grows without limit and the ladder
+    // stops firing at all, which defeats the protection this PR exists to add.
+    // Twilio dropped that audio, so it can never be "still being heard".
+    const h = await ladder();
+    h.generate("Ten seconds of the first answer.", 8 * 10_000);
+    h.handlers().onSpeechStarted(); // barge-in: Twilio is told to clear
+    h.generate("Ten seconds of the second answer.", 8 * 10_000);
+    h.handlers().onSpeechStarted(); // and again, still no mark echoed
+    h.generate("One second.", 8 * 1_000);
+    // Only the last second can still be queued: 21 seconds were discarded.
+    expect(h.timers.armed(WINDOW + 1_000)).toBe(1);
+    expect(h.timers.armed(WINDOW + 21_000)).toBe(0);
+  });
+
+  it("forgets discarded audio on the GUARDRAIL path too, not just the barge-in", async () => {
+    // BOTH cancel paths tell Twilio to `clear`, and a reset at one site and not
+    // the other is the drift `discardBufferedAudio` exists to prevent. This
+    // test is why that helper is justified: a mutation reverting ONLY this path
+    // to the inline three lines failed nothing until it existed.
+    const guardrail = {
+      name: "No diagnosis",
+      policyHint: "Do not diagnose.",
+      execute: async ({ agentOutput }: { agentOutput: string }) => ({
+        tripwireTriggered: /you have glaucoma/i.test(agentOutput),
+        outputInfo: {},
+      }),
+    };
+    const h = await ladder({ guardrails: [guardrail] });
+    // ORDER MATTERS, and `generate()` has it the other way round: the guardrail
+    // cuts a line the caller is ALREADY HEARING, so ten seconds of audio has to
+    // be in flight before the violating text arrives. Driven by hand for that.
+    h.handlers().onAudioDelta(Buffer.alloc(8 * 10_000).toString("base64"));
+    h.handlers().onAgentTranscriptDelta("Based on that, you have glaucoma");
+    // Guardrail verdicts land on the microtask queue.
+    await Promise.resolve().then(() => Promise.resolve());
+    expect(h.clears()).toBeGreaterThan(0);
+    // The replacement turn carries one second; the cut ten are gone.
+    h.generate("Let me take a message instead.", 8 * 1_000);
+    expect(h.timers.armed(WINDOW + 1_000)).toBe(1);
+    expect(h.timers.armed(WINDOW + 11_000)).toBe(0);
+  });
+
+  it("does not clear twice when the caller speaks again with no audio playing", async () => {
+    // `discardBufferedAudio` leaves `assistantAudioPlaying` false, which is what
+    // makes `handleCallerSpeechStarted` return early until new audio arrives. A
+    // second `clear` on a stream with nothing buffered is a wasted frame, and
+    // losing that line would also re-cancel an epoch that is already cancelled.
+    const h = await ladder();
+    h.generate("A line the caller talks over.", 8 * 1_000);
+    h.handlers().onSpeechStarted();
+    expect(h.clears()).toBe(1);
+    h.handlers().onSpeechStarted(); // nothing is playing now
+    expect(h.clears()).toBe(1);
+  });
+
   it("counts an utterance SUPERSEDED without a completion event", async () => {
     // CODEX P1, ROUND 3. `openOrGetCurrent` drops the previous `current` when a
     // new response epoch starts, WITHOUT a completion event — and its audio was
@@ -258,14 +325,18 @@ describe("the clock after the agent has finished and nothing is owed", () => {
     // Twenty seconds of stale audio on the CANCELLED epoch: dropped, not sent.
     h.handlers().onAudioDelta(Buffer.alloc(8 * 20_000).toString("base64"));
     h.generate("The reply after the barge-in.", 8 * 1_000); // new epoch, 1s
-    // Two seconds of forwarded audio, never twenty-two.
-    expect(h.timers.armed(WINDOW + 2_000)).toBe(1);
+    // ONE second — the reply's own. The barge-in told Twilio to `clear`, so the
+    // second that had been forwarded before it was DISCARDED and cannot still
+    // be reaching the caller.
+    //
+    // This assertion read `WINDOW + 2_000` until round 4, on the claim that the
+    // pre-barge-in audio stayed counted "in the safe direction, bounded to one
+    // agent turn". That claim was wrong — see the repeated-barge-in test above,
+    // where it grows without limit — and this is rewritten to the property, not
+    // loosened to fit.
+    expect(h.timers.armed(WINDOW + 1_000)).toBe(1);
+    expect(h.timers.armed(WINDOW + 2_000)).toBe(0);
     expect(h.timers.armed(WINDOW + 22_000)).toBe(0);
-    // AND THE FIRST SECOND IS STILL COUNTED, deliberately: the barge-in told
-    // Twilio to `clear`, so that audio was discarded and no mark will ever
-    // echo for it. Nothing decrements the accumulator, which leaves the bound
-    // an over-estimate until the next echo resets it — the safe direction, and
-    // bounded to one agent turn rather than the whole call.
   });
 
   it("counts an utterance that carried audio and no transcript", async () => {
