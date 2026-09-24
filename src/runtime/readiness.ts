@@ -348,6 +348,17 @@ import { callEnvironment } from "./callRecord";
  * end-call tool while the model has a tool result it has not put into
  * words (bounded at HANGUP_HOLD_LIMIT), and record_automated_resolution
  * tells the model to say what the lookup found.
+ *
+ * v63: the callback number says where it came from. Traced from a referral
+ * coordinator's emailed complaint that her requests file and nobody calls
+ * back. `asked_callback` is FALSE on every one of her office's calls —
+ * pcpAgent seeds callbackNumber from caller ID and the intake then skips a
+ * field that already reads answered, so a staffer rang her ANI and closed
+ * the ticket "line is unavailable". The state now records whether the
+ * number is caller ID only, record_pcp_intake clears that the moment the
+ * caller states one, and the ticket tells the staffer which it is holding.
+ * No question is added: v37 measured 18 of 25 PCP calls ending ON a
+ * pre-filing question with 10 leaving no ticket at all.
  */
 /**
  * v60 — WHY NO DIAL WENT OUT IS ON THE TICKET, so an ordinary task on a
@@ -369,7 +380,7 @@ import { callEnvironment } from "./callRecord";
  * gate, no tool, no spoken line. See `callerAudioEnergy.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v64-the-callers-audio-is-counted-20260924";
+  "voice-runtime-v67-the-callback-says-where-it-came-from-20260924";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

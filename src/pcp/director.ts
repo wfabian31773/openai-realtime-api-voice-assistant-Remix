@@ -20,6 +20,32 @@ export interface PcpConversationState {
   callerFacilityType?: PcpFacilityType;
   callbackNumber?: string;
   /**
+   * TRUE while `callbackNumber` is only the inbound caller ID, and nobody has
+   * said it is a line that answers.
+   *
+   * Traced 2026-09-24 from a referral coordinator's own complaint. Her office's
+   * calls all filed; on one of them a staffer tried the number on the ticket
+   * and resolved it "Processed callback but line is unavailable. Closing the
+   * ticket as little to no information provided." The number was her ANI — an
+   * out-of-state area code on a Southern California referral office, i.e. a trunk
+   * identifier and not a desk. Nobody asked her for a number on any of eight
+   * calls (`asked_callback` false on all eight), because the seed above makes
+   * the field read ANSWERED and the intake then skips it silently.
+   *
+   * `record_pcp_intake` clears this the moment the caller states a number, so
+   * a stated value is never labelled unverified.
+   *
+   * WHAT THIS DELIBERATELY DOES NOT DO: add a question. v37 measured 18 of 25
+   * PCP calls ENDING on a pre-filing question with 10 leaving NO ticket of any
+   * provenance, and the teardown sweep did not catch them — so a new pre-filing
+   * ask is the one change here that could cost more requests than it saves.
+   * Whether to CONFIRM the number, and before or after the ticket, is an open
+   * question for the operator; this flag is what makes either answer
+   * measurable and is useful on its own, because the staffer who hit an
+   * unreachable number was never told it was unverified.
+   */
+  callbackFromCallerIdOnly?: boolean;
+  /**
    * HOW THIS CALLER WANTS THE ANSWER BACK — the operator's fifth field, and
    * the one that makes his fourth redundant.
    *
