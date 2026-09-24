@@ -202,6 +202,48 @@ describe("the clock after the agent has finished and nothing is owed", () => {
     expect(h.timers.armed(WINDOW)).toBe(1);
   });
 
+  it("covers EVERY unechoed utterance, not just the newest one", async () => {
+    // CODEX P1, ROUND 2. The round-1 fix bounded on `done.bytes` — the newest
+    // line alone. Several utterances can complete before the newest mark
+    // echoes (one response carrying two is enough), and each completion
+    // RE-ARMS, so a long line followed by a short one left a window shorter
+    // than the audio still queued ahead of it: the prompt landed over the
+    // agent mid-line, and three strikes later the call is cut on a caller who
+    // was listening. The very failure the round-1 fix was for, one utterance
+    // along.
+    const h = await ladder();
+    h.generate("Ten seconds of question the caller is still hearing.", 8 * 10_000);
+    // The second completion must not shorten the window to its own one second.
+    h.generate("One more second.", 8 * 1_000);
+    expect(h.timers.armed(WINDOW + 1_000)).toBe(0);
+    expect(h.timers.fire(WINDOW + 1_000)).toBe(false);
+    expect(h.timers.armed(WINDOW + 11_000)).toBe(1);
+    expect(h.session.speak).not.toHaveBeenCalled();
+  });
+
+  it("counts an utterance that carried audio and no transcript", async () => {
+    // WHY THE TOTAL IS NOT READ OFF `awaitingMark`, which is the obvious place
+    // and the wrong one: its second push sits behind `else if (text)`, so an
+    // utterance with audio and an empty transcript sends a mark and leaves NO
+    // entry. Summing that array would make those bytes invisible and put the
+    // prompt back over the agent on exactly the lines nobody can see.
+    const h = await ladder();
+    h.handlers().onAudioDelta(Buffer.alloc(8 * 9_000).toString("base64"));
+    h.handlers().onAudioDone("");
+    expect(h.timers.armed(WINDOW)).toBe(0);
+    expect(h.timers.armed(WINDOW + 9_000)).toBe(1);
+  });
+
+  it("forgets the queue once the newest echo proves it played", async () => {
+    // Otherwise the bound only ever grows and every later window inherits the
+    // whole call's audio — too patient without limit is its own defect.
+    const h = await ladder();
+    h.speak("A long question.", 8 * 8_000); // generates AND echoes
+    h.generate("A short one.", 8 * 1_000);
+    expect(h.timers.armed(WINDOW + 9_000)).toBe(0);
+    expect(h.timers.armed(WINDOW + 1_000)).toBe(1);
+  });
+
   it("a mark that never echoes still fires, one line's patience later and never over the agent", async () => {
     const h = await ladder();
     h.generate("A long question.", 8 * 8_000);

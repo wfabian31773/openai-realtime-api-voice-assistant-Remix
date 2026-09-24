@@ -797,6 +797,24 @@ export class VoiceCallBridge {
    * derived from its own audio rather than a constant. */
   private lastCompletedUtteranceBytes = 0;
 
+  /**
+   * Audio bytes sent whose playback Twilio has NOT yet confirmed — the upper
+   * bound on what is still queued ahead of the newest mark.
+   *
+   * WHY THIS IS NOT `awaitingMark`'s SUM (Codex P1, #328 round 2). Several
+   * utterances can complete before the newest mark echoes, and the caller's
+   * silence window has to outlast ALL of the audio queued ahead of it, not
+   * just the newest line's. `awaitingMark` looks like the right place to total
+   * that from and is not: its second push is behind `else if (text)`, so an
+   * utterance that carried audio and no transcript sends a mark and leaves NO
+   * entry, and its bytes would be invisible to the sum.
+   *
+   * ONLY THE NEWEST MARK'S ECHO CLEARS IT, so an intermediate echo — or audio
+   * discarded by a barge-in `clear` — leaves this reading high. That is the
+   * safe direction: too patient never speaks over the agent.
+   */
+  private unechoedAudioBytes = 0;
+
   private maxCallTimer: unknown = null;
   private deadAirTimer: unknown = null;
   /** WHY the watchdog is armed. 'utterance' = an utterance's audio is
@@ -970,6 +988,8 @@ export class VoiceCallBridge {
     // one is playing proves nothing about current audio.
     if (name === this.latestMarkName && !this.mediaSinceLastMark) {
       this.assistantAudioPlaying = false;
+      // Everything sent has now played, so nothing is queued ahead.
+      this.unechoedAudioBytes = 0;
       // AND THIS IS WHERE THE CALLER'S SILENCE ACTUALLY BEGINS (v65). The
       // window armed at `response.done` carries the whole line's duration as
       // a safe upper bound on what was still buffered; here Twilio has proved
@@ -1383,6 +1403,7 @@ export class VoiceCallBridge {
     if (done.bytes > 0) this.noteAgentWords();
     this.agentTurns += 1;
     this.lastCompletedUtteranceBytes = done.bytes;
+    this.unechoedAudioBytes += done.bytes;
 
     // The utterance is delivered: the agent owes nothing for IT, so a
     // caller taking their time over the question can never trip the
@@ -1406,22 +1427,30 @@ export class VoiceCallBridge {
       // agent's debt is discharged; what is armed now is the caller's own
       // window, and it speaks to them before it ever ends the call.
       //
-      // AND IT CARRIES THIS UTTERANCE'S PLAYBACK DURATION, because
-      // `response.done` means the PROVIDER has finished GENERATING — not that
-      // the caller has finished HEARING (Codex P1, #328). Grok streams faster
-      // than real time, so at this moment up to the whole line can still be
-      // buffered inside Twilio; a bare 12-second window would then expire
-      // while the agent is still talking, prompt over its own question, and
-      // on the third one hang up on a caller who was listening. The 30-second
-      // watchdog this branch used to clear outlasted any plausible tail,
-      // which is why the trap only became reachable when the window shrank.
+      // AND IT CARRIES THE PLAYBACK STILL QUEUED, because `response.done`
+      // means the PROVIDER has finished GENERATING — not that the caller has
+      // finished HEARING (Codex P1, #328). Grok streams faster than real time,
+      // so at this moment up to the whole line can still be buffered inside
+      // Twilio; a bare 12-second window would then expire while the agent is
+      // still talking, prompt over its own question, and on the third one hang
+      // up on a caller who was listening. The 30-second watchdog this branch
+      // used to clear outlasted any plausible tail, which is why the trap only
+      // became reachable when the window shrank.
       //
-      // The whole duration is the UPPER bound on what is still unplayed, so
-      // this can only ever be too patient — and the mark echo below corrects
-      // it downward the moment Twilio proves the audio actually landed. A
-      // mark that never echoes therefore costs at most one line's worth of
-      // extra patience, and never a word spoken over the agent.
-      else this.armDeadAir("caller", Math.ceil(done.bytes / MULAW_BYTES_PER_MS));
+      // EVERY UNECHOED UTTERANCE COUNTS, NOT JUST THIS ONE (Codex P1, #328
+      // round 2). Several can complete before the newest mark echoes — a
+      // response carrying two utterances is enough — and the first fix bounded
+      // on `done.bytes` alone, so the second completion re-armed a window
+      // shorter than the audio still queued ahead of it and the prompt landed
+      // over the agent mid-line. `unplayedAudioMs` totals what Twilio has not
+      // confirmed; see `unechoedAudioBytes` for why that is not read off
+      // `awaitingMark`.
+      //
+      // It is an UPPER bound, so this can only ever be too patient — and the
+      // mark echo below corrects it downward the moment Twilio proves the audio
+      // landed. A mark that never echoes costs at most the queue's own
+      // duration in extra patience, and never a word spoken over the agent.
+      else this.armDeadAir("caller", this.unplayedAudioMs());
     }
     this.responseOwedFromGreeting = false;
 
@@ -2023,6 +2052,25 @@ export class VoiceCallBridge {
   }
 
   // ── Dead-air watchdog ────────────────────────────────────────────────
+
+  /**
+   * The upper bound, in milliseconds, on agent audio the caller has not
+   * finished hearing yet.
+   *
+   * `response.done` means the PROVIDER finished GENERATING; Twilio's mark echo
+   * is the only ground truth that audio reached the caller, and Grok streams
+   * faster than real time. So at the moment the caller's window is armed, up
+   * to every unechoed byte can still be sitting in Twilio's buffer.
+   *
+   * Deliberately an OVER-estimate: it counts audio a barge-in `clear` may have
+   * already discarded, and it is not reduced by an intermediate mark echo.
+   * Being too patient costs one line's worth of extra silence; being too eager
+   * speaks over the agent's own question and, three strikes later, hangs up on
+   * a caller who was listening.
+   */
+  private unplayedAudioMs(): number {
+    return Math.ceil(this.unechoedAudioBytes / MULAW_BYTES_PER_MS);
+  }
 
   private armDeadAir(cause: DeadAirCause, extraMs = 0): void {
     this.clearDeadAir();
