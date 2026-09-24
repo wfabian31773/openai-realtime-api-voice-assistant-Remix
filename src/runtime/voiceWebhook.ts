@@ -62,6 +62,22 @@ export const RUNTIME_TECHNICAL_TROUBLE_LINE =
   "I'm sorry, we ran into technical trouble on our end during this call. " +
   "Our office will follow up with you directly. Goodbye.";
 
+/**
+ * Spoken when the silence ladder ended the call (v65).
+ *
+ * Over TwiML rather than by the agent, and that is the same reasoning
+ * `blindTransfer` records for its own warning: teardown closes the media
+ * stream, so a line the bridge starts as it ends the call is cut mid-word.
+ *
+ * It is NOT the technical-trouble line. Nothing failed — we could not hear
+ * them — and telling a caller we had a fault would be a claim about our own
+ * side that the evidence does not support. It names a way back, because a
+ * caller whose microphone or line was broken has one.
+ */
+export const RUNTIME_CANNOT_HEAR_LINE =
+  "I'm sorry, I still cannot hear you, so I'll let you go. " +
+  "Please call us back when you can. Goodbye.";
+
 export interface WebhookRequest {
   headers: Record<string, string | string[] | undefined>;
   /** Parsed application/x-www-form-urlencoded POST params. */
@@ -248,6 +264,11 @@ export function handleAfterRedirect(
   const callSid = req.body.CallSid ?? "";
   const outcome: CallOutcome | null = callSid ? deps.registry.consumeOutcome(callSid) : null;
 
+  if (outcome === "caller_silent") {
+    // The ladder spoke three times and heard nothing. A sign-off, not an
+    // apology for a fault that did not happen — see RUNTIME_CANNOT_HEAR_LINE.
+    return twimlResponse(200, `<Say>${xmlEscape(RUNTIME_CANNOT_HEAR_LINE)}</Say><Hangup/>`);
+  }
   if (outcome === "provider_failure" || outcome === "dead_air") {
     // The two endings the runtime itself caused. A caller who was cut off
     // mid-sentence is owed an explanation, not a silent hangup.

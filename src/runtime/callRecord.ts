@@ -190,13 +190,22 @@ export function callEnvironment(env: Record<string, string | undefined>): string
  * meaning of the column is the one every other reader assumes: completed is
  * answered-and-ended, failed is never-connected. So dead_air is failed only
  * when the caller never spoke; `provider_failure` stays failed regardless.
+ *
+ * `caller_silent` (v65) takes the SAME rule rather than a flat `failed`, for
+ * exactly the reason dead_air stopped taking one: the ladder resets when a
+ * caller is heard, so it can also end a call that HELD a conversation and
+ * then went quiet, and that call must still be graded and synced to its
+ * ticket. A silent line from the first second reads failed, which is what it
+ * is.
  */
 export function statusFor(
   outcome: VoiceCallRecord["outcome"],
   transcript: string = "",
 ): "completed" | "failed" {
   if (outcome === "provider_failure") return "failed";
-  if (outcome === "dead_air") return /(^|\n)CALLER: /.test(transcript) ? "completed" : "failed";
+  if (outcome === "dead_air" || outcome === "caller_silent") {
+    return /(^|\n)CALLER: /.test(transcript) ? "completed" : "failed";
+  }
   return "completed";
 }
 

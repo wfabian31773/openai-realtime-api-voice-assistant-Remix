@@ -362,7 +362,7 @@ import { callEnvironment } from "./callRecord";
  * neither. v60 > v59 numerically and says nothing about containment.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v62-the-ticket-says-why-nobody-was-dialled-20260923";
+  "voice-runtime-v65-the-silence-ladder-20260924";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
