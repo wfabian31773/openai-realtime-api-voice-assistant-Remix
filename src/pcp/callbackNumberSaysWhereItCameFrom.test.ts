@@ -35,7 +35,10 @@ describe('the seed marks the number as caller ID only', () => {
     // a closing brace, so slicing to the FIRST `}` after the `if` cuts the
     // window off before the object literal and the assertion passes on an
     // empty haystack. Slice to the update call, then to the end of its object.
-    const seed = src.slice(src.indexOf('if (metadata.callerPhone &&'));
+    // Anchored on the EXTRACTED predicate: the seed's inline regex moved into
+    // `isDialableAni` so the ticket's provenance line could share one copy of
+    // the rule (Codex P2, #326).
+    const seed = src.slice(src.indexOf('if (isDialableAni(metadata.callerPhone))'));
     const update = seed.slice(seed.indexOf('pcpDirector.update('));
     const block = update.slice(0, update.indexOf('});'));
     expect(block).toContain('callbackNumber: metadata.callerPhone');
@@ -81,6 +84,44 @@ describe('the ticket a staffer opens says which it is', () => {
 
   it('branches on the flag rather than printing one label for both', () => {
     const line = src.slice(src.indexOf('reaches the requesting office, not the patient.') - 400);
-    expect(line.slice(0, 900)).toContain('state.callbackFromCallerIdOnly');
+    expect(line.slice(0, 900)).toContain('callbackIsCallerIdOnly');
+  });
+});
+
+describe('a caller ID nobody can ring is never labelled as given by the caller', () => {
+  /**
+   * CODEX P2 ON #326, and it inverted the one case this whole change is for.
+   *
+   * A withheld caller ID arrives as the WORD "anonymous", so the seed's E.164
+   * guard correctly refuses and `callbackFromCallerIdOnly` is never set. The
+   * ticket body then fell back to `metadata.callerPhone` anyway — truthy — read
+   * the unset flag as false, and printed "Given by the caller." over the word
+   * "anonymous". Exactly backwards, on exactly the population this change
+   * exists to protect. v40 is the same ANI and the same lesson.
+   */
+  const src = source('src/agents/pcpAgent.ts');
+
+  it('resolves the value and its provenance together, not from the seed flag alone', () => {
+    expect(src).toContain('const statedCallback =');
+    expect(src).toContain('const callbackIsCallerIdOnly = statedCallback');
+    // The bare fallback that produced the inversion must be gone from this site.
+    expect(src).not.toContain("const callback = String(state.callbackNumber ?? metadata.callerPhone ?? '')");
+  });
+
+  it('only takes the ANI as a callback when it is dialable', () => {
+    const line = src.slice(src.indexOf('const callback = statedCallback'));
+    expect(line.slice(0, 200)).toContain('isDialableAni(metadata.callerPhone)');
+  });
+
+  it('treats a fallback to caller ID as caller-ID-only whatever the flag says', () => {
+    // statedCallback empty -> caller-ID-only, unconditionally. A ternary that
+    // consulted the flag in that arm is the defect.
+    const decl = src.slice(src.indexOf('const callbackIsCallerIdOnly = statedCallback'));
+    expect(decl.slice(0, 160)).toMatch(/:\s*true;/);
+  });
+
+  it('keeps ONE copy of the dialable rule, shared by the seed and the label', () => {
+    expect((src.match(/\/\^\\\+\\d\{10,15\}\$\//g) ?? []).length).toBe(1);
+    expect((src.match(/isDialableAni\(/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
 });
