@@ -800,6 +800,12 @@ export class VoiceCallBridge {
     switch (frame.event) {
       case "media":
         // Caller audio: base64 μ-law pass-through, no transcoding.
+        //
+        // NOT COUNTED HERE. The caller-audio instrument counts at the SOCKET
+        // (`voiceRuntime`), because the bridge sees only the frames that
+        // survived the pre-bridge hold — and a frame that hit this server and
+        // was dropped there is precisely what the instrument must not report
+        // as a line nobody spoke into (Codex P2, #327).
         this.session.appendAudio(frame.media.payload);
         break;
       case "mark":

@@ -357,6 +357,17 @@ import { callEnvironment } from "./callRecord";
  * all. `handoffNotAttemptedReason` is read from the policy table and two
  * server-owned director latches, never from a model argument.
  *
+ * v57 IS RETIRED (the withdrawn surgeon claim), v58 is claimed by #322 and v59
+ * by #293 — both OPEN branches, so this is a SIBLING of both and contains
+ * neither. v60 > v59 numerically and says nothing about containment.
+ *
+ * v64: the caller's audio is COUNTED. `handleTwilioFrame`'s media case was
+ * `session.appendAudio(payload)` and nothing else, so nothing anywhere could
+ * say whether a caller's audio ever reached us — which is why optical's
+ * barely-heard rate survived three attempts. An instrument, not a fix: two
+ * integers per inbound frame and one PHI-free `call_events` row per call, no
+ * gate, no tool, no spoken line. See `callerAudioEnergy.ts`.
+ *
  * v66 — THE PCP LOST-REQUEST FLOOR IS WIRED INTO THIS RUNTIME'S TEARDOWN.
  * `sweepPcpUnfiledCall` had three ships of work behind it (v18, v30, v31) and
  * had never once run: its only caller was the OLD CORE's SIP teardown, and PCP
@@ -366,13 +377,14 @@ import { callEnvironment } from "./callRecord";
  * 0 POSTs have ever carried `caller_hung_up_before_completion` or
  * `call_not_classified`, the two literals only that function writes.
  *
- * WHY 66 AND NOT 63. This branch held v61 while it sat below `main`; `main`
- * moved to v62 when #323 merged, and v63/v64/v65 are three OPEN siblings off
- * that v62 (#326, #327, #328). A marker below `main` reads as a failed pull and
- * two branches sharing one number make two builds indistinguishable at
- * `/voice/health`, so this took the next free number above all of them.
- * v57 and v60 are RETIRED rather than reused; v59 is still claimed by the open
- * #293. A higher number says nothing about containment: this contains v62 alone.
+ * WHY 66, AND WHY IT DID NOT MOVE WHEN #327 LANDED. This branch held v61 while
+ * it sat below the v58 `main`, took v66 when `main` reached v62, and KEEPS it
+ * now that #327 has moved `main` to v64 — a marker only reads as a failed pull
+ * when it is BELOW `main`, and 66 > 64. The open siblings are v65 (#328) and
+ * v67 (#326, re-bumped from v63 by that same merge because v63 fell below
+ * `main`). v57, v60 and v63 are RETIRED rather than reused and a build must
+ * never read them; v59 is still claimed by the open #293. A higher number says
+ * nothing about containment: this contains v64, and neither sibling.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v66-the-pcp-floor-is-wired-20260924";
