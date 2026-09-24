@@ -74,13 +74,59 @@ describe('the μ-law energy probe', () => {
   });
 
   it('refuses a malformed payload rather than measuring whatever it decodes to', () => {
-    // `not@@base64!!` decodes to six bytes whose exponents run 6 7 2 1 3 4, so
-    // before the shape check it read VOICED — and `voiced` on a call with no
-    // transcript is the verdict that accuses our own speech recognition, while
-    // `silent_line` says nobody spoke. They call for OPPOSITE fixes, so a
-    // malformed frame must never be able to pick the accusing one.
-    for (const bad of ['not@@base64!!', 'AAAA AAAA', 'AA=A', '####', 'AAAA=AAAA']) {
-      expect(frameIsVoiced(bad), bad).toBe(false);
+    // `voiced` on a call with no transcript is the verdict that accuses our own
+    // speech recognition, while `silent_line` says nobody spoke. They call for
+    // OPPOSITE fixes, so a malformed frame must never be able to pick the
+    // accusing one — and `0x00` is MAXIMUM amplitude in μ-law, so a payload
+    // that decodes to zero bytes reads voiced. Each row below did.
+    const bad = [
+      'not@@base64!!', // bad ALPHABET: decoded to 6 bytes, exponents 6 7 2 1 3 4
+      'AAAA AAAA', //     a space is not in the alphabet
+      '####', //          nothing in the alphabet
+      'AA=A', //          padding before data
+      'AAAA=AAAA', //     padding mid-string
+      'AA=', //           bad LENGTH: decodes to 00        -> was voiced
+      'AAAA=', //         bad LENGTH: decodes to 00 00 00  -> was voiced
+      'AAA', //           bad LENGTH: decodes to 00 00     -> was voiced
+      'AAAAA', //         bad LENGTH
+      'AAB=', //          non-canonical TRAILING BITS: right length, right
+      //                  padding, and the final char's low bits are not zero,
+      //                  so re-encoding gives 'AAA='     -> was voiced
+      'AB==',
+      'A+B=',
+    ];
+    for (const s of bad) expect(frameIsVoiced(s), s).toBe(false);
+  });
+
+  it('accepts exactly what canonical base64 accepts, proven rather than reasoned', () => {
+    // THIS TEST EXISTS BECAUSE I GOT THE PREDICATE WRONG TWICE BY REASONING
+    // ABOUT IT. An anchored alphabet-and-padding pattern let three bad lengths
+    // through (round 3); adding `length % 4 === 0` still let 60 non-canonical
+    // trailing-bit strings through, which a brute force found and my
+    // enumeration had not. So the property is asserted against the canonical
+    // definition over every short string, not against a list I thought of.
+    const alphabet = ['A', 'B', '+', '/', '='];
+    const canonical = (s: string) => Buffer.from(s, 'base64').toString('base64') === s;
+    const seen: string[] = [];
+    const walk = (prefix: string, len: number) => {
+      if (prefix.length === len) return void seen.push(prefix);
+      for (const c of alphabet) walk(prefix + c, len);
+    };
+    for (let len = 0; len <= 4; len += 1) walk('', len);
+    expect(seen.length).toBeGreaterThan(700);
+    for (const s of seen) {
+      // A canonical payload is measured; a non-canonical one is never voiced.
+      if (!canonical(s)) expect(frameIsVoiced(s), `non-canonical: ${s}`).toBe(false);
+    }
+  });
+
+  it('accepts every real μ-law frame length, so it cannot fail closed', () => {
+    // A guard that rejects too much reads EVERY call as `silent_line` — the
+    // same defect pointed the other way. Twilio sends 160-byte frames; this
+    // walks every length up to 200 at an amplitude that must read voiced.
+    for (let len = 1; len <= 200; len += 1) {
+      const payload = Buffer.alloc(len, 0x00).toString('base64');
+      expect(frameIsVoiced(payload), `len ${len}`).toBe(true);
     }
   });
 

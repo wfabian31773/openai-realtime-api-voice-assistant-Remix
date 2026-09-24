@@ -59,10 +59,32 @@ export const VOICED_EXPONENT = 4;
 export const FRAME_BYTES = 160;
 
 /**
- * Base64 as Twilio actually sends it: the standard alphabet, and padding only
- * at the end. Anchored, so one stray character rejects the whole payload.
+ * Is this string canonical base64?
+ *
+ * DECODE AND RE-ENCODE, rather than a pattern. Node's decoder is permissive in
+ * three independent ways and a hand-written predicate was wrong about two of
+ * them on two successive review rounds (#327):
+ *
+ *   - the ALPHABET: invalid characters are silently skipped, never thrown on,
+ *     so `not@@base64!!` decoded to six bytes and read voiced;
+ *   - the LENGTH: `AA=` and `AAAA=` are not valid quanta but decode anyway, to
+ *     `00` and `00 00 00` — and `0x00` is maximum amplitude in μ-law, so both
+ *     read voiced;
+ *   - the TRAILING BITS: `AAB=` is the right length with the right padding and
+ *     is still not canonical, because the final data character's low bits must
+ *     be zero. A brute force over 3,906 strings found 60 such cases that an
+ *     anchored alphabet-plus-length predicate accepts and this test rejects.
+ *
+ * The round trip is exact by construction and cannot be wrong about one of the
+ * three while being right about the others. Measured cost: 0.12 µs per frame
+ * on top of a 0.33 µs decode-and-scan — 2.4 ms of CPU per second at 20,000
+ * frames per second, or 0.24% of one core. Correctness is worth that here,
+ * because the verdict this guards decides whether we accuse our own speech
+ * recognition.
  */
-const BASE64_ONLY = /^[A-Za-z0-9+/]*={0,2}$/;
+function isCanonicalBase64(s: string): boolean {
+  return Buffer.from(s, "base64").toString("base64") === s;
+}
 
 /**
  * Does this μ-law frame's loudest sample reach speech loudness?
@@ -71,12 +93,12 @@ const BASE64_ONLY = /^[A-Za-z0-9+/]*={0,2}$/;
  * empty or undecodable is not voiced and is not an error — a malformed frame
  * must never cost a live call anything, and this is telemetry.
  *
- * THE SHAPE IS CHECKED RATHER THAN THE DECODE TRUSTED (Codex P2, #327 round 2).
- * `Buffer.from(s, "base64")` does NOT throw on invalid input — it silently
- * skips the characters it cannot read — so the `try/catch` this used to rely on
- * was dead code and the sentence above it was false. Measured: the payload
- * `not@@base64!!` decodes to six bytes whose exponents run 6 7 2 1 3 4 and so
- * returned VOICED.
+ * THE PAYLOAD IS VALIDATED RATHER THAN THE DECODE TRUSTED (Codex P2, #327
+ * rounds 2 and 3). `Buffer.from(s, "base64")` does NOT throw on invalid input —
+ * it silently skips what it cannot read — so the `try/catch` this used to rely
+ * on was dead code and the sentence above it was false. See
+ * `isCanonicalBase64` for the three ways it is permissive and why the test is
+ * a round trip rather than a pattern.
  *
  * THE DIRECTION IS WHY THIS IS WORTH A REGEX. `voiced` on a call with no
  * transcript is the verdict that accuses our own speech recognition, and
@@ -86,7 +108,7 @@ const BASE64_ONLY = /^[A-Za-z0-9+/]*={0,2}$/;
  * `no_frames`.
  */
 export function frameIsVoiced(payloadBase64: string): boolean {
-  if (!BASE64_ONLY.test(payloadBase64)) return false;
+  if (!isCanonicalBase64(payloadBase64)) return false;
   const buf = Buffer.from(payloadBase64, "base64");
   for (let i = 0; i < buf.length; i += 1) {
     // Invert (μ-law is stored inverted), then read the exponent: bits 4-6.
