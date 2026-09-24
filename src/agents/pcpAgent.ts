@@ -29,6 +29,7 @@ import { refusePcp } from '../pcp/refusals';
 import { asksForAPerson } from '../pcp/explicitAsk';
 import { preTransferGaps, preTransferQuestion } from '../pcp/preTransferIntake';
 import { QUEUE_CHOICE_WARNING, readQueueChoice, choseTheQueue } from '../pcp/queueChoice';
+import { defaultDispositionFor, handoffNotAttemptedReason } from '../pcp/handoffNotAttempted';
 import { handoffAfterQueueDial } from '../pcp/queueDialSettlement';
 import { callerLines, saidMoreThanTheirOwnIdentity } from '../runtime/requestSweep';
 import { NARRATIVE_MAX_CHARS } from '../pcp/pcpTicketing';
@@ -553,6 +554,28 @@ function buildPayload(
     ...(disposition === 'HAND_OFF' && state.callerRequestedHuman
       ? { dispositionGrantedByExplicitAsk: true }
       : {}),
+    /**
+     * WHY NO DIAL WENT OUT, on the one shape the ticketing app asks about.
+     *
+     * READ FROM THE POLICY TABLE AND TWO SERVER-OWNED LATCHES, never from a
+     * model argument — `getPcpCallPurpose` for the purpose's own default, and
+     * `pcpDirector` for what actually happened on the call. The v17 P1 is why:
+     * a guard that read `create_pcp_task`'s `disposition` was reading an
+     * argument with `.default('CREATE_TASK')` behind it.
+     *
+     * Absent on every other shape, and `sanitizePcpPayload` drops undefined —
+     * see `handoffNotAttempted.ts` for why `undefined` is itself an answer.
+     */
+    handoffNotAttemptedReason: handoffNotAttemptedReason({
+      purposeDefaultDisposition: defaultDispositionFor(state.callPurpose),
+      disposition,
+      callerDeclinedTheQueue: state.callerDeclinedTheQueue,
+      handoffRefusedAsIneligible: state.handoffRefusedAsIneligible,
+      callerRequestedHuman: state.callerRequestedHuman,
+      // From the block on THIS payload, so one record cannot contradict itself
+      // about whether a dial went out. See handoffNotAttempted.ts.
+      handoffDialAttempted: handoff?.attempted === true,
+    }),
     urgency,
     verificationStatus: state.verificationStatus,
     patientFirstName: state.patientFirstName,
@@ -1283,6 +1306,11 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // and the agent is told so, in the same shape it already handles for a
       // transfer that fails to connect.
       if (!pcpDirector.next(callId).handoffEligible) {
+        // Latched BEFORE the payload is built, because `buildPayload` reads it.
+        // This is the "the agent asked to dial and was told it could not" fact,
+        // and it has to survive onto a ticket `create_pcp_task` may file several
+        // turns later — see handoffNotAttempted.ts.
+        pcpDirector.markHandoffRefusedAsIneligible(callId);
         const fallback = await submitPcpTicket(
           buildPayload(metadata, state, 'CREATE_TASK', narrative, urgency, undefined, 'handoff_not_eligible', missing),
         );
@@ -1371,6 +1399,11 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // No dial is coming. Their request is an ordinary filing again, so it
         // may route like one.
         transferAwaitingTicket = false;
+        // A LATCH, not `setCallerChoseTheQueue(false)`. That one is reversible
+        // because it is withdrawn when a dial fails; this records that the
+        // caller said no, which does not stop being true. It is what puts
+        // `caller_declined_queue` on the ticket the model files next.
+        pcpDirector.markCallerDeclinedTheQueue(callId);
         console.info(`[PCP] the caller chose to have it taken here rather than hold for the queue (${callId})`);
         return refusePcp('queue_choice_declined');
       }
