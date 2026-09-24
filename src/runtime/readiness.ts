@@ -360,9 +360,16 @@ import { callEnvironment } from "./callRecord";
  * v57 IS RETIRED (the withdrawn surgeon claim), v58 is claimed by #322 and v59
  * by #293 — both OPEN branches, so this is a SIBLING of both and contains
  * neither. v60 > v59 numerically and says nothing about containment.
+ *
+ * v64: the caller's audio is COUNTED. `handleTwilioFrame`'s media case was
+ * `session.appendAudio(payload)` and nothing else, so nothing anywhere could
+ * say whether a caller's audio ever reached us — which is why optical's
+ * barely-heard rate survived three attempts. An instrument, not a fix: two
+ * integers per inbound frame and one PHI-free `call_events` row per call, no
+ * gate, no tool, no spoken line. See `callerAudioEnergy.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v62-the-ticket-says-why-nobody-was-dialled-20260923";
+  "voice-runtime-v64-the-callers-audio-is-counted-20260924";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
