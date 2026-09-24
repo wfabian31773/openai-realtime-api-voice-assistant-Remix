@@ -268,6 +268,7 @@ import { persistRuntimeTurns } from "./runtimeTurns";
 import { makeRecordingStarter } from "./callRecording";
 import { gradeRuntimeCall } from "./runtimeGrading";
 import { logRuntimeFollowUps } from "./followUpTelemetry";
+import { logCallerAudio } from "./callerAudioTelemetry";
 import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
 import {
   handleAfterRedirect,
@@ -1263,10 +1264,19 @@ export function mountVoiceRuntime(
              * stop the identity row being buffered. The 2h reaper recovers what
              * is emitted; it cannot recover what was never emitted at all.
              */
-            void logIdentity(record, identity, identityProbe, persisted, { callLogId }, {
+            const identityWritten = logIdentity(record, identity, identityProbe, persisted, { callLogId }, {
               after: followUpsWritten,
               precontextWrite,
             }).catch(() => undefined);
+            /**
+             * AND WHETHER THE CALLER'S AUDIO EVER REACHED US — the optical
+             * barely-heard instrument. Same discipline as the two above: emits
+             * its row immediately, waits on its predecessor only before
+             * flushing, never awaited by teardown, and changes nothing a caller
+             * hears. `callerAudioEnergy.ts` carries the measurement.
+             */
+            void logCallerAudio(record, { callLogId }, { after: identityWritten })
+              .catch(() => undefined);
           },
         });
         // Connect AFTER the bridge exists: a connection that fails then has

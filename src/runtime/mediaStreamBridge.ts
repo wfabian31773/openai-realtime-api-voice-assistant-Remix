@@ -119,6 +119,7 @@ import {
   ceilingReplay,
   successCeilingRefusal,
 } from "./toolCeiling";
+import { CallerAudioMeter, type CallerAudioCounts } from "./callerAudioEnergy";
 
 /**
  * A tool's answer as an object the wire layer can spread into its payload.
@@ -407,6 +408,10 @@ export interface VoiceCallRecord {
   /** End-call tool calls the bridge refused because the model held a tool
    * answer it had not voiced (v56, HANGUP_HOLD_LIMIT). */
   hangupsHeld?: number;
+  /** Inbound caller media frames and how many carried speech-loud audio.
+   * Optional so older fixtures still type-check; the bridge always sets it.
+   * See `callerAudioEnergy.ts` for why frame count alone says nothing. */
+  callerAudio?: CallerAudioCounts;
 }
 
 /**
@@ -801,6 +806,9 @@ export class VoiceCallBridge {
       case "media":
         // Caller audio: base64 μ-law pass-through, no transcoding.
         this.session.appendAudio(frame.media.payload);
+        // Telemetry only, and AFTER the append so it can never delay the
+        // audio reaching the model: two integers per frame, no allocation.
+        this.callerAudio.note(frame.media.payload);
         break;
       case "mark":
         this.handleTwilioMark(frame.mark.name);
@@ -1542,6 +1550,8 @@ export class VoiceCallBridge {
   private awaitingToolResponseDone = false;
   /** v55 — see FollowUpStats. */
   private readonly followUps = { owed: 0, requested: 0, toolCallsAfterDone: 0 };
+  /** Was the caller's audio ever loud enough to be speech? Telemetry only. */
+  private readonly callerAudio = new CallerAudioMeter();
   /** The response epoch at the moment the last follow-up was requested; a
    * created response advances the epoch, so equality at teardown means the
    * wire never answered that request. */
@@ -2059,6 +2069,7 @@ export class VoiceCallBridge {
         agentTurns: this.agentTurns,
         interruptions: this.interruptions,
         hangupsHeld: this.hangupsHeld,
+        callerAudio: this.callerAudio.counts(),
         followUps: {
           ...this.followUps,
           lastUnanswered:
