@@ -349,8 +349,33 @@ import { callEnvironment } from "./callRecord";
  * words (bounded at HANGUP_HOLD_LIMIT), and record_automated_resolution
  * tells the model to say what the lookup found.
  */
+/**
+ * v60 — WHY NO DIAL WENT OUT IS ON THE TICKET, so an ordinary task on a
+ * handoff-default purpose stops being an HTTP 500 the model retries. Measured
+ * 2026-09-19 in `voice_agent_api_logs`: 7 calls, 41 refused POSTs, worst storm
+ * 8 on one call, 2026-09-15..18 — and 4 of the 7 never attempted a handoff at
+ * all. `handoffNotAttemptedReason` is read from the policy table and two
+ * server-owned director latches, never from a model argument.
+ *
+ * v66 — THE PCP LOST-REQUEST FLOOR IS WIRED INTO THIS RUNTIME'S TEARDOWN.
+ * `sweepPcpUnfiledCall` had three ships of work behind it (v18, v30, v31) and
+ * had never once run: its only caller was the OLD CORE's SIP teardown, and PCP
+ * moved to this runtime on 2026-09-04. The generic sweep declines the lane by
+ * table, so PCP had no teardown filer at all on the pipeline serving it. Read
+ * from production rather than inferred: across ALL of `voice_agent_api_logs`,
+ * 0 POSTs have ever carried `caller_hung_up_before_completion` or
+ * `call_not_classified`, the two literals only that function writes.
+ *
+ * WHY 66 AND NOT 63. This branch held v61 while it sat below `main`; `main`
+ * moved to v62 when #323 merged, and v63/v64/v65 are three OPEN siblings off
+ * that v62 (#326, #327, #328). A marker below `main` reads as a failed pull and
+ * two branches sharing one number make two builds indistinguishable at
+ * `/voice/health`, so this took the next free number above all of them.
+ * v57 and v60 are RETIRED rather than reused; v59 is still claimed by the open
+ * #293. A higher number says nothing about containment: this contains v62 alone.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v61-the-identity-write-says-why-20260923";
+  "voice-runtime-v66-the-pcp-floor-is-wired-20260924";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
