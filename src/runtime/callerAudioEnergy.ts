@@ -59,19 +59,35 @@ export const VOICED_EXPONENT = 4;
 export const FRAME_BYTES = 160;
 
 /**
+ * Base64 as Twilio actually sends it: the standard alphabet, and padding only
+ * at the end. Anchored, so one stray character rejects the whole payload.
+ */
+const BASE64_ONLY = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/**
  * Does this μ-law frame's loudest sample reach speech loudness?
  *
  * Takes the base64 payload exactly as Twilio delivers it. A payload that is
  * empty or undecodable is not voiced and is not an error — a malformed frame
  * must never cost a live call anything, and this is telemetry.
+ *
+ * THE SHAPE IS CHECKED RATHER THAN THE DECODE TRUSTED (Codex P2, #327 round 2).
+ * `Buffer.from(s, "base64")` does NOT throw on invalid input — it silently
+ * skips the characters it cannot read — so the `try/catch` this used to rely on
+ * was dead code and the sentence above it was false. Measured: the payload
+ * `not@@base64!!` decodes to six bytes whose exponents run 6 7 2 1 3 4 and so
+ * returned VOICED.
+ *
+ * THE DIRECTION IS WHY THIS IS WORTH A REGEX. `voiced` on a call with no
+ * transcript is the verdict that accuses our own speech recognition, and
+ * `silent_line` is the one that says nobody spoke — they call for opposite
+ * fixes. A malformed frame must never be allowed to pick the accusing one,
+ * which is the same reasoning that makes the missing-counts default
+ * `no_frames`.
  */
 export function frameIsVoiced(payloadBase64: string): boolean {
-  let buf: Buffer;
-  try {
-    buf = Buffer.from(payloadBase64, "base64");
-  } catch {
-    return false;
-  }
+  if (!BASE64_ONLY.test(payloadBase64)) return false;
+  const buf = Buffer.from(payloadBase64, "base64");
   for (let i = 0; i < buf.length; i += 1) {
     // Invert (μ-law is stored inverted), then read the exponent: bits 4-6.
     const exponent = (~buf[i] >> 4) & 0x07;

@@ -61,8 +61,39 @@ describe('the μ-law energy probe', () => {
 
   it('treats an empty or undecodable payload as not voiced, never as an error', () => {
     // Telemetry must never cost a live call anything.
+    //
+    // AND THIS TEST USED TO ASSERT THE WRONG HALF OF ITS OWN TITLE (Codex P2,
+    // round 2). It checked only `.not.toThrow()` on the malformed payload and
+    // never that the answer was `false` — so "as not voiced" went untested,
+    // and it was in fact returning TRUE. `Buffer.from(s, 'base64')` does not
+    // throw on invalid input, it silently skips what it cannot read, so the
+    // no-throw half could never fail and the half that mattered was absent.
     expect(frameIsVoiced('')).toBe(false);
     expect(() => frameIsVoiced('not@@base64!!')).not.toThrow();
+    expect(frameIsVoiced('not@@base64!!')).toBe(false);
+  });
+
+  it('refuses a malformed payload rather than measuring whatever it decodes to', () => {
+    // `not@@base64!!` decodes to six bytes whose exponents run 6 7 2 1 3 4, so
+    // before the shape check it read VOICED — and `voiced` on a call with no
+    // transcript is the verdict that accuses our own speech recognition, while
+    // `silent_line` says nobody spoke. They call for OPPOSITE fixes, so a
+    // malformed frame must never be able to pick the accusing one.
+    for (const bad of ['not@@base64!!', 'AAAA AAAA', 'AA=A', '####', 'AAAA=AAAA']) {
+      expect(frameIsVoiced(bad), bad).toBe(false);
+    }
+  });
+
+  it('still measures well-formed payloads, padded or not', () => {
+    // The guard must not reject what Twilio actually sends: the standard
+    // alphabet with padding only at the end. A guard that refuses everything
+    // reads every call as silent, which is the same defect pointed the other
+    // way.
+    expect(frameIsVoiced(Buffer.alloc(160, 0x00).toString('base64'))).toBe(true);
+    expect(frameIsVoiced(Buffer.alloc(160, 0xff).toString('base64'))).toBe(false);
+    // Lengths 1 and 2 pad to '==' and '=', so both forms are exercised.
+    expect(frameIsVoiced(Buffer.from([0x00]).toString('base64'))).toBe(true);
+    expect(frameIsVoiced(Buffer.from([0x00, 0x00]).toString('base64'))).toBe(true);
   });
 
   it('keeps the threshold clear of the band where comfort noise lives', () => {
@@ -168,15 +199,38 @@ describe('the counting happens at the SOCKET, not in the bridge', () => {
     expect(runtime).toContain('callerAudio.note(frame.media.payload)');
   });
 
-  it('counts BEFORE the branch that holds frames and the branch that drops them', () => {
+  it('counts AFTER the claim and BEFORE both branches that can drop a frame', () => {
+    // REWRITTEN, NOT LOOSENED (Codex P2, #327 round 2). The count used to sit
+    // above the `start` arm, which metered an UNAUTHENTICATED socket: until a
+    // valid `start` arrives the claim deadline is still running, the parser
+    // accepts a payload up to the 64 KiB message limit, and there is no rate
+    // limit — so an anonymous client could spend the shared event loop on
+    // base64 decodes and byte scans. Those frames were not this call's anyway:
+    // the identity arrives IN the `start` frame.
+    //
+    // The property that matters is unchanged and is still asserted — nothing
+    // that can LOSE a frame runs before the count.
     const handler = runtime.slice(runtime.indexOf('ws.on("message"'));
     const note = handler.indexOf('callerAudio.note(');
     expect(note).toBeGreaterThan(-1);
-    // Both of the branches that can lose a frame come after the count: the
-    // pre-bridge hold with its cap, and the `start` arm's early returns.
+    // The claim is established first, so unauthenticated traffic is never scanned.
+    expect(handler.indexOf('registry.claimStream(')).toBeLessThan(note);
+    expect(handler.indexOf('claimed = true;')).toBeLessThan(note);
+    // And both branches that can lose a frame still come after it.
     expect(handler.indexOf('pendingFrames.push(')).toBeGreaterThan(note);
     expect(handler.indexOf('PRE_BRIDGE_FRAME_CAP')).toBeGreaterThan(note);
-    expect(handler.indexOf('if (frame.event === "start")')).toBeGreaterThan(note);
+    expect(handler.indexOf('bridge.handleTwilioFrame(')).toBeGreaterThan(note);
+  });
+
+  it('gates the count on the CLAIM, not on `starting`', () => {
+    // `starting` is set BEFORE `claimStream` is tested and stays true on a
+    // refused claim, so it cannot gate work that must never run for an
+    // unauthenticated client — frames still in flight when the socket is
+    // closed would be scanned anyway.
+    expect(runtime).toContain('if (frame.event === "media" && claimed)');
+    const handler = runtime.slice(runtime.indexOf('ws.on("message"'));
+    const refused = handler.indexOf('refused a stream with no valid claim');
+    expect(handler.indexOf('claimed = true;')).toBeGreaterThan(refused);
   });
 
   it('is never awaited by teardown — telemetry must not delay a hangup', () => {

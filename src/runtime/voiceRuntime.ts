@@ -738,6 +738,13 @@ export function mountVoiceRuntime(
     let bridge: VoiceCallBridge | null = null;
     let starting = false;
     /**
+     * A valid `start` frame CLAIMED this socket: the callSid and token checked
+     * out. Distinct from `starting`, which is set before the claim is tested
+     * and stays true on a refused one — so it cannot gate work that must never
+     * run for an unauthenticated client.
+     */
+    let claimed = false;
+    /**
      * Twilio is gone. Set by the close and error handlers, which cannot
      * report to a bridge that does not exist yet: building the agent is
      * asynchronous, and a caller who hangs up during it would otherwise be
@@ -790,12 +797,6 @@ export function mountVoiceRuntime(
       const frame = parseTwilioInboundFrame(raw.toString());
       if (!frame) return;
 
-      // Counted BEFORE every branch below, including the hold that discards
-      // its oldest frame and the bridge that may not exist yet. Two integers
-      // and one pass over 160 bytes; nothing here can delay the audio, which
-      // is handed on unchanged further down.
-      if (frame.event === "media") callerAudio.note(frame.media.payload);
-
       if (frame.event === "start") {
         if (starting || bridge) return; // one stream per socket
         starting = true;
@@ -808,6 +809,7 @@ export function mountVoiceRuntime(
           twilioSocket.close();
           return;
         }
+        claimed = true;
         clearClaimDeadline();
         // The public host the webhook was reached on rides in as a stream
         // parameter, so the recording callback can be named without a second
@@ -816,6 +818,22 @@ export function mountVoiceRuntime(
         void startCall(entry, frame.streamSid, params.host);
         return;
       }
+
+      // COUNTED HERE: after the claim, before every branch below that can drop
+      // a frame — the hold that discards its oldest, and the bridge that may
+      // not exist yet. Two integers and one pass over 160 bytes, and the audio
+      // is handed on unchanged further down, so nothing here can delay it.
+      //
+      // BEHIND `claimed` FOR TWO REASONS (Codex P2, #327 round 2). Until a
+      // valid `start` arrives this socket is unauthenticated for up to the
+      // claim deadline, and the parser accepts a payload up to the 64 KiB
+      // message limit with no rate limit behind it — so metering ahead of the
+      // claim let an anonymous client spend the shared event loop on scans.
+      // And those frames are not this call's anyway: the call's identity
+      // arrives IN the `start` frame, and a socket that never claims writes no
+      // row at all, so counting them could only ever inflate `frames` with
+      // audio that belongs to no measurement.
+      if (frame.event === "media" && claimed) callerAudio.note(frame.media.payload);
 
       if (!bridge) {
         if (starting) {
