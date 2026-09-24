@@ -61,6 +61,17 @@ interface EventBuffer {
   agentSlug?: string;
   startedAt: number;
   flushedCount: number;
+  /**
+   * Flushes that have CLAIMED a slice of this buffer and not yet settled.
+   *
+   * The claim is taken before the await and rolled back if the insert fails,
+   * so between those two moments `events.length === flushedCount` describes a
+   * buffer whose events are in flight, not one whose events are written. A
+   * release that could not tell those apart deleted the buffer, and the
+   * rollback then landed on an object no longer in the map — see
+   * `releaseCallEvents`.
+   */
+  inFlight: number;
   /** True once we have dropped events on the cap, so the UI can say so. */
   truncated: boolean;
 }
@@ -80,7 +91,7 @@ const INCREMENTAL_FLUSH_AT = 25;
 function bufferFor(callId: string, ids?: { callSid?: string; callLogId?: string; agentSlug?: string }): EventBuffer {
   let b = buffers.get(callId);
   if (!b) {
-    b = { events: [], startedAt: Date.now(), flushedCount: 0, truncated: false };
+    b = { events: [], startedAt: Date.now(), flushedCount: 0, inFlight: 0, truncated: false };
     buffers.set(callId, b);
   }
   if (ids?.callSid) b.callSid = ids.callSid;
@@ -280,6 +291,9 @@ export async function flushCallEvents(callIdOrSid: string): Promise<boolean> {
   // Claim before the await so a concurrent incremental flush cannot write the
   // same rows twice; roll back on failure so teardown retries them.
   b.flushedCount = b.events.length;
+  // And say so, because the claim makes this buffer LOOK fully written while
+  // the insert is still open. `releaseCallEvents` reads this.
+  b.inFlight += 1;
   try {
     await ensureTable();
     const values = pending
@@ -296,6 +310,8 @@ export async function flushCallEvents(callIdOrSid: string): Promise<boolean> {
     b.flushedCount = claimedFrom;
     console.error('[CALL-EVENTS] flush failed:', e);
     return false;
+  } finally {
+    b.inFlight -= 1;
   }
 }
 
@@ -322,19 +338,31 @@ export async function flushCallEvents(callIdOrSid: string): Promise<boolean> {
  * back to the index it claimed from, and re-basing the array here would point
  * that rollback at the wrong events.
  *
- * ONE NARROWER CASE IS NOT CLOSED AND IS NOT THIS PR'S: a release that races a
- * flush already IN FLIGHT sees `events.length === flushedCount` (the claim is
- * taken before the await) and deletes the buffer, so a rollback on that
- * statement's failure lands on an object no longer in the map. It is
- * unreachable on the runtime — a runtime call emits two events, both at
- * teardown, and `INCREMENTAL_FLUSH_AT` is 25, so nothing else is ever flushing
- * — and on the old core it predates both teardown writers. Closing it needs an
- * in-flight count on the buffer, which is a change to every flush path.
+ * AND THE NARROWER CASE ROUND 4 LEFT OPEN IS NOW CLOSED (Codex P2, #327): a
+ * release that races a flush already IN FLIGHT sees `events.length ===
+ * flushedCount`, because the claim is taken before the await — so it used to
+ * delete a buffer whose events were still in the air, and a rollback on that
+ * insert's failure landed on an object no longer in the map. `inFlight` is the
+ * discriminator, and it is one counter in the one flush function rather than
+ * the change to every flush path round 4 estimated.
+ *
+ * IT WAS TAKEN FOR THE OLD CORE, NOT BECAUSE THE THIRD TEARDOWN WRITER MADE IT
+ * REACHABLE. Measured over the seven days to 2026-09-24: 2,835 grok calls
+ * carry `call_events` rows, the MOST any one of them carries is 2, and 0 reach
+ * `INCREMENTAL_FLUSH_AT`; the third writer takes that ceiling to 3 against a
+ * threshold of 25, so nothing on the runtime is ever flushing while a teardown
+ * writer releases. On the OLD CORE the same week: 488 calls, max 263 events,
+ * and 369 of them past 25 — so the incremental flush fires there routinely,
+ * which is where this was always live and where the fix earns its keep.
+ *
+ * A buffer kept this way is not kept for ever: the in-flight insert either
+ * lands (leaving nothing unwritten, so the 2h reaper drops it) or rolls back
+ * (leaving events the reaper flushes once more first).
  */
 export function releaseCallEvents(callId: string | undefined): void {
   if (!callId) return;
   const b = buffers.get(callId);
-  if (b && b.events.length > b.flushedCount) {
+  if (b && (b.events.length > b.flushedCount || b.inFlight > 0)) {
     // The latency marks are the call's and the call is over; the events are
     // the only thing that must outlive it.
     clocks.delete(callId);

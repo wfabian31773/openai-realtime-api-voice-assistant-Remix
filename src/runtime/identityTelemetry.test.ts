@@ -453,7 +453,24 @@ describe("the runtime's teardown", () => {
   });
 
   it("never awaits the identity writer — telemetry must not hold teardown", () => {
+    /**
+     * REWRITTEN, NOT LOOSENED. This asserted the literal `void ` before the
+     * call, which was a sound PROXY while nothing needed the promise. The
+     * caller-audio row now chains off it (`after: identityWritten`), so the
+     * call site is an assignment — and an assignment is still not an await.
+     *
+     * So the assertion now tests the PROPERTY directly: teardown must not
+     * await this writer. `void X` and `const p = X` both satisfy it;
+     * `await X` does not, and that is the only thing that would hold a
+     * hangup. A bare `.catch()` is still required either way, because an
+     * unhandled rejection here would surface as a crash rather than a
+     * dropped telemetry row.
+     */
     const at = src.indexOf("logIdentity(record, identity, identityProbe");
-    expect(src.slice(Math.max(0, at - 40), at)).toContain("void ");
+    const before = src.slice(Math.max(0, at - 60), at);
+    expect(before).not.toContain("await ");
+    expect(before).toMatch(/(void\s+$|=\s+$)/);
+    // And it handles its own failure rather than escaping as a rejection.
+    expect(src.slice(at, at + 400)).toContain(".catch(() => undefined)");
   });
 });
