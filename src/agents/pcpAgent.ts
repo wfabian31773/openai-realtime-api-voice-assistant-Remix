@@ -581,7 +581,13 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
   // states a different number (a direct line or extension is better than the
   // main switchboard they happened to dial from).
   if (metadata.callerPhone && /^\+\d{10,15}$/.test(metadata.callerPhone)) {
-    pcpDirector.update(callId, { callbackNumber: metadata.callerPhone });
+    // Flagged as caller ID only, so the ticket can say the number is
+    // unverified instead of presenting a trunk identifier as a callback line.
+    // See PcpConversationState.callbackFromCallerIdOnly.
+    pcpDirector.update(callId, {
+      callbackNumber: metadata.callerPhone,
+      callbackFromCallerIdOnly: true,
+    });
   }
 
   /**
@@ -722,7 +728,20 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           pcpDirector.clearRecordsDestination(callId);
         }
       }
-      pcpDirector.update(callId, facts);
+      /**
+       * A STATED NUMBER IS NOT CALLER ID.
+       *
+       * The seed at the top of the call marks `callbackNumber` as caller ID
+       * only, so the ticket can say it is unverified. The moment the caller
+       * states one, that label stops being true — and `update` merges, so
+       * without clearing it here a direct line the caller read out would still
+       * ride onto the ticket labelled unverified. Cleared in the SAME update,
+       * so no reader can observe a stated number still flagged.
+       */
+      pcpDirector.update(
+        callId,
+        facts.callbackNumber ? { ...facts, callbackFromCallerIdOnly: false } : facts,
+      );
       /**
        * THE OTHER DELIVERY SYSTEM HAS TO HEAR ABOUT THIS. Codex P1, PR #273.
        *
@@ -2195,7 +2214,24 @@ async function fileSchedulingToHub(
       'Taken on the PCP Support line.',
       redirect.note,
       who ? `Requested by ${who}.` : null,
-      callback ? `Callback ${callback} reaches the requesting office, not the patient.` : null,
+      /**
+       * WHOSE NUMBER, AND WHETHER ANYBODY VOUCHED FOR IT.
+       *
+       * "reaches the requesting office, not the patient" was true and was not
+       * enough. On 2026-09-17 a staffer rang the number on one of these
+       * tickets and closed it "Processed callback but line is unavailable...
+       * little to no information provided" — the number was the caller's ANI,
+       * which on a clinic PBX is a trunk and not a desk, and nothing on the
+       * ticket said it was unverified. Saying so is what turns a dead callback
+       * into "ask this office for a direct line".
+       */
+      callback
+        ? `Callback ${callback} reaches the requesting office, not the patient.`
+          + (state.callbackFromCallerIdOnly
+            ? ' UNVERIFIED — this is the inbound caller ID, not a number the caller gave;'
+              + ' if it does not answer, ask them for a direct line.'
+            : ' Given by the caller.')
+        : null,
       '',
       // The same gap annotation `buildPayload` puts on a PCP ticket. Routing a
       // request to another department must not quietly drop the note saying
