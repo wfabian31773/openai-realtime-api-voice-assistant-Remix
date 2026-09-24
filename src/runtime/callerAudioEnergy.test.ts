@@ -10,10 +10,12 @@
  * the session and counted nothing.
  *
  * These tests pin the μ-law arithmetic against bytes whose loudness is known
- * by construction, and pin the COUNTING AT THE BRIDGE, because a helper test
- * proves the helper and not that anything calls it (failure mode 10, and v20
- * is the worked example where both ends had tests and the links between them
- * did not).
+ * by construction, and pin WHERE THE COUNTING HAPPENS — at the socket, never
+ * in the bridge — because a helper test proves the helper and not that
+ * anything calls it (failure mode 10, and v20 is the worked example where both
+ * ends had tests and the links between them did not). The behaviour itself,
+ * one row on every exit that writes a `call_logs` row, is driven at the real
+ * runtime in `voiceRuntime.test.ts`.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
@@ -103,79 +105,85 @@ describe('the row', () => {
   it('writes on EVERY call, because "no caller audio" is the finding', () => {
     // Unlike follow_up_summary, which returns null and skips. A skip here
     // would hide exactly the population being measured.
-    const ev = callerAudioEvent({ callerAudio: { frames: 0, voiced: 0 }, outcome: 'caller_hangup' } as never);
+    const ev = callerAudioEvent({ frames: 0, voiced: 0 }, 'caller_hangup');
     expect(ev).not.toBeNull();
     expect(ev.data.verdict).toBe('no_frames');
   });
 
-  it('a record carrying NO counts reads no_frames, never voiced', () => {
+  it('a call carrying NO counts reads no_frames, never voiced', () => {
     // MUTATION TESTING CAUGHT THIS GAP: every other assertion here passes
-    // `callerAudio` explicitly, so the `??` default was never exercised and a
+    // counts explicitly, so the `??` default was never exercised and a
     // mutation to `{ frames: 1, voiced: 1 }` survived. That default is load
-    // bearing — an older fixture, or a bridge that stopped setting the field,
-    // must read as "we know nothing", never as "the caller was speaking",
-    // because `voiced` on a zero-caller-line call is what accuses our own STT.
-    const ev = callerAudioEvent({ outcome: 'caller_hangup' } as never);
+    // bearing — a caller that cannot say what arrived must read "we know
+    // nothing", never "the caller was speaking", because `voiced` on a
+    // zero-caller-line call is what accuses our own STT.
+    const ev = callerAudioEvent(undefined, 'caller_hangup');
     expect(ev.data.verdict).toBe('no_frames');
     expect(ev.data.frames).toBe(0);
     expect(ev.data.voiced).toBe(0);
   });
 
   it('warns only on no_frames — a silent line is ordinary on a business number', () => {
-    expect(callerAudioEvent({ callerAudio: { frames: 0, voiced: 0 }, outcome: 'caller_hangup' } as never).level)
-      .toBe('warn');
-    expect(callerAudioEvent({ callerAudio: { frames: 900, voiced: 0 }, outcome: 'caller_hangup' } as never).level)
-      .toBe('info');
-    expect(callerAudioEvent({ callerAudio: { frames: 900, voiced: 90 }, outcome: 'caller_hangup' } as never).level)
-      .toBe('info');
+    expect(callerAudioEvent({ frames: 0, voiced: 0 }, 'caller_hangup').level).toBe('warn');
+    expect(callerAudioEvent({ frames: 900, voiced: 0 }, 'caller_hangup').level).toBe('info');
+    expect(callerAudioEvent({ frames: 900, voiced: 90 }, 'caller_hangup').level).toBe('info');
   });
 
   it('carries the share, so a long call and a short one are comparable', () => {
-    expect(callerAudioEvent({ callerAudio: { frames: 200, voiced: 50 }, outcome: 'x' } as never).data.voicedPct)
-      .toBe(25);
+    expect(callerAudioEvent({ frames: 200, voiced: 50 }, 'x').data.voicedPct).toBe(25);
     // Never divides by zero.
-    expect(callerAudioEvent({ callerAudio: { frames: 0, voiced: 0 }, outcome: 'x' } as never).data.voicedPct)
-      .toBe(0);
+    expect(callerAudioEvent({ frames: 0, voiced: 0 }, 'x').data.voicedPct).toBe(0);
   });
 
   it('carries no audio and no transcript — counts and a verdict only', () => {
-    const ev = callerAudioEvent({ callerAudio: { frames: 10, voiced: 2 }, outcome: 'x' } as never);
+    const ev = callerAudioEvent({ frames: 10, voiced: 2 }, 'x');
     expect(Object.keys(ev.data).sort()).toEqual(
       ['frames', 'outcome', 'verdict', 'voiced', 'voicedPct'],
     );
   });
 });
 
-describe('the bridge actually counts, and the runtime actually writes', () => {
-  // Read from source: these are the two links that a helper test cannot see,
-  // and the pair v20 records as both-ends-covered-middle-uncovered.
+describe('the counting happens at the SOCKET, not in the bridge', () => {
+  /**
+   * Read from source. The behaviour — every exit writing a row with the
+   * socket's counts — is driven for real at the runtime in
+   * `voiceRuntime.test.ts`, because a helper test proves the helper and not
+   * that anything calls it (failure mode 10). What source can say, and a
+   * behavioural test cannot, is that nothing counts in the WRONG place.
+   */
   const bridge = readFileSync(join(process.cwd(), 'src/runtime/mediaStreamBridge.ts'), 'utf8');
   const runtime = readFileSync(join(process.cwd(), 'src/runtime/voiceRuntime.ts'), 'utf8');
 
-  it('notes every inbound media frame', () => {
-    const media = bridge.slice(bridge.indexOf('case "media":'));
-    const arm = media.slice(0, media.indexOf('break;'));
-    expect(arm).toContain('this.callerAudio.note(frame.media.payload)');
+  it('the bridge counts nothing — it never sees the frames the hold discarded', () => {
+    // Codex P2, #327: `PRE_BRIDGE_FRAME_CAP` drops its OLDEST frame, so a
+    // caller who spoke during a slow start and went quiet afterwards would
+    // have been counted `silent_line` by a bridge-side meter — audio that
+    // reached this server, reported as its opposite.
+    expect(bridge).not.toContain('CallerAudioMeter');
+    expect(bridge).not.toContain('callerAudio');
   });
 
-  it('counts AFTER handing the audio to the model, never before', () => {
-    const media = bridge.slice(bridge.indexOf('case "media":'));
-    const arm = media.slice(0, media.indexOf('break;'));
-    expect(arm.indexOf('appendAudio')).toBeLessThan(arm.indexOf('callerAudio.note'));
+  it('the socket notes every inbound media frame', () => {
+    expect(runtime).toContain('new CallerAudioMeter()');
+    expect(runtime).toContain('callerAudio.note(frame.media.payload)');
   });
 
-  it('puts the counts on the record', () => {
-    expect(bridge).toContain('callerAudio: this.callerAudio.counts()');
-  });
-
-  it('the runtime writes the row at teardown, chained after its predecessor', () => {
-    expect(runtime).toContain('logCallerAudio(record, { callLogId }, { after: identityWritten })');
+  it('counts BEFORE the branch that holds frames and the branch that drops them', () => {
+    const handler = runtime.slice(runtime.indexOf('ws.on("message"'));
+    const note = handler.indexOf('callerAudio.note(');
+    expect(note).toBeGreaterThan(-1);
+    // Both of the branches that can lose a frame come after the count: the
+    // pre-bridge hold with its cap, and the `start` arm's early returns.
+    expect(handler.indexOf('pendingFrames.push(')).toBeGreaterThan(note);
+    expect(handler.indexOf('PRE_BRIDGE_FRAME_CAP')).toBeGreaterThan(note);
+    expect(handler.indexOf('if (frame.event === "start")')).toBeGreaterThan(note);
   });
 
   it('is never awaited by teardown — telemetry must not delay a hangup', () => {
-    const site = runtime.slice(runtime.indexOf('logCallerAudio(record'));
-    expect(runtime.slice(runtime.indexOf('void logCallerAudio'), runtime.indexOf('void logCallerAudio') + 20))
-      .toContain('void');
-    expect(site.slice(0, 200)).toContain('.catch(');
+    const at = runtime.indexOf('logAudio(record');
+    expect(at).toBeGreaterThan(-1);
+    const before = runtime.slice(Math.max(0, at - 60), at);
+    expect(before).not.toContain('await ');
+    expect(runtime.slice(at, at + 260)).toContain('.catch(() => undefined)');
   });
 });

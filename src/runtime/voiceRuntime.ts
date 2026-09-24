@@ -269,6 +269,7 @@ import { makeRecordingStarter } from "./callRecording";
 import { gradeRuntimeCall } from "./runtimeGrading";
 import { logRuntimeFollowUps } from "./followUpTelemetry";
 import { logCallerAudio } from "./callerAudioTelemetry";
+import { CallerAudioMeter, type CallerAudioCounts } from "./callerAudioEnergy";
 import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
 import {
   handleAfterRedirect,
@@ -441,6 +442,17 @@ export interface VoiceRuntimeOptions {
     ids: { callLogId?: string },
     opts?: { after?: Promise<unknown>; precontextWrite?: string },
   ) => Promise<unknown>;
+  /**
+   * Whether the caller's audio ever reached us (v64, callerAudioTelemetry.ts)
+   * — one PHI-free row per call, on EVERY exit that writes a `call_logs` row
+   * and not only the bridge's teardown. Injected for tests.
+   */
+  logCallerAudio?: (
+    call: { callSid: string; outcome: string },
+    counts: CallerAudioCounts | undefined,
+    ids: { callLogId?: string },
+    opts?: { after?: Promise<unknown> },
+  ) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -529,6 +541,7 @@ export function mountVoiceRuntime(
   const gradeCall = options.gradeCall ?? gradeRuntimeCall;
   const logFollowUps = options.logFollowUps ?? logRuntimeFollowUps;
   const logIdentity = options.logIdentity ?? logRuntimeIdentity;
+  const logAudio = options.logCallerAudio ?? logCallerAudio;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -743,6 +756,22 @@ export function mountVoiceRuntime(
      * is worth less than fresh, and oldest goes first.
      */
     const pendingFrames: TwilioInboundFrame[] = [];
+    /**
+     * WHAT TWILIO DELIVERED FROM THE CALLER, counted at the socket.
+     *
+     * At the SOCKET and not in the bridge, for two reasons that are the whole
+     * point of the instrument (Codex P2, #327). The queue above drops its
+     * OLDEST frame past the cap, so a caller who spoke during a slow start
+     * and went quiet afterwards would be counted as a line nobody spoke into
+     * — audio that reached this server, reported as its opposite, by the
+     * measure built to separate those two. And three exits below write a
+     * `call_logs` row without ever building a bridge; they are part of the
+     * no-audio population, and from here they have counts to write.
+     *
+     * One stream per socket (the `start` handler refuses a second), so this
+     * is per call.
+     */
+    const callerAudio = new CallerAudioMeter();
 
     const twilioSocket = {
       sendFrame: (frame: TwilioOutboundFrame) => {
@@ -760,6 +789,12 @@ export function mountVoiceRuntime(
     ws.on("message", (raw) => {
       const frame = parseTwilioInboundFrame(raw.toString());
       if (!frame) return;
+
+      // Counted BEFORE every branch below, including the hold that discards
+      // its oldest frame and the bridge that may not exist yet. Two integers
+      // and one pass over 160 bytes; nothing here can delay the audio, which
+      // is handed on unchanged further down.
+      if (frame.event === "media") callerAudio.note(frame.media.payload);
 
       if (frame.event === "start") {
         if (starting || bridge) return; // one stream per socket
@@ -1006,6 +1041,15 @@ export function mountVoiceRuntime(
             startedAtMs,
             endedAtMs: Date.now(),
           }).catch(() => undefined);
+          // And what the caller's audio did, on an exit that never built a
+          // bridge (Codex P2, #327). Part of the no-audio population, so the
+          // row goes here too or the instrument's claim of one per call is
+          // false on exactly the calls it was built to size.
+          void logAudio(
+            { callSid: entry.callSid, outcome: "provider_failure" },
+            callerAudio.counts(),
+            { callLogId },
+          ).catch(() => undefined);
           twilioSocket.close();
           return;
         }
@@ -1075,6 +1119,15 @@ export function mountVoiceRuntime(
           }).catch(() => {
             // Losing the record must never break the hangup path.
           });
+          // And what the caller's audio did, on an exit that never built a
+          // bridge (Codex P2, #327). Part of the no-audio population, so the
+          // row goes here too or the instrument's claim of one per call is
+          // false on exactly the calls it was built to size.
+          void logAudio(
+            { callSid: entry.callSid, outcome: "caller_hangup" },
+            callerAudio.counts(),
+            { callLogId },
+          ).catch(() => undefined);
           return;
         }
         if (lane.agent.skipped.length > 0) {
@@ -1275,7 +1328,7 @@ export function mountVoiceRuntime(
              * flushing, never awaited by teardown, and changes nothing a caller
              * hears. `callerAudioEnergy.ts` carries the measurement.
              */
-            void logCallerAudio(record, { callLogId }, { after: identityWritten })
+            void logAudio(record, callerAudio.counts(), { callLogId }, { after: identityWritten })
               .catch(() => undefined);
           },
         });
@@ -1334,6 +1387,15 @@ export function mountVoiceRuntime(
             startedAtMs,
             endedAtMs: Date.now(),
           }).catch(() => undefined);
+          // And what the caller's audio did, on an exit that never built a
+          // bridge (Codex P2, #327). Part of the no-audio population, so the
+          // row goes here too or the instrument's claim of one per call is
+          // false on exactly the calls it was built to size.
+          void logAudio(
+            { callSid: entry.callSid, outcome: "provider_failure" },
+            callerAudio.counts(),
+            { callLogId },
+          ).catch(() => undefined);
           twilioSocket.close();
         }
       } finally {

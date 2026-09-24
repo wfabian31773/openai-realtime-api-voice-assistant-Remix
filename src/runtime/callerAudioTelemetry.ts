@@ -5,8 +5,7 @@
  *
  * One row per call, PHI-free: frame counts and a verdict, never a byte of
  * audio and never a transcript. It answers the one question no query could,
- * because `handleTwilioFrame` passed caller audio straight through without
- * counting it:
+ * because nothing on the runtime counted caller audio at all:
  *
  *   SELECT data->>'verdict', count(*)
  *   FROM call_events
@@ -28,14 +27,32 @@
  * skip would hide exactly the population being measured — the v58 identity
  * summary made the same choice for the same reason.
  *
+ * AND "EVERY CALL" MEANS THE FOUR EXITS, NOT JUST THE TEARDOWN (Codex P2,
+ * #327). `voiceRuntime` persists a `call_logs` row on three paths that never
+ * reach a bridge — an unknown or disabled lane, a caller who hangs up while
+ * the agent is being built, and a setup failure before the bridge exists —
+ * and the first version of this wrote from the bridge's teardown only. Those
+ * three are PART OF the no-audio population this exists to size, so a claim
+ * of one row per call that skipped exactly them would have been measuring the
+ * calls least likely to be the problem.
+ *
+ * THE COUNTS COME FROM THE SOCKET, NOT FROM THE BRIDGE, for the same reason
+ * and one more (Codex P2, #327): `voiceRuntime` holds up to
+ * `PRE_BRIDGE_FRAME_CAP` frames while the agent is built and DISCARDS THE
+ * OLDEST past that, so a caller who spoke during a slow start and went quiet
+ * afterwards would have been counted `silent_line` — audio that reached this
+ * server, reported as a line nobody spoke into, by the instrument built to
+ * tell those two apart. Counting at ingress also means the three bridgeless
+ * exits have counts to write.
+ *
  * AN INSTRUMENT, NOT A FIX. It changes no gate, no tool, no spoken line and
  * nothing a caller can hear. That is deliberate and it is this repo's own
  * pattern for a number that has resisted several attempts (v47, v48, v58,
  * v61) — and v61 records a fix written and REVERTED for shipping onto a
  * population nobody could count.
  */
-import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { PERSIST_RETRY_BACKOFF_MS } from "./callRecord";
+import type { CallerAudioCounts } from "./callerAudioEnergy";
 
 export const CALLER_AUDIO_EVENT = "caller_audio_summary";
 
@@ -73,26 +90,37 @@ export function callerAudioVerdict(counts: { frames: number; voiced: number }): 
  * on a business line it is ordinary and common.
  */
 export function callerAudioEvent(
-  record: Pick<VoiceCallRecord, "callerAudio" | "outcome">,
+  counts: CallerAudioCounts | undefined,
+  outcome: string,
 ): CallerAudioEvent {
-  const counts = record.callerAudio ?? { frames: 0, voiced: 0 };
-  const verdict = callerAudioVerdict(counts);
+  // THE DEFAULT IS LOAD BEARING and mutation testing is what said so: a call
+  // whose counts we do not have must read `no_frames` and never `voiced`,
+  // because `voiced` on a zero-caller-line call is what accuses our own STT.
+  const c = counts ?? { frames: 0, voiced: 0 };
+  const verdict = callerAudioVerdict(c);
   return {
     level: verdict === "no_frames" ? "warn" : "info",
     data: {
       verdict,
-      frames: counts.frames,
-      voiced: counts.voiced,
+      frames: c.frames,
+      voiced: c.voiced,
       // The share is what makes two calls comparable when one ran four times
       // as long as the other. Integer percent — no false precision.
-      voicedPct: counts.frames > 0 ? Math.round((counts.voiced * 100) / counts.frames) : 0,
-      outcome: record.outcome,
+      voicedPct: c.frames > 0 ? Math.round((c.voiced * 100) / c.frames) : 0,
+      outcome,
     },
   };
 }
 
 export async function logCallerAudio(
-  record: VoiceCallRecord,
+  /**
+   * The call, by the two things this row names it with. Deliberately NOT a
+   * `VoiceCallRecord`: three of the four exits that write a `call_logs` row
+   * never build one, and they are part of the population being measured.
+   */
+  call: { callSid: string; outcome: string },
+  /** What the SOCKET counted — see the module doc on why not the bridge. */
+  counts: CallerAudioCounts | undefined,
   ids: { callLogId?: string } = {},
   opts: {
     backoffMs?: readonly number[];
@@ -108,12 +136,12 @@ export async function logCallerAudio(
     after?: Promise<unknown>;
   } = {},
 ): Promise<boolean> {
-  const ev = callerAudioEvent(record);
+  const ev = callerAudioEvent(counts, call.outcome);
   // Lazy, like every database-touching import on the runtime: callEventLog
   // pulls in server/db, which validates DATABASE_URL at load.
   const { emitCallEvent, flushCallEvents, releaseCallEvents } = await import("../services/callEventLog");
-  emitCallEvent(record.callSid, ev.level, "vad", CALLER_AUDIO_EVENT, ev.data, {
-    callSid: record.callSid,
+  emitCallEvent(call.callSid, ev.level, "vad", CALLER_AUDIO_EVENT, ev.data, {
+    callSid: call.callSid,
     callLogId: ids.callLogId,
   });
   if (opts.after) await opts.after.catch(() => undefined);
@@ -124,15 +152,15 @@ export async function logCallerAudio(
   // cannot delete the only copy of the row it just made worth keeping. An
   // unflushed buffer is left for the 2h reaper.
   for (let attempt = 0; ; attempt += 1) {
-    if (await flushCallEvents(record.callSid)) {
-      releaseCallEvents(record.callSid);
+    if (await flushCallEvents(call.callSid)) {
+      releaseCallEvents(call.callSid);
       return true;
     }
     if (attempt >= backoff.length) break;
     await sleep(backoff[attempt]);
   }
   console.warn(
-    `[CALLER AUDIO] the ${CALLER_AUDIO_EVENT} row did not land for ${record.callSid} — left for the reaper`,
+    `[CALLER AUDIO] the ${CALLER_AUDIO_EVENT} row did not land for ${call.callSid} — left for the reaper`,
   );
   return false;
 }
