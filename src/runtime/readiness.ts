@@ -113,7 +113,9 @@ import { callEnvironment } from "./callRecord";
  * thing this constant exists to prevent — so this takes the next free number
  * rather than the next sequential one. A gap in the sequence is readable; a
  * collision is not. #293 still has to merge main and re-bump above whatever
- * main then carries, exactly as CLAUDE.md already requires of it.
+ * main then carries, exactly as CLAUDE.md already requires of it. IT DID, TWICE
+ * — v13 to v59 to v70, merged 2026-09-24 — so v13 is RETIRED and no build ever
+ * served it.
  *
  * WHY IT NEEDS A MARKER AT ALL: the change is invisible from outside except on
  * a PCP call where somebody asks for a person, and its whole effect is that
@@ -368,9 +370,11 @@ import { callEnvironment } from "./callRecord";
  * all. `handoffNotAttemptedReason` is read from the policy table and two
  * server-owned director latches, never from a model argument.
  *
- * v57 IS RETIRED (the withdrawn surgeon claim), v58 is claimed by #322 and v59
- * by #293 — both OPEN branches, so this is a SIBLING of both and contains
- * neither. v62 > v59 numerically and says nothing about containment.
+ * v57 IS RETIRED (the withdrawn surgeon claim), v58 was claimed by #322 and v59
+ * by #293 — both OPEN branches when this was written, so this is a SIBLING of
+ * both and contains neither. v62 > v59 numerically and says nothing about
+ * containment. SETTLED SINCE: #322 shipped as v58 and #293 shipped as v70, so
+ * v59 is retired and was never served by any build.
  *
  * v68: THE SILENCE LADDER. Nothing in the runtime ever spoke to a caller it
  * could not hear. `handleResponseDone` clears the dead-air watchdog when the
@@ -405,30 +409,37 @@ import { callEnvironment } from "./callRecord";
  * because 69 > 68. It is the last of the four siblings off the v62 `main`, so
  * `main` now CONTAINS the other three: v64 (#327), v67 (#326) and v68 (#328).
  * v65 and v66 are RETIRED rather than reused, along with v57, v60 and v63, and
- * a build must never read any of the five; v59 is still claimed by the open
- * #293, which branched off v10 and must merge and re-bump above whatever `main`
- * carries when it lands. A higher number says nothing about containment — this
- * one contains v68 because `main` was merged into it, not because 69 > 68.
+ * a build must never read any of the five. **AND v59 HAS SINCE JOINED THEM:**
+ * it was #293's number, that branch merged this v69 `main` and re-bumped to
+ * v70, so `main` now carries v70 and contains this ship. A higher number says
+ * nothing about containment — this one contains v68 because `main` was merged
+ * into it, not because 69 > 68.
  */
 /**
- * v59, 2026-09-19: A CALLER WHO SAYS "NEW" IS NOT LOOKED UP — and it takes v59
- * rather than v57 or v58, which is the part to read before calling this a gap.
+ * v70, 2026-09-24: A CALLER WHO SAYS "NEW" IS NOT LOOKED UP — and the number
+ * has moved twice, which is the part to read before calling the gaps a defect.
  *
- * v57 was WITHDRAWN and the number is RETIRED: the surgeon-ask claim was built,
- * reviewed six times and pulled before merge on the operator's ruling, so a
- * build must never report it. v58 is claimed by an OPEN branch (the identity
- * probe). This is #293, which branched off v10 and has just merged `main` at
- * v56 — so it clears what `main` carries, which is the rule, and skips two
- * numbers that are spoken for.
+ * WHY IT NEEDS A MARKER AT ALL: the change is invisible from outside except on
+ * a call where somebody says they are new, and its whole effect is that one
+ * tool stops running. A build without it looks identical until you read a
+ * transcript.
  *
- * IT IS A SIBLING OF v58, NOT ITS SUCCESSOR. Neither branch contains the other.
- * v59 > v58 numerically and says nothing about containment, which is the exact
- * hazard the CLAUDE.md marker table documents for v19-v24. Whichever of the two
- * lands second must merge `main` and re-bump above whatever it then carries.
+ * WHY 70. This branch (#293) has held three numbers. It took v13 on 2026-09-12
+ * off a v10 `main`; v13 was withdrawn and is RETIRED when the PCP queue choice
+ * needed v14 and a collision would have made two builds read alike. It merged
+ * `main` at v56 and took v59, skipping v57 (the WITHDRAWN surgeon claim, which
+ * a build must never report) and v58 (then an open branch, the identity probe,
+ * which has since shipped). It then merged `main` at v69 — four siblings had
+ * landed in between, v64, v67, v68 and v69 — and v59 had fallen BELOW what
+ * `main` carries, which reads as a failed pull rather than as a new build, so
+ * it takes v70. A marker re-bumps only when it falls below `main`; it does not
+ * re-bump merely because a number ahead of it was used.
  *
- * WHY IT NEEDS A MARKER: the change is invisible from outside except on a call
- * where somebody says they are new, and its whole effect is that one tool stops
- * running. A build without it looks identical until you read a transcript.
+ * SO v13 AND v59 ARE BOTH RETIRED and no build ever served either. This ship
+ * CONTAINS v64, v67, v68 and v69 because `main` was merged into it, not because
+ * 70 is the largest number — that distinction is the hazard the CLAUDE.md
+ * marker table documents for v19-v24, and it is why every re-bump above is
+ * justified by what the branch had merged rather than by arithmetic.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v70-new-or-existing-gates-the-lookup-20260924";

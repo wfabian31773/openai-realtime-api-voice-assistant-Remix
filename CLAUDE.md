@@ -2392,29 +2392,38 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 before and brought it in, so v12 contains both.
 
 **AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v70 IS THE
-NEWEST, v69 IS WHAT `main` CARRIES SINCE #325 MERGED 2026-09-24 (`3eed16a`),
-AND v57, v60, v63, v65 AND v66 ARE ALL RETIRED RATHER THAN REUSED — see THE
-SURGEON CLAIM below the table for v57.** **THIS LINE GOES STALE EVERY TIME A
-MARKER LANDS, SO RE-READ IT AGAINST `main` RATHER THAN TRUSTING IT.** Six
-corrections have landed on it in five days and every one was the same trap: it
-read `v58 IS WHAT main CARRIES` after #324 moved `main` to v61, `v61` after
-#323 moved it to v62, `v62` after #327 moved it to v64, `v64` after #326 moved
-it to v67, `v67` after #328 moved it to v68, and `v68` after #325 moved it to
-v69 — four of those arrived ON `main` already wrong, because a branch's own
-prose does not update itself when that branch merges.
+NEWEST AND IS ALSO WHAT `main` CARRIES, SINCE #293 MERGED 2026-09-24
+(`c247479`), AND v57, v59, v60, v63, v65 AND v66 ARE ALL RETIRED RATHER THAN
+REUSED — see THE SURGEON CLAIM below the table for v57.** **THIS LINE GOES
+STALE EVERY TIME A MARKER LANDS, SO RE-READ IT AGAINST `main` RATHER THAN
+TRUSTING IT.** SEVEN corrections have landed on it in six days and every one
+was the same trap: it read `v58 IS WHAT main CARRIES` after #324 moved `main`
+to v61, `v61` after #323 moved it to v62, `v62` after #327 moved it to v64,
+`v64` after #326 moved it to v67, `v67` after #328 moved it to v68, `v68`
+after #325 moved it to v69, and `v69` after #293 moved it to v70 — **FIVE of
+those arrived ON `main` already wrong**, because a branch's own prose does not
+update itself when that branch merges, and the branch that writes it cannot
+know it will be the last to land.
+
+**THIS IS THE FIRST TIME SINCE 2026-09-18 THAT THE NEWEST MARKER AND WHAT
+`main` CARRIES ARE ONE NUMBER**, and the reason is structural rather than
+lucky: #293 was the last open branch holding a marker, so there is no sibling
+above `main` to keep the two apart. The next branch to take v71 splits them
+again, and this paragraph goes stale the moment it does.
 
 **`main` NOW CONTAINS ALL FOUR SIBLINGS off the v62 base** — v64 (#327, the
 caller-audio meter), v67 (#326, the callback provenance), v68 (#328, the
-silence ladder) and v69 (#325, the PCP floor) — so this is the FIRST marker in
-five days with no open sibling beside it. **v13 was #293's original number and
-it has now yielded twice:** the branch merged `main` at v56 and took v59, then
-merged it again at v69 and takes **v70**, which is the rule working rather than
-a renumbering — a marker re-bumps only when it falls BELOW `main`, where it
-would read as a failed pull. **NEWEST IS NOT THE SAME AS CONTAINED:** v70
-contains v69 because `main` was merged into it, not because 70 > 69. **A build
-must never read v13, v57, v60, v63, v65 or v66** — v13 and v57 were withdrawn,
-and the other four were branch numbers given up the moment a merge put them
-below `main`. The next ship takes **v71**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
+silence ladder) and v69 (#325, the PCP floor) — **AND v70 (#293) ON TOP OF
+THEM**, so for the first time in six days no marker-holding branch is open.
+**v13 was #293's original number and it has now yielded twice:** the branch
+merged `main` at v56 and took v59, then merged it again at v69 and takes
+**v70**, which is the rule working rather than a renumbering — a marker
+re-bumps only when it falls BELOW `main`, where it would read as a failed pull.
+**NEWEST IS NOT THE SAME AS CONTAINED:** v70 contains v69 because `main` was
+merged into it, not because 70 > 69. **A build must never read v13, v57, v59,
+v60, v63, v65 or v66** — v13 and v57 were withdrawn, and the other five were
+branch numbers given up the moment a merge put them below `main`. The next ship
+takes **v71**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
 (#301), v22 the question format (#303), v23 the recording disclosure (#304),
 v24 the answerable queue choice (#306). Distinct numbers were assigned UP FRONT
 precisely so six open branches could never make six different builds read alike
@@ -2549,16 +2558,19 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v67 (#326) IS WHAT `main` CARRIES (merged 2026-09-24, `a5815ca`), AND v57,
-v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last four
-was a branch's own number while it sat below `main`, and each was given up the
-moment a merge put it there: two branches carrying one version make two builds
-indistinguishable at `/voice/health` — the single thing this constant exists to
-prevent — and a number BELOW `main` reads as a failed pull. **This branch is
-v69 for exactly that reason**, with **v68** (#328) the one open sibling above
-the same `main`. **v59 is still claimed by the open #293** and stays reserved
-for it. Containment is stated once, in the sequence sentence above; see the v56
-row for what v61 measures.
+**v70 (#293) IS WHAT `main` CARRIES (merged 2026-09-24, `c247479`), AND v57,
+v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
+five was a branch's own number while it sat below `main`, and each was given up
+the moment a merge put it there: two branches carrying one version make two
+builds indistinguishable at `/voice/health` — the single thing this constant
+exists to prevent — and a number BELOW `main` reads as a failed pull. **v59 is
+the newest addition to that list** — it was #293's number from 2026-09-19 until
+#325 moved `main` to v69, at which point it fell below and the branch re-bumped
+to v70. **THIS PARAGRAPH ITSELF ARRIVED ON `main` WRONG TWICE**, once naming
+v67 as what `main` carried and once describing #328 and #293 as open siblings,
+which is the fourth and fifth of the five the sequence sentence counts.
+Containment is stated once, in the sequence sentence above; see the v56 row for
+what v61 measures.
 
 **AND THE TWO FIXES BELOW ARE v58'S, NOT v61'S** — they rode in with the
 identity probe on #322 and are recorded here because the surgeon claim was
