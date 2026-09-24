@@ -372,6 +372,15 @@ import { callEnvironment } from "./callRecord";
  * by #293 — both OPEN branches, so this is a SIBLING of both and contains
  * neither. v62 > v59 numerically and says nothing about containment.
  *
+ * v68: THE SILENCE LADDER. Nothing in the runtime ever spoke to a caller it
+ * could not hear. `handleResponseDone` clears the dead-air watchdog when the
+ * greeting completes and nothing re-arms it until the caller speaks, so a
+ * caller who never speaks is never detected: 278 zero-caller-line runtime
+ * calls over 09-17..23 ended `caller_hangup` at 74s average, and four sat
+ * open to the 602-second ceiling. The agent now says "I'm sorry, I cannot
+ * hear you. Are you still there?" after 12s of silence and ends the call on
+ * the third strike — the operator's own wording and his own bound.
+ *
  * v64: the caller's audio is COUNTED. `handleTwilioFrame`'s media case was
  * `session.appendAudio(payload)` and nothing else, so nothing anywhere could
  * say whether a caller's audio ever reached us — which is why optical's
@@ -388,17 +397,18 @@ import { callEnvironment } from "./callRecord";
  * 0 POSTs have ever carried `caller_hung_up_before_completion` or
  * `call_not_classified`, the two literals only that function writes.
  *
- * WHY 69, AND WHY IT HAS MOVED THREE TIMES. This branch held v61 below the v58
- * `main`, took v66 when `main` reached v62, KEPT v66 when #327 moved `main` to
- * v64 — a marker only reads as a failed pull when it is BELOW `main`, and
- * 66 > 64 — and now takes v69, because #326 has moved `main` to v67 and 66 is
- * below it. v65 and v66 are RETIRED rather than reused, along with v57, v60
- * and v63, and a build must never read any of the five; v59 is still claimed
- * by the open #293. The one remaining sibling is **v68** (#328, the silence
- * ladder), already re-bumped above the same `main`. Both now sit above it, so
- * only one ordering costs anything: if v68 merges first, `main` reaches v68 and
- * 69 is still above it; this branch needs nothing either way. A higher number
- * says nothing about containment: this contains v67, and not the sibling.
+ * WHY 69, AND WHY IT HAS MOVED THREE TIMES AND NOW STAYS PUT. This branch held
+ * v61 below the v58 `main`, took v66 when `main` reached v62, KEPT v66 when
+ * #327 moved `main` to v64 — a marker only reads as a failed pull when it is
+ * BELOW `main`, and 66 > 64 — took v69 when #326 moved `main` to v67 and 66
+ * fell below it, and KEEPS v69 now that #328 has merged and `main` reads v68,
+ * because 69 > 68. It is the last of the four siblings off the v62 `main`, so
+ * `main` now CONTAINS the other three: v64 (#327), v67 (#326) and v68 (#328).
+ * v65 and v66 are RETIRED rather than reused, along with v57, v60 and v63, and
+ * a build must never read any of the five; v59 is still claimed by the open
+ * #293, which branched off v10 and must merge and re-bump above whatever `main`
+ * carries when it lands. A higher number says nothing about containment — this
+ * one contains v68 because `main` was merged into it, not because 69 > 68.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v69-the-pcp-floor-is-wired-20260924";
