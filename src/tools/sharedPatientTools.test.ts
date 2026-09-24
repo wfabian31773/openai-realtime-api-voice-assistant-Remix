@@ -50,6 +50,15 @@ vi.mock('./verifiedIdentity', () => ({
   rememberVerifiedIdentity: (...a: unknown[]) => rememberVerifiedIdentity(...a),
   verifiedDobFor: () => null,
   forgetIfSameName: (...a: unknown[]) => forgetIfSameName(...a),
+  /**
+   * RULE ZERO 2a's gate reads this to let Rule 1 outrank a spoken "new" — an
+   * established identity is never suppressed. Nothing in THIS file exercises
+   * that path, so it answers "nobody established yet", which is the state
+   * every test here is already written for. A partial mock that omits a new
+   * dependency fails at the import, not at an assertion, which is how this
+   * turned up.
+   */
+  verifiedIdentityFor: () => undefined,
 }));
 vi.mock('../services/consoleDirectory', () => ({
   lookupLocation: (...a: unknown[]) => lookupLocation(...a),

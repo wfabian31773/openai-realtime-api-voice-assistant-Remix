@@ -410,8 +410,28 @@ import { callEnvironment } from "./callRecord";
  * carries when it lands. A higher number says nothing about containment — this
  * one contains v68 because `main` was merged into it, not because 69 > 68.
  */
+/**
+ * v59, 2026-09-19: A CALLER WHO SAYS "NEW" IS NOT LOOKED UP — and it takes v59
+ * rather than v57 or v58, which is the part to read before calling this a gap.
+ *
+ * v57 was WITHDRAWN and the number is RETIRED: the surgeon-ask claim was built,
+ * reviewed six times and pulled before merge on the operator's ruling, so a
+ * build must never report it. v58 is claimed by an OPEN branch (the identity
+ * probe). This is #293, which branched off v10 and has just merged `main` at
+ * v56 — so it clears what `main` carries, which is the rule, and skips two
+ * numbers that are spoken for.
+ *
+ * IT IS A SIBLING OF v58, NOT ITS SUCCESSOR. Neither branch contains the other.
+ * v59 > v58 numerically and says nothing about containment, which is the exact
+ * hazard the CLAUDE.md marker table documents for v19-v24. Whichever of the two
+ * lands second must merge `main` and re-bump above whatever it then carries.
+ *
+ * WHY IT NEEDS A MARKER: the change is invisible from outside except on a call
+ * where somebody says they are new, and its whole effect is that one tool stops
+ * running. A build without it looks identical until you read a transcript.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v69-the-pcp-floor-is-wired-20260924";
+  "voice-runtime-v70-new-or-existing-gates-the-lookup-20260924";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
